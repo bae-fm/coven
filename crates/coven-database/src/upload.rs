@@ -385,8 +385,9 @@ pub(crate) fn prepare(
 }
 
 /// The newest of this device's waiting writes it may send now: none past a
-/// raise's captured prefix (§18.5), and none from the first write a bound
-/// upload holds on (§17.4). `None` with no write waiting. The caller holds
+/// raise's captured prefix, none from the first write ahead of an audience's
+/// version (§18.5), and none from the first write a bound upload holds on
+/// (§17.4). `None` with no write waiting. The caller holds
 /// one committed read, so a write is never sent past a hold it was queued
 /// with.
 pub(crate) fn sendable_through(
@@ -401,8 +402,9 @@ pub(crate) fn sendable_through(
         return Ok(None);
     };
     let captured = crate::raise_capture::captured_through(db)?;
+    let ahead = crate::raise_capture::first_ahead(db, device)?.map(|first| first - 1);
     let held = crate::file_queue::first_held(db)?.map(|first| first - 1);
-    Ok(Some([captured, held].into_iter().flatten().fold(newest, u64::min)))
+    Ok(Some([captured, ahead, held].into_iter().flatten().fold(newest, u64::min)))
 }
 
 /// The first own queued write at or before `through` not yet confirmed

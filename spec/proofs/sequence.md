@@ -627,6 +627,15 @@ and a circle made after it has none.
   device that started reading the circle after migrating holds only the part
   it converted on reading, which isn't that body.
 
+[`WriteVersion`](sequence/CovenSequence/WriteVersion.lean) gives the sending
+side of the rule that a part counts only at a version its audience has reached.
+
+- `step_version`, `version_mono`: no slot lowers an audience's version.
+- `waiting_part_counts`: a part sent once the sender's applied prefix shows
+  its audience at the part's version meets that rule at any later landing slot.
+- `ahead_part_refused`: a circle at version 1 refuses a part at version 2 and
+  counts the same part at version 1.
+
 ## Operations
 
 [`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim

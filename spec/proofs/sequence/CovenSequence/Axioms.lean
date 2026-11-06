@@ -144,6 +144,10 @@ import SequenceApply
 #print axioms CovenSequence.CircleRaise.fresh_raise_body
 #print axioms CovenSequence.CircleRaise.below_refused_until_raised
 #print axioms CovenSequence.CircleRaise.joiner_cannot_raise
+#print axioms CovenSequence.WriteVersion.step_version
+#print axioms CovenSequence.WriteVersion.version_mono
+#print axioms CovenSequence.WriteVersion.waiting_part_counts
+#print axioms CovenSequence.WriteVersion.ahead_part_refused
 
 #print axioms CovenSequence.reaches_target
 #print axioms CovenSequence.QueueReload.commit_numbered

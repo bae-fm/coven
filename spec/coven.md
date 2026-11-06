@@ -7549,6 +7549,20 @@ it are new-version writes and wait behind it.
 - **A pass's writes slot can carry those writes and the marker.** Later ordinary
   writes wait for a raise to their version, this device's or another's, or until
   a later local breaking migration captures them (below).
+- **Every audience a write goes to must have reached its version.** A part
+  counts only at a version its audience has reached, so every device refuses
+  one ahead of it
+  ([`ahead_part_refused`](proofs/sequence/CovenSequence/WriteVersion.lean)).
+  An ordinary write made at or after the device's newest breaking migration
+  waits while any audience it has a part in is below that migration's version,
+  and the writes behind it wait with it. An audience's version never goes
+  down, so once the device has applied the raise, the part counts wherever it
+  lands
+  ([`waiting_part_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
+  Ben's app reached version 2 before Ana added him to Garden, which nobody had
+  raised; his pin in Garden waits until Ana's update raises it (§18.3). A pass
+  decides what it sends from the slots it applied before reading, so the pass
+  that applies the raise sends the pin on the next one.
 - **Before uploading the raise snapshot,** the device confirms the captured
   writes and the marker have landed. The snapshot leaves out app writes without a
   slot and includes the migration's effects over the slots it covers. Those are
@@ -11166,6 +11180,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A device reading a circle below its breaking version gets none of its snapshots counted until a raise reaches that version | `below_refused_until_raised` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A circle no slot has touched holds its initial rows, which are its raise body when migrating leaves an empty audience empty | `untouched_rows`, `fresh_raise_body` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A device that started reading a circle after migrating holds only converted parts, not the migrated rows a raise covering them must carry | `joiner_cannot_raise` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
+| *Body.* An audience's version never goes down, so a part sent once its audience reached its version counts on that rule wherever it lands | `step_version`, `version_mono`, `waiting_part_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |

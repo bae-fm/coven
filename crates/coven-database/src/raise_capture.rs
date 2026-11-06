@@ -181,6 +181,42 @@ pub(crate) fn prepare(
         .find(|capture| capture.audience == *selected && capture.version == version))
 }
 
+/// This device's first queued write that waits for a raise: one made at or
+/// after its newest breaking migration, with a part in an audience that
+/// hasn't reached that migration's version. Every device would refuse that
+/// part until the audience has, so it waits, and the writes behind it with it
+/// (§18.5). A raise's captured prefix goes out before its raise; while one
+/// waits, it holds everything after it already.
+pub(crate) fn first_ahead(
+    db: &DatabaseConnection,
+    device: DeviceId,
+) -> Result<Option<u64>, DbError> {
+    let breaking = breaking_version(db)?;
+    if breaking == 0 || captured_through(db)?.is_some() {
+        return Ok(None);
+    }
+    let state = crate::store_state_tables::read(db)?;
+    let below = |audience: &Audience| state.reached(audience) < breaking;
+    if !below(&Audience::Store) && !state.circles.keys().any(|c| below(&Audience::Circle(*c))) {
+        return Ok(None);
+    }
+    let queued = db.query(
+        "SELECT number FROM _coven_uploads WHERE device=?1 ORDER BY number",
+        [device],
+        |r| counter(r.get::<_, Vec<u8>>(0)?),
+    )?;
+    for number in queued {
+        let write = crate::upload::queued(db, WriteId { device, number })?
+            .ok_or(DbError::Invariant { what: "a queued write has its header" })?;
+        if write.header.schema_version >= breaking
+            && write.parts.iter().any(|part| below(&part.audience))
+        {
+            return Ok(Some(number));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
     db.query_row("SELECT max(through) FROM _coven_raise_captures", [], |r| {
         r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()

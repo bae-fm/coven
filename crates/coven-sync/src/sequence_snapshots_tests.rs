@@ -872,3 +872,55 @@ async fn a_circle_joined_after_migrating_is_raised_by_a_member_who_held_it() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben's app reached version 2 before Ana added him to Garden, which nobody
+/// has raised. His pin in Garden is written at version 2, which Garden hasn't
+/// reached, and every device would refuse it there, so it waits in his queue,
+/// and his later writes behind it, until Ana's update raises Garden (§18.5).
+#[tokio::test]
+async fn a_write_into_a_circle_below_its_version_waits_for_the_circles_raise() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&coven_merge::Audience::Store), 2);
+    assert_eq!(state.reached(&coven_merge::Audience::Circle(garden)), 0);
+    let id = "00000000-0000-4000-8000-000000000001";
+    pin(ben.database(), id, garden, "seeds").await;
+    insert(ben.database(), "00000000-0000-4000-8000-000000000002", "after the pin").await;
+    ben.sync.pass().await.unwrap();
+    let waiting = async |ben: &Device| ben.database().waiting_snapshot_headers().await.unwrap();
+    assert_eq!(waiting(&ben).await.len(), 2, "the pin and the write behind it wait");
+
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    // A pass decides what it sends from the slots applied before it reads,
+    // so the pass that applies Garden's raise sends nothing yet.
+    ben.sync.pass().await.unwrap();
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&coven_merge::Audience::Circle(garden)), 2);
+    ben.sync.pass().await.unwrap();
+    assert!(waiting(&ben).await.is_empty());
+    ana.sync.pass().await.unwrap();
+    assert_eq!(pins(ana.database()).await, [(id.to_string(), "seeds".to_string())]);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
