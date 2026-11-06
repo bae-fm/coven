@@ -128,6 +128,109 @@ answer is to run the race. They stay uncertified until we do.
   copy, staging plus copy has exactly one winner and never exposes a staging object). The proof says what
   coven needs, and the live suites check whether a provider gives it.
 
+## One slot, three ways to publish it
+
+*This section describes coven on 2026-11-06, partway through a change. What has landed and what
+hasn't is marked at the end.*
+
+Coven publishes each batch of writes into the next numbered slot, say `seq/7`, with a create the
+storage accepts only if nothing is at that name yet. Most slots are a few kilobytes, but the format puts
+no cap on a batch, so a slot can be large. The floor, the one object every device replaces, has the
+same problem. On S3 services a slot could go up three ways.
+
+**A. One request.** An object goes up in a single PUT carrying the create-once condition when it is at
+most the lesser of the service's single-request limit and 32 MiB. The 32 MiB bound is coven's own: a
+request carries its whole body, and without it a laptop would hold a 2 GB snapshot in memory to send it.
+A crash here is harmless. Before sending, the device records in its journal the slot and the exact
+bytes. After a crash or a lost reply it reads `seq/7` and compares: its own bytes mean the claim landed,
+another device's bytes mean it lost the race, and nothing there means it sends the same bytes again.
+
+**B. In parts, finished in place.** R2, RustFS, Ceph RGW and Versity Gateway did this, as could an
+unknown S3 service whose detected settings chose it:
+
+1. Start a multipart upload at `seq/7`. The start carries no condition and is never refused, so
+   several devices can each have an upload open at that name at once.
+2. Save the upload id the reply carries.
+3. Send the parts.
+4. Complete the upload with the create-once condition. The service refuses the completion if `seq/7`
+   is already taken.
+
+**C. In parts, by copy.** AWS and GCS did this for every object that goes in parts, and SeaweedFS for
+every object, small ones included:
+
+1. Upload to a name only this device uses, `<store>/.coven-uploads/<device>/<session>`, and finish the
+   upload there. No condition is needed, since no other device writes there.
+2. Copy that object to `seq/7` in one server-side request carrying the create-once condition
+   (`If-None-Match: *`, or `x-goog-if-generation-match: 0` on GCS).
+3. Delete the private object.
+
+The object is dated by the copy's completion.
+
+### Why the services differ
+
+Path B is the services' own way to create a large object once, and coven used it wherever it held. It
+didn't hold everywhere:
+
+- **AWS** refuses a taken name at completion, but dates a multipart object from when its upload
+  started. A copy is dated when it completes.
+- **GCS** dates completion correctly, but its multipart completion doesn't enforce create-once, and
+  its start refuses the generation condition.
+- **SeaweedFS** refuses a taken name one request at a time, but two racing conditional completions were
+  both accepted in 198 of 200 trials (the table above). Copies racing copies kept one winner. A PUT
+  racing a copy did not in an unversioned bucket, so on SeaweedFS small objects go by copy too.
+
+### The gap a crash found
+
+Path B has a window. Between the start going out and the upload id being saved, the device can stop,
+or the reply to the start can be lost. Then an upload exists at `seq/7` that nothing on the device
+names.
+
+At a name only the device uses, that is easy to clean up: every unfinished upload there is the
+device's own, so its next attempt aborts all of them and starts over. Path C's private name is such a
+name, and so are the device's own file and snapshot folders, where path B also put uploads.
+
+At `seq/7` it can't. Other devices' uploads for the same slot may be open there. Coven tags each upload
+with a random id in its metadata when it starts, but the S3 request that lists unfinished uploads
+(`ListMultipartUploads`) gives each one's name, upload id and start time, not the metadata set at its
+start. Nothing in the listing ties an upload to this device. Aborting all of them could end another
+device's claim partway through, and picking one is a guess. So coven didn't guess: the claim failed with
+`SessionIdentityUnknown`, a failure that never clears by itself. A device settles one claim before
+starting another, so nothing else it wrote went out either.
+
+Certification had passed those four services on path B. It checked what path B needs from the
+service: completion refuses a taken name, an unfinished upload is invisible, and the object is dated
+by completion. They do all three. The gap isn't the service misbehaving. It is what coven can find out
+after its own crash, and no live race covers that. It turned up while modelling upload sessions in
+Lean.
+
+### One path for large uploads
+
+The decision, on 2026-11-06: every S3 service publishes large uploads by copy, path C. A device's
+unfinished upload then always sits at a name only it uses, and after a crash it aborts whatever is
+there and starts over. S3 has no rename, so publishing from a private name is a copy, then a delete.
+Each large publish costs one extra server-side copy. The bytes don't pass through the device again.
+Objects up to the single-request size still go in one PUT, except on SeaweedFS.
+
+That has two consequences:
+
+- A certificate covers the publication it raced. The four services were certified completing in
+  place, so each is certified again on its copy, under the same races: the copy must refuse a taken
+  name atomically. R2 takes its own header for that, `cf-copy-destination-if-none-match`. A service
+  whose copy fails is reported, with no quiet fallback to path B.
+- One S3 copy request copies at most 5 GiB. Coven already refuses an upload past that, before sending
+  anything, on AWS and SeaweedFS (`CopyTooLarge`). With copy everywhere the same limit reaches the
+  other services.
+
+Where this stands on 2026-11-06:
+
+- **Landed:** paths A, B and C as above; recording an upload's plan before its start, so a crash at a
+  device's own name is cleaned up; and `SessionIdentityUnknown` at a slot or the floor on path B.
+- **In progress, on a coven branch, not landed:** the Lean model in which every upload's plan names a
+  place of the device's own, and the spec's rewrite to one path. Still to come: the profile type that
+  no longer offers completing in place, the code, the update to the test that compares the code with
+  the model, and the four services' new certification runs. None of the four has been certified on its
+  copy yet.
+
 ## Open questions for the post
 
 - GCS hasn't run suite 5 yet (the test key lacked permission to read the bucket's versioning).
@@ -136,3 +239,8 @@ answer is to run the race. They stay uncertified until we do.
   20.2.1).
 - Whether to report these upstream first (SeaweedFS PUT-vs-copy, Ceph versioned conditional writes)
   and link the issues.
+- Once copy publication lands, "What coven does with this" no longer lists conditional multipart as a
+  way to publish on S3. Rewrite that bullet, and the slot section's status list, from what landed.
+- The branch's spec draft says Ceph RGW 20.2.4's conditional copy refused no taken name, even one
+  request at a time. Confirm against a recorded run before quoting it; if it holds, Ceph has no
+  certified way to publish large objects.
