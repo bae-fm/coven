@@ -8,9 +8,10 @@ use coven_foundation::id_source::FileId;
 use std::collections::BTreeSet;
 
 impl FileWrite<'_> {
-    /// Release the pins on these files' stored bytes, then evict each
-    /// namespace they are in down to its budget. A file this device has no
-    /// record of, or one on one device only, has no pin to release.
+    /// Release the pins on these files' stored bytes, and end the pin
+    /// requests coven keeps for them, then evict each namespace they are in
+    /// down to its budget. A file this device has no record of, or one on
+    /// one device only, has no pin to release.
     pub(crate) fn unpin(&self, files: &[FileId]) -> Result<(), DbError> {
         let db = self.database;
         let mut namespaces = BTreeSet::new();
@@ -21,6 +22,9 @@ impl FileWrite<'_> {
             let file = FileRef::of(record)?;
             if let FilePlace::Cloud { .. } = file.place() {
                 crate::database::file_database::unpin_cached(db, &file)?;
+                // The app no longer wants the file kept here, so coven
+                // doesn't make the pin a switch asked for either (§17.8).
+                crate::file_pins::end(db, id)?;
                 namespaces.insert(file.namespace().to_owned());
             }
         }
@@ -55,8 +59,9 @@ impl FileWrite<'_> {
         Ok(())
     }
 
-    /// End the request for the pin coven keeps for `file` (§17.8).
-    pub(crate) fn end_pin_request(&self, file: FileId) -> Result<(), DbError> {
+    /// End the request for the pin coven keeps for `file`, returning whether
+    /// one waited (§17.8).
+    pub(crate) fn end_pin_request(&self, file: FileId) -> Result<bool, DbError> {
         crate::file_pins::end(self.database, file)
     }
 

@@ -11,26 +11,31 @@ impl FileDatabase {
     pub async fn pin_requests(&self) -> Result<Vec<crate::PinRequest>, DbError> {
         self.read(crate::file_pins::read).await
     }
-    /// The pin `file`'s request asked for is made, or its file is gone: the
-    /// request, its record and wait end, and the copy it kept goes once
-    /// nothing else names it.
+    /// `file` left the stored bytes its request asked to keep: the request,
+    /// its record and wait end, and the copy it kept goes once nothing else
+    /// names it.
     pub async fn end_pin_request(&self, file: FileId) -> Result<(), DbError> {
         self.database
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
                 inner.with_files("end a pin request", |writer, _| {
-                    writer.state_transaction(|db| crate::file_pins::end(db, file))
+                    writer.state_transaction(|db| crate::file_pins::end(db, file).map(drop))
                 })
             })
             .await
     }
     /// Make the pin coven keeps for `file` from `prepared`, ending its
-    /// request in the same write (§17.8).
-    pub async fn keep(&self, prepared: crate::PreparedPin, file: FileId) -> Result<(), DbError> {
+    /// request in the same write, and return true (§17.8). A request that
+    /// ended since it was read, by the app's unpin or the file leaving,
+    /// makes nothing: false.
+    pub async fn keep(&self, prepared: crate::PreparedPin, file: FileId) -> Result<bool, DbError> {
         self.database
             .write(move |sql| {
+                if !sql.end_pin_request(file)? {
+                    return Ok(false);
+                }
                 sql.pin(prepared)?;
-                sql.end_pin_request(file)
+                Ok(true)
             })
             .await
     }

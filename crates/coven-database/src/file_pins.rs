@@ -31,20 +31,22 @@ pub(crate) fn request(db: &DatabaseConnection, file: FileId) -> Result<(), DbErr
     Ok(())
 }
 
-/// End the request: its pin is made, or its file is gone from this device.
-/// Its record and wait go with it, and the copy it kept goes once nothing
-/// else names it.
-pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
-    let copy = db
+/// End the request: its pin is made, the app unpinned its file, or its file
+/// is gone from this device. Its record and wait go with it, and the copy it
+/// kept goes once nothing else names it. Returns whether a request waited.
+pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+    let Some(copy) = db
         .query("DELETE FROM _coven_pin_requests WHERE file=?1 RETURNING copy", [file], |r| {
             r.get::<_, Option<String>>(0)
         })?
         .pop()
-        .flatten();
+    else {
+        return Ok(false);
+    };
     if let Some(copy) = copy {
         crate::file_queue::release_copy(db, &copy)?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The cache copy couldn't be made from coven's copy: the pin downloads from

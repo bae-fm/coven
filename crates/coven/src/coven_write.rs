@@ -88,8 +88,9 @@ impl<'write> CovenWrite<'write> {
     /// Releases the pins on these files' stored bytes, then evicts each of
     /// their namespaces down to its budget (§17.8). A file this device has
     /// no record of, or one on one device only, has no pin to release. A
-    /// pin coven keeps for a switch to the cloud stays (§17.8). The evicted
-    /// bytes go once the write has committed.
+    /// file kept here whose pin coven has not yet made has its pin request
+    /// ended too: `coven_pin_requests` loses it, and coven never makes that
+    /// pin (§17.8). The evicted bytes go once the write has committed.
     pub fn unpin(&self, files: &[FileId]) -> Result<(), DbError> {
         self.sql.unpin(files)
     }

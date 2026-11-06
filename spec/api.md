@@ -3462,7 +3462,7 @@ let moved = handle
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
-| `coven_pin_requests`: each file a switch to the cloud asked this device to keep whole, whose pin coven has not yet made (E8); a table, which local triggers can follow: a row appears as the switching write records the request and goes as the request ends, whether by the pin made or the file gone | `file` | the file's id; the copy the request keeps and its wait are coven's, and `pin_requests` reads them |
+| `coven_pin_requests`: each file a switch to the cloud asked this device to keep whole, whose pin coven has not yet made (E8); a table, which local triggers can follow: a row appears as the switching write records the request and goes as the request ends, whether by the pin made, the app's unpin or the file gone | `file` | the file's id; the copy the request keeps and its wait are coven's, and `pin_requests` reads them |
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
@@ -6308,7 +6308,9 @@ impl CovenWrite<'_> {
     /// pin ends and its namespace is evicted down to its budget in the
     /// write, and the evicted bytes go once it has committed. A file on one
     /// device only, or one this device has no record of, has no pin to
-    /// release. A pin coven keeps for a file kept here stays.
+    /// release. A file kept here whose pin coven has not yet made has its
+    /// pin request ended too: `coven_pin_requests` loses it in this write,
+    /// and coven never makes that pin.
     pub fn unpin(&self, files: &[FileId]) -> Result<(), DbError>;
 
     /// Removes a stored file's copies from the cache, pinned or not, as a

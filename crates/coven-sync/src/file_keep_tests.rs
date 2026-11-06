@@ -149,6 +149,70 @@ async fn making_a_kept_file_device_only_here_ends_its_request() {
     f.close().await;
 }
 
+/// The files `coven_pin_requests` lists, as the app's SQL reads them.
+async fn requested(f: &Fixture) -> Vec<FileId> {
+    f.database
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query("SELECT file FROM coven_pin_requests", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap()
+}
+
+/// The app's unpin of a file kept here ends coven's pin request in its write
+/// (§17.8): `coven_pin_requests` loses the file, coven's copy the request
+/// kept goes, and coven never makes the pin.
+#[tokio::test]
+async fn unpinning_a_kept_file_ends_its_request() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    let file = kept_app_file(&f, "kept", vec![56; CHUNK + 3]).await;
+    f.drain().await;
+    let copy = f.files.inner.database.pin_requests().await.unwrap()[0].copy.clone().unwrap();
+    let copy =
+        f.directory.area_path(coven_foundation::files::FileArea::AppProvided).join(copy.as_str());
+    assert!(copy.exists());
+    assert_eq!(requested(&f).await, [file]);
+    f.database.write(move |sql| sql.unpin(&[file])).await.unwrap();
+    assert!(requested(&f).await.is_empty());
+    assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
+    assert!(!copy.exists());
+    let before = f.storage.request_trace().len();
+    f.files.inner.keep_pinned().await.unwrap();
+    assert!(!pinned(&f, file).await);
+    assert_eq!(reads(&f, before), 0);
+    f.close().await;
+}
+
+/// An unpin while coven downloads the pin it keeps ends the request, and the
+/// download's write makes no pin: a pin is made only while its request
+/// waits (§17.8).
+#[tokio::test]
+async fn unpinning_a_kept_file_mid_download_keeps_nothing() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let file = kept_original(&f, "song", &vec![57; CHUNK + 5]).await;
+    f.drain().await;
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_request(started, held).await;
+    let mut keeping = Box::pin(f.files.inner.keep_pinned());
+    tokio::select! {
+        result = &mut keeping => panic!("the kept pin ended before its download: {result:?}"),
+        result = tokio::time::timeout(HANG_GUARD, starting) => result.unwrap().unwrap(),
+    }
+    f.database.write(move |sql| sql.unpin(&[file])).await.unwrap();
+    resume.send(()).unwrap();
+    keeping.await.unwrap();
+    assert!(!pinned(&f, file).await);
+    assert!(requested(&f).await.is_empty());
+    assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
+    assert!(keep_records(&f).await.is_empty());
+    f.files.inner.keep_pinned().await.unwrap();
+    assert!(!pinned(&f, file).await);
+    f.close().await;
+}
+
 /// A failed pin coven keeps is its own record, which retries by itself,
 /// and survives reopening; once storage answers, it is made.
 #[tokio::test]

@@ -30,10 +30,11 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.cancel_move(id))
     }
 
-    /// Release the pins on these files' stored bytes and evict each of their
-    /// namespaces down to its budget, in this write (§17.8). A file this
-    /// device has no record of, or one on one device only, has no pin to
-    /// release. The evicted bytes go once the write has committed.
+    /// Release the pins on these files' stored bytes, end the pin requests
+    /// coven keeps for them, and evict each of their namespaces down to its
+    /// budget, in this write (§17.8). A file this device has no record of,
+    /// or one on one device only, has no pin to release. The evicted bytes
+    /// go once the write has committed.
     pub fn unpin(
         &self,
         files: &[coven_foundation::id_source::FileId],
@@ -138,12 +139,12 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.pin(prepared))
     }
 
-    /// End the request for the pin coven keeps for `file`, in this write
-    /// (§17.8).
+    /// End the request for the pin coven keeps for `file`, in this write,
+    /// returning whether one waited (§17.8).
     pub(crate) fn end_pin_request(
         &self,
         file: coven_foundation::id_source::FileId,
-    ) -> Result<(), crate::DbError> {
+    ) -> Result<bool, crate::DbError> {
         self.files.step(|| self.files.end_pin_request(file))
     }
 

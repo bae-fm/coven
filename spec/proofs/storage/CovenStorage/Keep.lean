@@ -3,14 +3,15 @@ namespace CovenStorage.Keep
 /-! §17.8: files kept here. A file staged or moved for the cloud can be kept
 here: the write that switches it to the cloud records a pin request, and
 coven makes the pin itself. The request ends when the pin is made, when the
-file's record goes from this device, or when a switch takes the file off its
-stored bytes, making it device-only (§17.3). A failed attempt leaves it in
-place, waiting to retry.
+app unpins the file, when the file's record goes from this device, or when a
+switch takes the file off its stored bytes, making it device-only (§17.3). A
+failed attempt leaves it in place, waiting to retry.
 
 Proved here: a request appears only in the write switching its file to the
-cloud, for a file kept here (`requested_by_switch`); and it ends only once
-the pin is made, the file's record is gone or the file has left the cloud
-(`request_ends_made_or_gone`). -/
+cloud, for a file kept here (`requested_by_switch`); the app's unpin ends it
+with the pin (`unpin_ends_request`); and it ends only once the pin is made,
+the app has unpinned the file, the file's record is gone or the file has
+left the cloud (`request_ends_made_unpinned_or_gone`). -/
 
 /-- One device's files, by id: whether this device has a record of each,
 whether its coordinates say cloud, whether its upload link says keep it
@@ -22,12 +23,20 @@ structure State where
   requested : Nat → Bool
   pinned : Nat → Bool
 
+/-- The app's unpin of `f`: its pin goes, and the pin request coven keeps for
+it ends too, so coven makes no pin the app has stopped wanting. -/
+def unpinned (s : State) (f : Nat) : State :=
+  { s with
+    pinned := fun x => if x = f then false else s.pinned x
+    requested := fun x => if x = f then false else s.requested x }
+
 /-- What a device may do. `switch` is the write switching a move's files,
 on this device only until then, to the cloud; it requests the pin of each one
 kept here. `make` makes a requested pin and ends its request; `fail` is a
 failed attempt, which changes nothing it records here; `forget` is the
 record going; `leave` is a switch, this device's or another's, taking the
-file off its stored bytes. The app pins and unpins as it likes. -/
+file off its stored bytes. The app pins as it likes, and `unpin` is its
+unpin, which ends the file's request with its pin. -/
 inductive Step : State → State → Prop where
   | switch (s : State) (files : Nat → Bool)
       (here : ∀ f, files f = true → s.recorded f = true ∧ s.cloud f = false) :
@@ -47,8 +56,9 @@ inductive Step : State → State → Prop where
       Step s { s with
         cloud := fun x => if x = f then false else s.cloud x
         requested := fun x => if x = f then false else s.requested x }
-  | pin (s : State) (f : Nat) (p : Bool) :
-      Step s { s with pinned := fun x => if x = f then p else s.pinned x }
+  | pin (s : State) (f : Nat) :
+      Step s { s with pinned := fun x => if x = f then true else s.pinned x }
+  | unpin (s : State) (f : Nat) : Step s (unpinned s f)
   | mark (s : State) (f : Nat) (k : Bool) (here : s.cloud f = false) :
       Step s { s with keep := fun x => if x = f then k else s.keep x }
 
@@ -78,15 +88,25 @@ theorem requested_by_switch {s t : State} (st : Step s t) (f : Nat)
     by_cases e : f = g
     · simp [e] at after
     · simp [e, before] at after
-  | pin g p => simp only at after; rw [before] at after; simp at after
+  | pin g => simp only at after; rw [before] at after; simp at after
+  | unpin g =>
+    by_cases e : f = g
+    · simp [unpinned, e] at after
+    · simp [unpinned, e, before] at after
   | mark g k here => simp only at after; rw [before] at after; simp at after
 
-/-- A pin request ends only once its pin is made, its file's record is gone
-or the file has left the cloud: a failed attempt, the app's pins and unpins,
-and other files' steps leave it waiting. -/
-theorem request_ends_made_or_gone {s t : State} (st : Step s t) (f : Nat)
+/-- The app's unpin ends the file's pin request with its pin: no `make` of it
+can follow until a switch requests it again (`requested_by_switch`). -/
+theorem unpin_ends_request (s : State) (f : Nat) :
+    (unpinned s f).requested f = false ∧ (unpinned s f).pinned f = false := by
+  simp [unpinned]
+
+/-- A pin request ends only once its pin is made, the app has unpinned its
+file, its file's record is gone or the file has left the cloud: a failed
+attempt, the app's pins and other files' steps leave it waiting. -/
+theorem request_ends_made_unpinned_or_gone {s t : State} (st : Step s t) (f : Nat)
     (before : s.requested f = true) (after : t.requested f = false) :
-    t.pinned f = true ∨ t.recorded f = false ∨ t.cloud f = false := by
+    t.pinned f = true ∨ t = unpinned s f ∨ t.recorded f = false ∨ t.cloud f = false := by
   cases st with
   | switch files here => simp [before] at after
   | make g asked =>
@@ -98,14 +118,18 @@ theorem request_ends_made_or_gone {s t : State} (st : Step s t) (f : Nat)
   | forget g =>
     simp only at after ⊢
     by_cases e : f = g
-    · right; left; simp [e]
+    · right; right; left; simp [e]
     · simp [e, before] at after
   | leave g =>
     simp only at after ⊢
     by_cases e : f = g
-    · right; right; simp [e]
+    · right; right; right; simp [e]
     · simp [e, before] at after
-  | pin g p => simp only at after; rw [before] at after; simp at after
+  | pin g => simp only at after; rw [before] at after; simp at after
+  | unpin g =>
+    by_cases e : f = g
+    · right; left; rw [e]
+    · simp [unpinned, e, before] at after
   | mark g k here => simp only at after; rw [before] at after; simp at after
 
 /-- A file not kept here is never requested by its switch. -/

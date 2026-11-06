@@ -169,13 +169,17 @@ committed state is the code's.
 
 [Keep.lean](storage/CovenStorage/Keep.lean) models files kept here (§17.8):
 the write switching a move's files records a pin request for each one kept
-here, a made pin ends its request, and a file's record going ends it too, as
-does a switch taking the file off its stored bytes. `requested_by_switch`
-shows a request appears only in the write switching its file to the cloud,
-for a file kept here, and `unkept_unrequested` that a file not kept here gets
-none. `request_ends_made_or_gone` shows a request ends only once its pin is
-made, its file's record is gone or the file has left the cloud: a failed
-attempt and the app's own pins and unpins leave it waiting.
+here, a made pin ends its request, and the app's unpin of the file ends it
+too, as do a file's record going and a switch taking the file off its stored
+bytes. `requested_by_switch` shows a request appears only in the write
+switching its file to the cloud, for a file kept here, and
+`unkept_unrequested` that a file not kept here gets none.
+`unpin_ends_request` shows the app's unpin ends the request with the pin, so
+no pin of coven's follows unless a switch requests it again.
+`request_ends_made_unpinned_or_gone` shows a request ends only once its pin
+is made, the app has unpinned the file, its file's record is gone or the file
+has left the cloud: a failed attempt and the app's own pins leave it
+waiting.
 
 The file model's `makeLocal` step is this device's one write making cloud
 files device-only here (§17.3), with the app's own change in it when the

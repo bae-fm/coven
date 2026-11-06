@@ -91,7 +91,8 @@ import CovenStorage
 #print axioms CovenStorage.DeviceOnly.reserved_stays
 #print axioms CovenStorage.DeviceOnly.released_removable
 #print axioms CovenStorage.Keep.requested_by_switch
-#print axioms CovenStorage.Keep.request_ends_made_or_gone
+#print axioms CovenStorage.Keep.unpin_ends_request
+#print axioms CovenStorage.Keep.request_ends_made_unpinned_or_gone
 #print axioms CovenStorage.Keep.unkept_unrequested
 #print axioms CovenStorage.Files.completion_idempotent
 #print axioms CovenStorage.Files.completion_retires_queue

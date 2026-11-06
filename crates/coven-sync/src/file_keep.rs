@@ -18,6 +18,18 @@ use coven_foundation::files::FileName;
 use coven_storage::ObjectPath;
 use std::sync::Arc;
 
+/// What one attempt at a pin coven keeps came to.
+enum Kept {
+    /// The pin is made, in the write that ended its request.
+    Made,
+    /// A metered network the app keeps files off held its download (§17.8):
+    /// nothing was made, and nothing failed.
+    Held,
+    /// Its request ended in a write since it was read, by the app's unpin or
+    /// the file leaving: nothing was made.
+    Ended,
+}
+
 impl FilesInner {
     /// Make each pin coven keeps whose wait is over and whose failure needs
     /// no new connection.
@@ -54,12 +66,13 @@ impl FilesInner {
                 outcome => outcome,
             };
             match outcome {
-                // The write making the pin ended its request.
-                Ok(true) => self.ended_here(&file),
+                // The write making the pin ended its request, or a write
+                // since the read above did.
+                Ok(Kept::Made | Kept::Ended) => self.ended_here(&file),
                 // A metered network the app keeps files off holds it; the
                 // upload worker runs again as the network or the setting
                 // changes (§17.8).
-                Ok(false) => {}
+                Ok(Kept::Held) => {}
                 // The file left the bytes while they downloaded: the write
                 // taking it off them ended the request, and nothing was kept.
                 Err(TransferError::File(FileReadError::Database(DbError::NoLongerStored {
@@ -73,25 +86,22 @@ impl FilesInner {
 
     /// Prepare the file's pin, from a whole copy already kept if `kept`
     /// finds one, and otherwise from its cache copy made here, then make it
-    /// in one write that ends its request too. Returns false when a metered
-    /// network the app keeps files off held its download (§17.8): nothing
-    /// was made, and nothing failed.
+    /// in one write that ends its request too, if the request still waits.
     async fn pin_kept(
         self: &Arc<Self>,
         file: &FileRef,
         request: &PinRequest,
         kept: bool,
-    ) -> Result<bool, TransferError> {
+    ) -> Result<Kept, TransferError> {
         let prepared = if kept && self.database.whole_kept(file).await? {
             self.database.prepared_pin(Vec::new(), vec![file.clone()])?
         } else {
             let Some(copy) = self.keep(file, request).await? else {
-                return Ok(false);
+                return Ok(Kept::Held);
             };
             self.database.prepared_pin(vec![copy], Vec::new())?
         };
-        self.database.keep(prepared, file.id()).await?;
-        Ok(true)
+        Ok(if self.database.keep(prepared, file.id()).await? { Kept::Made } else { Kept::Ended })
     }
 
     /// Make the cache copy: from coven's copy while the request keeps one,

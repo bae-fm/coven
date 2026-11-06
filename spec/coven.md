@@ -518,8 +518,8 @@ yet made (§17.8), by its id alone. Ben's music app shows how many tracks of
 each album are still downloading to be kept. A local trigger on
 `coven_pin_requests` keeps each album's count in a device-local table: coven's
 triggers on its own pin requests add the file's row in the statement that
-records the request, and delete it in the one that ends it, by the pin made or
-the file gone.
+records the request, and delete it in the one that ends it: the pin made, the
+app's unpin or the file gone.
 
 `coven_upload_queue` is a table for the same reason: it lists each file
 waiting in the upload queue, by its id and place, as `coven_uploads` does,
@@ -6805,6 +6805,8 @@ its tracks' pins never disagree. The step releases each file's pin and evicts
 the file's namespace down to its budget, all in that write; the evicted bytes
 go once it has committed and the writer is free (Appendix C.3). A file on one
 device only has no pin to release, nor does one this device has no record of.
+For a file kept here, unpinning also ends the pin request coven keeps for it,
+as described below.
 
 **Kept here.** A file staged for the cloud, or moved to the cloud, can be kept
 here too (`Place::CloudKeptHere`, `MoveFile::AppKeptHere`,
@@ -6831,10 +6833,20 @@ it in a write of its own that ends its request too.
   keeps, so a failed attempt waits under the shared backoff (§6.7) and tries
   again; one only a person can clear waits for a new connection, and one that
   never clears stays. Its record (§19.1), with subject `Keep`, names the file,
-  and ends when the pin is made, or the file's record goes or leaves the cloud
-  (§17.3). This is unlike the
+  and ends when the pin is made, the app unpins the file, or the file's record
+  goes or leaves the cloud (§17.3). This is unlike the
   app's own pin, whose failure goes back to its call and is retried only by the
   app's next pin or read (§17.7).
+
+**Stopping keeping a file here** is the app's unpin. It releases a pin coven
+already made, and ends a pin request still waiting, in the same write. Ana's
+laptop is still downloading track 7 of her import when she chooses "stop
+keeping here" for the album. Her app unpins the tracks: track 7's request
+ends, and `coven_pin_requests` loses its row in that write. Coven's copy that
+the request kept goes once nothing else names it, and the request's wait and
+record go with it. The download under way keeps nothing, since coven makes a
+pin only while its request waits. Without this, coven would make the pin
+after the app released it, and track 7 would go on downloading.
 
 - Preparing assembles a complete encrypted cache file from cached and fetched
   chunks, checks its content hash, and syncs it to disk. The write publishes it
@@ -9709,7 +9721,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.8) |
 | `_coven_file_uploads` | each stored object this device uploads: its location and key, size, content hash, source, move and provider session, and for a bound upload the number of the write that staged its file, from which this device's writes wait while a file waits for the upload (§17.4, §17.9) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.9) |
-| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, or the file's record goes or leaves the cloud (§17.8) |
+| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, the app unpins the file, or the file's record goes or leaves the cloud (§17.8) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
@@ -11396,7 +11408,7 @@ Write-ups explain each model and state its assumptions:
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
 | With a raise's marker between a held write and its completion, the raise waits while the upload is queued, a pass publishing the held write publishes through the marker, and the completion waits for the raise | `raise_waits_for_held`, `held_with_marker`, `completion_after_raise` | `proofs/storage/CovenStorage/Holds.lean` | §17.4, §18.5 |
-| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the file's record goes or the file leaves the cloud | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
+| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the app unpins the file, the file's record goes or the file leaves the cloud; the app's unpin ends it with the pin | `requested_by_switch`, `unkept_unrequested`, `unpin_ends_request`, `request_ends_made_unpinned_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
 | Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published; so is the app's write that carries the switch beside its own change, refused whole if that change removes a switched file's last reference | `make_local_whole`, `make_local_keeps_candidates`, `make_local_with_whole`, `make_local_with_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
