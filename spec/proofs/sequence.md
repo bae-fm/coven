@@ -303,7 +303,8 @@ replacement (or removing that member). Rotation cannot erase previously
 downloaded ciphertext or secrets.
 
 [`KeyCustody`](sequence/CovenSequence/KeyCustody.lean) separates the journal's
-key identity and public commitment from secret material in custody.
+key identity and public commitment from secret material in custody, for an
+audience key and for a member's new pair alike.
 `saved_before_prepared` requires saved material before recording its commitment;
 `restart_reuses_saved` keeps that material on restart, and `save_keeps_other`
 preserves other keys. `journal_depends_only_on_commitment` makes the journal's
@@ -798,6 +799,24 @@ undone. `unheld_keeps_pause` retains the pause under an unheld binding;
 its restore code. `undo_requires_active` permits release only under the held
 active pair. Public pairs are equality-preserving tokens; custody writes and
 restore-code persistence are outside this decision.
+
+The same file models the race and the procedure:
+
+- `replaced_never_current`, `competing_replacement_refused`: a replacement
+  applies only while the pair it expects is current and its new pair was never
+  bound. Once one applies, the pair it replaced is never its member's again,
+  so a competing replacement expecting that pair, and every retry of it, which
+  keeps the pair it expects, is refused at every later slot.
+- `writes_straddle_replacement`, `pause_lifts_after_install`: replacing one's
+  own keys pauses the app's writes, sends the writes already queued, keeps the
+  new pair in custody, claims the replacement, installs the pair and refreshes
+  the restore code before lifting the pause. Over any interleaving with other
+  devices' slots, every write under the old pair lands before the
+  replacement's slot and every write under the new pair after it, so none is
+  lost to the cut-off; and once the replacement has landed the device writes
+  again only with the new pair kept, installed and its code refreshed. The
+  replacement's copies and the undo after a refusal (`resolve`) are outside
+  this part.
 
 ## Invites and the app's operations
 

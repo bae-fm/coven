@@ -1,33 +1,32 @@
-import CovenSequence.Keys
-
-/-! Audience-key preparation records an identity before saving material in
-custody (§11.1, §12.4). A restart reuses saved material. The database records
-only the identity and, once prepared, its public commitment. -/
+/-! Key preparation records an identity before saving material in custody
+(§11.1, §12.3, §12.4). A restart reuses saved material. The database records
+only the identity and, once prepared, its public commitment. `Id` is an
+audience key's `Id`, or a member's candidate pair in a replacement of its
+own keys. -/
 namespace CovenSequence.KeyCustody
-open Keys
 
-variable {Aud Secret : Type} [DecidableEq Aud]
+variable {Id Secret : Type} [DecidableEq Id]
 
 /-- The database record has no field for secret material. -/
-inductive Journal (Aud : Type) where
-  | generating (key : Key Aud)
-  | prepared (key : Key Aud) (commitment : Nat)
+inductive Journal (Id : Type) where
+  | generating (key : Id)
+  | prepared (key : Id) (commitment : Nat)
   deriving DecidableEq
 
 /-- Custody is the only destination of newly generated material. -/
-def save (held : Key Aud → Option Secret) (key : Key Aud) (fresh : Secret) :
-    Key Aud → Option Secret :=
+def save (held : Id → Option Secret) (key : Id) (fresh : Secret) :
+    Id → Option Secret :=
   fun k => if k = key then some ((held key).getD fresh) else held k
 
-def ready (hash : Secret → Nat) (held : Key Aud → Option Secret) (key : Key Aud) :
-    Journal Aud :=
+def ready (hash : Secret → Nat) (held : Id → Option Secret) (key : Id) :
+    Journal Id :=
   match held key with
   | none => .generating key
   | some material => .prepared key (hash material)
 
-omit [DecidableEq Aud] in
-theorem saved_before_prepared (hash : Secret → Nat) (held : Key Aud → Option Secret)
-    (key : Key Aud) (commitment : Nat) (h : ready hash held key = .prepared key commitment) :
+omit [DecidableEq Id] in
+theorem saved_before_prepared (hash : Secret → Nat) (held : Id → Option Secret)
+    (key : Id) (commitment : Nat) (h : ready hash held key = .prepared key commitment) :
     ∃ material, held key = some material ∧ hash material = commitment := by
   unfold ready at h
   split at h
@@ -35,7 +34,7 @@ theorem saved_before_prepared (hash : Secret → Nat) (held : Key Aud → Option
   · cases h
     exact ⟨_, ‹held key = some _›, rfl⟩
 
-theorem restart_reuses_saved (held : Key Aud → Option Secret) (key : Key Aud)
+theorem restart_reuses_saved (held : Id → Option Secret) (key : Id)
     (material fresh : Secret) (h : held key = some material) :
     save held key fresh = held := by
   funext k
@@ -43,16 +42,16 @@ theorem restart_reuses_saved (held : Key Aud → Option Secret) (key : Key Aud)
   · subst k; simp [save, h]
   · simp [save, same]
 
-theorem save_keeps_other (held : Key Aud → Option Secret) (key other : Key Aud)
+theorem save_keeps_other (held : Id → Option Secret) (key other : Id)
     (fresh : Secret) (different : other ≠ key) : save held key fresh other = held other := by
   simp [save, different]
 
-omit [DecidableEq Aud] in
+omit [DecidableEq Id] in
 /-- Even during preparation, changing secrets with equal public commitments
 does not change the database record. SQLite's copies of that record have the
 same observation; their physical encoding is checked in Rust. -/
 theorem journal_depends_only_on_commitment (hash : Secret → Nat)
-    (a b : Key Aud → Option Secret) (key : Key Aud)
+    (a b : Id → Option Secret) (key : Id)
     (same : (a key).map hash = (b key).map hash) :
     ready hash a key = ready hash b key := by
   unfold ready

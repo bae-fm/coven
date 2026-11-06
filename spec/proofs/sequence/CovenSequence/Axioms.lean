@@ -66,6 +66,10 @@ import SequenceApply
 #print axioms CovenSequence.MemberKeyReplacement.unheld_keeps_pause
 #print axioms CovenSequence.MemberKeyReplacement.candidate_installs
 #print axioms CovenSequence.MemberKeyReplacement.undo_requires_active
+#print axioms CovenSequence.MemberKeyReplacement.replaced_never_current
+#print axioms CovenSequence.MemberKeyReplacement.competing_replacement_refused
+#print axioms CovenSequence.MemberKeyReplacement.writes_straddle_replacement
+#print axioms CovenSequence.MemberKeyReplacement.pause_lifts_after_install
 
 #print axioms CovenSequence.ClaimRecord.remember_number
 #print axioms CovenSequence.Claims.witness
