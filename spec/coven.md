@@ -5558,7 +5558,14 @@ and again before committing the slots it read; §6.1 and §6.2 give those rules.
 Every check of a floor holds the history through its `at`, since the snapshots
 it names were announced up to there. A device whose history stops short of it
 reads the kept slots up to `at` first: a settling claim (§5.2), a reload before
-it commits (§16.5), and retention settling a lost reply (§16.6) all do.
+it commits (§16.5), and retention settling a lost reply (§16.6) all do. Once the
+floor's `first` has passed the device's next slot, the slots between may be
+deleted, so reading forward from its own slots would need a deleted slot
+([`history_needs_deleted_slot`](proofs/sequence/CovenSequence/FloorCheck.lean)).
+The device starts instead from the history in the floor's store snapshot, which
+covers at least `first - 1`, and reads the kept slots after it up to `at`: a
+claim whose slot the floor passed settles this way (§5.3), and a pass reloads
+this way (§6.1).
 A floor read back unchanged since the device last checked it isn't checked again:
 the check reads only history through the floor's `at`, which never changes once
 applied. So a quiet pass under a floor decodes nothing (§21.2).
@@ -5755,11 +5762,26 @@ The rules:
 - **A lost race changes nothing.** If the floor changed, the conditional write
   fails. The device reads the current floor and decides again. It never moves
   `first`, or any audience's coverage, backward.
-- **A lost reply is settled by reading the floor** before deleting anything. The
-  device deletes only slots the confirmed floor puts below `first`. Another
-  device may have replaced the floor since, past the slots this one has applied,
-  so the device reads forward first, as a pass does (§6.1, §6.2), and checks the
-  floor against the history through its `at`.
+- **A lost reply is settled by reading the floor** before deleting anything.
+  Another device may have replaced the floor since, past the slots this one has
+  applied, so the device reads forward first, as a pass does (§6.1, §6.2), and
+  checks the floor as §16.4 says. Then it decides:
+  - The floor is still the one its write was conditional on: the write didn't
+    land, and the device writes it again.
+  - A changed floor whose `first` reaches the write's own: the device deletes
+    the slots below that floor's `first`. Its write may not have landed, since
+    another device's floor can reach that far too; the deletions are below a
+    floor in storage either way.
+  - A changed floor whose `first` is below the write's own: the write didn't
+    land, since no floor moves `first` back. Nothing is deleted.
+
+  Ana's floor moves `first` from 161 to 201, written at 205, and its reply is
+  lost. Before she tries again, Ben writes slots 206 to 230, announces a
+  snapshot covering them at 231, and a week later writes a floor with `first`
+  231, deleting 201 to 230. Ana, still at 205, finds slot 206 gone: she reloads
+  from Ben's floor, as any pass would, then deletes 161 to 230. Her write landed
+  and her deletions are hers to make; had it not landed, Ben's floor would
+  still put them below `first`.
 - **Failed deletions stay journaled and reported** (§19.1). A later floor update
   doesn't wait for them to finish.
 - **Keep the snapshots still in use:** those the floor names, those a pending
@@ -11272,6 +11294,9 @@ Write-ups explain each model and state its assumptions:
 | Loading a floor snapshot and the slots after it reaches the full state; sound readers at one position agree | `joiner_reaches_head`, `readers_agree` | `proofs/sequence/CovenSequence/Reader.lean` | §16.4, §16.5 |
 | A reload that reads the kept slots through the floor's `at` before checking the floor it reads before committing never refuses an honest floor; for a floor whose `at` is at most the target, checking at the target is the same check | `honest_floor_installs`, `install_eq_atTarget` | `proofs/sequence/CovenSequence/ReloadFloor.lean` | §16.4, §16.5 |
 | *Body.* Checked against only the slots through its target, a reload refuses an honest floor written past it, as after a newer snapshot of a circle a device was just added to | `atTarget_refuses_honest_floor` | `proofs/sequence/CovenSequence/ReloadFloor.lean` | §16.5 |
+| A floor check reads only kept slots: after the device's own while the floor's `first` is at most its next slot, otherwise after the floor's store snapshot's coverage. In storage in good order every slot it reads is present, and it accepts an honest floor | `check_reads_kept`, `check_from_floor` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §5.3, §16.4, §16.6 |
+| *Body.* Past a floor whose `first` has passed a device's next slot, reading forward from its own slots needs a deleted slot, and the floor is refused against those slots | `history_needs_deleted_slot` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §16.4 |
+| Settling a lost floor reply: a landed write is always confirmed, at the `first` of the floor read, which can be past its own; a write not confirmed did not land; the deletions a confirmed verdict makes are storage steps then and after any later storage steps | `landed_confirms`, `unconfirmed_not_landed`, `confirmed_deletes`, `moved_floor_confirms` | `proofs/sequence/CovenSequence/RetentionConfirm.lean` | §16.6 |
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Each eligible original is applied over the loaded state exactly once; consumed ones are left out; repeating the step rebuilds from the loaded state | `queued_exactly_once`, `covered_not_reapplied`, `install_twice` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |

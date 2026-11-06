@@ -1207,6 +1207,56 @@ holds: through the target, then the kept slots it reads through the floor's
   `install_eq_atTarget`: for a floor whose `at` is at most the target, the two
   checks are the same.
 
+## Checking a floor from the history a device holds
+
+[`FloorCheck`](sequence/CovenSequence/FloorCheck.lean) states where the history
+a floor is checked against starts. A device has applied the slots through
+`through`. While the floor's first kept slot is at most `through + 1`, the check
+reads the kept slots after `through` up to the floor's `at`. Once the first kept
+slot has passed `through + 1`, it starts from the floor's store snapshot, whose
+coverage reaches at least `first - 1`, and reads the kept slots after that
+coverage. `checkFrom` is the slot the check starts after. The history through
+`checkFrom` is the device's own or the store snapshot's; the model takes the
+snapshot's body as honest (`Good.floor_body`).
+
+- `check_reads_kept`: every slot the check reads is at or after the floor's
+  first kept slot. `check_from_floor`: in storage in good order each of them
+  is present and genuine, and the floor's check, `Settle.FloorAnnounced`,
+  accepts an honest floor.
+- `history_needs_deleted_slot` is a checked counterexample to reading forward
+  from the device's own slots. In `compactStore`, slot 1 adds a member, slots 2
+  and 3 announce snapshots covering 1 and 2, and the floor names the one at 3,
+  with first kept slot 3; slots 1 and 2 are deleted. A device at slot 1 would
+  need slot 2, and against slot 1 alone the floor is refused. Starting from the
+  floor's store snapshot, it reads only slot 3 and accepts the floor.
+
+## Settling a lost floor reply
+
+[`RetentionConfirm`](sequence/CovenSequence/RetentionConfirm.lean) models what
+retention concludes when the reply to its conditional floor write was lost. The
+floor's revisions are a log (`Log`): each write makes a new revision, and none
+moves the first kept slot back, as `StoreStep.writeFloor` requires. A write
+conditional on revision `previous` landed when it directly follows `previous`
+in the log (`Landed`). Having read and checked the current floor, `confirm`
+answers `write` when it is still `previous`, `confirmed n` for a changed floor
+whose first kept slot `n` reaches the write's own, and `lost` otherwise.
+
+- `landed_confirms`: a landed write is always confirmed, at the current floor's
+  first kept slot, however far later floors moved it.
+  `unconfirmed_not_landed`: so `write` and `lost` mean the write is not in the
+  log. A confirmed write need not have landed.
+- `confirmed_deletes`: the slots below a confirmed `n` are below the floor the
+  device read, and deleting them is a `StoreStep.delete` then and after any
+  later storage steps, since the first kept slot never moves back.
+- `moved_floor_confirms`: Ana's write moves the first kept slot from 3 to 5 and
+  lands; Ben's later floor moves it to 9, and Ana confirms at 9. Had Ben's floor
+  replaced the one she read first, her write could not land, and she still
+  confirms at 9.
+
+The model takes the revision a floor read returns as storage's current one, and
+the log's revisions as distinct: a write makes a new revision, and a revision
+never reappears.
+
 ## JSON runner
 
 Build with `cd spec/proofs/sequence && lake build`; the executable is

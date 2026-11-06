@@ -390,7 +390,9 @@ impl SequenceSync {
                 // missing reply. This observation alone authorizes deletion.
                 // Another device may have replaced the floor since, past the
                 // slots this one has applied: reading forward checks it
-                // against the history through its `at` (§16.4, §16.6).
+                // against the history through its `at`, or reloads from it
+                // when its `first` has passed the next slot, whose slots
+                // may be deleted (§16.4, §16.6).
                 self.read_forward(session, ring, member).await?;
                 // A changed floor whose `first` reaches this one's authorizes
                 // the deletions. An unchanged one never does: a write that

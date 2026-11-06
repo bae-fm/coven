@@ -205,6 +205,74 @@ async fn a_lost_floor_reply_accepts_a_newer_floor_written_past_the_applied_slots
     }
 }
 
+/// Ana's floor write lands but its reply is lost. Before her retention
+/// resumes, Ben writes past her slots, snapshots them and, once that snapshot
+/// has passed grace, writes a floor whose first kept slot has passed the slot
+/// after Ana's, deleting the slots between. Ana's confirm needs none of them:
+/// it starts from that floor's store snapshot, checks the floor against the
+/// history there, and deletes below its first kept slot (§16.6,
+/// `RetentionConfirm.landed_confirms`, `FloorCheck.check_from_floor`).
+#[tokio::test]
+async fn a_lost_floor_reply_confirms_a_floor_moved_past_the_applied_slots() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "published", "retained").await;
+    ana.sync.pass().await.unwrap();
+    let covered = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let grace = crate::sequence_sync::sequence_retention::GRACE;
+    let second = std::time::Duration::from_secs(1);
+    group.clock.set(std::time::UNIX_EPOCH + grace + second);
+    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    // Retention alone, so the lost reply is the floor's.
+    let mut session = ana.sync.session.lock().await;
+    ana.sync.retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity).await.unwrap();
+    drop(session);
+    ana.storage.set_faults(Faults::none()).await;
+    let own = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    let path = ObjectPath::slot(group.store, covered.try_into().unwrap());
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+
+    ben.sync.pass().await.unwrap();
+    for id in ["after", "her floor"] {
+        insert(&ben.sync.database, id, "written by ben").await;
+        ben.sync.pass().await.unwrap();
+    }
+    ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(std::time::UNIX_EPOCH + grace * 2 + second * 3);
+    ben.sync.pass().await.unwrap();
+    let moved = crate::sequence_sync::sequence_reload::tests::stored_floor(&ben).await;
+    assert_ne!(moved.object(), own.object());
+    assert!(moved.header.first.0 > applied + 1, "{:?} after {applied}", moved.header);
+    let next = ObjectPath::slot(group.store, (applied + 1).try_into().unwrap());
+    assert!(group.storage.status(&next).await.unwrap().is_none(), "Ben deleted the slots between");
+
+    // Retention alone again, as in a pass whose read forward came before
+    // Ben's floor.
+    let mut session = ana.sync.session.lock().await;
+    ana.sync.retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity).await.unwrap();
+    drop(session);
+    let pending = ana.sync.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert!(pending.is_empty(), "{pending:?}");
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    for slot in 1..moved.header.first.0 {
+        let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
+        assert!(group.storage.status(&path).await.unwrap().is_none(), "slot {slot} kept");
+    }
+    assert!(ana.sync.database.applied_slot().await.unwrap() >= moved.header.first.0 - 1);
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
+    assert_eq!(rows(&ana.sync.database).await.len(), 3);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// The floor a quiet pass reads back unchanged was authenticated when it was
 /// first read; checking it again decodes its copies and announcements.
 #[tokio::test]

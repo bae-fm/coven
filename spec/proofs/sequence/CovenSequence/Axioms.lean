@@ -405,6 +405,14 @@ import SequenceApply
 #print axioms CovenSequence.ReloadFloor.install_eq_atTarget
 #print axioms CovenSequence.ReloadFloor.honest_floor_installs
 #print axioms CovenSequence.ReloadFloor.atTarget_refuses_honest_floor
+#print axioms CovenSequence.FloorCheck.check_reads_kept
+#print axioms CovenSequence.FloorCheck.check_from_floor
+#print axioms CovenSequence.FloorCheck.compactStore_good
+#print axioms CovenSequence.FloorCheck.history_needs_deleted_slot
+#print axioms CovenSequence.RetentionConfirm.landed_confirms
+#print axioms CovenSequence.RetentionConfirm.unconfirmed_not_landed
+#print axioms CovenSequence.RetentionConfirm.confirmed_deletes
+#print axioms CovenSequence.RetentionConfirm.moved_floor_confirms
 #print axioms CovenSequence.JoinScan.readOrDamage_undamaged
 #print axioms CovenSequence.JoinScan.damaged_not_passed
 #print axioms CovenSequence.JoinScan.stop_strands_scan
