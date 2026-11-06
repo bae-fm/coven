@@ -260,6 +260,12 @@ impl StorageConnections {
         *lock_unpoisoned(&self.setup_hook) = Some(hook);
     }
 
+    /// Stop the next S3 key replacement after `at`, as a crash would.
+    #[cfg(test)]
+    pub(crate) fn test_replace_crash(&self, at: coven_sync::ReplaceStop) {
+        self.codes.test_replace_crash(at);
+    }
+
     /// Start a setup call, which a cancel reaches from now on (§11.6).
     /// Refused while another runs, or one past its point of no return is
     /// still finishing.

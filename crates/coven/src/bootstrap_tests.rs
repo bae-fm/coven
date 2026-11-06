@@ -650,7 +650,10 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
 }
 
 #[tokio::test]
-async fn failed_access_publication_retains_credentials_and_retry_finishes_once() {
+/// A replacement whose record fails to publish keeps the new key apart:
+/// custody connects with the old one until history records the new, and
+/// retrying finishes it once (§14.3).
+async fn failed_access_publication_keeps_the_key_apart_and_retry_finishes_once() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
@@ -671,14 +674,20 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     ));
     let retained = handle.restore_code().await.unwrap();
     assert_eq!(retained, before);
-    restore_credentials::assert_key(
-        &install,
-        directory.id(),
-        &S3Credentials {
-            access_key_id: "replacement".into(),
-            secret_access_key: SecretText::new("secret".into()),
-        },
-    );
+    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
+    let connected = || {
+        let StorageCredentials::S3(key) =
+            StorageCredentials::decode(custody.storage_credentials().unwrap().unwrap().as_bytes())
+                .unwrap()
+        else {
+            panic!("S3 device key")
+        };
+        key.access_key_id
+    };
+    let original = connected();
+    assert_ne!(original, "replacement");
+    let kept = custody.replacing_access_key().unwrap().unwrap();
+    assert_eq!(S3Credentials::decode(kept.as_bytes()).unwrap().access_key_id, "replacement");
 
     assert_eq!(
         keychain_code(
@@ -702,6 +711,15 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
             .unwrap();
         assert_eq!(handle.restore_code().await.unwrap(), retained);
     }
+    restore_credentials::assert_key(
+        &install,
+        directory.id(),
+        &S3Credentials {
+            access_key_id: "replacement".into(),
+            secret_access_key: SecretText::new("secret".into()),
+        },
+    );
+    assert!(custody.replacing_access_key().unwrap().is_none());
     owner.sync().await;
     assert_eq!(slots().await, entries_before + 1);
     handle.close().await.unwrap();

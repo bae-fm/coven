@@ -5083,6 +5083,10 @@ pub enum SyncError {
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§14.1).
     Removed,
+    /// A replacement of this member's S3 key by another key is still under
+    /// way: its id isn't recorded yet, or custody doesn't connect with it
+    /// yet (§14.3). Retrying with that key finishes it.
+    ReplacementPending { access_key_id: String },
     /// Another copy uses this device's id; this one sends nothing more.
     /// Nothing is recorded; `reset_device` is the app's option (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
@@ -6847,9 +6851,11 @@ impl CovenHandle {
     /// The restore code does not change. They keep the key separately,
     /// update their other devices with update_credentials, and delete the
     /// old key in the provider's console; coven forgets it (§14.3).
-    /// Requires connected storage.
-    /// An uncertain claim retains the new credentials and attempted bytes.
-    /// Retry with the same key to settle it before completing or undoing (§11).
+    /// Requires connected storage. Custody keeps the new key apart, and the
+    /// connection uses the old one, until the entry lands; then this device
+    /// connects with the new key. A failed or uncertain claim stays
+    /// journaled, and passes retry it; retrying with the same key finishes
+    /// it too. Another key fails with `ReplacementPending` until it ends.
     /// An invalidated operation settles any uncertain claim before undo (§11).
     /// Once this member's removal applies, returns Removed and saves nothing.
     pub async fn replace_access_key(

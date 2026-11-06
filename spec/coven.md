@@ -5044,9 +5044,19 @@ carries, so the app can tell the person which key to delete.
 
 **Replacing a member's key** (to lock out a lost device, say) is the member's own
 change. Dan makes a new key in the console and gives it to a device he keeps,
-which installs it and records it as his current access. His other devices need
+which records it as his current access, then installs it. His other devices need
 the new key from Dan; the old key keeps working until he deletes it in the
 console.
+
+The device keeps the new key apart until the entry recording it lands, still
+connecting with the old one, and only then connects with the new. A crash
+before the entry lands lets the kept key go; one after it connects with the
+kept key as the next pass settles it. So the key history records for Dan is
+always one his device can connect with, and the key Ana's app names when she
+removes him is the one his device uses. Installing the key first, a crash
+before the entry would leave the device on a key history never records, and
+Ana would delete the old key while the new one went on reaching the store
+([`custody_first_strands`](proofs/sequence/CovenSequence/AccessKeyReplacement.lean)).
 
 **When a key stops being used.** Removing a member, replacing a member's key, or
 ending an invite leaves a key nobody in the store uses. Coven forgets it: it
@@ -10098,7 +10108,7 @@ keeps them apart from the app's own Block Store entries:
 
 | Scope | Entries | Deleted when |
 |---|---|---|
-| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), the invite code of a join under way, the record of a restore under way, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
+| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), a replacement S3 key until history records it or the replacement ends (§14.3), the invite code of a join under way, the record of a restore under way, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
 | Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
 
 On Apple devices the device-only entries can be read only while the device is
@@ -11503,7 +11513,8 @@ Write-ups explain each model and state its assumptions:
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
 | After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
-| A member's S3 key replacement connects with the new key only once history records it, whatever crash cuts it; from every reachable state coven's own steps end with no key kept apart and custody on the recorded key. Committing the key to custody first could strand custody on a key history never records | `custody_never_ahead`, `replacement_settles`, `custody_first_strands` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
+| A member's S3 key replacement connects with the new key only once history records it, whatever crash cuts it; from every reachable state coven's own steps end with no key kept apart and custody on the recorded key | `custody_never_ahead`, `replacement_settles` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
+| *Body.* Committing the new key to custody before its entry lets a crash strand custody on a key history never records | `custody_first_strands` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied approval still admits a member not subsequently removed. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
 | A scan with no matching copies reaches the end; an absent request without its approving binding reports declined | `no_copy_reaches_end`, `real_decline` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |

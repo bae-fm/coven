@@ -221,6 +221,9 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     handle.close().await.unwrap();
 }
 
+/// A dropped replacement's caller doesn't stop it: its record publishes
+/// while the connection keeps the old key, and custody connects with the
+/// new one once history records it (§14.3).
 #[tokio::test]
 async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_publication() {
     let f = Fixture::new().await;
@@ -242,7 +245,9 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
             _ = entering => {}
         }
     }
-    assert_connected_key(&f, "retained", "retained-secret").await;
+    // The record publishes with the key history records now.
+    let provider = f.connector.providers.lock().unwrap().last().unwrap().clone();
+    assert_eq!(provider.s3_credentials().await.unwrap().access_key_id, "member-key");
     resume.send(()).unwrap();
     f.handle.close().await.unwrap();
     let handle = builder(&f.app, f.clock.clone(), f.connector.clone())
@@ -370,4 +375,35 @@ async fn a_panicking_key_forget_fails_with_its_bug() {
     let KeyError::Bug(bug) = &failed else { panic!("the call heard no bug: {failed:?}") };
     assert_eq!(bug.message, "the key's entry is locked");
     handle.close().await.unwrap();
+}
+
+/// Ben's phone is killed while it replaces its S3 key: once the new key is in
+/// custody, or once its id is journaled. Reopened and synced, the phone uses
+/// the key its member's record names, whichever that is: custody never holds
+/// a key the history doesn't name (§14.3).
+#[tokio::test]
+async fn a_key_replacement_cut_at_any_step_leaves_custody_on_the_recorded_key() {
+    for at in [coven_sync::ReplaceStop::Custody, coven_sync::ReplaceStop::Journal] {
+        let f = Fixture::new().await;
+        f.setup().await.unwrap();
+        synced(&f.handle).await;
+        f.handle.test_replace_crash(at);
+        f.handle
+            .replace_access_key("replacement".into(), SecretText::new("replacement-secret".into()))
+            .await
+            .unwrap_err();
+        f.handle.close().await.unwrap();
+        let handle = builder(&f.app, f.clock.clone(), f.connector.clone())
+            .open(f.directory.id(), |_| ())
+            .await
+            .unwrap();
+        f.advance(Duration::from_secs(1));
+        handle.start_sync().await.unwrap();
+        synced_since(&handle, f.clock.now()).await;
+        let provider = f.connector.providers.lock().unwrap().last().unwrap().clone();
+        let used = provider.s3_credentials().await.unwrap().access_key_id;
+        let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
+        assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: used }, "{at:?}");
+        handle.close().await.unwrap();
+    }
 }

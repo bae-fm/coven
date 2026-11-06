@@ -92,6 +92,15 @@ pub enum SyncError {
     /// This device or its member was removed; syncing stops for good (§14.1).
     #[error("this device or its member was removed")]
     Removed,
+    /// A replacement of this member's S3 key by another key is still under
+    /// way: its id isn't recorded yet, or custody doesn't connect with it yet
+    /// (§14.3). Retrying with that key finishes it; once it ends, another key
+    /// can replace it.
+    #[error("the replacement by S3 key {access_key_id} is still under way")]
+    ReplacementPending {
+        /// The key the replacement under way records.
+        access_key_id: String,
+    },
     /// Another copy uses this device's id, as this evidence shows. This copy
     /// sends nothing more; nothing is recorded, and `reset_device` is the
     /// app's option (§19.3).
@@ -243,6 +252,7 @@ impl SyncError {
             | SyncError::NoStorage
             | SyncError::StoreOwner
             | SyncError::InvitationChanged
+            | SyncError::ReplacementPending { .. }
             | SyncError::NotPending(_)
             | SyncError::ReloadPending(_)
             | SyncError::SnapshotPending(_)
@@ -279,6 +289,7 @@ impl SyncError {
             | Self::NoStorage
             | Self::StoreOwner
             | Self::InvitationChanged
+            | Self::ReplacementPending { .. }
             | Self::NotPending(_)
             | Self::ReloadPending(_)
             | Self::SnapshotPending(_)

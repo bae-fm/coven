@@ -62,6 +62,25 @@ pub struct RestoreCodes {
     credentials: Arc<DeviceCredentials>,
     /// Where a bug in a replacement its caller stopped waiting for goes.
     bugs: coven_foundation::task::BugSinkRef,
+    /// Whether custody may keep a replacement S3 key apart: true until a
+    /// settling finds none, and from when a replacement keeps one. Only this
+    /// owner keeps or lets go of that key, so a pass reads the keychain
+    /// only while one may be there.
+    replacing: Arc<std::sync::atomic::AtomicBool>,
+    /// Where the next key replacement stops as a crash would, for a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    replace_crash: Arc<std::sync::Mutex<Option<ReplaceStop>>>,
+}
+
+/// A step of an S3 key replacement a test stops it after, as the app being
+/// killed there would.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaceStop {
+    /// The new key is in custody.
+    Custody,
+    /// Its id is journaled and the journal's operation has ended.
+    Journal,
 }
 struct RestoreCodesInner {
     directory: StoreDir,
@@ -95,7 +114,32 @@ impl RestoreCodes {
                 credentials: credentials.clone(),
             }))),
             credentials,
+            replacing: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            #[cfg(any(test, feature = "test-utils"))]
+            replace_crash: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Stop the next key replacement after `at`, as a crash would.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_replace_crash(&self, at: ReplaceStop) {
+        *coven_foundation::locks::lock_unpoisoned(&self.replace_crash) = Some(at);
+    }
+
+    /// The error a replacement stopped at `at` fails with, once.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn crashed_at(
+        crash: &std::sync::Mutex<Option<ReplaceStop>>,
+        at: ReplaceStop,
+    ) -> Result<(), SyncError> {
+        let mut crash = coven_foundation::locks::lock_unpoisoned(crash);
+        if *crash == Some(at) {
+            *crash = None;
+            return Err(coven_storage::StorageFailure::InvalidConfiguration
+                .with_source("the replacement stopped as a crash would")
+                .into());
+        }
+        Ok(())
     }
 
     /// How a connection reaches storage with these committed credentials: a
@@ -176,13 +220,17 @@ impl RestoreCodes {
         Ok(())
     }
 
-    /// Install a manually supplied S3 key on `sync`, the connection's
-    /// sequence owner, and publish its id; the code stays unchanged.
-    /// Credentials remain committed if publication fails: the remote entry
-    /// may already exist. Retry with the same key to finish publication;
-    /// queued entry bytes and numbers are reused. Coven never deletes the
-    /// key it replaces; the person deletes it in the provider's console
-    /// (§14.3). The change holds this owner as `replace_member_keys` does.
+    /// Replace this member's S3 key with one the person made in the
+    /// provider's console (§14.3): keep it apart in custody, record its id
+    /// in an admin entry the connection claims with the key in use, then
+    /// connect with it. Custody never connects with a key history doesn't
+    /// record: a replacement cut before its record lands lets the kept key
+    /// go, and one cut after connects with it, as a pass settles it. A
+    /// failed claim stays journaled and passes retry it; retrying with the
+    /// same key finishes it too, and another key is refused until it ends
+    /// (`ReplacementPending`). Coven never deletes the key it replaces; the
+    /// person deletes it in the provider's console. The change holds this
+    /// owner as `replace_member_keys` does.
     pub async fn replace_access_key(
         &self,
         sync: Arc<crate::SequenceSync>,
@@ -190,23 +238,37 @@ impl RestoreCodes {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
         let guard = self.inner.clone().lock_owned().await;
-        let replacing = async move {
+        let replacing = self.replacing.clone();
+        #[cfg(any(test, feature = "test-utils"))]
+        let crash = self.replace_crash.clone();
+        let work = async move {
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            owner
-                .install_s3(
-                    S3Credentials { access_key_id: access_key_id.clone(), secret_access_key },
-                    Some(&sync),
-                )
-                .await?;
+            let key = S3Credentials { access_key_id: access_key_id.clone(), secret_access_key };
+            owner.keep_replacing(&sync, &key, &replacing).await?;
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::crashed_at(&crash, ReplaceStop::Custody)?;
             sync.record_access_key(access_key_id).await?;
-            Ok(())
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::crashed_at(&crash, ReplaceStop::Journal)?;
+            owner.settle_access_key(&sync, &replacing).await
         };
-        coven_foundation::task::spawn_completing(
-            "replace the access key",
-            self.bugs.clone(),
-            replacing,
-        )
-        .await?
+        coven_foundation::task::spawn_completing("replace the access key", self.bugs.clone(), work)
+            .await?
+    }
+
+    /// Settle a key replacement a pass of `sync` may have advanced (§14.3):
+    /// connect with the kept key once history records it, or let it go once
+    /// nothing journals or records it.
+    pub(crate) async fn resume_access_key(
+        &self,
+        sync: &crate::SequenceSync,
+    ) -> Result<(), SyncError> {
+        if !self.replacing.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let guard = self.inner.lock().await;
+        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+        owner.settle_access_key(sync, &self.replacing).await
     }
 
     /// Keep this member's separately supplied S3 key without changing identity,
@@ -348,6 +410,61 @@ impl RestoreCodesInner {
             (Ok(()), result) | (result, Ok(())) => result,
             (Err(operation), Err(cleanup)) => Err(SyncError::cleanup(operation, cleanup)),
         }
+    }
+
+    /// Keep `key` apart as this member's replacement S3 key, once an
+    /// earlier replacement has settled; one by another key still under way
+    /// refuses it.
+    async fn keep_replacing(
+        &self,
+        sync: &crate::SequenceSync,
+        key: &S3Credentials,
+        replacing: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), SyncError> {
+        let location =
+            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
+        ConnectionCredentials { location, credentials: StorageCredentials::S3(key.clone()) }
+            .validate()?;
+        refuse_after_leaving(&self.database, &self.identity).await?;
+        self.settle_access_key(sync, replacing).await?;
+        replacing.store(true, std::sync::atomic::Ordering::Release);
+        self.credentials.write(|keychains| match keychains.replacing_key()? {
+            Some(kept) if kept.access_key_id != key.access_key_id => {
+                Err(SyncError::ReplacementPending { access_key_id: kept.access_key_id })
+            }
+            _ => keychains.keep_replacing_key(key),
+        })
+    }
+
+    /// Settle the replacement key custody keeps apart, if any: while the
+    /// journal runs its record, wait for it; once history records it as
+    /// this member's key, connect with it; otherwise let it go (§14.3).
+    async fn settle_access_key(
+        &self,
+        sync: &crate::SequenceSync,
+        replacing: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), SyncError> {
+        let Some(kept) = self.credentials.write(|keychains| keychains.replacing_key())? else {
+            replacing.store(false, std::sync::atomic::Ordering::Release);
+            return Ok(());
+        };
+        let access =
+            coven_format::MemberAccess::S3AccessKey { access_key_id: kept.access_key_id.clone() };
+        // The journal first: a record landing between the two reads then
+        // shows in history.
+        if sync.journals_access(&access).await? {
+            return Ok(());
+        }
+        let member =
+            self.identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?.member();
+        let recorded =
+            self.database.store_state().await?.active_member(&member).map(|m| m.access.clone());
+        if recorded == Some(access) {
+            self.install_s3(kept, Some(sync)).await?;
+        }
+        self.credentials.write(|keychains| keychains.drop_replacing_key())?;
+        replacing.store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
