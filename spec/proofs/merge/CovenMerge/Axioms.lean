@@ -293,6 +293,13 @@ open CovenMerge
 #print axioms Ownership.Classification.Overlapping.Stale.live_exact
 #print axioms Ownership.Classification.Overlapping.Stale.ended_exact
 #print axioms Ownership.Classification.Overlapping.Stale.views_differ
+#print axioms Ownership.Classification.Place.place_sound
+#print axioms Ownership.Classification.Place.recorded_sound
+#print axioms Ownership.Classification.Place.untouched_views_differ
+#print axioms Ownership.Classification.Place.carried_views_differ
+#print axioms Ownership.Classification.Place.run_sorted
+#print axioms Ownership.Classification.Place.run_last
+#print axioms Ownership.Classification.Place.run_take
 #print axioms Ownership.Classification.local_accept_iff
 #print axioms Ownership.Classification.rebuild_refusal_refuses
 #print axioms Ownership.Classification.accepted_rooted

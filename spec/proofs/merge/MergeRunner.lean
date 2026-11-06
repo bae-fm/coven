@@ -2,6 +2,7 @@ import CovenMerge.Boundary
 import CovenMerge.OwnerAdmission
 import CovenMerge.ForeignKeyRecords
 import CovenMerge.ForeignKeyAuthoring
+import CovenMerge.ForeignKeyPlace
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
@@ -472,6 +473,42 @@ private def runClassify (j : Json) : Except String Json := do
     refs := fun i r => (((refs.find? (·.1 == i)).map (·.2)).getD []).filter (·.ref.child == r) }
   pure (toJson ((List.range steps.size).map fun i => cause rule t i))
 
+open Ownership.Classification.Place in
+/-- `place` mode: each case's operations on one parent key, from its view
+before the write, as the steps they record, the place `StepIndex::place`
+must find before position `at`, and the view the operations leave there. -/
+private def runPlace (j : Json) : Except String Json := do
+  let readOp (o : Json) : Except String (Op Nat) := do
+    match ← o.getObjValAs? String "op" with
+    | "insert" => pure (.insert (← natField o "aud") (← natField o "inc"))
+    | "update" => pure .update
+    | "delete" => pure .delete
+    | "move" => pure (.move (← natField o "aud") (← natField o "inc"))
+    | "carry" => pure (.carry (← natField o "aud") (← natField o "inc"))
+    | "other" => pure .other
+    | _ => throw "an operation is insert, update, delete, move, carry or other"
+  let stepJson (st : Step Nat) : List (String × Json) :=
+    [("seq", toJson st.seq), ("aud", toJson st.aud), ("delete", toJson st.delete),
+      ("move", toJson st.move), ("inc", toJson st.inc)]
+  let viewJson (v : Ownership.Classification.Place.View Nat) : Json := match v with
+    | some (a, g) => toJson [a, g]
+    | none => Json.null
+  let cases ← (← j.getObjValAs? (Array Json) "cases").mapM fun c => do
+    let start ← c.getObjValAs? (Option (Nat × Nat)) "start"
+    let ops ← ((← c.getObjValAs? (Array Json) "ops").mapM readOp).map Array.toList
+    let before ← natField c "at"
+    match Ownership.Classification.Place.run ops 0 start, viewAt ops start before with
+    | some (_, steps), some view =>
+      let carried := ops.any (·.carries)
+      let found := match place carried steps before with
+        | .untouched => Json.mkObj [("kind", "untouched")]
+        | .unplaced => Json.mkObj [("kind", "unplaced")]
+        | .last st => Json.mkObj (("kind", "last") :: stepJson st)
+      pure (Json.mkObj [("steps", toJson (steps.map fun st => Json.mkObj (stepJson st))),
+        ("carried", toJson carried), ("place", found), ("view", viewJson view)])
+    | _, _ => pure Json.null
+  pure (toJson cases)
+
 private def run (j : Json) : Except String Json := do
   let mode ← j.getObjValAs? String "mode"
   if mode == "freeze" then return ← runFreeze j
@@ -479,6 +516,7 @@ private def run (j : Json) : Except String Json := do
   if mode == "admission" then return ← runAdmission j
   if mode == "receive" then return ← runReceive j
   if mode == "classify" then return ← runClassify j
+  if mode == "place" then return ← runPlace j
   let writes ← (← j.getObjValAs? (Array Json) "writes").mapM readWrite
   let order ← j.getObjValAs? (Array Nat) "order"
   for w in order do
