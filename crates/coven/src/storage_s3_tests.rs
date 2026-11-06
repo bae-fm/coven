@@ -74,6 +74,7 @@ impl StorageConnector for Overwrites {
 }
 
 struct Opened {
+    app: Coven,
     handle: CovenHandle,
     directory: StoreDir,
     _root: tempfile::TempDir,
@@ -168,7 +169,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
     let directory = app.create_closed_store("Loop", Arc::new(UuidIds)).await.unwrap();
     let handle = builder(&app, clock, storage).open(directory.id(), |_| ()).await.unwrap();
 
-    Opened { handle, directory, _root: root }
+    Opened { app, handle, directory, _root: root }
 }
 
 async fn setup(
@@ -210,6 +211,34 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
     assert_eq!(reconnected.connection.storage, detected);
     assert_eq!(reconnected.restore_code.as_str(), connected.restore_code.as_str());
     assert_eq!(reconnected.restore_code.as_str(), opened.handle.restore_code().await.unwrap());
+    opened.handle.close().await.unwrap();
+}
+
+/// Detecting settings commits only its run's record: no location is
+/// recorded, custody keeps no storage credentials, the store still has no
+/// storage, and the bucket holds no object of the store once it returns (E5).
+#[tokio::test]
+async fn detecting_settings_commits_nothing() {
+    let location = uncatalogued(Some(S3Profile::Custom(DETECTED_S3_SETTINGS)));
+    let storage = Arc::new(MemoryStorage::builder().location(location).build().unwrap());
+    let opened = open(storage.clone()).await;
+    let detection = opened
+        .handle
+        .detect_s3_settings(
+            uncatalogued(None),
+            "member-key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detection.settings, DETECTED_S3_SETTINGS);
+    assert!(coven_storage::recorded_config(&opened.directory).unwrap().is_none());
+    assert!(opened.handle.storage_config().await.unwrap().is_none());
+    let custody = opened.app.store_keychain(opened.directory.id());
+    assert!(custody.storage_credentials().unwrap().is_none());
+    assert_eq!(opened.handle.sync_status().await.unwrap().state, SyncState::NotSynced);
+    let left = storage.list(&ObjectPrefix::all(opened.directory.id())).await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
     opened.handle.close().await.unwrap();
 }
 
