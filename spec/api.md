@@ -1620,12 +1620,6 @@ pub enum DbError {
         maximum: u64,
     },
 
-    /// An upload cannot succeed before its sealing keys have been fixed (§6.3).
-    UploadNotAttempted {
-        /// The write whose success was reported.
-        write: coven_merge::WriteId,
-    },
-
     /// Original row-change evidence is unavailable. Receipt waits without
     /// consuming the write; local authoring rolls back instead of guessing.
     MissingWriteSources(Vec<coven_format::write_sources::ChangeId>),

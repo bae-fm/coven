@@ -350,7 +350,7 @@ impl SequenceSync {
             let held = ring.clone();
             let history = session.history.clone();
             let identity = member.member();
-            let headers = self
+            let prepared = self
                 .database
                 .prepare_uploads::<SyncError, _>(through, move |header| {
                     Ok(WriteObjectPrefix {
@@ -364,9 +364,10 @@ impl SequenceSync {
                     })
                 })
                 .await?;
-            if headers.is_empty() {
+            if prepared.is_empty() {
                 return Ok(());
             }
+            let count = prepared.len() as u64;
             let at = session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
             let path = self.path(at)?;
             let prefix = SlotObjectPrefix {
@@ -383,10 +384,11 @@ impl SequenceSync {
             let produce = async move {
                 let output = send.clone();
                 let result = producer_database
-                    .read_uploads::<SyncError, _>(through, move |upload| {
+                    .read_uploads::<SyncError, _>(prepared, move |upload| {
                         let length = coven_format::sealed_write::sealed_length(
-                            upload.header_frame.len(),
+                            upload.plaintext.header_frame.len(),
                             &upload
+                                .plaintext
                                 .header
                                 .parts
                                 .iter()
@@ -418,7 +420,6 @@ impl SequenceSync {
             };
             let author = member.clone();
             let device = self.device;
-            let count = headers.len() as u64;
             let seal = move |number| -> Result<_, coven_database::DbError> {
                 let header =
                     SlotHeader { device, claim: number, author: author.member(), after: at - 1 };

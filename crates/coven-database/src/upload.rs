@@ -12,17 +12,50 @@ use coven_merge::WriteId;
 use rusqlite::params;
 use std::rc::Rc;
 
-/// The oldest waiting write, read under one committed reader transaction.
-/// Sealing and transport belong to sync; these are its input streams.
-pub struct WaitingUpload<'a> {
+/// A waiting write's plaintext, fixed at commit, read under one committed
+/// reader transaction.
+pub struct UploadPlaintext<'a> {
     /// Identity, causality and the audience stream boundaries.
     pub header: WriteHeaderFrame,
     /// The exact plaintext header frame, sealed as one chunk.
     pub header_frame: Vec<u8>,
     /// Each audience's record stream, in header order, cut into 64 KiB chunks.
     pub parts: UploadParts<'a>,
-    /// Format and keys fixed by the first attempt; plaintext is fixed at commit.
-    pub keys: Option<WriteObjectPrefix>,
+}
+
+/// A captured write ready to seal. Sealing and transport belong to sync;
+/// these are its input streams and the keys it seals with.
+pub struct WaitingUpload<'a> {
+    /// The plaintext fixed at commit.
+    pub plaintext: UploadPlaintext<'a>,
+    /// Format and keys fixed by the first attempt.
+    pub keys: WriteObjectPrefix,
+}
+
+/// A captured queue prefix whose writes all have their first-attempt keys
+/// fixed, in queue order. Only [`crate::Database::prepare_uploads`] makes
+/// one, and [`crate::Database::read_uploads`] reads its writes' plaintext.
+pub struct PreparedUploads {
+    writes: Vec<PreparedUpload>,
+}
+
+/// One captured write: its queue row and the keys it seals with.
+struct PreparedUpload {
+    rowid: i64,
+    write: WriteId,
+    keys: WriteObjectPrefix,
+}
+
+impl PreparedUploads {
+    /// How many writes the prefix captured.
+    pub fn len(&self) -> usize {
+        self.writes.len()
+    }
+
+    /// Whether the prefix captured no write.
+    pub fn is_empty(&self) -> bool {
+        self.writes.is_empty()
+    }
 }
 
 /// A queue read failed in the database or in its consumer.
@@ -190,18 +223,32 @@ fn oldest(database: &DatabaseConnection) -> Result<Option<QueueEntry>, DbError> 
         .pop())
 }
 
+/// The oldest waiting write and the keys its first attempt fixed, if any.
+#[cfg(test)]
+pub(crate) fn oldest_keys(
+    database: &DatabaseConnection,
+) -> Result<Option<(WriteId, Option<WriteObjectPrefix>)>, DbError> {
+    let Some(entry) = oldest(database)? else {
+        return Ok(None);
+    };
+    let keys =
+        entry.keys.as_deref().map(WriteObjectPrefix::decode).transpose().map_err(DbError::from)?;
+    Ok(Some((entry.write, keys)))
+}
+
 fn plaintext<'a>(
     database: &'a DatabaseConnection,
-    entry: &QueueEntry,
+    rowid: i64,
+    write: WriteId,
 ) -> Result<(WriteHeaderFrame, Vec<u8>, UploadBytes<'a>), DbError> {
-    let mut bytes = database.upload_plaintext(entry.rowid)?;
+    let mut bytes = database.upload_plaintext(rowid)?;
     let prefix = bytes.read(0, coven_format::FRAME_PREFIX_LEN)?;
     let length = encoded(coven_format::frame_length(&prefix))?;
     let header_frame = bytes.read(0, length)?;
     let header = encoded(WriteHeaderFrame::decode(&header_frame))?;
     let total =
         header.parts.iter().try_fold(length as u64, |n, p| n.checked_add(p.plaintext_length));
-    if total != Some(bytes.end as u64) || header.header.position != entry.write {
+    if total != Some(bytes.end as u64) || header.header.position != write {
         return Err(DbError::DamagedDatabase);
     }
     bytes.offset = length;
@@ -211,23 +258,24 @@ fn plaintext<'a>(
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn read<R, E>(
     database: &DatabaseConnection,
-    consume: impl FnOnce(WaitingUpload<'_>) -> Result<R, E>,
+    consume: impl FnOnce(UploadPlaintext<'_>) -> Result<R, E>,
 ) -> Result<Option<R>, UploadReadError<E>> {
     let Some(entry) = oldest(database)? else {
         return Ok(None);
     };
-    consume(read_entry(database, &entry)?).map(Some).map_err(UploadReadError::Consumer)
+    consume(read_plaintext(database, entry.rowid, entry.write)?)
+        .map(Some)
+        .map_err(UploadReadError::Consumer)
 }
 
-fn read_entry<'a>(
-    database: &'a DatabaseConnection,
-    entry: &QueueEntry,
-) -> Result<WaitingUpload<'a>, DbError> {
-    let (header, header_frame, bytes) = plaintext(database, entry)?;
-    let keys =
-        entry.keys.as_deref().map(WriteObjectPrefix::decode).transpose().map_err(DbError::from)?;
+fn read_plaintext(
+    database: &DatabaseConnection,
+    rowid: i64,
+    write: WriteId,
+) -> Result<UploadPlaintext<'_>, DbError> {
+    let (header, header_frame, bytes) = plaintext(database, rowid, write)?;
     let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
-    Ok(WaitingUpload { header, header_frame, parts, keys })
+    Ok(UploadPlaintext { header, header_frame, parts })
 }
 
 fn batch(
@@ -244,20 +292,27 @@ fn batch(
     )
 }
 
+/// Fix the keys of every write in `device`'s queue through `through` that
+/// has none yet, keeping the keys earlier attempts fixed.
 pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
     database: &mut DatabaseConnection,
     device: DeviceId,
     through: u64,
     mut select: impl FnMut(&WriteHeaderFrame) -> Result<WriteObjectPrefix, E>,
-) -> Result<Vec<WriteHeaderFrame>, E> {
-    let mut headers = Vec::new();
+) -> Result<PreparedUploads, E> {
+    let mut writes = Vec::new();
     let mut selected = Vec::new();
     for entry in batch(database, device, through)? {
-        let (header, _, _) = plaintext(database, &entry)?;
-        if entry.keys.is_none() {
-            selected.push((entry.write, select(&header)?.encode()?));
-        }
-        headers.push(header);
+        let keys = match entry.keys {
+            Some(keys) => WriteObjectPrefix::decode(&keys).map_err(DbError::from)?,
+            None => {
+                let (header, _, _) = plaintext(database, entry.rowid, entry.write)?;
+                let keys = select(&header)?;
+                selected.push((entry.write, keys.encode()?));
+                keys
+            }
+        };
+        writes.push(PreparedUpload { rowid: entry.rowid, write: entry.write, keys });
     }
     if !selected.is_empty() {
         database.stream_transaction(|database| {
@@ -267,7 +322,7 @@ pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
             Ok(())
         })?;
     }
-    Ok(headers)
+    Ok(PreparedUploads { writes })
 }
 
 /// Fix the keys a queued write is sealed with, at its first attempt.
@@ -279,14 +334,14 @@ fn keep_keys(database: &DatabaseConnection, write: WriteId, keys: &[u8]) -> Resu
     Ok(())
 }
 
+/// Read each prepared write's plaintext, with the keys it seals with.
 pub(crate) fn read_batch<E: From<DbError>>(
     database: &DatabaseConnection,
-    device: DeviceId,
-    through: u64,
+    prepared: PreparedUploads,
     mut consume: impl FnMut(WaitingUpload<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    for entry in batch(database, device, through)? {
-        consume(read_entry(database, &entry)?)?;
+    for PreparedUpload { rowid, write, keys } in prepared.writes {
+        consume(WaitingUpload { plaintext: read_plaintext(database, rowid, write)?, keys })?;
     }
     Ok(())
 }
@@ -334,8 +389,7 @@ pub(crate) fn queued(
     else {
         return Ok(None);
     };
-    let entry = QueueEntry { rowid, write, keys: None };
-    Ok(Some(plaintext(database, &entry)?.0))
+    Ok(Some(plaintext(database, rowid, write)?.0))
 }
 
 /// Read every waiting plaintext, including attempted entries.
@@ -350,8 +404,8 @@ pub(crate) fn each_plaintext(
         QueueEntry::read,
     )?;
     for entry in entries {
-        let (header, _, bytes) = plaintext(database, &entry)?;
-        let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
+        let UploadPlaintext { header, parts, .. } =
+            read_plaintext(database, entry.rowid, entry.write)?;
         consume(header, parts)?;
     }
     Ok(())
@@ -374,7 +428,7 @@ pub(crate) fn prepare(
         if entry.keys.is_some() {
             return Ok(Some(entry.write));
         }
-        let (header, _, _) = plaintext(database, &entry)?;
+        let (header, _, _) = plaintext(database, entry.rowid, entry.write)?;
         let keys = select(log, database.schema_version()?, &header)?;
         if keys.part_keys.len() != header.parts.len() {
             return Err(DbError::Invariant { what: "sealing selects one key per write part" });

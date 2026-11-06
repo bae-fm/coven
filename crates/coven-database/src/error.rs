@@ -292,12 +292,6 @@ pub enum DbError {
         /// Its maximum length.
         maximum: u64,
     },
-    /// An upload cannot succeed before its sealing keys have been fixed (§6.3).
-    #[error("write {write:?} has no recorded upload attempt")]
-    UploadNotAttempted {
-        /// The write whose success was reported.
-        write: coven_merge::WriteId,
-    },
     /// A reference reaches an audience the source row's readers cannot read (§15.3).
     #[error("reference {table}.{column} at {key:?} reaches another audience")]
     ReferenceAudience {

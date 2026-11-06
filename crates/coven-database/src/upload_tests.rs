@@ -6,11 +6,9 @@ use coven_format::dismissal::WriteFrame;
 use coven_format::write::{WritePart, WriteRecord};
 use coven_format::write_stream::PartDecoder;
 
+/// The oldest waiting write and the keys its first attempt fixed, if any.
 pub(crate) async fn selected(db: &Database) -> (WriteId, Option<WriteObjectPrefix>) {
-    db.read_oldest_upload(|upload| Ok::<_, DbError>((upload.header.header.position, upload.keys)))
-        .await
-        .unwrap()
-        .unwrap()
+    db.oldest_upload_keys().await.unwrap().unwrap()
 }
 
 pub(crate) async fn attempt(db: &Database, byte: u8) -> Result<Option<WriteId>, DbError> {
@@ -46,8 +44,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     db.inspect_writer(|db| db.internal_execute("UPDATE _coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM _coven_uploads)", []).unwrap());
     let streamed = db
         .read_oldest_upload(|upload| {
-            let WaitingUpload { header, header_frame, parts, keys } = upload;
-            assert!(keys.is_none());
+            let UploadPlaintext { header, header_frame, parts } = upload;
             assert_eq!(WriteHeaderFrame::decode(&header_frame).unwrap(), header);
             let mut decoded = Vec::new();
             for (part, bytes) in parts {
@@ -413,17 +410,19 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
         .await
         .is_err());
     assert!(selected(&db).await.1.is_none());
-    let headers =
+    let prepared =
         db.prepare_uploads::<DbError, _>(through, move |header| Ok(prefix(header))).await.unwrap();
-    assert_eq!(headers.len(), 2);
-    db.prepare_uploads::<DbError, _>(through, |_| panic!("attempted originals retain their keys"))
+    assert_eq!(prepared.len(), 2);
+    let prepared = db
+        .prepare_uploads::<DbError, _>(through, |_| panic!("attempted originals retain their keys"))
         .await
         .unwrap();
+    assert_eq!(prepared.len(), 2);
     let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed = output.clone();
-    db.read_uploads::<DbError, _>(through, move |upload| {
-        let mut bytes = upload.header_frame;
-        for (_, chunks) in upload.parts {
+    db.read_uploads::<DbError, _>(prepared, move |upload| {
+        let mut bytes = upload.plaintext.header_frame;
+        for (_, chunks) in upload.plaintext.parts {
             for chunk in chunks {
                 bytes.extend(chunk?);
             }
@@ -440,10 +439,7 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
     assert_eq!(selected.len(), 2);
     for ((record, keys), original) in selected.iter().zip(records(&db)) {
         assert_eq!(record, &original);
-        assert_eq!(
-            keys.as_ref().unwrap().store_key,
-            coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(29))
-        );
+        assert_eq!(keys.store_key, coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(29)));
     }
     assert_eq!(count(&db, "_coven_uploads"), 3);
     db.close().await.unwrap();

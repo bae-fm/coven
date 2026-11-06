@@ -2,7 +2,7 @@
 
 use crate::SyncError;
 use coven_crypto::{CircleKey, DerivedKeys, MemberIdentity, ObjectHasher, StoreKey, StoreKeyring};
-use coven_database::{DbError, WaitingUpload};
+use coven_database::{UploadPlaintext, WaitingUpload};
 use coven_format::sealed_write::WriteObjectLayout;
 use coven_foundation::id_source::{KeyId, StoreId};
 use coven_merge::Audience;
@@ -60,8 +60,8 @@ pub(crate) fn seal(
     member: &MemberIdentity,
     emit: &mut dyn FnMut(&[u8]) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
-    let WaitingUpload { header, header_frame, parts, keys } = upload;
-    let prefix = keys.ok_or(DbError::UploadNotAttempted { write: header.header.position })?;
+    let WaitingUpload { plaintext: UploadPlaintext { header, header_frame, parts }, keys: prefix } =
+        upload;
     let coven_format::FormatVersion::V1 = prefix.format;
     // Each part's keyed leaves commit to its original authorship (D11); the
     // header signature lets a snapshot carry them without the parts (D9).

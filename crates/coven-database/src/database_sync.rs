@@ -32,7 +32,7 @@ impl Database {
         &self,
         through: u64,
         select: F,
-    ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, E>
+    ) -> Result<crate::PreparedUploads, E>
     where
         E: From<DbError> + From<coven_format::Error> + CarriesBug + Send + 'static,
         F: FnMut(
@@ -49,17 +49,21 @@ impl Database {
         .await
     }
 
-    /// Stream the captured originals through one committed reader. Concurrent
-    /// app commits append after this fixed number and remain for the next pass.
-    pub async fn read_uploads<E, F>(&self, through: u64, consume: F) -> Result<(), E>
+    /// Stream the prepared originals through one committed reader. Concurrent
+    /// app commits append after the prepared prefix and remain for the next pass.
+    pub async fn read_uploads<E, F>(
+        &self,
+        prepared: crate::PreparedUploads,
+        consume: F,
+    ) -> Result<(), E>
     where
         E: From<DbError> + CarriesBug + Send + 'static,
         F: FnMut(crate::WaitingUpload<'_>) -> Result<(), E> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_committed(|reader| {
-                crate::upload::read_batch(reader, inner.access.device, through, consume)
-            })
+            inner
+                .access
+                .with_committed(|reader| crate::upload::read_batch(reader, prepared, consume))
         })
         .await
     }
@@ -610,7 +614,7 @@ impl Database {
         .await
     }
 
-    /// Read the oldest waiting plaintext and its recorded sealing keys.
+    /// Read the oldest waiting plaintext.
     /// The callback runs in a committed reader transaction; its result is `None`
     /// when the queue is empty.
     #[cfg(any(test, feature = "test-utils"))]
@@ -619,7 +623,7 @@ impl Database {
         consume: F,
     ) -> Result<Option<R>, crate::UploadReadError<E>>
     where
-        F: FnOnce(crate::WaitingUpload<'_>) -> Result<R, E> + Send + 'static,
+        F: FnOnce(crate::UploadPlaintext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: CarriesBug + Send + 'static,
     {
@@ -627,6 +631,24 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| crate::upload::read(reader, consume))
+            })
+        })
+        .await
+    }
+
+    /// The oldest waiting write and the keys its first attempt fixed, if
+    /// any; `None` when the queue is empty.
+    #[cfg(test)]
+    pub(crate) async fn oldest_upload_keys(
+        &self,
+    ) -> Result<
+        Option<(coven_merge::WriteId, Option<coven_format::sealed_write::WriteObjectPrefix>)>,
+        DbError,
+    > {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|reader| {
+                reader.read_transaction(|| crate::upload::oldest_keys(reader))
             })
         })
         .await
