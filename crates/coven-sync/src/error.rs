@@ -4,7 +4,7 @@ use crate::OperationRejection;
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
 use coven_database::DbError;
 use coven_foundation::files::{FileError, ObservationError, StoreLockError};
-use coven_foundation::id_source::{KeyId, StoreId};
+use coven_foundation::id_source::KeyId;
 use coven_storage::{StorageError, StorageFailure};
 use std::sync::Arc;
 
@@ -83,9 +83,6 @@ pub enum SyncError {
     /// A required key's sealed copy has not arrived.
     #[error("key {0} is not available yet")]
     KeyUnavailable(KeyId),
-    /// An entry must not introduce a second key under an existing identity.
-    #[error("key identity {0} has already been used")]
-    KeyAlreadyUsed(KeyId),
     /// The proposed change is already invalid in the author's applied view.
     #[error("administrative change rejected: {0:?}")]
     Rejected(OperationRejection),
@@ -114,14 +111,6 @@ pub enum SyncError {
     /// A code can't be used for this call, as one naming another store.
     #[error(transparent)]
     Code(#[from] crate::CodeError),
-    /// A create-store entry named a store other than this database's store.
-    #[error("create-store entry names another store")]
-    WrongStore {
-        /// This database's store.
-        expected: StoreId,
-        /// The proposed creation's store.
-        actual: StoreId,
-    },
     /// The call's runtime is shutting down and dropped its work (E15). A
     /// database call the blocking pool dropped unstarted changed nothing; a
     /// call that runs as its own task, as closing and replacing credentials
@@ -256,9 +245,7 @@ impl SyncError {
             | SyncError::Crypto(_)
             | SyncError::Format(_)
             | SyncError::Key(_)
-            | SyncError::KeyAlreadyUsed(_)
             | SyncError::DeviceIdInUse(_)
-            | SyncError::WrongStore { .. }
             | SyncError::Code(_)
             | SyncError::Shutdown(_)
             | SyncError::Bug(_) => PendingReason::Failed(error.local_failure()),
@@ -291,14 +278,12 @@ impl SyncError {
             | Self::Storage(_)
             | Self::Format(_)
             | Self::KeyUnavailable(_)
-            | Self::KeyAlreadyUsed(_)
             | Self::Rejected(_)
             | Self::Damaged(_)
             | Self::Removed
             | Self::DeviceIdInUse(_)
             | Self::MemberKeysReplaced { .. }
             | Self::UpdateRequired(_)
-            | Self::WrongStore { .. }
             | Self::Code(_) => crate::LocalFailure::Operation,
             Self::Shutdown(_) => crate::LocalFailure::Shutdown,
             Self::Bug(_) => crate::LocalFailure::Bug,

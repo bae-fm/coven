@@ -5031,8 +5031,6 @@ pub enum SyncError {
     Key(coven_crypto::MaterialError),
     /// A required sealed key has not arrived; retry after acquiring it.
     KeyUnavailable(KeyId),
-    /// A key introduction reused an immutable key identity.
-    KeyAlreadyUsed(KeyId),
     /// The latest applied prefix no longer permits the operation; its journal
     /// undoes owned artifacts before completion (§11).
     Rejected(OperationRejection),
@@ -5081,8 +5079,6 @@ pub enum SyncError {
     /// store than the join's directory. Bootstrap reports it as
     /// `BootstrapError::Code`.
     Code(CodeError),
-    /// A create-store entry names another store (§10.3).
-    WrongStore { expected: StoreId, actual: StoreId },
     /// The requested journal row has no retryable work for this call.
     NotPending(OperationId),
 
