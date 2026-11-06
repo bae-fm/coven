@@ -378,11 +378,13 @@ async fn rotation_failed(last: &mut Followed<Option<LastPass>, DbError>) {
 async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     let network = Network::new(2).await;
     let owner = &network.devices[0];
-    let rotation = refuse_rotation(&network, StorageFailure::QuotaExceeded, 507).await;
-    // On the polling clock the rotation's first retry follows its refusal by
-    // a millisecond and replaces the report before a busy test can see it.
-    // Its waits now end when the test moves the fixed clock.
+    // On the polling clock the rotation's first retry would follow its
+    // refusal at once and replace the report before a busy test can see it,
+    // and each retry doubles the next wait. Its waits end only when the test
+    // moves the fixed clock, held before the removal asks for the rotation,
+    // so the one refusal leaves the first wait.
     network.polling.hold_waits();
+    let rotation = refuse_rotation(&network, StorageFailure::QuotaExceeded, 507).await;
     let mut last = owner.handle.test_last_pass();
     owner.handle.sync_now();
     rotation_failed(&mut last).await;
