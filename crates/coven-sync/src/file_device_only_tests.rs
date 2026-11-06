@@ -2,6 +2,7 @@
 //! drops leaves in the person's folder.
 
 use super::*;
+use crate::files::file_device_only::DeviceOnlyPoint;
 use coven_foundation::files::RelativePath;
 
 /// The app drops the call's future while a copy, renamed to its path, is
@@ -18,7 +19,8 @@ async fn a_dropped_call_leaves_no_copy_unrecorded() {
     let copy = music.path().join("song.flac");
     let (reached, reaching) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    *f.files.inner.placing_gate.lock().unwrap() = Some((reached, resumed));
+    *f.files.inner.device_only_gate.lock().unwrap() =
+        Some((DeviceOnlyPoint::Renamed, reached, resumed));
     let call = {
         let (files, folder) = (f.files.clone(), music.path().to_owned());
         tokio::spawn(async move {
@@ -50,5 +52,61 @@ async fn a_dropped_call_leaves_no_copy_unrecorded() {
     // call left.
     f.reopen().await;
     assert!(!copy.exists(), "the copy is left with no record");
+    f.close().await;
+}
+
+/// The app drops the call's future while a copy's bytes are being
+/// appended. The append finishes holding the copy's name, so a write's
+/// removal meanwhile leaves the copy's file alone: it never removes a file
+/// an append still writes, which Windows would refuse, leaving the record
+/// for a later open. Once the append ends, the copy goes like any the call
+/// left.
+#[tokio::test]
+async fn a_dropped_calls_append_finishes_before_its_copy_is_removed() {
+    let mut f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let file = f.original("song", &vec![62; CHUNK + 7]).await;
+    f.drain().await;
+    let music = tempfile::tempdir().unwrap();
+    let (reached, reaching) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    *f.files.inner.device_only_gate.lock().unwrap() =
+        Some((DeviceOnlyPoint::Appended, reached, resumed));
+    let call = {
+        let (files, folder) = (f.files.clone(), music.path().to_owned());
+        tokio::spawn(async move {
+            files
+                .prepare_device_only(
+                    &folder,
+                    vec![(file.id(), RelativePath::new(["song.flac"]).unwrap())],
+                    &tokio::sync::watch::channel(false).1,
+                    tokio::sync::watch::channel(None).0,
+                )
+                .await
+        })
+    };
+    reaching.await.unwrap();
+    let temporary = || {
+        std::fs::read_dir(music.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|e| e == "download"))
+    };
+    assert!(temporary().is_some(), "the copy's bytes are being written");
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    f.database
+        .write(|sql| {
+            sql.execute("INSERT INTO files(id) VALUES('next')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(temporary().is_some(), "a write removed a copy an append still writes");
+    // A step already dropped with its call no longer waits.
+    resume.send(()).ok();
+    f.reopen().await;
+    assert!(temporary().is_none());
+    assert_eq!(std::fs::read_dir(music.path()).unwrap().count(), 0);
     f.close().await;
 }

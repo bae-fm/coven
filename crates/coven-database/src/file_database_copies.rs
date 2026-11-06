@@ -291,11 +291,16 @@ impl CopyReservation {
     ) -> Result<Result<T, E>, TaskFailed> {
         // The names go before the store the writing holds can close.
         let held = (self.names.clone(), self.writing.clone());
-        coven_foundation::task::spawn_completing(operation, bugs, async move {
-            let _held = held;
-            work.await
+        let stepped = coven_foundation::task::spawn_completing(operation, bugs, async move {
+            // Declared first, so it goes last as a panic unwinds the work.
+            let held = held;
+            // A value comes back with the hold, so whatever it keeps open,
+            // such as a copy's file, closes before the hold goes, also when
+            // no caller waits for it any more.
+            work.await.map(|value| (value, held))
         })
-        .await
+        .await?;
+        Ok(stepped.map(|(value, _held)| value))
     }
 }
 

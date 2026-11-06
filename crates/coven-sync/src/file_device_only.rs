@@ -229,11 +229,13 @@ impl Files {
 /// call, so every copy is on the drive before the write records it
 /// (Appendix C.3). A cancel is heard while waiting for bytes and between
 /// steps, never inside one, so every name a step made is in its record
-/// when the call removes them. A step that makes a name, a folder, a copy's
-/// file, or its rename to its path, runs to its end with its record once
-/// started, holding the call's copies, though the call is dropped
-/// meanwhile: what it made is then in its record for the next write or open
-/// to remove.
+/// when the call removes them. A step that makes a name or writes under one,
+/// a folder, a copy's file, an append to it, or its rename to its path, runs
+/// to its end with its record once started, holding the call's copies,
+/// though the call is dropped meanwhile: what it made is then in its record
+/// for the next write or open to remove, and no removal meets a file a step
+/// still holds open, which Windows would refuse. Between steps the call
+/// holds no file open but the copy's writer, which drops with the call.
 #[expect(clippy::too_many_arguments, reason = "the call's parts, each its own")]
 async fn download(
     handle: &Files,
@@ -292,8 +294,18 @@ async fn download(
             };
             let Some(bytes) = bytes else { break };
             hashes.update(&bytes);
-            writer.append(&bytes).await?;
             done += bytes.len() as u64;
+            writer = {
+                #[cfg(test)]
+                let owner = handle.inner.clone();
+                step(reservation, "append to a copy", &bugs, async move {
+                    writer.append(&bytes).await?;
+                    #[cfg(test)]
+                    owner.pass_device_only_gate(DeviceOnlyPoint::Appended).await;
+                    Ok(writer)
+                })
+                .await?
+            };
             report.done(done);
         }
         before += file.size();
@@ -302,7 +314,7 @@ async fn download(
             step(reservation, "place a copy", &bugs, async move {
                 writer.publish(&path, &mut batch).await?;
                 #[cfg(test)]
-                owner.pass_placing_gate().await;
+                owner.pass_device_only_gate(DeviceOnlyPoint::Renamed).await;
                 let observed = folder.observe(&path).await.map_err(DbError::from)?;
                 owner.database.place_copy(&observed).await?;
                 Ok(batch)
@@ -320,12 +332,35 @@ async fn download(
     Ok((switches, batch.flush().await?))
 }
 
+/// Where a test holds a device-only call (`FilesInner::device_only_gate`).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceOnlyPoint {
+    /// A copy's bytes were just appended.
+    Appended,
+    /// A copy was renamed to its path and is not yet recorded placed.
+    Renamed,
+}
+
+/// A test's hold on a device-only call: where, the signal that it got
+/// there, and the resume it waits for.
+#[cfg(test)]
+pub(crate) type DeviceOnlyGate =
+    (DeviceOnlyPoint, tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>);
+
 impl crate::files::FilesInner {
-    /// Wait at the gate a test set, if any, once there.
+    /// Wait at the gate a test set for `point`, if any, once there.
     #[cfg(test)]
-    async fn pass_placing_gate(&self) {
-        let gate = coven_foundation::locks::lock_unpoisoned(&self.placing_gate).take();
-        if let Some((reached, resume)) = gate {
+    async fn pass_device_only_gate(&self, point: DeviceOnlyPoint) {
+        let gate = {
+            let mut gate = coven_foundation::locks::lock_unpoisoned(&self.device_only_gate);
+            if gate.as_ref().is_some_and(|(at, _, _)| *at == point) {
+                gate.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, reached, resume)) = gate {
             reached.send(()).ok();
             resume.await.ok();
         }
