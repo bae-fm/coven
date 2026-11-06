@@ -8110,7 +8110,9 @@ impl OAuthAccess {
   only the status and the OAuth error code, never a description or other
   provider-supplied detail.
 - Refresh and S3 key replacement leave restore codes untouched. Restore
-  codes carry the storage location, never S3 keys or OAuth tokens.
+  codes carry the storage location. The code to write down and the saved
+  copy carry no S3 key; only `restore_code_for_transfer()`'s does (§13.1). No
+  restore code carries OAuth tokens.
 - Token custody retains the client id and granted access. Refresh uses that
   registered client, including the chosen Dropbox key, and preserves granted
   access only when the provider omits a scope field. A returned scope field is
