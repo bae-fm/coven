@@ -440,3 +440,53 @@ async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
     ana.close().await.unwrap();
     carol.close().await.unwrap();
 }
+
+/// Applying a slot stages its rows in temporary tables the writer keeps,
+/// empty between slots, so a slot changes no temporary table: each change
+/// would expire every statement prepared on the writer, and SQLite would parse
+/// and plan all of them again in every slot.
+#[tokio::test]
+async fn applying_a_slot_leaves_the_temporary_tables_as_they_were() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("rows", RowIdentity::SharedKey),
+                SyncedTable::new("owned", RowIdentity::SharedKey).owner_only(),
+            ],
+            SCHEMA,
+        )
+        .await
+        .unwrap();
+    let ben = DeviceId(900);
+    TestStore::register(&db, ben, 2);
+    let mut versions = Vec::new();
+    for slot in 1..=3u64 {
+        let mut write = record(ben.0, slot, slot, slot as usize, slot as usize, 0);
+        write.parts[0].rows.retain(|row| row.row.table == "rows");
+        db.apply_slot::<crate::pending::tests::Record, _, _>(
+            IncomingSlot {
+                slot: Slot(slot),
+                header: SlotHeader {
+                    device: ben,
+                    claim: slot,
+                    author: crate::tests::member(2),
+                    after: slot - 1,
+                },
+                digest: [slot as u8; 32],
+                content: SlotContent::Writes {
+                    size: 1,
+                    writes: vec![crate::sequence::tests::stream(write.into())],
+                },
+            },
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+        versions.push(db.inspect_writer(|writer| {
+            writer.query_row("PRAGMA temp.schema_version", [], |r| r.get::<_, i64>(0)).unwrap()
+        }));
+    }
+    assert_eq!(versions[2], versions[1]);
+    db.close().await.unwrap();
+}

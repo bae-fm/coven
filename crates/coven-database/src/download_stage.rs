@@ -15,11 +15,29 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The staging of one transaction's merged values: the rows its writes
 /// staged one at a time, and the audiences a reload replaces whole, whose
-/// other rows are staged in the snapshot's install tables.
+/// other rows are staged in the snapshot's install tables. The tables stay on
+/// the writer's connection, empty between transactions: creating or dropping
+/// a temporary table expires every statement prepared on the connection, so
+/// SQLite would parse and plan each again in every slot. A transaction that
+/// rolls back takes its staged rows with it, and the tables too if it made
+/// them.
 pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch("CREATE TEMP TABLE _coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
-        CREATE TEMP TABLE _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);
-        CREATE TEMP TABLE _coven_download_replaced(audience TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;")
+    database.batch("CREATE TEMP TABLE IF NOT EXISTS _coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
+        CREATE TEMP TABLE IF NOT EXISTS _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);
+        CREATE TEMP TABLE IF NOT EXISTS _coven_download_replaced(audience TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;")?;
+    let staged: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM temp._coven_download_rows)
+             OR EXISTS(SELECT 1 FROM temp._coven_download_dismissals)
+             OR EXISTS(SELECT 1 FROM temp._coven_download_replaced)",
+        [],
+        |r| r.get(0),
+    )?;
+    if staged {
+        return Err(DbError::Invariant {
+            what: "a transaction's staging begins with no rows another left",
+        });
+    }
+    Ok(())
 }
 
 /// The reload replaces `audience` with the snapshot it installed: the rows
@@ -292,10 +310,10 @@ pub(crate) fn rules(
         .replace(&old, touched)
 }
 
-/// Drop the staging once the transaction's rows are materialized.
+/// Empty the staging once the transaction's rows are materialized.
 pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch(
-        "DROP TABLE temp._coven_download_rows; DROP TABLE temp._coven_download_dismissals; DROP TABLE temp._coven_download_replaced",
+        "DELETE FROM temp._coven_download_rows; DELETE FROM temp._coven_download_dismissals; DELETE FROM temp._coven_download_replaced",
     )
 }
 
