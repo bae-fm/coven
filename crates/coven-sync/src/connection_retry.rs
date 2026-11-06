@@ -72,7 +72,8 @@ impl ConnectionRetry {
     /// and return what the status shows for it: `shown` turns the error into
     /// that failure. If saving fails, the returned error is that failure
     /// together with the save's, and only new credentials or a new connection
-    /// retry it.
+    /// retry it. The connection's owner saves on its own, so a bug the save
+    /// fails on goes to the store's bug sink (E15).
     pub async fn failed(
         &mut self,
         database: &Database,
@@ -123,6 +124,7 @@ impl ConnectionRetry {
         let wait = match saved {
             Ok(wait) => wait,
             Err((cleanup, held)) => {
+                let cleanup = coven_foundation::task::reported(database.bugs().as_ref(), cleanup);
                 let failure =
                     PassFailure::Failed { error: SyncError::cleanup(error, cleanup).into() };
                 if held {

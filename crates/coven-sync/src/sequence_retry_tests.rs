@@ -195,3 +195,28 @@ async fn a_finished_pass_leaves_a_failing_waits_delay() {
     assert_eq!(after, before);
     ana.database().close().await.unwrap();
 }
+
+/// An attempt coven drove at an operation that failed on a bug has no
+/// caller: its record keeps the failure, and the bug goes to the sink, once,
+/// as it does when the failure ended the operation and no record keeps it
+/// (E15).
+#[tokio::test]
+async fn a_bug_a_resumed_operation_hit_reaches_the_sink_once() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let id = ana.database().start_operation(operation("failing")).await.unwrap();
+    let kind = crate::OperationKind::RetainFiles;
+    let bug = coven_foundation::task::Bug {
+        operation: "resume an operation",
+        message: "the attempt broke".into(),
+    };
+    ana.sync.settle_resumed(id, kind, Err(SyncError::Bug(bug.clone())), &group.ring).await.unwrap();
+    assert!(ana.database().operation_pending::<PendingRecord>(id).await.unwrap().is_some());
+    assert_eq!(group.bugs.take(), std::slice::from_ref(&bug));
+
+    ana.database().finish_operation(id).await.unwrap();
+    ana.sync.settle_resumed(id, kind, Err(SyncError::Bug(bug.clone())), &group.ring).await.unwrap();
+    assert_eq!(group.bugs.take(), [bug]);
+    ana.database().close().await.unwrap();
+}

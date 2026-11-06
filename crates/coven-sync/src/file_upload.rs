@@ -46,7 +46,11 @@ impl FilesInner {
                 }
                 Ok(attempted)
             }
+            // Nobody waits for the attempt: a bug its failure carries goes
+            // to the sink, and the record keeps the failure for its retry
+            // (E15).
             Err(error) => {
+                coven_foundation::task::report_carried(self.database.bugs().as_ref(), &error);
                 self.record_failure(&item, error).await?;
                 Ok(Attempted::Queued)
             }

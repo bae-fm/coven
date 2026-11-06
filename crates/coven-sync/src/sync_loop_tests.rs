@@ -340,6 +340,43 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
     }
 }
 
+/// A write the loop makes on its own, here what a retry would do as it
+/// plans, panics: no caller waits for the loop, so the bug goes to the
+/// app's bug sink, once, and the loop stops as on any failed write of its
+/// own (E15).
+#[tokio::test]
+async fn a_bug_in_the_loops_own_write_reaches_the_sink_once() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let mut last = LastPass::follow(&ben.sync.database);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
+    ben_loop.start().await.unwrap();
+    last.wait_for(|last| matches!(last, Some(LastPass::Synced))).await;
+    let parked = ben_loop.parked_from_now();
+    ben_loop.sync_now().unwrap();
+    parked.await;
+    ben.database().test_panic_in_next_write("the retry effect's write broke").await.unwrap();
+    ben_loop.sync_now().unwrap();
+    let bug = tokio::time::timeout(HANG_GUARD, group.bugs.next())
+        .await
+        .expect("the sink hears the loop's bug");
+    assert_eq!(bug.message, "the retry effect's write broke");
+    let shown = last.wait_for(|last| matches!(last, Some(LastPass::Failed { .. }))).await;
+    let Some(LastPass::Failed { error: shown, .. }) = shown else {
+        panic!("the last pass shows no failure: {shown:?}");
+    };
+    assert!(shown.contains(&bug.message), "{shown}");
+    assert!(group.bugs.take().is_empty(), "the sink heard the bug once");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// Set the group's clock `seconds` after the epoch.
 fn at(group: &Group, seconds: u64) {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));

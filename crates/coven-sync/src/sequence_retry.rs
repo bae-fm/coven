@@ -8,7 +8,8 @@ use coven_database::{Journal, OperationId, OperationRecord, RetrySubject};
 /// An operation's failed attempt, and who receives its error.
 pub(crate) enum OperationFailure<'a> {
     /// Coven drives the operation and nothing awaits this attempt: the
-    /// record keeps the error's text as its cause.
+    /// record keeps the error's text as its cause, and a bug it carries goes
+    /// to the store's bug sink (E15).
     Held(SyncError),
     /// The attempt's caller receives this error.
     Returned(&'a SyncError),
@@ -89,7 +90,9 @@ impl SequenceSync {
     /// it: a failure becomes the operation's pending record and wait, and
     /// the pass goes on to the next; a success ends its wait. A failure
     /// that ended the operation, such as a refused request, has no record
-    /// to keep it: it is logged, and the operation's wait ends.
+    /// to keep it: it is logged, and the operation's wait ends. Nobody waits
+    /// for the attempt, so a bug its failure carries goes to the store's bug
+    /// sink either way (E15).
     pub(crate) async fn settle_resumed(
         &self,
         id: OperationId,
@@ -110,6 +113,7 @@ impl SequenceSync {
             )
             .await?;
         } else {
+            coven_foundation::task::report_carried(self.database.bugs().as_ref(), &error);
             tracing::warn!(?id, ?kind, "a resumed operation ended failing: {}", error.cause());
             self.waits.operation_advanced(id);
         }
@@ -161,6 +165,7 @@ impl SequenceSync {
         let (reason, error_source, cause): (_, &(dyn std::error::Error + 'static), _) =
             match &failure {
                 OperationFailure::Held(error) => {
+                    coven_foundation::task::report_carried(self.database.bugs().as_ref(), error);
                     (self.error_reason(error), error.cause(), Some(error.cause().to_string()))
                 }
                 OperationFailure::Returned(error) => (self.error_reason(error), *error, None),

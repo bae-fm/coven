@@ -297,15 +297,22 @@ impl FilesInner {
 
     /// One run of the upload worker: start uploads while they can run,
     /// keeping the upload limit's number in flight, and end once none is in
-    /// flight and none can start.
+    /// flight and none can start. A run that fails on a bug returns it to
+    /// the worker, which reports it; each waiting app retry hears it as
+    /// `WorkerFailed` (E15).
     pub(crate) async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
+        use coven_foundation::task::CarriesBug;
         let _run = self.drain.lock().await;
         let result = self.serve_uploads().await;
         match result {
             Ok(outcome) => Ok(outcome),
             Err(error) if lock_unpoisoned(&self.app_retries).is_empty() => Err(error),
-            // Every waiting app retry learns the failure that ended the run.
             Err(error) => {
+                if let Some(bug) = error.bug().cloned() {
+                    self.answer_retries(|| Some(Err(SyncError::WorkerFailed(bug.clone()))));
+                    return Err(error);
+                }
+                // Every waiting app retry learns the failure that ended the run.
                 let (failure, source) = error.into_shared();
                 self.answer_retries(|| {
                     Some(Err(SyncError::Failed { failure, source: source.clone() }))
@@ -539,6 +546,14 @@ impl FilesInner {
         }
     }
 
+    /// The run's own work failed with `error`, which no caller hears: a bug
+    /// it carries goes to the sink, and any other failure is logged (E15).
+    fn failed_on_its_own(&self, what: &'static str, error: &SyncError) {
+        if !coven_foundation::task::report_carried(self.database.bugs().as_ref(), error) {
+            tracing::error!(?error, "{what}");
+        }
+    }
+
     /// Act on reports for upload waits, as each plan does (§6.7).
     /// A failure keeps every wait and the report, for the next plan.
     async fn act_on_reports(&self, run: &mut Run<'_>) {
@@ -547,7 +562,7 @@ impl FilesInner {
             match self.waits.end_waits_after_report(NetworkOwner::Uploads, &crossed).await {
                 Ok(()) => run.stale = true,
                 Err(error) => {
-                    tracing::error!(?error, "ending reported upload waits failed");
+                    self.failed_on_its_own("ending reported upload waits failed", &error);
                     run.crossed = crossed;
                 }
             }
@@ -555,7 +570,7 @@ impl FilesInner {
         match self.waits.end_reported_waits(NetworkOwner::Uploads).await {
             Ok(true) => run.stale = true,
             Ok(false) => {}
-            Err(error) => tracing::error!(?error, "ending reported upload waits failed"),
+            Err(error) => self.failed_on_its_own("ending reported upload waits failed", &error),
         }
     }
 

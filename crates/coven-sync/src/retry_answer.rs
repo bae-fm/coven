@@ -29,7 +29,9 @@
 //!
 //! A failed write has failed the store's handle, which every call and live
 //! query then reports, and no later step can commit; the requests waiting
-//! then are answered with that failure.
+//! then are answered with that failure. A write that panicked fails alone:
+//! its bug goes to the step's caller, or to the sink when the connection's
+//! owner wrote on its own, and that owner stops (E15).
 
 use crate::{NetworkOwner, PassFailure, RetryWaits, SyncFailure};
 use coven_database::{DbError, RetryState, RetrySync};

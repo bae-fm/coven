@@ -38,6 +38,21 @@ impl Database {
         .await
     }
 
+    /// Panic in the next write the writer judges, before it commits, as a
+    /// bug in it would: the write rolls back, and its call fails with
+    /// `DbError::Bug` carrying `message` (E15).
+    pub async fn test_panic_in_next_write(&self, message: &'static str) -> Result<(), DbError> {
+        let armed = std::sync::atomic::AtomicBool::new(true);
+        self.test_on_write_checkpoint(move |point| {
+            if point == crate::test_utils::WriteCheckpoint::Judged
+                && armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                panic!("{message}");
+            }
+        })
+        .await
+    }
+
     /// Make every later write of how the passes go fail, as a full disk
     /// would: their move, their end and the last synced time. Counting a
     /// start still writes, so the loop starts and its first pass fails.

@@ -284,6 +284,30 @@ async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
     f.handle.close().await.unwrap();
 }
 
+/// The first pass's connection fails, and the write saving its retry wait
+/// panics: nobody waits for the attempt, so the bug goes to the app's bug
+/// sink, once, and the attempt stops as on any failed write of its own
+/// (E15).
+#[tokio::test]
+async fn a_bug_saving_a_failed_connections_wait_reaches_the_sink() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    stop(&f).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    *f.connector.held.lock().await = Some((entered, resumed));
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
+    f.handle.start_sync().await.unwrap();
+    entering.await.unwrap();
+    f.handle.test_panic_in_next_write("the connection's wait broke").await;
+    resume.send(()).unwrap();
+    let bug = tokio::time::timeout(HANG_GUARD, f.bugs.next()).await.expect("the sink hears it");
+    assert_eq!(bug.message, "the connection's wait broke");
+    f.handle.close().await.unwrap();
+    assert!(f.bugs.take().is_empty(), "the sink heard the bug once");
+}
+
 #[tokio::test]
 async fn unconfigured_storage_and_lost_credentials_stay_disconnected_on_start() {
     let mut f = Fixture::new().await;

@@ -78,11 +78,14 @@ impl StorageConnections {
     async fn attempt_panicked(&self, bug: crate::task::Bug) {
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "the attempt has ended either way; a failed write has failed the handle, which reports it"
+            reason = "the attempt has ended either way; a bug has gone to the sink, and any other failed write has failed the handle, which reports it"
         )]
-        let _ = self.show(LastPass::failed(SyncError::WorkerFailed(bug.clone()))).await;
+        let _ = self.shown(LastPass::failed(SyncError::WorkerFailed(bug.clone()))).await;
         if let Err(error) = self.waits.sync_panicked(bug).await {
-            tracing::debug!("stopping sync on a failed handle: {error}");
+            tracing::debug!(
+                "stopping sync after the attempt's panic failed: {}",
+                self.reported(error)
+            );
         }
     }
 
@@ -101,11 +104,11 @@ impl StorageConnections {
             }
         };
         let held = retry.held(&self.waits);
-        if self.waits.holds(held).await.is_err() {
-            return;
+        if let Err(error) = self.waits.holds(held).await {
+            return self.give_up(coven_sync::connection_failure(self.reported(error))).await;
         }
         if let Some(failure) = held {
-            if self.show(failure.clone().into()).await.is_err() {
+            if self.shown(failure.clone().into()).await.is_err() {
                 return self.stopped().await;
             }
         }
@@ -131,8 +134,8 @@ impl StorageConnections {
             let cooldown = self.waits.cooldown_wake();
             // A held pass answers the retries acted on at once, and a
             // cooldown that ended is written.
-            if self.waits.answer_held(retry.held(&self.waits)).await.is_err() {
-                return;
+            if let Err(error) = self.waits.answer_held(retry.held(&self.waits)).await {
+                return self.give_up(coven_sync::connection_failure(self.reported(error))).await;
             }
             let previous = match self.database.retry_wait(coven_database::RetrySubject::Sync).await
             {
@@ -167,7 +170,9 @@ impl StorageConnections {
             let requests = match self.waits.begin_pass().await {
                 Ok(Some(requests)) => requests,
                 Ok(None) => continue,
-                Err(_) => return,
+                Err(error) => {
+                    return self.give_up(coven_sync::connection_failure(self.reported(error))).await
+                }
             };
             // Location identifies the provider even if decoding or reading its
             // credentials fails. A location read itself is a local disk failure.
@@ -191,16 +196,20 @@ impl StorageConnections {
                     return;
                 }
                 Ok(()) => {
-                    if self.waits.return_requests(requests).await.is_err() {
-                        return;
+                    if let Err(error) = self.waits.return_requests(requests).await {
+                        return self
+                            .give_up(coven_sync::connection_failure(self.reported(error)))
+                            .await;
                     }
                     if let ConnectionState::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start().await {
                             #[expect(
                                 clippy::let_underscore_must_use,
-                                reason = "the attempt ends either way; a failed write has failed the handle, which reports it"
+                                reason = "the attempt ends either way; a bug has gone to the sink, and any other failed write has failed the handle, which reports it"
                             )]
-                            let _ = self.show(coven_sync::connection_failure(error).into()).await;
+                            let _ = self
+                                .shown(coven_sync::connection_failure(self.reported(error)).into())
+                                .await;
                         }
                     } else {
                         // Connecting installs the connection's loop; without
@@ -228,7 +237,7 @@ impl StorageConnections {
                             // before the person hears it or the row records
                             // it.
                             if let Err(error) = self.waits.holds(retry.held(&self.waits)).await {
-                                let error = SyncError::from(error);
+                                let error = self.reported(error);
                                 return requests.answer(
                                     &coven_sync::PassFailure::Failed { error: error.into() }.into(),
                                 );
@@ -237,7 +246,7 @@ impl StorageConnections {
                             if superseded() {
                                 break;
                             }
-                            if self.show(failure.into()).await.is_err() {
+                            if self.shown(failure.into()).await.is_err() {
                                 return self.stopped().await;
                             }
                         }
@@ -274,22 +283,30 @@ impl StorageConnections {
         crate::task::reported(self.database.bugs().as_ref(), error.into())
     }
 
+    /// Write how the attempt failed as the last pass. The attempt writes on
+    /// its own, so a bug its write fails on goes to the store's bug sink;
+    /// any other failed write has failed the handle (E15).
+    async fn shown(&self, failure: LastPass) -> Result<(), SyncError> {
+        self.show(failure).await.map_err(|error| self.reported(error))
+    }
+
     /// An attempt that cannot go on shows why; no pass follows it.
     async fn give_up(&self, failure: coven_sync::PassFailure) {
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "the attempt ends either way; a failed write has failed the handle, which reports it"
+            reason = "the attempt ends either way; a bug has gone to the sink, and any other failed write has failed the handle, which reports it"
         )]
-        let _ = self.show(failure.into()).await;
+        let _ = self.shown(failure.into()).await;
         self.stopped().await;
     }
 
     /// No connection plans after an attempt ends: the waiting retries hear
-    /// so. A failed write has failed the handle and answered them with its
-    /// failure, which every call reports, so the attempt ends either way.
+    /// so. A failed write has answered them with its failure, and its bug
+    /// has gone to the sink or it has failed the handle, so the attempt ends
+    /// either way.
     async fn stopped(&self) {
         if let Err(error) = self.waits.sync_stopped().await {
-            tracing::debug!("stopping sync on a failed handle: {error}");
+            tracing::debug!("stopping sync failed: {}", self.reported(error));
         }
     }
 

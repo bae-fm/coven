@@ -277,6 +277,57 @@ async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
     f.close().await;
 }
 
+/// Ben's photo's upload is held as it starts, then fails, and the write
+/// recording that failure panics, which fails the run serving Ben's app's
+/// early retry. The worker goes on and sends the bug to the sink, once;
+/// the retry, which waited on the worker's work, hears it as `WorkerFailed`
+/// (E15).
+#[tokio::test]
+async fn a_run_that_fails_on_a_bug_answers_its_retries_with_the_workers_bug() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.attach("files", "a", photo(1)).await;
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_request(started, resumed).await;
+    f.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            fail_next: 1,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    f.set_uploads_paused(false).await;
+    tokio::time::timeout(HANG_GUARD, starting).await.unwrap().unwrap();
+    let answer = f.files.inner.ask_retry().unwrap();
+    f.database.test_panic_in_next_write("the upload's failure record broke").await.unwrap();
+    resume.send(()).unwrap();
+    let answered = tokio::time::timeout(HANG_GUARD, answer.answered()).await.unwrap();
+    let Err(SyncError::WorkerFailed(bug)) = answered else {
+        panic!("the retry heard no worker's bug: {answered:?}");
+    };
+    assert_eq!(bug.message, "the upload's failure record broke");
+    assert_eq!(f.bugs.take(), [bug], "the app's bug sink heard it, once");
+    f.close().await;
+}
+
+/// Ben's photo is stored, and the write that records it stored panics: the
+/// attempt fails, its failure is recorded for its retry, and the bug, which
+/// no caller hears, goes to the app's bug sink (E15).
+#[tokio::test]
+async fn a_bug_an_upload_attempt_records_reaches_the_sink() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.attach("files", "a", photo(1)).await;
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_request(started, resumed).await;
+    f.set_uploads_paused(false).await;
+    tokio::time::timeout(HANG_GUARD, starting).await.unwrap().unwrap();
+    f.database.test_panic_in_next_write("the stored upload's record broke").await.unwrap();
+    resume.send(()).unwrap();
+    let bug = tokio::time::timeout(HANG_GUARD, f.bugs.next()).await.expect("the sink hears it");
+    assert_eq!(bug.message, "the stored upload's record broke");
+    f.close().await;
+}
+
 /// A write of the retry effect fails, as on a full disk, and fails the
 /// handle: the upload worker ends on that failure, and Ben's app's early
 /// retry, and any after it, hear it instead of waiting for a run that never

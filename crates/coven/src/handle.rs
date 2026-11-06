@@ -655,6 +655,12 @@ impl CovenHandle {
     pub(crate) async fn test_record_pending(&self, record: coven_sync::PendingRecord) {
         self.database.record_pending(record).await.unwrap();
     }
+    /// Panic in the next write the store's writer judges, as a bug in it
+    /// would.
+    #[cfg(test)]
+    pub(crate) async fn test_panic_in_next_write(&self, message: &'static str) {
+        self.database.test_panic_in_next_write(message).await.unwrap();
+    }
 
     /// Count the work the store's connections run into `counter`, in
     /// application tests: its reads' SQLite steps, the app's and coven's
