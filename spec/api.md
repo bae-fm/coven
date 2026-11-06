@@ -623,8 +623,9 @@ impl Clock for SystemClock {
 #[cfg(feature = "test-utils")]
 impl Coven {
     /// An installation with its stores under `app_dir`, no device-only
-    /// entries and none of the person's entries. Its bug sink keeps each
-    /// bug and logs it at error.
+    /// entries and none of the person's entries. Its bug sink is a
+    /// `HeardBugs` no test can take from, so any bug coven reports to it
+    /// fails the test.
     pub fn in_memory(app_dir: PathBuf) -> Self;
 
     /// `in_memory`, whose bugs in work nobody waits for go to `bugs`, for a
@@ -9151,6 +9152,23 @@ pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 /// Logs each bug at error: the sink of an app that wants its bugs only
 /// logged.
 pub struct LoggedBugs;
+
+/// Keeps every bug it hears of and logs each at error: the sink a test
+/// gives coven. The test takes each bug it expects; a bug left untaken when
+/// the sink drops fails the test, so a bug no test expected never passes
+/// unseen.
+#[cfg(feature = "test-utils")]
+#[derive(Default)]
+pub struct HeardBugs { /* private */ }
+
+#[cfg(feature = "test-utils")]
+impl HeardBugs {
+    /// A sink that has heard nothing yet, to share with coven.
+    pub fn shared() -> std::sync::Arc<Self>;
+
+    /// Every bug heard since the last take, in the order heard.
+    pub fn take(&self) -> Vec<Bug>;
+}
 
 /// An error that may carry a bug: work its call ran panicked, and the
 /// call's error says so. Implemented by `Bug`, `TaskFailed`, every coven

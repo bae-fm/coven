@@ -114,7 +114,7 @@ fn a_panic_in_a_platform_callback_goes_to_the_bug_sink_and_cannot_tell() {
     heard(&sink, &bugs, "read the network's path", || panic!("the path has no interfaces"));
     assert_eq!(*state.borrow(), NetworkState { usable: None, metered: true, joined: 1 });
     assert_eq!(
-        bugs.heard(),
+        bugs.take(),
         [crate::task::Bug {
             operation: "read the network's path",
             message: "the path has no interfaces".into()
@@ -125,5 +125,5 @@ fn a_panic_in_a_platform_callback_goes_to_the_bug_sink_and_cannot_tell() {
         lock_unpoisoned(&sink).observe(Some(UsableNetwork { id: "wifi".into(), metered: false }));
     });
     assert_eq!(*state.borrow(), NetworkState { usable: Some(true), metered: false, joined: 1 });
-    assert_eq!(bugs.heard().len(), 1);
+    assert!(bugs.take().is_empty());
 }

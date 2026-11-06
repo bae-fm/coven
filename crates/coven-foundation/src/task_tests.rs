@@ -205,7 +205,7 @@ async fn an_owned_task_s_panic_goes_to_the_sink_then_its_owner_ends_its_work() {
     );
     task.ended().await;
     let bug = Bug { operation: "upload files", message: "the queue's first row is gone".into() };
-    assert_eq!(bugs.heard(), std::slice::from_ref(&bug));
+    assert_eq!(bugs.take(), std::slice::from_ref(&bug));
     assert_eq!(owner_heard.await.unwrap(), bug);
 }
 
@@ -217,7 +217,7 @@ async fn an_owned_task_s_ending_that_panics_goes_to_the_sink_too() {
     })
     .ended()
     .await;
-    let messages: Vec<_> = bugs.heard().into_iter().map(|bug| bug.message).collect();
+    let messages: Vec<_> = bugs.take().into_iter().map(|bug| bug.message).collect();
     assert_eq!(messages, ["a pass panicked", "recording the failure panicked"]);
 }
 
@@ -229,7 +229,7 @@ async fn an_owned_task_that_finishes_reports_nothing() {
     })
     .ended()
     .await;
-    assert!(bugs.heard().is_empty());
+    assert!(bugs.take().is_empty());
 }
 
 #[tokio::test]
@@ -246,7 +246,7 @@ async fn a_completing_task_s_panic_goes_to_its_waiting_caller_alone() {
             message: "a writer is still held".into(),
         }))
     );
-    assert!(bugs.heard().is_empty());
+    assert!(bugs.take().is_empty());
     assert_eq!(spawn_completing("add", bugs, async { Ok::<_, Bug>(2 + 2) }).await, Ok(Ok(4)));
 }
 
@@ -362,4 +362,13 @@ async fn a_completing_task_dropped_with_its_answer_unread_reports_the_answer_s_b
         reported.try_recv(),
         Ok(Bug { operation: "stop sync", message: "the loop is gone".into() })
     );
+}
+
+/// A test's sink dropped with a bug no test took fails the test, so a bug no
+/// test expected never passes unseen.
+#[test]
+#[should_panic(expected = "coven reported bugs no test took")]
+fn a_test_sink_dropped_with_a_bug_untaken_fails_the_test() {
+    let bugs = HeardBugs::shared();
+    report(bugs.as_ref(), &Bug { operation: "read the tags", message: "no tags".into() });
 }

@@ -275,7 +275,7 @@ async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
         matches!(error.downcast_ref::<SyncError>(), Some(SyncError::Bug(heard)) if *heard == bug),
         "{error:?}"
     );
-    assert_eq!(f.bugs.heard(), std::slice::from_ref(&bug));
+    assert_eq!(f.bugs.take(), std::slice::from_ref(&bug));
     last_pass(&f.handle, |last| {
         matches!(last, Some(LastPass::Failed { error, .. }) if error.contains("connecting panicked"))
     })

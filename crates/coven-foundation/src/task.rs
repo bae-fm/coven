@@ -206,7 +206,9 @@ impl BugSink for LoggedBugs {
 }
 
 /// Keeps every bug it hears of, and logs each at error, as an app's crash
-/// reporter would: the sink a test gives coven, reading back what it heard.
+/// reporter would: the sink a test gives coven. A test that expects a bug
+/// takes it; one left untaken when the sink drops fails the test, so a bug
+/// no test expected never passes unseen.
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Default)]
 pub struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
@@ -218,9 +220,9 @@ impl HeardBugs {
         std::sync::Arc::new(Self::default())
     }
 
-    /// Every bug heard so far, in the order heard.
-    pub fn heard(&self) -> Vec<Bug> {
-        crate::locks::lock_unpoisoned(&self.0).clone()
+    /// Every bug heard since the last take, in the order heard.
+    pub fn take(&self) -> Vec<Bug> {
+        std::mem::take(&mut *crate::locks::lock_unpoisoned(&self.0))
     }
 }
 
@@ -229,6 +231,17 @@ impl BugSink for HeardBugs {
     fn report(&self, bug: &Bug) {
         tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
         crate::locks::lock_unpoisoned(&self.0).push(bug.clone());
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Drop for HeardBugs {
+    fn drop(&mut self) {
+        let untaken = self.take();
+        // A test already failing says why itself.
+        if !untaken.is_empty() && !std::thread::panicking() {
+            panic!("coven reported bugs no test took: {untaken:?}");
+        }
     }
 }
 
