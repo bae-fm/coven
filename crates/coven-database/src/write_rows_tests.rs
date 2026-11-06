@@ -222,6 +222,32 @@ async fn a_note_cannot_be_added_to_gifts_after_its_deletion_was_applied() {
     database.close().await.unwrap();
 }
 
+/// A breaking migration that writes a note into Gifts after its deletion
+/// applied fails as the deletion, and the store stays at its version
+/// (§15.9, §18.4).
+#[tokio::test]
+async fn a_migration_cannot_write_into_gifts_after_its_deletion_was_applied() {
+    use crate::{Migration, OldWrites};
+    const GIFT: &str =
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000042','Gift nine',
+           '00000000-0000-4000-8000-00000000000a')";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
+    let database = store.builder(tables(), initial()).open().await.unwrap();
+    let gifts = CircleId(uuid::Uuid::parse_str(ANA).unwrap());
+    crate::tests::delete_circle(&database, gifts).await.unwrap();
+    database.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "gift", GIFT, OldWrites::Drop));
+    let error = store.builder(tables(), migrations).open().await.err().unwrap();
+    let error = crate::tests::database_error(error);
+    assert!(matches!(error, DbError::DeletedCircle(circle) if circle == gifts), "{error:?}");
+    let database = store.builder(tables(), initial()).open().await.unwrap();
+    assert_eq!(database.schema_version().await.unwrap(), 1);
+    assert_eq!(count(&database, "notes"), 0);
+    database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn references_use_the_parents_affinity_before_and_after_cascade() {
     let store = TestStore::new();

@@ -341,7 +341,10 @@ pub(crate) fn queue(
 
 /// Check a write's rows, its file records among them, against the same
 /// committed membership. A deleted circle refuses every write into it, as its
-/// deletion, before any question of who is in it (§15.9).
+/// deletion, before any question of who is in it (§15.9). A file record is
+/// checked here before `write_record::changes` sees the write's rows, so this
+/// is a file's deletion check; that function's own check is the one a
+/// migration write's rows meet.
 /// The caller must keep its write transaction open until the authorized work commits.
 pub(crate) fn check_membership(
     database: &DatabaseConnection,

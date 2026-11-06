@@ -323,6 +323,10 @@ pub(crate) fn changes(
         .map(|(row, c)| (row.clone(), c.change.after().expect("generation exhausted")))
         .collect();
     for (row, change) in &mut changes {
+        // A migration write's rows never reach `write_commit::check_membership`:
+        // its parts are cleared before it is queued, so this is the only check
+        // that refuses one in a deleted circle. A local write's rows meet the
+        // same refusal again there, which also covers its file records.
         if let Audience::Circle(circle) = row.audience {
             if deleted.contains_key(&circle) {
                 return Err(DbError::DeletedCircle(circle));
