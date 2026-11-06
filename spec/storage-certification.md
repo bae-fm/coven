@@ -33,7 +33,7 @@ the run exercised. The linked sections hold the output.
 | Ceph RGW | 20.2.4 | off only | suite 6, 2026-10-28; sequence races and member keys, 2026-10-17 ([S7c](#s7c-sequence-live-tests-2026-10-17)) | Versioned buckets fail the races and are refused |
 | Versity Gateway | 1.9.0, POSIX backend | off and on | suite 6, 2026-10-28; sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | |
 | AWS S3 | | | none | No account to run against: uncertified |
-| Dropbox | Full Dropbox app and App folder | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | Listing lag: the suite has no measurement, a probe measured 1.1 to 1.4 s. Unmounting and mounting again (`dropbox_live_account_sharing`), never run |
+| Dropbox | Full Dropbox app and App folder | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | Listing lag: the suite has no measurement, a probe measured 1.1 to 1.4 s. Unmounting and mounting again (`dropbox_live_account_sharing`), never run. Whether `get_folder_metadata`'s `name` follows a member's own rename (`dropbox_live_member_folder_name`), never run |
 | OneDrive (personal) | Microsoft Graph | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([floor replacement](#onedrive-floor-replacement-through-an-upload-session-2026-10-17)) | Personal accounts only were run. What a join's acceptance leaves and whether the recipient can give it back (`onedrive_live_join_acceptance`), never run |
 | CloudKit | `iCloud.fm.bae.desktop`, Development | not applicable | live test, 2026-10-14; one-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)); two-account create-once, 2026-10-16 ([probes](#cross-account-create-once-probes-2026-10-16)) | Sharing on two accounts (`cloudkit_live_sharing`), with leaving an accepted share and accepting it again, never run |
 
@@ -93,6 +93,13 @@ run in every provider's live test; the races are separate tests.
   the share, then accepts the same URL again; the probe prints its
   acceptance status, its reads and the second acceptance's result.
   `cloudkit_live_sharing` in the CloudKit tests.
+- **A member's own folder name:** a Dropbox recipient renames the mounted
+  shared folder in its own account, which Dropbox applies to that account
+  alone. The probe prints the `name` and `path_display` that
+  `get_folder_metadata` gives the recipient before and after, and the folder
+  label each account's connection reads (coven.md §20.2); it asserts only
+  that the rename moved the recipient's mount. `dropbox_live.rs`
+  (`dropbox_live_member_folder_name`).
 - **Cross-account create-once:** writers on two accounts race one name in a
   shared folder or zone. `sequence_live.rs` for Dropbox and OneDrive,
   `cloudkit_race.rs` for CloudKit.

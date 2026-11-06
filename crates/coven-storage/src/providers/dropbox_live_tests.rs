@@ -114,6 +114,82 @@ fn dropbox_live_account_sharing() {
     });
 }
 
+/// Whether the shared folder's `name` in `get_folder_metadata` follows a
+/// member's own rename, which Dropbox applies to that member's account alone.
+/// The folder label coven records is that `name` (§20.2). Dropbox documents
+/// it only as the folder's name, so the probe prints what each account reads
+/// instead of asserting it.
+#[test]
+#[ignore = "requires COVEN_LIVE_DROPBOX_ENV and COVEN_LIVE_DROPBOX_B_ENV and writes to Dropbox"]
+fn dropbox_live_member_folder_name() {
+    run(async |live, storage| {
+        let recipient_tokens = tokens("COVEN_LIVE_DROPBOX_B_ENV", live.clock.clone()).await;
+        let session = || {
+            OAuthSession::new(
+                PROVIDER,
+                recipient_tokens.clone(),
+                Arc::new(crate::test_utils::RefusedRefresh),
+                live.clock.clone(),
+                crate::providers::tests::live_http_client(),
+            )
+            .unwrap()
+        };
+        let recipient = Arc::new(StorageConnection::from_provider(Arc::new(
+            DropboxStorage::new(storage.config(), session()).unwrap(),
+        )));
+        let account = recipient.account().await.unwrap();
+        assert!(account != storage.account().await.unwrap(), "renaming requires two accounts");
+        live.members.push((storage.clone(), account.clone()));
+        let AccessGrant::Granted { invitation } = storage.grant_access(&account).await.unwrap()
+        else {
+            panic!("Dropbox did not grant account access")
+        };
+        recipient.join(live.store, &invitation).await.unwrap();
+        let StorageConfig::Dropbox {
+            location: DropboxLocation::SharedFolder { namespace_id }, ..
+        } = storage.config()
+        else {
+            panic!("a shared folder")
+        };
+        // The member's own calls, outside the shared folder's namespace.
+        let member = session();
+        let rpc = async |method: &str, value: Value| {
+            let response = member
+                .send(
+                    Method::POST,
+                    &format!("{}/{method}", crate::providers::DROPBOX_API),
+                    &[],
+                    Body::Json(value),
+                    true,
+                )
+                .await
+                .unwrap();
+            http::json(PROVIDER, response).await.unwrap()
+        };
+        let folder = json!({"shared_folder_id":namespace_id});
+        let mounted = rpc("sharing/get_folder_metadata", folder.clone()).await;
+        let path = http::string(&mounted, "path_lower").unwrap().to_owned();
+        let renamed = format!("/coven-live-renamed-{}", live.store);
+        rpc("files/move_v2", json!({"from_path":path,"to_path":renamed,"autorename":false})).await;
+        let after = rpc("sharing/get_folder_metadata", folder).await;
+        let label = |config: StorageConfig| match config {
+            StorageConfig::Dropbox { folder_label, .. } => folder_label.unwrap().name,
+            _ => unreachable!(),
+        };
+        let member_label = label(recipient.labelled_config().await.unwrap());
+        let owner_label = label(storage.labelled_config().await.unwrap());
+        println!(
+            "Dropbox member rename: before_name={} before_path={} after_name={} after_path={} member_label={member_label} owner_label={owner_label} follows_member_rename={}",
+            http::string(&mounted, "name").unwrap(),
+            http::string(&mounted, "path_display").unwrap(),
+            http::string(&after, "name").unwrap(),
+            after["path_display"].as_str().unwrap_or("absent"),
+            renamed.strip_prefix('/') == Some(member_label.as_str())
+        );
+        assert_eq!(after["path_lower"].as_str(), Some(renamed.to_lowercase().as_str()));
+    });
+}
+
 #[test]
 #[ignore = "requires COVEN_LIVE_DROPBOX_ENV and writes to Dropbox"]
 fn dropbox_live_complete_publication_time() {
