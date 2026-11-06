@@ -396,8 +396,7 @@ pub fn writer_lock(directory: &Path, id: StoreId) -> PathBuf {
 }
 
 /// The bootstrap lock file of the store at `directory`, which a test waits
-/// on to know a bootstrap finds the store's bootstrap or writer closing and
-/// waits for it.
+/// on to know an open finds the store's bootstrap closing and waits for it.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn bootstrap_lock(directory: &Path, id: StoreId) -> PathBuf {
     bootstrap_lock_path(directory, id)

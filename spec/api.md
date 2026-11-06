@@ -1891,8 +1891,10 @@ pub fn copy_tree(from: &Path, to: &Path);
 pub fn copy_tree_keeping(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool);
 
 /// Told once file work reaches `path`: about to open it, or finding its
-/// lock held and about to wait for it. A test that stalls the file, as a
-/// FIFO in its place does, then knows the work is held there.
+/// lock held and about to wait for it. An open that finds another instance
+/// of its store closing is told at the lock file that instance holds, the
+/// one it waits for. A test that stalls the file, as a FIFO in its place
+/// does, then knows the work is held there.
 #[cfg(feature = "test-utils")]
 pub fn when_reached(path: &Path) -> tokio::sync::oneshot::Receiver<()>;
 

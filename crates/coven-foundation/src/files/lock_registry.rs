@@ -232,7 +232,8 @@ pub(super) fn try_acquire(
 }
 
 enum Acquisition {
-    Waiting(watch::Receiver<LockPhase>),
+    /// The kind of the closing instance it waits for, and its phase.
+    Waiting(LockKind, watch::Receiver<LockPhase>),
     Reserved(LockRegistration),
 }
 
@@ -261,15 +262,18 @@ pub(super) async fn acquire_registered(
                     entry.kind != LockKind::Reader && *entry.phase.borrow() == LockPhase::Closing
                 })
             }) {
-                Some(entry) => Acquisition::Waiting(entry.phase.subscribe()),
+                Some(entry) => Acquisition::Waiting(entry.kind, entry.phase.subscribe()),
                 None => Acquisition::Reserved(reserve(&mut registry, store.clone(), kind)),
             }
         };
         let mut released = match acquisition {
             Acquisition::Reserved(registration) => return registration.open_on_worker(bugs).await,
-            Acquisition::Waiting(released) => {
+            Acquisition::Waiting(closing, released) => {
+                // Told at the lock file of the instance it waits for.
                 #[cfg(any(test, feature = "test-utils"))]
-                super::reached::reached(&super::lock::kind_lock(directory, id, kind));
+                super::reached::reached(&super::lock::kind_lock(directory, id, closing));
+                #[cfg(not(any(test, feature = "test-utils")))]
+                let _: LockKind = closing;
                 released
             }
         };

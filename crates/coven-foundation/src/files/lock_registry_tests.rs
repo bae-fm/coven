@@ -127,46 +127,37 @@ async fn a_released_guard_cannot_mark_a_replacement_as_closing() {
     drop(replacement);
 }
 
+/// Dropping a bootstrap releases its lock at once, and the directories it
+/// gave out hold none of it, even while an owner keeps one (api.md E10). A
+/// second bootstrap of the store waits only for the dropped one's remaining
+/// work: the writer its directory opened, now closing. The reopen tells that
+/// wait at the writer's lock, and finishes once the writer drops, with the
+/// directory still held.
 #[tokio::test]
-async fn bootstrap_reopen_waits_for_both_the_lease_and_the_writer_in_either_drop_order() {
-    for writer_first in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
-        let id = StoreId(uuid::Uuid::from_u128(3));
-        let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
-        let directory = pending.directory();
-        let writer = directory.lock_for_open().await.unwrap();
-        let lease = crate::files::bootstrap_lock(directory.database_path().parent().unwrap(), id);
-        drop(pending);
-        let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
-        let mut waits = crate::files::when_reached(&lease);
-        poll_fn(|cx| {
-            assert!(reopen.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        waits.try_recv().expect("the reopen waits for the closing lease and writer");
-        if writer_first {
-            drop(writer);
-            poll_fn(|cx| {
-                assert!(reopen.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            drop(directory);
-        } else {
-            drop(directory);
-            poll_fn(|cx| {
-                assert!(reopen.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            drop(writer);
+async fn bootstrap_reopen_waits_for_the_dropped_bootstraps_writer_and_not_its_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
+    let id = StoreId(uuid::Uuid::from_u128(3));
+    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
+    let directory = pending.directory();
+    let writer = directory.lock_for_open().await.unwrap();
+    let parent = directory.database_path().parent().unwrap().to_owned();
+    let mut waits = crate::files::when_reached(&crate::files::writer_lock(&parent, id));
+    drop(pending);
+    let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
+    tokio::select! {
+        biased;
+        waited = crate::clock::within(&mut waits) => {
+            waited.expect("the reopen waits for the closing writer").unwrap();
         }
-        let resumed = reopen.await.unwrap();
-        drop(resumed.directory().lock_for_open().await.unwrap());
-        resumed.cancel().unwrap();
+        _ = reopen.as_mut() => panic!("the reopen finished without waiting"),
     }
+    drop(writer);
+    let resumed =
+        crate::clock::within(reopen).await.expect("the reopen ends once the writer drops").unwrap();
+    drop(resumed.directory().lock_for_open().await.unwrap());
+    resumed.cancel().unwrap();
+    drop(directory);
 }
 
 #[cfg(unix)]

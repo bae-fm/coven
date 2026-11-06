@@ -215,14 +215,16 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     }
     drop(read);
     drop(database);
-    let lease = coven_foundation::files::bootstrap_lock(
+    // The dropped bootstrap's database is closing until its read ends: the
+    // reopen waits for that writer.
+    let writer = coven_foundation::files::writer_lock(
         coven_foundation::files::StoreDirAccess::database_path(&pending.directory())
             .parent()
             .unwrap(),
         id,
     );
     drop(pending);
-    let waits = coven_foundation::files::when_reached(&lease);
+    let waits = coven_foundation::files::when_reached(&writer);
     let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
     crate::tests::until_waiting(&mut reopen, waits).await;
     release.send(()).unwrap();
