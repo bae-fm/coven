@@ -78,6 +78,51 @@ async fn an_entered_key_and_one_the_code_carries_both_restore_and_leave_the_code
     owner.close().await;
 }
 
+/// Ana's laptop scans the code her phone showed, with her key inside, and the
+/// app passes a key she typed as well. The laptop would hold two keys and no
+/// way to tell which she meant, so the restore is refused before anything
+/// changes (§13.1).
+#[tokio::test]
+async fn a_key_entered_beside_a_code_that_carries_one_is_refused() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let location =
+        coven_storage::RestoreStorage::decode(owner.code.storage.as_bytes()).unwrap().location;
+    let code = RestoreCode {
+        store: owner.code.store,
+        member: owner.code.member,
+        member_keys: owner.code.member_keys.clone(),
+        storage: coven_storage::RestoreStorage {
+            location,
+            s3_key: Some(supplied_key("own-device")),
+        }
+        .encode()
+        .unwrap(),
+    };
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let result = restore_from_code(
+        install.builder(&owner, owner.storage.clone()),
+        &code.to_text().unwrap(),
+        Some(supplied_key("entered")),
+        "Laptop",
+        |_| panic!("bootstrap began"),
+        &cancel,
+    )
+    .await;
+    assert!(
+        matches!(&result, Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::InvalidConfiguration),
+        "{:?}",
+        result.map(drop)
+    );
+    assert!(!install.root.path().join("stores").exists());
+    assert!(scoped(&install, &owner).storage_credentials().unwrap().is_none());
+    let person = person_entries(&install, &owner);
+    assert!(person.restore_code().unwrap().is_none());
+    assert!(person.s3_credentials().unwrap().is_none());
+    owner.close().await;
+}
+
 #[tokio::test]
 async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
     let owner = Owner::new(CloudProvider::S3, false).await;

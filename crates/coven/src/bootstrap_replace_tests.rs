@@ -493,6 +493,58 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     network.close().await;
 }
 
+/// Carol's laptop stops past the restore's record, before or after its swap,
+/// and she gives up on the laptop's copy. Discarding the store deletes both
+/// copies and the laptop's own keychain entries; her restore code and S3 key
+/// stay, and she restores from scratch (§13.1).
+#[tokio::test]
+async fn discarding_a_store_waiting_for_its_restore_keeps_the_persons_entries() {
+    for after_swap in [false, true] {
+        let mut network = Network::new(2).await;
+        let replaced = network.replace_keys_elsewhere().await;
+        let store = replaced.carol.store;
+        let app = &replaced.carol.app;
+        let builder = network.reopen(&replaced.carol);
+        let builder = if after_swap {
+            builder.interrupt_after_swap()
+        } else {
+            builder.interrupt_after_registering()
+        };
+        let interrupted = restore(builder, store, &replaced.code).await;
+        assert!(matches!(interrupted, Err(BootstrapError::Cancelled)), "{interrupted:?}");
+        refuses_opens(&network, &replaced).await;
+        let person = app.person_entries(store);
+        let saved = (person.restore_code().unwrap(), person.s3_credentials().unwrap());
+        assert!(saved.0.is_some() && saved.1.is_some());
+
+        app.discard_store(&app.store_dir(&store)).await.unwrap();
+        assert!(!store_path(&replaced).exists());
+        assert!(app.readable_stores().await.is_empty());
+        let keychain = app.store_keychain(store);
+        assert_eq!(keychain.device_id().unwrap(), None);
+        assert!(keychain.storage_credentials().unwrap().is_none());
+        assert!(keychain.replacement_record().unwrap().is_none());
+        let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
+        assert_eq!(bytes(person.restore_code().unwrap()), bytes(saved.0));
+        assert_eq!(bytes(person.s3_credentials().unwrap()), bytes(saved.1));
+
+        let (_, cancel) = watch::channel(false);
+        let handle = restore_from_code(
+            network.reopen(&replaced.carol),
+            &replaced.code,
+            Some(carol_key()),
+            "Carol's laptop",
+            |_| {},
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(handle.store_id(), store);
+        handle.close().await.unwrap();
+        network.close().await;
+    }
+}
+
 /// The network's migrations, with Carol's app keeping her theme in a
 /// device-local table.
 fn with_preferences() -> Vec<Migration> {

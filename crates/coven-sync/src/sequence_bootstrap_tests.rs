@@ -337,6 +337,30 @@ async fn an_old_restore_code_cannot_register_after_its_keys_were_replaced() {
     }
 }
 
+/// Ana removes Ben, and her next entry goes out under a store key his pair
+/// was never given. A phone of Ben's that never applied the removal still
+/// keeps his code; a new installation restoring from it applies the removal
+/// and fails with `Removed`, not on the later slot it can't open (§13.1).
+#[tokio::test]
+async fn a_removed_members_code_fails_at_restore() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.keys.read().unwrap().unwrap().store_key_ids().count() > 1, "rotated");
+    ana.sync.administer(StoreChange::RenameStore { name: "Family".into() }).await.unwrap();
+    let laptop = group.newcomer(ben.identity.clone(), group.storage.for_device()).await;
+    let result = laptop.sync.unlock().await;
+    assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
+    for device in [&ana, &ben, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_newcomer_without_a_copy_reports_the_key_it_lacks() {
     let group = Group::new();
