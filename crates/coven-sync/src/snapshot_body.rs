@@ -37,7 +37,37 @@ pub(crate) struct SnapshotBody {
     pub(crate) digest: SignedDigest,
 }
 
+/// A body read's failure, and whether a second read of the stored object
+/// already confirmed it: a mismatch with the announced digest is refused only
+/// once the second read's digest agrees, so nothing remains to confirm
+/// (§19.1).
+pub(crate) struct BodyFailure {
+    pub(crate) error: SyncError,
+    pub(crate) confirmed: bool,
+}
+
+impl<E: Into<SyncError>> From<E> for BodyFailure {
+    fn from(error: E) -> Self {
+        Self { error: error.into(), confirmed: false }
+    }
+}
+
 impl SnapshotObject {
+    /// `read_body_confirmed` for a caller that doesn't ask how its refusal
+    /// was confirmed.
+    pub(crate) async fn read_body(
+        &self,
+        storage: &dyn coven_storage::Storage,
+        ring: &StoreKeyring,
+        announcement: &SnapshotAnnouncement,
+        staging: Option<&mut SnapshotStaging>,
+        progress: Option<&mut ProgressReport<LoadStep>>,
+    ) -> Result<SnapshotBody, SyncError> {
+        self.read_body_confirmed(storage, ring, announcement, staging, progress)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
     /// Stream the body after the prefix once. Every byte is hashed for the
     /// announced digest and the signature, each chunk is opened, the history
     /// records are read, and each batch of plaintext goes to `staging`. No
@@ -46,14 +76,14 @@ impl SnapshotObject {
     /// An interrupted stream starts over. The object's bytes count toward
     /// the step `progress` is on as they arrive. The body must be the one
     /// `announcement` names, with its digest.
-    pub(crate) async fn read_body(
+    pub(crate) async fn read_body_confirmed(
         &self,
         storage: &dyn coven_storage::Storage,
         ring: &StoreKeyring,
         announcement: &SnapshotAnnouncement,
         mut staging: Option<&mut SnapshotStaging>,
         mut progress: Option<&mut ProgressReport<LoadStep>>,
-    ) -> Result<SnapshotBody, SyncError> {
+    ) -> Result<SnapshotBody, BodyFailure> {
         let path = &self.input.object().path;
         let size = self.input.object().size;
         let plaintext = checked(path, self.prefix.plaintext_length(size))?;
@@ -86,7 +116,7 @@ impl SnapshotObject {
                     refused = Some(error);
                     body.pass_over().await?;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
             // Everything but the final signature and what is still to come.
             if let Some(progress) = progress.as_deref_mut() {
@@ -108,22 +138,25 @@ impl SnapshotObject {
             // (§19.1).
             if self.input.stored_digest(storage).await? != *digest.complete() {
                 self.input.clone().discard().await?;
-                return Err(crate::object_input::corrupted(path));
+                return Err(crate::object_input::corrupted(path).into());
             }
-            return Err(crate::write_object::wrong_identity(path));
+            return Err(BodyFailure {
+                error: crate::write_object::wrong_identity(path),
+                confirmed: true,
+            });
         }
         if let Some(refused) = refused {
-            return Err(refused);
+            return Err(refused.into());
         }
         if opening.opened != plaintext {
-            return Err(damaged(path, Refusal::Parse { cause: None }));
+            return Err(damaged(path, Refusal::Parse { cause: None }).into());
         }
         checked(path, opening.layout.read_signature(&signature))?;
         checked(path, opening.decoder.finish())?;
         let Opening { decoder, mut originals, claims, .. } = opening;
         let header = decoder.header().expect("finished snapshot").clone();
         if header.id != announcement.snapshot {
-            return Err(crate::write_object::wrong_identity(path));
+            return Err(crate::write_object::wrong_identity(path).into());
         }
         originals.sort_by_key(|original| original.slot);
         Ok(SnapshotBody { header, originals, claims, digest })

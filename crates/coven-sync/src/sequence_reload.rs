@@ -7,7 +7,7 @@ use crate::{
     sequence_sync::{SequenceSync, Session},
     slot_object::{self, ReceivedSlot, SlotBody},
     snapshot_authorship::SnapshotAuthorship,
-    snapshot_object::{self, SnapshotBody, SnapshotObject},
+    snapshot_object::{self, BodyFailure, SnapshotBody, SnapshotObject},
     write_object::database_failure,
     PendingRecord, Refusal, SyncError,
 };
@@ -269,15 +269,21 @@ impl SequenceSync {
         ring: &StoreKeyring,
         staging: Option<&mut SnapshotStaging>,
         progress: Option<&mut ProgressReport<LoadStep>>,
-    ) -> Result<ReadSnapshot, SyncError> {
+    ) -> Result<ReadSnapshot, BodyFailure> {
         let started = self.clock.elapsed();
-        let body =
-            object.read_body(self.storage.as_ref(), ring, &announcement, staging, progress).await;
+        let body = object
+            .read_body_confirmed(self.storage.as_ref(), ring, &announcement, staging, progress)
+            .await;
         let body = match (body, object.release().await) {
             (Ok(body), Ok(())) => body,
-            (Ok(_), Err(cleanup)) => return Err(cleanup),
-            (Err(error), Ok(())) => return Err(error),
-            (Err(error), Err(cleanup)) => return Err(SyncError::cleanup(error, cleanup)),
+            (Ok(_), Err(cleanup)) => return Err(cleanup.into()),
+            (Err(failure), Ok(())) => return Err(failure),
+            (Err(failure), Err(cleanup)) => {
+                return Err(BodyFailure {
+                    error: SyncError::cleanup(failure.error, cleanup),
+                    confirmed: failure.confirmed,
+                })
+            }
         };
         tracing::info!(
             audience = ?announcement.snapshot.audience,
@@ -317,7 +323,15 @@ impl SequenceSync {
                 Ok(()) => return Ok(SelectedSnapshot { read, staging }),
                 Err(error) => database_failure(&path, error),
             },
-            Err(error) => error,
+            // A refusal the stored object's second read confirmed judged no
+            // staged record, so a second staging has nothing to add (§19.1).
+            Err(failure) if failure.confirmed => {
+                return Err(match staging.discard().await {
+                    Ok(()) => failure.error,
+                    Err(cleanup) => SyncError::cleanup(failure.error, cleanup.into()),
+                })
+            }
+            Err(failure) => failure.error,
         };
         Err(self.end_staged(failed, staging, &announcement, ring).await)
     }
@@ -383,7 +397,10 @@ impl SequenceSync {
     ) -> Result<(History, ReadSnapshot), SyncError> {
         let announcement = self.floor_store_announcement(floor, ring)?;
         let object = self.snapshot_prefix(&announcement).await?;
-        let snapshot = self.read_snapshot(announcement, object, ring, None, None).await?;
+        let snapshot = self
+            .read_snapshot(announcement, object, ring, None, None)
+            .await
+            .map_err(|failure| failure.error)?;
         let history = self.history_from(floor, &snapshot, ring, member).await?;
         Ok((history, snapshot))
     }

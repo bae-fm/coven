@@ -8004,7 +8004,8 @@ read, never a refusal.
   announced bytes, so the announcement checks their transfer, and a check that
   refuses them needs no second read. A snapshot whose digest differs is read
   again, keeping only the first read's digest, and refused as not the announced
-  snapshot only when the second read's digest is the same. Its signed prefix,
+  snapshot only when the second read's digest is the same; that second read
+  confirms the refusal, and no second staging follows it. Its signed prefix,
   which coven keeps and checks before the digest is known, is read again as a
   slot is when a check refuses it. Checks that run as the snapshot loads judge
   those same announced bytes, so a snapshot whose records disagree, or whose

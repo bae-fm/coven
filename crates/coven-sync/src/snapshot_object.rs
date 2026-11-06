@@ -20,7 +20,7 @@ use std::{
 
 #[path = "snapshot_body.rs"]
 mod body;
-pub(crate) use body::SnapshotBody;
+pub(crate) use body::{BodyFailure, SnapshotBody};
 
 pub(crate) struct SnapshotObject {
     input: ObjectInput,

@@ -76,3 +76,37 @@ async fn a_snapshot_whose_stagings_agree_is_refused() {
         ben.sync.database.close().await.unwrap();
     }
 }
+
+/// The stored snapshot's last byte differs from its announcement: Ben's
+/// read of it and a second read agree on that, which refuses it. That second
+/// read is the confirmation, so no second staging streams it again (§19.1).
+#[tokio::test]
+async fn a_refusal_a_second_read_confirmed_is_not_staged_again() {
+    use coven_storage::{test_utils::MemoryRequest, Storage};
+    let (group, ana, ben) = snapshotted().await;
+    let history = ben.sync.session.lock().await.history.clone();
+    let announced = history.announcements.values().find(|a| a.snapshot.audience == Audience::Store);
+    let path = crate::snapshot_object::path(group.store, &announced.unwrap().snapshot).unwrap();
+    let size = group.storage.status(&path).await.unwrap().unwrap().size;
+    group.storage.corrupt_byte(&path, size as usize - 1).await.unwrap();
+    let before = ben.storage.request_trace().len();
+    let result = ben.sync.reload_from_snapshot().await;
+    assert!(
+        matches!(
+            &result,
+            Err(SyncError::Damaged(DamagedObject { failure: Refusal::WrongIdentity { .. }, .. }))
+        ),
+        "{result:?}"
+    );
+    let streams = ben.storage.request_trace()[before..]
+        .iter()
+        .filter(|request| {
+            matches!(request, MemoryRequest::Read(read, range)
+            if *read == path && range.is_some_and(|range| range.end() == size))
+        })
+        .count();
+    // The body's stream, and the second read that confirms its digest.
+    assert_eq!(streams, 2, "{:?}", &ben.storage.request_trace()[before..]);
+    ana.sync.database.close().await.unwrap();
+    ben.sync.database.close().await.unwrap();
+}
