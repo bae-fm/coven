@@ -8448,8 +8448,11 @@ unchanged.
 its id:
 
 - it reads a new slot signed by its own id at a path its journal never attempted;
-- it settles a claim and finds different bytes there signed by its own id
-  (different bytes signed by another device are just a lost race);
+- it settles a claim and finds different bytes there signed by its own id,
+  whatever their claim number (different bytes signed by another device are
+  just a lost race). A copy may reuse a number below the claim being settled,
+  so a check of later numbers alone would miss it
+  ([`earlier_claim_counterexample`](proofs/sequence/CovenSequence/Settle.lean));
 - it settles from the floor's snapshot and finds a later claim number, or the
   same number with a different hash (§5.3).
 
@@ -11845,6 +11848,8 @@ Write-ups explain each model and state its assumptions:
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
+| Settling a claim at a kept slot that holds other bytes signed by this device's id answers another copy, whatever the claim number those bytes carry | `kept_same_id_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3, §19.3 |
+| *Body.* A settlement that takes only a claim number at or above its own as another copy misses a copy that reused an earlier number | `earlier_claim_counterexample` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
 
 ### G.8 Storage (§20, Appendix E)
 
