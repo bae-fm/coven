@@ -530,6 +530,10 @@ proofs() {
         COVEN_FILES_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             files::tests::uploads::differential::st_differential_files \
             files::tests::status::st_differential_file_status
+        runner=$(runner storage uploadSessionRunner)
+        step "Rust / Lean upload sessions"
+        COVEN_UPLOAD_SESSION_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            files::tests::abandoned_tests::sessions::upload_sessions_match_the_storage_model
     fi
 
     if proof_selected storage || crate_selected coven-storage; then

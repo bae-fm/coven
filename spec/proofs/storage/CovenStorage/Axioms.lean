@@ -197,3 +197,24 @@ import CovenStorage
 #print axioms CovenStorage.FloorUpload.stale_keeps_floor
 #print axioms CovenStorage.FloorUpload.stored_whole
 #print axioms CovenStorage.FloorUpload.one_winner
+
+#print axioms CovenStorage.UploadSession.steps_good
+#print axioms CovenStorage.UploadSession.reachable_good
+#print axioms CovenStorage.UploadSession.progress_never_ahead
+#print axioms CovenStorage.UploadSession.next_part_new
+#print axioms CovenStorage.UploadSession.held_nodup
+#print axioms CovenStorage.UploadSession.published_whole
+#print axioms CovenStorage.UploadSession.crash_keeps
+#print axioms CovenStorage.UploadSession.resume_continues
+#print axioms CovenStorage.UploadSession.expired_starts_over
+#print axioms CovenStorage.UploadSession.steps_keep_fixed
+#print axioms CovenStorage.UploadSession.retired_no_session
+#print axioms CovenStorage.UploadSession.retire_needs_no_session
+#print axioms CovenStorage.UploadSession.forgotten_by_abort
+#print axioms CovenStorage.UploadSession.failed_abort_queued
+#print axioms CovenStorage.UploadSession.start_needs_due
+#print axioms CovenStorage.UploadSession.abort_needs_ready
+#print axioms CovenStorage.UploadSession.failure_waits_by_class
+#print axioms CovenStorage.UploadSession.wait_ends
+#print axioms CovenStorage.UploadSession.never_retried
+#print axioms CovenStorage.UploadSession.run_good

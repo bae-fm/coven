@@ -1,5 +1,5 @@
 name = "covenStorage"
-defaultTargets = ["CovenStorage", "clockRunner", "createRunner", "filesRunner", "authorshipRunner", "floorUploadRunner"]
+defaultTargets = ["CovenStorage", "clockRunner", "createRunner", "filesRunner", "authorshipRunner", "floorUploadRunner", "uploadSessionRunner"]
 
 [[lean_lib]]
 name = "CovenStorage"
@@ -23,3 +23,7 @@ root = "AuthorshipRunner"
 [[lean_exe]]
 name = "floorUploadRunner"
 root = "FloorUploadRunner"
+
+[[lean_exe]]
+name = "uploadSessionRunner"
+root = "UploadSessionRunner"
