@@ -176,7 +176,8 @@ async fn a_held_write_and_every_later_one_wait_for_the_file_and_arrive_with_it()
 
 /// A network failure of a bound upload retries under backoff by itself, as
 /// a trailing upload's does, uploads paused or not: the writes wait
-/// meanwhile, and go once it succeeds, with no call of the app's.
+/// meanwhile, and go once it succeeds, with no call of the app's. The
+/// backoff passes as the test moves the clock to its end.
 #[tokio::test]
 async fn a_failing_bound_upload_retries_by_itself_while_its_writes_wait() {
     let network = household().await;
@@ -189,12 +190,15 @@ async fn a_failing_bound_upload_retries_by_itself_while_its_writes_wait() {
     ana.storage.set_faults(faults).await;
     ana.handle.start_sync().await.unwrap();
     upload_failed(ana, StorageFailure::Network).await;
-    network.sync(0).await;
+    // Once sync has nothing left to do, the write still waits for its cover.
+    ana.handle.test_parked().await;
     assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 1);
     ana.storage.set_faults(Faults::none()).await;
+    network.end_wait(crate::tests::upload_wait(&ana.handle, cover, |_| true).await);
     wait_for_sent(&ana.handle).await;
     network.sync(1).await;
     assert_eq!(covers(ben).await, [("album".to_owned(), true)]);
+    network.assert_moved_only_by_the_test();
     network.close().await;
 }
 
@@ -370,8 +374,6 @@ async fn update(network: &mut Network, index: usize) {
 #[tokio::test]
 async fn a_raise_waits_for_a_held_write_and_follows_it() {
     let mut network = household().await;
-    // The refused upload retries only as the test lets it.
-    network.polling.hold_waits();
     let ana = &network.devices[0];
     stopped(ana).await;
     let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
@@ -492,8 +494,6 @@ async fn an_old_app_holds_its_unsent_writes_and_sends_them_unchanged_after_updat
 #[tokio::test]
 async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
     let mut network = household().await;
-    // The refused upload retries only as the test lets it.
-    network.polling.hold_waits();
     let ana = &network.devices[0];
     stopped(ana).await;
     let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
@@ -680,6 +680,9 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
         );
     }
     assert_eq!(ana.handle.lost_values().await.unwrap(), ben.handle.lost_values().await.unwrap());
+    // Ana's failed passes while offline backed off on held waits: only the
+    // test's passes moved the clock.
+    network.assert_moved_only_by_the_test();
     network.close().await;
 }
 
@@ -748,8 +751,6 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
 #[tokio::test]
 async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() {
     let mut network = household().await;
-    // The refused upload retries only as the test lets it.
-    network.polling.hold_waits();
     note(&network.devices[0], "n").await;
     wait_for_sent(&network.devices[0].handle).await;
     network.sync(1).await;

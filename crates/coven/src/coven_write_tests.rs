@@ -237,8 +237,6 @@ async fn a_new_circle_takes_rows_once_its_slot_applies() {
 #[tokio::test]
 async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     let network = Network::new(1).await;
-    // The expiry wakes by the fixed clock, not after a day.
-    network.polling.hold_waits();
     let ana = &network.devices[0].handle;
     stopped(&network.devices[0]).await;
     let invite = |key: &str| {

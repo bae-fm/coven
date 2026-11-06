@@ -696,8 +696,6 @@ async fn an_uploads_cooldown_is_published_until_it_ends() {
     network.sync(0).await;
     let mut effect = device.handle.test_retry_effect();
     assert_eq!(effect.latest().await, RetryEffect::Pass);
-    // The cooldown ends only as the test moves the clock.
-    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {

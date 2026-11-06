@@ -131,9 +131,6 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
     let mut last = device.handle.test_last_pass();
-    // The cooldown and the pass's backoff end only as the test moves the
-    // clock, whatever the machine's load.
-    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {
@@ -256,8 +253,6 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     device.handle.set_uploads_paused(true).await.unwrap();
     let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
-    // The cooldown ends only as the test moves the clock.
-    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {
@@ -320,7 +315,9 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     .await
     .unwrap();
     // The fixed clock moves, so the pass's end moves the last synced time.
-    network.clock.set(network.clock.now() + Duration::from_secs(1));
+    // The move also ends the refused upload's first backoff, a second, and
+    // its retry is refused again.
+    network.move_clock(Duration::from_secs(1));
     let after = network.clock.now();
     let mut status = device.handle.test_sync_status();
     insert(&device.handle, "the rest").await;
@@ -332,9 +329,12 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     );
     wait_for_sent(&device.handle).await;
     assert!(refused(&device.handle.pending().await.unwrap()));
+    let retry = crate::tests::upload_wait(&device.handle, photo, |wait| wait.failures == 2).await;
     device.storage.set_faults(Faults::none()).await;
+    network.end_wait(retry);
     wait_for_empty_queue(&device.handle).await;
     assert!(!refused(&device.handle.pending().await.unwrap()));
+    network.assert_moved_only_by_the_test();
     network.close().await;
 }
 
@@ -379,12 +379,6 @@ async fn rotation_failed(last: &mut Followed<Option<LastPass>, DbError>) {
 async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     let network = Network::new(2).await;
     let owner = &network.devices[0];
-    // On the polling clock the rotation's first retry would follow its
-    // refusal at once and replace the report before a busy test can see it,
-    // and each retry doubles the next wait. Its waits end only when the test
-    // moves the fixed clock, held before the removal asks for the rotation,
-    // so the one refusal leaves the first wait.
-    network.polling.hold_waits();
     let rotation = refuse_rotation(&network, StorageFailure::QuotaExceeded, 507).await;
     let mut last = owner.handle.test_last_pass();
     owner.handle.sync_now();
@@ -443,11 +437,17 @@ fn storage_failure(last: &Option<LastPass>) -> Option<StorageFailure> {
 /// Request a pass and return the first last pass from the current one on
 /// that `expected` accepts, which must name a storage failure. Callers
 /// expect a last pass the current one is not, so it comes from the
-/// requested pass.
+/// requested pass. A backoff the last failed pass armed holds the request,
+/// so the test ends it first: a failed pass records its wait before its
+/// end is reported.
 async fn attempt(
+    network: &Network,
     device: &crate::tests::Device,
     expected: impl Fn(&Option<LastPass>) -> bool,
 ) -> Option<LastPass> {
+    if let Some(wait) = device.handle.test_connection_retry_wait().await {
+        network.end_wait(wait);
+    }
     let mut last = device.handle.test_last_pass();
     device.handle.sync_now();
     let last = last.wait_for(expected).await;
@@ -464,7 +464,7 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
     // Ana syncs, then loses Wi-Fi: the next attempt is Offline.
     device.storage.set_online(false);
     // Offline means no provider response.
-    let offline = attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
+    let offline = attempt(&network, device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
     assert_eq!(storage_failure(&offline), Some(StorageFailure::Network));
     device.storage.set_online(true);
     // A provider outage is classified Network, but storage answered.
@@ -478,7 +478,7 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
         })
         .await;
     // Failed with a storage failure means storage answered.
-    let outage = attempt(device, |s| matches!(s, Some(LastPass::Failed { .. }))).await;
+    let outage = attempt(&network, device, |s| matches!(s, Some(LastPass::Failed { .. }))).await;
     assert_eq!(storage_failure(&outage), Some(StorageFailure::Network));
     // A denied read fails the pass too.
     device
@@ -490,7 +490,7 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
             ..Faults::none()
         })
         .await;
-    let denied = attempt(device, |s| {
+    let denied = attempt(&network, device, |s| {
         storage_failure(s).is_some_and(|failure| failure == StorageFailure::PermissionDenied)
     })
     .await;
@@ -501,11 +501,13 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
     // Permission failures require app action; a new connection permits a retry.
     device.stop_sync().await;
     device.handle.start_sync().await.unwrap();
-    attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
+    attempt(&network, device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
     device.storage.set_online(true);
     let mut last = device.handle.test_last_pass();
-    device.handle.sync_now();
+    // The offline attempt's backoff ends, and the pass after it syncs.
+    network.end_wait(device.handle.test_connection_retry_wait().await.expect("a backoff"));
     last.wait_for(|last| *last == Some(LastPass::Synced)).await;
+    network.assert_moved_only_by_the_test();
     network.close().await;
 }
 
@@ -533,15 +535,6 @@ async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
     network.close().await;
 }
 
-/// The connection's persisted wait, once `ready` holds for it.
-async fn connection_wait(
-    device: &crate::tests::Device,
-    ready: impl Fn(&coven_database::RetryWait) -> bool,
-) -> coven_database::RetryWait {
-    let mut wait = device.handle.test_follow_retry_wait(coven_database::RetrySubject::Sync);
-    wait.wait_for(|wait| wait.as_ref().is_some_and(&ready)).await.expect("the connection's wait")
-}
-
 /// Ana's phone locked on a train: every pass found no network and backed off.
 /// Once it unlocks, `sync_now` still waits out the backoff, but coven sees
 /// the network come back, and its report ends the backoff and a pass runs at
@@ -550,12 +543,10 @@ async fn connection_wait(
 async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    // Waits end only when the test moves the fixed clock, which it never does.
-    network.polling.hold_waits();
     device.storage.set_online(false);
     device.app.lose_network();
-    attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
-    let wait = connection_wait(device, |_| true).await;
+    attempt(&network, device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
+    let wait = crate::tests::connection_wait(&device.handle, |_| true).await;
     assert_eq!(wait.failures, 1);
     assert!(!wait.wait.is_zero());
     device.storage.set_online(true);
@@ -582,7 +573,6 @@ async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
 async fn a_network_report_leaves_a_provider_cooldown_and_an_answered_backoff() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {
@@ -592,8 +582,8 @@ async fn a_network_report_leaves_a_provider_cooldown_and_an_answered_backoff() {
             ..Faults::none()
         })
         .await;
-    attempt(device, |s| matches!(s, Some(LastPass::Failed { .. }))).await;
-    let wait = connection_wait(device, |_| true).await;
+    attempt(&network, device, |s| matches!(s, Some(LastPass::Failed { .. }))).await;
+    let wait = crate::tests::connection_wait(&device.handle, |_| true).await;
     let requests = device.storage.request_trace().len();
     device.app.join_network(false);
     device.app.join_network(false);
@@ -614,7 +604,6 @@ async fn a_network_report_leaves_a_provider_cooldown_and_an_answered_backoff() {
 async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    network.polling.hold_waits();
     let (read, reading) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     device
@@ -630,7 +619,7 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     device.storage.set_online(false);
     resume.send(()).unwrap();
     // The first failure's wait ended; the second pass's failure waits.
-    let wait = connection_wait(device, |wait| wait.failures == 2).await;
+    let wait = crate::tests::connection_wait(&device.handle, |wait| wait.failures == 2).await;
     assert!(!wait.wait.is_zero());
     device.handle.test_parked().await;
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
@@ -648,12 +637,11 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
 #[tokio::test]
 async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     let mut network = Network::new(1).await;
-    network.polling.hold_waits();
     let device = &network.devices[0];
     device.storage.set_online(false);
     device.app.lose_network();
-    attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
-    let wait = connection_wait(device, |_| true).await;
+    attempt(&network, device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
+    let wait = crate::tests::connection_wait(&device.handle, |_| true).await;
     device.handle.close().await.unwrap();
     device.storage.set_online(true);
     let handle = network.reopen(device).open(device.store, |_| ()).await.unwrap();
@@ -677,12 +665,11 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
 #[tokio::test]
 async fn opening_on_a_usable_network_ends_an_offline_backoff() {
     let mut network = Network::new(1).await;
-    network.polling.hold_waits();
     let device = &network.devices[0];
     device.storage.set_online(false);
     device.app.lose_network();
-    attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
-    connection_wait(device, |_| true).await;
+    attempt(&network, device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
+    crate::tests::connection_wait(&device.handle, |_| true).await;
     device.handle.close().await.unwrap();
     device.storage.set_online(true);
     device.app.join_network(false);
@@ -706,7 +693,6 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     device.handle.set_uploads_paused(true).await.unwrap();
     let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
-    network.polling.hold_waits();
     device.storage.set_online(false);
     let offline = |records: &[PendingRecord]| {
         records.iter().any(|record| {
@@ -747,7 +733,6 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     device.handle.set_uploads_paused(true).await.unwrap();
     let photo = attach(&device.handle, "photo", vec![4; 2048]).await;
     network.sync(0).await;
-    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {

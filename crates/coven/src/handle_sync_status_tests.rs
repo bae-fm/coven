@@ -135,8 +135,6 @@ async fn a_bound_file_waits_on_its_retry_while_uploads_are_paused() {
     let mut faults = Faults::none();
     faults.create_failures.insert(upload_path(ana, cover).await, (StorageFailure::Network, 503));
     ana.storage.set_faults(faults).await;
-    // The upload's backoff holds until the test lets it go.
-    network.polling.hold_waits();
     ana.handle.start_sync().await.unwrap();
     let waiting =
         state(ana, |state| matches!(state, SyncState::WaitingToSync(SyncWait::Retrying { .. })))
@@ -174,6 +172,9 @@ async fn one_refused_file_upload_leaves_the_passes_alone() {
         })
         .await;
     let photo = stage(ana, "photos", "beach", vec![7; 4096]).await;
+    // The refused upload's backoff passes as the test moves the clock to
+    // its end.
+    network.end_wait(crate::tests::upload_wait(&ana.handle, photo, |_| true).await);
     wait_for_sent(&ana.handle).await;
     state(ana, |state| *state == SyncState::Synced).await;
     assert!(file_stored(ana, photo).await);
@@ -185,6 +186,7 @@ async fn one_refused_file_upload_leaves_the_passes_alone() {
         .filter(|request| matches!(request, MemoryRequest::Create(created) if *created == path))
         .count();
     assert_eq!(creates, 2, "one refused create, then the one that stored it");
+    network.assert_moved_only_by_the_test();
     network.close().await;
 }
 

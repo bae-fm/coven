@@ -51,8 +51,10 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     assert_eq!(ben.handle.applied_slot().await, applied);
     assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), saved);
     // Sync retries a custody failure on its own, under the shared backoff,
-    // and applies the removal once the keychain answers (E5).
+    // and applies the removal once the keychain answers (E5). The backoff
+    // passes as the test moves the clock to its end.
     ben.app.refuse_person_entry_operations(false);
+    network.end_wait(crate::tests::connection_wait(&ben.handle, |_| true).await);
     removed(&ben.handle).await;
     assert!(ben.handle.applied_slot().await > applied);
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
@@ -91,6 +93,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
         "Household"
     );
     ben.app.refuse_person_entry_operations(false);
+    network.end_wait(crate::tests::connection_wait(&ben.handle, |_| true).await);
     wait_for(&ben.handle, |last| *last == Some(LastPass::Synced)).await;
     assert_eq!(ben.handle.store_name().await.unwrap(), "Family");
     assert_eq!(
@@ -180,6 +183,7 @@ async fn leave(refused: bool) {
         .await;
         assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(), 1);
         ben.app.refuse_person_entry_operations(false);
+        network.end_wait(crate::tests::connection_wait(&ben.handle, |_| true).await);
     }
     // The removal took effect, and its operation ended landed as this
     // device stopped.
@@ -206,7 +210,7 @@ async fn removing_one_device_keeps_the_person_entries() {
             .builder()
             .synced_tables(Vec::new())
             .migrations(Vec::new())
-            .clock(std::sync::Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
+            .clock(network.polling.clone())
             .storage_connector(std::sync::Arc::new(phone.storage.for_device())),
         &saved[0],
         None,
@@ -246,7 +250,7 @@ async fn a_device_is_removable_right_after_its_restore_finished() {
             .builder()
             .synced_tables(Vec::new())
             .migrations(Vec::new())
-            .clock(std::sync::Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
+            .clock(network.polling.clone())
             .storage_connector(std::sync::Arc::new(phone.storage.for_device())),
         &saved[0],
         None,

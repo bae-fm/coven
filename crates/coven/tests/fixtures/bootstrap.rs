@@ -28,16 +28,11 @@ pub(super) struct Owner {
 
 impl Owner {
     /// Ana's store with two rows of notes, the first in a snapshot when
-    /// `snapshot` says. Her waits are held from her store's setup on: a
+    /// `snapshot` says. Her waits are held, as every network's are: a
     /// backoff or cooldown of hers ends only as the test moves the clock or
-    /// asks for a pass. A sent invite looks for its request between passes,
-    /// and each look's backoff would otherwise move every device's clock,
-    /// as many times as her loop turns before the test's next step.
+    /// asks for a pass, so a sent invite looks for its request only then.
     pub(super) async fn new(provider: CloudProvider, snapshot: bool) -> Self {
         let network = crate::tests::Network::with_schema(provider, tables(), migrations()).await;
-        let waited = network.polling.waited();
-        assert!(waited.is_empty(), "waits passed before Ana's were held: {waited:?}");
-        network.polling.hold_waits();
         let device = &network.devices[0];
         let handle = device.handle.clone();
         let directory = device.app.store_dir(&device.store);

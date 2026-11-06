@@ -66,6 +66,42 @@ pub(crate) async fn wait_for_sent(handle: &CovenHandle) {
     unsent.wait_for(|work| work.writes == 0).await;
 }
 
+/// The persisted wait of `file`'s queued upload, once one `ready` accepts
+/// is armed.
+pub(crate) async fn upload_wait(
+    handle: &CovenHandle,
+    file: FileId,
+    ready: impl Fn(&coven_database::RetryWait) -> bool,
+) -> coven_database::RetryWait {
+    let position: i64 = handle
+        .read(move |sql| {
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT position FROM coven_uploads WHERE file=?1",
+                [file],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let mut wait = handle.test_follow_retry_wait(coven_database::RetrySubject::Upload(position));
+    coven_foundation::clock::within(wait.wait_for(|wait| wait.as_ref().is_some_and(&ready)))
+        .await
+        .expect("the upload's wait is armed")
+        .expect("the upload's wait")
+}
+
+/// The connection's persisted wait, once one `ready` accepts is armed.
+pub(crate) async fn connection_wait(
+    handle: &CovenHandle,
+    ready: impl Fn(&coven_database::RetryWait) -> bool,
+) -> coven_database::RetryWait {
+    let mut wait = handle.test_follow_retry_wait(coven_database::RetrySubject::Sync);
+    coven_foundation::clock::within(wait.wait_for(|wait| wait.as_ref().is_some_and(&ready)))
+        .await
+        .expect("the connection's wait is armed")
+        .expect("the connection's wait")
+}
+
 /// Wait for the operation a write journaled to end, as an app waiting in
 /// place does, and return its outcome.
 pub(crate) async fn outcome(
@@ -153,72 +189,6 @@ async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade
     assert_eq!(record.retry(), Retry::Automatic);
 }
 
-#[cfg(test)]
-pub(crate) struct Device {
-    pub(crate) app: Coven,
-    pub(crate) store: StoreId,
-    pub(crate) handle: CovenHandle,
-    pub(crate) storage: Arc<MemoryStorage>,
-    /// The device's connector over `storage`, across reopening.
-    pub(crate) connector: Arc<Connector>,
-}
-
-impl Device {
-    /// Stop sync, which returns once the active pass and this connection's
-    /// transfers have finished and the provider's client is released (E5).
-    /// Then no pass or upload runs until sync starts again.
-    pub(crate) async fn stop_sync(&self) {
-        self.connector.stop(&self.handle).await;
-    }
-}
-
-/// Stop `handle`'s sync in a task of its own, for a test that lets the pass
-/// or transfer stopping waits for go on meanwhile.
-pub(crate) fn stopping(handle: &CovenHandle) -> tokio::task::JoinHandle<Result<(), SyncError>> {
-    let handle = handle.clone();
-    tokio::spawn(async move { handle.stop_sync().await })
-}
-
-#[cfg(test)]
-pub(crate) struct Network {
-    root: tempfile::TempDir,
-    pub(crate) clock: Arc<FixedClock>,
-    /// Every device's clock: the fixed clock, with waits shortened.
-    pub(crate) polling: Arc<PollingClock>,
-    ids: IdSourceRef,
-    /// The synced tables and migrations every device opens with.
-    schema: (Vec<SyncedTable>, Vec<Migration>),
-    pub(crate) devices: Vec<Device>,
-    _sign_in: Option<crate::authentication::SignIn>,
-}
-fn tables() -> Vec<SyncedTable> {
-    vec![
-        SyncedTable::new("parents", RowIdentity::SharedKey),
-        SyncedTable::new("children", RowIdentity::SharedKey),
-        SyncedTable::new("circle_notes", RowIdentity::IndependentUuid).audience_column("audience"),
-    ]
-}
-pub(crate) fn migrations() -> Vec<Migration> {
-    vec![Migration::addition(1, "records", "
-        CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
-        CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY, parent TEXT NOT NULL REFERENCES parents(id) ON DELETE CASCADE, value INTEGER NOT NULL);
-        CREATE TABLE circle_notes(id TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL, audience TEXT NOT NULL);
-    ")]
-}
-fn builder(
-    app: &Coven,
-    clock: Arc<PollingClock>,
-    ids: IdSourceRef,
-    connector: Arc<Connector>,
-) -> CovenBuilder {
-    app.builder()
-        .synced_tables(tables())
-        .namespaces(file_network::namespaces())
-        .migrations(migrations())
-        .clock(clock)
-        .id_source(ids)
-        .storage_connector(connector)
-}
 pub(crate) use coven_foundation::clock::PollingClock;
 #[path = "../tests/fixtures/file_network.rs"]
 mod file_network;
@@ -226,307 +196,9 @@ pub(crate) use file_network::*;
 #[path = "../tests/fixtures/connector.rs"]
 mod connector;
 pub(crate) use connector::{Clients, Connector};
-
-impl Network {
-    pub(crate) async fn new(count: usize) -> Self {
-        let mut network = Self::with_schema(CloudProvider::S3, tables(), migrations()).await;
-        for device in 1..count {
-            network.join(device).await;
-        }
-        network.quiet().await;
-        network
-    }
-
-    pub(crate) async fn with_schema(
-        provider: CloudProvider,
-        tables: Vec<SyncedTable>,
-        migrations: Vec<Migration>,
-    ) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let app_dir = root.path().join("0");
-        std::fs::create_dir(&app_dir).unwrap();
-        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
-        let polling = Arc::new(PollingClock::new(clock.clone()));
-        let ids: IdSourceRef = Arc::new(SequentialIds::new());
-        let app = Coven::in_memory(app_dir);
-        let directory = app.create_closed_store("Household", ids.clone()).await.unwrap();
-        let storage = Arc::new(
-            MemoryStorage::builder()
-                .provider(provider)
-                .clock(clock.clone())
-                .transfer_limits(1024 * 1024, 65536)
-                .build()
-                .unwrap(),
-        );
-        let connector = Connector::new(storage.clone());
-        let builder = builder(&app, polling.clone(), ids.clone(), connector.clone())
-            .synced_tables(tables.clone())
-            .migrations(migrations.clone());
-        let (builder, sign_in) = if provider.signs_in_with_oauth() {
-            let sign_in = crate::authentication::SignIn::new().await;
-            let mut builder = sign_in.configure(builder);
-            builder.authenticate(storage.config().oauth_access().unwrap()).await.unwrap();
-            (builder, Some(sign_in))
-        } else {
-            (builder, None)
-        };
-        let handle = builder.open(directory.id(), |_| ()).await.unwrap();
-
-        match provider {
-            CloudProvider::S3 => handle
-                .setup_s3_storage(
-                    storage.config(),
-                    "Device 0",
-                    "owner-key".into(),
-                    SecretText::new("secret".into()),
-                    |_| {},
-                )
-                .await
-                .unwrap(),
-            CloudProvider::CloudKit => {
-                handle.setup_cloudkit_storage("container", "Device 0", |_| {}).await.unwrap()
-            }
-            _ => handle.setup_oauth_storage(storage.config(), "Device 0", |_| {}).await.unwrap(),
-        };
-        let network = Self {
-            _sign_in: sign_in,
-            root,
-            clock,
-            polling,
-            ids,
-            schema: (tables, migrations),
-            devices: vec![Device { app, store: directory.id(), handle, storage, connector }],
-        };
-        network.sync(0).await;
-        network
-    }
-    async fn join(&mut self, index: usize) {
-        self.join_as(
-            index,
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-        )
-        .await;
-    }
-    /// Join device `index` through an invite for `target`, approved by device 0.
-    pub(crate) async fn join_as(&mut self, index: usize, target: InviteTarget) {
-        let joined = self.try_join_as(index, target).await;
-        assert!(joined.is_ok(), "{:?}", joined.err());
-    }
-    /// Join device `index` as `join_as` does, returning what the join returned:
-    /// the device joins the network only when it opened.
-    pub(crate) async fn try_join_as(
-        &mut self,
-        index: usize,
-        target: InviteTarget,
-    ) -> Result<(), BootstrapError> {
-        let owner = &self.devices[0].handle;
-        // Device 0's invite looks for the join's request and the join checks
-        // for its approval, each backing off between looks. Held from before
-        // the invite, neither wait passes on its own and moves every device's
-        // clock: device 0 reads the request in the pass asked for once the
-        // join waits, and Check now runs the check that finds the approval.
-        let held = self.polling.holds_waits();
-        self.polling.hold_waits();
-        let invite = crate::tests::invite(
-            owner,
-            target,
-            InviteAccess::S3AccessKey {
-                access_key_id: format!("member-{index}"),
-                secret_access_key: SecretText::new("secret".into()),
-            },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await;
-        let app_dir = self.root.path().join(index.to_string());
-        std::fs::create_dir(&app_dir).unwrap();
-        let app = Coven::in_memory(app_dir);
-        let storage = Arc::new(self.devices[0].storage.for_device());
-        let connector = Connector::new(storage.clone());
-        let control = JoinControl::new();
-        let name = format!("Device {index}");
-        let (waiting, mut waits) = tokio::sync::watch::channel(false);
-        let joining = join_with_invite(
-            builder(&app, self.polling.clone(), self.ids.clone(), connector.clone())
-                .synced_tables(self.schema.0.clone())
-                .migrations(self.schema.1.clone()),
-            invite.shown_code(),
-            &name,
-            |status| {
-                if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
-                    waiting.send_replace(true);
-                }
-            },
-            &control,
-        );
-        let (handle, ()) = join_with_response(joining, async {
-            waits.wait_for(|waiting| *waiting).await.unwrap();
-            self.pass(0).await;
-            let request = next_join_request(owner).await;
-            approve(owner, &request).await;
-            control.check_now();
-        })
-        .await;
-        if !held {
-            self.polling.release_waits();
-        }
-        let handle = handle?.expect("an approved join opens");
-        let store = decode_code_info(invite.shown_code()).unwrap().metadata().store_id;
-        handle.start_sync().await.unwrap();
-        self.devices.push(Device { app, store, handle, storage, connector });
-        self.sync(index).await;
-        Ok(())
-    }
-    pub(crate) async fn sync(&self, index: usize) {
-        let handle = &self.devices[index].handle;
-        self.pass(index).await;
-        let pending = handle.pending().await.unwrap();
-        assert!(
-            pending
-                .iter()
-                .all(|record| !matches!(record.subject, PendingSubject::Operation { .. })),
-            "{pending:?}"
-        );
-    }
-
-    /// Request a pass and wait for the first one that begins after the
-    /// request. A pass already running may have read state before it, so its
-    /// status can't say whether it served the request; the retry's answer
-    /// comes from the pass that took the request.
-    pub(crate) async fn pass(&self, index: usize) {
-        let handle = &self.devices[index].handle;
-        self.clock.set(self.clock.now() + Duration::from_secs(1));
-        match handle.retry_now().await.unwrap().await {
-            RetryOutcome::Synced { .. } => {}
-            outcome => panic!("device {index}: {outcome:?}"),
-        }
-    }
-
-    async fn quiet(&self) {
-        for _ in 0..3 {
-            for i in 0..self.devices.len() {
-                self.sync(i).await;
-            }
-        }
-    }
-    async fn rows(
-        &self,
-        index: usize,
-    ) -> (Vec<(String, String, i64)>, Vec<(String, String, i64)>, Vec<(String, i64, String)>) {
-        self.devices[index]
-            .handle
-            .read(|sql| {
-                Ok::<_, CovenError>((
-                    sql.query("SELECT id,label,value FROM parents ORDER BY id", [], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?,
-                    sql.query("SELECT id,parent,value FROM children ORDER BY id", [], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?,
-                    sql.query("SELECT id,value,audience FROM circle_notes ORDER BY id", [], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?,
-                ))
-            })
-            .await
-            .unwrap()
-    }
-    async fn raise_schema(&mut self) {
-        let mut changed = migrations();
-        changed.push(Migration::breaking(
-            2,
-            "extra",
-            "ALTER TABLE parents ADD COLUMN extra INTEGER NOT NULL DEFAULT 0",
-            crate::OldWrites::Drop,
-        ));
-        for device in &mut self.devices {
-            device.handle.close().await.unwrap();
-            device.handle = builder(
-                &device.app,
-                self.polling.clone(),
-                self.ids.clone(),
-                device.connector.clone(),
-            )
-            .migrations(changed.clone())
-            .open(device.store, |_| ())
-            .await
-            .unwrap();
-            device.handle.start_sync().await.unwrap();
-        }
-        self.quiet().await;
-    }
-    async fn assert_converged(&self) {
-        let expected = self.rows(0).await;
-        let applied = self.devices[0].handle.applied_slot().await;
-        let schema = self.devices[0].handle.store_state().await.schema;
-        for (i, device) in self.devices.iter().enumerate() {
-            assert_eq!(self.rows(i).await, expected, "device {i} rows");
-            assert_eq!(device.handle.applied_slot().await, applied, "device {i} slot");
-            assert_eq!(device.handle.store_state().await.schema, schema, "device {i} schema");
-            let value = device.handle.test_sync_status().latest().await;
-            assert_eq!(value.state, SyncState::Synced, "device {i}: {value:?}");
-        }
-    }
-    /// Open later joins and reopens with `migrations`, as an updated app does.
-    pub(crate) fn update_app(&mut self, migrations: Vec<Migration>) {
-        self.schema.1 = migrations;
-    }
-
-    /// A builder for a device's directory, as the app would reopen it.
-    pub(crate) fn reopen(&self, device: &Device) -> CovenBuilder {
-        builder(&device.app, self.polling.clone(), self.ids.clone(), device.connector.clone())
-            .synced_tables(self.schema.0.clone())
-            .migrations(self.schema.1.clone())
-    }
-    pub(crate) async fn close(self) {
-        for device in self.devices {
-            device.handle.close().await.unwrap();
-        }
-    }
-}
-
-/// Carol, the member on device 1, after Ana replaced her keys with a pair
-/// Carol prepared elsewhere. Her laptop applied the replacement and closed.
-#[cfg(test)]
-pub(crate) struct KeysReplaced {
-    pub(crate) carol: Device,
-    pub(crate) member: MemberId,
-    /// Carol's restore code with the prepared pair, current in history.
-    pub(crate) code: String,
-    /// The code her laptop showed before, which history now refuses.
-    pub(crate) stale: String,
-}
-
-impl Network {
-    /// Replace device 1's member keys from device 0, the admin, and remove
-    /// device 1 from the network once it has stopped on the replacement.
-    pub(crate) async fn replace_keys_elsewhere(&mut self) -> KeysReplaced {
-        let carol = self.devices.remove(1);
-        let stale = carol.handle.restore_code().await.unwrap();
-        let old = coven_sync::read_restore_code(&stale).unwrap();
-        let prepared = MemberKeys::generate().unwrap();
-        let replaced = self.devices[0]
-            .handle
-            .replace_member_keys_for(&old.member, prepared.public_keys())
-            .await
-            .unwrap();
-        landed(&self.devices[0].handle, replaced).await;
-        // The first pass that begins after the replacement landed reads it,
-        // and stops Carol's laptop on it.
-        self.clock.set(self.clock.now() + Duration::from_secs(1));
-        let outcome = carol.handle.retry_now().await.unwrap().await;
-        assert!(
-            matches!(carol.handle.restore_code().await, Err(SyncError::MemberKeysReplaced { .. })),
-            "the pass after the replacement ended {outcome:?}"
-        );
-        carol.handle.close().await.unwrap();
-        let member = old.member;
-        let code = coven_format::codes::RestoreCode { member_keys: prepared, ..old }
-            .to_text()
-            .unwrap()
-            .to_string();
-        KeysReplaced { carol, member, code, stale }
-    }
-}
+#[path = "../tests/fixtures/network.rs"]
+mod network;
+pub(crate) use network::*;
 
 /// What this installation's keychain holds for a store.
 #[cfg(test)]
@@ -760,6 +432,9 @@ async fn seeded_whole_system_convergence() {
                 network.quiet().await;
             }
             network.assert_converged().await;
+            // An offline device's failed passes back off: those waits are
+            // held, so only the test's passes moved the clock.
+            network.assert_moved_only_by_the_test();
             network.close().await;
         });
         match tokio::time::timeout(HANG_GUARD, task).await {

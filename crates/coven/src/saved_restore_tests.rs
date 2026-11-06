@@ -330,7 +330,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
             .builder()
             .synced_tables(Vec::new())
             .migrations(Vec::new())
-            .clock(Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
+            .clock(network.polling.clone())
             .storage_connector(device.storage.clone()),
         &saved,
         None,
