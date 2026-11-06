@@ -2,17 +2,18 @@ use super::*;
 
 /// Wait until `address` binds again, which is what the next sign-in needs.
 /// Closing our listener is not enough at once: a child another test is
-/// spawning holds an inherited copy of the socket until it execs, and until
-/// then the address still accepts connections and refuses a bind.
+/// spawning (the Lean runners, when their variables are set) holds an
+/// inherited copy of the socket until it execs, and until then the address
+/// still accepts connections and refuses a bind. Nothing in this process
+/// hears that child exec, so the bind is tried again until it takes; with no
+/// child it takes the first time.
 async fn released(address: std::net::SocketAddr) {
     let rebind = async {
         while tokio::net::TcpListener::bind(address).await.is_err() {
             tokio::task::yield_now().await;
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(10), rebind)
-        .await
-        .expect("the listener is still bound");
+    coven_foundation::clock::within(rebind).await.expect("the listener is still bound");
 }
 
 #[tokio::test]
