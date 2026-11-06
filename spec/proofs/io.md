@@ -309,6 +309,15 @@ real uploader listing on a removed S3 member's folder through uploads, passes
 and cleanups that complete or fail, and compares the recorded candidates with
 `ioRunner` after each event.
 
+Whose folders are listed, and by whom, mirrors `History::stops` and
+`History::deletes_for`. `member_cutoff_covers` proves that a member's removal
+stops every one of the member's devices, and a replacement of the member's
+keys every one added before it but its author. `every_gone_folder_cleaned`
+proves that every gone device's folder has a device that isn't gone to clean
+it up, one of its own member's or, when that member has none, an active
+admin's, as long as some active admin has a device that isn't gone. Without
+one, nobody cleans up until an admin registers a device.
+
 The premise matters: a successful listing is complete. That is a provider
 assumption. A listing discovers candidates; retained references and snapshots
 still determine whether any file can be deleted.

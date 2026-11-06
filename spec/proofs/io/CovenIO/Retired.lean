@@ -83,4 +83,81 @@ theorem cleanup_finds_a_later_upload :
     1 ∈ once.files ∧ 1 ∉ once.candidates ∧ 1 ∈ (once.step (.cleanUp true)).candidates := by
   decide
 
+/-! ### Who cleans up, and whose folders (§14.1, §17.10)
+
+A member's removal stops every device of the member for good, and a
+replacement of the member's keys every device of the member added before it,
+except the device that wrote it, which holds the new pair. A device's own
+member's other devices clean up its folder; when that member has no device
+left that isn't gone, every active admin's devices do. This mirrors
+`History::stops` and `History::deletes_for`. -/
+
+/-- A counted entry that stops devices for good: a device's removal, a
+member's, a reset registering another installation in a device's place, or a
+member's keys replaced by the device `author`. -/
+inductive Stop (Dev Mem : Type) where
+  | removeDevice (device : Dev)
+  | removeMember (member : Mem)
+  | replaced (device : Dev)
+  | replaceKeys (member : Mem) (author : Dev)
+
+/-- A registered device: its id, its member and the slot that added it. -/
+structure Device (Dev Mem : Type) where
+  id : Dev
+  member : Mem
+  added : Nat
+
+variable {Dev Mem : Type} [DecidableEq Dev] [DecidableEq Mem]
+
+/-- Whether the entry at `slot` stops device `d` for good. -/
+def stops (d : Device Dev Mem) : Nat × Stop Dev Mem → Bool
+  | (_, .removeDevice x) => decide (x = d.id)
+  | (_, .removeMember m) => decide (m = d.member)
+  | (_, .replaced x) => decide (x = d.id)
+  | (slot, .replaceKeys m author) => decide (m = d.member) && decide (d.added < slot) && decide (author ≠ d.id)
+
+/-- Gone for good: some counted entry stops it. -/
+def gone (cutoffs : List (Nat × Stop Dev Mem)) (d : Device Dev Mem) : Bool :=
+  cutoffs.any (stops d)
+
+/-- Whether device `own`, whose member is an active admin when `admin`
+says so, cleans up `uploader`'s folder. -/
+def cleansUp (devices : List (Device Dev Mem)) (cutoffs : List (Nat × Stop Dev Mem))
+    (admin : Mem → Bool) (own uploader : Device Dev Mem) : Bool :=
+  decide (own.id = uploader.id) ||
+    (gone cutoffs uploader &&
+      (decide (own.member = uploader.member) ||
+        (!devices.any (fun d => decide (d.member = uploader.member) && !gone cutoffs d) &&
+          admin own.member)))
+
+/-- **A member's cut-off covers every one of its devices.** A member's removal
+stops each of the member's devices, and a replacement of the member's keys
+stops each one added before it except its author. -/
+theorem member_cutoff_covers (cutoffs : List (Nat × Stop Dev Mem)) (d : Device Dev Mem) :
+    ((∃ slot, (slot, Stop.removeMember d.member) ∈ cutoffs) → gone cutoffs d = true) ∧
+    (∀ slot author, (slot, Stop.replaceKeys d.member author) ∈ cutoffs → d.added < slot →
+      author ≠ d.id → gone cutoffs d = true) := by
+  constructor
+  · rintro ⟨slot, member⟩
+    exact List.any_eq_true.mpr ⟨_, member, by simp [stops]⟩
+  · intro slot author member before other
+    exact List.any_eq_true.mpr ⟨_, member, by simp [stops, before, other]⟩
+
+/-- **Every gone device's folder has a device to clean it up**, as long as
+some active admin has a device that isn't gone: one of its own member's
+devices that isn't gone, or else that admin's. -/
+theorem every_gone_folder_cleaned (devices : List (Device Dev Mem))
+    (cutoffs : List (Nat × Stop Dev Mem)) (admin : Mem → Bool) (g : Device Dev Mem)
+    (stopped : gone cutoffs g = true)
+    (adminLeft : ∃ a ∈ devices, gone cutoffs a = false ∧ admin a.member = true) :
+    ∃ d ∈ devices, gone cutoffs d = false ∧ cleansUp devices cutoffs admin d g = true := by
+  by_cases left : devices.any (fun d => decide (d.member = g.member) && !gone cutoffs d) = true
+  · obtain ⟨d, member, same⟩ := List.any_eq_true.mp left
+    simp only [Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true'] at same
+    exact ⟨d, member, same.2, by simp [cleansUp, stopped, same.1]⟩
+  · obtain ⟨a, member, alive, isAdmin⟩ := adminLeft
+    refine ⟨a, member, alive, ?_⟩
+    simp only [Bool.not_eq_true] at left
+    simp [cleansUp, stopped, left, isAdmin]
+
 end CovenIO.Retired

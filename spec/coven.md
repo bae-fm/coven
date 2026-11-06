@@ -7484,10 +7484,12 @@ and the reference evidence above alone decides whether it is deleted.
   folder. When the member has no device left that isn't gone, because the member
   was removed or the gone device was their last, every active admin's devices
   do. A store always keeps an admin (§10.1), so this covers the member who owns
-  the storage having no device left too. Ana removes Ben's phone, his only
-  device, and Ben stays a member: Ana's laptop, an admin's, cleans up the
-  phone's folder. Several admins' devices may clean up the same folder; deleting
-  an absent object succeeds, and each checks the reference evidence itself.
+  the storage having no device left too. While no admin has a device that
+  isn't gone, the folder waits for an admin to register one. Ana removes
+  Ben's phone, his only device, and Ben stays a member: Ana's laptop, an
+  admin's, cleans up the phone's folder. Several admins' devices may clean up
+  the same folder; deleting an absent object succeeds, and each checks the
+  reference evidence itself.
 - **Every admin can.** Every member's provider access reaches the store's
   objects: an S3 member key may list and delete in the store's bucket
   (Appendix E.12), and Dropbox and OneDrive share the store's folder with each
@@ -11769,6 +11771,7 @@ Write-ups explain each model and state its assumptions:
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
 | A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.8 |
+| A member's removal stops every one of its devices, and a replacement of its keys every one added before it but its author; every gone device's folder has a device not gone to clean it up, its own member's or an active admin's, while some active admin has a device not gone | `member_cutoff_covers`, `every_gone_folder_cleaned` | `proofs/io/CovenIO/Retired.lean` | §14.1, §17.10 |
 | A complete listing of the folder of a device gone for good makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.10 |
 
 ### G.7 Schema changes and resets (§18, §19)
