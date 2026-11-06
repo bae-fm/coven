@@ -472,3 +472,58 @@ async fn an_addition_moves_a_raise_journaled_before_its_snapshot() {
     assert!(operations.is_empty(), "{operations:?}");
     ana.sync.database.close().await.unwrap();
 }
+
+/// Ana's update journals the store's raise to version 2, and her phone stops
+/// at the raise's snapshot step: its migration marker hasn't landed yet. Ben
+/// then writes, and her next pass applies his slot and lands her marker, so
+/// the state her raise prepared at is behind the one she has applied. The
+/// raise takes its capture again from that state when it resumes, and
+/// publishes (§16.3, §18.5).
+#[tokio::test]
+async fn a_raise_resumed_at_its_snapshot_after_a_pass_applied_more_publishes() {
+    use crate::sequence_sync::sequence_operations::Request;
+    use crate::sequence_sync::snapshot_capture::SnapshotRequest;
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let raise = ana
+        .sync
+        .start_request_row(
+            Request::Snapshot(SnapshotRequest {
+                audience: Audience::Store,
+                purpose: coven_format::sequence::Purpose::Raise(2),
+            }),
+            coven_database::operation_kind::COVEN,
+        )
+        .await
+        .unwrap();
+    let member = ana.sync.member.read().unwrap().unwrap();
+    let mut session = ana.sync.session.lock().await;
+    let mut ring = ana.sync.ring(&mut session, &member).await.unwrap();
+    let stopped = ana.sync.run_administration(&mut session, &mut ring, &member, raise).await;
+    assert!(
+        matches!(stopped, Err(crate::SyncError::Database(coven_database::DbError::ClaimUnsettled))),
+        "{stopped:?}"
+    );
+    drop(session);
+
+    insert(ben.database(), "b", "Ben's note").await;
+    ben.sync.pass().await.unwrap();
+    ana.sync.retry_operation(raise).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let state = ana.database().store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 2);
+    assert!(ana.database().raise_captures().await.unwrap().is_empty());
+    let operations = ana.database().operations().await.unwrap();
+    assert!(operations.is_empty(), "{operations:?}");
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
