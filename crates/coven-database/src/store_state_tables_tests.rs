@@ -11,7 +11,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
          INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
          INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
          INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
-         INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i FROM fixture;
+         INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i,i%3 FROM fixture;
          INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;",
     )
@@ -65,7 +65,7 @@ pub(crate) fn scan_reason(
     Some("store_state() returns every registered key pair"),
 ("store_state_tables.rs", "SELECT device,member,name,state FROM _coven_devices", "_coven_devices") =>
     Some("store_state() returns the complete device map"),
-("store_state_tables.rs", "SELECT circle,name FROM _coven_circles", "_coven_circles") =>
+("store_state_tables.rs", "SELECT circle,name,base FROM _coven_circles", "_coven_circles") =>
     Some("store_state() returns the complete circle map"),
 ("store_state_tables.rs", "SELECT circle,member FROM _coven_circle_members", "_coven_circle_members") =>
     Some("store_state() returns every circle membership"),
