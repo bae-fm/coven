@@ -1367,8 +1367,15 @@ pub enum DbError {
     /// which the caller reports (E15). A write that panicked rolled back,
     /// and the bytes it released or staged are removed as after any failed
     /// write. One that panicked after it committed, telling its live
-    /// queries, kept its changes and failed the handle with the bug.
+    /// queries, kept its changes and failed the handle with the bug. A bug
+    /// a drop in the call's work found is this call's too.
     Bug(Bug),
+    /// An earlier bug may have left this handle's state wrong, so the
+    /// handle failed with it, and every call and live query fails with it
+    /// until the store is reopened (E15). The call whose work hit the bug
+    /// returned it as `Bug`, or the bug sink heard it, so the app shows this
+    /// and doesn't report it again.
+    StoreFailed(Bug),
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
@@ -3793,8 +3800,8 @@ where
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed, the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`, `WallTimer`, or `Bug` for state a panic left
-    /// half-changed), or one that carries a bug, as a run that panicked
+    /// `CheckpointFailed`, `WallTimer`, or `StoreFailed` for state a bug
+    /// may have left wrong), or one that carries a bug, as a run that panicked
     /// does (`DbError::Bug`, E15): after it, `None`, so a loop over the
     /// query ends.
     pub async fn next(&mut self) -> Option<Result<T, E>>
@@ -5117,6 +5124,11 @@ pub enum SyncError {
     /// The call's work panicked: a bug in coven, which the caller reports
     /// (E15). Its category is `LocalFailure::Bug`.
     Bug(Bug),
+    /// The worker this call needs ended on a panic: the sync loop, a
+    /// connection attempt or the upload worker. The bug sink heard the bug
+    /// as it happened, so the app shows this and doesn't report it again
+    /// (E15). Its category is `LocalFailure::Bug`.
+    WorkerFailed(Bug),
 }
 
 impl SyncError {
@@ -5432,6 +5444,8 @@ impl CovenHandle {
 
     /// Starts syncing with the keys unlocked for this session; the first pass
     /// connects. Does nothing if already running or no storage is set up.
+    /// Once the sync loop has ended on a panic, it fails with
+    /// `SyncError::WorkerFailed` (E15).
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
     /// Stops syncing, retaining keys, credentials and location: once
@@ -6049,7 +6063,7 @@ impl CovenHandle {
     /// it tries none and returns `NotSyncing`. Provider cooldowns still hold; failures stay in
     /// pending() (§6.7). Once the upload worker has ended other than with
     /// the store, by a panic or a failure of the handle, no run follows, so
-    /// it fails with why, `SyncError::Bug` for a panic (E15).
+    /// it fails with why, `SyncError::WorkerFailed` for a panic (E15).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// `CovenWrite::set_uploads_paused`, in a write of its own.
@@ -8953,21 +8967,31 @@ forever.
   app's bug sink hears `Bug { operation: "the sync loop", message: "a chunk
   runs past the slot's end" }`. The last pass is recorded failed with the
   bug, so the sync status shows it, and sync stops. Ben's retry is answered
-  `Failed` with the bug, and a later `start_sync` fails with it.
+  `Failed` with `SyncError::WorkerFailed` carrying the bug, and a later
+  `start_sync` fails with the same `WorkerFailed`. The sink heard the bug
+  already, so Ben's app shows these and reports neither.
 - Each worker's owner ends the work it served, so nothing waits on a worker
   that is gone. The sync loop and a connection attempt do as above, and
-  answer every waiting retry with the bug, those the panicking pass took
-  among them. The upload worker answers each waiting `retry_uploads_now`
-  with the bug, and each later one too, as it does with the failure when a
-  failed handle ends it. The invite expiry, the network
-  follower and a read-ahead only report: the next open writes the expiries
-  that passed, the network shows as last heard until the store closes, and
-  the next read fetches what the read-ahead would have.
+  answer every waiting retry with `WorkerFailed`, those the panicking pass
+  took among them. The upload worker answers each waiting
+  `retry_uploads_now` with `WorkerFailed`, and each later one too, as it
+  does with the failure when a failed handle ends it. The invite expiry, the
+  network follower and a read-ahead only report: the next open writes the
+  expiries that passed, the network shows as last heard until the store
+  closes, and the next read fetches what the read-ahead would have.
+- A call's `Bug` is always a bug its own work hit, and its caller is the
+  one that reports it. A bug coven has already reported comes back to later
+  calls under a variant naming what it ended: `SyncError::WorkerFailed` for
+  a worker's, and `DbError::StoreFailed` for a handle's, below. Were both
+  `Bug`, an app would report one bug once for each call that repeats it, or
+  guess from their text which ones are the same.
 - A failure such a worker records, or answers a retry with, may carry a bug:
   a database call in the loop's pass that panicked returns `DbError::Bug`,
   and the loop records it as the pass's failure. No caller hears of it, so
-  that bug goes to the sink too. `CarriesBug::bug` finds the bug an error
-  carries, itself or through the failure it keeps.
+  that bug goes to the sink too. So a pass's failure, in the sync status or
+  a retry's answer, is never the app's to report. `CarriesBug::bug` finds
+  the bug an error carries, itself or through the failure it keeps, and
+  none in `WorkerFailed` or `StoreFailed`.
 - A live query whose run panics returns its `DbError::Bug` once, then
   `None`, as for a closed store. What the run read is unknown, so no commit
   could tell whether to run it again.
@@ -9002,17 +9026,23 @@ forever.
 A panic can also leave state half-changed: a lock held as it unwinds is
 poisoned, and code that SQLite calls can't fail at all. What coven does
 depends on whose state it is. State of one open store that a panic may have
-left wrong fails that store's handle with the bug, `DbError::Bug`, and every
-later call and live query reports it, as for the other failures that fail a
-handle ([§4](coven.md#4-writing-locally)). State the whole process shares ends the process.
-Elsewhere a panic leaves nothing half-changed, by how the state changes.
+left wrong fails that store's handle with the bug. The store's call whose
+work hit it returns it as `DbError::Bug`; one hit outside the store's calls
+goes to the sink. Every later call and live query fails with
+`DbError::StoreFailed`, carrying the same bug, until the store reopens, as
+for the other failures that fail a handle ([§4](coven.md#4-writing-locally)). The bug has
+reached its one reporter, so the app shows `StoreFailed` and doesn't report
+it. State the whole process shares ends the process. Elsewhere a panic leaves
+nothing half-changed, by how the state changes.
 
 - Dan's app writes a note, and a bug in coven's SQL authorizer panics while
   it judges the `INSERT`. SQLite's authorizer can't fail, and what the
   authorizer was recording may be half-changed, so it refuses that statement
   and every later one on its connection. The write fails with
-  `DbError::Bug(Bug { operation: "authorize a statement", .. })`, the handle
-  fails with the same bug, and Dan's app reopens the store.
+  `DbError::Bug(Bug { operation: "authorize a statement", .. })`, which
+  Dan's app reports. The handle fails with the same bug: Dan's next read
+  fails with `DbError::StoreFailed` carrying it, which his app only shows,
+  and the app reopens the store.
 - A hook SQLite calls as a write's transaction changes a row, which
   records the row for sync and for live queries, can't fail. A panic in it,
   which rusqlite drops, and a read of the row's values that fails are kept
@@ -9021,11 +9051,14 @@ Elsewhere a panic leaves nothing half-changed, by how the state changes.
   goes on. Only a virtual generated column, which keeps no value, reads as
   absent.
 - A panic while the handle's live-query state is held may have left a live
-  query untold of a commit, so the handle fails with the bug, and each live
-  query returns it as its last result. A panic after a write commits, as
-  it tells its live queries, does the same at once, with that panic's own
-  bug. The write's changes stay committed, and the write returns the bug
-  as every later call does.
+  query untold of a commit. The panic reaches whatever ran it, as any panic
+  does. The next use of that state fails the handle with a bug naming it,
+  `Bug { operation: "the store's live queries", .. }`, and each live query
+  returns `StoreFailed` with it as its last result, as every later call
+  does. A panic after a write commits, as it tells its live queries, fails
+  the handle at once, with that panic's own bug. The write's changes stay
+  committed, the write returns the bug as `DbError::Bug`, and every later
+  call returns `StoreFailed`.
 - The registry of the store locks this process holds is shared by every
   store, and its changes check its rules as they go. A panic partway ends
   the process: no one store's handle covers it. A lock's drop that finds
@@ -9061,7 +9094,13 @@ Edge cases:
   unwind that panicked again would end the process. What a drop finds
   wrong fails the store's handle instead: a write transaction whose hooks
   SQLite won't let go of, a staged or cache file's name released that no
-  holder reserved, or a transfer whose file lost its entry in flight.
+  holder reserved, or a transfer whose file lost its entry in flight. A bug
+  a drop finds goes where a panic's does: to the store's call the drop runs
+  in, as `DbError::Bug`, or, outside the store's calls, as for a transfer
+  dropped on the upload worker's task, to the sink.
+- A store's call whose work hits a second bug returns the first, and the
+  sink hears the second, so neither is lost. The handle keeps the first
+  bug that failed it.
 
 ```rust
 // These items are in `coven::task`, not at coven's root.
@@ -9201,7 +9240,10 @@ impl HeardBugs {
 /// error with a `Bug` variant, `std::io::Error`, which carries the bug it was
 /// made from, and `Infallible`.
 pub trait CarriesBug {
-    /// The bug this error carries, itself or through the failure it keeps.
+    /// The bug this error carries, itself or through the failure it keeps:
+    /// one for the caller to report. An earlier bug that an error repeats,
+    /// `DbError::StoreFailed`'s or `SyncError::WorkerFailed`'s, was reported
+    /// already, so this finds none in it.
     fn bug(&self) -> Option<&Bug>;
 }
 

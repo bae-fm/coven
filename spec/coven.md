@@ -157,6 +157,7 @@ A commit can be refused for these local reasons:
 | `UndeclaredNamespace`, `NamespaceKind` and other file checks | a file is staged into an undeclared namespace or one of the other kind, or the staged file can't be used | §17.1, [api.md E3](api.md#e3-writing) |
 | `BoundFileTooLarge`, `DeviceOnly`, `NamespaceKind` | a bound reference names a file over its column's limit, a file on one device only that no bound upload stores, or a user's file | §17.4 |
 | `RollbackFailed`, `CheckpointFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
+| `StoreFailed` | an earlier bug may have left the handle's state wrong; it carries that bug | [api.md E15](api.md#e15-background-work-panics-and-shutdown) |
 | Closed or unusable installation | nothing can be written | [api.md E1](api.md#e1-opening) |
 
 Schema and migration checks can also refuse opening the database or running a
@@ -1162,7 +1163,7 @@ how the app receives them.
   coven none for one under 100 rows, so every run analyzes each again, which
   reads fewer than 100 rows of each.
 - **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
-  `StatePersistence`, `CheckpointFailed`) skips the run,
+  `StatePersistence`, `CheckpointFailed`, `StoreFailed`) skips the run,
   since its writer may still hold a transaction.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
@@ -11569,6 +11570,7 @@ maps them are with each provider in Appendix E.
 | `DbError::StatementFailed` | one of the app's statements in a write failed and the write's closure still returned success | §4 |
 | `DbError::OperationRunning`, `DbError::OperationUnknown` | a write acknowledges an operation that is still running, or one `coven_operations` doesn't list | §11.4 |
 | `DbError::CheckpointFailed` | one of coven's WAL checkpoints failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
+| `DbError::StoreFailed` | an earlier bug may have left the handle's state wrong; the call whose work hit it returned it as `DbError::Bug`, or the bug sink heard it; every later call on that handle fails with it until the store is reopened | api.md E15 |
 | `DbError::CheckpointerThread` | the system refused the thread that checkpoints the store's WAL, so the store did not open | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
@@ -11630,6 +11632,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
+| `SyncError::WorkerFailed` | the sync loop, a connection attempt or the upload worker ended on a panic, which the bug sink heard; the retries and calls that need it fail with it | api.md E15 |
 | `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
 | `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |
