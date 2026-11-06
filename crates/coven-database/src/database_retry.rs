@@ -146,14 +146,19 @@ impl Database {
     }
 
     /// End, in one transaction, the persisted waits `select` picks after
-    /// reading every wait, every pending record and the upload queue as one
-    /// committed state. Each ended wait keeps its failure count; its deadline
+    /// reading every wait, every pending record, the upload queue and the pin
+    /// requests as one committed state. Each ended wait keeps its failure count; its deadline
     /// becomes `now` and its full wait zero, so reopening arms none (§6.7).
     /// Returns the ended waits.
     pub async fn end_retry_waits<P: crate::PendingValue>(
         &self,
         now: std::time::SystemTime,
-        select: impl FnOnce(&[(RetrySubject, RetryWait)], &[P], &[crate::FileUpload]) -> Vec<RetrySubject>
+        select: impl FnOnce(
+                &[(RetrySubject, RetryWait)],
+                &[P],
+                &[crate::FileUpload],
+                &[crate::PinRequest],
+            ) -> Vec<RetrySubject>
             + Send
             + 'static,
     ) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
@@ -179,8 +184,9 @@ impl Database {
                     let waits = retry::read_all(db)?;
                     let pending = crate::pending::read::<P>(db)?;
                     let uploads = crate::file_queue::read(db)?;
+                    let pins = crate::file_pins::read(db)?;
                     let mut ended = Vec::new();
-                    for subject in select(&waits, &pending, &uploads) {
+                    for subject in select(&waits, &pending, &uploads, &pins) {
                         let Some((_, wait)) = waits.iter().find(|(held, _)| *held == subject)
                         else {
                             return Err(DbError::Invariant {

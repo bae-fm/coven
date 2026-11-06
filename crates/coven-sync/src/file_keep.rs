@@ -40,8 +40,12 @@ impl FilesInner {
         // The persisted setting governs whether a metered network holds
         // their downloads (§17.8).
         self.read_unmetered_only().await?;
-        for request in self.database.pin_requests().await? {
-            let subject = RetrySubject::Pin(request.file);
+        let requests = self.database.pin_requests().await?;
+        // A wait names its request, whose id is never reused, so one this
+        // session keeps for a request ended since names nothing any more.
+        self.retain_pin_waits(&requests.iter().map(|request| request.id).collect());
+        for request in requests {
+            let subject = RetrySubject::Pin(request.id);
             if !self.waits.due(subject, request.retry.as_ref()) || !self.connection_due(subject) {
                 continue;
             }
@@ -68,7 +72,7 @@ impl FilesInner {
             match outcome {
                 // The write making the pin ended its request, or a write
                 // since the read above did.
-                Ok(Kept::Made | Kept::Ended) => self.ended_here(&file),
+                Ok(Kept::Made | Kept::Ended) => self.ended_here(&request),
                 // A metered network the app keeps files off holds it; the
                 // upload worker runs again as the network or the setting
                 // changes (§17.8).
@@ -77,7 +81,7 @@ impl FilesInner {
                 // taking it off them ended the request, and nothing was kept.
                 Err(TransferError::File(FileReadError::Database(DbError::NoLongerStored {
                     ..
-                }))) => self.ended(&file).await?,
+                }))) => self.ended(&request).await?,
                 Err(error) => self.keep_failed(&request, error).await?,
             }
         }
@@ -101,7 +105,7 @@ impl FilesInner {
             };
             self.database.prepared_pin(vec![copy], Vec::new())?
         };
-        Ok(if self.database.keep(prepared, file.id()).await? { Kept::Made } else { Kept::Ended })
+        Ok(if self.database.keep(prepared, request.id).await? { Kept::Made } else { Kept::Ended })
     }
 
     /// Make the cache copy: from coven's copy while the request keeps one,
@@ -124,7 +128,7 @@ impl FilesInner {
                         file = %file.id(),
                         "keeping a file from coven's copy failed, so it downloads: {error}"
                     );
-                    self.database.drop_pin_copy(file.id()).await?;
+                    self.database.drop_pin_copy(request.id).await?;
                 }
             }
         }
@@ -172,19 +176,28 @@ impl FilesInner {
     }
 
     /// The file left its stored bytes: its request, record and wait end.
-    async fn ended(&self, file: &FileRef) -> Result<(), SyncError> {
-        self.database.end_pin_request(file.id()).await?;
-        self.ended_here(file);
+    async fn ended(&self, request: &PinRequest) -> Result<(), SyncError> {
+        self.database.end_pin_request(request.id).await?;
+        self.ended_here(request);
         Ok(())
     }
 
     /// The request ended in a write: its wait and logged failure end in
     /// this session too.
-    fn ended_here(&self, file: &FileRef) {
-        let subject = RetrySubject::Pin(file.id());
+    fn ended_here(&self, request: &PinRequest) {
+        let subject = RetrySubject::Pin(request.id);
         self.waits.forget(subject);
         self.forget_connection_wait(subject);
-        self.waits.failure_cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
+        self.waits.failure_cleared(&PendingSubject::Keep { file: request.file }, |_| true);
+    }
+
+    /// Let go of the waits this session keeps for pin requests not in
+    /// `live`, which have ended.
+    fn retain_pin_waits(&self, live: &std::collections::BTreeSet<i64>) {
+        let ended =
+            |subject: &RetrySubject| matches!(subject, RetrySubject::Pin(id) if !live.contains(id));
+        self.waits.retain(|subject| !ended(subject));
+        self.retain_connection_waits(|subject| !ended(subject));
     }
 
     /// Record a failed attempt as the pin's record, with its next wait when
@@ -199,7 +212,7 @@ impl FilesInner {
         if matches!(&error, TransferError::File(FileReadError::Database(DbError::StoreClosed))) {
             return Ok(());
         }
-        let subject = RetrySubject::Pin(request.file);
+        let subject = RetrySubject::Pin(request.id);
         let pending = PendingSubject::Keep { file: request.file };
         let record = self.file_failure(pending, FileCopy::Stored, FileFailure::Held(error));
         let needs_connection = record.reason.clears() == Some(crate::pending::Clears::ByPerson);
@@ -216,7 +229,7 @@ impl FilesInner {
         } else {
             None
         };
-        if let Err(persist) = self.database.fail_pin(request.file, record, retry).await {
+        if let Err(persist) = self.database.fail_pin(request, record, retry).await {
             self.waits.hold(subject);
             return Err(persist.into());
         }

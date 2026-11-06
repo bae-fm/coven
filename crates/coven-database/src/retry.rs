@@ -21,8 +21,9 @@ pub enum RetrySubject {
     /// A queued file upload, by its queue id.
     Upload(i64),
     /// A file a switch to the cloud asked this device to keep, which coven
-    /// downloads whole itself (§17.8).
-    Pin(coven_foundation::id_source::FileId),
+    /// downloads whole itself (§17.8), by its request's id: a later request
+    /// for the same file is another subject.
+    Pin(i64),
     /// The joining device's polling for its request's outcome (§13.2).
     Join,
     /// A failed sequence pass.
@@ -60,14 +61,14 @@ enum Key {
     Scope(&'static str),
     Operation(i64),
     Upload(i64),
-    Pin(String),
+    Pin(i64),
 }
 
 fn key(subject: RetrySubject) -> Key {
     match subject {
         RetrySubject::Operation(id) => Key::Operation(id.0),
         RetrySubject::Upload(id) => Key::Upload(id),
-        RetrySubject::Pin(file) => Key::Pin(file.to_string()),
+        RetrySubject::Pin(id) => Key::Pin(id),
         RetrySubject::Join => Key::Scope("join"),
         RetrySubject::Sync => Key::Scope("sync"),
         RetrySubject::Provider => Key::Scope("provider"),
@@ -116,8 +117,9 @@ impl Key {
     fn value(&self) -> rusqlite::types::Value {
         match self {
             Self::Scope(scope) => rusqlite::types::Value::Text((*scope).into()),
-            Self::Operation(id) | Self::Upload(id) => rusqlite::types::Value::Integer(*id),
-            Self::Pin(file) => rusqlite::types::Value::Text(file.clone()),
+            Self::Operation(id) | Self::Upload(id) | Self::Pin(id) => {
+                rusqlite::types::Value::Integer(*id)
+            }
         }
     }
 
@@ -147,33 +149,23 @@ struct RawRow {
     scope: Option<String>,
     operation: Option<i64>,
     upload: Option<i64>,
-    pin: Option<String>,
+    pin: Option<i64>,
     failures: i64,
     not_before: Vec<u8>,
     wait: i64,
 }
 
 impl RawRow {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a stored value that won't convert or decode is DamagedDatabase"
-    )]
     fn decode(self) -> Result<(RetrySubject, RetryWait), DbError> {
-        let subject =
-            match (self.scope.as_deref(), self.operation, self.upload, self.pin.as_deref()) {
-                (None, Some(id), None, None) => RetrySubject::Operation(OperationId(id)),
-                (None, None, Some(id), None) => RetrySubject::Upload(id),
-                (None, None, None, Some(file)) => {
-                    RetrySubject::Pin(coven_foundation::id_source::FileId(
-                        coven_foundation::id_source::canonical_uuid(file)
-                            .map_err(|_| DbError::DamagedDatabase)?,
-                    ))
-                }
-                (Some("join"), None, None, None) => RetrySubject::Join,
-                (Some("sync"), None, None, None) => RetrySubject::Sync,
-                (Some("provider"), None, None, None) => RetrySubject::Provider,
-                _ => return Err(DbError::DamagedDatabase),
-            };
+        let subject = match (self.scope.as_deref(), self.operation, self.upload, self.pin) {
+            (None, Some(id), None, None) => RetrySubject::Operation(OperationId(id)),
+            (None, None, Some(id), None) => RetrySubject::Upload(id),
+            (None, None, None, Some(id)) => RetrySubject::Pin(id),
+            (Some("join"), None, None, None) => RetrySubject::Join,
+            (Some("sync"), None, None, None) => RetrySubject::Sync,
+            (Some("provider"), None, None, None) => RetrySubject::Provider,
+            _ => return Err(DbError::DamagedDatabase),
+        };
         Ok((subject, RetryWait::stored(self.failures, &self.not_before, self.wait)?))
     }
 }

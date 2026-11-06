@@ -256,12 +256,18 @@ impl RetryWaits {
         self.failures.cleared_operation(id);
     }
 
+    /// Keep only the waits `keep` accepts: an owner lets go of those whose
+    /// work has ended.
+    pub(crate) fn retain(&self, keep: impl Fn(&RetrySubject) -> bool) {
+        self.lock().armed.retain(|subject, _| keep(subject));
+    }
+
     /// Forget operation waits whose operations no longer exist.
     pub(crate) fn retain_operations(
         &self,
         live: &std::collections::BTreeSet<coven_database::OperationId>,
     ) {
-        self.lock().armed.retain(|subject, _| match subject {
+        self.retain(|subject| match subject {
             RetrySubject::Operation(id) => live.contains(id),
             _ => true,
         });
@@ -351,7 +357,8 @@ impl RetryWaits {
         };
         let select = move |waits: &[(RetrySubject, RetryWait)],
                            _: &[crate::PendingRecord],
-                           _: &[coven_database::FileUpload]| {
+                           _: &[coven_database::FileUpload],
+                           _: &[coven_database::PinRequest]| {
             waits
                 .iter()
                 .filter(|(held, wait)| *held == subject && !wait.wait.is_zero())

@@ -3,7 +3,7 @@
 macro_rules! coven_retries_tables {
     ($visit:ident) => {
         // One persisted retry wait, T and W, per waiting operation, queued
-        // upload, joiner poll or provider cooldown (§6.7). Work rows take
+        // upload, pin request, joiner poll or provider cooldown (§6.7). Work rows take
         // their waits with them.
         $visit!(
             _coven_retries,
@@ -13,7 +13,7 @@ macro_rules! coven_retries_tables {
                 scope TEXT UNIQUE CHECK(scope IN ('join','sync','provider')),
                 operation INTEGER UNIQUE REFERENCES _coven_operations(id) ON DELETE CASCADE,
                 upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
-                pin TEXT UNIQUE REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
+                pin INTEGER UNIQUE REFERENCES _coven_pin_requests(id) ON DELETE CASCADE,
                 failures INTEGER NOT NULL CHECK(failures>=0),
                 not_before BLOB NOT NULL CHECK(length(not_before)=13),
                 wait INTEGER NOT NULL CHECK(wait>=0),

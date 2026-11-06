@@ -59,10 +59,9 @@ impl FileWrite<'_> {
         Ok(())
     }
 
-    /// End the request for the pin coven keeps for `file`, returning whether
-    /// one waited (§17.8).
-    pub(crate) fn end_pin_request(&self, file: FileId) -> Result<bool, DbError> {
-        crate::file_pins::end(self.database, file)
+    /// End the pin request `id`, returning whether it still waited (§17.8).
+    pub(crate) fn end_pin_request(&self, id: i64) -> Result<bool, DbError> {
+        crate::file_pins::end_request(self.database, id)
     }
 
     /// Set a declared namespace's budget and evict its unpinned entries,

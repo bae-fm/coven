@@ -3,7 +3,7 @@
 
 use super::{file_ref, FileDatabase};
 use crate::{DbError, FileRef};
-use coven_foundation::{files::FileName, id_source::FileId};
+use coven_foundation::files::FileName;
 
 impl FileDatabase {
     /// The files a switch to the cloud asked this device to keep whole, each
@@ -11,27 +11,27 @@ impl FileDatabase {
     pub async fn pin_requests(&self) -> Result<Vec<crate::PinRequest>, DbError> {
         self.read(crate::file_pins::read).await
     }
-    /// `file` left the stored bytes its request asked to keep: the request,
-    /// its record and wait end, and the copy it kept goes once nothing else
-    /// names it.
-    pub async fn end_pin_request(&self, file: FileId) -> Result<(), DbError> {
+    /// The file of request `id` left the stored bytes the request asked to
+    /// keep: the request, its record and wait end, and the copy it kept goes
+    /// once nothing else names it.
+    pub async fn end_pin_request(&self, id: i64) -> Result<(), DbError> {
         self.database
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
                 inner.with_files("end a pin request", |writer, _| {
-                    writer.state_transaction(|db| crate::file_pins::end(db, file).map(drop))
+                    writer.state_transaction(|db| crate::file_pins::end_request(db, id).map(drop))
                 })
             })
             .await
     }
-    /// Make the pin coven keeps for `file` from `prepared`, ending its
+    /// Make the pin request `id` asked for from `prepared`, ending the
     /// request in the same write, and return true (§17.8). A request that
     /// ended since it was read, by the app's unpin or the file leaving,
     /// makes nothing: false.
-    pub async fn keep(&self, prepared: crate::PreparedPin, file: FileId) -> Result<bool, DbError> {
+    pub async fn keep(&self, prepared: crate::PreparedPin, id: i64) -> Result<bool, DbError> {
         self.database
             .write(move |sql| {
-                if !sql.end_pin_request(file)? {
+                if !sql.end_pin_request(id)? {
                     return Ok(false);
                 }
                 sql.pin(prepared)?;
@@ -39,26 +39,27 @@ impl FileDatabase {
             })
             .await
     }
-    /// The cache copy couldn't be made from coven's copy: the pin downloads
-    /// from storage instead.
-    pub async fn drop_pin_copy(&self, file: FileId) -> Result<(), DbError> {
+    /// The cache copy couldn't be made from coven's copy for request `id`:
+    /// the pin downloads from storage instead.
+    pub async fn drop_pin_copy(&self, id: i64) -> Result<(), DbError> {
         self.database
             .call(move |inner| {
                 inner.with_files("drop a pin's copy", |writer, _| {
-                    writer.transaction(|db| crate::file_pins::drop_copy(db, file))
+                    writer.transaction(|db| crate::file_pins::drop_copy(db, id))
                 })
             })
             .await
     }
-    /// Record a failed attempt at a pin coven keeps as its record, with its
-    /// next wait or none, in one transaction. A request already ended
-    /// records nothing.
+    /// Record a failed attempt at the pin `request` asked for as its record,
+    /// with its next wait or none, in one transaction. A request already
+    /// ended records nothing.
     pub async fn fail_pin<P: crate::PendingValue>(
         &self,
-        file: FileId,
+        request: &crate::PinRequest,
         record: P,
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
+        let (id, file) = (request.id, request.file);
         self.run(move |db, _, _, _| {
             db.state_transaction(|db| {
                 if record.pin_of() != Some(file) {
@@ -67,8 +68,8 @@ impl FileDatabase {
                     });
                 }
                 if !db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE file=?1)",
-                    [file],
+                    "SELECT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE id=?1)",
+                    [id],
                     |r| r.get::<_, bool>(0),
                 )? {
                     return Ok(());
@@ -76,7 +77,7 @@ impl FileDatabase {
                 crate::retry::save_failure(
                     db,
                     &record,
-                    crate::RetrySubject::Pin(file),
+                    crate::RetrySubject::Pin(id),
                     retry.as_ref(),
                 )
             })

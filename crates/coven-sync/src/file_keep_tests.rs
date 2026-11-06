@@ -149,6 +149,71 @@ async fn making_a_kept_file_device_only_here_ends_its_request() {
     f.close().await;
 }
 
+/// A wait belongs to its request (§17.8): one held because its deadline
+/// couldn't be saved, or one waiting for a new connection after a failure
+/// only a person can clear, ends as the file leaves the cloud, and the
+/// request a later move back records is made at once.
+#[tokio::test]
+async fn a_kept_pins_wait_ends_with_its_request() {
+    for cause in ["unsaved", "sign-in"] {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let clock = Arc::new(FixedClock::new(start));
+        let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
+        f.files.stop_background_for_counts().await;
+        let bytes = vec![58; CHUNK + 9];
+        let file = kept_original(&f, "song", &bytes).await;
+        f.drain().await;
+        match cause {
+            "unsaved" => {
+                // A clock at the end of its range has no instant for the
+                // wait's deadline, so the wait can't be saved.
+                f.storage.set_online(false);
+                clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(i64::MAX as u64));
+                assert!(f.files.inner.keep_pinned().await.is_err());
+                clock.set(start);
+                f.storage.set_online(true);
+            }
+            _ => {
+                f.storage
+                    .set_faults(coven_storage::test_utils::Faults {
+                        fail_next: 1,
+                        failure: coven_storage::StorageFailure::Authentication,
+                        ..coven_storage::test_utils::Faults::none()
+                    })
+                    .await;
+                f.files.inner.keep_pinned().await.unwrap();
+            }
+        }
+        // The wait holds the request: storage answers, and nothing is made.
+        f.files.inner.keep_pinned().await.unwrap();
+        assert!(!pinned(&f, file).await, "{cause}");
+        let music = tempfile::tempdir().unwrap();
+        let prepared = f
+            .files
+            .prepare_device_only(
+                music.path(),
+                vec![(file, coven_foundation::files::RelativePath::new(["song.flac"]).unwrap())],
+                &tokio::sync::watch::channel(false).1,
+                tokio::sync::watch::channel(None).0,
+            )
+            .await
+            .unwrap();
+        f.database.write(move |sql| sql.make_device_only(prepared)).await.unwrap();
+        assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty(), "{cause}");
+        f.database
+            .write(move |sql| {
+                sql.move_to_cloud(vec![coven_database::MoveFile::UserKeptHere(file)]).map(drop)
+            })
+            .await
+            .unwrap();
+        f.drain().await;
+        assert_eq!(f.files.inner.database.pin_requests().await.unwrap().len(), 1, "{cause}");
+        f.files.inner.keep_pinned().await.unwrap();
+        assert!(pinned(&f, file).await, "{cause}");
+        f.close().await;
+    }
+}
+
 /// The files `coven_pin_requests` lists, as the app's SQL reads them.
 async fn requested(f: &Fixture) -> Vec<FileId> {
     f.database

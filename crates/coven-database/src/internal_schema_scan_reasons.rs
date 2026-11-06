@@ -40,7 +40,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the table lists every file this device has a record of"),
 ("file_moves.rs", "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving' AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u WHERE u.move=m.id AND u.stored=0 AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))", "m") =>
     Some("the moves still moving, each with its queued uploads; a finished, failed or cancelled move is in no index entry"),
-("file_pins.rs", "SELECT file,copy FROM _coven_pin_requests ORDER BY file", "_coven_pin_requests") =>
+("file_pins.rs", "SELECT id,file,copy FROM _coven_pin_requests ORDER BY file", "_coven_pin_requests") =>
     Some("the pins coven keeps, each until it is made: the work the upload worker does"),
 ("coven_user_files", "SELECT * FROM coven_user_files", "u") =>
     Some("the view lists every user original this device records"),

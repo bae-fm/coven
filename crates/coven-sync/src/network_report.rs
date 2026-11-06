@@ -20,7 +20,7 @@
 //! every ordinary wait if any of them was a retry report.
 
 use crate::{PendingRecord, PendingSubject, RetryWaits, SyncError};
-use coven_database::{FileUpload, RetrySubject, RetryWait};
+use coven_database::{FileUpload, PinRequest, RetrySubject, RetryWait};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicU64, Ordering},
@@ -115,6 +115,7 @@ fn record_for<'a>(
     subject: RetrySubject,
     pending: &'a [PendingRecord],
     uploads: &[FileUpload],
+    pins: &[PinRequest],
 ) -> Option<&'a PendingRecord> {
     let wanted = match subject {
         RetrySubject::Sync => PendingSubject::Connection,
@@ -130,7 +131,9 @@ fn record_for<'a>(
                 file: location.object(),
             }
         }
-        RetrySubject::Pin(file) => PendingSubject::Keep { file },
+        RetrySubject::Pin(id) => {
+            PendingSubject::Keep { file: pins.iter().find(|request| request.id == id)?.file }
+        }
         RetrySubject::Join | RetrySubject::Provider => return None,
     };
     pending.iter().find(|record| record.subject == wanted)
@@ -263,7 +266,8 @@ impl RetryWaits {
         let chosen = ending.clone();
         let select = move |waits: &[(RetrySubject, RetryWait)],
                            pending: &[PendingRecord],
-                           uploads: &[FileUpload]| {
+                           uploads: &[FileUpload],
+                           pins: &[PinRequest]| {
             waits
                 .iter()
                 .filter(|(subject, wait)| {
@@ -277,7 +281,7 @@ impl RetryWaits {
                             Ending::Every => true,
                             Ending::Network => {
                                 !held.contains(subject)
-                                    && record_for(*subject, pending, uploads)
+                                    && record_for(*subject, pending, uploads, pins)
                                         .is_some_and(|record| record.reason.offline())
                             }
                         }

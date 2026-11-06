@@ -11,6 +11,9 @@ use rusqlite::params;
 /// One file this device keeps whole as a switch asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinRequest {
+    /// The request's own id, never reused: its wait, and what coven keeps
+    /// of it in memory, are never a later request's for the same file.
+    pub id: i64,
     /// The file.
     pub file: FileId,
     /// Coven's copy of an app file's bytes, while the cache copy is still to
@@ -31,16 +34,31 @@ pub(crate) fn request(db: &DatabaseConnection, file: FileId) -> Result<(), DbErr
     Ok(())
 }
 
-/// End the request: its pin is made, the app unpinned its file, or its file
-/// is gone from this device. Its record and wait go with it, and the copy it
-/// kept goes once nothing else names it. Returns whether a request waited.
+/// End `file`'s request, if one waits: the app unpinned the file, or it is
+/// gone from this device or left its stored bytes. Returns whether a request
+/// waited.
 pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
-    let Some(copy) = db
-        .query("DELETE FROM _coven_pin_requests WHERE file=?1 RETURNING copy", [file], |r| {
+    let ended =
+        db.query("DELETE FROM _coven_pin_requests WHERE file=?1 RETURNING copy", [file], |r| {
             r.get::<_, Option<String>>(0)
-        })?
-        .pop()
-    else {
+        })?;
+    release(db, ended)
+}
+
+/// End the request `id`, if it still waits: its pin is made, or its file
+/// left the stored bytes. Returns whether it waited.
+pub(crate) fn end_request(db: &DatabaseConnection, id: i64) -> Result<bool, DbError> {
+    let ended =
+        db.query("DELETE FROM _coven_pin_requests WHERE id=?1 RETURNING copy", [id], |r| {
+            r.get::<_, Option<String>>(0)
+        })?;
+    release(db, ended)
+}
+
+/// An ended request's record and wait went with its row; the copy it kept
+/// goes once nothing else names it. Returns whether a request ended.
+fn release(db: &DatabaseConnection, mut ended: Vec<Option<String>>) -> Result<bool, DbError> {
+    let Some(copy) = ended.pop() else {
         return Ok(false);
     };
     if let Some(copy) = copy {
@@ -49,11 +67,12 @@ pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError
     Ok(true)
 }
 
-/// The cache copy couldn't be made from coven's copy: the pin downloads from
-/// storage instead, and the copy goes once nothing else names it.
-pub(crate) fn drop_copy(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+/// The cache copy couldn't be made from coven's copy for request `id`: the
+/// pin downloads from storage instead, and the copy goes once nothing else
+/// names it.
+pub(crate) fn drop_copy(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     let copy = db
-        .query("SELECT copy FROM _coven_pin_requests WHERE file=?1", [file], |r| {
+        .query("SELECT copy FROM _coven_pin_requests WHERE id=?1", [id], |r| {
             r.get::<_, Option<String>>(0)
         })?
         .pop()
@@ -61,7 +80,7 @@ pub(crate) fn drop_copy(db: &DatabaseConnection, file: FileId) -> Result<(), DbE
     let Some(copy) = copy else {
         return Ok(());
     };
-    db.internal_execute("UPDATE _coven_pin_requests SET copy=NULL WHERE file=?1", [file])?;
+    db.internal_execute("UPDATE _coven_pin_requests SET copy=NULL WHERE id=?1", [id])?;
     crate::file_queue::release_copy(db, &copy)
 }
 
@@ -71,17 +90,18 @@ pub(crate) fn drop_copy(db: &DatabaseConnection, file: FileId) -> Result<(), DbE
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<PinRequest>, DbError> {
-    db.query("SELECT file,copy FROM _coven_pin_requests ORDER BY file", [], |r| {
-        Ok((r.get::<_, FileId>(0)?, r.get::<_, Option<String>>(1)?))
+    db.query("SELECT id,file,copy FROM _coven_pin_requests ORDER BY file", [], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, FileId>(1)?, r.get::<_, Option<String>>(2)?))
     })?
     .into_iter()
-    .map(|(file, copy)| {
+    .map(|(id, file, copy)| {
         Ok(PinRequest {
+            id,
             file,
             copy: copy
                 .map(|copy| FileName::new(copy).map_err(|_| DbError::DamagedDatabase))
                 .transpose()?,
-            retry: crate::retry::find(db, crate::RetrySubject::Pin(file))?,
+            retry: crate::retry::find(db, crate::RetrySubject::Pin(id))?,
         })
     })
     .collect()

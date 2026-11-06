@@ -139,13 +139,10 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.pin(prepared))
     }
 
-    /// End the request for the pin coven keeps for `file`, in this write,
-    /// returning whether one waited (§17.8).
-    pub(crate) fn end_pin_request(
-        &self,
-        file: coven_foundation::id_source::FileId,
-    ) -> Result<bool, crate::DbError> {
-        self.files.step(|| self.files.end_pin_request(file))
+    /// End the pin request `id`, in this write, returning whether it still
+    /// waited (§17.8).
+    pub(crate) fn end_pin_request(&self, id: i64) -> Result<bool, crate::DbError> {
+        self.files.step(|| self.files.end_pin_request(id))
     }
 
     /// Switch a prepared call's files to device-only on this device, each to

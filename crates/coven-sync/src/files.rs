@@ -549,6 +549,11 @@ impl<M: FilesMode> FilesInner<M> {
         lock_unpoisoned(&self.connection_waits).remove(&subject);
     }
 
+    /// Keep only the connection waits `keep` accepts.
+    fn retain_connection_waits(&self, keep: impl Fn(&coven_database::RetrySubject) -> bool) {
+        lock_unpoisoned(&self.connection_waits).retain(|subject| keep(subject));
+    }
+
     /// Hold the lock on one stored object's cache entries while reading
     /// them, fetching and caching chunks. Files over the same bytes share it.
     pub(crate) async fn lock_file(

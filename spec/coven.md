@@ -6873,6 +6873,13 @@ it in a write of its own that ends its request too.
   goes or leaves the cloud (§17.3). This is unlike the
   app's own pin, whose failure goes back to its call and is retried only by the
   app's next pin or read (§17.7).
+- **Its wait ends with its request.** Each request has its own id, never reused,
+  and its wait belongs to that id, whether saved, held because it couldn't be
+  saved, or waiting for a new connection. Ana's laptop fails to keep track 7
+  because her sign-in expired; she makes the album device-only, then moves it
+  back to the cloud with "keep a copy here". The new request starts with no
+  wait and downloads at once. Without this, the ended request's wait would
+  hold the new one until a new connection or the app's retry.
 
 **Stopping keeping a file here** is the app's unpin. It releases a pin coven
 already made, and ends a pin request still waiting, in the same write. Ana's
@@ -9758,7 +9765,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.8) |
 | `_coven_file_uploads` | each stored object this device uploads: its location and key, size, content hash, source, move and provider session, and for a bound upload the number of the write that staged its file, from which this device's writes wait while a file waits for the upload (§17.4, §17.9) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.9) |
-| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, the app unpins the file, or the file's record goes or leaves the cloud (§17.8) |
+| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, by the request's own id, never reused, which its wait names, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, the app unpins the file, or the file's record goes or leaves the cloud (§17.8) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_move_files` | the files each moving or failed move lists, by file, since a file is in at most one move: written in the write that records the move, and as a new file over a moving file's bytes joins it; a file leaves as its record goes, and a switch or a cancel ends the move's list, while a failure keeps it (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
