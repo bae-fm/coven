@@ -2301,10 +2301,17 @@ e.g. when the reference that made it a deleted parent's child is pointed
 elsewhere. When a write changes which rows are out, coven makes the change in the
 app's table with ordinary SQL, which the app's triggers see like any other change.
 They see each row's change once, in the order SQLite's constraints and cascades
-need: a parent's insert or update before its children's, a child's delete before
-its parent's, and a key or unique value given up before another row takes it.
-Nothing else about the order across rows is promised; a reload inserts the rows
-it installs a table at a time (§16.5).
+need: a key or unique value given up before another row takes it, a child's
+delete before its parent's, and otherwise a parent's insert or update before its
+children's. SQLite checks a key or unique value at once, while coven defers the
+foreign keys to the commit, so where the two disagree the value comes first and
+a child can arrive before its parent. In one write Ana renames note 1 from
+"Plan" to "Ideas", adds note 2 titled "Plan", adds note 3 as a sub-note of note
+2, and moves note 1 under note 3. Ben's device can't insert note 2 until note 1
+gives "Plan" up, and note 1's update points it at note 3, so note 3 goes in
+first: Ben's triggers see it while its parent is missing, and every foreign key
+holds again by the commit. Nothing else about the order across rows is promised;
+a reload inserts the rows it installs a table at a time (§16.5).
 
 A row can be out for several reasons at once, and comes back only when none
 holds. Its record names every reason that holds once the rules have run. Todos

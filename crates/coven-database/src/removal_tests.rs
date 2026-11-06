@@ -823,3 +823,74 @@ fn unique_claims_order_before_deferrable_parents() {
         [parent, child]
     );
 }
+
+/// Nodes with unique names under parent nodes, and a local log of each
+/// node's arrival as the app's triggers see it: whether its parent was in
+/// the table yet.
+const NODES: &str = "CREATE TABLE nodes(id TEXT NOT NULL PRIMARY KEY, name TEXT UNIQUE, parent TEXT REFERENCES nodes(id));
+CREATE TABLE arrivals(kind TEXT NOT NULL, id TEXT NOT NULL, parent_here INT NOT NULL);
+CREATE TRIGGER node_inserted AFTER INSERT ON nodes BEGIN
+  INSERT INTO arrivals VALUES('insert', new.id, new.parent IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=new.parent));
+END;
+CREATE TRIGGER node_updated AFTER UPDATE ON nodes BEGIN
+  INSERT INTO arrivals VALUES('update', new.id, new.parent IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=new.parent));
+END;";
+
+/// Ana's and Ben's devices on `schema`, each knowing both members.
+async fn two_devices(schema: &'static str) -> (Database, Database, [TestStore; 2]) {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let stores = [TestStore::with_ids(&ids), TestStore::with_ids(&ids)];
+    let ana = stores[0].schema(vec![table("nodes")], schema).await.unwrap();
+    let ben = stores[1].schema(vec![table("nodes")], schema).await.unwrap();
+    for db in [&ana, &ben] {
+        TestStore::register(db, stores[0].device(), 1);
+        TestStore::register(db, stores[1].device(), 2);
+    }
+    (ana, ben, stores)
+}
+
+/// Each node's arrival on `db`, in the order its triggers saw them.
+fn arrivals(db: &Database) -> Vec<(String, String, bool)> {
+    db.inspect_writer(|db| {
+        db.query("SELECT kind,id,parent_here FROM arrivals ORDER BY rowid", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap()
+    })
+}
+
+/// In one write Ana renames node a from "x" to "y", adds node b named "x",
+/// adds node c under b, and moves a under c. Ben's device can't insert b
+/// until a gives "x" up, and a's update points it at c, so c goes in first,
+/// before b, its parent: the deferred foreign key is checked at commit.
+#[tokio::test]
+async fn a_child_arrives_before_its_parent_when_the_parent_takes_a_value_given_up_for_it() {
+    let (ana, ben, _stores) = two_devices(NODES).await;
+    sql(&ana, "INSERT INTO nodes VALUES('a','x',NULL)").await.unwrap();
+    crate::author_judgement::tests::deliver(&ana, &ben).await;
+    sql(
+        &ana,
+        "UPDATE nodes SET name='y' WHERE id='a';
+         INSERT INTO nodes VALUES('b','x',NULL);
+         INSERT INTO nodes VALUES('c','z','b');
+         UPDATE nodes SET parent='c' WHERE id='a';",
+    )
+    .await
+    .unwrap();
+    crate::author_judgement::tests::deliver(&ana, &ben).await;
+
+    let seen = |kind: &str, id: &str, parent_here| (kind.to_string(), id.to_string(), parent_here);
+    assert_eq!(
+        arrivals(&ben),
+        [
+            seen("insert", "a", true),
+            seen("insert", "c", false),
+            seen("update", "a", true),
+            seen("insert", "b", true),
+        ]
+    );
+    assert_eq!(count(&ben, "nodes"), 3);
+    for db in [ana, ben] {
+        db.close().await.unwrap();
+    }
+}
