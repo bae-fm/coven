@@ -12,9 +12,10 @@ use std::future::Future;
 /// no return (§11.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageSetupStep {
-    /// S3, creating the store: listing the bucket's root to check it holds
-    /// nothing but this store (§20.3).
-    CheckingBucket,
+    /// Creating the store in a location it needs to itself (a Dropbox shared
+    /// folder, a OneDrive folder, or an S3 bucket): listing the location's
+    /// root to check it holds nothing but this store (§20.3).
+    CheckingLocation,
     /// S3: probing the service with fresh objects for the settings the
     /// location needs, and checking them against what it does (§20.8).
     DetectingSettings,
@@ -26,8 +27,9 @@ pub enum StorageSetupStep {
     /// Connecting, then checking the provider with a fresh sealed object it
     /// must create once, read back and delete.
     Connecting,
-    /// Creating the store, past the point of no return: claiming the bucket
-    /// where the location needs it (§20.7), then slot 1, which publishes it.
+    /// Creating the store, past the point of no return: claiming the
+    /// location where it holds one store (§20.3), then slot 1, which
+    /// publishes it.
     CreatingStore,
     /// Reconnecting: opening this member's store keys and loading what other
     /// devices published, each of loading's steps with its count (§13.4).

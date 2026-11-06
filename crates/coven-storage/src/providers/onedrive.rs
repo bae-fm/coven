@@ -16,6 +16,8 @@ const PROVIDER: CloudProvider = CloudProvider::OneDrive;
 
 #[path = "onedrive_folder.rs"]
 mod folder;
+#[path = "onedrive_location.rs"]
+mod location;
 #[path = "onedrive_replace.rs"]
 mod replace;
 #[path = "onedrive_upload.rs"]
@@ -259,6 +261,16 @@ impl ProviderOps for OneDriveStorage {
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;
         Ok(())
+    }
+    async fn create_location_marker(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        _device: coven_foundation::id_source::DeviceId,
+    ) -> Result<(), StorageError> {
+        self.create_marker(store).await
+    }
+    async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
+        self.marker_bytes().await
     }
 
     fn config(&self) -> StorageConfig {

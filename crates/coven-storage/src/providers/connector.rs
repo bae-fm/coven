@@ -109,15 +109,16 @@ pub trait StorageConnector: Send + Sync {
     ) -> S3DetectionRun {
         S3DetectionRun::unwritten(runs, Err(StorageFailure::ProviderUnavailable.into()))
     }
-    /// Before a store's first setup at an S3 location, refuse a bucket
-    /// holding anything outside the store's folder or the `coven-bucket`
-    /// marker (§20.3). Reads only.
-    /// A connector without native S3 refuses this capability.
+    /// Before a store's first setup at a location it needs to itself (a
+    /// Dropbox shared folder, a OneDrive folder, or an S3 bucket), refuse a
+    /// location whose root holds anything outside the store's folder or the
+    /// `coven-location` marker (§20.3).
+    /// Reads only. A connector without that provider refuses this capability.
     /// A rate-limited listing is sent again while setup's `waits` allow.
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         _config: StorageConfig,
-        _credentials: S3Credentials,
+        _auth: ProviderAuth,
         _store: StoreId,
         _waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
@@ -371,30 +372,60 @@ impl StorageConnector for ProviderConnector {
         )
         .await
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: S3Credentials,
+        auth: ProviderAuth,
         store: StoreId,
         waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
-        crate::ConnectionCredentials {
-            location: config.clone(),
-            credentials: StorageCredentials::S3(credentials.clone()),
+        crate::ConnectionCredentials { location: config.clone(), credentials: auth.credentials() }
+            .validate()?;
+        if !config.holds_one_store() {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("the location holds several stores, so nothing checks it"));
         }
-        .validate()?;
-        super::check_new_s3_store(
-            config,
-            credentials,
-            store,
-            self.clock.clone(),
-            self.ids.clone(),
-            self.http.clone().map_err(|source| {
-                super::http_client::tls_failure(crate::CloudProvider::S3, source)
-            })?,
-            waits,
-        )
-        .await
+        let provider = config.provider();
+        let http = self
+            .http
+            .clone()
+            .map_err(|source| super::http_client::tls_failure(provider, source))?;
+        let session = |tokens, custody| {
+            OAuthSession::new(provider, tokens, custody, self.clock.clone(), http.clone())
+        };
+        // Each page is one listing request: a rate-limited one stored nothing.
+        let clock = self.clock.as_ref();
+        let holds_only = match (&config, auth) {
+            (StorageConfig::S3 { .. }, ProviderAuth::S3(credentials)) => {
+                return super::check_new_s3_store(
+                    config,
+                    credentials,
+                    store,
+                    self.clock.clone(),
+                    self.ids.clone(),
+                    http,
+                    waits,
+                )
+                .await
+            }
+            (StorageConfig::Dropbox { .. }, ProviderAuth::OAuth { tokens, custody }) => {
+                let dropbox = DropboxStorage::new(config, session(tokens, custody)?)?;
+                waits.resend(clock, || dropbox.holds_only(store)).await?
+            }
+            (StorageConfig::OneDrive { .. }, ProviderAuth::OAuth { tokens, custody }) => {
+                let onedrive =
+                    OneDriveStorage::new(config, session(tokens, custody)?, self.ids.clone())?;
+                waits.resend(clock, || onedrive.holds_only(store)).await?
+            }
+            _ => {
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("credentials do not match the provider"))
+            }
+        };
+        if !holds_only {
+            return Err(StorageFailure::OwnLocationRequired.into());
+        }
+        Ok(())
     }
 }
 

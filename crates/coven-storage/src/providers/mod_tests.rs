@@ -370,7 +370,6 @@ pub(crate) mod listing_lag {
     }
 }
 
-/// Compare an adapter's occupied-path decisions and complete bytes with Lean.
 /// Run the Lean `createRunner` on one JSON input.
 pub(crate) fn create_runner(input: &serde_json::Value) -> serde_json::Value {
     use std::io::Write;
@@ -382,6 +381,43 @@ pub(crate) fn create_runner(input: &serde_json::Value) -> serde_json::Value {
     let output = process.wait_with_output().unwrap();
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Compare a connection's location claims, setup's and a reconnect's, and
+/// the marker's bytes after each, which `marker` reads from the provider,
+/// with Lean's `LocationClaim`.
+pub(crate) async fn compare_location_model<P: crate::ProviderOps + ?Sized>(
+    storage: &crate::StorageConnection<P>,
+    marker: impl Fn() -> Option<Vec<u8>>,
+) {
+    use crate::{test_utils::STORE_ID, StorageFailure};
+    let other = coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16]));
+    let cases = [
+        ("reconnect", other),
+        ("setup", STORE_ID),
+        ("setup", other),
+        ("setup", STORE_ID),
+        ("reconnect", other),
+        ("reconnect", STORE_ID),
+    ];
+    let input: Vec<_> = cases
+        .iter()
+        .map(|(op, store)| serde_json::json!({"op": op, "store": store.to_string().into_bytes()}))
+        .collect();
+    let expected = create_runner(&serde_json::json!({"location": input}));
+    let expected = expected.as_array().unwrap();
+    assert_eq!(expected.len(), cases.len());
+    for ((op, store), expected) in cases.into_iter().zip(expected) {
+        let result = match op {
+            "setup" => storage.claim_location(store).await,
+            _ => storage.check_location_claim(store).await,
+        };
+        assert_eq!(expected["accepted"], result.is_ok(), "{op} {store}: {result:?}");
+        if let Err(error) = result {
+            assert_eq!(error.failure(), StorageFailure::OwnLocationRequired);
+        }
+        assert_eq!(expected["bytes"], serde_json::json!(marker()));
+    }
 }
 
 /// Compare creates with the Lean model. A copy-publication adapter

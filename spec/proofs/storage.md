@@ -49,8 +49,8 @@ passes only when the marker names its store; no listing appears in it.
 `at_most_one_store` shows that two setups that both pass, with any creates
 between them, name the same store. `retry_passes` lets a retry of one store's
 setup pass, and `reconnect_refuses_other` refuses another store at a claimed
-location. `createRunner` compares setup and reconnect with the S3 adapter's
-request-level tests.
+location. `createRunner` compares setup and reconnect with the S3, Dropbox and
+OneDrive adapters' request-level tests.
 
 ## Conditional floor uploads
 

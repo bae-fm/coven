@@ -65,7 +65,7 @@ enum AccountAccess {
     Joined,
 }
 struct MemoryState {
-    bucket_claim: Option<Vec<u8>>,
+    location_marker: Option<Vec<u8>>,
     objects: BTreeMap<ObjectPath, Object>,
     uploads: BTreeMap<u64, Pending>,
     next: u64,
@@ -568,25 +568,25 @@ impl Drop for ActiveMemoryRequest<'_> {
 
 #[async_trait]
 impl ProviderOps for MemoryProvider {
-    async fn create_bucket_claim(
+    async fn create_location_marker(
         &self,
         store: coven_foundation::id_source::StoreId,
         _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
-        self.before(MemoryRequest::Other("create_bucket_claim")).await?;
+        self.before(MemoryRequest::Other("create_location_marker")).await?;
         let mut state = self.state.lock().await;
-        if state.bucket_claim.is_some() {
+        if state.location_marker.is_some() {
             return Err(StorageFailure::AlreadyExists.into());
         }
-        state.bucket_claim = Some(store.to_string().into_bytes());
+        state.location_marker = Some(store.to_string().into_bytes());
         if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
             return Err(StorageFailure::Network.into());
         }
         Ok(())
     }
-    async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
-        self.before(MemoryRequest::Other("read_bucket_claim")).await?;
-        self.state.lock().await.bucket_claim.clone().ok_or(StorageFailure::NotFound.into())
+    async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
+        self.before(MemoryRequest::Other("read_location_marker")).await?;
+        self.state.lock().await.location_marker.clone().ok_or(StorageFailure::NotFound.into())
     }
     async fn account(&self) -> Result<String, StorageError> {
         self.before_request(MemoryRequest::Other("account")).await?;

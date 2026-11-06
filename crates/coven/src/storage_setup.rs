@@ -364,7 +364,7 @@ impl StorageConnections {
             .await?;
         let setup = Arc::new(storage.during_setup(waits));
         if !journal.creating() {
-            setup.check_bucket(self.store()).await?;
+            setup.check_location_claim(self.store()).await?;
         }
         let path = ObjectPath::file(self.store(), self.device, FileId(self.ids.new_id()));
         let plaintext = b"coven storage check";
@@ -523,7 +523,7 @@ impl StorageConnections {
         let prepared = Self::with_passes_held(live, async {
             let claimed = if journal.creating() {
                 progress.begin(StorageSetupStep::CreatingStore, 1);
-                match setup.claim_bucket(self.store()).await {
+                match setup.claim_location(self.store()).await {
                     Ok(()) => {
                         self.claim_creation(&claiming, access, journal.device_name(), progress)
                             .await
@@ -592,8 +592,8 @@ impl StorageConnections {
         Ok(restore_code)
     }
 
-    /// Create the store, once its bucket is claimed where the location needs
-    /// it (§20.7): keep its first store key, then claim slot 1 and the
+    /// Create the store, once its location is claimed where it holds one
+    /// store (§20.3): keep its first store key, then claim slot 1 and the
     /// creator's key copy (§10.3). A crash may have left the creation journaled or
     /// applied: it is settled first, and an applied one claims nothing more.
     async fn claim_creation(
@@ -691,7 +691,7 @@ impl StorageConnections {
 }
 
 /// Whether a claim past the point of no return was refused before it
-/// landed: another store holds the bucket or slot 1, or the caught-up
+/// landed: another store holds the location or slot 1, or the caught-up
 /// history refuses the access change. Any other failure is retried.
 fn refused(error: &SyncError) -> bool {
     match error {

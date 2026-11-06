@@ -8,13 +8,13 @@ impl DropboxStorage {
         &self,
         listing: &mut ObjectListing,
     ) -> Result<(), StorageError> {
-        let prefix = listing.prefix().clone();
-        self.folder_entries(&prefix, |entry| {
+        let folder = format!("/{}", listing.prefix().folder());
+        // A recursive listing already includes every descendant.
+        self.folder_entries(folder, true, |entry| {
             let name = http::string(entry, "path_lower")?
                 .strip_prefix('/')
                 .ok_or(StorageFailure::Protocol.with_source("Dropbox listed a relative path"))?;
             match http::string(entry, ".tag")? {
-                // A recursive listing already includes every descendant.
                 "folder" => {
                     listing.object_folder(name)?;
                 }
@@ -35,13 +35,18 @@ impl DropboxStorage {
         .await
     }
 
-    async fn folder_entries(
+    /// Visit every entry in `folder`, Dropbox's `""` being the root, and with
+    /// `recursive` every entry beneath it, following every page. A folder
+    /// that isn't there has no entries, once the root is confirmed.
+    pub(super) async fn folder_entries(
         &self,
-        prefix: &crate::ObjectPrefix,
+        folder: String,
+        recursive: bool,
         mut visit: impl FnMut(&serde_json::Value) -> Result<(), StorageError> + Send,
     ) -> Result<(), StorageError> {
         let mut method = "files/list_folder";
-        let mut request = json!({"path":format!("/{}", prefix.folder()),"recursive":true,"include_deleted":false,"limit":2000});
+        let mut request =
+            json!({"path":folder,"recursive":recursive,"include_deleted":false,"limit":2000});
         let mut seen = Pagination::new();
         loop {
             let value = match self.rpc(method, request).await {

@@ -112,6 +112,21 @@ impl StorageConfig {
         }
     }
 
+    /// Whether every member reaches the whole location, so it holds one
+    /// store, which the location marker at its root names (§20.3): a
+    /// Dropbox shared folder, a OneDrive folder, or an S3 bucket. Nobody else
+    /// reaches the Dropbox App folder, and a CloudKit store's zone is its own.
+    pub fn holds_one_store(&self) -> bool {
+        match self {
+            Self::S3 { .. } | Self::OneDrive { .. } => true,
+            Self::Dropbox { location, .. } => match location {
+                crate::DropboxLocation::SharedFolder { .. } => true,
+                crate::DropboxLocation::AppFolder => false,
+            },
+            Self::CloudKit { .. } => false,
+        }
+    }
+
     /// Access required to open this location.
     pub fn oauth_access(&self) -> Option<crate::OAuthAccess> {
         match self {

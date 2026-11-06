@@ -266,3 +266,94 @@ async fn a_reconnect_cut_past_its_point_of_no_return_finishes_once_sync_starts()
     assert!(!phone.candidate_kept());
     phone.handle.close().await.unwrap();
 }
+
+// Setting up a store in a Dropbox shared folder or a OneDrive folder, which
+// every member reaches whole, so each holds one store; the Dropbox App
+// folder, which nobody else reaches, holds several (§20.3, E5).
+
+fn own_location_required(error: &StorageSetupError) -> bool {
+    matches!(
+        error,
+        StorageSetupError::Storage(source)
+            if source.failure() == StorageFailure::OwnLocationRequired
+    )
+}
+
+struct Opened {
+    handle: CovenHandle,
+    directory: StoreDir,
+    _sign_in: crate::authentication::SignIn,
+    _root: tempfile::TempDir,
+}
+
+/// A new store on its own device, signed in to `storage`'s provider.
+async fn open(storage: Arc<MemoryStorage>) -> Opened {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    let sign_in = crate::authentication::SignIn::new().await;
+    let mut builder = sign_in.configure(builder(&app, &storage));
+    builder.authenticate(storage.config().oauth_access().unwrap()).await.unwrap();
+    let handle = builder.open(directory.id(), |_| ()).await.unwrap();
+    Opened { handle, directory, _sign_in: sign_in, _root: root }
+}
+
+async fn setup(
+    opened: &Opened,
+    location: StorageConfig,
+) -> Result<StorageSetup, StorageSetupError> {
+    opened.handle.setup_oauth_storage(location, "Laptop", |_| {}).await
+}
+
+/// Ana creates Household in her shared folder; Ben's Garden is then refused
+/// there before setup writes anything, and Ana's reconnect reads the marker.
+#[tokio::test]
+async fn a_store_is_created_only_in_a_folder_of_its_own() {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        let storage = Arc::new(MemoryStorage::builder().provider(provider).build().unwrap());
+        let location = storage.config();
+        let household = open(storage.clone()).await;
+        setup(&household, location.clone()).await.unwrap();
+        let garden = open(storage.clone()).await;
+        let before = storage.request_count();
+        let error = setup(&garden, location.clone()).await.unwrap_err();
+        assert!(own_location_required(&error), "{provider:?}: {error:?}");
+        assert_eq!(storage.request_count(), before, "{provider:?}");
+        assert_eq!(coven_storage::recorded_config(&garden.directory).unwrap(), None);
+        setup(&household, location).await.unwrap();
+        household.handle.close().await.unwrap();
+        garden.handle.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reconnect_refuses_a_folder_marker_naming_another_store() {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        let storage = Arc::new(MemoryStorage::builder().provider(provider).build().unwrap());
+        let location = storage.config();
+        let opened = open(storage.clone()).await;
+        setup(&opened, location.clone()).await.unwrap();
+        let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
+        storage.plant_location_marker(Some(other.to_string().into_bytes())).await;
+        let error = setup(&opened, location.clone()).await.unwrap_err();
+        assert!(own_location_required(&error), "{provider:?}: {error:?}");
+        opened.handle.close().await.unwrap();
+    }
+}
+
+/// Ana keeps Household and Recipes, neither shared, in her Dropbox App folder.
+#[tokio::test]
+async fn the_app_folder_holds_several_stores() {
+    let location = StorageConfig::Dropbox {
+        account_label: None,
+        location: coven_storage::DropboxLocation::AppFolder,
+    };
+    let storage = Arc::new(MemoryStorage::builder().location(location.clone()).build().unwrap());
+    let household = open(storage.clone()).await;
+    let recipes = open(storage.clone()).await;
+    setup(&household, location.clone()).await.unwrap();
+    setup(&recipes, location.clone()).await.unwrap();
+    setup(&household, location).await.unwrap();
+    household.handle.close().await.unwrap();
+    recipes.handle.close().await.unwrap();
+}

@@ -39,7 +39,7 @@ impl LiveS3 {
             .optional("COVEN_LIVE_S3_ENDPOINT")
             .map(|value| value.as_str().parse().expect("valid live endpoint"));
         // The suite's stores share the test bucket, each in its own folder
-        // at the root; none claims the bucket.
+        // at the root; none claims it with the location marker.
         let config = StorageConfig::S3 {
             bucket: settings.take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
             region: settings.take("COVEN_LIVE_S3_REGION").as_str().to_owned(),

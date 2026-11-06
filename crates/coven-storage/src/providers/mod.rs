@@ -24,8 +24,6 @@ mod s3;
 pub fn s3_member_policy(config: &crate::StorageConfig) -> Result<String, crate::StorageError> {
     s3::member_policy(config)
 }
-/// Whether a provider failure's native cause is a response the provider sent,
-/// even an error one (E5).
 /// Dropbox's API, for its RPC endpoints.
 pub(crate) const DROPBOX_API: &str = "https://api.dropboxapi.com/2";
 /// Dropbox's content endpoints, for uploads and downloads.
@@ -43,6 +41,8 @@ pub(crate) fn oauth_api(provider: crate::CloudProvider) -> Option<&'static str> 
     }
 }
 
+/// Whether a provider failure's native cause is a response the provider sent,
+/// even an error one (E5).
 pub(crate) fn response_arrived(source: &(dyn std::error::Error + 'static)) -> bool {
     #[cfg(target_vendor = "apple")]
     if let Some(native) = source.downcast_ref::<cloudkit::NativeError>() {

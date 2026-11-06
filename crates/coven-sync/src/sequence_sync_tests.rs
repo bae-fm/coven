@@ -347,6 +347,8 @@ impl Group {
         ana: &Device,
         access: coven_format::MemberAccess,
     ) -> Result<(), SyncError> {
+        // Setup claims a location that holds one store before slot 1.
+        self.storage.claim_location(self.store).await?;
         let key = self.ring.store_key_ids().next().unwrap();
         ana.sync
             .administer(StoreChange::CreateStore {

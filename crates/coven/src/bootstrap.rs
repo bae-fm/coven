@@ -557,7 +557,7 @@ async fn prepare_and_load(
             .await
             .map_err(SyncError::from)?;
         if matches!(admission, Admission::Restoring) {
-            storage.check_bucket(settings.id).await.map_err(SyncError::from)?;
+            storage.check_location_claim(settings.id).await.map_err(SyncError::from)?;
         }
         tracing::info!(
             ?provider,

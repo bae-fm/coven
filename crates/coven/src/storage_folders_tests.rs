@@ -155,6 +155,15 @@ impl StorageConnector for Connector {
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.storage.connect(config, auth, device, publications, cooldown, transfers).await
     }
+    async fn check_new_store(
+        &self,
+        config: StorageConfig,
+        auth: ProviderAuth,
+        store: StoreId,
+        waits: &coven_storage::SetupWaits,
+    ) -> Result<(), StorageError> {
+        self.storage.check_new_store(config, auth, store, waits).await
+    }
 }
 struct Fixture {
     _root: tempfile::TempDir,

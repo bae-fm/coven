@@ -9,8 +9,8 @@ An array of creates runs `create`, or for a copy-publication profile
 (`"copy": true`) stages each create as its own session and publishes it with
 `CopyPublication.publish`. An object `{"ops": [...]}` runs staged sessions and
 publications in the given arrival order through `CopyPublication.run`. An
-object `{"bucket": [...]}` runs setup and reconnect through `LocationClaim`; the
-key is the name the Rust differential sends. -/
+object `{"location": [...]}` runs setup and reconnect through `LocationClaim`,
+for the S3, Dropbox and OneDrive differentials alike. -/
 
 open Lean CovenStorage
 
@@ -108,7 +108,7 @@ private def recordings (requests : Array Json) : Except String Json := do
 private def run (j : Json) : Except String Json :=
   match j with
   | .arr requests => creates requests
-  | _ => match j.getObjVal? "bucket" with
+  | _ => match j.getObjVal? "location" with
     | .ok requests => do locationClaims (← requests.getArr?)
     | .error _ => match j.getObjVal? "recordings" with
       | .ok requests => do recordings (← requests.getArr?)

@@ -29,22 +29,8 @@ impl StorageConnections {
                 .await?;
             owner
                 .run_setup(journal, async |journal| {
-                    if journal.creating() {
-                        // Creating the store: the bucket must hold nothing
-                        // but this store (§20.3).
-                        let checking = owner.connector.check_new_s3_store(
-                            config.clone(),
-                            credentials.clone(),
-                            owner.store(),
-                            &waits,
-                        );
-                        setup_step::single(
-                            &mut progress,
-                            StorageSetupStep::CheckingBucket,
-                            checking,
-                        )
-                        .await?;
-                    }
+                    let auth = ProviderAuth::S3(credentials.clone());
+                    owner.check_new_location(journal, &config, auth, &waits, &mut progress).await?;
                     // §20.8's safety check: the effective settings must agree
                     // with what the service does, before the provider check
                     // and any commitment.

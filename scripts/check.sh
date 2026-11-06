@@ -540,7 +540,9 @@ proofs() {
         runner=$(runner storage createRunner)
         step "Rust / Lean provider create-once tests"
         COVEN_CREATE_LEAN="$runner" exact_ignored coven-storage --all-features -- \
-            providers::s3::tests::bucket_claim_tests::bucket_claims_match_lean \
+            providers::s3::tests::location_marker_tests::location_claims_match_lean \
+            providers::dropbox::tests::location_tests::location_claims_match_lean \
+            providers::onedrive::tests::location_tests::location_claims_match_lean \
             providers::s3::tests::gcs::lean_differential_s3_create \
             providers::onedrive::tests::upload_tests::lean_differential_onedrive_create \
             providers::onedrive::tests::upload_tests::lean_differential_onedrive_records_before_initiation

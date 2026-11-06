@@ -18,14 +18,14 @@ use coven_foundation::locks::{read_unpoisoned, write_unpoisoned};
 use coven_foundation::{clock::ClockRef, id_source::IdSourceRef};
 use std::fmt;
 
-#[path = "s3_bucket_claim.rs"]
-mod bucket_claim;
 #[path = "s3_clock.rs"]
 mod clock;
 #[path = "s3_destination.rs"]
 mod destination;
 #[path = "s3_error.rs"]
 mod error;
+#[path = "s3_location_marker.rs"]
+mod location_marker;
 #[path = "s3_publication.rs"]
 mod publication;
 use destination::Destination;
@@ -331,22 +331,22 @@ impl S3Storage {
 
 #[async_trait]
 impl ProviderOps for S3Storage {
-    async fn create_bucket_claim(
+    async fn create_location_marker(
         &self,
         store: coven_foundation::id_source::StoreId,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         self.create_at(
             None,
-            Destination::BucketClaim(store),
+            Destination::LocationMarker(store),
             store.to_string().as_bytes(),
             &ByteProgress::unread(),
             device,
         )
         .await
     }
-    async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
-        self.bucket_claim_bytes().await
+    async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
+        self.location_marker_bytes().await
     }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         credentials.validate()?;

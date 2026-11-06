@@ -4,7 +4,7 @@
 //! readable and deletable by the store's members. The root listing admits
 //! only the store's folder and the ownership marker.
 use super::*;
-use crate::bucket_claim::BUCKET_CLAIM;
+use crate::location_claim::LOCATION_MARKER;
 use crate::s3_detection::SIGNERS;
 use coven_foundation::id_source::StoreId;
 
@@ -73,7 +73,7 @@ impl S3Storage {
     async fn holds_only(&self, store: StoreId) -> Result<bool, StorageError> {
         let own = ObjectPrefix::all(store);
         self.root_admits(|entry| match entry {
-            RootEntry::Object(key) => key == BUCKET_CLAIM,
+            RootEntry::Object(key) => key == LOCATION_MARKER,
             RootEntry::Folder(folder) => folder == own.as_str(),
         })
         .await

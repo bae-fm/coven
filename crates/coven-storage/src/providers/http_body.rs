@@ -58,6 +58,25 @@ pub(super) async fn stream(
     )
 }
 
+/// At most the first `limit` bytes of a successful response's body, without
+/// reading the rest: enough to tell an object of `limit - 1` bytes from a
+/// longer one.
+pub(super) async fn bounded(
+    provider: CloudProvider,
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, StorageError> {
+    let mut response = checked(provider, response).await?;
+    let mut bytes = Vec::new();
+    while bytes.len() < limit {
+        match response.chunk().await.map_err(|error| transport(provider, error))? {
+            Some(chunk) => bytes.extend_from_slice(&chunk[..chunk.len().min(limit - bytes.len())]),
+            None => break,
+        }
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 #[path = "http_body_tests.rs"]
 mod tests;

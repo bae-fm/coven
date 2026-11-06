@@ -81,7 +81,7 @@ impl MemoryStorageBuilder {
             s3_key: Arc::new(Mutex::new(None)),
             account: Account::Owner,
             state: Arc::new(Mutex::new(MemoryState {
-                bucket_claim: None,
+                location_marker: None,
                 objects: BTreeMap::new(),
                 uploads: BTreeMap::new(),
                 next: 1,

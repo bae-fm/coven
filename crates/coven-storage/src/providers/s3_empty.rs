@@ -21,7 +21,7 @@ pub struct EmptiedS3Bucket {
 #[derive(Debug, thiserror::Error)]
 pub enum EmptyS3BucketError {
     /// The bucket's root holds something no store wrote: an object other
-    /// than the bucket marker, or a folder not named by a store id. Nothing
+    /// than the location marker, or a folder not named by a store id. Nothing
     /// was removed.
     #[error("the S3 bucket holds files no coven store wrote")]
     OtherFiles,
@@ -33,7 +33,7 @@ pub enum EmptyS3BucketError {
 
 /// Abort every unfinished upload and delete every object in the location's
 /// bucket, with the location's own settings, once its root shows it holds
-/// only stores' folders and the bucket marker.
+/// only stores' folders and the location marker.
 #[cfg(feature = "dev-tools")]
 pub(crate) async fn empty_bucket(
     config: StorageConfig,
@@ -59,7 +59,7 @@ pub(crate) async fn empty_bucket(
     .map_err(EmptyS3BucketError::Storage)?;
     let stores_only = storage
         .root_admits(|entry| match entry {
-            RootEntry::Object(key) => key == crate::bucket_claim::BUCKET_CLAIM,
+            RootEntry::Object(key) => key == crate::location_claim::LOCATION_MARKER,
             RootEntry::Folder(folder) => folder
                 .strip_suffix('/')
                 .is_some_and(|name| coven_foundation::id_source::canonical_uuid(name).is_ok()),

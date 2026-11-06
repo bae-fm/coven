@@ -549,7 +549,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         let result = async {
             invitation.check(&self.config())?;
             self.send(RequestKind::Account, 0, self.provider.join(invitation)).await?;
-            self.check_bucket(store).await?;
+            self.check_location_claim(store).await?;
             self.status(&ObjectPath::floor(store)).await?;
             Ok(())
         }
@@ -645,10 +645,10 @@ impl<P: ?Sized> StorageConnection<P> {
     }
 }
 
-// The connection's bucket claim requests and the in-memory connection's own
+// The connection's location claim requests and the in-memory connection's own
 // calls read its private parts, so they live beneath it.
-#[path = "bucket_claim.rs"]
-pub(crate) mod bucket_claim;
+#[path = "location_claim.rs"]
+pub(crate) mod location_claim;
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "test_utils.rs"]
 pub mod test_utils;

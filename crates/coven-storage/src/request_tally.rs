@@ -12,9 +12,9 @@ use std::{fmt, sync::Mutex, time::Duration};
 pub enum RequestKind {
     /// An exact metadata lookup.
     Status,
-    /// A whole-object or ranged read, the bucket marker's included.
+    /// A whole-object or ranged read, the location marker's included.
     Read,
-    /// A single-request object creation, the bucket marker's included.
+    /// A single-request object creation, the location marker's included.
     Create,
     /// A conditional single-request floor replacement.
     Replace,

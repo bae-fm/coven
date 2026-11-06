@@ -896,11 +896,13 @@ pub trait StorageConnector: Send + Sync {
     /// location whose root holds anything outside the store's folder or the
     /// `coven-location` marker (§20.3).
     /// Reads only. A connector without that provider refuses this capability.
+    /// A rate-limited listing is sent again while setup's `waits` allow.
     async fn check_new_store(
         &self,
         _config: StorageConfig,
         _auth: ProviderAuth,
         _store: StoreId,
+        _waits: &SetupWaits,
     ) -> Result<(), StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }

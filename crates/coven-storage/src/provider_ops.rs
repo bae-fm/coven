@@ -12,19 +12,21 @@ pub trait ProviderOps: Send + Sync {
     fn config(&self) -> StorageConfig;
     /// Largest complete body accepted by `create` or `replace`.
     fn single_request_limit(&self) -> u64;
-    /// Create D10's bucket-root marker with the provider's create-once primitive.
-    /// Only first setup on an S3 location calls this operation.
-    /// Anything it stages sits in `device`'s reserved folder (D10).
-    async fn create_bucket_claim(
+    /// Create D10's location marker at the location's root with the
+    /// provider's create-once request. Only first setup at a location that
+    /// holds one store calls this operation. Anything it stages sits in
+    /// `device`'s reserved folder (D10).
+    async fn create_location_marker(
         &self,
         _store: coven_foundation::id_source::StoreId,
         _device: DeviceId,
     ) -> Result<(), StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
-    /// Read the complete bucket marker, bounded to D10's UUID byte count.
-    /// Only S3 locations call this operation.
-    async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
+    /// Read the complete location marker, bounded to D10's UUID byte count.
+    /// Only a location that holds one store calls this operation. A marker
+    /// read that finds nothing confirms the location is still there first.
+    async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
     /// Signed-in account; coven shares nothing on S3, so it has none.

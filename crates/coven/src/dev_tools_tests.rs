@@ -72,8 +72,8 @@ async fn serve(root: Vec<String>, keys: Vec<String>) -> (String, Arc<Mutex<Vec<S
 
 #[tokio::test]
 async fn a_bucket_holding_only_stores_is_emptied_through_the_production_connector() {
-    let keys = vec!["coven-bucket".to_owned(), format!("{STORE}/floor")];
-    let root = vec!["coven-bucket".to_owned(), format!("{STORE}/")];
+    let keys = vec!["coven-location".to_owned(), format!("{STORE}/floor")];
+    let root = vec!["coven-location".to_owned(), format!("{STORE}/")];
     let (endpoint, deleted) = serve(root, keys.clone()).await;
     let (location, credentials) = location(&endpoint);
 
@@ -85,7 +85,7 @@ async fn a_bucket_holding_only_stores_is_emptied_through_the_production_connecto
 
 #[tokio::test]
 async fn a_bucket_holding_other_files_is_refused_before_anything_is_removed() {
-    for root in [vec!["notes.txt"], vec!["music/"], vec!["coven-bucket", "0f8e/"]] {
+    for root in [vec!["notes.txt"], vec!["music/"], vec!["coven-location", "0f8e/"]] {
         let root: Vec<String> = root.into_iter().map(str::to_owned).collect();
         let (endpoint, deleted) = serve(root.clone(), vec!["notes.txt".to_owned()]).await;
         let (location, credentials) = location(&endpoint);

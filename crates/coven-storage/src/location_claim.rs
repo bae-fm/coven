@@ -1,27 +1,33 @@
-//! Bucket ownership is provider metadata, separate from encrypted store paths.
+//! A location every member reaches whole holds one store, which the location
+//! marker at its root names (§20.3). The marker is provider metadata,
+//! separate from encrypted store paths.
 
-use crate::{ProviderOps, Storage, StorageConfig, StorageConnection, StorageError, StorageFailure};
+use crate::{ProviderOps, Storage, StorageConnection, StorageError, StorageFailure};
 use coven_foundation::id_source::StoreId;
 
-pub(crate) const BUCKET_CLAIM: &str = "coven-bucket";
-pub(crate) const BUCKET_CLAIM_SIZE: usize = 36;
+pub(crate) const LOCATION_MARKER: &str = "coven-location";
+pub(crate) const LOCATION_MARKER_SIZE: usize = 36;
 
 pub(crate) fn occupied() -> StorageError {
     StorageFailure::OwnLocationRequired.into()
 }
 
-impl<P: ProviderOps + ?Sized> StorageConnection<P> {
-    /// Every S3 store has its bucket to itself (§20.7).
-    fn needs_bucket_claim(&self) -> bool {
-        matches!(self.config(), StorageConfig::S3 { .. })
+/// Refuse a marker whose size isn't a store id's before reading its bytes:
+/// it is someone else's object.
+pub(crate) fn check_marker_size(size: u64) -> Result<(), StorageError> {
+    if size != LOCATION_MARKER_SIZE as u64 {
+        return Err(occupied());
     }
+    Ok(())
+}
 
-    /// First setup claims the bucket after provider validation and before
+impl<P: ProviderOps + ?Sized> StorageConnection<P> {
+    /// First setup claims the location after provider validation and before
     /// publishing store state. An occupied marker is accepted only when its
     /// exact bytes name this store. No failure removes or replaces the marker.
-    /// Non-S3 locations need no marker.
-    pub async fn claim_bucket(&self, store: StoreId) -> Result<(), StorageError> {
-        if !self.needs_bucket_claim() {
+    /// A location that holds several stores has no marker.
+    pub async fn claim_location(&self, store: StoreId) -> Result<(), StorageError> {
+        if !self.config().holds_one_store() {
             return Ok(());
         }
         // A resend that finds the marker occupied reads it, as any occupied
@@ -32,8 +38,8 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                 self.observed(
                     self.send(
                         crate::RequestKind::Create,
-                        crate::bucket_claim::BUCKET_CLAIM_SIZE as u64,
-                        self.provider.create_bucket_claim(store, self.device),
+                        LOCATION_MARKER_SIZE as u64,
+                        self.provider.create_location_marker(store, self.device),
                     )
                     .await,
                 )
@@ -43,24 +49,25 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         match created {
             Ok(()) => Ok(()),
             Err(error) if error.own_failure() == Some(StorageFailure::AlreadyExists) => {
-                self.check_bucket(store).await
+                self.check_location_claim(store).await
             }
             Err(error) => Err(error),
         }
     }
 
-    /// Reconnect, restore and join read the exact bucket marker without
+    /// Reconnect, restore and join read the exact location marker without
     /// listing the root or claiming an absent marker. Provider errors survive;
     /// missing, malformed and other-store markers refuse this connection.
-    pub async fn check_bucket(&self, store: StoreId) -> Result<(), StorageError> {
-        if !self.needs_bucket_claim() {
+    pub async fn check_location_claim(&self, store: StoreId) -> Result<(), StorageError> {
+        if !self.config().holds_one_store() {
             return Ok(());
         }
         let read = self
             .resent(move || async move {
                 self.cooling()?;
-                let read =
-                    self.send(crate::RequestKind::Read, 0, self.provider.read_bucket_claim()).await;
+                let read = self
+                    .send(crate::RequestKind::Read, 0, self.provider.read_location_marker())
+                    .await;
                 if let Ok(bytes) = &read {
                     self.received(bytes.len() as u64);
                 }
@@ -77,5 +84,5 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
 }
 
 #[cfg(test)]
-#[path = "bucket_claim_tests.rs"]
+#[path = "location_claim_tests.rs"]
 mod tests;

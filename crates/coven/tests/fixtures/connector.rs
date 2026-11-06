@@ -162,13 +162,13 @@ impl coven_storage::providers::StorageConnector for Connector {
         }
         self.storage.detect_s3(config, credentials, store, runs, waits).await
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: coven_storage::S3Credentials,
+        auth: coven_storage::ProviderAuth,
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.storage.check_new_s3_store(config, credentials, store, waits).await
+        self.storage.check_new_store(config, auth, store, waits).await
     }
 }

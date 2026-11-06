@@ -1,12 +1,12 @@
 //! The in-memory provider as an application's storage connector: settings
 //! saved through the builder's connector hook, S3 detection that conforms to
-//! any settings, and the S3 new-store bucket check.
+//! any settings, and the new-store check of a location that holds one store.
 use super::*;
 
 impl MemoryStorage {
-    /// Replace or remove the bucket marker as an external actor, without a request.
-    pub async fn plant_bucket_claim(&self, bytes: Option<Vec<u8>>) {
-        self.provider.state.lock().await.bucket_claim = bytes;
+    /// Replace or remove the location marker as an external actor, without a request.
+    pub async fn plant_location_marker(&self, bytes: Option<Vec<u8>>) {
+        self.provider.state.lock().await.location_marker = bytes;
     }
     /// Bind a simulated installation to the real synchronization gate, preserving
     /// this provider's credentials, durable objects and request observations.
@@ -150,18 +150,19 @@ impl crate::providers::StorageConnector for MemoryStorage {
         let cleaned = std::iter::once(runs.run).chain(runs.earlier.iter().copied()).collect();
         crate::S3DetectionRun { detection, cleaned }
     }
-    /// Memory's objects are one bucket, which another store's object
+    /// Memory's objects are one location, which another store's object
     /// occupies.
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        _credentials: crate::S3Credentials,
+        _auth: crate::ProviderAuth,
         store: coven_foundation::id_source::StoreId,
         _waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
         config.validate()?;
-        if config.provider() != crate::CloudProvider::S3 {
-            return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
+        if !config.holds_one_store() {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("the location holds several stores, so nothing checks it"));
         }
         if self.provider.state.lock().await.objects.keys().any(|path| path.store() != store) {
             return Err(StorageFailure::OwnLocationRequired.into());

@@ -485,7 +485,7 @@ impl StorageConnections {
                 self.transfers.clone(),
             )
             .await?;
-        storage.check_bucket(self.store()).await?;
+        storage.check_location_claim(self.store()).await?;
         s3::end_detection_runs(&self.database, self.store(), &data.location, &storage).await?;
         self.attach(live, storage).await
     }
@@ -542,6 +542,9 @@ impl StorageConnections {
             };
             let journal = owner.begin_setup(&device_name, &auth.credentials()).await?;
             let setup = owner.run_setup(journal, async |journal| {
+                owner
+                    .check_new_location(journal, &storage, auth.clone(), &waits, &mut progress)
+                    .await?;
                 let (connector, cooldown) = (owner.connector.as_ref(), &owner.waits);
                 let (location, signed_in) = (&storage, &auth);
                 let reading = waits.resend(owner.clock.as_ref(), move || {
@@ -617,6 +620,26 @@ impl StorageConnections {
                 .await
         })
         .await
+    }
+
+    /// Before a store's first setup at a location every member reaches
+    /// whole, check that it holds nothing but this store (§20.3). Reads only,
+    /// so it runs before setup's first write; a location that holds several
+    /// stores, and a reconnect, check nothing here.
+    async fn check_new_location(
+        &self,
+        journal: &coven_sync::SetupJournal,
+        config: &StorageConfig,
+        auth: ProviderAuth,
+        waits: &SetupWaits,
+        progress: &mut ProgressReport<StorageSetupStep>,
+    ) -> Result<(), StorageSetupError> {
+        if !journal.creating() || !config.holds_one_store() {
+            return Ok(());
+        }
+        let checking = self.connector.check_new_store(config.clone(), auth, self.store(), waits);
+        setup_step::single(progress, StorageSetupStep::CheckingLocation, checking).await?;
+        Ok(())
     }
 
     async fn check_location(&self, config: &StorageConfig) -> Result<(), StorageSetupError> {

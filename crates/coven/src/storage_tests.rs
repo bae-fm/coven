@@ -150,14 +150,14 @@ impl StorageConnector for TrackingConnector {
     ) -> coven_storage::S3DetectionRun {
         self.storage.detect_s3(config, credentials, store, runs, waits).await
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: coven_storage::S3Credentials,
+        auth: coven_storage::ProviderAuth,
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.storage.check_new_s3_store(config, credentials, store, waits).await
+        self.storage.check_new_store(config, auth, store, waits).await
     }
 }
 
@@ -407,8 +407,8 @@ async fn setup_reports_each_step_it_runs() {
     assert_eq!(
         recorded_setup(&f, &f.handle, &f.recorder).await,
         [
-            (CheckingBucket, 0, 1),
-            (CheckingBucket, 1, 1),
+            (CheckingLocation, 0, 1),
+            (CheckingLocation, 1, 1),
             (DetectingSettings, 0, 1),
             (DetectingSettings, 1, 1),
             (Connecting, 0, 1),
@@ -608,14 +608,14 @@ impl StorageConnector for Locations {
     ) -> coven_storage::S3DetectionRun {
         self.0[0].detect_s3(config, credentials, store, runs, waits).await
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: coven_storage::S3Credentials,
+        auth: coven_storage::ProviderAuth,
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.0[0].check_new_s3_store(config, credentials, store, waits).await
+        self.0[0].check_new_store(config, auth, store, waits).await
     }
 }
 

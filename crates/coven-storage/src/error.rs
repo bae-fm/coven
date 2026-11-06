@@ -46,11 +46,12 @@ pub enum StorageFailure {
     /// S3 rejected the device clock after one retry with the offset its
     /// response stated (§20.7).
     ClockSkew,
-    /// The S3 bucket holds something besides this store, so the store
-    /// can't have it to itself (§20.3). At first setup: an object or folder
-    /// outside the store's own, or a bucket marker that doesn't name it. At
-    /// a reconnect, restore or join: a marker that is missing, malformed or
-    /// names another store.
+    /// Every member reaches the whole location (a Dropbox shared folder, a
+    /// OneDrive folder, or an S3 bucket), so a store there needs it to
+    /// itself, and it holds something besides this store (§20.3). At first
+    /// setup: an object or folder outside the store's own, or a location
+    /// marker that doesn't name it. At a reconnect, restore or join: a marker
+    /// that is missing, malformed or names another store.
     OwnLocationRequired,
     /// The provider has no space left.
     QuotaExceeded,

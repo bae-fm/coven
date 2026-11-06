@@ -268,6 +268,18 @@ fn ascii_json(value: &Value) -> String {
     }
     result
 }
+/// The file metadata a download carries in its `Dropbox-API-Result` header.
+fn download_metadata(response: &reqwest::Response) -> Result<Value, StorageError> {
+    serde_json::from_str(
+        response
+            .headers()
+            .get("Dropbox-API-Result")
+            .ok_or(StorageFailure::Protocol.with_source("Dropbox omitted download metadata"))?
+            .to_str()
+            .map_err(|e| StorageFailure::Protocol.with_source(e))?,
+    )
+    .map_err(|e| StorageFailure::Protocol.with_source(e))
+}
 fn check_file(value: &Value, path: &ObjectPath, size: u64) -> Result<(), StorageError> {
     if http::string(value, "path_lower")? != path.absolute() || value["size"].as_u64() != Some(size)
     {
@@ -283,6 +295,16 @@ impl ProviderOps for DropboxStorage {
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;
         Ok(())
+    }
+    async fn create_location_marker(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        _device: coven_foundation::id_source::DeviceId,
+    ) -> Result<(), StorageError> {
+        self.create_marker(store).await
+    }
+    async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
+        self.marker_bytes().await
     }
 
     fn config(&self) -> StorageConfig {
@@ -354,16 +376,7 @@ impl ProviderOps for DropboxStorage {
             .await?,
         )
         .await?;
-        let value: Value = serde_json::from_str(
-            response
-                .headers()
-                .get("Dropbox-API-Result")
-                .ok_or(StorageFailure::Protocol.with_source("Dropbox omitted download metadata"))?
-                .to_str()
-                .map_err(|e| StorageFailure::Protocol.with_source(e))?,
-        )
-        .map_err(|e| StorageFailure::Protocol.with_source(e))?;
-        let metadata = super::object_metadata::dropbox(path, &value)?;
+        let metadata = super::object_metadata::dropbox(path, &download_metadata(&response)?)?;
         super::http_body::stream(PROVIDER, response, metadata, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
@@ -618,6 +631,9 @@ impl ProviderOps for DropboxStorage {
 
 #[path = "dropbox_listing.rs"]
 mod listing;
+
+#[path = "dropbox_location.rs"]
+mod location;
 
 #[cfg(test)]
 #[path = "dropbox_tests.rs"]

@@ -172,12 +172,18 @@ pub(super) async fn endpoint(
                     );
                     response
                 }
+                None if state.folders.contains(&path) => response(
+                    409,
+                    json!({"error_summary":"path/not_file/...","error":{".tag":"path","path":{".tag":"not_file"}}})
+                        .to_string(),
+                ),
                 None => error("path/not_found/..."),
             }
         }
         "/2/files/list_folder" | "/2/files/list_folder/continue" => {
             if uri.path() == "/2/files/list_folder" {
-                assert!(!path.is_empty());
+                // Only first setup lists the root, and never recursively.
+                assert!(!path.is_empty() || arg["recursive"] == false);
                 state.list_prefix = format!("{path}/");
                 state.list_recursive = arg["recursive"].as_bool().unwrap();
             }
@@ -606,11 +612,16 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
 #[path = "dropbox_access_tests.rs"]
 mod access_tests;
 
+#[path = "dropbox_location_tests.rs"]
+mod location_tests;
+
 #[tokio::test]
 async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let owner = provider(&server.url);
+    // The owner's setup claimed the shared folder; joining reads its marker.
+    owner.claim_location(STORE_ID).await.unwrap();
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     owner.create(&path, b"first").await.unwrap();
     let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {

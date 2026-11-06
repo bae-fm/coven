@@ -8,7 +8,7 @@ mod config;
 mod provider_access;
 pub use provider_access::*;
 mod connection;
-use connection::bucket_claim;
+use connection::location_claim;
 mod connection_credentials;
 mod cooldown;
 pub use cooldown::{

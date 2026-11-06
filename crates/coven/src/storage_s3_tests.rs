@@ -62,14 +62,14 @@ impl StorageConnector for Overwrites {
             }),
         )
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: S3Credentials,
+        auth: coven_storage::ProviderAuth,
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.0.check_new_s3_store(config, credentials, store, waits).await
+        self.0.check_new_store(config, auth, store, waits).await
     }
 }
 
@@ -110,14 +110,14 @@ impl StorageConnector for BucketState {
         }
         run
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: S3Credentials,
+        auth: coven_storage::ProviderAuth,
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.storage.check_new_s3_store(config, credentials, store, waits).await
+        self.storage.check_new_store(config, auth, store, waits).await
     }
 }
 
@@ -273,14 +273,14 @@ impl StorageConnector for ConcurrentSetup {
     ) -> coven_storage::S3DetectionRun {
         self.storage.detect_s3(config, credentials, store, runs, waits).await
     }
-    async fn check_new_s3_store(
+    async fn check_new_store(
         &self,
         config: StorageConfig,
-        credentials: S3Credentials,
+        auth: coven_storage::ProviderAuth,
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.storage.check_new_s3_store(config, credentials, store, waits).await?;
+        self.storage.check_new_store(config, auth, store, waits).await?;
         self.listed.wait().await;
         Ok(())
     }
@@ -322,7 +322,7 @@ async fn a_store_is_created_only_in_a_bucket_of_its_own() {
         assert!(own_location_required(&error), "{location:?}: {error:?}");
         assert_eq!(storage.request_count(), before);
         assert_eq!(coven_storage::recorded_config(&second.directory).unwrap(), None);
-        // Reconnecting reads the bucket marker, without listing the root.
+        // Reconnecting reads the location marker, without listing the root.
         setup(&first.handle, location).await.unwrap();
         first.handle.close().await.unwrap();
         second.handle.close().await.unwrap();
@@ -330,11 +330,11 @@ async fn a_store_is_created_only_in_a_bucket_of_its_own() {
 }
 
 /// Ana's first R2 setup claims its bucket, then fails reading the floor:
-/// it is past its point of no return, so it keeps its bucket claim and
+/// it is past its point of no return, so it keeps its location claim and
 /// commits nothing yet. Once storage answers, the loop setup started
 /// finishes it, and a later setup reconnects.
 #[tokio::test]
-async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
+async fn a_setup_failing_past_its_location_claim_finishes_through_the_loop() {
     let storage = Arc::new(MemoryStorage::builder().location(r2()).build().unwrap());
     let opened = open(storage.clone()).await;
     storage
@@ -348,7 +348,7 @@ async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
         .await;
     assert!(setup(&opened.handle, r2()).await.is_err());
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
-    storage.check_bucket(opened.directory.id()).await.unwrap();
+    storage.check_location_claim(opened.directory.id()).await.unwrap();
     storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     opened.handle.retry_now().await.unwrap().await;
     let setups = opened
@@ -375,11 +375,11 @@ async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
     let opened = open(storage.clone()).await;
     setup(&opened.handle, r2()).await.unwrap();
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
-    storage.plant_bucket_claim(Some(other.to_string().into_bytes())).await;
+    storage.plant_location_marker(Some(other.to_string().into_bytes())).await;
     let error = setup(&opened.handle, r2()).await.unwrap_err();
     assert!(own_location_required(&error), "{error:?}");
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2()));
-    storage.check_bucket(other).await.unwrap();
+    storage.check_location_claim(other).await.unwrap();
     opened.handle.close().await.unwrap();
 }
 

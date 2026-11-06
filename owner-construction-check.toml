@@ -1325,6 +1325,10 @@ tables = [
 "crates/coven-storage/src/providers/connector.rs" = [
     "ProviderConnector::with_folders",
     "ProviderConnector::connect",
+    # A new store's check of its location reaches it with setup's
+    # credentials before any connection exists, as S3's own-bucket check
+    # does (§20.3).
+    "ProviderConnector::check_new_store",
     "ProviderConnector::new",
     # A connector makes each connection, in every connector.
     "StorageConnector::connect",

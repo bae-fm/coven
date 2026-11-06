@@ -93,17 +93,17 @@ impl Fixture {
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
         )
-        .check_new_s3_store(
+        .check_new_store(
             StorageConfig::S3 {
                 bucket: "bucket".into(),
                 region: "auto".into(),
                 endpoint: Some(self.server.url.parse().unwrap()),
                 profile,
             },
-            S3Credentials {
+            crate::ProviderAuth::S3(S3Credentials {
                 access_key_id: "access".into(),
                 secret_access_key: SecretText::new("secret".into()),
-            },
+            }),
             STORE_ID,
             &crate::SetupWaits::default(),
         )
@@ -131,7 +131,7 @@ async fn a_bucket_holding_only_this_store_admits_its_creation() {
         vec![],
         vec![vec![own()]],
         vec![vec![own()], vec![]],
-        vec![vec!["coven-bucket".into()], vec![own()]],
+        vec![vec!["coven-location".into()], vec![own()]],
     ] {
         let fixture = Fixture::new(pages.clone()).await;
         fixture.check(R2).await.unwrap();
@@ -150,7 +150,7 @@ async fn a_bucket_holding_anything_else_refuses_creation_before_any_write() {
         vec![vec![other()]],
         vec![vec![own(), other()]],
         vec![vec!["notes.txt".into()]],
-        vec![vec!["coven-bucket/".into()]],
+        vec![vec!["coven-location/".into()]],
         vec![vec!["Coven-bucket".into()]],
         vec![vec![own()], vec![other()]],
     ] {
@@ -240,7 +240,12 @@ impl Served {
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
         )
-        .check_new_s3_store(self.location(), credentials(), STORE_ID, &crate::SetupWaits::default())
+        .check_new_store(
+            self.location(),
+            crate::ProviderAuth::S3(credentials()),
+            STORE_ID,
+            &crate::SetupWaits::default(),
+        )
         .await
     }
     /// The store's connection to the bucket.
@@ -290,10 +295,10 @@ async fn setup_accepts_an_empty_bucket_and_claims_it() {
     for service in SERVICES {
         let served = Served::new(service, &[]).await;
         served.check_new().await.unwrap();
-        served.connection().claim_bucket(STORE_ID).await.unwrap();
+        served.connection().claim_location(STORE_ID).await.unwrap();
         assert_eq!(
             served.objects(),
-            BTreeMap::from([("coven-bucket".to_owned(), STORE_ID.to_string().into_bytes())]),
+            BTreeMap::from([("coven-location".to_owned(), STORE_ID.to_string().into_bytes())]),
             "{:?}",
             served.profile
         );
@@ -306,26 +311,26 @@ async fn setup_accepts_an_empty_bucket_and_claims_it() {
 #[tokio::test]
 async fn a_librarys_own_objects_dont_block_its_reconnect() {
     let own = [
-        "coven-bucket".to_owned(),
+        "coven-location".to_owned(),
         ObjectPath::floor(STORE_ID).as_str().to_owned(),
         ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN).as_str().to_owned(),
         format!("{STORE_ID}/.coven-check/{}/marker-before", uuid::Uuid::from_bytes([7; 16])),
     ];
     for service in SERVICES {
         let served = Served::new(service, &own).await;
-        served.state.lock().unwrap().objects.get_mut("coven-bucket").unwrap().bytes =
+        served.state.lock().unwrap().objects.get_mut("coven-location").unwrap().bytes =
             STORE_ID.to_string().into_bytes();
         let connection = served.connection();
-        connection.check_bucket(STORE_ID).await.unwrap();
+        connection.check_location_claim(STORE_ID).await.unwrap();
         assert_eq!(
             served.state.lock().unwrap().requests,
-            [(axum::http::Method::GET, "/bucket/coven-bucket".to_owned())],
+            [(axum::http::Method::GET, "/bucket/coven-location".to_owned())],
             "{:?}",
             served.profile
         );
         let held = served.objects();
         served.check_new().await.unwrap();
-        connection.claim_bucket(STORE_ID).await.unwrap();
+        connection.claim_location(STORE_ID).await.unwrap();
         assert_eq!(served.objects(), held, "{:?}", served.profile);
     }
 }

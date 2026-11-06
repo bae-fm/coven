@@ -190,7 +190,7 @@ mod location {
     async fn a_bucket_holding_only_stores_is_emptied_marker_and_all() {
         let other = coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16]));
         let keys = [
-            "coven-bucket".to_owned(),
+            "coven-location".to_owned(),
             ObjectPath::floor(STORE_ID).as_str().to_owned(),
             ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN).as_str().to_owned(),
             ObjectPath::floor(other).as_str().to_owned(),
@@ -207,7 +207,7 @@ mod location {
     #[tokio::test]
     async fn a_bucket_holding_other_files_is_refused_before_anything_is_removed() {
         for other in ["notes.txt", "music/song.flac", "not-a-store/floor"] {
-            let keys = ["coven-bucket".to_owned(), other.to_owned()];
+            let keys = ["coven-location".to_owned(), other.to_owned()];
             let (state, server) = bucket(&keys).await;
 
             let error = empty(&server.url).await.unwrap_err();

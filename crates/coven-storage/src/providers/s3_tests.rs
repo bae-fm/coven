@@ -878,8 +878,8 @@ mod profile_tests;
 #[path = "s3_versioning_tests.rs"]
 mod versioning_tests;
 
-#[path = "s3_bucket_claim_tests.rs"]
-mod bucket_claim_tests;
+#[path = "s3_location_marker_tests.rs"]
+mod location_marker_tests;
 
 #[path = "s3_left_uploads_tests.rs"]
 mod left_uploads_tests;

@@ -51,7 +51,7 @@ pub(crate) async fn reset_device(
     )?;
     // Unlocking must succeed; loading acquires any store key it lacks.
     builder.keys = SessionSource::Session(keys);
-    // Check bucket ownership and slot 1 before anything is loaded.
+    // Check the location marker and slot 1 before anything is loaded.
     let storage = builder
         .connector()
         .connect(
@@ -69,7 +69,7 @@ pub(crate) async fn reset_device(
         )
         .await
         .map_err(SyncError::from)?;
-    storage.check_bucket(store).await.map_err(SyncError::from)?;
+    storage.check_location_claim(store).await.map_err(SyncError::from)?;
     storage
         .status(&coven_storage::ObjectPath::slot(store, std::num::NonZeroU64::MIN))
         .await

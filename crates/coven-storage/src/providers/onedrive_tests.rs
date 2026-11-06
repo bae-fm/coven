@@ -280,7 +280,7 @@ pub(super) async fn endpoint(
         };
         let path = if base.is_empty() { relative.to_owned() } else { format!("{base}/{relative}") };
         if method == Method::PUT || method == Method::POST {
-            let parent = path.rsplit_once('/').unwrap().0;
+            let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
             if !state.dirs.values().any(|directory| directory == parent) {
                 return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
             }
@@ -655,6 +655,8 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let owner = provider(&server.url);
+    // The owner's setup claimed the folder; joining reads its marker.
+    owner.claim_location(STORE_ID).await.unwrap();
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     owner.create(&path, b"first").await.unwrap();
     let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
@@ -712,6 +714,9 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
 
 #[path = "onedrive_access_tests.rs"]
 mod access_tests;
+
+#[path = "onedrive_location_tests.rs"]
+mod location_tests;
 
 #[tokio::test]
 async fn missing_container_is_not_an_empty_store_or_a_missing_object() {

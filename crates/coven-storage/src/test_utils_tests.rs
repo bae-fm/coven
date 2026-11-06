@@ -434,6 +434,8 @@ fn sharing_configs() -> [StorageConfig; 3] {
 async fn recipient_access_follows_account_grants_and_acceptance() {
     for config in sharing_configs() {
         let owner = MemoryStorage::builder().location(config).build().unwrap();
+        // The owner's setup claimed the location; joining reads its marker.
+        owner.claim_location(STORE_ID).await.unwrap();
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         owner.create(&path, b"first").await.unwrap();
         let member = MemoryStorage::for_recipient(&owner, "member").unwrap();
@@ -501,6 +503,7 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
 #[tokio::test]
 async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() {
     let owner = MemoryStorage::builder().provider(crate::CloudProvider::Dropbox).build().unwrap();
+    owner.claim_location(STORE_ID).await.unwrap();
     let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
         panic!()
     };

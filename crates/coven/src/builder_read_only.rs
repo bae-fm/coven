@@ -52,7 +52,7 @@ impl CovenBuilder {
                     )
                     .await
                     .map_err(SyncError::from)?;
-                storage.check_bucket(store).await.map_err(SyncError::from)?;
+                storage.check_location_claim(store).await.map_err(SyncError::from)?;
                 Some(storage)
             }
             None => None,

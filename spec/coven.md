@@ -8764,10 +8764,12 @@ at most one store's setup passes per location, however far listings lag
 The marker relies only on create-once and exact reads, which every provider
 must supply (§20.1), never on a listing. On Dropbox its create is an upload in
 mode `add` that never renames, refused with 409 `path/conflict` when the name is
-taken. On OneDrive it is a temporary copied to the marker's name with
-`conflictBehavior=fail`, refused with 409 when the name is taken (Appendix E.2).
-On S3 it is the profile's create (§20.7). Writers on two accounts racing one
-name in a shared folder kept exactly one winner on both Dropbox and OneDrive
+taken. On OneDrive it is one `PUT` of its bytes with `If-None-Match: *` and
+`conflictBehavior=fail`, as for any small object (§20.6), refused with 409
+`nameAlreadyExists` when the name is taken. On S3 it is the profile's create
+(§20.7). Appendix E.2 gives the Dropbox and OneDrive calls of the whole check.
+Writers on two accounts racing one name in a shared folder kept exactly one
+winner on both Dropbox and OneDrive
 ([probes](storage-certification.md#cross-account-create-once-probes-2026-10-16)).
 Measured listings lagged by up to 1.4 s on Dropbox and 1.9 s on OneDrive, and
 no measurement bounds the lag, so a listing alone can't hold the rule.
@@ -10107,6 +10109,19 @@ folder, without a shared-namespace path-root header. Dropbox refuses sharing
 inside that folder, so `create_invite` returns a typed error before changing the
 provider. OneDrive, CloudKit and S3 have no such choice; their access rules are
 those of §20.
+
+**A location of its own.** On a Dropbox shared folder and a OneDrive folder,
+first setup lists the location's immediate children: Dropbox's
+`files/list_folder` at the namespace's root, not recursive, and Graph's
+`children` of the configured folder, following every page of each (§20.3).
+Both providers match names without regard to case, so the check does too: a
+folder named with the store id in capitals is the store's own folder, since
+writes to `<store>/` land in it. Reconnecting reads the marker with
+`files/download`, or with the item's metadata and then its download URL, and
+refuses a folder at its name, or a size other than 36 bytes, before reading
+it. A marker read that finds
+nothing first confirms the location is still there, as an exact status does
+(§20.5), so a shared folder or folder that is gone keeps its own cause.
 
 **OneDrive floor replacement.** OneDrive's direct `PUT …/content` with
 `If-Match` let two writers holding one eTag both succeed, so the floor is
