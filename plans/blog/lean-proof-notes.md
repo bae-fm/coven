@@ -200,6 +200,70 @@ feed the same generated histories to the real code and to the runner and compare
 outcomes, retention decisions, which snapshot a reload picks, identity verdicts, file status. About forty
 of these run in CI.
 
+## Worked example: an upload stuck at a shared name (November)
+
+As of 2026-11-06, partway through; what has landed and what hasn't is marked below. The storage post
+tells the provider side of this.
+
+**The model.** `UploadSession.lean` (`spec/proofs/storage/CovenStorage/`) models one upload going up in
+parts through a provider session: the upload worker's runs, crashes, a provider that expires sessions,
+and the retry of each failure. The upload's place is a parameter: either the device's own, where no
+other device's upload goes, or shared, like a slot every device claims.
+
+- The first version took "the provider begins a session" and "the device records it" as one step. So a
+  session the provider began that the device never recorded couldn't happen in the model.
+- The next version split them. The device's row records a *plan* naming where the session will be,
+  and marks it before the request that may begin it. `begin` became its own step with a lost reply as a
+  fault: the provider begins the session, the reply never arrives, and the session is a *stray*. A crash
+  after the start leaves one too.
+- The model proves those two steps are the only ones that leave a stray (`steps_stray_le`), and that
+  every stray sits at the place of the marked plan the row still records (`stray_named`).
+
+**What the model said.** At the device's own place, every session there is this upload's, so the next
+attempt ends them all first (`open_sweeps`). At a shared place nothing tells a stray from another
+device's session, and the model can only fail. `marked_shared_never` states it: a marked plan at a
+shared place fails with the class that never retries. That theorem describes what the design does, and
+stating it as a theorem put the stuck case in writing: one lost reply, or one crash at the wrong moment,
+and the upload never goes out.
+
+**Narrowing it.** Before deciding what to do, the model was made exact about when a plan is marked,
+and that found two bugs in the code, both fixed:
+
+- The mark lived only in memory, so after a restart every plan at a shared slot was taken as maybe
+  started, and stuck, even one whose start had never been sent.
+- The start can be refused as it goes out, after the plan was marked, when the publication gate closes
+  or a provider cooldown begins in between. That refusal sent nothing, but left the plan marked. Now
+  it unmarks the plan (`refusal_unmarks`).
+
+What remained was the real case: a start that went out and whose reply was lost. No change to recovery
+fixes that, because what the device needs, which upload at the slot is its own, isn't in storage. So
+the fix moved where uploads go: on every S3 service a large upload goes to a name of the device's own
+and is published by one copy that refuses a taken name. No unfinished upload ever sits at a shared
+place.
+
+**Three layers keep it gone.**
+
+1. **The theorem.** In the new model a plan names a place of the device's own whatever the
+   destination, and a theorem (`no_shared_strays` on the branch) says no stray is ever at a shared
+   place. The proof is one line: the model's plan place is `.own` for every destination, so no step can
+   put a stray anywhere else. The work moved into the model's shape. `open_sweeps` loses its "the
+   place is the device's own" premise, and `marked_shared_never` goes away. *Committed on a coven
+   branch, not landed.*
+2. **The differential test.** `upload_sessions_match_the_storage_model` (coven-sync) runs the real
+   upload worker over coven's in-memory provider and the model's runner on the same histories, once at
+   an owned place and once at a shared one, and compares after each run: the queue row, the parts it
+   records, the provider's sessions and their parts, the strays, the published object and the class of
+   the failure. *Landed, with the shared case expecting the upload to fail for good. Its update, so the
+   shared case expects the strays ended, comes with the code.*
+3. **The type.** A profile's `S3CopyPublication` today is `Never` (complete in place), `Multipart`
+   (copy objects that go in parts) or `Every` (copy every object). The plan drops completing in place
+   from the type, so a new S3 profile can't choose it. *Planned, not started.*
+
+Each layer covers what the others can't. The theorem is about the model. The differential test checks
+the code against the model, on the histories it samples. And a new S3 profile is a value in a table: a
+theorem about the model says nothing about a value someone adds later, but a type without the option
+has no way to express it.
+
 ## Facts and figures
 
 - Lean 4.34.1, no Mathlib. Every lemma, including Newman's lemma, is
