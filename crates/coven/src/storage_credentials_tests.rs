@@ -407,3 +407,109 @@ async fn a_key_replacement_cut_at_any_step_leaves_custody_on_the_recorded_key() 
         handle.close().await.unwrap();
     }
 }
+
+/// Unlocking names what failed: no storage before any setup, and custody
+/// that fails while unlocking; once custody answers, unlocking opens the
+/// keys (E5).
+#[tokio::test]
+async fn unlocking_names_what_failed() {
+    let f = Fixture::new().await;
+    assert!(matches!(f.handle.unlock_store_key().await, Err(StoreKeyUnlockError::NoStorage)));
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    f.handle.forget_store_keys().await.unwrap();
+    f.app.fail_next_keychain_operation();
+    let refused = f.handle.unlock_store_key().await;
+    assert!(matches!(refused, Err(StoreKeyUnlockError::SecureStorage(_))), "{refused:?}");
+    f.handle.unlock_store_key().await.unwrap();
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
+    f.handle.close().await.unwrap();
+}
+
+/// Member-key custody that counts how often it is unlocked.
+struct CountedIdentity {
+    inner: coven_crypto::custody::KeyringCustody<coven_crypto::MemberIdentity>,
+    unlocks: std::sync::atomic::AtomicUsize,
+}
+
+impl coven_crypto::custody::Custody<coven_crypto::MemberIdentity> for CountedIdentity {
+    fn unlock(&self) -> Result<Option<coven_crypto::MemberIdentity>, KeyError> {
+        self.unlocks.fetch_add(1, Ordering::SeqCst);
+        self.inner.unlock()
+    }
+    fn persist(&self, keys: &coven_crypto::MemberIdentity) -> Result<(), KeyError> {
+        self.inner.persist(keys)
+    }
+    fn forget(&self) -> Result<(), KeyError> {
+        self.inner.forget()
+    }
+    fn close(&self) {
+        self.inner.close()
+    }
+}
+
+/// Unlocking opens the store keys with the member keys held since the store
+/// opened, without unlocking their custody again, and connects without
+/// syncing: a retry is answered `NotSyncing` and sends nothing until sync
+/// starts (E5).
+#[tokio::test]
+async fn unlocking_reads_no_member_key_custody_and_starts_no_sync() {
+    let f = Fixture::new().await;
+    f.handle.close().await.unwrap();
+    let identity = Arc::new(CountedIdentity {
+        inner: coven_crypto::custody::KeyringCustody::new(Arc::new(
+            f.app.store_keychain(f.directory.id()),
+        )),
+        unlocks: Default::default(),
+    });
+    let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
+    let opened = identity.unlocks.load(Ordering::SeqCst);
+    handle
+        .setup_s3_storage(
+            f.storage.config(),
+            "Test device",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    synced(&handle).await;
+    handle.stop_sync().await.unwrap();
+    handle.forget_store_keys().await.unwrap();
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+
+    let unlocked = handle.unlock_store_key().await.unwrap();
+    assert_eq!(unlocked.key_state, StoreKeyState::Available);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    assert_eq!(identity.unlocks.load(Ordering::SeqCst), opened);
+    assert_eq!(handle.test_retry_effect().latest().await, RetryEffect::NotSyncing);
+    let requests = f.storage.request_count();
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::NotSyncing), "{answer:?}");
+    assert_eq!(f.storage.request_count(), requests, "no pass runs until sync starts");
+
+    f.advance(Duration::from_secs(1));
+    handle.start_sync().await.unwrap();
+    synced_since(&handle, f.clock.now()).await;
+    handle.close().await.unwrap();
+}
+
+/// The store key state is read from the handle's session alone: it reads no
+/// custody, so a custody failure armed before it is still there for the next
+/// call that reads custody (E5).
+#[tokio::test]
+async fn the_store_key_state_reads_no_custody() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    f.app.fail_next_keychain_operation();
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
+    assert!(f.handle.forget_store_keys().await.is_err());
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
+    f.handle.close().await.unwrap();
+}
