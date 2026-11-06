@@ -184,4 +184,64 @@ theorem announced_fault_recovers :
       passAnnounced refusesFaults faultyAnnounced 2 = .applies := by
   decide
 
+/-! A file's cached copy (§17.8) is kept only once it passed the check, and a
+chunk's check is its authentication: bytes that pass it are the stored bytes
+(`Cached.authentic`). So a cached copy that fails its check changed on this
+device after it was kept, and says nothing about the stored file. The device
+reads the file from storage instead, judges those reads as `pass` does, and
+writes the stored bytes back over the copy (`cachedPass`).
+
+Proved here: the stored bytes of a file with a cached copy pass
+(`cached_stored_passes`), so a file whose cached copy fails its check is never
+refused (`damaged_copy_never_refused`), and a copy that passes applies with no
+read of storage (`passing_copy_applies`). Refused on the copy instead, a file
+whose stored bytes pass is refused (`copy_once_refuses_honest`). -/
+
+/-- An object's storage reads, with the cached copy of it this device kept
+once it passed `refuses`, and what that copy holds now. -/
+structure Cached (Bytes : Type) (refuses : Bytes → Bool) extends Reads Bytes where
+  kept : Bytes
+  passed : refuses kept = false
+  authentic : ∀ b, refuses b = false → b = stored
+  copy : Bytes
+
+/-- A copy that passes is read; one that fails is set aside, and storage's
+reads are judged from read `k`. -/
+def cachedPass (refuses : Bytes → Bool) (c : Cached Bytes refuses) (k : Nat) : Outcome :=
+  if refuses c.copy then pass refuses c.toReads k else .applies
+
+omit [DecidableEq Bytes] in
+theorem cached_stored_passes (refuses : Bytes → Bool) (c : Cached Bytes refuses) :
+    refuses c.stored = false := by
+  rw [← c.authentic c.kept c.passed]
+  exact c.passed
+
+theorem damaged_copy_never_refused (refuses : Bytes → Bool) (c : Cached Bytes refuses)
+    (k : Nat) : cachedPass refuses c k ≠ .refused := by
+  unfold cachedPass
+  split
+  · exact honest_never_refused refuses c.toReads k (cached_stored_passes refuses c)
+  · intro applies
+    cases applies
+
+theorem passing_copy_applies (refuses : Bytes → Bool) (c : Cached Bytes refuses) (k : Nat)
+    (passes : refuses c.copy = false) : cachedPass refuses c k = .applies := by
+  simp [cachedPass, passes]
+
+/-- Refusing on the cached copy alone. -/
+def copyOnce (refuses : Bytes → Bool) (c : Cached Bytes refuses) : Outcome :=
+  if refuses c.copy then .refused else .applies
+
+/-- The file `0`, kept as `0`, whose copy turned into `1` on this device. -/
+def damagedCopy : Cached Nat refusesFaults where
+  toReads := faulty
+  kept := 0
+  passed := rfl
+  authentic b passes := by simpa [refusesFaults, faulty] using passes
+  copy := 1
+
+theorem copy_once_refuses_honest :
+    refusesFaults damagedCopy.stored = false ∧ copyOnce refusesFaults damagedCopy = .refused := by
+  decide
+
 end CovenIO.Reread

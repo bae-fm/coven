@@ -372,25 +372,31 @@ impl<M: Mode> UploadedFile<M> {
         if opened.header.chunk_count() == 0 {
             let _file = opened.owner.lock_file(&opened.file, &opened.location).await;
             let _guard = opened.owner.cache.read().await;
-            if !opened.cached_header().await? {
-                opened.fetch_header().await?;
+            let cached = opened.cached_header().await?;
+            if cached != CachedHeader::Checked {
+                opened.fetch_header(cached).await?;
             }
         }
         Ok(opened)
     }
-    /// Accept the header cached for this file, if one is.
-    async fn cached_header(&self) -> Result<bool, FileReadError> {
+    /// Check the header cached for this file, if one is.
+    async fn cached_header(&self) -> Result<CachedHeader, FileReadError> {
         if self.header_checked.load(std::sync::atomic::Ordering::Acquire) {
-            return Ok(true);
+            return Ok(CachedHeader::Checked);
         }
         let Some(bytes) = self.owner.database.cached(&self.file, -1).await? else {
-            return Ok(false);
+            return Ok(CachedHeader::Missing);
         };
-        self.accept_header(&bytes)?;
-        Ok(true)
+        // The cache keeps only a header that checked, so one that fails now
+        // changed on this device.
+        Ok(match self.accept_header(&bytes) {
+            Ok(()) => CachedHeader::Checked,
+            Err(_) => CachedHeader::Damaged,
+        })
     }
-    /// Read the header alone, check it and cache it.
-    async fn fetch_header(&self) -> Result<(), FileReadError> {
+    /// Read the header alone and check it, then cache it, or write it back
+    /// over the cached copy that failed its check.
+    async fn fetch_header(&self, cached: CachedHeader) -> Result<(), FileReadError> {
         let bytes = fetch(
             &self.owner,
             &self.file,
@@ -403,7 +409,12 @@ impl<M: Mode> UploadedFile<M> {
         if let Err(refused) = self.accept_header(&bytes) {
             return Err(self.confirm(0, &bytes, refused).await);
         }
-        self.publish_header(bytes).await
+        match cached {
+            CachedHeader::Damaged => {
+                Ok(self.owner.database.repair_cached(&self.file, -1, bytes).await?)
+            }
+            CachedHeader::Checked | CachedHeader::Missing => self.publish_header(bytes).await,
+        }
     }
     /// A refusal judges the stored file, not one fetch of it, and nothing
     /// checks a fetch's transfer: bytes from `start` that a check refused are
@@ -529,12 +540,19 @@ impl<M: Mode> UploadedFile<M> {
         self.owner.check_open()?;
         let _file = self.owner.lock_file(&self.file, &self.location).await;
         let _guard = self.owner.cache.read().await;
-        let cached = self.owner.database.cached(&self.file, first as i64).await?;
-        let header_here = self.cached_header().await?;
+        // A cached copy that fails its check changed on this device, which
+        // says nothing about the stored file (§17.8): its bytes are fetched.
+        let cached = self
+            .owner
+            .database
+            .cached(&self.file, first as i64)
+            .await?
+            .map(|bytes| self.open_chunk(first, bytes));
+        let header = self.cached_header().await?;
         // A pin's download asks storage for nothing while a metered network
         // holds it; what is here already it still takes (§17.8).
         if matches!(destination, ChunkDestination::WholeFile(_))
-            && (cached.is_none() || !header_here)
+            && (!matches!(cached, Some(Ok(_))) || header != CachedHeader::Checked)
             && self.owner.downloads_held()
         {
             return Ok(ChunkStep::Held);
@@ -542,15 +560,20 @@ impl<M: Mode> UploadedFile<M> {
         // An unchecked header comes with an uncached chunk zero; any other
         // first read checks it alone (§17.7).
         let mut with_header = false;
-        if !header_here {
-            if first == 0 && cached.is_none() {
-                with_header = true;
-            } else {
-                self.fetch_header().await?;
-            }
+        if header == CachedHeader::Missing && first == 0 && cached.is_none() {
+            with_header = true;
+        } else if header != CachedHeader::Checked {
+            self.fetch_header(header).await?;
         }
-        if let Some(bytes) = cached {
-            return Ok(ChunkStep::Read(first, vec![self.open_cached(first, bytes)?]));
+        match cached {
+            Some(Ok(chunk)) => return Ok(ChunkStep::Read(first, vec![chunk])),
+            Some(Err(_)) => {
+                return Ok(ChunkStep::Read(
+                    first,
+                    vec![self.write_back(first, &destination).await?],
+                ))
+            }
+            None => {}
         }
         let first_chunk = self.header.chunk(first).map_err(|_| self.integrity())?;
         let start = first_chunk.offset;
@@ -607,11 +630,37 @@ impl<M: Mode> UploadedFile<M> {
                 .await?;
             self.owner.trim(self.file.namespace()).await;
         }
-        if let Some(bytes) = stop {
+        // A cached chunk that fails its check is left for the next step,
+        // which fetches it as its first.
+        if let Some(Ok(chunk)) = stop.map(|bytes| self.open_chunk(end_index + 1, bytes)) {
             end_index += 1;
-            plain.push(self.open_cached(end_index, bytes)?);
+            plain.push(chunk);
         }
         Ok(ChunkStep::Read(end_index, plain))
+    }
+    /// Chunk `index`'s cached copy failed its check: damage on this device,
+    /// which says nothing about the stored file (§17.8). Its stored bytes are
+    /// fetched, judged as any fetch's are, and written back over the copy.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a chunk the file size's layout lacks is the disagreement Integrity names"
+    )]
+    async fn write_back(
+        &self,
+        index: u64,
+        destination: &ChunkDestination<'_>,
+    ) -> Result<OpenedChunk, FileReadError> {
+        let chunk = self.header.chunk(index).map_err(|_| self.integrity())?;
+        let received = self.received(destination, index, index, chunk.offset)?;
+        let fetched =
+            fetch(&self.owner, &self.file, &self.path, chunk.offset, chunk.end(), &received)
+                .await?;
+        let opened = match self.open_chunk(index, fetched.clone()) {
+            Ok(opened) => opened,
+            Err(refused) => return Err(self.confirm(chunk.offset, &fetched, refused).await),
+        };
+        self.owner.database.repair_cached(&self.file, index as i64, fetched).await?;
+        Ok(opened)
     }
     /// What hears a fetch of chunks `first..=last`, which starts `start`
     /// bytes into the object. A pin's meter hears the furthest through the
@@ -698,8 +747,8 @@ impl<M: Mode> UploadedFile<M> {
         }
         Ok((bytes, plain))
     }
-    /// Authenticate chunk `index`'s cached bytes.
-    fn open_cached(&self, index: u64, bytes: Vec<u8>) -> Result<OpenedChunk, FileReadError> {
+    /// Authenticate chunk `index`'s sealed bytes.
+    fn open_chunk(&self, index: u64, bytes: Vec<u8>) -> Result<OpenedChunk, FileReadError> {
         let plaintext = self
             .header
             .open_chunk(&self.key, self.path.as_str(), index, &bytes)
@@ -767,6 +816,17 @@ impl UploadedFile {
 struct OpenedChunk {
     plaintext: Vec<u8>,
     ciphertext: Vec<u8>,
+}
+
+/// What the cache holds of a file's header.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CachedHeader {
+    /// A header this open checked, from the cache or from storage.
+    Checked,
+    /// No header.
+    Missing,
+    /// A copy that fails its check, which changed on this device (§17.8).
+    Damaged,
 }
 
 /// What one step of reading chunks found.

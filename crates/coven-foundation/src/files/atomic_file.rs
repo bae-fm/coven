@@ -165,6 +165,38 @@ impl AtomicFile {
         Ok(())
     }
 
+    /// Write `bytes` over this existing file's bytes from `offset`, which
+    /// they must lie within, and hand them to the drive. Readers can see
+    /// some of the old bytes and some of the new while it writes, and a
+    /// crash can leave them so: only bytes that check themselves, as a
+    /// cache's authenticated chunks do, are written this way.
+    pub fn overwrite_at(&self, offset: u64, bytes: &[u8]) -> Result<(), super::ObservationError> {
+        let path = self.resolved()?;
+        #[cfg(any(test, feature = "test-utils"))]
+        super::reached::reached(&path);
+        let file = owned_options()
+            .open(&path)
+            .map_err(|error| super::ObservationError::at("open owned file", &path, error))?;
+        let metadata =
+            file.metadata().map_err(|source| FileError::at("inspect owned file", &path, source))?;
+        if !metadata.is_file()
+            || offset.checked_add(bytes.len() as u64).is_none_or(|end| end > metadata.len())
+        {
+            return Err(FileError::at(
+                "overwrite owned file",
+                &path,
+                io::Error::new(io::ErrorKind::InvalidInput, "a range within a regular file"),
+            )
+            .into());
+        }
+        // No directory entry changes, so `sync_all`, which flushes an Apple
+        // drive's cache with `F_FULLFSYNC`, is the whole barrier.
+        write_all_at(&file, offset, bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|source| FileError::at("overwrite owned file", &path, source))?;
+        Ok(())
+    }
+
     /// The path under its canonical parent, which also supplies Windows'
     /// extended-length prefix.
     fn resolved(&self) -> Result<PathBuf, FileError> {
@@ -301,6 +333,32 @@ impl FileWriter {
             run(&mut file, &path).map_err(|source| FileError::at(operation, &path, source))
         })
         .await?
+    }
+}
+
+/// Write all of `bytes` at `offset` with the platform's positioned writes.
+fn write_all_at(file: &fs::File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.write_all_at(bytes, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let (mut offset, mut bytes) = (offset, bytes);
+        while !bytes.is_empty() {
+            match file.seek_write(bytes, offset) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(count) => {
+                    bytes = &bytes[count..];
+                    offset += count as u64;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 }
 

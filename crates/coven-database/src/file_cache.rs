@@ -106,16 +106,7 @@ pub(super) fn read<L>(
     let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
     let reader = match access.directory.file(FileArea::Cache, &name).open_reader() {
         Ok(reader) => reader,
-        Err(ObservationError::Missing(_)) => {
-            let recorded = access.with_writer(|db| {
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)",
-                    [&path],
-                    |r| r.get::<_, bool>(0),
-                )
-            })?;
-            return if recorded { Err(DbError::DamagedDatabase) } else { Ok(None) };
-        }
+        Err(ObservationError::Missing(_)) => return evicted(access, &path).map(|()| None),
         Err(error) => return Err(observation(error)),
     };
     if reader.size() != u64::try_from(length).map_err(|_| DbError::DamagedDatabase)? {
@@ -133,6 +124,51 @@ pub(super) fn read<L>(
         })
     })?;
     Ok(Some(bytes))
+}
+/// Write the stored bytes of chunk `index`, or the header (-1), back over
+/// the cached copy of them that failed its check: damage on this device,
+/// which says nothing about the stored file (§17.8). The entry is looked up
+/// under the writer, and the bytes written with no writer held (§21.2).
+/// Only bytes change: the entry still holds the verified bytes its row says.
+/// An entry evicted meanwhile has nothing to write back.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+pub(super) fn repair<L>(
+    access: &DatabaseAccess<L>,
+    file: &FileRef,
+    index: i64,
+    bytes: &[u8],
+) -> Result<(), DbError> {
+    let entry = access.with_writer(|db| db.read_transaction(|| covering(db, file, index)))?;
+    let Some((path, first, _, _)) = entry else {
+        return Ok(());
+    };
+    let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
+    let (offset, length) = within(file, first, index)?;
+    if bytes.len() != length {
+        return Err(DbError::Invariant { what: "bytes written back are the chunk's stored bytes" });
+    }
+    match access.directory.file(FileArea::Cache, &name).overwrite_at(offset, bytes) {
+        Ok(()) => Ok(()),
+        Err(ObservationError::Missing(_)) => evicted(access, &path),
+        Err(error) => Err(observation(error)),
+    }
+}
+/// An entry's bytes are missing: evicted since it was looked up, unless a
+/// row still names them, which is damage.
+fn evicted<L>(access: &DatabaseAccess<L>, path: &str) -> Result<(), DbError> {
+    let recorded = access.with_writer(|db| {
+        db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)", [path], |r| {
+            r.get::<_, bool>(0)
+        })
+    })?;
+    if recorded {
+        Err(DbError::DamagedDatabase)
+    } else {
+        Ok(())
+    }
 }
 /// Publish one verified range of `chunks` consecutive chunks from `first`,
 /// or the header (`first` = -1), as one file and one row (Appendix C.3). Its name

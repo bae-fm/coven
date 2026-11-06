@@ -572,6 +572,8 @@ mod abandoned_tests;
 mod cache;
 #[path = "file_keep_tests.rs"]
 mod keep;
+#[path = "file_read_tests.rs"]
+mod read;
 #[path = "file_status_tests.rs"]
 mod status;
 #[path = "file_upload_pool_tests.rs"]

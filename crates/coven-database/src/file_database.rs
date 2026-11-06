@@ -111,6 +111,18 @@ impl<M: Mode> FileDatabase<M> {
         let file = file.clone();
         self.database.call(move |open| cache::read(M::access(open), &file, index)).await
     }
+    /// Write the stored bytes of chunk `index`, or the header (-1), back
+    /// over the cached copy of them that failed its check (§17.8). The
+    /// bytes are written with no writer held (§21.2).
+    pub async fn repair_cached(
+        &self,
+        file: &FileRef,
+        index: i64,
+        bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        let file = file.clone();
+        self.database.call(move |open| cache::repair(M::access(open), &file, index, &bytes)).await
+    }
     /// Keep one verified range of `chunks` consecutive encrypted chunks from
     /// `first`, or the header (`first` = -1), durably before publishing its
     /// cache metadata in one transaction. The bytes are written with no

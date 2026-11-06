@@ -362,6 +362,33 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     db.close().await.unwrap();
 }
 
+/// Bytes written back over a cached chunk land in its place in its entry,
+/// and change no record; with the entry evicted, there is nothing to write
+/// back (§17.8).
+#[tokio::test]
+async fn bytes_written_back_land_in_their_chunks_place() {
+    const CHUNK: usize = 64 * 1024 + 16;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 2 * 64 * 1024 + 5]).await;
+    let owner = FileDatabase::new(db.clone());
+    let range = vec![1; 2 * CHUNK + 21];
+    owner.cache_range(&file, 0, 3, FileName::new("range").unwrap(), range.clone()).await.unwrap();
+    owner.cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11]).await.unwrap();
+    owner.repair_cached(&file, 1, vec![2; CHUNK]).await.unwrap();
+    owner.repair_cached(&file, -1, vec![3; 11]).await.unwrap();
+    assert_eq!(owner.cached(&file, 0).await.unwrap().unwrap(), range[..CHUNK]);
+    assert_eq!(owner.cached(&file, 1).await.unwrap().unwrap(), vec![2; CHUNK]);
+    assert_eq!(owner.cached(&file, 2).await.unwrap().unwrap(), range[2 * CHUNK..]);
+    assert_eq!(owner.cached(&file, -1).await.unwrap().unwrap(), vec![3; 11]);
+    assert!(owner.repair_cached(&file, 2, vec![2; CHUNK]).await.is_err(), "not chunk 2's length");
+    let id = file.id();
+    db.write(move |sql| sql.evict_file(id)).await.unwrap();
+    owner.repair_cached(&file, 1, vec![2; CHUNK]).await.unwrap();
+    assert_eq!(owner.cached(&file, 1).await.unwrap(), None);
+    db.close().await.unwrap();
+}
+
 /// The namespace total changes with its cache records in their transaction:
 /// publication, eviction, a failed publication and pinning (Appendix C.3).
 #[tokio::test]

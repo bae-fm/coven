@@ -251,3 +251,16 @@ async fn a_dropped_writer_leaves_its_name_for_recorded_cleanup() {
     file.remove().unwrap();
     assert!(file.read_optional().unwrap().is_none());
 }
+
+#[test]
+fn overwriting_changes_only_its_range_of_an_existing_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = AtomicFile::new(directory.path().join("cached"));
+    assert!(matches!(file.overwrite_at(0, b"x"), Err(crate::files::ObservationError::Missing(_))));
+    file.write_recorded(b"abcdef").unwrap();
+    file.overwrite_at(2, b"XY").unwrap();
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"abXYef");
+    // A range past the end writes nothing: the file keeps its size.
+    assert!(matches!(file.overwrite_at(5, b"XY"), Err(crate::files::ObservationError::File(_))));
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"abXYef");
+}

@@ -320,6 +320,20 @@ pin, and
 one of a snapshot's prefix and of its body: each read fails with `Corrupted`
 and records no refusal, and the next one succeeds.
 
+A file's cached copy is kept only once it checked, and a chunk's check is its
+authentication, which only the stored bytes pass. The model's cached objects
+carry the copy as kept, which passed, and what it holds now; a copy that fails
+is set aside and storage's reads are judged as `pass` judges them. The stored
+bytes then pass (`cached_stored_passes`), so a file whose cached copy fails its
+check is never refused (`damaged_copy_never_refused`), and a copy that passes
+applies with no read of storage (`passing_copy_applies`). Refused on the copy,
+a file whose stored bytes pass is refused (`copy_once_refuses_honest`).
+`files::tests::read::a_damaged_cached_copy_is_fetched_and_written_back_not_refused`
+changes a byte of a cached header and of a cached chunk on disk, in a read's
+entries and in a pin's whole copy: the next read or pin fetches them and records
+nothing, a pinned file stays pinned, and the read after it asks storage for
+nothing.
+
 ## Rechecking a refusal
 
 [Recheck.lean](io/CovenIO/Recheck.lean) models when a refusal is checked again

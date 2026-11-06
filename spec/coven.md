@@ -6777,6 +6777,13 @@ The app can remove a stored file from the cache, pinned or not, as a step of a
 write (§4); that never touches storage, and the bytes go once the write has
 committed.
 
+**A damaged copy is fetched again.** The cache keeps only bytes that checked,
+so a cached header or chunk that fails its check changed on this device (§19.1).
+A read or pin that meets one fetches those bytes from storage, checks them as it
+checks any fetch, and writes them back over the copy. The entry, and a pin of
+its whole copy, stay as they were. Dropping the copy instead would end the pin,
+since a pin is its whole copy, and a read-only handle may not change pins.
+
 **Cached bytes last while a record names them.** Ben's laptop pins photo A,
 then Ana deletes the last row naming it. When her write arrives, the
 transaction deleting A's record on Ben's laptop removes A's cached copies too,
@@ -7952,6 +7959,13 @@ read, never a refusal.
   snapshot only when the second read's digest is the same. Its signed prefix,
   which coven keeps and checks before the digest is known, is read again as a
   slot is when a check refuses it.
+- A file's cached copy is kept only once it checked (§17.8), so a cached header
+  or chunk that fails its check changed on this device, and says nothing about
+  the stored file. Coven fetches those bytes from storage, judges them as any
+  fetch's, and writes them back over the copy; a pinned file stays pinned. Say
+  a disk error changes a byte of a song Ben's laptop keeps offline: his next
+  play fetches that chunk, and the play after it reads the copy again
+  ([`damaged_copy_never_refused`](proofs/io/CovenIO/Reread.lean)).
 - Calls and pending records use the same `Refusal` variant. A call keeps the
   native error; a durable record keeps its category. File integrity failures are
   the exception: the file API returns `FileReadError::Integrity` for failed
@@ -11198,6 +11212,7 @@ Write-ups explain each model and state its assumptions:
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, waiting to sync only while nothing moves and a held-back pass or a queued file names its wait, and synced only once every file this device uploads is stored and only after a pass that ended synced; with the setting to transfer only on unmetered networks on and a metered network, every upload the setting holds waits for something before its backoff, and an upload waits for the network only then; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_files_stored`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `metered_holds`, `metered_only_held`, `network_keeps_state` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* A refusal judges the stored bytes when it stands only on two reads that agree, so an object whose stored bytes pass is never refused, and a kept copy that is the stored bytes applies; refusing on one read, one fault on the way refuses an honest object for good, while with the second read the next pass applies it | `refusal_judges_stored`, `honest_never_refused`, `stored_copy_applies`, `one_read_refuses_honest`, `fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
+| *Body.* A file's cached copy is kept only once it checked, and only the stored bytes pass an authenticated check, so the stored bytes pass: a file whose cached copy fails its check is never refused, and a copy that passes applies with no read of storage; refused on the copy, a file whose stored bytes pass is refused | `cached_stored_passes`, `damaged_copy_never_refused`, `passing_copy_applies`, `copy_once_refuses_honest` | `proofs/io/CovenIO/Reread.lean` | §17.8, §19.1 |
 | A snapshot, read once and kept nowhere whole, is judged at once when its digest is the announced one, and otherwise refused as not the announced snapshot only when a second read's digest is the first's: a refusal is then a verdict on what storage holds, and an honestly stored snapshot that passes is never refused; refused as soon as its digest differs, one fault makes it not the announced one | `announced_refusal_judges_stored`, `honest_announced_never_refused`, `digest_once_refuses_honest`, `announced_fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
 | A refusal is rechecked by every build of coven other than the one that recorded it, so by every build that would judge it differently, and never by its own; waiting loses nothing, and a recheck that refuses again records its build, so each build rechecks once and never loops. Keyed to a number several builds share, a refusal is never rechecked by a build that would accept it | `other_build_rechecks`, `differing_build_rechecks`, `own_refusal_waits`, `waiting_loses_nothing`, `recheck_once`, `shared_key_strands` | `proofs/io/CovenIO/Recheck.lean` | §19.1 |
 | A replacement of this device's installation that records itself before its fresh device registers, refuses opens while recorded and from the record on only goes forward never opens the old installation once a registration replacing it may have landed, keeps the new installation while history names it, and settles, on every path, published or with the old installation the store and no claim open | `old_never_stale`, `never_missing`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §11.6, §19.3 |

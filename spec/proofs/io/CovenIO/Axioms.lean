@@ -168,3 +168,7 @@ import CovenIO
 #print axioms CovenIO.Reread.honest_announced_never_refused
 #print axioms CovenIO.Reread.digest_once_refuses_honest
 #print axioms CovenIO.Reread.announced_fault_recovers
+#print axioms CovenIO.Reread.cached_stored_passes
+#print axioms CovenIO.Reread.damaged_copy_never_refused
+#print axioms CovenIO.Reread.passing_copy_applies
+#print axioms CovenIO.Reread.copy_once_refuses_honest
