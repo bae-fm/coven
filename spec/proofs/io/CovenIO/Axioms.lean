@@ -9,6 +9,7 @@ import CovenIO
 #print axioms CovenIO.Downloads.pending_replaced
 #print axioms CovenIO.Downloads.failure_atomic
 #print axioms CovenIO.Downloads.failed_read_records_nothing
+#print axioms CovenIO.Downloads.read_settles
 #print axioms CovenIO.Downloads.prepare_retains_nothing
 #print axioms CovenIO.Downloads.prepared_settles
 #print axioms CovenIO.Downloads.commit_pins

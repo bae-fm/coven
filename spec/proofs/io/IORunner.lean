@@ -75,6 +75,36 @@ private def download (j : Json) : Except String Json := do
     ("refused", toJson (retry == some .afterUpdate)),
     ("next_call", toJson (retry == some .nextCall))]
 
+/-- A pin of a two-chunk file fails, offline (`network`) or over a second
+chunk that fails authentication (`refused`), and then a read succeeds: the
+first chunk alone, or both chunks in order, which completes the file. What
+stays pending is `Downloads.read_settles`. -/
+private def readSettles (j : Json) : Except String Json := do
+  let reason ← match ← j.getObjValAs? String "before" with
+    | "network" => pure Downloads.Reason.network
+    | "refused" => pure Downloads.Reason.authentication
+    | other => throw s!"unknown pin failure {other}"
+  let whole ← j.getObjValAs? Bool "whole"
+  let attempt (index : Nat) (pin : Bool) (failure : Option Downloads.Reason) :
+      Downloads.Attempt := {
+    path := .slot 1
+    fetched := if failure == some .network then .error .network else .ok ()
+    authenticated := failure != some .authentication
+    hashMatches := true
+    diskCommitted := true
+    databaseCommitted := true
+    range := ⟨index, [1]⟩
+    chunks := 2
+    last := index == 1
+    pin
+  }
+  let pinned := Downloads.apply (.idle []) (attempt 1 true (some reason))
+  let first := Downloads.apply pinned (attempt 0 false none)
+  let read := if whole then Downloads.apply first (attempt 1 false none) else first
+  let retry := (Downloads.pending read).map Downloads.retry
+  return Json.mkObj [("refused", toJson (retry == some .afterUpdate)),
+    ("next_call", toJson (retry == some .nextCall))]
+
 /-- A kept pin's attempt (`Keep.reads`): whether it reads storage, for an
 app file whose request keeps coven's copy, which does or doesn't check out,
 or for a user's file. -/
@@ -455,6 +485,7 @@ private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "retained" => retained j
   | "download" => download j
+  | "read_settles" => readSettles j
   | "keep" => keep j
   | "waiting" => waiting j
   | "evidence" => evidence j

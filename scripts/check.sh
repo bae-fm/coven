@@ -506,9 +506,10 @@ proofs() {
 
     if proof_selected io || crate_selected coven-sync; then
         runner=$(runner io ioRunner)
-        step "Rust / Lean downloads, kept pins, retained ranges, retry evidence, network reports, the answer to a retry, removed-device file listings and the sync state"
+        step "Rust / Lean downloads, what a read settles, kept pins, retained ranges, retry evidence, network reports, the answer to a retry, removed-device file listings and the sync state"
         COVEN_IO_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             files::tests::cache::retries::io_differential_download \
+            files::tests::cache::retries::io_differential_read_settles \
             files::tests::keep::io_differential_keep \
             object_input::tests::io_differential_retained_ranges_and_refusal_eviction \
             retry_waits::tests::io_differential_waiting \

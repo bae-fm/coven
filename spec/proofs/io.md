@@ -35,7 +35,10 @@ file pinned (`commit_pins`), while a record still names its stored bytes
 (`unnamed_commit_keeps_nothing`). Only a pin's failure is recorded
 (`failure_atomic`): a read's goes
 to its caller and leaves the state as it was (`failed_read_records_nothing`),
-so nothing is pending after it. Only the app's reads and pins download, so
+so nothing is pending after it. A read that succeeds records nothing either: one
+that completes the file settles every condition, and one that stops short
+settles all but a lasting one, a refusal, the file unavailable or a required
+update, which stays as it was (`read_settles`). Only the app's reads and pins download, so
 nothing retries a download on its own (`never_on_its_own`): a failure the
 app's next read or pin can clear retries then (`next_call_retries`), refused
 bytes wait for another build of coven to recheck them (below), and a
@@ -54,6 +57,10 @@ compares the retained-range behavior.
 network, authentication, content-hash and disk outcomes to the download case,
 through a read and through a pin's prepare and the write committing it, and
 compares completion and the persisted retry disposition.
+`files::tests::cache::retries::io_differential_read_settles` pins a two-chunk
+file offline or over a second chunk that fails authentication, then reads its
+first chunk, or the whole file once the cause is gone, and compares what stays
+pending with the runner's `read_settles` case.
 
 [Keep.lean](io/CovenIO/Keep.lean) models what an attempt at a pin coven keeps
 for a file kept here reads (§17.8). An app file's attempt reads coven's copy and

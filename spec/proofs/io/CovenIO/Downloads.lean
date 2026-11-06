@@ -12,10 +12,11 @@ inductive Clears where
 inductive Reason where
   | noStorage | network | disk | database
   | storage (clears : Clears)
-  | range (path : Path) (index : Nat)
   | unavailable (reason : CovenStorage.Files.MissingReason)
   | key (parent : Path)
   | authentication | contentHash
+  /-- The stored file needs a newer app or coven. -/
+  | update
   deriving DecidableEq, Repr
 
 /-- What lets a failed download run again (§17.7, E5). Only the app's reads
@@ -29,10 +30,16 @@ inductive Retry where
   deriving DecidableEq, Repr
 
 def retry : Reason → Retry
-  | .authentication | .contentHash => .afterUpdate
+  | .authentication | .contentHash | .update => .afterUpdate
   | .storage .never => .never
   | .storage .byItself | .storage .byPerson | .noStorage | .network | .disk | .database
-  | .range _ _ | .unavailable _ | .key _ => .nextCall
+  | .unavailable _ | .key _ => .nextCall
+
+/-- What only a whole read of the file settles: a refusal, the file
+unavailable, a required update (§17.7). -/
+def lasting : Reason → Bool
+  | .authentication | .contentHash | .unavailable _ | .update => true
+  | _ => false
 
 /-- Before decrypting the row there is a pending write/snapshot subject, no
 fabricated file reference. Acquiring its key opens the retained row bytes. -/
@@ -127,13 +134,44 @@ def settle : State → State
   | .unfinished rs _ => .idle rs
   | s => s
 
-/-- A read's verified range, kept as it commits. -/
+/-- `s` holding `retained`, after a read that leaves the file as complete as
+it was: every condition but a lasting one settles, and the read records none
+of its own, since a read is no lasting wish (§17.7). -/
+def kept (s : State) (retained : List Range) : State :=
+  match s with
+  | .unfinished _ reason => if lasting reason then .unfinished retained reason else .idle retained
+  | .complete _ pin => .complete retained pin
+  | .idle _ => .idle retained
+
+@[simp] theorem ranges_complete (retained : List Range) (pin : Bool) :
+    ranges (.complete retained pin) = retained := rfl
+
+@[simp] theorem ranges_kept (s : State) (retained : List Range) :
+    ranges (kept s retained) = retained := by
+  cases s with
+  | unfinished _ reason => cases h : lasting reason <;> simp [kept, h, ranges]
+  | complete | idle => simp [kept, ranges]
+
+@[simp] theorem completed_kept (s : State) (retained : List Range) :
+    completed (kept s retained) = completed s := by
+  cases s with
+  | unfinished _ reason => cases h : lasting reason <;> simp [kept, h, completed]
+  | complete | idle => simp [kept, completed]
+
+theorem pending_kept (s : State) (retained : List Range) :
+    pending (kept s retained) = (pending s).filter lasting := by
+  cases s with
+  | unfinished _ reason => cases h : lasting reason <;> simp [kept, h, pending, Option.filter]
+  | complete | idle => simp [kept, pending]
+
+/-- A read's verified range, kept as it commits. A read that completes the
+file settles every condition (§17.7). -/
 def readCommit (s : State) (attempt : Attempt) : State :=
   let retained := if attempt.range.index ∈ (ranges s).map Range.index then ranges s
     else ranges s ++ [attempt.range]
   if attempt.last && (List.range attempt.chunks).all (fun index => index ∈ retained.map Range.index)
-    then .complete retained false
-  else .unfinished retained (.range attempt.path (attempt.range.index + 1))
+    then .complete retained (pinned s)
+  else kept s retained
 
 def apply (s : State) (attempt : Attempt) : State :=
   match first attempt.checks with
@@ -184,6 +222,20 @@ theorem failed_read_records_nothing (s : State) (attempt : Attempt) (reason : Re
     apply s attempt = s := by
   simp [apply, failed, read]
 
+/-- §17.7: a read that succeeds settles the conditions it checked. A whole
+read leaves nothing pending; a partial one settles every condition but a
+lasting one, which stays as it was, and records none of its own. -/
+theorem read_settles (s : State) (attempt : Attempt) (read : attempt.pin = false)
+    (success : first attempt.checks = none) :
+    pending (apply s attempt) =
+      if completed (apply s attempt) then none else (pending s).filter lasting := by
+  simp only [apply, success, read, Bool.false_eq_true, ↓reduceIte, readCommit]
+  by_cases present : attempt.range.index ∈ (ranges s).map Range.index <;>
+    simp only [present, ↓reduceIte] <;> split <;>
+    first
+    | (simp [pending, completed]; done)
+    | (rw [pending_kept, completed_kept]; cases s <;> simp [pending, completed])
+
 theorem progress_never_decreases (s : State) (attempt : Attempt) :
     progress s ≤ progress (apply s attempt) := by
   cases hf : first attempt.checks with
@@ -194,7 +246,7 @@ theorem progress_never_decreases (s : State) (attempt : Attempt) :
         by_cases present : attempt.range.index ∈ (ranges s).map Range.index
         all_goals
           simp only [readCommit, present, ↓reduceIte]
-          split <;> simp [progress, ranges, List.map_append, List.sum_append]
+          split <;> simp [progress, List.map_append, List.sum_append]
       · cases s <;> simp [apply, hf, hp, settle, progress, ranges]
 
 theorem committed_ranges_unique (s : State) (attempt : Attempt)
@@ -207,9 +259,9 @@ theorem committed_ranges_unique (s : State) (attempt : Attempt)
       · simp only [apply, hf, hp, Bool.false_eq_true, ↓reduceIte]
         by_cases present : attempt.range.index ∈ (ranges s).map Range.index
         · simp only [readCommit, present, ↓reduceIte]
-          split <;> exact unique
+          split <;> simpa using unique
         · simp only [readCommit, present, ↓reduceIte]
-          split <;> simpa [ranges, List.map_append, List.nodup_append] using And.intro unique present
+          split <;> simpa [List.map_append, List.nodup_append] using And.intro unique present
       · cases s <;> simpa [apply, hf, hp, settle, ranges] using unique
 
 /-- A completion an attempt makes holds every range. A failed read leaves a
@@ -235,7 +287,7 @@ theorem completion_has_all_ranges (s : State) (attempt : Attempt)
             change ∀ index, index < attempt.chunks → _
             intro index bound
             exact of_decide_eq_true (List.all_eq_true.mp all index (List.mem_range.mpr bound))
-          · simp [completed] at done
+          · simp [incomplete] at done
       · cases s <;> simp_all [apply, settle, completed]
 
 theorem committed_range_checked (a : Attempt) (success : first a.checks = none) :

@@ -81,3 +81,48 @@ async fn io_differential_download() {
     }
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
+
+/// A read that succeeds settles the download conditions it checked: one
+/// reaching the end of the file every one, one that stops short all but a
+/// refusal (§17.7). Each case pins a two-chunk file first, offline or over a
+/// second chunk that fails authentication, then reads its first chunk, or
+/// the whole file once the pin's cause is gone.
+#[tokio::test]
+#[ignore = "requires COVEN_IO_LEAN"]
+async fn io_differential_read_settles() {
+    let mut inputs = Vec::new();
+    let mut actual = Vec::new();
+    for (before, whole) in
+        [("network", false), ("refused", false), ("network", true), ("refused", true)]
+    {
+        let f = Fixture::new(Provenance::AppProvided).await;
+        let bytes = vec![73; CHUNK * 2];
+        let file = f.uploaded("settle", bytes.clone()).await;
+        let second_chunk = 11 + (CHUNK + 16) + 3;
+        let refused = before == "refused";
+        if refused {
+            f.storage.corrupt_byte(&f.path(&file), second_chunk).await.unwrap();
+        } else {
+            f.storage.set_online(false);
+        }
+        assert!(f.files.pin(std::slice::from_ref(&file)).await.is_err());
+        assert_eq!(download_retries(&f).await.len(), 1, "{before}");
+        if refused && whole {
+            f.storage.corrupt_byte(&f.path(&file), second_chunk).await.unwrap();
+        }
+        f.storage.set_online(true);
+        if whole {
+            assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+        } else {
+            let stream = f.files.open_file_stream(&file).await.unwrap();
+            stream.read_at(0, 1).await.unwrap();
+        }
+        let retries = download_retries(&f).await;
+        actual.push(serde_json::json!({
+            "refused": retries.contains(&Retry::AfterUpdate),
+            "next_call": retries.contains(&Retry::AppAction)}));
+        inputs.push(serde_json::json!({"check": "read_settles", "before": before, "whole": whole}));
+        f.close().await;
+    }
+    assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
+}
