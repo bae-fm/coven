@@ -9707,7 +9707,17 @@ What they don't cover:
 - **The providers.** Whether a real service really is create-once is checked
   live: certification races writers against each service (§20.7), and every
   setup re-checks the server (§20.8). A live sample measures listing lag; it
-  doesn't prove the listing margin.
+  doesn't prove the listing margin. Coven also takes as given what each
+  provider says about access and sign-in: a Dropbox App-folder key reaches
+  only the app's folder (§20.2), a provider refuses a token it no longer
+  accepts with HTTP 401 and a refresh token gets a new one, and a success
+  reply to a grant or revoke means it applied (§20.9). The live tests run
+  both Dropbox access levels, refresh their tokens, and check grants and
+  revocations (storage-certification.md); coven's own side, refusing an
+  App-folder share before any request and refreshing once then retrying once,
+  is tested in Rust.
+- **Costs.** The request counts and bounds of §21, the database writer never
+  held across a network request among them, are tested (§21.3), not proved.
 - **The composition.** The merge and conversion proofs cover their stated inputs;
   they don't establish the whole storage protocol built from them. The orders a
   pass's reading, applying and claiming rely on are modelled step by step
