@@ -359,6 +359,58 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
     }
 }
 
+/// A command that races the loop's panic hears the bug too: Ben's app
+/// pauses the loop as the sink hears the panic, and the pause fails with
+/// `WorkerFailed`, never as though the store had closed (E15).
+#[tokio::test]
+async fn a_command_racing_the_loops_panic_hears_its_bug() {
+    type Pausing =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SyncError>> + Send>>;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let mut last = LastPass::follow(&ben.sync.database);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
+    ben_loop.start().await.unwrap();
+    last.wait_for(|last| matches!(last, Some(LastPass::Synced))).await;
+    // The pause is sent as the sink hears the bug, and answered later.
+    let pausing = std::sync::Arc::new(std::sync::Mutex::new(None::<Pausing>));
+    let paused_at_once = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (racing, held, at_once) = (ben_loop.clone(), pausing.clone(), paused_at_once.clone());
+    group.bugs.on_next_report(move |_| {
+        let mut pause: Pausing = Box::pin(async move { racing.pause().await });
+        match futures_util::FutureExt::now_or_never(&mut pause) {
+            Some(answer) => *at_once.lock().unwrap() = Some(answer),
+            None => *held.lock().unwrap() = Some(pause),
+        }
+    });
+    let before = ben.database().applied_slot().await.unwrap();
+    insert(ana.database(), "a", "read by a panicking pass").await;
+    ana.sync.pass().await.unwrap();
+    let mut faults = coven_storage::test_utils::Faults::none();
+    faults.read_panics.insert(ana.sync.path(before + 1).unwrap());
+    ben.storage.set_faults(faults).await;
+    ben_loop.sync_now().unwrap();
+    let bug = tokio::time::timeout(HANG_GUARD, group.bugs.next()).await.expect("the sink hears it");
+    let at_once = paused_at_once.lock().unwrap().take();
+    let paused = match at_once {
+        Some(answer) => answer,
+        None => {
+            let pause = pausing.lock().unwrap().take().expect("the pause was sent");
+            tokio::time::timeout(HANG_GUARD, pause).await.expect("the pause is answered")
+        }
+    };
+    assert!(matches!(&paused, Err(SyncError::WorkerFailed(heard)) if heard == &bug), "{paused:?}");
+    assert!(group.bugs.take().is_empty(), "the sink heard the bug once");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// A write the loop makes on its own, here what a retry would do as it
 /// plans, panics: no caller waits for the loop, so the bug goes to the
 /// app's bug sink, once, and the loop stops as on any failed write of its

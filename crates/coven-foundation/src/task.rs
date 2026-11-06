@@ -214,7 +214,13 @@ pub struct HeardBugs {
     heard: std::sync::Mutex<Vec<Bug>>,
     /// Told of each bug as it is heard.
     notice: tokio::sync::Notify,
+    /// Runs as the next bug is heard, inside its report.
+    next_report: std::sync::Mutex<Option<ReportHook>>,
 }
+
+/// What a test runs as [`HeardBugs`] hears its next bug.
+#[cfg(any(test, feature = "test-utils"))]
+type ReportHook = Box<dyn FnOnce(&Bug) + Send>;
 
 #[cfg(any(test, feature = "test-utils"))]
 impl HeardBugs {
@@ -223,7 +229,14 @@ impl HeardBugs {
         std::sync::Arc::new(Self {
             heard: std::sync::Mutex::new(Vec::new()),
             notice: tokio::sync::Notify::new(),
+            next_report: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Run `hook` as the next bug is heard, inside its report: for a test
+    /// that acts at the moment the reporter hands a bug over.
+    pub fn on_next_report(&self, hook: impl FnOnce(&Bug) + Send + 'static) {
+        *crate::locks::lock_unpoisoned(&self.next_report) = Some(Box::new(hook));
     }
 
     /// Every bug heard since the last take, in the order heard.
@@ -251,6 +264,10 @@ impl HeardBugs {
 impl BugSink for HeardBugs {
     fn report(&self, bug: &Bug) {
         tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
+        let hook = crate::locks::lock_unpoisoned(&self.next_report).take();
+        if let Some(hook) = hook {
+            hook(bug);
+        }
         crate::locks::lock_unpoisoned(&self.heard).push(bug.clone());
         self.notice.notify_waiters();
     }

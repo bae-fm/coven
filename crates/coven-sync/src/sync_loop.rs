@@ -93,23 +93,21 @@ impl SyncLoop {
     pub fn new(sync: Arc<SequenceSync>, codes: crate::RestoreCodes) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let waits = sync.waits.clone();
-        let owner = sync.clone();
+        // Weak, so the connection's owners go when the loop lets them go.
+        let owner = Arc::downgrade(&sync);
         let ended = Arc::new(std::sync::OnceLock::new());
-        let panicked = ended.clone();
+        let unwound = ended.clone();
         let parks = crate::Parks::new();
+        // The loop catches a panic in its work itself; this one hears a
+        // panic in how the loop ends.
         drop(coven_foundation::task::spawn_owned(
             "the sync loop",
             sync.database.bugs().clone(),
             run(sync, codes, receiver, parks.clone(), ended.clone()),
             |bug| async move {
-                panicked.get_or_init(|| LoopEnd::Bug(bug.clone()));
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "the loop has ended either way; a bug has gone to the sink, and any other failed write has failed the handle, which reports it"
-                )]
-                let _ = show(&owner, LastPass::failed(SyncError::WorkerFailed(bug.clone()))).await;
-                if let Err(error) = own_write(&owner, owner.waits.sync_panicked(bug).await) {
-                    tracing::debug!("stopping sync after the loop's panic failed: {error}");
+                unwound.get_or_init(|| LoopEnd::Bug(bug.clone()));
+                if let Some(owner) = owner.upgrade() {
+                    panicked(&owner, bug).await;
                 }
             },
         ));
@@ -331,6 +329,24 @@ fn idle_wait(
     sync.clock.deadline((from + interval).saturating_sub(sync.clock.elapsed()))
 }
 
+/// The loop panicked with `bug`, which has gone to the sink: the last pass
+/// is recorded failed with it, sync stops, and the retries waiting, those
+/// the panicking pass took among them, are answered with it as
+/// `SyncError::WorkerFailed` (E15).
+async fn panicked(sync: &SequenceSync, bug: coven_foundation::task::Bug) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "the loop has ended either way; a bug has gone to the sink, and any other failed write has failed the handle, which reports it"
+    )]
+    let _ = show(sync, LastPass::failed(SyncError::WorkerFailed(bug.clone()))).await;
+    if let Err(error) = own_write(sync, sync.waits.sync_panicked(bug).await) {
+        tracing::debug!("stopping sync after the loop's panic failed: {error}");
+    }
+}
+
+/// Run the loop, catching a panic in its work while it still holds its
+/// commands and a closer's reply: it records why it ended before it lets
+/// either go, so each hears that, a panic's bug as `WorkerFailed` (E15).
 async fn run(
     sync: Arc<SequenceSync>,
     codes: crate::RestoreCodes,
@@ -339,6 +355,47 @@ async fn run(
     why_ended: Arc<std::sync::OnceLock<LoopEnd>>,
 ) {
     let _running = parks.running();
+    let bugs = sync.database.bugs().clone();
+    let owner = sync.clone();
+    let mut closing = None;
+    let served = coven_foundation::task::caught(
+        "the sync loop",
+        serve(sync, codes, &mut commands, &parks, &mut closing),
+    )
+    .await;
+    let (end, closed) = match served {
+        Ok(served) => served,
+        Err(bug) => {
+            coven_foundation::task::report(bugs.as_ref(), &bug);
+            panicked(&owner, bug.clone()).await;
+            (LoopEnd::Bug(bug.clone()), Err(SyncError::WorkerFailed(bug)))
+        }
+    };
+    // The connection's owners are released before the closer learns so.
+    drop(owner);
+    // Commands from now on hear why the loop ended; those it never took
+    // go as `commands` does, after this.
+    why_ended.get_or_init(|| end);
+    if let Some(reply) = closing {
+        // A closer that stopped waiting leaves a bug to the sink and any
+        // other failure to the log.
+        if let Err(Err(error)) = reply.send(closed) {
+            if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
+                tracing::warn!("closing sync failed after its caller stopped waiting: {error}");
+            }
+        }
+    }
+}
+
+/// The loop's work: why it ended, and how a closer's release of its
+/// transfers went. A closer's reply goes in `closing` as the loop takes it.
+async fn serve(
+    sync: Arc<SequenceSync>,
+    codes: crate::RestoreCodes,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    parks: &crate::Parks,
+    closing: &mut Option<oneshot::Sender<Result<(), SyncError>>>,
+) -> (LoopEnd, Result<(), SyncError>) {
     let mut changes = sync.database.sync_changes();
     let mut rearmed = sync.waits.rearmed();
     let mut retry = match crate::ConnectionRetry::open(&sync.database).await {
@@ -347,7 +404,7 @@ async fn run(
             crate::ConnectionRetry::Never(crate::connection_failure(reported(&sync, error)))
         }
     };
-    let mut closing = None;
+    let mut closed = Ok(());
     let end = 'run: {
         let held = retry.held(&sync.waits);
         if let Err(error) = sync.waits.holds(held).await {
@@ -458,12 +515,11 @@ async fn run(
                     // Transfers outlive this connection's loop; the store's
                     // owner closes them. This connection's transfers finish first.
                     Some(Command::Close(reply)) => {
-                        let result = if started && !paused {
-                            sync.files.set_storage(None, std::future::ready(Ok(()))).await
-                        } else {
-                            Ok(())
-                        };
-                        closing = Some((reply, result));
+                        // Held outside the work, so a panic below answers it.
+                        *closing = Some(reply);
+                        if started && !paused {
+                            closed = sync.files.set_storage(None, std::future::ready(Ok(()))).await;
+                        }
                         break LoopEnd::Released;
                     }
                     None => {
@@ -602,23 +658,7 @@ async fn run(
     if closing.is_none() {
         stopped(&sync).await;
     }
-    // The connection's owners are released before the closer learns so.
-    let bugs = sync.database.bugs().clone();
-    drop(changes);
-    drop(codes);
-    drop(sync);
-    // Commands from now on hear why the loop ended; those it never took
-    // go as `commands` does, after this.
-    why_ended.get_or_init(|| end);
-    if let Some((reply, result)) = closing {
-        // A closer that stopped waiting leaves a bug to the sink and any
-        // other failure to the log.
-        if let Err(Err(error)) = reply.send(result) {
-            if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
-                tracing::warn!("closing sync failed after its caller stopped waiting: {error}");
-            }
-        }
-    }
+    (end, closed)
 }
 
 #[cfg(test)]
