@@ -221,7 +221,13 @@ impl InputDatabase {
                 Ok(result) => Ok(result),
                 Err(error) => {
                     let error = with_staged_digest(writer, stagings.as_mut(), error);
-                    let removed = writer.transaction(|db| remove_all(db, stagings.as_mut()));
+                    let removed = writer.transaction(|db| {
+                        #[cfg(any(test, feature = "test-utils"))]
+                        if self.fail_removal.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            return Err(damage::removal_failure());
+                        }
+                        remove_all(db, stagings.as_mut())
+                    });
                     match removed {
                         Ok(()) => Err(error),
                         // The stagings keep their tables, which dropping

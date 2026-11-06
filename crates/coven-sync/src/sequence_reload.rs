@@ -13,8 +13,8 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
-    DbError, IncomingSlot, LoadStep, OperationUpdate, SlotContent, SnapshotError, SnapshotReload,
-    SnapshotSource, SnapshotStaging,
+    IncomingSlot, LoadStep, OperationUpdate, SlotContent, SnapshotReload, SnapshotSource,
+    SnapshotStaging,
 };
 use coven_format::sequence::{Purpose, SlotFrame, SnapshotAnnouncement};
 use coven_foundation::progress::ProgressReport;
@@ -849,24 +849,7 @@ impl SequenceSync {
             )
             .await;
         if let Err(error) = loaded {
-            return Err(match error {
-                DbError::Snapshot(SnapshotError::Body { snapshot, error, staged }) => {
-                    match stored.iter().find(|(stored, _)| stored.snapshot == snapshot) {
-                        Some((announcement, path)) => {
-                            self.judge_staged(
-                                database_failure(path, *error),
-                                staged,
-                                announcement,
-                                ring,
-                            )
-                            .await
-                        }
-                        None => DbError::Snapshot(SnapshotError::Body { snapshot, error, staged })
-                            .into(),
-                    }
-                }
-                error => error.into(),
-            });
+            return Err(self.judge_staged_body(error, &stored, ring, SyncError::from).await);
         }
         tracing::info!(
             store_rows = rows,

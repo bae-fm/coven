@@ -43,6 +43,10 @@ pub(crate) struct InputDatabase {
     /// would.
     #[cfg(any(test, feature = "test-utils"))]
     damage_finishing: Mutex<Option<(staging::StagedDamage, u32)>>,
+    /// A test's request to fail the next removal of the stagings a failed
+    /// load or file check ends, as a disk error would.
+    #[cfg(any(test, feature = "test-utils"))]
+    fail_removal: std::sync::atomic::AtomicBool,
 }
 
 struct InputRead {
@@ -200,6 +204,8 @@ impl InputDatabase {
             damage_staged: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             damage_finishing: Mutex::new(None),
+            #[cfg(any(test, feature = "test-utils"))]
+            fail_removal: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

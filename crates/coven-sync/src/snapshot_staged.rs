@@ -3,10 +3,54 @@
 
 use crate::{sequence_sync::SequenceSync, write_object::database_failure, SyncError};
 use coven_crypto::StoreKeyring;
-use coven_database::{DbError, SnapshotStaging, StagedDigest};
+use coven_database::{DbError, SnapshotError, SnapshotStaging, StagedDigest};
 use coven_format::sequence::SnapshotAnnouncement;
+use coven_storage::ObjectPath;
 
 impl SequenceSync {
+    /// Judge `error`, a failed load or file check over stagings: a failure
+    /// of a stored snapshot's body, one `stored` names with its announcement
+    /// and path, is judged at that snapshot's object as `judge_staged` does,
+    /// and any other failure is `other`'s. A failed removal of the stagings
+    /// the failure ends is this device's and says nothing about the
+    /// snapshot's bytes, so it is reported beside that verdict, never in its
+    /// place (§19.1).
+    pub(crate) async fn judge_staged_body(
+        &self,
+        error: DbError,
+        stored: &[(SnapshotAnnouncement, ObjectPath)],
+        ring: &StoreKeyring,
+        other: impl FnOnce(DbError) -> SyncError,
+    ) -> SyncError {
+        let (error, cleanup) = match error {
+            DbError::StagingCleanup { operation, cleanup } => (*operation, Some(*cleanup)),
+            error => (error, None),
+        };
+        let judged = match error {
+            DbError::Snapshot(SnapshotError::Body { snapshot, error, staged }) => {
+                match stored.iter().find(|(stored, _)| stored.snapshot == snapshot) {
+                    Some((announcement, path)) => {
+                        self.judge_staged(
+                            database_failure(path, *error),
+                            staged,
+                            announcement,
+                            ring,
+                        )
+                        .await
+                    }
+                    None => {
+                        other(DbError::Snapshot(SnapshotError::Body { snapshot, error, staged }))
+                    }
+                }
+            }
+            error => other(error),
+        };
+        match cleanup {
+            None => judged,
+            Some(cleanup) => SyncError::cleanup(judged, cleanup.into()),
+        }
+    }
+
     /// Judge `failed`, a failure of the snapshot `announcement` names met by
     /// a check of its records as one staging held them, `staged`. Staging is
     /// a function of the snapshot's bytes, so a refusal stands only when a

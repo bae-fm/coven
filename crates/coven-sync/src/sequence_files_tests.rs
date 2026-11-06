@@ -506,6 +506,47 @@ async fn a_snapshot_staged_for_file_deletion_damaged_here_is_not_refused() {
     }
 }
 
+/// The same damage, and removing the staging the failed check ends fails
+/// too. That removal says nothing about the snapshot's bytes, so the check
+/// is judged as it would be alone: the snapshot is not refused on its one
+/// staging, and the record keeps both local failures (§19.1).
+#[tokio::test]
+async fn a_snapshot_damaged_here_is_not_refused_when_removing_its_staging_fails() {
+    let (group, ana, object) = ana_with_an_unreferenced_stored_file().await;
+    ana.database().damage_next_staged_read().await.unwrap();
+    ana.database().fail_next_staging_removal().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&object).await.unwrap().is_some(), "the file stays");
+    let operation = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "sequence-files")
+        .expect("the failed deletion stays journaled")
+        .id;
+    let pending = ana
+        .database()
+        .operation_pending::<crate::PendingRecord>(operation)
+        .await
+        .unwrap()
+        .expect("the failure is reported");
+    let local = crate::PendingReason::Failed(crate::LocalFailure::Database);
+    assert_eq!(
+        pending.reason,
+        crate::PendingReason::Cleanup {
+            operation: Box::new(local.clone()),
+            cleanup: Box::new(local)
+        },
+        "{pending:?}"
+    );
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert!(group.storage.status(&object).await.unwrap().is_none(), "the file is deleted");
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}
+
 /// The snapshots a deletion decision reads are the ones announcements and
 /// the floor name, read by their paths: no pass lists a snapshot folder to
 /// find them (§17.10).

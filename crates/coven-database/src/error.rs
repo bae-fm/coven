@@ -619,7 +619,8 @@ pub enum DbError {
         failures: Vec<DbError>,
     },
     /// A snapshot load or file check failed, and so did removing the records
-    /// it staged, which its failure ends (§16.2); both failures are kept.
+    /// it staged, which its failure ends (§16.2); both failures are kept,
+    /// and sync judges the load's or check's own as it would alone (§19.1).
     #[error("removing staged snapshot records failed: {cleanup}; after: {operation}")]
     StagingCleanup {
         /// The load's or check's own failure.

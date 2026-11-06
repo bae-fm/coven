@@ -155,3 +155,46 @@ async fn a_refusal_of_announced_bytes_is_not_staged_again() {
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
 }
+
+/// Ben's load of the snapshot fails its check, and removing the staging it
+/// ends fails too. That removal is local and says nothing about the
+/// snapshot's bytes, so the check is judged as it would be alone, and the
+/// failed removal is reported beside the verdict (§19.1): stagings that
+/// agree refuse the snapshot, and a staging damaged here fails locally, and
+/// the next reload loads the snapshot.
+#[tokio::test]
+async fn a_body_failure_is_judged_when_removing_its_staging_fails() {
+    for agreeing in [true, false] {
+        let (_group, ana, ben) = snapshotted().await;
+        if agreeing {
+            ben.sync.database.damage_staged_finishes(StagedDamage::Record, 2).await.unwrap();
+        } else {
+            ben.sync.database.damage_next_staged_read().await.unwrap();
+        }
+        ben.sync.database.fail_next_staging_removal().await.unwrap();
+        let result = ben.sync.reload_from_snapshot().await;
+        let Err(SyncError::Cleanup { operation, cleanup }) = &result else {
+            panic!("{agreeing}: {result:?}");
+        };
+        assert!(
+            matches!(**cleanup, SyncError::Database(coven_database::DbError::Sqlite(_))),
+            "{agreeing}: {cleanup:?}"
+        );
+        let judged = match agreeing {
+            true => matches!(
+                **operation,
+                SyncError::Damaged(DamagedObject { failure: Refusal::Parse { .. }, .. })
+            ),
+            false => {
+                matches!(**operation, SyncError::Database(coven_database::DbError::DamagedDatabase))
+            }
+        };
+        assert!(judged, "{agreeing}: {operation:?}");
+        if !agreeing {
+            ben.sync.reload_from_snapshot().await.unwrap();
+            assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);
+        }
+        ana.sync.database.close().await.unwrap();
+        ben.sync.database.close().await.unwrap();
+    }
+}

@@ -140,6 +140,29 @@ pub(super) fn damage(
     }
 }
 
+/// The disk error a test's request fails a staging removal with.
+#[cfg(any(test, feature = "test-utils"))]
+pub(super) fn removal_failure() -> DbError {
+    DbError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+        Some("injected staging removal failure".into()),
+    ))
+}
+
+impl crate::Database {
+    /// Fail the next removal of the stagings a failed load or file check
+    /// ends, as a disk error would; the stagings keep their records until
+    /// they are dropped (§16.2).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn fail_next_staging_removal(&self) -> Result<(), DbError> {
+        self.call(|inner| {
+            inner.inputs.fail_removal.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, DbError>(())
+        })
+        .await
+    }
+}
+
 impl SnapshotStaging {
     /// The digest of the records it holds now (§19.1).
     pub async fn digest(&self) -> Result<StagedDigest, DbError> {

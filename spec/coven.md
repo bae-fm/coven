@@ -8036,7 +8036,11 @@ read, never a refusal.
   record Ben's laptop staged while his reload reads its slots: that reload
   fails, and his next one loads the snapshot
   ([`refusal_judges_stored`](proofs/io/CovenIO/Reread.lean), with the two
-  stagings as its reads).
+  stagings as its reads). A failed check ends its staging (§16.2), and when
+  removing the staging fails too, that failure is this device's and says
+  nothing about the snapshot's bytes: the check is judged as it would be alone,
+  and the call fails with its outcome, a refusal or `DamagedDatabase`, and the
+  failed removal beside it.
 - A file's cached copy is kept only once it checked (§17.8), so a cached header
   or chunk that fails its check changed on this device, and says nothing about
   the stored file. Coven fetches those bytes from storage, judges them as any

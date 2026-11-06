@@ -486,19 +486,11 @@ impl SequenceSync {
             .await
         {
             Ok(files) => Ok(files),
-            Err(coven_database::DbError::Snapshot(coven_database::SnapshotError::Body {
-                error,
-                staged,
-                ..
-            })) => Err(self
-                .judge_staged(
-                    crate::write_object::database_failure(path, *error),
-                    staged,
-                    announcement,
-                    ring,
-                )
+            Err(error) => Err(self
+                .judge_staged_body(error, &[(announcement.clone(), path.clone())], ring, |error| {
+                    crate::write_object::database_failure(path, error)
+                })
                 .await),
-            Err(error) => Err(crate::write_object::database_failure(path, error)),
         }
     }
 }

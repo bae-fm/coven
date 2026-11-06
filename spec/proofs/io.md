@@ -356,6 +356,13 @@ or deletes the file.
 `sequence_sync::snapshot_staged::tests::a_snapshot_whose_stagings_agree_is_refused`
 damages both stagings alike, as a snapshot whose own records fail stages
 them, and the refusal stands, at the staging's check and at the load's.
+A failed removal of the staging a failed check ends is a local failure outside
+the model, and changes no outcome `pass` gives:
+`sequence_sync::snapshot_staged::tests::a_body_failure_is_judged_when_removing_its_staging_fails`
+fails that removal under both damages at a reload, and
+`sequence_sync::sequence_files::tests::a_snapshot_damaged_here_is_not_refused_when_removing_its_staging_fails`
+under local damage at a file deletion's check; each reports the outcome with
+the failed removal beside it.
 
 ## Rechecking a refusal
 

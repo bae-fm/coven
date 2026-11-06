@@ -1526,7 +1526,8 @@ pub enum DbError {
     /// after a failed write, whose error it retains (Appendix C.3).
     FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DbError> },
     /// A snapshot load or file check failed, and so did removing the records
-    /// it staged, which its failure ends (§16.2); both failures are kept.
+    /// it staged, which its failure ends (§16.2); both failures are kept,
+    /// and sync judges the load's or check's own as it would alone (§19.1).
     StagingCleanup { operation: Box<DbError>, cleanup: Box<DbError> },
     /// A transaction failed and rolling it back failed too. Later calls fail
     /// with `RollbackFailed` until the store is reopened (§4).
