@@ -146,7 +146,13 @@ async fn a_bound_file_waits_on_its_retry_while_uploads_are_paused() {
     };
     assert!(at > network.clock.now(), "it retries after its backoff: {at:?}");
     ana.storage.set_faults(Faults::none()).await;
-    ana.handle.retry_uploads_now().await.unwrap();
+    // The pause doesn't hold the cover, so the retry tries it, whenever it
+    // is asked: before or after the run that found the cover waiting ends.
+    assert_eq!(
+        ana.handle.retry_uploads_now().await.unwrap(),
+        DrainOutcome::Drained { uploaded: 1 }
+    );
+    assert!(file_stored(ana, cover).await);
     state(ana, |state| *state == SyncState::Synced).await;
     network.close().await;
 }

@@ -56,8 +56,8 @@ pub(super) struct AppRetry {
     covers: Option<BTreeSet<i64>>,
     /// How many covered uploads were stored.
     uploaded: usize,
-    /// Its place among the retries asked, which says whether a read of the
-    /// write pause came after it.
+    /// Its place among the retries asked, which says whether a run's reads
+    /// of the queue and the holds came after it.
     asked: u64,
     reply: oneshot::Sender<Result<DrainOutcome, SyncError>>,
 }
@@ -330,35 +330,42 @@ impl FilesInner {
     }
 
     fn end_blocked(&self, blocked: Blocked, uploaded: usize) -> Result<DrainOutcome, SyncError> {
-        if let Blocked::Held(TrailingHold::MemberKeysChanging) = blocked {
-            self.answer_paused_writes();
-        } else {
-            self.answer_retries(|| blocked.retry_answer());
-        }
+        self.answer_retries(|| blocked.retry_answer());
         blocked.run_outcome(uploaded)
     }
 
-    /// Answer `MemberKeysChanging` to each app retry asked before the read
-    /// that found writes paused. One asked since may come after the pause
-    /// ended, so it waits for the next run, which reads the pause again.
-    fn answer_paused_writes(&self) {
-        let read_after = self.writes_paused_read_after();
+    /// End a run that a hold on trailing uploads stops. Each app retry a
+    /// read of the queue covered is answered with the hold: a trailing upload
+    /// it covers was not tried, and each bound one was, or none waited. One
+    /// asked since could cover a bound upload queued after that read, which
+    /// the hold doesn't stop, or come after the hold ended, so it waits for
+    /// the next run, which reads the queue and the hold again.
+    fn end_held(
+        &self,
+        hold: TrailingHold,
+        uploaded: usize,
+        covered: impl Fn(&AppRetry) -> bool,
+    ) -> Result<DrainOutcome, SyncError> {
+        let blocked = Blocked::Held(hold);
         let mut retries = lock_unpoisoned(&self.app_retries);
-        let (answered, kept): (Vec<_>, Vec<_>) =
-            retries.drain(..).partition(|retry| retry.asked < read_after);
-        *retries = kept;
+        let (answered, asked_since): (Vec<_>, Vec<_>) =
+            retries.drain(..).partition(|retry| covered(retry));
+        *retries = asked_since;
         let waiting = !retries.is_empty();
         drop(retries);
         for retry in answered {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "a retry whose caller stopped waiting needs no answer"
-            )]
-            let _ = retry.reply.send(Err(DbError::MemberKeysChanging.into()));
+            if let Some(answer) = blocked.retry_answer() {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "a retry whose caller stopped waiting needs no answer"
+                )]
+                let _ = retry.reply.send(answer);
+            }
         }
         if waiting {
             self.upload_wake.notify_one();
         }
+        blocked.run_outcome(uploaded)
     }
 
     #[cfg(test)]
@@ -402,6 +409,8 @@ impl FilesInner {
         // it read, so the run cannot answer a retry asked after a resume
         // with the pause.
         let change = self.lock_hold_change().await;
+        // The app retries asked before the reads below, which cover them.
+        let read_after = self.retries_asked();
         let paused = self.database.uploads_paused().await?;
         self.set_paused(paused);
         let unmetered_only = self.database.unmetered_only().await?;
@@ -420,7 +429,9 @@ impl FilesInner {
         // hold trailing uploads only (§12.3, §17.4, §17.9).
         if let Some(hold) = self.trailing_hold() {
             if work.iter().all(|(item, _)| Lane::of(item) == Lane::Trailing) {
-                return self.end_blocked(Blocked::Held(hold), 0);
+                #[cfg(test)]
+                self.pass_blocked_end_gate();
+                return self.end_held(hold, 0, |retry| retry.asked < read_after);
             }
         }
         drop(change);
@@ -468,7 +479,8 @@ impl FilesInner {
                         let _change = self.lock_hold_change().await;
                         self.read_writes_paused().await?;
                         if let Some(hold) = self.trailing_hold() {
-                            return self.end_blocked(Blocked::Held(hold), run.uploaded);
+                            return self
+                                .end_held(hold, run.uploaded, |retry| retry.covers.is_some());
                         }
                         run.stale = true;
                         continue;

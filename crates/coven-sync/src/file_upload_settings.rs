@@ -12,9 +12,6 @@ pub struct UploadSettings {
     /// Whether a self-replacement pauses this device's writes, as of the last
     /// read of the upload queue or a completion it refused (§12.3).
     writes_paused: AtomicBool,
-    /// How many app retries had been asked when the write pause was last
-    /// read: only those can be answered that it holds writes.
-    writes_paused_read_after: AtomicU64,
     /// How many app retries have been asked.
     retries_asked: AtomicU64,
     /// Held by an app's change of either setting, and by an upload run from
@@ -39,7 +36,6 @@ impl UploadSettings {
         Self {
             paused: AtomicBool::new(false),
             writes_paused: AtomicBool::new(false),
-            writes_paused_read_after: AtomicU64::new(0),
             retries_asked: AtomicU64::new(0),
             hold_change: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -62,16 +58,8 @@ impl UploadSettings {
     pub(super) fn set_writes_paused(&self, paused: bool) {
         self.writes_paused.store(paused, Ordering::Release);
     }
-    pub(super) fn writes_paused_read_after(&self) -> u64 {
-        self.writes_paused_read_after.load(Ordering::Acquire)
-    }
     pub(super) fn retries_asked(&self) -> u64 {
         self.retries_asked.load(Ordering::Acquire)
-    }
-    /// The write pause as read, after `asked` app retries.
-    pub(super) fn read_writes_paused(&self, paused: bool, asked: u64) {
-        self.writes_paused.store(paused, Ordering::Release);
-        self.writes_paused_read_after.store(asked, Ordering::Release);
     }
     #[cfg(test)]
     pub(super) fn hold_after_settings_read(
@@ -143,9 +131,9 @@ impl FilesInner {
             None
         }
     }
-    /// How many app retries had been asked when the write pause was last read.
-    pub(crate) fn writes_paused_read_after(&self) -> u64 {
-        self.uploads.writes_paused_read_after()
+    /// How many app retries have been asked.
+    pub(crate) fn retries_asked(&self) -> u64 {
+        self.uploads.retries_asked()
     }
     /// A trailing upload's completion was refused: the pause holds the lane
     /// until a read of the queue finds it ended.
@@ -196,10 +184,8 @@ impl FilesInner {
     }
     /// Read whether a self-replacement pauses this device's writes.
     pub(crate) async fn read_writes_paused(&self) -> Result<(), coven_database::DbError> {
-        let uploads = &self.uploads;
-        let asked = uploads.retries_asked();
         let paused = self.database.writes_paused().await?;
-        uploads.read_writes_paused(paused, asked);
+        self.uploads.set_writes_paused(paused);
         Ok(())
     }
 }

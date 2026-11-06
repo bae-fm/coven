@@ -6578,9 +6578,9 @@ covers are in flight.
   stops between parts, and one whose file is stored meanwhile records no
   failure: it stays queued, and the first run after the pause finds its bytes
   stored and completes it. `retry_uploads_now` meanwhile tries only bound
-  uploads and returns `MemberKeysChanging`, as an app write does. A retry
-  asked once the pause has ended is never answered so, even by a run that
-  read the pause before it ended.
+  uploads and, if it covers a trailing one, returns `MemberKeysChanging`, as
+  an app write does. A retry asked once the pause has ended is never answered
+  so, even by a run that read the pause before it ended.
 - **Both lanes stop** for the stuck-device stop (§5.4), the removal cut-off
   (§14.1), a provider cooldown, a connection change and stopping sync, as writes
   do.
@@ -7024,8 +7024,11 @@ to the same limit, so a cover never waits behind the photos (§17.4).
 - `retry_uploads_now` joins the uploads in progress rather than waiting for
   them. It covers every queued file that can retry, whatever its delay, and
   returns once each one's attempt has ended. While uploads are paused it tries
-  only bound ones, and says uploads are paused; while sync is stopped it tries
-  none, and says sync isn't running.
+  only bound ones, and says uploads are paused if it covers a trailing one;
+  while sync is stopped it tries none, and says sync isn't running. What it
+  covers comes from a read of the queue made after it was asked: one asked as
+  a held run ends waits for the next run, so a cover queued or waiting on its
+  backoff by then is tried, not answered paused unseen.
 - **Same stops as writes.** File sends follow the stuck-device rule (§5.4) and the
   removal cut-off (§14.1). Parts the provider confirmed stay recorded for
   resuming; no time-based permission to send is needed.

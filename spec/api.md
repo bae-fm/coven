@@ -6038,7 +6038,11 @@ impl CovenHandle {
     /// `Paused`, and while the setting holds trailing uploads on a metered
     /// network it does the same and returns `Metered`. While a
     /// self-replacement pauses writes it does the same and fails with
-    /// `MemberKeysChanging` (§12.3, §17.4); while sync is stopped
+    /// `MemberKeysChanging` (§12.3, §17.4). Each answer means a trailing
+    /// upload it covers was held; covering only bound ones, it returns
+    /// `Drained`. What it covers comes from a read of the queue after it
+    /// was asked, so a bound upload queued or waiting by then is always
+    /// tried, even when asked as a held run ends. While sync is stopped
     /// it tries none and returns `NotSyncing`. Provider cooldowns still hold; failures stay in
     /// pending() (§6.7). Once the upload worker has ended other than with
     /// the store, by a panic or a failure of the handle, no run follows, so

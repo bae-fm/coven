@@ -398,6 +398,95 @@ async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
     f.close().await;
 }
 
+/// Paused, a bound upload still retries (§17.4). Ana's cover fails on a
+/// server error while uploads are paused, so the run has nothing it may
+/// start and ends paused; her app's retry, asked as the run ends, is not
+/// answered `Paused` unseen but taken by the next run, which tries the cover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_asked_as_a_paused_run_ends_tries_the_waiting_bound_upload() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    f.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            fail_next: 1,
+            failure: coven_storage::StorageFailure::Network,
+            response: Some(503),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let cover = f.attach("covers", "album", photo(3)).await;
+
+    let (reached, mut ending) = tokio::sync::mpsc::unbounded_channel();
+    let (proceed, held) = std::sync::mpsc::channel::<()>();
+    // Only the first end waits; later runs pass straight through.
+    let held = Mutex::new(Some(held));
+    *f.files.inner.blocked_end_gate.lock().unwrap() = Some(Arc::new(move || {
+        if let Some(held) = held.lock().unwrap().take() {
+            reached.send(()).unwrap();
+            held.recv().unwrap();
+        }
+    }));
+    let inner = f.files.inner.clone();
+    let run = tokio::spawn(async move { inner.drain_uploads().await });
+    tokio::time::timeout(HANG_GUARD, ending.recv())
+        .await
+        .expect("the run ends paused once the cover's attempt fails")
+        .unwrap();
+    let mut answer = f.files.inner.ask_retry().unwrap();
+    proceed.send(()).unwrap();
+    assert_eq!(run.await.unwrap().unwrap(), DrainOutcome::Paused);
+    assert!(answer.try_answered().is_none(), "the retry waits for the next run");
+    f.files.inner.drain_uploads().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(HANG_GUARD, answer.answered()).await.unwrap().unwrap(),
+        DrainOutcome::Drained { uploaded: 1 }
+    );
+    assert!(!f.queued(&cover).await);
+    f.close().await;
+}
+
+/// Paused, a run that reads only trailing uploads ends at once (§17.4). Ana's
+/// app attaches a cover and retries as that run ends: the run read the queue
+/// before the cover was queued, so the retry is not answered `Paused` with
+/// the cover untried but taken by the next run, which tries the cover and
+/// holds the photo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_asked_as_a_paused_run_starts_tries_a_bound_upload_queued_since() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    let photo_file = f.attach("files", "photo", photo(1)).await;
+
+    let (reached, mut ending) = tokio::sync::mpsc::unbounded_channel();
+    let (proceed, held) = std::sync::mpsc::channel::<()>();
+    // Only the first end waits; later runs pass straight through.
+    let held = Mutex::new(Some(held));
+    *f.files.inner.blocked_end_gate.lock().unwrap() = Some(Arc::new(move || {
+        if let Some(held) = held.lock().unwrap().take() {
+            reached.send(()).unwrap();
+            held.recv().unwrap();
+        }
+    }));
+    let inner = f.files.inner.clone();
+    let run = tokio::spawn(async move { inner.drain_uploads().await });
+    tokio::time::timeout(HANG_GUARD, ending.recv())
+        .await
+        .expect("the run ends paused with only the photo queued")
+        .unwrap();
+    let cover = f.attach("covers", "album", photo(3)).await;
+    let mut answer = f.files.inner.ask_retry().unwrap();
+    proceed.send(()).unwrap();
+    assert_eq!(run.await.unwrap().unwrap(), DrainOutcome::Paused);
+    assert!(answer.try_answered().is_none(), "the retry waits for the next run");
+    f.files.inner.drain_uploads().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(HANG_GUARD, answer.answered()).await.unwrap().unwrap(),
+        DrainOutcome::Paused
+    );
+    assert!(!f.queued(&cover).await);
+    assert!(f.queued(&photo_file).await);
+    f.close().await;
+}
+
 /// A file sent in one request shows as uploading while its request is open,
 /// with no progress: only storage's confirmation retires it (E7).
 #[tokio::test]

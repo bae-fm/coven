@@ -72,6 +72,7 @@ impl Fixture {
         let namespaces = vec![
             Namespace::new("files", provenance, 1 << 30),
             Namespace::new("other", Provenance::AppProvided, 1 << 30),
+            Namespace::new("covers", Provenance::AppProvided, 1 << 30),
         ];
         let database = builder(&directory, &ids, &clock, &namespaces).open().await.unwrap();
         let storage = Arc::new(
@@ -410,13 +411,19 @@ fn stored(file: &FileRef) -> &FileLocation {
     }
 }
 
-/// Two synced tables whose rows reference a file each, one per namespace.
+/// Three synced tables whose rows reference a file each, one per namespace:
+/// in `covers`, a file bound to its row (§17.4).
 fn tables() -> Vec<SyncedTable> {
-    ["files", "other"]
+    let mut tables: Vec<_> = ["files", "other"]
         .map(|table| {
             SyncedTable::new(table, RowIdentity::SharedKey).file_column(FileColumn::new("file"))
         })
-        .into()
+        .into();
+    tables.push(
+        SyncedTable::new("covers", RowIdentity::SharedKey)
+            .file_column(FileColumn::new("file").bound()),
+    );
+    tables
 }
 
 fn builder(
@@ -433,7 +440,7 @@ fn builder(
         .migrations(vec![Migration::addition(
             1,
             "files",
-            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,file TEXT); CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
         )])
 }
 
