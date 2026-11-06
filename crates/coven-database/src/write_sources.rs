@@ -231,8 +231,9 @@ pub(crate) fn executed(
         return Ok(Default::default());
     };
     let pre = PreWrite::new(db, store, row.clone())?;
-    // A row that moved into this audience earlier in the write starts from
-    // the incarnation the move began: nothing before the write is replaced.
+    // A row a move carried into this audience earlier in the write, with no
+    // step of its own, starts from the incarnation that move began: nothing
+    // before the write is replaced.
     if first.change.generation != pre.state.generation() {
         return Ok(coven_format::write::Execution { steps, sources: Default::default() });
     }

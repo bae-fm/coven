@@ -289,9 +289,9 @@ def parse_change(r):
 
 
 def parse_execution(r, own=None):
-    """D5: each step is `sequence | change | key_update`, its change `0` for
+    """D5: each step is `sequence | change | half`, its change `0` for
     exactly the row change's own (`own`, its bytes) or `1 | change`. The
-    returned steps are expanded to `sequence | change | key_update`, as
+    returned steps are expanded to `sequence | change | half`, as
     their D11 leaves encode them."""
     steps = []
     for _ in range(r.int(4)):

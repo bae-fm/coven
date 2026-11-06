@@ -9,7 +9,7 @@ use crate::{DbError, LostValue};
 use coven_format::{
     dismissal::{Dismissal, DismissalTarget},
     value::Value,
-    write::{RowChange, Step, WritePart, WriteRecord},
+    write::{Half, RowChange, Step, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Change, Operation, RowId, RowState};
@@ -198,7 +198,7 @@ fn cascade_deletes(
         change.execution.steps.push(Step {
             sequence,
             change: change.change.clone(),
-            key_update: false,
+            half: Half::Whole,
         });
         sequence = sequence.checked_add(1).expect("a write has fewer operations");
         for declaration in &schema.declarations {

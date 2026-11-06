@@ -14,7 +14,7 @@ use crate::write_rows::{
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::value::Value;
-use coven_format::write::Step;
+use coven_format::write::{Half, Step};
 use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -127,8 +127,9 @@ impl Tracker<'_> {
     }
 
     /// The merge row an existing app row is in now. When an earlier
-    /// operation moved it, or its audience parent, into another audience,
-    /// that move ended the old merge row and began this one (§15.4).
+    /// operation moved its audience parent into another audience, carrying
+    /// the row with no step of its own, that move ended the old merge row
+    /// and began this one (§15.4).
     fn existing(&mut self, key: &AppKey, values: &AppValues) -> Result<RowId, DbError> {
         let now = self.row(key, values)?;
         let last = match self.rows.get(key) {
@@ -241,27 +242,60 @@ pub(crate) fn capture(
             (Some(old_key), Some(new_key)) if old_key == new_key => {
                 let old = old.as_ref().expect("an update has old values");
                 let new = new.as_ref().expect("an update has new values");
-                tracker.existing(old_key, old)?;
+                let from = tracker.existing(old_key, old)?;
                 let changed: BTreeSet<_> = new
                     .iter()
                     .filter(|(name, value)| old.get(*name) != Some(*value))
                     .map(|(name, _)| name.clone())
                     .collect();
                 tracker.current.insert(old_key.clone(), Some(new.clone()));
-                // An update changing the row's audience moves it: the old
-                // audience's row ends, and the update is the first operation
-                // on the new audience's row, which the move began (§15.4).
-                let row = tracker.existing(old_key, new)?;
-                let columns = tracker.columns(table, new, Some(&row.audience), changed)?;
-                let generation = tracker.generation(&row)?;
-                steps.push((
-                    row,
-                    Step {
-                        sequence,
-                        change: Change { generation, operation: Operation::Update(columns) },
-                        key_update: false,
-                    },
-                ));
+                let to = tracker.row(old_key, new)?;
+                if to == from {
+                    let columns = tracker.columns(table, new, Some(&to.audience), changed)?;
+                    let generation = tracker.generation(&to)?;
+                    steps.push((
+                        to,
+                        Step {
+                            sequence,
+                            change: Change { generation, operation: Operation::Update(columns) },
+                            half: Half::Whole,
+                        },
+                    ));
+                } else {
+                    // An update changing the row's own audience moves it: a
+                    // delete of the old audience's row and an insert of the
+                    // new one's, at one position (§15.4).
+                    let generation = tracker.generation(&from)?;
+                    tracker.advance(&from)?;
+                    steps.push((
+                        from,
+                        Step {
+                            sequence,
+                            change: Change { generation, operation: Operation::Delete },
+                            half: Half::Move,
+                        },
+                    ));
+                    let all = new.keys().cloned().collect::<Vec<_>>();
+                    let columns = tracker.columns(table, new, Some(&to.audience), all)?;
+                    let generation = tracker.generation(&to)?;
+                    // A removed row the move lands on is updated, every
+                    // column set, as inserting its key does (§8.4).
+                    let operation = if coven_merge::generation_present(generation) {
+                        Operation::Update(columns)
+                    } else {
+                        tracker.advance(&to)?;
+                        Operation::Insert(columns)
+                    };
+                    tracker.rows.insert(old_key.clone(), to.clone());
+                    steps.push((
+                        to,
+                        Step {
+                            sequence,
+                            change: Change { generation, operation },
+                            half: Half::Move,
+                        },
+                    ));
+                }
             }
             _ => {
                 if let (Some(key), Some(old)) = (&old_key, &old) {
@@ -275,7 +309,7 @@ pub(crate) fn capture(
                         Step {
                             sequence,
                             change: Change { generation, operation: Operation::Delete },
-                            key_update: new_key.is_some(),
+                            half: if new_key.is_some() { Half::OldKey } else { Half::Whole },
                         },
                     ));
                 }
@@ -299,7 +333,7 @@ pub(crate) fn capture(
                         Step {
                             sequence,
                             change: Change { generation, operation },
-                            key_update: false,
+                            half: Half::Whole,
                         },
                     ));
                 }

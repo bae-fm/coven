@@ -130,8 +130,9 @@ pub struct RowChange {
     /// row's original creation, whose author keeps owning it (§9.6).
     pub creator: Option<ChangeId>,
     /// The statement, shared-trigger and foreign-key operations on this row,
-    /// in execution order, including a dismissal's deletes. Audience moves
-    /// and migration differences have no steps.
+    /// in execution order, including a dismissal's deletes and the halves
+    /// of a move the row's own operation made. A row a move carried along
+    /// with its ancestor, and a migration difference, have no steps.
     pub execution: Execution,
 }
 impl Wire for RowChange {
@@ -230,15 +231,50 @@ impl RowChange {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
     /// The operation's position in the write. Only the two halves of one
-    /// primary-key update share a position.
+    /// operation share a position: of a primary-key update, or of a row's
+    /// move to another audience.
     pub sequence: u32,
     /// The row's generation before the operation, and the columns it set,
     /// with the parents its references named at that moment.
     pub change: Change<Value>,
-    /// A delete that is the old half of a primary-key update: its foreign
-    /// keys follow their ON UPDATE actions, not ON DELETE (§9.2).
-    pub key_update: bool,
+    /// Which half of an operation on two rows the step is, if either.
+    pub half: Half,
 }
+
+/// The halves of one operation that changes two merge rows at once (D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Half {
+    /// An operation on one row.
+    Whole,
+    /// The delete of a primary-key update's old key: its foreign keys follow
+    /// their ON UPDATE actions, not ON DELETE (§9.2).
+    OldKey,
+    /// The delete in the old audience, or the insert in the new one, of a
+    /// row whose own operation changed its audience (§15.4). SQLite still
+    /// holds the row, so no foreign key acts on its delete.
+    Move,
+}
+
+impl Half {
+    fn put(self, out: &mut Encoder) -> Result<(), Error> {
+        let tag: u8 = match self {
+            Self::Whole => 0,
+            Self::OldKey => 1,
+            Self::Move => 2,
+        };
+        tag.put(out)
+    }
+
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(Self::Whole),
+            1 => Ok(Self::OldKey),
+            2 => Ok(Self::Move),
+            tag => Err(Error::UnknownTag { field: "step half", tag }),
+        }
+    }
+}
+
 impl Step {
     /// The position after every one of `steps`, where an operation the
     /// write adds after them goes: 0 with none.
@@ -251,23 +287,18 @@ impl crate::wire::Wire for Step {
     fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), Error> {
         self.sequence.put(out)?;
         self.change.put(out)?;
-        u8::from(self.key_update).put(out)
+        self.half.put(out)
     }
     fn get(input: &mut crate::wire::Decoder<'_>) -> Result<Self, Error> {
         let sequence = Wire::get(input)?;
         let change = Wire::get(input)?;
-        let key_update = match u8::get(input)? {
-            0 => false,
-            1 => true,
-            tag => return Err(Error::UnknownTag { field: "key update", tag }),
-        };
-        Ok(Self { sequence, change, key_update })
+        Ok(Self { sequence, change, half: Half::get(input)? })
     }
 }
 /// A row's operations in execution order, with the sources they replaced
 /// that its net change, if any, does not already name (§9.5, D5). An
-/// operation after the row moved into this audience in the same write
-/// starts from the generation the move began, not the net change's.
+/// operation after a move carried the row into this audience in the same
+/// write starts from the generation that move began, not the net change's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Execution {
     /// In increasing sequence order, each starting at the previous one's
@@ -278,7 +309,7 @@ pub struct Execution {
     pub sources: crate::write_sources::WriteSources,
 }
 impl Execution {
-    /// Each step is `sequence | change | key_update`, with `change` as
+    /// Each step is `sequence | change | half`, with `change` as
     /// `0` for exactly the row change's own change, written once, or as
     /// `1 | change` otherwise (D5). An execution record has no own change.
     fn put_against(&self, out: &mut Encoder, own: Option<&Change<Value>>) -> Result<(), Error> {
@@ -293,7 +324,7 @@ impl Execution {
                 1u8.put(out)?;
                 step.change.put(out)?;
             }
-            u8::from(step.key_update).put(out)?;
+            step.half.put(out)?;
         }
         self.sources.put(out)
     }
@@ -311,12 +342,7 @@ impl Execution {
                 }
                 (tag, _) => return Err(Error::UnknownTag { field: "step change", tag }),
             };
-            let key_update = match u8::get(input)? {
-                0 => false,
-                1 => true,
-                tag => return Err(Error::UnknownTag { field: "key update", tag }),
-            };
-            Ok(Step { sequence, change, key_update })
+            Ok(Step { sequence, change, half: Half::get(input)? })
         })?;
         Ok(Self { steps, sources: Wire::get(input)? })
     }
@@ -328,7 +354,7 @@ impl Execution {
                 crate::merge_wire::columns(values)?;
             }
             require(
-                !step.key_update || matches!(step.change.operation, Operation::Delete),
+                step.half != Half::OldKey || matches!(step.change.operation, Operation::Delete),
                 "key update step",
                 Rule::ColumnOperation,
             )?;

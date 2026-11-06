@@ -17,8 +17,8 @@ use crate::Database;
 use coven_format::loss::AuthorizationFailure;
 use coven_format::snapshot_rows::ChangeVerdict;
 use coven_format::value::Value;
-use coven_format::write::Step;
 use coven_format::write::WriteRecord;
+use coven_format::write::{Half, Step};
 use coven_format::write_sources::ChangeId;
 use coven_merge::RowId;
 use serde_json::{json, Value as Json};
@@ -105,7 +105,7 @@ fn effect(
 ) -> Json {
     let id = ids.row(row);
     let (kind, cells) = match &step.change.operation {
-        coven_merge::Operation::Delete if step.key_update => {
+        coven_merge::Operation::Delete if step.half == Half::OldKey => {
             let new = steps
                 .iter()
                 .find(|(r, s)| {
@@ -224,7 +224,7 @@ fn input(
                 fk.columns.iter().map(|c| column_name(child_table, c).to_owned()).collect();
             let targets = target_columns(parent_table, fk);
             let old = key_values(schema, parent);
-            if parent_step.key_update {
+            if parent_step.half == Half::OldKey {
                 let (new, _) = steps
                     .iter()
                     .find(|(r, s)| {
@@ -329,7 +329,7 @@ fn input(
                 let owned = coven_format::snapshot_rows::OriginalRow::Change(change.clone());
                 if !consistent(&owned) {
                     let step =
-                        Step { sequence: 0, change: change.change.clone(), key_update: false };
+                        Step { sequence: 0, change: change.change.clone(), half: Half::Whole };
                     payloads.push(effect(&mut ids, schema, &steps, row, &step));
                 }
             }
@@ -532,7 +532,7 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
                     }
                 }
             }
-            let becomes = step.key_update.then(|| {
+            let becomes = (step.half == Half::OldKey).then(|| {
                 let (new, new_step) = index.new_half(row, step.sequence).unwrap();
                 json!([ids.row(new), new_step.after])
             });
@@ -551,7 +551,7 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
                 // parent's incarnation could cascade.
                 let mut store = Vec::new();
                 for parent_step in index.before(&held.parent, step.sequence) {
-                    if !parent_step.key_update || parent_step.generation != held.generation {
+                    if parent_step.half != Half::OldKey || parent_step.generation != held.generation {
                         continue;
                     }
                     let (new, _) = index.new_half(&held.parent, parent_step.sequence).unwrap();

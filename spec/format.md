@@ -553,7 +553,7 @@ ChangeId   = write:WriteId | row:RowId
 CellSource = change:ChangeId | column:name
 Execution  = steps:[Step] | generation_source:Option<ChangeId> |
              replaced_setters:map<name, CellSource>
-Step       = sequence:u32 | change | key_update:u8
+Step       = sequence:u32 | change | half:u8
 ```
 
 | Field | Type | Rule |
@@ -703,10 +703,16 @@ and each later operation takes the next number, except as below.
 *Example.* If Ana's write 3 updated note 42 first and then deleted the tag, note
 42's step is at 0 and the tag's step at 1.
 
-- Only the two halves of one primary-key update share a position. That update is
-  a delete of the old key, with `key_update` 1, and an insert of the new one. The
-  old key's foreign keys follow their ON UPDATE actions, not ON DELETE (§9.2).
-- `key_update` is 0 everywhere else.
+- Only the two halves of one operation that changes two rows share a position:
+  - A primary-key update is a delete of the old key, with `half` 1, and an
+    insert of the new one. The old key's foreign keys follow their ON UPDATE
+    actions, not ON DELETE (§9.2).
+  - An update that changes the row's own audience moves it (§15.4): a delete of
+    its row in the old audience and an insert of its row in the new one, both
+    with `half` 2. SQLite still holds the row, so no foreign key acts on that
+    delete. When the new audience has a removed row with that key, the insert
+    half is an update setting every column, as inserting a removed row's key is.
+- `half` is 0 everywhere else.
 - A receiver checks that each row's steps are in strictly increasing sequence
   order. It doesn't check that the write's positions start at 0 or run without
   gaps.
@@ -735,8 +741,8 @@ and each later operation takes the next number, except as below.
 - A delete step sets none.
 - Inserting a removed row's key is an update step setting every column.
 - Generated columns are never set (D5.5).
-- Operations on a row after a move into this audience in the same write start at
-  the generation the move began.
+- Operations on a row after a move carried it into this audience in the same
+  write start at the generation that move began.
 
 **No labels.** No step says whether a statement, a trigger or a foreign-key
 action made it. A receiver reconstructs that from the original schema and the
@@ -748,7 +754,8 @@ steps, through the references as replayed up to each step.
 are the sources the steps used beyond those the net change already names, in the
 same role order (D5.6).
 
-**Changes without SQL.** Audience moves and migration differences have no steps.
+**Changes without SQL.** A row a move carries along with its moved ancestor, and
+migration differences, have no steps.
 A dismissal records its deletes as steps, a parent before the children whose
 deletes it causes, so receivers can verify the children's permission (§9.6).
 
@@ -1876,7 +1883,7 @@ none.
 1 | row:RowId | generation:u64 | kind:u8 | column:name | value:ColumnValue
                                  each column an insert (kind 0) or update (1) set
 2 | row:RowId | generation:u64                                a delete
-3 | row:RowId | sequence:u32 | generation:u64 | operation:u8 | columns | key_update:u8
+3 | row:RowId | sequence:u32 | generation:u64 | operation:u8 | columns | half:u8
                                                               each SQL operation
 ```
 

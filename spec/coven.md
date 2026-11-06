@@ -5127,7 +5127,10 @@ insert of them in the new one:
   never had;
 - devices that read only the old audience see a delete;
 - which rows move is worked out against the database as it was before the write;
-- moving them back later is a re-add (§8.3).
+- moving them back later is a re-add (§8.3);
+- the write's steps (D5.8) record the update that moved a row as that delete and
+  that insert, at one position, so receivers replay where the row went; a
+  descendant the move carries has no steps of its own.
 
 Ana moves note 42 and its attachments from the store into Gifts. Carol's devices
 delete them; Ana's and Ben's insert them in Gifts. Each moved attachment gets a

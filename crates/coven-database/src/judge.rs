@@ -30,7 +30,7 @@ use coven_format::loss::AuthorizationFailure;
 use coven_format::merge_fields;
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
-use coven_format::write::{PartRecord, Step, WriteHeader, WriteRecord};
+use coven_format::write::{Half, PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 pub(crate) struct Indexed {
     pub(crate) sequence: u32,
     pub(crate) delete: bool,
-    pub(crate) key_update: bool,
+    pub(crate) half: Half,
     pub(crate) generation: u64,
     /// The row's generation after this step.
     pub(crate) after: u64,
@@ -54,7 +54,7 @@ impl Indexed {
         Self {
             sequence: step.sequence,
             delete: matches!(step.change.operation, Operation::Delete),
-            key_update: step.key_update,
+            half: step.half,
             generation: step.change.generation,
             after: step.change.after().expect("a decoded step's generation advances"),
         }

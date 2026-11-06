@@ -221,11 +221,17 @@ fn operations_are_ordered_continuous_and_start_at_the_change_generation() {
     parity.parts[0].executions[0].execution.steps[0].change.generation = 1;
     refuses(parity, Error::Merge(MergeError::GenerationParity(1)));
     let mut key_update = test_utils::write();
-    key_update.parts[0].executions[0].execution.steps[0].key_update = true;
+    key_update.parts[0].executions[0].execution.steps[0].half = Half::OldKey;
     refuses(key_update, Error::Invalid { field: "key update step", rule: Rule::ColumnOperation });
     // Only a delete is the old half of a primary-key update.
+    let mut old_key = test_utils::write();
+    old_key.parts[0].executions[0].execution.steps[1].half = Half::OldKey;
+    assert_eq!(decode_plaintext(&test_utils::write_plaintext(&old_key).unwrap()).unwrap(), old_key);
+    // Either operation of a move is its half.
     let mut moved = test_utils::write();
-    moved.parts[0].executions[0].execution.steps[1].key_update = true;
+    for step in &mut moved.parts[0].executions[0].execution.steps {
+        step.half = Half::Move;
+    }
     assert_eq!(decode_plaintext(&test_utils::write_plaintext(&moved).unwrap()).unwrap(), moved);
     let mut empty = test_utils::write();
     empty.parts[0].executions[0].execution.steps.clear();
@@ -327,7 +333,7 @@ fn copied_creations_and_operation_sources_must_have_been_read() {
 fn a_step_equal_to_its_row_change_is_written_once() {
     let mut change = test_utils::write().parts.remove(0).rows.remove(0);
     change.execution = Execution {
-        steps: vec![Step { sequence: 0, change: change.change.clone(), key_update: false }],
+        steps: vec![Step { sequence: 0, change: change.change.clone(), half: Half::Whole }],
         sources: Default::default(),
     };
     let compact = change.encode().unwrap();

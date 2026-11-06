@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::TestStore;
 use crate::write::tests::{records, sql};
 use crate::{Database, RowIdentity, SyncedTable};
-use coven_format::write::RowExecution;
+use coven_format::write::{Half, RowExecution};
 
 const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
 CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE, body TEXT);
@@ -130,8 +130,8 @@ async fn a_key_update_is_two_halves_at_one_position() {
     let old = &operations.steps[&row("tracks", "t")][0];
     let new = &operations.steps[&row("tracks", "u")][0];
     assert_eq!(old.sequence, new.sequence);
-    assert!(old.key_update && matches!(old.change.operation, Operation::Delete));
-    assert!(!new.key_update && matches!(new.change.operation, Operation::Insert(_)));
+    assert!(old.half == Half::OldKey && matches!(old.change.operation, Operation::Delete));
+    assert!(new.half == Half::Whole && matches!(new.change.operation, Operation::Insert(_)));
     assert_eq!(operations.origin("reviews", "r"), [cause("tracks", "t", old.sequence)]);
     let review = &operations.steps[&row("reviews", "r")][0];
     let Operation::Update(columns) = &review.change.operation else {
@@ -258,7 +258,7 @@ pub(crate) mod lean {
     ) -> Json {
         let id = ids.row(row);
         let (kind, cells) = match &step.change.operation {
-            Operation::Delete if step.key_update => {
+            Operation::Delete if step.half == Half::OldKey => {
                 let (new_row, _) = operations
                     .steps
                     .iter()
@@ -435,4 +435,51 @@ pub(crate) mod lean {
         assert!(compared >= 10, "{compared} actions compared");
         db.close().await.unwrap();
     }
+}
+
+/// A row whose own update changes its audience moves: a delete of its old
+/// audience's row and an insert of the new one's, both halves at the
+/// update's position, and a later update continues from that insert. No
+/// foreign key acts on the delete (§15.4, D5).
+#[tokio::test]
+async fn a_move_is_two_halves_at_one_position() {
+    const NOTE: &str = "00000000-0000-4000-8000-0000000000a1";
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")
+            ],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL, body TEXT)",
+        )
+        .await
+        .unwrap();
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    store.join_circle(&db, circle);
+    sql(&db, "INSERT INTO notes VALUES('00000000-0000-4000-8000-0000000000a1','store','draft')")
+        .await
+        .unwrap();
+    let audience = circle.to_string();
+    db.write(move |sql| {
+        sql.execute("UPDATE notes SET audience=?1, body='moved' WHERE id=?2", [&audience, NOTE])?;
+        sql.execute("UPDATE notes SET body='later' WHERE id=?1", [NOTE])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let operations = Classified::last(&db);
+    let old = row("notes", NOTE);
+    let new = RowId { audience: Audience::Circle(circle), ..old.clone() };
+    let [delete] = &operations.steps[&old][..] else { panic!("one step in the store") };
+    let [insert, later] = &operations.steps[&new][..] else { panic!("two steps in the circle") };
+    assert_eq!(delete.sequence, insert.sequence);
+    assert_eq!([delete.half, insert.half, later.half], [Half::Move, Half::Move, Half::Whole]);
+    assert_eq!((delete.change.generation, insert.change.generation), (1, 0));
+    assert_eq!(delete.change.operation, Operation::Delete);
+    let Operation::Insert(columns) = &insert.change.operation else { panic!("the move inserts") };
+    assert_eq!(columns["body"].value, Value::Text("moved".into()));
+    assert_eq!(columns["audience"].value, Value::Text(circle.to_string()));
+    assert_eq!(later.change.generation, 1);
+    assert!(operations.causes.is_empty());
+    db.close().await.unwrap();
 }

@@ -14,7 +14,7 @@ use crate::{
 use coven_format::{
     dismissal::Dismissal,
     value::Value,
-    write::{RowChange, Step, WriteRecord},
+    write::{Half, RowChange, Step, WriteRecord},
 };
 use coven_foundation::id_source::FileId;
 use coven_merge::{RowId, RowUpdate, WriteId};
@@ -94,7 +94,7 @@ pub(crate) fn deletions(
             .ok_or(DbError::Invariant { what: "an unreferenced file to delete has its record" })?;
         let row = crate::file_table::row(*file, record.audience)?;
         let change = crate::dismissal::deletion(db, store, &store.row(&row)?.state)?;
-        let step = Step { sequence, change: change.change.clone(), key_update: false };
+        let step = Step { sequence, change: change.change.clone(), half: Half::Whole };
         sequence = sequence
             .checked_add(1)
             .ok_or(DbError::Invariant { what: "a write's steps fit their counter" })?;

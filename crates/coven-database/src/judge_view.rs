@@ -22,7 +22,7 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
-use coven_format::write::Step;
+use coven_format::write::{Half, Step};
 use coven_merge::{Audience, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::BTreeMap;
 
@@ -191,8 +191,9 @@ impl<'a> ChildView<'a> {
     /// Every reference this row holds at `step` through which the step can
     /// be a foreign-key action (Lean `Trace.refs`): one into a table a row of
     /// which an earlier step deleted, whose columns hold a complete key now,
-    /// and, for an update, whose columns the step writes. An insert, or the
-    /// old half of the row's own key update, is never an action. A reference
+    /// and, for an update, whose columns the step writes. An insert, the old
+    /// half of the row's own key update, and a half of its move are never
+    /// actions. A reference
     /// names the parent its setter recorded, which must hold its key, or else
     /// the row its values key in the child's audience or the store, at the
     /// incarnation the write's earlier steps leave it.
@@ -204,7 +205,7 @@ impl<'a> ChildView<'a> {
         let Some(table) = self.authoring.table(&self.row.table) else {
             return Ok(Vec::new());
         };
-        if step.key_update || matches!(step.change.operation, Operation::Insert(_)) {
+        if step.half != Half::Whole || matches!(step.change.operation, Operation::Insert(_)) {
             return Ok(Vec::new());
         }
         let mut held = Vec::new();
@@ -401,7 +402,8 @@ impl<'a> ChildView<'a> {
     }
 
     /// The operation an action through `held` on the parent's step records,
-    /// if the write's schema derives one (Lean `heldConsequence`): a cascade
+    /// if the write's schema derives one (Lean `heldConsequence`); a move's
+    /// delete derives none, as SQLite still holds the row: a cascade
     /// delete, or an update writing NULL or the parent's new key as the child
     /// stores it into the key's columns, with the carried cells and the
     /// parents every recorded reference names.
@@ -415,7 +417,10 @@ impl<'a> ChildView<'a> {
         else {
             return Ok(None);
         };
-        if !parent_step.delete || parent_step.generation != held.generation {
+        if !parent_step.delete
+            || parent_step.half == Half::Move
+            || parent_step.generation != held.generation
+        {
             return Ok(None);
         }
         let key = &table.foreign_keys[held.key];
@@ -424,9 +429,9 @@ impl<'a> ChildView<'a> {
         };
         let columns = key_names(table, key);
         let targets = target_columns(parent_table, key);
-        let rule = if parent_step.key_update { &key.on_update } else { &key.on_delete }
-            .to_ascii_uppercase();
-        let replacement = match (rule.as_str(), parent_step.key_update) {
+        let key_update = parent_step.half == Half::OldKey;
+        let rule = if key_update { &key.on_update } else { &key.on_delete }.to_ascii_uppercase();
+        let replacement = match (rule.as_str(), key_update) {
             ("CASCADE", false) => return Ok(Some(Operation::Delete)),
             ("CASCADE", true) => {
                 let Some((new_row, new_step)) = index.new_half(&held.parent, parent_step.sequence)
