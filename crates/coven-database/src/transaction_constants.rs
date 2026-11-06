@@ -76,7 +76,8 @@ impl DatabaseConnection {
     }
 
     /// SQLite's count of changes to the main schema, which app statements
-    /// kept prepared were judged against.
+    /// kept prepared were judged against and the tables' shapes were read
+    /// in.
     pub(super) fn app_schema_cookie(&self) -> rusqlite::Result<i64> {
         if let Some(cookie) = self.constants.schema_cookie.get() {
             return Ok(cookie);

@@ -5,7 +5,7 @@
 //! columns changed, and the changed rows' keys and the values a live query's
 //! scope tests, only where a waiting live query narrows that table.
 
-use super::DatabaseConnection;
+use super::table_shapes::{TableShape, TableShapes};
 use crate::observation::RowChange;
 use crate::row_scope::RowImage;
 use crate::sql_value::SqlValue;
@@ -23,75 +23,21 @@ const ROW: usize = usize::MAX;
 /// query that reads the table then runs again.
 pub(crate) const ROWS_PER_TABLE: usize = 10_000;
 
-/// One table of the store's database as a local write's capture reads it.
-struct TableShape {
-    /// Lowercase, as live queries record what they read.
-    name: String,
-    synced: bool,
-    /// Each column at its pre-update position: lowercase name, whether it is
-    /// part of the key, and whether it is hidden or generated.
-    columns: Vec<(String, bool, bool)>,
-    /// No key can name its rows' changes: the table has no primary key.
-    whole: bool,
-    /// The virtual table a shadow table belongs to.
-    parent: Option<String>,
+/// The columns a table's row images hold, with their pre-update positions.
+pub(crate) struct ImageColumns {
+    names: Arc<[String]>,
+    positions: Vec<usize>,
 }
 
-/// Every table of the store's database, read once as the writer starts
-/// serving: no write creates or changes one.
-pub(crate) struct TableShapes {
-    positions: HashMap<String, usize>,
-    shapes: Vec<TableShape>,
-}
-
-impl TableShapes {
-    pub(crate) fn read(
-        database: &DatabaseConnection,
-        synced: &[crate::SyncedTable],
-    ) -> Result<Self, DbError> {
-        let synced: BTreeSet<String> =
-            synced.iter().map(|table| table.name.to_ascii_lowercase()).collect();
-        let names = database.query(
-            "SELECT name FROM pragma_table_list WHERE schema='main' AND type IN ('table','shadow') AND name NOT GLOB 'sqlite_*'",
-            [],
-            |r| r.get::<_, String>(0),
-        )?;
-        let mut positions = HashMap::new();
-        let mut shapes = Vec::new();
-        for table in names {
-            let name = table.to_ascii_lowercase();
-            let columns = crate::change_capture::column_shapes(database, &table)?;
-            let keyed = columns.iter().any(|(_, key, _)| *key);
-            positions.insert(table.clone(), shapes.len());
-            shapes.push(TableShape {
-                synced: synced.contains(&name),
-                whole: !keyed,
-                parent: crate::change_capture::shadow_parent(database, &name)?,
-                name,
-                columns,
-            });
-        }
-        Ok(Self { positions, shapes })
-    }
-
-    /// The position of `table`, as SQLite names it to a pre-update hook.
-    pub(crate) fn position(&self, table: &str) -> Option<usize> {
-        self.positions.get(table).copied()
-    }
-
-    pub(crate) fn synced(&self, position: usize) -> bool {
-        self.shapes[position].synced
-    }
-
+impl ImageColumns {
     /// The row images of the tables `scoped` names, by position: each one's
     /// key and the scoped columns it has. A table no key can name keeps none.
     pub(crate) fn scoped(
-        &self,
+        shapes: &TableShapes,
         scoped: &crate::change_capture::ScopedColumns,
     ) -> HashMap<usize, ImageColumns> {
-        self.shapes
+        shapes
             .iter()
-            .enumerate()
             .filter(|(_, shape)| !shape.whole)
             .filter_map(|(position, shape)| {
                 let columns = scoped.get(&shape.name)?;
@@ -107,15 +53,7 @@ impl TableShapes {
             })
             .collect()
     }
-}
 
-/// The columns a table's row images hold, with their pre-update positions.
-pub(crate) struct ImageColumns {
-    names: Arc<[String]>,
-    positions: Vec<usize>,
-}
-
-impl ImageColumns {
     fn before(&self, old: &PreUpdateOldValueAccessor) -> Result<RowImage, DbError> {
         self.image(|index| old_value(old, index))
     }
@@ -183,8 +121,9 @@ pub(crate) struct PreUpdateChanges {
     /// Shadow tables changed: each change is its virtual table's too, in
     /// every column.
     shadows: BTreeSet<usize>,
-    /// Tables made after the writer read the shapes, lowercase. Every synced
-    /// table was there by then, so these are device-local, and change whole.
+    /// Tables the transaction's shapes don't hold, lowercase: made since
+    /// they were read, as only a migration makes a synced table, so these
+    /// are device-local, and change whole.
     unshaped: BTreeSet<String>,
     /// Tables a row was inserted into without an image of it: a read of
     /// insertions alone still learns of it.
@@ -198,7 +137,7 @@ impl PreUpdateChanges {
         Self { scoped, ..Self::default() }
     }
 
-    /// Record an operation on a table made after the shapes were read.
+    /// Record an operation on a table the transaction's shapes don't hold.
     pub(crate) fn unshaped(&mut self, table: &str) {
         if !self.unshaped.iter().any(|known| known.eq_ignore_ascii_case(table)) {
             self.unshaped.insert(table.to_ascii_lowercase());
@@ -212,7 +151,7 @@ impl PreUpdateChanges {
         position: usize,
         case: &PreUpdateCase,
     ) -> Result<(), DbError> {
-        let shape = &shapes.shapes[position];
+        let shape = shapes.shape(position);
         let before = self.rows.len();
         self.record_rows(shape, position, case)?;
         let kept = self.kept.entry(position).or_default();
@@ -310,10 +249,10 @@ impl PreUpdateChanges {
         let parents: BTreeSet<&String> = self
             .shadows
             .iter()
-            .filter_map(|position| shapes.shapes[*position].parent.as_ref())
+            .filter_map(|position| shapes.shape(*position).parent.as_ref())
             .collect();
         for (position, column) in self.columns {
-            let shape = &shapes.shapes[position];
+            let shape = shapes.shape(position);
             changes.push(RowChange {
                 table: shape.name.clone(),
                 column: if column == ROW { String::new() } else { shape.columns[column].0.clone() },
@@ -324,7 +263,7 @@ impl PreUpdateChanges {
         // falls within every scope.
         changes.extend(self.inserted.into_iter().map(|position| {
             let unknown = RowImage::new(Arc::from([]), Vec::new());
-            whole(&shapes.shapes[position], None, Some(unknown))
+            whole(shapes.shape(position), None, Some(unknown))
         }));
         changes.extend(parents.into_iter().cloned().chain(self.unshaped).map(|table| RowChange {
             table,

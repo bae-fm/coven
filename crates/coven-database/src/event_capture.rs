@@ -6,7 +6,7 @@
 //! session runs until it ends. Only a synced table's operations are kept
 //! whole; a device-local table's are kept as live queries need them.
 
-use super::pre_update_changes::{new_value, old_value};
+use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;
 use crate::sql_value::SqlValue;
 use crate::DbError;
@@ -39,26 +39,27 @@ struct CapturedEvents {
 /// (`write_transaction.rs`), so what a panicking hook call left half-recorded
 /// is never committed: the capture's lock is taken as it is.
 pub(super) struct EventCapture {
-    shapes: Arc<super::pre_update_changes::TableShapes>,
+    shapes: Arc<super::table_shapes::TableShapes>,
     events: Arc<Mutex<CapturedEvents>>,
 }
 
 impl EventCapture {
     /// Record `transaction`'s row operations until it stops observing them.
     pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
-        let (tables, scoped) = transaction.within(|database| {
-            let tables = Arc::clone(
+        let (tables, synced, scoped) = transaction.within(|database| {
+            let synced = Arc::clone(
                 &database
                     .observation
                     .as_ref()
                     .ok_or(DbError::Invariant { what: "a local write's writer serves its handle" })?
-                    .tables,
+                    .synced,
             );
+            let tables = database.table_shapes()?;
             let scoped = match &database.handle {
-                Some(handle) => tables.scoped(&handle.scoped_columns()),
+                Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
                 None => std::collections::HashMap::new(),
             };
-            Ok::<_, DbError>((tables, scoped))
+            Ok::<_, DbError>((tables, synced, scoped))
         })?;
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
@@ -72,7 +73,7 @@ impl EventCapture {
                     return Ok(());
                 }
                 match tables.position(table) {
-                    Some(position) if tables.synced(position) => {}
+                    Some(position) if synced.contains(&tables.shape(position).name) => {}
                     Some(position) => {
                         return lock_unpoisoned(&recorded).local.record(&tables, position, case);
                     }

@@ -253,7 +253,7 @@ impl DatabaseBuilder {
                 let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
                 Ok((outcomes, write_schema, inputs, checkpoints, migrating, migrated, optimized))
             })?;
-        writer.observe_commits(observer.clone(), settings.device_id, &tables)?;
+        writer.observe_commits(observer.clone(), settings.device_id, &tables);
         let writer = Arc::new(Mutex::new(writer));
         if let Some(pages) = self.sqlite.checkpoint_pages() {
             let checkpointing = DatabaseConnection::open(

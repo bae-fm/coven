@@ -153,9 +153,7 @@ impl DatabaseConnection {
                 let events = recording.events();
                 let mut changes = recording.local_changes();
                 let mut capture = match &database.observation {
-                    Some(observation) => {
-                        Some(ChangeCapture::begin(database, observation, supplemental)?)
-                    }
+                    Some(_) => Some(ChangeCapture::begin(database, supplemental)?),
                     None => None,
                 };
                 let result = coven(database, &events, begun)?;

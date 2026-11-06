@@ -666,8 +666,10 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
     db.close().await.unwrap();
 }
 
+/// The tables an update hook watches beside the session are those of the
+/// schema no primary key names.
 #[tokio::test]
-async fn hook_tables_are_selected_once_from_the_open_schema() {
+async fn hook_tables_are_the_schemas_tables_with_no_primary_key() {
     let store = TestStore::new();
     let db = store
         .schema(
@@ -688,8 +690,14 @@ async fn hook_tables_are_selected_once_from_the_open_schema() {
         .await
         .unwrap();
     db.inspect_writer(|writer| {
-        let tables = &writer.observation.as_ref().unwrap().supplemental;
-        assert_eq!(tables.keys().map(String::as_str).collect::<Vec<_>>(), ["sqliteish", "unkeyed"]);
+        let shapes = writer.table_shapes().unwrap();
+        let mut whole: Vec<&str> = shapes
+            .iter()
+            .filter(|(_, shape)| shape.whole)
+            .map(|(_, shape)| shape.name.as_str())
+            .collect();
+        whole.sort_unstable();
+        assert_eq!(whole, ["sqliteish", "unkeyed"]);
     });
     db.close().await.unwrap();
 }
@@ -778,7 +786,8 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
     let db = store.schema(vec![], "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit VALUES(new.value); END").await.unwrap();
     // The metadata reads of a write of two updates and one of six: each
     // update and the trigger it fires read none, so the two are the same,
-    // whatever the commit reads once.
+    // whatever the commit reads once. A first write reads the tables'
+    // shapes, once for the schema.
     let metadata_reads = |updates: u8| {
         db.inspect_writer(|writer| {
             writer
@@ -802,6 +811,7 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
                 .collect::<Vec<_>>()
         })
     };
+    metadata_reads(1);
     assert_eq!(metadata_reads(2), metadata_reads(6));
     db.close().await.unwrap();
 }

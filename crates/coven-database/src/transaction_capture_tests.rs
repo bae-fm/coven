@@ -49,9 +49,7 @@ async fn a_captured_transaction_records_analyzes_statistics() {
         let mut transaction = WriteTransaction::begin(writer, false).unwrap();
         let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
         let changeset = transaction.within(|writer| {
-            let mut capture =
-                ChangeCapture::begin(writer, writer.observation.as_ref().unwrap(), supplemental)
-                    .unwrap();
+            let mut capture = ChangeCapture::begin(writer, supplemental).unwrap();
             let _internal = writer.authorization.internal();
             writer.batch("ANALYZE notes").unwrap();
             capture.changeset().unwrap()
@@ -85,9 +83,7 @@ async fn a_captured_transaction_skips_tables_no_live_query_reads() {
         let mut transaction = WriteTransaction::begin(writer, false).unwrap();
         let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
         let changeset = transaction.within(|writer| {
-            let mut capture =
-                ChangeCapture::begin(writer, writer.observation.as_ref().unwrap(), supplemental)
-                    .unwrap();
+            let mut capture = ChangeCapture::begin(writer, supplemental).unwrap();
             let _internal = writer.authorization.internal();
             writer
                 .batch(&format!(

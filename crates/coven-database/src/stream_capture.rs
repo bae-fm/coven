@@ -2,7 +2,8 @@
 //! tables: applying another device's slot, loading a snapshot, and coven's
 //! upload and claim bookkeeping.
 
-use super::pre_update_changes::{PreUpdateChanges, TableShapes};
+use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
+use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
 use crate::{observation::RowChange, DbError};
@@ -15,7 +16,7 @@ enum Recorded {
     /// On the writer that serves live queries: each table's changed
     /// columns, and the rows' images where a waiting live query narrows it.
     Rows { shapes: Arc<TableShapes>, changes: PreUpdateChanges },
-    /// On a connection that knows no table's shape: the tables changed.
+    /// On a connection that observes no commits: the tables changed.
     Tables(BTreeSet<String>),
 }
 
@@ -23,8 +24,8 @@ enum Recorded {
 pub(super) enum StreamChanges {
     /// The changed rows, as live queries read them.
     Rows(Vec<RowChange>),
-    /// The tables changed, on a connection that knows no table's shape:
-    /// the connection reads their changes (`change_capture::table_changes`).
+    /// The tables changed, on a connection that observes no commits: the
+    /// connection reads their changes (`change_capture::table_changes`).
     Tables(BTreeSet<String>),
 }
 
@@ -40,18 +41,19 @@ impl StreamCapture {
     /// by; it keeps those values of each changed row, up to a bound per
     /// table, as a local write does.
     pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
-        let recorded =
-            Arc::new(Mutex::new(transaction.within(|database| match &database.observation {
-                Some(observation) => {
-                    let shapes = Arc::clone(&observation.tables);
+        let recorded = Arc::new(Mutex::new(transaction.within(|database| {
+            Ok::<_, DbError>(match &database.observation {
+                Some(_) => {
+                    let shapes = database.table_shapes()?;
                     let scoped = match &database.handle {
-                        Some(handle) => shapes.scoped(&handle.scoped_columns()),
+                        Some(handle) => ImageColumns::scoped(&shapes, &handle.scoped_columns()),
                         None => std::collections::HashMap::new(),
                     };
                     Recorded::Rows { shapes, changes: PreUpdateChanges::new(scoped) }
                 }
                 None => Recorded::Tables(BTreeSet::new()),
-            })));
+            })
+        })?));
         let observed = Arc::clone(&recorded);
         transaction.observe_operations(
             move |_, schema: &str, table: &str, case: &rusqlite::hooks::PreUpdateCase| {

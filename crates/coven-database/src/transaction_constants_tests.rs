@@ -148,9 +148,10 @@ async fn applying_a_write_reads_its_constants_once() {
     b.test_track_work(counter.clone()).await.unwrap();
     crate::author_judgement::tests::deliver(&a, &b).await;
     // The schema version as the write arrives and again in the transaction
-    // applying it, the schema cookie its materialized rows are judged
-    // against, and the three columns' ids.
-    assert_eq!(counter.take().constant_reads, 6);
+    // applying it, the schema cookie the transaction's capture reads the
+    // tables' shapes by as it begins, and again as its materialized rows are
+    // judged against it, and the three columns' ids.
+    assert_eq!(counter.take().constant_reads, 7);
     assert_eq!(count(&b, "notes"), 50);
     a.close().await.unwrap();
     b.close().await.unwrap();

@@ -1,10 +1,11 @@
 //! Transaction observation through SQLite sessions.
 
+use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
-use super::{DatabaseConnection, WriterObservation};
+use super::DatabaseConnection;
 use crate::{observation::RowChange, DbError};
 use coven_foundation::locks::lock_unpoisoned;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 // rusqlite does not expose the session ROWID option. Keep raw handles here,
@@ -12,50 +13,47 @@ use std::sync::{Arc, Mutex};
 pub(super) struct ChangeCapture<'a> {
     session: *mut rusqlite::ffi::sqlite3_session,
     database: &'a DatabaseConnection,
-    supplemental: &'a BTreeMap<String, Option<String>>,
-    hook_changes: Arc<Mutex<BTreeSet<String>>>,
+    supplemental: SupplementalChanges,
 }
 
-/// The supplemental tables a transaction's update hook saw change: those
-/// whose rows a session can't key (`change_capture::supplemental_tables`).
-/// A panic in the hook fails the transaction before it commits, so the
-/// lock is taken as it is.
-pub(super) struct SupplementalChanges(Arc<Mutex<BTreeSet<String>>>);
+/// The tables a transaction's update hook saw change that a session can't
+/// key, having no primary key, by their position in the shapes the hook
+/// read them by. A panic in the hook fails the transaction before it
+/// commits, so the lock is taken as it is.
+pub(super) struct SupplementalChanges {
+    shapes: Arc<TableShapes>,
+    changed: Arc<Mutex<BTreeSet<usize>>>,
+}
 
 impl SupplementalChanges {
-    /// Watch `transaction`'s supplemental tables, which only a serving
-    /// writer knows; none are watched where there are none.
+    /// Watch the tables of `transaction`'s schema that no key names; none
+    /// are watched where there are none.
     pub(super) fn observe(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
-        let changes = Arc::new(Mutex::new(BTreeSet::new()));
-        let tables = transaction.within(|database| match &database.observation {
-            Some(observation) if !observation.supplemental.is_empty() => {
-                Some(Arc::clone(&observation.supplemental))
-            }
-            _ => None,
-        });
-        let Some(tables) = tables else {
-            return Ok(Self(changes));
-        };
-        // A session's pre-update hook disables SQLite's truncate-delete
-        // optimization, so even DELETE without WHERE reaches this hook.
-        let seen = Arc::clone(&changes);
-        transaction.observe_rows(move |_, schema: &str, table: &str, _| {
-            if schema == "main" {
-                let table = table.to_ascii_lowercase();
-                if tables.contains_key(&table) {
-                    lock_unpoisoned(&seen).insert(table);
+        let shapes = transaction.within(DatabaseConnection::table_shapes)?;
+        let changed = Arc::new(Mutex::new(BTreeSet::new()));
+        if shapes.iter().any(|(_, shape)| shape.whole) {
+            // A session's pre-update hook disables SQLite's truncate-delete
+            // optimization, so even DELETE without WHERE reaches this hook.
+            let seen = Arc::clone(&changed);
+            let tables = Arc::clone(&shapes);
+            transaction.observe_rows(move |_, schema: &str, table: &str, _| {
+                if schema == "main" {
+                    if let Some(position) =
+                        tables.position(table).filter(|position| tables.shape(*position).whole)
+                    {
+                        lock_unpoisoned(&seen).insert(position);
+                    }
                 }
-            }
-            Ok(())
-        })?;
-        Ok(Self(changes))
+                Ok(())
+            })?;
+        }
+        Ok(Self { shapes, changed })
     }
 }
 
 impl<'a> ChangeCapture<'a> {
     pub(super) fn begin(
         database: &'a DatabaseConnection,
-        observation: &'a WriterObservation,
         supplemental: SupplementalChanges,
     ) -> Result<Self, DbError> {
         let mut session = std::ptr::null_mut();
@@ -67,12 +65,7 @@ impl<'a> ChangeCapture<'a> {
                 &mut session,
             )
         })?;
-        let capture = Self {
-            session,
-            database,
-            supplemental: &observation.supplemental,
-            hook_changes: supplemental.0,
-        };
+        let capture = Self { session, database, supplemental };
         let mut rowid: std::ffi::c_int = 1;
         // SAFETY: the live session has no attached tables yet and rowid is an int.
         sqlite_ok(unsafe {
@@ -106,15 +99,20 @@ impl<'a> ChangeCapture<'a> {
             .map(crate::observation::CommitObserver::scoped_columns)
             .unwrap_or_default();
         let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
-        for table in std::mem::take(&mut *lock_unpoisoned(&self.hook_changes)) {
-            if let Some(parent) = &self.supplemental[&table] {
+        for position in std::mem::take(&mut *lock_unpoisoned(&self.supplemental.changed)) {
+            let shape = self.supplemental.shapes.shape(position);
+            if let Some(parent) = &shape.parent {
                 changes.push(RowChange {
                     table: parent.clone(),
                     column: String::new(),
                     rows: None,
                 });
             }
-            changes.push(RowChange { table, column: String::new(), rows: None });
+            changes.push(RowChange {
+                table: shape.name.clone(),
+                column: String::new(),
+                rows: None,
+            });
         }
         Ok(changes)
     }

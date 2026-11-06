@@ -24,6 +24,8 @@ pub(crate) use rowid_policy::rowid_guard;
 mod rowid_policy;
 #[path = "stream_capture.rs"]
 mod stream_capture;
+#[path = "table_shapes.rs"]
+pub(crate) mod table_shapes;
 #[path = "transaction_capture.rs"]
 mod transaction_capture;
 #[path = "transaction_constants.rs"]
@@ -35,7 +37,9 @@ pub(crate) use event_capture::Event;
 use transaction_capture::ChangeCapture;
 use write_transaction::WriteTransaction;
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,6 +76,9 @@ pub(crate) struct DatabaseConnection {
     /// a failure fails the open and drops the connection instead.
     handle: Option<CommitObserver>,
     observation: Option<WriterObservation>,
+    /// The main schema's tables as last read, with the schema they were
+    /// read in (table_shapes.rs).
+    shapes: std::cell::RefCell<Option<Arc<table_shapes::TableShapes>>>,
     /// The writer's checkpointer, woken after each commit (§4).
     checkpoints: Option<crate::upkeep::Wake>,
     /// The writer's keeper of the planner's statistics, woken as its
@@ -100,8 +107,9 @@ pub(crate) struct DatabaseConnection {
 
 struct WriterObservation {
     device: DeviceId,
-    supplemental: Arc<BTreeMap<String, Option<String>>>,
-    tables: Arc<pre_update_changes::TableShapes>,
+    /// The synced tables, lowercase: a local write keeps their operations
+    /// whole.
+    synced: Arc<BTreeSet<String>>,
 }
 
 impl DatabaseConnection {
@@ -178,6 +186,7 @@ impl DatabaseConnection {
             constants: transaction_constants::TransactionConstants::default(),
             handle: None,
             observation: None,
+            shapes: std::cell::RefCell::new(None),
             checkpoints: None,
             statistics: None,
             streaming: std::cell::Cell::new(false),
@@ -746,17 +755,14 @@ impl DatabaseConnection {
         handle: CommitObserver,
         device: DeviceId,
         synced: &[SyncedTable],
-    ) -> Result<(), DbError> {
+    ) {
         assert!(self.observation.is_none(), "commit observation installed once");
-        let supplemental = crate::change_capture::supplemental_tables(self)?;
-        let tables = Arc::new(pre_update_changes::TableShapes::read(
-            self,
-            &crate::file_table::synced(synced),
-        )?);
+        let synced = crate::file_table::synced(synced)
+            .iter()
+            .map(|table| table.name.to_ascii_lowercase())
+            .collect();
         self.serve(handle);
-        self.observation =
-            Some(WriterObservation { device, supplemental: Arc::new(supplemental), tables });
-        Ok(())
+        self.observation = Some(WriterObservation { device, synced: Arc::new(synced) });
     }
 
     pub(crate) fn lost_values(&self) -> Result<Vec<crate::LostValue>, DbError> {
@@ -834,8 +840,7 @@ impl DatabaseConnection {
                 let (stream, mut session) = match observing {
                     Observing::Stream(stream) => (Some(stream), None),
                     Observing::Session(supplemental) => {
-                        let observation = database.observation.as_ref().expect("observed above");
-                        (None, Some(ChangeCapture::begin(database, observation, supplemental)?))
+                        (None, Some(ChangeCapture::begin(database, supplemental)?))
                     }
                     Observing::Nothing => (None, None),
                 };

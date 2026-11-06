@@ -1,5 +1,6 @@
 //! Convert transaction changes into read dependencies before commit.
 
+use crate::sqlite::table_shapes::{TableShape, TableShapes};
 use crate::{
     observation::RowChange, row_scope::RowImage, sql_value::SqlValue, sqlite::DatabaseConnection,
     DbError,
@@ -30,58 +31,21 @@ fn image_columns(
     (columns, positions)
 }
 
-struct TableColumns {
-    names: Vec<(String, bool, bool)>,
-    has_primary_key: bool,
-    virtual_parent: Option<String>,
-}
-
-fn observe_table<'a>(
-    database: &DatabaseConnection,
+/// The shape of `table`, as SQLite names it in one of the transaction's
+/// changes, noting the change of the virtual table a shadow table belongs to.
+fn changed_table<'a>(
+    shapes: &'a TableShapes,
     table: &str,
-    tables: &'a mut BTreeMap<String, TableColumns>,
     changes: &mut Vec<RowChange>,
-) -> Result<&'a TableColumns, DbError> {
-    if !tables.contains_key(table) {
-        let names = column_shapes(database, table)?;
-        let has_primary_key = names.iter().any(|(_, pk, _)| *pk);
-        tables.insert(
-            table.to_owned(),
-            TableColumns {
-                names,
-                has_primary_key,
-                virtual_parent: shadow_parent(database, table)?,
-            },
-        );
-    }
-    let columns = &tables[table];
-    if let Some(parent) = &columns.virtual_parent {
+) -> Result<&'a TableShape, DbError> {
+    let shape = shapes
+        .position(table)
+        .map(|position| shapes.shape(position))
+        .ok_or(DbError::Invariant { what: "every table a transaction changes has a shape" })?;
+    if let Some(parent) = &shape.parent {
         changes.push(RowChange { table: parent.clone(), column: String::new(), rows: None });
     }
-    Ok(columns)
-}
-
-/// Tables whose changes need an update hook in addition to the session: those
-/// with no primary key, whose rows no key names. A table whose key allows
-/// NULL never opens (`schema::validate_local_keys`, §9.2).
-pub(crate) fn supplemental_tables(
-    database: &DatabaseConnection,
-) -> Result<BTreeMap<String, Option<String>>, DbError> {
-    let names = database.query(
-        "SELECT name FROM pragma_table_list AS t
-         WHERE schema='main' AND type IN ('table','shadow') AND wr=0
-         AND name NOT GLOB 'sqlite_*'
-         AND NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,'main') WHERE pk>0)",
-        [],
-        |row| row.get::<_, String>(0).map(|name| name.to_ascii_lowercase()),
-    )?;
-    names
-        .into_iter()
-        .map(|table| {
-            let parent = shadow_parent(database, &table)?;
-            Ok((table, parent))
-        })
-        .collect()
+    Ok(shape)
 }
 
 /// A whole-table change to each of `tables`, as a transaction that records
@@ -91,57 +55,16 @@ pub(crate) fn table_changes(
     database: &DatabaseConnection,
     mut tables: BTreeSet<String>,
 ) -> Result<Vec<RowChange>, DbError> {
+    let shapes = database.table_shapes()?;
     for table in tables.clone() {
-        if let Some(parent) = shadow_parent(database, &table)? {
-            tables.insert(parent);
+        if let Some(parent) = shapes.parent(&table) {
+            tables.insert(parent.to_owned());
         }
     }
     Ok(tables
         .into_iter()
         .map(|table| RowChange { table, column: String::new(), rows: None })
         .collect())
-}
-
-/// Each column of the main table `table` in declared order: its lowercase
-/// name, whether it is in the primary key, and whether it is hidden.
-pub(crate) fn column_shapes(
-    database: &DatabaseConnection,
-    table: &str,
-) -> Result<Vec<(String, bool, bool)>, DbError> {
-    database.query(
-        "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
-        [table],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?.to_ascii_lowercase(),
-                r.get::<_, bool>(1)?,
-                r.get::<_, u32>(2)? != 0,
-            ))
-        },
-    )
-}
-
-pub(crate) fn shadow_parent(
-    database: &DatabaseConnection,
-    table: &str,
-) -> Result<Option<String>, DbError> {
-    let shadow: bool = database.query_row(
-        "SELECT type='shadow' FROM pragma_table_list WHERE schema='main' AND name=?1 COLLATE NOCASE",
-        [table],
-        |r| r.get(0),
-    )?;
-    if !shadow {
-        return Ok(None);
-    }
-    // SQLite's built-in virtual modules name shadow tables with the owning
-    // table's name and a suffix. Longest prefix disambiguates underscores.
-    let parents = database.query("SELECT lower(name) FROM pragma_table_list WHERE schema='main' AND type='virtual' ORDER BY length(name) DESC", [], |r| r.get::<_,String>(0))?;
-    Ok(Some(
-        parents
-            .into_iter()
-            .find(|parent| table.starts_with(&format!("{parent}_")))
-            .expect("shadow table has a virtual-table owner"),
-    ))
 }
 
 pub(crate) fn changes(
@@ -152,22 +75,23 @@ pub(crate) fn changes(
     let mut input = bytes;
     let input: &mut dyn std::io::Read = &mut input;
     let mut items = ChangesetIter::start_strm(&input)?;
-    let mut tables = BTreeMap::<String, TableColumns>::new();
+    let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
     let mut changes = Vec::new();
     while let Some(item) = items.next()? {
         let operation = item.op()?;
-        let table = operation.table_name().to_ascii_lowercase();
-        let first = !tables.contains_key(&table);
-        let columns = observe_table(database, &table, &mut tables, &mut changes)?;
+        let columns = changed_table(&shapes, operation.table_name(), &mut changes)?;
+        let table = columns.name.clone();
+        let first = !images.contains_key(&table);
         // SQLITE_SESSION_OBJCONFIG_ROWID adds the implicit key first. Session
         // positions otherwise omit generated columns; event positions don't.
-        let names: Vec<&str> = (!columns.has_primary_key)
+        let names: Vec<&str> = columns
+            .whole
             .then_some("rowid")
             .into_iter()
             .chain(
                 columns
-                    .names
+                    .columns
                     .iter()
                     .filter(|(_, _, hidden)| !hidden)
                     .map(|(name, _, _)| name.as_str()),
@@ -246,7 +170,7 @@ pub(crate) fn changes(
             // Sessions omit generated columns; they can change with their inputs.
             changed.extend(
                 columns
-                    .names
+                    .columns
                     .iter()
                     .filter(|(_, _, hidden)| *hidden)
                     .map(|(name, _, _)| name.clone()),
@@ -319,13 +243,13 @@ pub(crate) fn event_changes(
     events: &[crate::sqlite::Event],
     scoped: &ScopedColumns,
 ) -> Result<Vec<RowChange>, DbError> {
-    let mut tables = BTreeMap::new();
+    let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
     let mut changes = Vec::new();
     for event in events {
-        let table = event.table.to_ascii_lowercase();
-        let fields = observe_table(database, &table, &mut tables, &mut changes)?;
-        if !fields.has_primary_key {
+        let fields = changed_table(&shapes, &event.table, &mut changes)?;
+        let table = fields.name.clone();
+        if fields.whole {
             changes.push(RowChange { table, column: String::new(), rows: None });
             continue;
         }
@@ -333,13 +257,13 @@ pub(crate) fn event_changes(
             .entry(table.clone())
             .or_insert_with(|| {
                 let names: Vec<&str> =
-                    fields.names.iter().map(|(name, _, _)| name.as_str()).collect();
-                image_columns(&names, |index| fields.names[index].1, scoped.get(&table))
+                    fields.columns.iter().map(|(name, _, _)| name.as_str()).collect();
+                image_columns(&names, |index| fields.columns[index].1, scoped.get(&table))
             })
             .clone();
         let key = |values: &[Option<SqlValue>]| {
             fields
-                .names
+                .columns
                 .iter()
                 .zip(values.iter().map(Some).chain(std::iter::repeat(None)))
                 .filter(|((_, pk, _), _)| *pk)
@@ -363,7 +287,7 @@ pub(crate) fn event_changes(
             }
             _ => {
                 let rows = (Some(row(&event.old)), Some(row(&event.new)));
-                for (index, (name, pk, hidden)) in fields.names.iter().enumerate() {
+                for (index, (name, pk, hidden)) in fields.columns.iter().enumerate() {
                     // Sessions omit generated columns; they can change with their inputs.
                     if *pk || (!*hidden && event.old.get(index) == event.new.get(index)) {
                         continue;
