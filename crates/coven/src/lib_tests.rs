@@ -320,6 +320,13 @@ impl Network {
         target: InviteTarget,
     ) -> Result<(), BootstrapError> {
         let owner = &self.devices[0].handle;
+        // Device 0's invite looks for the join's request and the join checks
+        // for its approval, each backing off between looks. Held from before
+        // the invite, neither wait passes on its own and moves every device's
+        // clock: device 0 reads the request in the pass asked for once the
+        // join waits, and Check now runs the check that finds the approval.
+        let held = self.polling.holds_waits();
+        self.polling.hold_waits();
         let invite = crate::tests::invite(
             owner,
             target,
@@ -351,11 +358,6 @@ impl Network {
             },
             &control,
         );
-        // The join's checks for approval back off. Held, they wait while
-        // device 0 reads the request in a pass and approves it, and Check
-        // now runs the check that finds the approval.
-        let held = self.polling.holds_waits();
-        self.polling.hold_waits();
         let (handle, ()) = join_with_response(joining, async {
             waits.wait_for(|waiting| *waiting).await.unwrap();
             self.pass(0).await;
@@ -656,6 +658,18 @@ async fn random_write(handle: &CovenHandle, random: &mut Generator, audience: St
         }
         Ok::<_, CovenError>(())
     }).await.unwrap();
+}
+
+/// A network's devices' clock moves only by the passes the test asks for, a
+/// second each: one as device 0 sets up, one as it reads the join's request,
+/// one as device 1 first syncs, and six as both settle. No wait of device
+/// 0's invite, which looks for the request between those passes, passes on
+/// its own.
+#[tokio::test]
+async fn a_join_moves_the_clock_only_by_its_passes() {
+    let network = Network::new(2).await;
+    assert_eq!(network.clock.now(), UNIX_EPOCH + Duration::from_secs(1009));
+    network.close().await;
 }
 
 #[tokio::test]
