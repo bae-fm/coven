@@ -3355,8 +3355,7 @@ snapshot body is deleted (§16.3).
   afterwards, leaving what it made behind
   ([`eager_undo_leaks`](proofs/sequence/CovenSequence/Operation.lean)).
 - **Some calls can't be cancelled.** A provider call that can't be cancelled keeps
-  its cleanup duty in the journal until it ends. An S3 key also carries the name
-  of the device that made it, so §14.3 can find it if everything else is lost.
+  its cleanup duty in the journal until it ends.
 - **Deleting what's already gone succeeds,** so retrying an undo is safe.
 - **A failed undo stays.** It keeps both causes, the rejection and the undo
   failure, in the call's error and the app's pending list, and retries. The undo
