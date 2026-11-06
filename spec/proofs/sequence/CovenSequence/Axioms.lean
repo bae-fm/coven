@@ -148,6 +148,8 @@ import SequenceApply
 #print axioms CovenSequence.WriteVersion.version_mono
 #print axioms CovenSequence.WriteVersion.waiting_part_counts
 #print axioms CovenSequence.WriteVersion.ahead_part_refused
+#print axioms CovenSequence.RaiseBody.one_part_agrees
+#print axioms CovenSequence.RaiseBody.late_part_differs
 
 #print axioms CovenSequence.reaches_target
 #print axioms CovenSequence.QueueReload.commit_numbered

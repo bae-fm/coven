@@ -636,6 +636,20 @@ side of the rule that a part counts only at a version its audience has reached.
 - `ahead_part_refused`: a circle at version 1 refuses a part at version 2 and
   counts the same part at version 1.
 
+[`RaiseBody`](sequence/CovenSequence/RaiseBody.lean) compares the model's raise
+body with the one coven writes. The model's is the rows at the raise's coverage,
+migrated. Coven's raising device migrates the rows it held when its app
+migrated, judges each part landing after that as a late write (coven.md §18.5),
+and moves its coverage forward over them.
+
+- `one_part_agrees`: on a part, the two agree when the part's converter does
+  what the migration does to it.
+- `late_part_differs`: under a migration that declares `Drop`, a part on the
+  old app landing after the raising device migrated and before its coverage is
+  in the model's body and not in coven's. The honest-body premise below is the
+  model's body, so the model's theorems don't cover coven's body for such a
+  part.
+
 ## Operations
 
 [`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim
@@ -1510,6 +1524,8 @@ they do not replace the separate byte-format, merge or queue tests.
   the initial member and device bindings.
 - Snapshot bodies are honest: ordinary bodies contain the covered state;
   raise bodies contain migrated rows; reset bodies contain the chosen rows.
+  Coven's raise body differs from that for a part that lands after its raising
+  device migrated and whose converter isn't the migration (`RaiseBody`).
   Floor reload uses ordinary snapshots; prepared bodies are consumed at their
   matching entries. Direct floor loading of a prepared body is not modelled.
 - Admin slots and key copies are readable by every member device. So are a
