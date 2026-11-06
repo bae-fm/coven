@@ -4102,9 +4102,11 @@ while let Some(Ok(values)) = lost.next().await {
     [§20.8](coven.md#208-checking-a-provider-before-use)). Before its first
     write to storage it journals itself, listed in `coven_operations` as
     `StorageSetup`, and keeps the credentials it connects with in a device
-    entry of its own. `cancel_storage_setup` before `CreatingStore` or
-    `RecordingAccess` begins answers `Undoing`: setup undoes what it wrote and
-    fails with `Cancelled`, its outcome `Cancelled`. From those steps on it
+    entry of its own. `cancel_storage_setup` from the setup call until
+    `CreatingStore` or `RecordingAccess` begins answers `Undoing`: setup undoes
+    what it wrote and fails with `Cancelled`, its outcome `Cancelled`. A cancel
+    that comes before setup has journaled itself is kept: setup journals, then
+    undoes itself at once. From those steps on it
     answers `Finishing`, and setup finishes; the app stops offering Cancel when
     either step begins. Dropping the call leaves setup running to its end.
   - Only finishing commits the location, sign-in and restore code on the
@@ -4986,8 +4988,9 @@ pub enum StorageSetupError {
     /// The app cancelled setup before its point of no return, and setup
     /// undid what it wrote (§11.6).
     Cancelled,
-    /// A setup past its point of no return is still finishing on this
-    /// device; starting sync finishes it (§11.6).
+    /// Another setup call is running on this store, or a setup past its
+    /// point of no return is still finishing; starting sync finishes that
+    /// one (§11.6).
     SetupRunning,
     /// Local setup failed, with its cause.
     Internal(Box<dyn std::error::Error + Send + Sync>),
@@ -5429,10 +5432,11 @@ impl CovenHandle {
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
-    /// Cancels the storage setup running on this store (§11.6): before its
-    /// point of no return it undoes what it wrote and fails with
-    /// `Cancelled`; from its `CreatingStore` or `RecordingAccess` step on, or
-    /// once a crash cut it there, it finishes. Takes no lock.
+    /// Cancels the storage setup running on this store (§11.6), from the
+    /// moment its call starts: before its point of no return it undoes what
+    /// it wrote and fails with `Cancelled`; from its `CreatingStore` or
+    /// `RecordingAccess` step on, or once a crash cut it there, it finishes.
+    /// Takes no lock.
     pub fn cancel_storage_setup(&self) -> SetupCancellation;
 
     /// Opens store keys from their copies sealed to this member in storage

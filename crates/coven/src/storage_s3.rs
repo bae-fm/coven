@@ -18,6 +18,7 @@ impl StorageConnections {
         require_s3(&storage)?;
         let credentials = S3Credentials { access_key_id, secret_access_key };
         let device_name = device_name.to_owned();
+        let call = self.start_setup()?;
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = SetupWaits::default();
@@ -25,7 +26,7 @@ impl StorageConnections {
             let config = recorded_s3(storage, recorded.as_ref());
             owner.check_location(&config).await?;
             let journal = owner
-                .begin_setup(&device_name, &StorageCredentials::S3(credentials.clone()))
+                .begin_setup(call, &device_name, &StorageCredentials::S3(credentials.clone()))
                 .await?;
             owner
                 .run_setup(journal, async |journal| {

@@ -174,6 +174,9 @@ task_types = [
     # one it replaced, put back when the scope ends.
     "Active",
     "PreviousActive",
+    # One storage setup call until it journals itself, which a cancel
+    # already reaches and whose end before the journal ends it (§11.6).
+    "SetupCall",
     # One of a store's calls running on a thread, which claims the bug its
     # work fails the handle with, and puts back the call it ran inside as
     # it ends (api.md E15).

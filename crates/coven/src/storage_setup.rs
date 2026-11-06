@@ -15,12 +15,45 @@ use coven_sync::SetupJournal;
 pub(crate) enum SetupRun {
     /// No setup runs.
     Idle,
+    /// A setup call has started and journaled nothing yet; `cancelled` once
+    /// the app asked to cancel it, which it keeps until it journals.
+    Called { cancelled: bool },
     /// A setup checks the provider; `cancelled` once the app asked to
     /// cancel it.
     Checking { cancelled: bool },
     /// A setup is past its point of no return: this session's, or one a
     /// crash cut, which the first connection finishes.
     Finishing,
+}
+
+/// A setup call from its start until it journals itself, when a cancel
+/// already reaches it (§11.6). A call that ends before its journal ends it.
+pub(super) struct SetupCall(Arc<StorageConnections>);
+
+impl SetupCall {
+    /// The call has journaled itself: it checks the provider now, keeping
+    /// a cancel that came before. Answers whether one did.
+    fn journaled(self) -> Result<bool, StorageSetupError> {
+        let mut run = lock_unpoisoned(&self.0.setup);
+        match *run {
+            SetupRun::Called { cancelled } => {
+                *run = SetupRun::Checking { cancelled };
+                Ok(cancelled)
+            }
+            SetupRun::Idle | SetupRun::Checking { .. } | SetupRun::Finishing => {
+                Err(setup_error(DbError::Invariant { what: "a setup call runs alone" }.into()))
+            }
+        }
+    }
+}
+
+impl Drop for SetupCall {
+    fn drop(&mut self) {
+        let mut run = lock_unpoisoned(&self.0.setup);
+        if matches!(*run, SetupRun::Called { .. }) {
+            *run = SetupRun::Idle;
+        }
+    }
 }
 
 /// What cancelling storage setup did (E5).
@@ -39,6 +72,8 @@ pub enum SetupCancellation {
 /// would, or holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SetupStop {
+    /// Its call has started and journaled nothing.
+    Called,
     /// Its row and credentials are journaled.
     Journaled,
     /// S3 detection is done.
@@ -151,7 +186,7 @@ impl StorageConnections {
     pub(crate) fn cancel_setup(&self) -> SetupCancellation {
         let answer = match &mut *lock_unpoisoned(&self.setup) {
             SetupRun::Idle => SetupCancellation::NoSetup,
-            SetupRun::Checking { cancelled } => {
+            SetupRun::Called { cancelled } | SetupRun::Checking { cancelled } => {
                 *cancelled = true;
                 SetupCancellation::Undoing
             }
@@ -225,22 +260,37 @@ impl StorageConnections {
         *lock_unpoisoned(&self.setup_hook) = Some(hook);
     }
 
-    /// Journal a setup before its first write to storage: its row, then
-    /// `credentials`, kept apart from the committed ones (§11.6). Refused
-    /// while another is past its point of no return.
+    /// Start a setup call, which a cancel reaches from now on (§11.6).
+    /// Refused while another runs, or one past its point of no return is
+    /// still finishing.
+    pub(super) fn start_setup(self: &Arc<Self>) -> Result<SetupCall, StorageSetupError> {
+        let mut run = lock_unpoisoned(&self.setup);
+        if !matches!(*run, SetupRun::Idle) {
+            return Err(StorageSetupError::SetupRunning);
+        }
+        *run = SetupRun::Called { cancelled: false };
+        Ok(SetupCall(self.clone()))
+    }
+
+    /// Journal `call`'s setup before its first write to storage: its row,
+    /// then `credentials`, kept apart from the committed ones (§11.6). A
+    /// cancel that came before the row undoes it at once.
     pub(super) async fn begin_setup(
         &self,
+        call: SetupCall,
         device_name: &str,
         credentials: &StorageCredentials,
     ) -> Result<SetupJournal, StorageSetupError> {
-        if self.setup_finishing() {
-            return Err(StorageSetupError::SetupRunning);
-        }
+        self.reached(SetupStop::Called).await?;
         let creating = self.codes.location().await.map_err(setup_error)?.is_none();
         let journal = SetupJournal::start(&self.database, creating, device_name)
             .await
             .map_err(setup_error)?;
-        *lock_unpoisoned(&self.setup) = SetupRun::Checking { cancelled: false };
+        match call.journaled() {
+            Ok(false) => {}
+            Ok(true) => return Err(self.undo_setup(&journal, StorageSetupError::Cancelled).await),
+            Err(error) => return Err(self.undo_setup(&journal, error).await),
+        }
         let kept = credentials
             .encode()
             .map_err(StorageSetupError::from)

@@ -196,6 +196,47 @@ async fn cancelling_before_the_point_of_no_return_undoes_setup() {
     phone.handle.close().await.unwrap();
 }
 
+/// Ana taps Cancel right after starting setup, before it has journaled
+/// itself. The cancel is kept: setup undoes itself as soon as it has
+/// journaled, fails with `Cancelled`, and `coven_operations` lists it
+/// cancelled, with nothing created or kept.
+#[tokio::test]
+async fn cancelling_before_setup_journals_itself_undoes_it() {
+    let phone = Phone::new().await;
+    let (reached, resume) = phone.pause_at(SetupStop::Called);
+    let setup = tokio::spawn(phone.setup());
+    reached.await.unwrap();
+
+    assert_eq!(phone.handle.cancel_storage_setup(), SetupCancellation::Undoing);
+    resume.send(()).unwrap();
+
+    assert!(matches!(setup.await.unwrap(), Err(StorageSetupError::Cancelled)));
+    assert_eq!(phone.ended().await, OperationOutcome::Cancelled);
+    assert!(!phone.created().await);
+    assert!(!phone.candidate_kept());
+    assert_eq!(phone.handle.storage_config().await.unwrap(), None);
+    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    phone.handle.close().await.unwrap();
+}
+
+/// Ana's app starts setup twice: the second call is refused while the first
+/// runs, so a cancel reaches the setup the app started, and the first
+/// finishes.
+#[tokio::test]
+async fn a_second_setup_call_is_refused_while_one_runs() {
+    let phone = Phone::new().await;
+    let (reached, resume) = phone.pause_at(SetupStop::Called);
+    let setup = tokio::spawn(phone.setup());
+    reached.await.unwrap();
+
+    assert!(matches!(phone.setup().await, Err(StorageSetupError::SetupRunning)));
+    resume.send(()).unwrap();
+
+    setup.await.unwrap().unwrap();
+    assert_eq!(phone.ended().await, OperationOutcome::Landed(Slot(1)));
+    phone.handle.close().await.unwrap();
+}
+
 /// Ana taps Cancel once setup has passed its point of no return. The cancel
 /// says setup is finishing, and it does.
 #[tokio::test]

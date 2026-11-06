@@ -9267,7 +9267,10 @@ journals itself: `coven_operations` lists it as `StorageSetup`, and the
 credentials it connects with go in a device entry of their own, apart from the
 committed ones. Ben cancels his R2 setup while it detects settings: setup
 undoes what it wrote, fails with `StorageSetupError::Cancelled`, and its
-outcome is `Cancelled`. Detection's probes and the provider check's test object
+outcome is `Cancelled`. A cancel counts from the moment the app calls setup:
+had Ben tapped Cancel while the call waited for the store's other storage
+calls, before setup journaled itself, setup would journal, then undo itself at
+once, with the same outcome. Detection's probes and the provider check's test object
 are deleted as each check ends. A test object a crash leaves is space nothing
 refers to; what a detection run a crash cut leaves, the next detection or
 connection at that bucket removes (§20.7).
@@ -9292,8 +9295,10 @@ connection at that bucket removes (§20.7).
 - **Refused past the point.** A claim refused before it landed, a marker or
   slot 1 another store holds, or `Set access` the caught-up history refuses,
   undoes setup: its outcome is `Undone` or `Rejected`.
-- **One at a time.** While a setup is past its point of no return, another is
-  refused with `StorageSetupError::SetupRunning`.
+- **One at a time.** While a setup call runs, or a setup past its point of no
+  return is still finishing, another is refused with
+  `StorageSetupError::SetupRunning`. So the one setup a cancel reaches is the
+  one the app started.
 
 #### 20.9 Sharing with accounts
 
@@ -11779,7 +11784,7 @@ pass's failure, kept for its retry.
 | `Corrupted` | two reads of the same bytes of an immutable object, a slot, a file or a snapshot, disagreed: a fault on the way changed one; it retries as a failed read does | §6.5, §19.1 |
 | `StorageFailure::StoreExists` | another creation already holds slot 1; setup is undone | §10.3 |
 | `StorageSetupError::Cancelled` | the app cancelled setup before its point of no return, and setup undid what it wrote | §11.6, §20.8 |
-| `StorageSetupError::SetupRunning` | a setup past its point of no return is still finishing on this device | §20.8 |
+| `StorageSetupError::SetupRunning` | another setup call is running on this device, or a setup past its point of no return is still finishing | §20.8 |
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |
 | `ContainerNotFound` | CloudKit's zone is missing | E.1 |
 | `StorageFailure::OwnLocationRequired` | at first setup, the location of a store that needs its own (a Dropbox shared folder, a OneDrive folder, or an S3 bucket) holds anything besides the store's own folder and the location marker, or the marker `coven-location` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.3 |

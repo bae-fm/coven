@@ -513,6 +513,7 @@ impl StorageConnections {
         progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
         let device_name = device_name.to_owned();
+        let call = self.start_setup()?;
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = SetupWaits::default();
@@ -540,7 +541,7 @@ impl StorageConnections {
                     (owner.codes.provider_auth(data.credentials), None)
                 }
             };
-            let journal = owner.begin_setup(&device_name, &auth.credentials()).await?;
+            let journal = owner.begin_setup(call, &device_name, &auth.credentials()).await?;
             let setup = owner.run_setup(journal, async |journal| {
                 owner
                     .check_new_location(journal, &storage, auth.clone(), &waits, &mut progress)
@@ -575,6 +576,7 @@ impl StorageConnections {
     ) -> Result<StorageSetup, StorageSetupError> {
         let container = container.to_owned();
         let device_name = device_name.to_owned();
+        let call = self.start_setup()?;
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = SetupWaits::default();
@@ -584,7 +586,8 @@ impl StorageConnections {
             }) {
                 return Err(StorageSetupError::LocationChangeUnsupported);
             }
-            let journal = owner.begin_setup(&device_name, &StorageCredentials::CloudKit).await?;
+            let journal =
+                owner.begin_setup(call, &device_name, &StorageCredentials::CloudKit).await?;
             owner
                 .run_setup(journal, async |journal| {
                     let storage = match recorded {
