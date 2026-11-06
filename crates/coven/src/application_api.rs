@@ -81,7 +81,10 @@ pub use coven_foundation::network_watch::TestNetwork;
 pub use coven_foundation::progress::Progress;
 pub use coven_foundation::uuid_text::UuidText;
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
+pub use coven_foundation::{
+    clock::{FixedClock, PollingClock},
+    id_source::SequentialIds,
+};
 pub use coven_merge::{Audience, MergeError, Slot};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use coven_storage::providers::DesktopOAuthPresenter;
