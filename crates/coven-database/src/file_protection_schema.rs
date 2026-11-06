@@ -17,18 +17,18 @@ macro_rules! coven_file_protection_tables {
         ");
         // Each stored file's record as the cache keys its bytes, kept with
         // the record (§17.8): what coven's pins and transfer views join a
-        // file by. Records over the same stored bytes share a cache id.
+        // file by. Records over the same stored bytes share an object path.
         $visit!(_coven_stored_files, "
             CREATE TABLE _coven_stored_files (
                 file TEXT PRIMARY KEY NOT NULL,
                 namespace TEXT NOT NULL,
                 device BLOB NOT NULL CHECK(length(device)=8),
                 object BLOB NOT NULL CHECK(length(object)=16),
-                cache_id TEXT NOT NULL,
+                object_path TEXT NOT NULL,
                 hash BLOB NOT NULL CHECK(length(hash)=32)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_stored_files_object ON _coven_stored_files(device,object);
-            CREATE INDEX _coven_stored_files_cache ON _coven_stored_files(namespace,cache_id);
+            CREATE INDEX _coven_stored_files_object_path ON _coven_stored_files(namespace,object_path);
         ");
         // Every reference this device has to a file (§17.2): a synced row's
         // merged cell, in any audience and whether or not removal rules took

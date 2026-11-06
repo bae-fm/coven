@@ -149,8 +149,8 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
     // The records with something of their own here to settle once their
     // stored files are up to date, with the stored bytes each named before.
     db.internal_execute(
-        "INSERT INTO temp._coven_install_records(file,namespace,cache_id)
-         SELECT _coven_file_of_key(p.key),s.namespace,s.cache_id FROM temp._coven_install_protected p
+        "INSERT INTO temp._coven_install_records(file,namespace,object_path)
+         SELECT _coven_file_of_key(p.key),s.namespace,s.object_path FROM temp._coven_install_protected p
          LEFT JOIN _coven_stored_files s ON s.file=_coven_file_of_key(p.key)
          WHERE p.table_name=?1 AND (s.file IS NOT NULL
            OR EXISTS(SELECT 1 FROM _coven_user_files u WHERE u.file=_coven_file_of_key(p.key))
@@ -160,12 +160,12 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
         [&table.table],
     )?;
     db.internal_execute(
-        "INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash)
+        "INSERT INTO _coven_stored_files(file,namespace,device,object,object_path,hash)
          SELECT f.id,f.namespace,_coven_stored_device(f.coordinates),_coven_stored_object(f.coordinates),
-           _coven_stored_cache_id(f.coordinates),f.hash
+           _coven_stored_object_path(f.coordinates),f.hash
          FROM temp._coven_install_protected p CROSS JOIN main.coven_files f ON f.id=_coven_file_of_key(p.key)
          WHERE p.table_name=?1 AND _coven_stored_device(f.coordinates) IS NOT NULL
-         ON CONFLICT(file) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,object=excluded.object,cache_id=excluded.cache_id,hash=excluded.hash
+         ON CONFLICT(file) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,object=excluded.object,object_path=excluded.object_path,hash=excluded.hash
          WHERE namespace!=excluded.namespace OR device!=excluded.device OR object!=excluded.object OR hash!=excluded.hash",
         [&table.table],
     )?;
@@ -177,7 +177,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
         [&table.table],
     )?;
     db.for_each(
-        "SELECT file,namespace,cache_id FROM temp._coven_install_records ORDER BY file",
+        "SELECT file,namespace,object_path FROM temp._coven_install_records ORDER BY file",
         [],
         |r| {
             let file: FileId = r.get(0)?;

@@ -35,19 +35,19 @@ pub(crate) fn covered(
         crate::FilePlace::DeviceOnly { .. } => return Ok(0),
         crate::FilePlace::Cloud { .. } => {}
     }
-    let id = crate::database::file_database::cache_id(file)?;
+    let object = crate::database::file_database::object_path_of(file)?;
     if db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_cache
-         WHERE namespace=?1 AND file_id=?2 AND chunk=?3)",
-        (file.namespace(), &id, crate::internal_schema::CACHE_COMPLETE_FILE),
+         WHERE namespace=?1 AND object_path=?2 AND chunk=?3)",
+        (file.namespace(), &object, crate::internal_schema::CACHE_COMPLETE_FILE),
         |r| r.get::<_, bool>(0),
     )? {
         return Ok(file.size());
     }
     let cached = db.query_row(
         "SELECT coalesce(sum(size-chunks*?3),0) FROM _coven_cache
-         WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
-        (file.namespace(), &id, coven_crypto::FILE_CHUNK_TAG_LEN as i64),
+         WHERE namespace=?1 AND object_path=?2 AND chunk>=0",
+        (file.namespace(), &object, coven_crypto::FILE_CHUNK_TAG_LEN as i64),
         |r| r.get::<_, i64>(0),
     )?;
     let cached = u64::try_from(cached).map_err(|_| DbError::DamagedDatabase)?;

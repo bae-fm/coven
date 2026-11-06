@@ -375,16 +375,16 @@ async fn releases(
            INSERT INTO releases SELECT 'r' || i, 1 FROM n;
          WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<120000)
            INSERT INTO release_files(id,release_id,file) SELECT 'f' || i, 'r' || ((i-1)/12+1), 'file f' || i FROM n;
-         INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash)
+         INSERT INTO _coven_stored_files(file,namespace,device,object,object_path,hash)
            SELECT file, 'files', x'0000000000000001', randomblob(16),
                   'cache ' || id, zeroblob(32) FROM release_files;
          COMMIT;",
     );
     let pins = timed(
         "BEGIN;
-         INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
-           SELECT f.namespace, f.cache_id, -2, f.cache_id, 1, 1, 1, f.hash FROM _coven_stored_files AS f
-           WHERE CAST(substr(f.cache_id,8) AS INTEGER)%120<>1;
+         INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned,checked_hash)
+           SELECT f.namespace, f.object_path, -2, f.object_path, 1, 1, 1, f.hash FROM _coven_stored_files AS f
+           WHERE CAST(substr(f.object_path,8) AS INTEGER)%120<>1;
          COMMIT;",
     );
     (store, db, rows, pins)

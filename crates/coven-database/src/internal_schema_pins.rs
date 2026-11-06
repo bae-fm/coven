@@ -34,9 +34,9 @@ macro_rules! named_by {
         concat!(
             "SELECT f.file FROM _coven_stored_files AS f WHERE f.namespace=",
             $row,
-            ".namespace AND f.cache_id=",
+            ".namespace AND f.object_path=",
             $row,
-            ".file_id"
+            ".object_path"
         )
     };
 }
@@ -49,7 +49,7 @@ pub(super) fn schema() -> String {
     "CREATE VIEW _coven_pin_source(file) AS
         SELECT f.file FROM _coven_stored_files AS f
         JOIN _coven_cache AS c ON c.namespace=f.namespace
-            AND c.file_id=f.cache_id AND c.chunk={complete}
+            AND c.object_path=f.object_path AND c.chunk={complete}
             AND c.pinned=1 AND c.checked_hash=f.hash;
     CREATE TABLE coven_pins (
         file TEXT PRIMARY KEY NOT NULL
@@ -67,7 +67,7 @@ pub(super) fn schema() -> String {
     CREATE TRIGGER _coven_pins_cached AFTER INSERT ON _coven_cache WHEN NEW.chunk={complete} BEGIN ",
     refresh!(named_by!("NEW")),
     " END;
-    CREATE TRIGGER _coven_pins_cache_changed AFTER UPDATE OF namespace,file_id,chunk,pinned,checked_hash
+    CREATE TRIGGER _coven_pins_cache_changed AFTER UPDATE OF namespace,object_path,chunk,pinned,checked_hash
         ON _coven_cache WHEN OLD.chunk={complete} OR NEW.chunk={complete} BEGIN ",
     refresh!(named_by!("OLD")),
     refresh!(named_by!("NEW")),

@@ -82,8 +82,8 @@ impl FileWrite<'_> {
         };
         let file = FileRef::of(record)?;
         if let FilePlace::Cloud { .. } = file.place() {
-            let id = crate::database::file_database::cache_id(&file)?;
-            crate::database::file_database::remove_cached(db, file.namespace(), &id)?;
+            let object = crate::database::file_database::object_path_of(&file)?;
+            crate::database::file_database::remove_cached(db, file.namespace(), &object)?;
         }
         Ok(())
     }

@@ -11,11 +11,11 @@ pub(super) use crate::internal_schema::{
 };
 use coven_foundation::files::{FileArea, FileName, ObservationError};
 
-/// The cache's name for a stored file's bytes, which every file over them
-/// shares. Only a stored file is cached.
-pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
+/// The cache's name for a stored file's bytes, its object's path, which
+/// every file over them shares. Only a stored file is cached.
+pub(crate) fn object_path_of(file: &FileRef) -> Result<String, DbError> {
     let (location, _) = stored(file)?;
-    Ok(file_id(location.uploader(), location.object()))
+    Ok(object_path(location.uploader(), location.object()))
 }
 /// A stored file's location and content hash.
 fn stored(file: &FileRef) -> Result<(&crate::FileLocation, coven_crypto::ContentHash), DbError> {
@@ -26,9 +26,10 @@ fn stored(file: &FileRef) -> Result<(&crate::FileLocation, coven_crypto::Content
         }
     }
 }
-/// The cache's name for an uploader's stored object, which coven's pin view
+/// The cache's name for an uploader's stored object, its path under the
+/// store's files, `<uploader>/<object>` (§17.5), which coven's pin view
 /// computes too (Appendix C.1).
-pub(crate) fn file_id(
+pub(crate) fn object_path(
     uploader: coven_foundation::id_source::DeviceId,
     object: coven_foundation::id_source::ObjectId,
 ) -> String {
@@ -44,12 +45,12 @@ fn covering(
     file: &FileRef,
     index: i64,
 ) -> Result<Option<(String, i64, i64, i64)>, DbError> {
-    let id = id(file)?;
+    let object = object_path_of(file)?;
     if let Some(whole) = db
         .query(
             "SELECT path,chunk,chunks,size FROM _coven_cache
-             WHERE namespace=?1 AND file_id=?2 AND chunk=?3",
-            (file.namespace(), &id, COMPLETE_FILE),
+             WHERE namespace=?1 AND object_path=?2 AND chunk=?3",
+            (file.namespace(), &object, COMPLETE_FILE),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?
         .pop()
@@ -60,9 +61,9 @@ fn covering(
     Ok(db
         .query(
             "SELECT path,chunk,chunks,size FROM _coven_cache
-             WHERE namespace=?1 AND file_id=?2 AND chunk>=?3 AND chunk<=?4
+             WHERE namespace=?1 AND object_path=?2 AND chunk>=?3 AND chunk<=?4
              ORDER BY chunk DESC LIMIT 1",
-            (file.namespace(), &id, lower, index),
+            (file.namespace(), &object, lower, index),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?
         .pop()
@@ -277,11 +278,11 @@ fn publish_range(
         return Ok(false);
     }
     db.internal_execute(
-        "INSERT INTO _coven_cache(namespace,file_id,chunk,chunks,path,size,last_read,pinned)
+        "INSERT INTO _coven_cache(namespace,object_path,chunk,chunks,path,size,last_read,pinned)
          VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
         rusqlite::params![
             file.namespace(),
-            id(file)?,
+            object_path_of(file)?,
             first,
             chunks,
             name.as_str(),
@@ -408,7 +409,7 @@ pub(crate) fn trim_entries(
                    AND (chunk!=?2 OR NOT EXISTS(
                        SELECT 1 FROM _coven_cache AS chunks
                        WHERE chunks.namespace=candidate.namespace
-                         AND chunks.file_id=candidate.file_id AND chunks.chunk>=0))
+                         AND chunks.object_path=candidate.object_path AND chunks.chunk>=0))
                  ORDER BY last_read,path LIMIT 1",
             (namespace, HEADER),
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
@@ -428,8 +429,8 @@ pub(crate) fn trim_entries(
 pub(super) fn whole(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3)",
-        (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
+        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND checked_hash=?3)",
+        (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
         |r| r.get(0),
     )
 }
@@ -437,15 +438,15 @@ pub(super) fn whole(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbE
 pub(crate) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     Ok(db.internal_execute(
-        "UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",
-        (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
+        "UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND checked_hash=?3",
+        (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
     )? == 1)
 }
 /// Release a stored file's budget exemption: every entry of its bytes.
 pub(crate) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND file_id=?2",
-        (file.namespace(), id(file)?),
+        "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND object_path=?2",
+        (file.namespace(), object_path_of(file)?),
     )?;
     Ok(())
 }
@@ -453,8 +454,8 @@ pub(crate) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbErr
 pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",
-        (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
+        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",
+        (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
         |r| r.get(0),
     )
 }
@@ -484,11 +485,11 @@ pub(crate) fn publish(
     if !named(db, file)? {
         return Ok(false);
     }
-    let id = id(file)?;
-    remove_entries(db, file.namespace(), &id)?;
+    let object = object_path_of(file)?;
+    remove_entries(db, file.namespace(), &object)?;
     // The reservation's cleanup record goes before the row names its bytes.
     crate::file_removals::keep(db, "cache", name.as_str())?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
+    db.internal_execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
     Ok(true)
 }
 /// Whether a record here names the stored bytes `file` was taken over. The
@@ -497,8 +498,8 @@ pub(crate) fn publish(
 /// an entry after it would name bytes nothing could read or unpin.
 fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND cache_id=?2)",
-        (file.namespace(), id(file)?),
+        "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND object_path=?2)",
+        (file.namespace(), object_path_of(file)?),
         |r| r.get(0),
     )
 }
@@ -507,11 +508,11 @@ fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
 pub(crate) fn remove_entries(
     db: &DatabaseConnection,
     namespace: &str,
-    id: &str,
+    object: &str,
 ) -> Result<Vec<String>, DbError> {
     let paths = db.query(
-        "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2 RETURNING path",
-        (namespace, id),
+        "DELETE FROM _coven_cache WHERE namespace=?1 AND object_path=?2 RETURNING path",
+        (namespace, object),
         |r| r.get::<_, String>(0),
     )?;
     for path in &paths {

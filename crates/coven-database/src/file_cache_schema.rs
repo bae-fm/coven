@@ -10,7 +10,7 @@ macro_rules! coven_cache_tables {
         $visit!(_coven_cache, "
             CREATE TABLE _coven_cache (
                 namespace TEXT NOT NULL,
-                file_id TEXT NOT NULL,
+                object_path TEXT NOT NULL,
                 chunk INTEGER NOT NULL CHECK(chunk>={CACHE_COMPLETE_FILE}),
                 chunks INTEGER NOT NULL DEFAULT 1 CHECK(chunks>=1) CHECK(chunk>=0 OR chunks=1),
                 path TEXT NOT NULL UNIQUE,
@@ -18,7 +18,7 @@ macro_rules! coven_cache_tables {
                 last_read INTEGER NOT NULL,
                 pinned INTEGER NOT NULL CHECK(pinned IN (0,1)) CHECK(pinned=0 OR chunk={CACHE_COMPLETE_FILE}),
                 checked_hash BLOB CHECK((chunk={CACHE_COMPLETE_FILE})=(checked_hash IS NOT NULL)) CHECK(checked_hash IS NULL OR length(checked_hash)=32),
-                PRIMARY KEY(namespace,file_id,chunk)
+                PRIMARY KEY(namespace,object_path,chunk)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
             CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);

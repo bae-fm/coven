@@ -369,15 +369,15 @@ fn refresh_record(
             namespace,
             ..
         }) => db.internal_execute(
-            "INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash) VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(file) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,object=excluded.object,cache_id=excluded.cache_id,hash=excluded.hash
+            "INSERT INTO _coven_stored_files(file,namespace,device,object,object_path,hash) VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(file) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,object=excluded.object,object_path=excluded.object_path,hash=excluded.hash
              WHERE namespace!=excluded.namespace OR device!=excluded.device OR object!=excluded.object OR hash!=excluded.hash",
             params![
                 id,
                 namespace,
                 location.uploader(),
                 location.object(),
-                crate::database::file_database::file_cache_id(location.uploader(), location.object()),
+                crate::database::file_database::object_path(location.uploader(), location.object()),
                 hash.as_bytes().as_slice()
             ],
         )?,
@@ -386,7 +386,7 @@ fn refresh_record(
     settle_record(db, id, cached, shown.as_ref(), kept)
 }
 
-/// The namespace and cache id of the stored bytes a file's record named as
+/// The namespace and object path of the stored bytes a file's record named as
 /// this device last recorded it, before its stored file is brought up to
 /// date.
 pub(crate) fn cached(
@@ -394,9 +394,11 @@ pub(crate) fn cached(
     file: FileId,
 ) -> Result<Option<(String, String)>, DbError> {
     Ok(db
-        .query("SELECT namespace,cache_id FROM _coven_stored_files WHERE file=?1", [file], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
+        .query(
+            "SELECT namespace,object_path FROM _coven_stored_files WHERE file=?1",
+            [file],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
         .pop())
 }
 
@@ -419,13 +421,13 @@ pub(crate) fn settle_record(
     // The cache keeps a stored file's bytes only while a record here names
     // them: the last one going takes their cached copies, pinned or not,
     // whose bytes go once the writer is free (§17.8, Appendix C.3).
-    if let Some((namespace, cache)) = cached {
+    if let Some((namespace, object)) = cached {
         if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND cache_id=?2)",
-            params![namespace, cache],
+            "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND object_path=?2)",
+            params![namespace, object],
             |r| r.get::<_, bool>(0),
         )? {
-            crate::database::file_database::remove_cached(db, &namespace, &cache)?;
+            crate::database::file_database::remove_cached(db, &namespace, &object)?;
         }
         // A file off its stored bytes can't be kept whole here: a request
         // to keep it ends (§17.8).

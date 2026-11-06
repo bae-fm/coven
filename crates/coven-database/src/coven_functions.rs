@@ -90,7 +90,8 @@ pub(crate) fn register(
     // table at a time: the file a reference names, canonical UUID text or
     // NULL; the file a record's key names; and where a record's coordinates
     // store its file, as the uploader's device id, the stored object's id
-    // and the cache's name for it, each NULL for a file on one device only.
+    // and the object's path `<uploader>/<object>`, the cache's name for it,
+    // each NULL for a file on one device only.
     add(connection, authorization, "_coven_file_id", 1, INTERNAL, |ctx| {
         let value = crate::write_encoding::value(ctx.get_raw(0))?;
         Ok(crate::file_table::id(&value).map(|file| file.0.to_string()))
@@ -106,9 +107,9 @@ pub(crate) fn register(
     add(connection, authorization, "_coven_stored_object", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| location.object()))
     })?;
-    add(connection, authorization, "_coven_stored_cache_id", 1, INTERNAL, |ctx| {
+    add(connection, authorization, "_coven_stored_object_path", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| {
-            crate::database::file_database::file_cache_id(location.uploader(), location.object())
+            crate::database::file_database::object_path(location.uploader(), location.object())
         }))
     })?;
     // A stored time as milliseconds since the Unix epoch, for coven's views.

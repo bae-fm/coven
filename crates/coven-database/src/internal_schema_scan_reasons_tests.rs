@@ -38,7 +38,7 @@ mod fixture {
             ("_coven_file_of_key", 1),
             ("_coven_stored_device", 1),
             ("_coven_stored_object", 1),
-            ("_coven_stored_cache_id", 1),
+            ("_coven_stored_object_path", 1),
         ] {
             db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new())).unwrap();
         }
@@ -382,8 +382,8 @@ mod source {
                 "column_name",
                 "column_id",
                 "identity",
-                // Before `file`, which it starts with.
-                "file_id",
+                // Before `object`, which it starts with.
+                "object_path",
                 "namespace",
                 "size",
                 "device",
