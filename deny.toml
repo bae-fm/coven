@@ -41,6 +41,8 @@ deny = [
 [advisories]
 # An ignore that matches nothing fails, so one is removed once its crate is gone.
 unused-ignored-advisory = "deny"
+# A yanked release fails the check; update the crate.
+yanked = "deny"
 ignore = [
     # pin-utils: unmaintained, pulled in by aws-smithy-http <- aws-sdk-s3 <- coven-storage.
     # No maintained release replaces it until the AWS SDK drops it; it is a few
