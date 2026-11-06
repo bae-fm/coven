@@ -11,7 +11,8 @@ device applies nothing after that slot. Loading a floor snapshot also requires
 every followed audience key, so it cannot bypass a reader waiting for its key.
 
 A device also stops at a kept slot it can't open at all: its bytes are damaged,
-or in a newer format than its app reads. No reader applies that slot, for any
+in a newer format than its app reads, or a write at a newer schema version than
+its app runs (coven.md §18.2). No reader applies that slot, for any
 audience, and nothing reloads while a reader waits at it (`unopened_stops`).
 
 A device outside a circle has no reader for it. Its readers apply the circle's
@@ -343,7 +344,8 @@ theorem missing_key_blocks_reload {dv : Device S} {B : S.Aud}
 
 /-- **A device stops at a kept slot it can't open.** A device whose `B`
 reader's next slot is kept, exists, and is one the device can't open, its bytes
-damaged or in a newer format than its app reads, never moves that reader, and
+damaged, in a newer format than its app reads, or a write at a newer schema
+version than its app runs, never moves that reader, and
 no reader applies that slot for any audience: each stays at most where it was
 or at `B`'s position. Nothing reloads meanwhile. -/
 theorem unopened_stops {st : Store S} {dv : Device S} {B : S.Aud} (hB : B ∈ dv.follows)

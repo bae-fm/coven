@@ -666,11 +666,13 @@ entirely.
   next slot is `B`'s, never moves that reader. Even before it notices, every
   other reader applies at most up to that slot. `missing_key_blocks_reload`
   forbids every floor reload until all followed audience keys are held.
-- `unopened_stops`: a kept slot the device can't open at all, its bytes damaged
-  or in a newer format than its app reads, stops it too. No reader applies that
+- `unopened_stops`: a kept slot the device can't open at all, its bytes damaged,
+  in a newer format than its app reads, or a write at a newer schema version
+  than its app runs (coven.md §18.2), stops it too. No reader applies that
   slot, for any audience, or moves past it, and no audience reloads while a
   reader waits there. Which slots a device can open (`opens`) is an input: the
-  model reads no bytes or formats.
+  model reads no bytes, formats or schema versions. Once the app updates and
+  opens the slot, `device_reaches_head` runs the device on.
 - `stopped_stays`: once the device has stopped, nothing moves: no reader
   applies a slot and none reloads.
 - `dev_ok`: device steps keep every followed reader sound.

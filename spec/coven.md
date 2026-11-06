@@ -1517,9 +1517,10 @@ while still sending writes Ben's removal should have cut off.
 Ben's laptop reads slot 41, a copy of a Gifts key it can't open. A key that
 arrives in a later slot can't let it get past 41.
 
-A slot the device can't open at all, its bytes damaged or written in a newer
-format than its app reads, stops it the same way: it applies that slot for no
-audience and loads no floor snapshot while it waits there
+A slot the device can't apply at all stops it the same way: its bytes are
+damaged, written in a newer format than its app reads, or a write at a newer
+schema version than its app runs (§18.2). It applies that slot for no audience
+and loads no floor snapshot while it waits there
 ([`unopened_stops`](proofs/sequence/CovenSequence/Device.lean)).
 
 **Edge cases.**
@@ -7688,7 +7689,8 @@ updates, then applies them.
 
 Ana's app adds `color` to notes. Ben, on the old version, can still edit titles
 locally. Once his laptop reaches a slot from the newer version, it stops there
-(§5.4) and waits for his app update before his queued titles can reach Ana.
+(§5.4) and waits for his app update before his queued titles can reach Ana
+([`unopened_stops`](proofs/sequence/CovenSequence/Device.lean)).
 
 #### 18.3 Breaking changes and the raise
 
@@ -7947,7 +7949,12 @@ format and the keys it was sealed with.
 **Judging late writes before the raise.** Until it claims its raise, a migrated
 device interprets other devices' old-schema changes that its capture doesn't
 cover using its own local capture's conversion, keeping the original records. A
-recapture includes every write already judged. If another device claims the
+recapture includes every write already judged. Its raise body then agrees with
+the rows at its coverage migrated on a part whose converter does what the
+migration does to it, and under `Drop` leaves out a part that landed after it
+migrated
+([`one_part_agrees`, `late_part_differs`](proofs/sequence/CovenSequence/RaiseBody.lean)).
+If another device claims the
 version first, Ana's phone loads that announced state and judges the uncovered
 writes the way every receiver does (§18.6). Its local migration's results never
 become shared lost values.
@@ -9704,9 +9711,13 @@ What they don't cover:
   §15.9), though the membership it checks is modelled. Nor do they cover
   the checks that refuse a schema at open (§9.1, §9.2, §9.4), though one
   refusal's reason is proved (Appendix G.3); nor `UuidText`, how a CHECK is
-  judged on a merged row (§9.3), or which tables a trigger may write. Tests
-  check these; the merge model takes the recorded writes, their references
-  and CHECK results as given.
+  judged on a merged row (§9.3), or which tables a trigger may write. Nor do
+  they cover how a migration write is found from the tables before and after
+  the migration, renames included (§18.4), how coven's own tables migrate, or
+  the format version each stored object records (§18.9). Tests check these;
+  the merge model takes the recorded writes, their references and CHECK
+  results as given, and the sequence model a migration's effect on rows and
+  which slots a device can apply.
 - **Their own assumptions.** The models take as given correct cryptography,
   honest snapshot contents, a prepared snapshot's body in storage before its
   announcement counts, and providers that behave as §20 requires.
@@ -11600,7 +11611,7 @@ Write-ups explain each model and state its assumptions:
 | A settled claim, kept or claimed again after it didn't land (the model's `notLanded`), ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device missing a followed audience key cannot reload any audience past its blocked slot, even before noticing the block; a stopped device applies and reloads nothing | `device_stops`, `missing_key_blocks_reload`, `stopped_stays`, `Device.stopped_checks_nothing` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
-| *Body.* A device whose next kept slot is one it can't open, its bytes damaged or in a newer format than its app reads, applies that slot for no audience, moves no reader past it, and reloads nothing while it waits there | `unopened_stops` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
+| *Body.* A device whose next kept slot is one it can't apply, its bytes damaged, in a newer format than its app reads, or a write at a newer schema version than its app runs, applies that slot for no audience, moves no reader past it, and reloads nothing while it waits there | `unopened_stops` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §18.2, §22 |
 | A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2, §16.6 |
 | In storage in good order every slot from the first kept slot through the head is present, so one missing there, through the floor's `at` or a slot the device has applied, is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §16.6 |
 | *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
@@ -11732,10 +11743,10 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience's version never goes down, so a part sent once its audience reached its version counts on that rule wherever it lands | `step_version`, `version_mono`, `waiting_part_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience no one may raise, such as a deleted circle, keeps its version, so a part ahead of it never meets the version rule wherever it lands | `closed_step_version`, `closed_version`, `closed_part_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
-| A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
-| A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
+| *Body.* A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
+| *Body.* A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
-| Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
+| Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3, §18.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |
 | A preparation announcement alone changes no rows, schema version, reset or usable ordinary snapshots, though its coverage still limits later preparations and entries. In one example history, a reset preparation never activated stays out of the snapshots, never becomes a reset, and is never usable | `preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | Loading a floor snapshot and the slots after it reaches the full state; sound readers at one position agree | `joiner_reaches_head`, `readers_agree` | `proofs/sequence/CovenSequence/Reader.lean` | §16.4, §16.5 |
