@@ -933,3 +933,23 @@ async fn an_old_app_starting_from_a_newer_snapshot_needs_an_update() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// An installation whose custody holds no member keys can't unlock or sync,
+/// and says so the one way: `StorageFailure::MemberKeysMissing` (E5).
+#[tokio::test]
+async fn a_device_without_member_keys_reports_member_keys_missing() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync.member.forget().unwrap();
+    let missing = |result: Result<(), SyncError>| {
+        matches!(
+            &result,
+            Err(SyncError::Storage(error))
+                if error.failure() == coven_storage::StorageFailure::MemberKeysMissing
+        )
+    };
+    assert!(missing(ana.sync.unlock().await));
+    assert!(missing(ana.sync.pass().await.map(drop)));
+    ana.database().close().await.unwrap();
+}

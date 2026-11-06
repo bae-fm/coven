@@ -711,3 +711,45 @@ async fn rotating_a_deleted_circles_key_finds_its_target_gone() {
     assert!(ana.database().operations().await.unwrap().is_empty());
     ana.database().close().await.unwrap();
 }
+
+/// A store key custody holds under the store key's id with other material
+/// conflicts with this member's copy in history: opening the sequence fails
+/// with that key's material error, and custody keeps what it held (E5).
+#[tokio::test]
+async fn a_held_key_whose_material_conflicts_fails_with_its_material_error() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let key = group.ring.store_key_ids().next().unwrap();
+    let conflicting = StoreKeyring::new(coven_crypto::StoreKey::from_bytes(key, [9; 32]));
+    ana.sync.keys.persist(&conflicting).unwrap();
+    let held = &ana.sync;
+    let result = SequenceSync::open(
+        held.database.clone(),
+        held.storage.clone(),
+        held.directory.clone(),
+        held.device,
+        held.keys.clone(),
+        held.member.clone(),
+        held.person.clone(),
+        Arc::new(crate::SequenceState::new()),
+        held.clock.clone(),
+        held.ids.clone(),
+        held.waits.clone(),
+        held.files.clone(),
+    )
+    .await;
+    assert!(
+        matches!(
+            &result,
+            Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if *id == key
+        ),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(
+        ana.sync.keys.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
+        conflicting.to_secret_bytes().as_bytes()
+    );
+    ana.database().close().await.unwrap();
+}
