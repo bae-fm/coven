@@ -133,7 +133,9 @@ pub(crate) enum SessionState {
     S3Planned {
         token: SecretText,
         /// True only while this process knows no initiation was attempted.
-        /// A restored journal cannot establish that fact.
+        /// A restored journal cannot establish that fact. Read only at a
+        /// shared name: at a name the session owns, resuming or aborting
+        /// ends every upload there whatever this says (Appendix E.10).
         #[serde(skip)]
         unstarted: bool,
     },
@@ -152,6 +154,10 @@ pub(crate) enum SessionState {
     },
     VerifyPublished,
     Complete,
+    /// The deterministic provider's session named before its first part
+    /// starts it, as an S3 multipart upload is (Appendix E.10).
+    #[cfg(any(test, feature = "test-utils"))]
+    MemoryPlanned,
     #[cfg(any(test, feature = "test-utils"))]
     Memory {
         id: u64,
@@ -361,6 +367,14 @@ impl UploadSession {
                 }
             }
             SessionState::Complete => {}
+            #[cfg(any(test, feature = "test-utils"))]
+            SessionState::MemoryPlanned => {
+                return if self.confirmed == 0 {
+                    Ok(())
+                } else {
+                    Err(StorageFailure::InvalidPart.into())
+                };
+            }
             #[cfg(any(test, feature = "test-utils"))]
             SessionState::Memory { id, .. } => {
                 return if *id != 0 { Ok(()) } else { Err(StorageFailure::InvalidPart.into()) };

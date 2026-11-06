@@ -21,8 +21,8 @@ async fn the_device_that_deletes_a_gone_devices_files_ends_its_uploads() {
     group.create(&phone).await;
     group.admit(&phone, &ben).await;
     let laptop = group.laptop(&phone).await;
-    phone.storage.begin_upload(&photo(&group, &phone, 1), 4).await.unwrap();
-    laptop.storage.begin_upload(&photo(&group, &laptop, 2), 4).await.unwrap();
+    phone.storage.started_upload(&photo(&group, &phone, 1)).await.unwrap();
+    laptop.storage.started_upload(&photo(&group, &laptop, 2)).await.unwrap();
     laptop.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
     ben.sync.pass().await.unwrap();
     assert_eq!(group.storage.unfinished_uploads().await.len(), 2, "not Ben's to end");
@@ -51,7 +51,7 @@ async fn the_apps_cleanup_ends_what_a_gone_device_left_since() {
     laptop.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
     laptop.sync.pass().await.unwrap();
     let late = photo(&group, &phone, 3);
-    phone.storage.begin_upload(&late, 4).await.unwrap();
+    phone.storage.started_upload(&late).await.unwrap();
     let body = ObjectPath::snapshot(
         group.store,
         Audience::Store,

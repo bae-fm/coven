@@ -143,10 +143,10 @@ async fn another_device_ends_the_uploads_a_device_left() {
     };
     let elsewhere = StoreId(uuid::Uuid::from_u128(3));
     let phones = storage.with_device(phone);
-    let mut left = phones.begin_upload(&file(STORE_ID, phone), 4).await.unwrap();
-    phones.begin_upload(&file(elsewhere, phone), 4).await.unwrap();
+    let mut left = phones.started_upload(&file(STORE_ID, phone)).await.unwrap();
+    phones.started_upload(&file(elsewhere, phone)).await.unwrap();
     let laptops = storage.with_device(laptop);
-    laptops.begin_upload(&file(STORE_ID, laptop), 4).await.unwrap();
+    laptops.started_upload(&file(STORE_ID, laptop)).await.unwrap();
     for _ in 0..2 {
         laptops.end_device_uploads(STORE_ID, phone).await.unwrap();
         assert_eq!(
@@ -173,7 +173,7 @@ async fn sessions_at_applied_slots_are_ended_whoever_began_them() {
     for path in
         [slot(STORE_ID, 1), slot(STORE_ID, 2), slot(STORE_ID, 3), slot(elsewhere, 1), file.clone()]
     {
-        storage.with_device(DeviceId(7)).begin_upload(&path, 4).await.unwrap();
+        storage.with_device(DeviceId(7)).started_upload(&path).await.unwrap();
     }
     storage.end_settled_claims(STORE_ID, 2).await.unwrap();
     let left: Vec<_> =
@@ -191,11 +191,12 @@ async fn floor_sessions_begun_before_the_floor_are_ended() {
         Arc::new(FixedClock::new(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100)));
     let storage = MemoryStorage::builder().clock(clock.clone()).build().unwrap();
     let floor = ObjectPath::floor(STORE_ID);
-    storage.begin_upload(&floor, 4).await.unwrap();
+    storage.started_upload(&floor).await.unwrap();
     clock.set(clock.now() + std::time::Duration::from_secs(10));
     storage.create(&floor, b"floor").await.unwrap();
     let current = storage.status(&floor).await.unwrap().unwrap();
-    storage.begin_replace(&current, 4).await.unwrap();
+    let mut replacement = storage.begin_replace(&current, 4).await.unwrap();
+    storage.upload_part(&mut replacement, b"data").await.unwrap();
     storage.end_superseded_floor_sessions(STORE_ID).await.unwrap();
     assert_eq!(storage.unfinished_uploads().await.len(), 1);
     storage.end_superseded_floor_sessions(STORE_ID).await.unwrap();

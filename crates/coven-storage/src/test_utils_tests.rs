@@ -70,11 +70,10 @@ async fn memory_conforms() {
                 clock.set(std::time::UNIX_EPOCH + Duration::from_secs(10));
             })
             .await;
-        suite
-            .expired_session(async {
-                storage.set_faults(Faults { expire_uploads: true, ..Faults::none() }).await;
-            })
-            .await;
+        // A session begun here exists only once its first part starts it, as
+        // on S3, so `expired_session`, which expires a session only begun,
+        // doesn't apply; `lost_publication_replies_and_expired_parts_are_distinct`
+        // expires a started one.
         suite
             .lost_part_reply(4, async {
                 storage.set_faults(Faults { lose_part_reply: true, ..Faults::none() }).await;
@@ -400,7 +399,10 @@ async fn lost_publication_replies_and_expired_parts_are_distinct() {
     storage.resume_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
     storage.delete(&path).await.unwrap();
+    // The deterministic provider starts a session with its first part, as
+    // S3 does, so only a started session has anything to expire.
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
     storage.set_faults(Faults { expire_uploads: true, ..Faults::none() }).await;
     assert!(matches!(
         storage.resume_upload(&mut upload).await,

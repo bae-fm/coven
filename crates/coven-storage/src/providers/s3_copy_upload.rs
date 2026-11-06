@@ -134,24 +134,6 @@ impl S3Storage {
         Ok(SecretText::new(id.into()))
     }
 
-    /// Abort every native upload at a planned session's name: one its
-    /// initiation started before the reply was lost. Only a private staging
-    /// name proves ownership; a shared destination does not (Appendix E.10).
-    pub(super) async fn abort_initiated(
-        &self,
-        publication: &PublicationRequest,
-        session: &UploadSession,
-    ) -> Result<(), StorageError> {
-        if self.settings.copy_publication.multipart().is_none() {
-            return Err(StorageFailure::SessionIdentityUnknown.into());
-        }
-        let key = self.session_key(session)?;
-        self.abort_private_uploads(&key, Some(publication)).await
-    }
-
-    /// A fresh private name proves ownership of every native upload at that
-    /// exact key, including an initiation whose reply never arrived. Probes
-    /// have no sequence publication; ordinary uploads retain their gate.
     /// Abort the multipart upload `id` of `key`, counted under `publication`
     /// when one is given. An upload already gone, completed or aborted after
     /// it was named, leaves nothing to abort.
@@ -181,7 +163,10 @@ impl S3Storage {
         }
     }
 
-    /// Abort every unfinished multipart upload of exactly `key`.
+    /// Abort every unfinished multipart upload of exactly `key`, a name whose
+    /// uploads are all the caller's, an initiation whose reply never arrived
+    /// included. Probes have no sequence publication; ordinary uploads retain
+    /// their gate.
     pub(super) async fn abort_private_uploads(
         &self,
         key: &str,
@@ -202,7 +187,15 @@ impl S3Storage {
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         if self.settings.copy_publication.multipart().is_none() {
-            return self.completed(session).await;
+            return match (self.completed(session).await, &session.state) {
+                // A planned session that never published starts over.
+                (Err(error), SessionState::S3Planned { .. })
+                    if error.failure() == StorageFailure::SessionExpired =>
+                {
+                    Ok(())
+                }
+                (result, _) => result,
+            };
         }
         // NoSuchUpload leaves exactly one unknown: did assembly create the
         // temporary? If not, only this session's already-published object counts.

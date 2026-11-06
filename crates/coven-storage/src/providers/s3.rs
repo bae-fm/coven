@@ -51,6 +51,8 @@ mod left_uploads;
 mod listing;
 #[path = "s3_metadata.rs"]
 mod metadata;
+#[path = "s3_planned_upload.rs"]
+mod planned_upload;
 #[path = "s3_read.rs"]
 mod read;
 #[path = "s3_restart.rs"]
@@ -559,23 +561,25 @@ impl ProviderOps for S3Storage {
                 .await;
         }
         if let SessionState::S3Planned { unstarted, .. } = &session.state {
+            if self.owns_session_key(session) {
+                // Every upload at this name is this plan's: one whose start's
+                // reply was lost, or one started before the device stopped.
+                self.abort_initiated(publication, session).await?;
+                self.recover_completed_upload(publication, session).await?;
+                if let SessionState::S3Planned { unstarted, .. } = &mut session.state {
+                    *unstarted = true;
+                }
+                return Ok(());
+            }
             if *unstarted {
                 return Ok(());
             }
-            if self.settings.copy_publication.multipart().is_none() {
-                return self.completed(session).await.map_err(|error| match error.failure() {
-                    StorageFailure::SessionExpired | StorageFailure::AlreadyExists => {
-                        StorageFailure::SessionIdentityUnknown.with_source(error)
-                    }
-                    _ => error,
-                });
-            }
-            self.abort_initiated(publication, session).await?;
-            self.recover_completed_upload(publication, session).await?;
-            if let SessionState::S3Planned { unstarted, .. } = &mut session.state {
-                *unstarted = true;
-            }
-            return Ok(());
+            return self.completed(session).await.map_err(|error| match error.failure() {
+                StorageFailure::SessionExpired | StorageFailure::AlreadyExists => {
+                    StorageFailure::SessionIdentityUnknown.with_source(error)
+                }
+                _ => error,
+            });
         }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
         let mut marker = None;
@@ -777,7 +781,7 @@ impl ProviderOps for S3Storage {
         session: &UploadSession,
     ) -> Result<(), StorageError> {
         if let SessionState::S3Planned { unstarted, .. } = &session.state {
-            if *unstarted {
+            if *unstarted && !self.owns_session_key(session) {
                 return Ok(());
             }
             let aborted = self.abort_initiated(publication, session).await;

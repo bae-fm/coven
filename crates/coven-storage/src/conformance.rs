@@ -313,9 +313,13 @@ impl Conformance {
     ) {
         let storage = &self.storage;
         let path = ObjectPath::file(self.store, DeviceId(31), ObjectId(uuid::Uuid::from_u128(1)));
-        let mut upload = storage.begin_upload(&path, part_size as u64 + 1).await.unwrap();
+        let mut upload = storage.begin_upload(&path, 2 * part_size as u64 + 1).await.unwrap();
         assert_eq!(upload.part_size(), part_size);
         storage.resume_upload(&mut upload).await.unwrap();
+        // Where beginning sends nothing, the first part starts the session,
+        // and only the recording after it names the session (Appendix E.10).
+        let first = vec![41; part_size];
+        storage.upload_part(&mut upload, &first).await.unwrap();
         let recorded = upload.encode().unwrap();
         let bytes = vec![42; part_size];
         lose.await;
@@ -323,14 +327,15 @@ impl Conformance {
             storage.upload_part(&mut upload, &bytes).await.unwrap_err().failure(),
             StorageFailure::Network
         );
-        assert_eq!(upload.confirmed_bytes(), 0);
+        assert_eq!(upload.confirmed_bytes(), part_size as u64);
         let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
         storage.resume_upload(&mut upload).await.unwrap();
-        assert_eq!(upload.confirmed_bytes(), part_size as u64);
+        assert_eq!(upload.confirmed_bytes(), 2 * part_size as u64);
         storage.upload_part(&mut upload, b"z").await.unwrap();
         storage.finish_upload(&mut upload).await.unwrap();
         storage.finish_upload(&mut upload).await.unwrap();
-        let mut expected = bytes;
+        let mut expected = first;
+        expected.extend(bytes);
         expected.push(b'z');
         assert_eq!(storage.read(&path).await.unwrap(), expected);
         storage.delete(&path).await.unwrap();

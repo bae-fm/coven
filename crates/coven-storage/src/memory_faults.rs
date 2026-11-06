@@ -56,6 +56,9 @@ pub struct Faults {
     pub drop_part: bool,
     /// Store the next part, but lose the reply before advancing the caller's session.
     pub lose_part_reply: bool,
+    /// Start the next planned session's upload, but lose the reply: the
+    /// caller never learns the id of the session the provider holds.
+    pub lose_initiation_reply: bool,
     /// Publish the next upload but lose the completion reply.
     pub lose_completion_reply: bool,
     /// Refuse this many upload aborts, retaining the pending bytes.
@@ -110,6 +113,7 @@ impl Faults {
             delay: Duration::ZERO,
             drop_part: false,
             lose_part_reply: false,
+            lose_initiation_reply: false,
             lose_completion_reply: false,
             expire_uploads: false,
             abort_failures: 0,

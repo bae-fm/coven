@@ -40,6 +40,17 @@ fn confirm_published(
     Ok(())
 }
 
+/// End every session a planned one's first part may have started, whose
+/// start's reply was lost or never recorded, where its destination is a name
+/// its device alone uses: a path in its own file or snapshot folders, as on
+/// S3 (Appendix E.10). A shared slot or floor path proves nothing, so a plan
+/// there ends nothing.
+fn end_planned(state: &mut MemoryState, session: &UploadSession) {
+    if session.path().device() == Some(session.device) {
+        state.uploads.retain(|_, pending| pending.target.path() != session.path());
+    }
+}
+
 fn check_target(state: &MemoryState, target: &UploadTarget) -> Result<(), StorageError> {
     match target {
         UploadTarget::Create(path) => {
@@ -61,6 +72,24 @@ fn check_target(state: &MemoryState, target: &UploadTarget) -> Result<(), Storag
 }
 
 impl MemoryStorage {
+    /// A four-byte upload to `path` the provider holds unpublished: begun,
+    /// then started by its first and only part, as an S3 multipart upload
+    /// is (Appendix E.10).
+    pub async fn started_upload(&self, path: &ObjectPath) -> Result<UploadSession, StorageError> {
+        let mut session = self.begin_upload(path, 4).await?;
+        self.upload_part(&mut session, b"part").await?;
+        Ok(session)
+    }
+    /// Whether the provider holds the unfinished session `session` names; a
+    /// plan names none until its first part starts it.
+    pub async fn holds(&self, session: &UploadSession) -> bool {
+        match session.state {
+            SessionState::Memory { id, .. } => {
+                self.provider.state.lock().await.uploads.contains_key(&id)
+            }
+            _ => false,
+        }
+    }
     /// Each session still unfinished, in the order it began: the device
     /// whose connection began it, and its destination.
     pub async fn unfinished_uploads(
@@ -154,20 +183,8 @@ impl MemoryProvider {
         publication.check()?;
         self.before(MemoryRequest::Other("begin_upload")).await?;
         self.refuse_file_upload(target.path()).await?;
-        let mut state = self.state.lock().await;
-        check_target(&state, target)?;
-        let id = state.next_id()?;
-        state.uploads.insert(
-            id,
-            Pending {
-                device,
-                begun: self.storage_time()?,
-                target: target.clone(),
-                total,
-                bytes: Vec::new(),
-                part_size: self.part_size,
-            },
-        );
+        check_target(&*self.state.lock().await, target)?;
+        // The caller records the plan; the first part starts the session.
         Ok(UploadSession {
             device,
             location: self.config(),
@@ -175,7 +192,7 @@ impl MemoryProvider {
             total,
             confirmed: 0,
             part_size: self.part_size,
-            state: SessionState::Memory { id, complete: false },
+            state: SessionState::MemoryPlanned,
         })
     }
     pub(super) async fn memory_resume_upload(
@@ -185,6 +202,10 @@ impl MemoryProvider {
     ) -> Result<(), StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("resume_upload")).await?;
+        if matches!(session.state, SessionState::MemoryPlanned) {
+            end_planned(&mut *self.state.lock().await, session);
+            return Ok(());
+        }
         let id = self.session_id(session)?;
         let state = self.state.lock().await;
         match state.uploads.get(&id) {
@@ -207,6 +228,9 @@ impl MemoryProvider {
         publication.check()?;
         // The whole part is taken as the call starts, as for a create.
         sent.moved(bytes.len() as u64);
+        if matches!(session.state, SessionState::MemoryPlanned) {
+            self.initiate(session).await?;
+        }
         self.before(MemoryRequest::Other("upload_part")).await?;
         let gate = self.state.lock().await.part_gate.clone();
         if let Some(gate) = gate {
@@ -239,6 +263,28 @@ impl MemoryProvider {
         session.confirmed = end;
         Ok(())
     }
+    /// Start a planned session's upload, as its first part does on S3.
+    async fn initiate(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        self.before(MemoryRequest::Other("initiate_upload")).await?;
+        let mut state = self.state.lock().await;
+        let id = state.next_id()?;
+        state.uploads.insert(
+            id,
+            Pending {
+                device: session.device,
+                begun: self.storage_time()?,
+                target: session.target.clone(),
+                total: session.total,
+                bytes: Vec::new(),
+                part_size: session.part_size,
+            },
+        );
+        if std::mem::replace(&mut state.faults.lose_initiation_reply, false) {
+            return Err(StorageFailure::Network.into());
+        }
+        session.state = SessionState::Memory { id, complete: false };
+        Ok(())
+    }
     pub(super) async fn memory_finish_upload(
         &self,
         publication: &PublicationRequest,
@@ -246,6 +292,10 @@ impl MemoryProvider {
     ) -> Result<(), StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("finish_upload")).await?;
+        if matches!(session.state, SessionState::MemoryPlanned) {
+            // Nothing is sent before the first part starts the session.
+            return Err(StorageFailure::InvalidPart.into());
+        }
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
         let Some(pending) = state.uploads.get(&id) else {
@@ -286,12 +336,19 @@ impl MemoryProvider {
     ) -> Result<(), StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("abort_upload")).await?;
-        let id = self.session_id(session)?;
+        let id = match session.state {
+            SessionState::MemoryPlanned => None,
+            _ => Some(self.session_id(session)?),
+        };
         let mut state = self.state.lock().await;
         if state.faults.abort_failures > 0 {
             state.faults.abort_failures -= 1;
             return Err(StorageFailure::Network.into());
         }
+        let Some(id) = id else {
+            end_planned(&mut state, session);
+            return Ok(());
+        };
         if let Some(pending) = state.uploads.get(&id) {
             pending.check(session)?;
         }

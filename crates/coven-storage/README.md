@@ -43,9 +43,12 @@ refused before a request.
 Sessions cannot target the floor. Lost completion replies are checked against
 the immutable destination or the provider's publication identity. Abort accepts
 already closed or absent sessions and preserves published objects. An S3
-recording without its native upload ID can recover or abort only its own private
-staging path; at a shared destination it returns `SessionIdentityUnknown` and
-retains the recording. It never aborts another claimant’s upload.
+recording without its native upload ID, whose first part may have started an
+upload whose reply was lost or never recorded, recovers or aborts by aborting
+every upload at its name, only where that name is its own: its private staging
+path, or a destination in its device's file or snapshot folders. At a shared
+destination it returns `SessionIdentityUnknown` and retains the recording. It
+never aborts another claimant’s upload.
 OneDrive records a temporary UUID under `<store>/.coven-uploads/<device>/`, uploads there,
 then publishes with a conflict-refusing server-side copy and waits for its monitor.
 Successful and definitively refused copies delete the temporary; failed deletion
@@ -168,7 +171,10 @@ and credentials only after bootstrap succeeds.
 
 `MemoryStorage::builder()` supplies a shared test location and byte-sized transfer
 limits; `.clock(...)` controls publication timestamps and token expiry.
-Its `Faults` can lose part or completion replies and expire pending sessions.
+Its sessions are named when begun and started by their first part, as S3's
+are, and a plan at a path in its device's own folders ends what its first part
+may have started. Its `Faults` can lose a session's start, part or completion
+replies and expire pending sessions.
 Completed uploads discard pending parts and retain their immutable publication
 identity. `MemoryStorage::for_recipient(owner, email)` shares the backend with a
 separate account and sign-in; grants and acceptance govern its reads, writes and

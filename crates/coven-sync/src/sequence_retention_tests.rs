@@ -959,8 +959,8 @@ async fn a_floor_write_ends_the_sessions_left_at_applied_slots() {
     let slot = |number| ObjectPath::slot(group.store, std::num::NonZeroU64::new(number).unwrap());
     let other = group.storage.with_device(coven_foundation::id_source::DeviceId(99));
     // A claim racing Ana's next one, at a slot the sequence fills next.
-    other.begin_upload(&slot(through + 1), 4).await.unwrap();
-    other.begin_upload(&slot(through + 5), 4).await.unwrap();
+    other.started_upload(&slot(through + 1)).await.unwrap();
+    other.started_upload(&slot(through + 5)).await.unwrap();
     ana.sync.snapshot(Audience::Store).await.unwrap();
     ana.sync.pass().await.unwrap();
     assert!(ana.sync.session.lock().await.through > through);
@@ -984,7 +984,7 @@ async fn a_floor_write_ends_the_floor_sessions_it_superseded() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let other = group.storage.with_device(coven_foundation::id_source::DeviceId(99));
-    other.begin_upload(&ObjectPath::floor(group.store), 4).await.unwrap();
+    other.started_upload(&ObjectPath::floor(group.store)).await.unwrap();
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(10));
     ana.sync.snapshot(Audience::Store).await.unwrap();
     ana.sync.pass().await.unwrap();

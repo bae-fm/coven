@@ -416,6 +416,8 @@ mod metadata_tests;
 use gcs::gcs_provider;
 #[path = "s3_copy_upload_tests.rs"]
 mod gcs;
+#[path = "s3_planned_upload_tests.rs"]
+mod planned;
 fn provider(url: &str) -> StorageConnection<S3Storage> {
     let storage = S3Storage::new(
         StorageConfig::S3 {

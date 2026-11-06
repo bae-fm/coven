@@ -122,11 +122,72 @@ async fn without_storage_only_an_upload_with_no_session_retires() {
     f.close().await;
 }
 
+/// A song's upload records the plan of its session, and the first part starts
+/// the session at the provider, but the reply is lost, or the device stops
+/// before recording the session it started: the provider holds a session no
+/// record names. The upload's next attempt aborts every session at the plan's
+/// place before starting another, and so does the abort of an upload no file
+/// waits for any more (§17.9, Appendix E.10).
+#[tokio::test]
+async fn a_session_no_record_names_is_ended_by_the_next_pass() {
+    for (cut, deleted) in [("reply", false), ("stop", false), ("reply", true), ("stop", true)] {
+        let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
+        let mut f = Fixture::with_provider(
+            Provenance::AppProvided,
+            clock.clone(),
+            CHUNK as u64,
+            CloudProvider::S3,
+        )
+        .await;
+        f.files.stop_background_for_counts().await;
+        f.set_uploads_paused(false).await;
+        let song = f.attach("files", "song", vec![7; CHUNK * 3]).await;
+        f.connect_as(f.location(&song).await.uploader()).await;
+        if cut == "reply" {
+            f.storage.set_faults(Faults { lose_initiation_reply: true, ..Faults::none() }).await;
+            f.files.inner.drain_uploads().await.unwrap();
+        } else {
+            f.storage.gate_parts(Arc::new(tokio::sync::Semaphore::new(0))).await;
+            let mut requests = f.storage.subscribe_requests();
+            let inner = f.files.inner.clone();
+            let task = tokio::spawn(async move { inner.drain_uploads().await });
+            tokio::time::timeout(coven_foundation::clock::HANG_GUARD, async {
+                while f.storage.unfinished_uploads().await.is_empty() {
+                    requests.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("the first part starts the session");
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            f.reopen().await;
+            f.files.stop_background_for_counts().await;
+            f.set_uploads_paused(false).await;
+            let open = tokio::sync::Semaphore::MAX_PERMITS;
+            f.storage.gate_parts(Arc::new(tokio::sync::Semaphore::new(open))).await;
+        }
+        let what = format!("{cut}, deleted: {deleted}");
+        assert!(f.upload_of(&song).await.unwrap().session.is_some(), "{what}");
+        assert_eq!(f.storage.unfinished_uploads().await.len(), 1, "{what}");
+        if deleted {
+            delete_song(&f).await;
+        }
+        clock.set(clock.now() + Duration::from_secs(600));
+        tokio::time::timeout(coven_foundation::clock::HANG_GUARD, f.files.inner.drain_uploads())
+            .await
+            .expect("the run ends")
+            .unwrap();
+        assert!(f.storage.unfinished_uploads().await.is_empty(), "{what}");
+        assert!(f.files.inner.database.all_uploads().await.unwrap().is_empty(), "{what}");
+        f.close().await;
+    }
+}
+
 /// The upload worker's provider sessions against the storage model's
 /// `UploadSession` (§17.9): a file in three parts, through runs that meet a
-/// lost part reply, a dropped part, a crash, an expired session, a lost
-/// completion reply and failures of each retry class, and the abort of a
-/// session no file waits for any more.
+/// lost reply to a session's start or a part, a dropped part, a crash, an
+/// expired session, a lost completion reply and failures of each retry
+/// class, and the abort of a session no file waits for any more.
 mod sessions {
     use super::{Fixture, CHUNK};
     use coven_database::{FileLocation, FilePlace, FileRef, Provenance};
@@ -176,6 +237,9 @@ mod sessions {
     fn expiring() -> Value {
         run(false, json!({"kind": "expire"}))
     }
+    fn losing_begin() -> Value {
+        run(false, json!({"kind": "lose_begin"}))
+    }
     fn losing_completion() -> Value {
         run(false, json!({"kind": "lose_completion"}))
     }
@@ -196,11 +260,12 @@ mod sessions {
         async fn new() -> Self {
             let clock =
                 Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
-            let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
+            let mut f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
             f.files.stop_background_for_counts().await;
             f.set_uploads_paused(false).await;
             let file = f.attach("files", "photo", photo()).await;
             let location = f.location(&file).await;
+            f.connect_as(location.uploader()).await;
             let item = f.files.inner.database.uploads().await.unwrap().remove(0);
             assert_eq!(parts(item.bytes_total), PARTS);
             Self { f, clock, file, location }
@@ -242,6 +307,11 @@ mod sessions {
                 "fail" => {
                     let failure = failure_of(fault["class"].as_str().unwrap());
                     storage.set_faults(Faults { fail_next: 1, failure, ..Faults::none() }).await;
+                }
+                "lose_begin" => {
+                    storage
+                        .set_faults(Faults { lose_initiation_reply: true, ..Faults::none() })
+                        .await;
                 }
                 "lose_completion" => {
                     storage
@@ -353,8 +423,9 @@ mod sessions {
 
         /// What the model observes: the queue row and the parts its session
         /// records, the provider's live session and the parts it holds, the
-        /// published object, the switched file and the class of the pending
-        /// failure about the upload.
+        /// sessions it holds that the row doesn't name, the published object,
+        /// the switched file and the class of the pending failure about the
+        /// upload.
         async fn observe(&self) -> Value {
             let uploads = self.f.files.inner.database.all_uploads().await.unwrap();
             assert!(uploads.len() <= 1, "{uploads:?}");
@@ -371,17 +442,17 @@ mod sessions {
             });
             let unfinished = self.f.storage.unfinished_uploads().await;
             assert!(unfinished.len() <= 1, "{unfinished:?}");
-            let held = match unfinished.first() {
-                None => None,
-                Some(_) => {
-                    let bytes = upload
-                        .and_then(|upload| upload.session.as_ref())
-                        .expect("the provider's session is one the queue records");
-                    let mut session = UploadSession::decode(bytes.as_bytes()).unwrap();
-                    self.f.storage.resume_upload(&mut session).await.unwrap();
+            let mut session = upload
+                .and_then(|upload| upload.session.as_ref())
+                .map(|bytes| UploadSession::decode(bytes.as_bytes()).unwrap());
+            let held = match &mut session {
+                Some(session) if self.f.storage.holds(session).await => {
+                    self.f.storage.resume_upload(session).await.unwrap();
                     Some(parts(session.confirmed_bytes()))
                 }
+                _ => None,
             };
+            let stray = unfinished.len() - usize::from(held.is_some());
             let path = self.location.path(self.f.directory.id());
             let published = self.f.storage.status(&path).await.unwrap().is_some();
             let stored = match self.f.database.file_ref(self.file.id()).await {
@@ -415,7 +486,8 @@ mod sessions {
                     crate::Retry::AfterUpdate => panic!("no upload here waits for an update"),
                 });
             json!({"queued": upload.is_some(), "recorded": recorded, "held": held,
-                   "published": published, "stored": stored, "failure": failure})
+                   "stray": stray, "published": published, "stored": stored,
+                   "failure": failure})
         }
     }
 
@@ -430,6 +502,13 @@ mod sessions {
             // The process stops mid-upload, and the session continues.
             vec![after(1, "crash"), plain()],
             vec![after(0, "lost"), event("reopen"), plain(), elapse(), plain()],
+            // The first part starts the session, and the process stops before
+            // recording it, or the start's reply is lost: the next attempt, or
+            // the abort of an upload no file waits for, ends it.
+            vec![after(0, "crash"), plain()],
+            vec![after(0, "crash"), event("delete"), plain()],
+            vec![losing_begin(), plain(), elapse(), plain()],
+            vec![losing_begin(), event("delete"), elapse(), plain()],
             // An expired session starts over from its first part.
             vec![after(2, "crash"), expiring()],
             vec![after(1, "lost"), expiring(), elapse(), expiring()],

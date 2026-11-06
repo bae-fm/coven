@@ -123,6 +123,17 @@ impl Fixture {
             bugs,
         }
     }
+    /// Write for `device`, as an installation's connection writes for its own
+    /// device: the paths of the files it uploads then sit in this
+    /// connection's own folder (Appendix E.10). A reopened store keeps it.
+    async fn connect_as(&mut self, device: coven_foundation::id_source::DeviceId) {
+        self.storage = Arc::new(self.storage.with_device(device));
+        self.files
+            .set_storage(Some(self.storage.clone()), std::future::ready(Ok(())))
+            .await
+            .unwrap();
+    }
+
     async fn reopen(&mut self) {
         self.files.close().await;
         self.database.close().await.unwrap();
