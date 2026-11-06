@@ -24,8 +24,8 @@ mod rowid_policy;
 mod stream_capture;
 #[path = "transaction_capture.rs"]
 mod transaction_capture;
-#[path = "write_constants.rs"]
-mod write_constants;
+#[path = "transaction_constants.rs"]
+mod transaction_constants;
 #[path = "write_transaction.rs"]
 mod write_transaction;
 use app_statements::StepsOf;
@@ -65,7 +65,7 @@ pub(crate) struct DatabaseConnection {
     /// Stops a lookup that runs too long (`live_judging.rs`).
     lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
-    constants: write_constants::WriteConstants,
+    constants: transaction_constants::TransactionConstants,
     /// The open handle this connection serves: it receives the commits and
     /// failures after which the handle refuses calls. None while opening, when
     /// a failure fails the open and drops the connection instead.
@@ -171,7 +171,7 @@ impl DatabaseConnection {
             authorization,
             lookups,
             app_statements: app_statements::AppStatements::default(),
-            constants: write_constants::WriteConstants::default(),
+            constants: transaction_constants::TransactionConstants::default(),
             handle: None,
             observation: None,
             checkpoints: None,
@@ -628,9 +628,10 @@ impl DatabaseConnection {
         }
     }
 
+    /// SQLite's count of changes to the main schema, read afresh.
     pub(crate) fn schema_cookie(&self) -> rusqlite::Result<i64> {
         let _scope = self.authorization.internal();
-        self.connection.query_row("PRAGMA main.schema_version", [], |r| r.get(0))
+        self.connection.prepare_cached("PRAGMA main.schema_version")?.query_row([], |r| r.get(0))
     }
 
     /// Run one migration step inside the open migration transaction. Which
@@ -760,12 +761,18 @@ impl DatabaseConnection {
     ) -> Result<R, E> {
         self.batch("BEGIN DEFERRED")?;
         let mut guard = SqlTransaction { database: self, active: true };
+        // A read runs no migration and no DDL.
+        let constants = self.keep_constants();
         // BEGIN alone does not fix a WAL snapshot. Pin it before invoking a
-        // consumer that can wait while a writer commits.
+        // consumer that can wait while a writer commits. Reading the schema
+        // table also brings this connection's copy of the schema, and the
+        // planner's statistics SQLite loads with it, up to the snapshot's,
+        // before the read prepares a statement.
         let result = (|| {
             self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get::<_, i64>(0))?;
             read()
         })();
+        drop(constants);
         guard.active = false;
         match self.roll_back() {
             Ok(()) => result,

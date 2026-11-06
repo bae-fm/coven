@@ -1072,9 +1072,10 @@ how the app receives them.
   the first time in each kind of call, read or write, because SQLite reports
   what it reads, and coven refuses what it may not do, only as it prepares; a
   later use from the cache records the same reads. A schema change prepares
-  every statement again. A write changes no schema, so it checks for a change
-  once, not before each statement. An app statement whose triggers read a view of six
-  tables took 16 µs to prepare and runs from the cache in about 3 µs.
+  every statement again. A read or a write changes no schema, so each checks
+  for a change once, not before each statement. An app statement whose
+  triggers read a view of six tables took 16 µs to prepare and runs from the
+  cache in about 3 µs.
 - **A bulk write's statements aren't kept.** SQLite decides how a statement
   deletes as it prepares it, and empties a table in one step only where no
   pre-update hook watches. Kept, a bulk write's `DELETE FROM queue` would empty

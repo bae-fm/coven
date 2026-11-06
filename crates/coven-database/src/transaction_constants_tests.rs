@@ -56,6 +56,41 @@ async fn a_write_reads_the_schema_cookie_once() {
     db.close().await.unwrap();
 }
 
+/// A read checks once, not once an app statement, that the schema its kept
+/// statements were judged against is still the one in effect: nothing
+/// changes the schema of the snapshot it reads.
+#[tokio::test]
+async fn a_read_reads_the_schema_cookie_once() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT)",
+        )
+        .await
+        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('note','title','body')").await.unwrap();
+    let counter = crate::test_utils::WorkCounter::new();
+    db.test_track_work(counter.clone()).await.unwrap();
+    let titles = db
+        .read(|sql| {
+            Ok::<_, crate::DbError>(
+                (0..50)
+                    .map(|_| {
+                        sql.query_row("SELECT title FROM notes WHERE id='note'", [], |r| {
+                            r.get::<_, String>(0)
+                        })
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(titles.len(), 50);
+    assert_eq!(counter.take().constant_reads, 1);
+    db.close().await.unwrap();
+}
+
 /// A local write reads each foreign key's registered id once, not once for
 /// each reference it stores.
 #[tokio::test]

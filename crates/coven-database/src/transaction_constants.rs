@@ -1,8 +1,8 @@
-//! What a local write, or applying a slot, reads of coven's state that the
-//! transaction can't change: the schema version, SQLite's schema cookie and
-//! each synced column's and foreign key's registered id. Neither runs a
+//! What a read, a local write or applying a slot reads of coven's state that
+//! the transaction can't change: the schema version, SQLite's schema cookie
+//! and each synced column's and foreign key's registered id. None runs a
 //! migration or DDL, so each is read once in it rather than once for every
-//! row or statement; outside them each is read afresh. The transaction's own
+//! row or statement; outside them each is read afresh. A write's own
 //! authored parts are kept too, changed only where it records them
 //! (write_sources.rs).
 
@@ -12,7 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 #[derive(Default)]
-pub(super) struct WriteConstants {
+pub(super) struct TransactionConstants {
     active: Cell<bool>,
     schema_version: Cell<Option<u32>>,
     schema_cookie: Cell<Option<i64>>,
@@ -27,8 +27,8 @@ type PartKey = (Vec<u8>, String);
 /// An authored part's header and whether it is complete.
 pub(crate) type AuthoredPart = (Vec<u8>, bool);
 
-/// Holds the constants for one local write; they go when it ends.
-pub(crate) struct ConstantScope<'a>(&'a WriteConstants);
+/// Holds the constants for one transaction; they go when it ends.
+pub(crate) struct ConstantScope<'a>(&'a TransactionConstants);
 
 impl Drop for ConstantScope<'_> {
     fn drop(&mut self) {
@@ -36,7 +36,7 @@ impl Drop for ConstantScope<'_> {
     }
 }
 
-impl WriteConstants {
+impl TransactionConstants {
     /// Keep each constant once read, until [`Self::forget`].
     pub(super) fn keep(&self) {
         self.active.set(true);
@@ -55,7 +55,7 @@ impl WriteConstants {
 impl DatabaseConnection {
     /// Read each constant once until the returned scope drops. The caller's
     /// transaction runs no migration and no DDL.
-    pub(crate) fn write_constants(&self) -> ConstantScope<'_> {
+    pub(crate) fn keep_constants(&self) -> ConstantScope<'_> {
         self.constants.keep();
         ConstantScope(&self.constants)
     }
@@ -83,12 +83,7 @@ impl DatabaseConnection {
         }
         #[cfg(any(test, feature = "test-utils"))]
         self.record_work(|work| work.constant_reads += 1);
-        let cookie = {
-            let _scope = self.authorization.internal();
-            self.connection
-                .prepare_cached("PRAGMA main.schema_version")?
-                .query_row([], |r| r.get::<_, i64>(0))?
-        };
+        let cookie = self.schema_cookie()?;
         if self.constants.active.get() {
             self.constants.schema_cookie.set(Some(cookie));
         }
@@ -184,5 +179,5 @@ impl DatabaseConnection {
 }
 
 #[cfg(test)]
-#[path = "write_constants_tests.rs"]
+#[path = "transaction_constants_tests.rs"]
 mod tests;

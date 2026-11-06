@@ -21,7 +21,7 @@ pub(super) struct WriteTransaction<'a> {
     operations: bool,
     /// Whether its update hook is set.
     rows: bool,
-    /// Whether it keeps coven's constants once read (`write_constants.rs`).
+    /// Whether it keeps coven's constants once read (`transaction_constants.rs`).
     constants: bool,
     /// The first failure of one of its hooks: a read of the row that
     /// failed, or a panic. SQLite's hooks can't fail, and rusqlite drops a
@@ -51,7 +51,7 @@ impl<'a> WriteTransaction<'a> {
     }
 
     /// Read each of coven's constants once in this transaction, which runs
-    /// no migration and no DDL (`write_constants.rs`).
+    /// no migration and no DDL (`transaction_constants.rs`).
     pub(super) fn keep_constants(&mut self) {
         self.database.constants.keep();
         self.constants = true;
