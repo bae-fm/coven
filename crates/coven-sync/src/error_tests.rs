@@ -260,3 +260,43 @@ fn a_failed_writes_cleanup_follows_the_steps_own_error() {
     );
     assert!(matches!(database, SyncError::Database(DbError::FileCleanup { .. })), "{database:?}");
 }
+
+/// Write evidence a snapshot carries that doesn't authenticate, or names an
+/// author who couldn't write it, is invalid evidence, which is refused (§9.6):
+/// the snapshot is damaged, never a failure of the local database, whether
+/// the loader reports it bare or names the snapshot whose body it read.
+#[test]
+fn a_snapshots_invalid_write_evidence_refuses_the_snapshot() {
+    use coven_database::SnapshotError;
+    let snapshot = coven_format::admin::SnapshotId {
+        audience: coven_merge::Audience::Store,
+        device: DeviceId(1),
+        number: 1,
+    };
+    let path = ObjectPath::snapshot(
+        coven_storage::test_utils::STORE_ID,
+        coven_merge::Audience::Store,
+        DeviceId(1),
+        1.try_into().unwrap(),
+    );
+    let evidence = || {
+        [
+            SnapshotError::Unauthentic(coven_crypto::CryptoError::Authentication),
+            SnapshotError::Unauthentic(coven_crypto::CryptoError::Signature),
+            SnapshotError::Unauthorized,
+        ]
+    };
+    let named = evidence().map(|error| {
+        DbError::Snapshot(SnapshotError::Body {
+            snapshot: snapshot.clone(),
+            error: Box::new(error.into()),
+        })
+    });
+    for error in evidence().map(DbError::Snapshot).into_iter().chain(named) {
+        let failed = crate::write_object::database_failure(&path, error);
+        let SyncError::Damaged(object) = failed else { panic!("{failed:?}") };
+        assert_eq!(object.failure, crate::Refusal::InvalidWrite { cause: None });
+        assert_eq!(object.path, path.as_str());
+        assert!(object.failure.source().unwrap().is::<DbError>());
+    }
+}

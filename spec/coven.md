@@ -7984,7 +7984,11 @@ read, never a refusal.
   again, keeping only the first read's digest, and refused as not the announced
   snapshot only when the second read's digest is the same. Its signed prefix,
   which coven keeps and checks before the digest is known, is read again as a
-  slot is when a check refuses it.
+  slot is when a check refuses it. Checks that run as the snapshot loads judge
+  those same announced bytes, so a snapshot whose records disagree, or whose
+  carried write evidence doesn't authenticate or names an author who couldn't
+  write it (§9.6), is refused at its own object, never taken for a failure of
+  the local database.
 - A file's cached copy is kept only once it checked (§17.8), so a cached header
   or chunk that fails its check changed on this device, and says nothing about
   the stored file. Coven fetches those bytes from storage, judges them as any

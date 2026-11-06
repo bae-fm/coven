@@ -30,10 +30,17 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error)) => {
             damaged(path, Refusal::from(error))
         }
+        // A snapshot's body failed as the loader read it.
+        DbError::Snapshot(SnapshotError::Body { error, .. }) => database_failure(path, *error),
+        // Write evidence a snapshot carries that doesn't authenticate, or
+        // names an author who couldn't write it, is invalid (§9.6).
         error @ (DbError::InvalidWrite { .. }
         | DbError::Schema(_)
         | DbError::Snapshot(
-            SnapshotError::Inconsistent(_) | SnapshotError::Schema { .. },
+            SnapshotError::Inconsistent(_)
+            | SnapshotError::Schema { .. }
+            | SnapshotError::Unauthentic(_)
+            | SnapshotError::Unauthorized,
         )) => damaged(path, Refusal::InvalidWrite { cause: Some(Arc::new(error)) }),
         error @ DbError::TooLarge { .. } => {
             damaged(path, Refusal::Parse { cause: Some(Arc::new(error)) })

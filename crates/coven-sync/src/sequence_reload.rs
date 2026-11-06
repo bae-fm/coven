@@ -74,6 +74,10 @@ impl SelectedSnapshot {
     ) -> Result<coven_foundation::id_source::MemberId, SyncError> {
         self.read.authenticate(history)
     }
+    /// The snapshot object's path, where a failure of its body is judged.
+    fn path(&self) -> &coven_storage::ObjectPath {
+        self.read.object.path()
+    }
     /// What the load reads: the snapshot's identity, its staging and the
     /// member `author` whose key signed it.
     fn into_source(
@@ -777,6 +781,16 @@ impl SequenceSync {
             .collect::<Result<Vec<_>, SyncError>>()?;
         self.follow_person_entries(&session.history, &at_target, member)?;
         self.keys.persist(ring)?;
+        // A failure in a stored start's body is judged at its object (§19.1).
+        let paths: Vec<_> = starts
+            .iter()
+            .filter_map(|start| match start {
+                ReloadStart::Stored(selected) => {
+                    Some((selected.announcement().snapshot.clone(), selected.path().clone()))
+                }
+                ReloadStart::Current(_) | ReloadStart::Empty(_) => None,
+            })
+            .collect();
         let sources = std::mem::take(starts)
             .into_iter()
             .zip(authors)
@@ -815,7 +829,23 @@ impl SequenceSync {
                 },
                 reporting.then(|| ProgressReport::of(&self.progress, self.clock.clone())),
             )
-            .await?;
+            .await
+            .map_err(|error| match error {
+                coven_database::DbError::Snapshot(coven_database::SnapshotError::Body {
+                    snapshot,
+                    error,
+                }) => match paths.iter().find(|(id, _)| *id == snapshot) {
+                    Some((_, path)) => database_failure(path, *error),
+                    None => {
+                        coven_database::DbError::Snapshot(coven_database::SnapshotError::Body {
+                            snapshot,
+                            error,
+                        })
+                        .into()
+                    }
+                },
+                error => error.into(),
+            })?;
         tracing::info!(
             store_rows = rows,
             slots = fetched,
