@@ -474,3 +474,32 @@ async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana snapshots the store twice, and storage damages the newer body. Ben's
+/// reload refuses it and waits: it never loads the older snapshot, whose body
+/// is intact, to get around the damage (§16.2).
+#[tokio::test]
+async fn a_reload_waits_on_a_damaged_newest_snapshot_and_loads_no_older_one() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(ana.database(), "a", "in both snapshots").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    insert(ana.database(), "b", "in the newer snapshot").await;
+    ana.sync.pass().await.unwrap();
+    let newer = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let snapshot = ben.sync.session.lock().await.history.announcements[&newer].snapshot.clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    let size = group.storage.status(&path).await.unwrap().unwrap().size;
+    group.storage.corrupt_byte(&path, size as usize - 1).await.unwrap();
+    let result = ben.sync.reload_from_snapshot().await;
+    assert!(matches!(result, Err(crate::SyncError::Damaged(_))), "{result:?}");
+    let result = ben.sync.reload_from_snapshot().await;
+    assert!(matches!(result, Err(crate::SyncError::Pending(_))), "{result:?}");
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}

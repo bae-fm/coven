@@ -22,6 +22,8 @@ import SequenceApply
 #print axioms CovenSequence.reaches_head
 #print axioms CovenSequence.joiner_reaches_head
 #print axioms CovenSequence.readers_agree
+#print axioms CovenSequence.loads_only_floor_snapshot
+#print axioms CovenSequence.unloadable_floor_snapshot_waits
 #print axioms CovenSequence.keyless_passes_only_others
 #print axioms CovenSequence.keyless_stops
 #print axioms CovenSequence.ReaderExamples.slot4_refused

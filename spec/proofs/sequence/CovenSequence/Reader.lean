@@ -518,6 +518,38 @@ theorem readers_agree {st₁ st₂ : Store S} {seq : Nat → Slot S} {A : S.Aud}
   rw [h₁.ledger, h₁.aud, h₁.rows, h₂.ledger, h₂.aud, h₂.rows, hpos]
   exact ⟨rfl, rfl, rfl⟩
 
+/-! ## Which snapshot a reader loads -/
+
+/-- **A reader loads only the snapshot the floor names.** Every step keeps the
+reader where it is, or applies its next slot (a raise or reset there loads its
+own prepared body), or loads the floor's snapshot for its audience: that one
+needs the audience's key and the body in storage, and the reader ends at its
+coverage holding its state. No step loads another snapshot. -/
+theorem loads_only_floor_snapshot {reloadAllowed : Bool} {A : S.Aud} {key : Bool} {st : Store S}
+    {d d' : Reader S} (step : ReadStep R reloadAllowed A key st d d') :
+    d'.pos = d.pos ∨ d'.pos = d.pos + 1 ∨
+      (key = true ∧ d.pos < st.floor.covers A ∧ d'.pos = st.floor.covers A ∧
+        st.body (st.floor.path A) = some (d'.ledger, d'.aud, d'.rows)) := by
+  cases step with
+  | fetch => exact Or.inl rfl
+  | apply => exact Or.inr (Or.inl rfl)
+  | boundary => exact Or.inr (Or.inl rfl)
+  | reload L P rows hc hk _ hb => exact Or.inr (Or.inr ⟨hk, hc, rfl, hb⟩)
+
+/-- **Without the key or the body, a reader waits.** A reader whose floor
+snapshot it can't load, for want of its audience's key or of the body, moves at
+most to its next slot: it loads no older snapshot instead. -/
+theorem unloadable_floor_snapshot_waits {reloadAllowed : Bool} {A : S.Aud} {key : Bool}
+    {st : Store S} {d d' : Reader S}
+    (unloadable : key = false ∨ st.body (st.floor.path A) = none)
+    (step : ReadStep R reloadAllowed A key st d d') : d'.pos ≤ d.pos + 1 := by
+  rcases loads_only_floor_snapshot R step with h | h | ⟨hk, _, _, hb⟩
+  · omega
+  · omega
+  · rcases unloadable with h | h
+    · rw [hk] at h; cases h
+    · rw [hb] at h; cases h
+
 /-! ## Without the key -/
 
 /-- **A reader without the key passes only slots that are not its audience's.**

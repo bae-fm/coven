@@ -5626,7 +5626,8 @@ back one at a time and writing each row's merge records through the merge took
 **Which snapshot a device loads.** It loads the newest snapshot that applies to
 the audience's current schema version and reset. If that snapshot needs a key the
 device lacks, needs an app update, or has a damaged body, the device waits and
-reports why (§19.1). It never loads an older snapshot to get around the problem.
+reports why (§19.1). It never loads an older snapshot to get around the problem
+([`unloadable_floor_snapshot_waits`](proofs/sequence/CovenSequence/Reader.lean)).
 
 #### 16.3 Snapshots for schema raises and resets
 
@@ -11694,6 +11695,7 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | Model premise, for preparation announcements only: the storage step that claims a preparation announcement requires its body to be in storage already, and the theorem reads that premise back. Ordinary announcements carry no such premise | `announcement_uploaded` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.2 |
 | Among candidates already checked for applicability, explicit reload selects one with no later candidate, independently of the floor | `newest_mem`, `newest_latest` | `proofs/sequence/CovenSequence/Reload.lean` | §16.2 |
+| *Body.* A reader loads no snapshot but the one the floor names for its audience, its newest applicable, and only with the audience's key and that body in storage; without either it waits, moving at most to its next slot, and loads no older snapshot instead | `loads_only_floor_snapshot`, `unloadable_floor_snapshot_waits` | `proofs/sequence/CovenSequence/Reader.lean` | §16.2, §16.4 |
 | A counted ordinary announcement covers the latest raise and reset, and matches the schema and reset state | `ordinary_covers_boundary`, `ordinary_matches_schema_reset` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | A counted ordinary announcement names a schema version its audience had reached at its coverage | `ordinary_version_reached` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | *Body.* A snapshot whose body is a version ahead of its audience meets every coverage rule, and only the version rule refuses it | `ahead_refused` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |

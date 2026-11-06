@@ -536,6 +536,10 @@ what make one conditional floor write safe.
   the head can fetch and step forward, and some run reaches the head.
 - `joiner_reaches_head`: a joiner of `A` that loads the floor's snapshot for `A`
   and follows storage reaches the state of a device that applied every slot.
+- `loads_only_floor_snapshot`, `unloadable_floor_snapshot_waits`: the only
+  snapshot a reader loads is the one the floor names for its audience, which
+  needs the audience's key and the body in storage. Without either the reader
+  moves at most to its next slot; no step loads an older snapshot instead.
 
 **The coverage argument.** The proof of `read_progress` needs every valid raise or reset of `A`
 above the floor's coverage to cover the floor's snapshot. C6 gives this for a
