@@ -9690,7 +9690,10 @@ What they don't cover:
   setup re-checks the server (§20.8). A live sample measures listing lag; it
   doesn't prove the listing margin.
 - **The composition.** The merge and conversion proofs cover their stated inputs;
-  they don't establish the whole storage protocol built from them.
+  they don't establish the whole storage protocol built from them. The orders a
+  pass's reading, applying and claiming rely on are modelled step by step
+  (§6), but no model runs a whole pass, and the limits on what a pass sends,
+  such as one writes slot, are tested, not proved.
 - **What a stopped device sends.** The model proves a stopped device takes no
   apply or reload step (§5.4). The restriction on sending, its bootstrap
   join-request exception, and recovery once the cause clears are outside the model.

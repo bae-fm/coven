@@ -1665,6 +1665,12 @@ they do not replace the separate byte-format, merge or queue tests.
   member alone does not prove that authority. The JSON runner assumes this
   check has succeeded and does not model signatures. Store creation supplies
   the initial member and device bindings.
+- A write's signature is checked outside the model too, with its device
+  owner's signing key as it stood at the write's `read_through`; the first
+  device's writes from before storage was set up, at `read_through` 0, are
+  checked against slot 1's record of the store's creation. The model checks
+  the write permission at `read_through` (`authoredPermission`), not the key
+  that signed it.
 - Snapshot bodies are honest: ordinary bodies contain the covered state;
   raise bodies contain migrated rows; reset bodies contain the chosen rows.
   Coven's raise body differs from that for a part that lands after its raising
