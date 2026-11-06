@@ -362,6 +362,8 @@ async fn a_store_is_created_only_in_a_folder_of_its_own() {
         let household = open(storage.clone()).await;
         setup(&household, location.clone()).await.unwrap();
         let garden = open(storage.clone()).await;
+        // Setup starts Household's sync; its first pass's requests come first.
+        household.handle.test_parked().await;
         let before = storage.request_count();
         let error = setup(&garden, location.clone()).await.unwrap_err();
         assert!(own_location_required(&error), "{provider:?}: {error:?}");

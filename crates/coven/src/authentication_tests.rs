@@ -434,6 +434,8 @@ mod provider_access_tests {
         })
         .await;
         let handle = fixture.setup(fixture.builder()).await;
+        // Setup starts sync; its first pass's requests come first.
+        handle.test_parked().await;
         let before = fixture.storage.request_count();
         let credentials = fixture.credentials();
         assert!(
@@ -460,6 +462,8 @@ mod provider_access_tests {
         let code = handle.restore_code().await.unwrap();
         let recorded = coven_storage::recorded_config(&fixture.directory).unwrap();
         assert!(recorded.is_some());
+        // Setup starts sync; its first pass's requests come first.
+        handle.test_parked().await;
         let before = fixture.storage.request_count();
         let shared = StorageConfig::Dropbox {
             account_label: None,
