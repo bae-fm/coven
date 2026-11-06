@@ -275,3 +275,29 @@ fn compact_state_loading_rejects_damaged_records() {
         Err(MergeError::CellBeforeIncarnation(column)) if column == "0"
     ));
 }
+
+/// A cell's lost value is recorded only against a replacing write that had not
+/// read the lost cell's setter: when the replacer had read it, the replacement
+/// was deliberate and nothing was lost.
+#[test]
+fn a_loss_whose_replacing_write_had_read_its_setter_is_refused() {
+    let first = write(1, 1, &[], vec![(row(1), change(0, 0, &[("0", "first")]))]);
+    let second = write(2, 2, &[1], vec![(row(1), change(1, 1, &[("0", "second")]))]);
+    let blind = write(3, 3, &[1], vec![(row(1), change(1, 1, &[("0", "third")]))]);
+    let informed = write(3, 3, &[1, 2], vec![(row(1), change(1, 1, &[("0", "third")]))]);
+
+    let states = fold(&[first.clone(), second.clone(), blind.clone()], &[0, 1, 2]);
+    let state = &states[&row(1)];
+    assert_eq!(state.lost().len(), 1, "the replacer never read the setter, so the cell is lost");
+    let load = |replacer: Write<String>| {
+        RowState::from_parts(
+            row(1),
+            state.generations().clone(),
+            state.cells().clone(),
+            state.lost().clone(),
+            &History::new([first.clone(), second.clone(), replacer]).unwrap(),
+        )
+    };
+    assert!(load(blind).is_ok());
+    assert!(matches!(load(informed), Err(MergeError::InvalidLostValue(_))));
+}
