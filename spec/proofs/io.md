@@ -65,8 +65,14 @@ the wall deadline and full wait. Reopening arms the remaining delay bounded
 by that full wait; the armed wait uses monotonic time. Provider cooldowns
 remain independent of an individual operation's retry delay.
 
-The model includes a failed persistence outcome: it cannot authorize an
-automatic retry. It assumes durable transactions and the clock values
+The model's waits are all saved ones. A wait whose save fails is outside it:
+Rust holds that work until the app retries it (`RetryWaits::fail`), which
+`retry_waits::tests::a_wait_that_cannot_be_persisted_holds_until_the_app_retries`
+checks. Nor does the model reopen a provider cooldown: Rust saves it as a wait
+of its own and reopens it by the same restart rule, and
+`retry_waits::tests::a_provider_cooldown_holds_every_consumer_across_reopening`
+checks that it outlasts the ordinary cap, survives reopening and holds every
+consumer. The model assumes durable transactions and the clock values
 supplied at the boundary. It does not promise elapsed real-time cooldowns
 under arbitrary wall-clock jumps. `retry_waits::tests::io_differential_waiting`
 compares Rust's decisions with `ioRunner`.
