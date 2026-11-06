@@ -152,6 +152,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the snapshot emits the counted write history in canonical identity order"),
 ("write_boundary.rs", "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied FROM _coven_boundaries b ORDER BY b.slot", "b") =>
     Some("boundary selection folds each retained raise and reset in slot order"),
+("sqlite_settings.rs", "SELECT count(*) FROM (SELECT 1 FROM {table} LIMIT ?1)", _) =>
+    Some("reads at most SMALL_TABLE rows of each table PRAGMA optimize names, to tell whether gathering would keep statistics for it"),
 _ => None,
     }
 }

@@ -577,6 +577,19 @@ mod source {
                 .map(|table| sql.replace("{table}", table))
                 .collect();
         }
+        if file == "sqlite_settings.rs" && sql.contains("{table}") {
+            // A table `PRAGMA optimize` names, which may be any of coven's.
+            let tables: Vec<String> = db
+                .prepare(
+                    "SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB '_coven_*'",
+                )
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            return tables.iter().map(|table| sql.replace("{table}", table)).collect();
+        }
         if sql.contains("{table}") || sql.contains("{child}") {
             let variable = if sql.contains("{table}") { "table" } else { "child" };
             let loops: Vec<_> = source
