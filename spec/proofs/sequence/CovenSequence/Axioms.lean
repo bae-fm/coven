@@ -92,6 +92,14 @@ import SequenceApply
 #print axioms CovenSequence.Settle.settle_held_refuses_floor
 #print axioms CovenSequence.Settle.lostStore_good
 #print axioms CovenSequence.Settle.lost_claim_refuses_honest_floor
+#print axioms CovenSequence.ClaimJournal.empty_inv
+#print axioms CovenSequence.ClaimJournal.step_inv
+#print axioms CovenSequence.ClaimJournal.steps_inv
+#print axioms CovenSequence.ClaimJournal.journal_own
+#print axioms CovenSequence.ClaimJournal.journal_settles
+#print axioms CovenSequence.ClaimJournal.kind_counters_report_copy
+#print axioms CovenSequence.ClaimJournal.two_open_claims_report_copy
+#print axioms CovenSequence.ClaimJournal.unrecorded_create_looks_like_copy
 
 #print axioms CovenSequence.Deadline.bounded_retention
 #print axioms CovenSequence.Deadline.uncovered_has_no_deadline

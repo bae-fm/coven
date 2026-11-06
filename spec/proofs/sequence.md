@@ -1160,6 +1160,18 @@ its record. A read error supplies no settlement input.
   its claim number is nowhere in the sequence, `retry` means the slot is still
   empty, and `copy` is impossible. These journal facts are not premises of
   `settle_correct'`. Earlier claims must precede the attempted slot.
+- `journal_own`, `journal_settles` (in
+  [`ClaimJournal`](sequence/CovenSequence/ClaimJournal.lean)): `Own` holds for
+  the open claim of one device that keeps the journal rules, in every state
+  reached from empty storage. The device numbers claims of every kind with one
+  counter, begins one only with none open, sends only the attempt its journal
+  records, and after losing keeps the number and records a new attempt at the
+  slot after those it then applied. Other devices' slots and its own creates
+  landing late interleave freely. So `settle_correct` holds for it with no
+  premise about claim numbers. `kind_counters_report_copy`,
+  `two_open_claims_report_copy` and `unrecorded_create_looks_like_copy` are
+  checked counterexamples: a counter per kind, two claims open at once, or a
+  create sent before it is recorded each make the one copy read as another.
 - `kept_same_id_copy`: every different same-id kept claim detects a copy,
   including lower claim numbers. `earlier_claim_counterexample` shows why a
   number threshold misses this evidence.
@@ -1673,7 +1685,8 @@ they do not replace the separate byte-format, merge or queue tests.
   cryptographic security proof is included. Hash collision resistance and
   path binding appear as explicit premises of `settle_correct'` and
   `settle_from_floor`. Only the single-copy theorems assume `Own` or its
-  equivalent journal facts; these are not derived from a device counter.
+  equivalent journal facts; `ClaimJournal` derives `Own` from one device's
+  journal rules.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, store renames,
     the runner's device/key actions, circle membership changes and store resets;

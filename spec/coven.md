@@ -1387,6 +1387,15 @@ The rules:
   forgot its claim could land twice
   ([`forgetful_lands_twice`](proofs/sequence/CovenSequence/Operation.lean)).
 
+Settling relies on these rules together. A device that keeps them settles each
+claim, of any kind, as landed, not landed or still empty, and never as another
+copy of itself ([`journal_settles`](proofs/sequence/CovenSequence/ClaimJournal.lean)).
+A counter per kind of slot, two claims open at once, or a create sent before
+its record each make the one copy read as another
+([`kind_counters_report_copy`](proofs/sequence/CovenSequence/ClaimJournal.lean),
+[`two_open_claims_report_copy`](proofs/sequence/CovenSequence/ClaimJournal.lean),
+[`unrecorded_create_looks_like_copy`](proofs/sequence/CovenSequence/ClaimJournal.lean)).
+
 Settling means reading the recorded slot and comparing all its bytes:
 
 | What the device finds at its recorded slot | What it means | What the device does |
@@ -11528,6 +11537,8 @@ Write-ups explain each model and state its assumptions:
 | For one slot, in storage that only grows (no slot deleted), with every attempt's bytes unique to it: the claimant whose bytes fill the slot concludes it won, every other claimant that concludes anything concludes it lost, and both conclusions stay true | `conclude_correct`, `exactly_one_claimant` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* Without the byte comparison, a batch lands twice | `no_compare_lands_twice` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* An operation that forgets its claim on restart lands twice | `forgetful_lands_twice` | `proofs/sequence/CovenSequence/Operation.lean` | §5.1, §11.1 |
+| *Body.* A device that numbers its claims of every kind with one counter, keeps one claim open at a time, and records each attempt before sending it has the single-copy facts settling needs, under any interleaving with other devices' slots and its own late creates: its open claim settles as landed exactly when its attempt's bytes fill the slot, and never as another copy | `journal_own`, `journal_settles` | `proofs/sequence/CovenSequence/ClaimJournal.lean` | §5.1, §5.3 |
+| *Body.* A counter per kind of slot, two claims open at once, or a create sent before it is recorded each make one copy of a device read as another copy using its id | `kind_counters_report_copy`, `two_open_claims_report_copy`, `unrecorded_create_looks_like_copy` | `proofs/sequence/CovenSequence/ClaimJournal.lean` | §5.1 |
 | A read followed by a floor check admits only genuine first bytes | `floor_check_sound` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | *Body.* Without the floor check, a stale create can win a deleted slot and be taken as genuine, so recreated bytes can't confirm a claim | `stale_create_wins_deleted_slot` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | A slot at or above the floor read after the create holds the genuine bytes | `claim_floor_check` | `proofs/sequence/CovenSequence/Retention.lean` | §5.2 |

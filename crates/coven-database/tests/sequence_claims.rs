@@ -491,3 +491,38 @@ async fn claim_calls_without_a_claim_fail_with_no_claim() {
     ));
     db.close().await.unwrap();
 }
+
+/// A device settles its open claim before beginning another, across every
+/// kind of work (§5.1): a second claim begun while one is open is refused
+/// and reserves no number, and the next one takes the number after the
+/// settled claim's.
+#[tokio::test]
+async fn a_claim_begun_while_another_is_open_is_refused() {
+    let (_temp, directory, db) = open().await;
+    let first = operation(&db).await;
+    let second = operation(&db).await;
+    let object = attempt(directory.id(), 1, b"first");
+    let open = db
+        .begin_claim::<_, _, DbError>(ClaimWork::Operation(first), move |_| Ok(object))
+        .await
+        .unwrap();
+    assert_eq!(open.number, 1);
+    let object = attempt(directory.id(), 1, b"second");
+    assert!(matches!(
+        db.begin_claim::<_, _, DbError>(ClaimWork::Operation(second), move |_| Ok(object)).await,
+        Err(DbError::ClaimPending)
+    ));
+    assert_eq!(db.claim_counter().await.unwrap(), 1);
+    assert_eq!(db.current_claim().await.unwrap(), Some(open));
+    db.settle_claim(ClaimRead::Kept(Some(bytes(b"first")))).await.unwrap();
+    db.finish_claim(None).await.unwrap();
+    let object = attempt(directory.id(), 2, b"second");
+    assert_eq!(
+        db.begin_claim::<_, _, DbError>(ClaimWork::Operation(second), move |_| Ok(object))
+            .await
+            .unwrap()
+            .number,
+        2
+    );
+    db.close().await.unwrap();
+}
