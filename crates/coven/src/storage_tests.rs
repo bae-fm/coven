@@ -577,18 +577,22 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
         listing.await.unwrap();
         let mut status = f.handle.test_sync_status();
         status.wait_for(|status| status.state == SyncState::Syncing).await;
+        // Closing and stopping first write that sync isn't running; then
+        // they wait for the pass.
+        let mut effect = f.handle.test_retry_effect();
         if closing {
             let close = f.handle.close();
             tokio::pin!(close);
             tokio::select! {
+                biased;
                 result = &mut close => panic!("close ended during the pass: {result:?}"),
-                _ = tokio::task::yield_now() => {},
+                _ = effect.wait_for(|effect| *effect == RetryEffect::NotSyncing) => {},
             }
             resume.send(()).unwrap();
             close.await.unwrap();
         } else {
             let stopping = crate::tests::stopping(&f.handle);
-            tokio::task::yield_now().await;
+            effect.wait_for(|effect| *effect == RetryEffect::NotSyncing).await;
             assert_eq!(f.handle.sync_status().await.unwrap().state, SyncState::Syncing);
             resume.send(()).unwrap();
             stopping.await.unwrap().unwrap();
