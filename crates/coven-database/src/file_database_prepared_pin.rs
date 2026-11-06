@@ -37,8 +37,9 @@ impl FileDatabase {
         let copies = copies
             .into_iter()
             .map(|mut reservation| {
-                // The name stays reserved, now for the prepared pin.
-                let _lease = reservation.lease.take();
+                // The name stays reserved, now for the prepared pin, which
+                // holds nothing close or a reopen waits for.
+                let _writing = reservation.writing.take();
                 (reservation.file.clone(), reservation.name.clone())
             })
             .collect();

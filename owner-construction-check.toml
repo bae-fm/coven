@@ -207,6 +207,9 @@ task_types = [
     "FlushBatch",
     "BatchFolder",
     "CacheReservation",
+    # What a cache reservation holds while its file is written: close's
+    # lease and the open store (Appendix C.3, F.4).
+    "CacheFileWriting",
     # App bytes one staging wrote, until the write that takes them
     # (§17.3).
     "StagedFiles",

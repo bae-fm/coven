@@ -43,7 +43,6 @@ async fn a_cache_reservation_refuses_a_name_the_cache_still_uses() {
 #[tokio::test]
 async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
     use crate::file_write::tests::local_count;
-    use std::{future::Future, task::Poll};
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 3]).await;
@@ -52,11 +51,13 @@ async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
         owner.reserve_cache_file(&file, FileName::new("reserved").unwrap()).await.unwrap();
     drop(db);
     drop(owner);
+    // The reservation's copy is still being written: a reopen removing its
+    // recorded name would delete bytes a live writer owns (Appendix C.3),
+    // so the store stays closing until it drops, not live.
+    let waits = store.when_open_waits();
     let mut reopen = Box::pin(open(&store, Provenance::AppProvided));
-    let waiting =
-        std::future::poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
+    crate::tests::until_waiting(&mut reopen, waits).await;
     drop(reservation);
-    assert!(waiting, "a reservation retains work, not a live owner");
     let reopened = reopen.await;
     assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
     reopened.close().await.unwrap();
