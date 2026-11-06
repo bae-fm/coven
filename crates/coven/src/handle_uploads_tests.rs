@@ -96,17 +96,17 @@ async fn queued_writes(network: &Network, index: usize) -> usize {
     network.devices[index].handle.test_queued_writes().await.unwrap().len()
 }
 
-/// Run device `index`'s passes, as an app's pull to refresh does, until
-/// `done` holds. A pass's own commits ask for no pass (§6.7), so what the
-/// next one sends waits for one the test runs.
-async fn passes_until(network: &Network, index: usize, done: impl AsyncFn(&Network) -> bool) {
-    tokio::time::timeout(HANG_GUARD, async {
-        while !done(network).await {
-            network.sync(index).await;
-        }
-    })
-    .await
-    .expect("the passes reach the state");
+/// Wait until device `index`'s sync has nothing left that wakes it, then
+/// run `passes` more passes, as an app's pull to refresh does, each followed
+/// by the same wait. A pass's own commits ask for no pass (§6.7), so what
+/// one of them starts waits for a pass the test runs.
+async fn settle(network: &Network, index: usize, passes: usize) {
+    let handle = &network.devices[index].handle;
+    handle.test_parked().await;
+    for _ in 0..passes {
+        network.sync(index).await;
+        handle.test_parked().await;
+    }
 }
 
 async fn stopped(device: &Device) {
@@ -391,10 +391,11 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
 
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    passes_until(&network, 0, async |n: &Network| {
-        queued_writes(n, 0).await == 0 && raised_to(n, 0, 2).await
-    })
-    .await;
+    // The stored cover lets the loop send what waited for it; the step its
+    // own commits start waits for a pass.
+    settle(&network, 0, 1).await;
+    assert_eq!(queued_writes(&network, 0).await, 0);
+    assert!(raised_to(&network, 0, 2).await);
     assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
 
     let ben = &network.devices[1];
@@ -454,7 +455,8 @@ async fn an_old_app_holds_its_unsent_writes_and_sends_them_unchanged_after_updat
         network.reopen(device).migrations(converting()).open(device.store, |_| ()).await.unwrap();
     handle.start_sync().await.unwrap();
     network.devices[0].handle = handle;
-    passes_until(&network, 0, async |n: &Network| raised_to(n, 0, 2).await).await;
+    settle(&network, 0, 0).await;
+    assert!(raised_to(&network, 0, 2).await);
 
     let ben = &network.devices[1];
     let mut last = ben.handle.test_last_pass();
@@ -480,7 +482,8 @@ async fn an_old_app_holds_its_unsent_writes_and_sends_them_unchanged_after_updat
         network.reopen(device).migrations(converting()).open(device.store, |_| ()).await.unwrap();
     handle.start_sync().await.unwrap();
     network.devices[1].handle = handle;
-    passes_until(&network, 1, async |n: &Network| queued_writes(n, 1).await == 0).await;
+    settle(&network, 1, 0).await;
+    assert_eq!(queued_writes(&network, 1).await, 0);
     network.sync(0).await;
     assert_eq!(notes(&network.devices[0]).await, ["offline"]);
     network.close().await;
@@ -530,10 +533,11 @@ async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
 
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    passes_until(&network, 0, async |n: &Network| {
-        queued_writes(n, 0).await == 0 && raised_to(n, 0, 2).await
-    })
-    .await;
+    // The stored cover lets the loop send what waited for it; the step its
+    // own commits start waits for a pass.
+    settle(&network, 0, 1).await;
+    assert_eq!(queued_writes(&network, 0).await, 0);
+    assert!(raised_to(&network, 0, 2).await);
     let ben = &network.devices[1];
     let mut last = ben.handle.test_last_pass();
     ben.handle.sync_now();
@@ -619,10 +623,15 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
     let [marker, edit] = [&queued[0], &queued[1]].map(|write| write.header.position);
 
     retitle(&mut network, 1).await;
-    passes_until(&network, 1, async |n: &Network| raised_to(n, 1, 2).await).await;
+    settle(&network, 1, 0).await;
+    assert!(raised_to(&network, 1, 2).await);
 
+    // Back online, Ana's offline backoff holds her sync until a pass the
+    // test asks for, and the step that pass's commits start waits for a
+    // second.
     network.devices[0].storage.set_online(true);
-    passes_until(&network, 0, async |n: &Network| queued_writes(n, 0).await == 0).await;
+    settle(&network, 0, 2).await;
+    assert_eq!(queued_writes(&network, 0).await, 0);
     network.sync(1).await;
     network.sync(0).await;
     let (ana, ben) = (&network.devices[0], &network.devices[1]);
@@ -722,7 +731,8 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
     wait_for_sent(&network.devices[0].handle).await;
     network.sync(1).await;
     retitle(&mut network, 0).await;
-    passes_until(&network, 0, async |n: &Network| raised_to(n, 0, 2).await).await;
+    settle(&network, 0, 0).await;
+    assert!(raised_to(&network, 0, 2).await);
     retitle(&mut network, 1).await;
     network.sync(1).await;
     network.update_app(retitled());
@@ -772,7 +782,8 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
         .unwrap();
 
     retitle(&mut network, 1).await;
-    passes_until(&network, 1, async |n: &Network| raised_to(n, 1, 2).await).await;
+    settle(&network, 1, 0).await;
+    assert!(raised_to(&network, 1, 2).await);
 
     let ana = &network.devices[0];
     let mut faults = Faults::none();
@@ -781,9 +792,10 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
         .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
     ana.storage.set_faults(faults).await;
     ana.storage.set_online(true);
-    // Back online, Ana's passes send the marker; the edit waits on the
-    // refused upload.
-    passes_until(&network, 0, async |n: &Network| queued_writes(n, 0).await == 1).await;
+    // Back online, Ana's offline backoff holds her sync until a pass the
+    // test asks for, which sends the marker; the edit waits on the refused
+    // upload.
+    settle(&network, 0, 1).await;
     assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 1);
     network.sync(1).await;
     let marker_slot = network.devices[1].handle.applied_slot().await;
@@ -807,7 +819,8 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
     let ana = &network.devices[0];
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    passes_until(&network, 0, async |n: &Network| queued_writes(n, 0).await == 0).await;
+    settle(&network, 0, 0).await;
+    assert_eq!(queued_writes(&network, 0).await, 0);
     network.sync(1).await;
     assert!(network.devices[1].handle.applied_slot().await > marker_slot + 1);
 
