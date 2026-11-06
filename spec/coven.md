@@ -9660,6 +9660,14 @@ What they don't cover:
   the model's assumptions. Tests run the Rust against the sequence, invite, merge,
   conversion and storage models on generated cases and compare the answers; that
   is evidence, not proof.
+- **Writing locally and checking the schema.** No model covers how a write is
+  captured (§4): its record in the commit's transaction, rowids, a callback
+  that panics, a rollback that fails, read-only connections. Nor do they cover
+  the checks that refuse a schema at open (§9.1, §9.2, §9.4), though one
+  refusal's reason is proved (Appendix G.3); nor `UuidText`, how a CHECK is
+  judged on a merged row (§9.3), or which tables a trigger may write. Tests
+  check these; the merge model takes the recorded writes, their references
+  and CHECK results as given.
 - **Their own assumptions.** The models take as given correct cryptography,
   honest snapshot contents, a prepared snapshot's body in storage before its
   announcement counts, and providers that behave as §20 requires.
