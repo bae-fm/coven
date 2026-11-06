@@ -34,10 +34,11 @@ macro_rules! coven_file_uploads_tables {
         // number of the first write it holds back, set as it is queued: the
         // write that staged its file, or the first write another queued
         // bound upload holds. That write and every later one wait while a
-        // file waits for the upload (§17.4).
+        // file waits for the upload (§17.4). Its id is never reused, so the
+        // waits and links that name an upload are never a later one's.
         $visit!(_coven_file_uploads, "
             CREATE TABLE _coven_file_uploads (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 location TEXT NOT NULL UNIQUE,
                 device BLOB NOT NULL CHECK(length(device)=8),
                 file BLOB NOT NULL CHECK(length(file)=16),

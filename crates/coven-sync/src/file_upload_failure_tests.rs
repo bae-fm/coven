@@ -319,6 +319,31 @@ async fn reopening_permits_one_attempt_for_a_connection_failure() {
     f.close().await;
 }
 
+/// A wait belongs to its upload, whose id is never another's (§17.9): an
+/// upload waiting for a new connection after a sign-in failure is retired
+/// with its file's last reference, and the upload a later file queues runs
+/// at once.
+#[tokio::test]
+async fn an_uploads_wait_ends_with_its_upload() {
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+    let f = fixture(&clock).await;
+    let first = f.attach("files", "photo", b"photo".to_vec()).await;
+    f.storage.set_faults(fail_next(StorageFailure::Authentication, None)).await;
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
+    f.database
+        .write(|sql| Ok::<_, DbError>(sql.execute("DELETE FROM files WHERE id='photo'", [])?))
+        .await
+        .unwrap();
+    // The worker retires the upload no file waits for any more.
+    assert!(matches!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::QueueEmpty));
+    assert!(f.files.inner.database.all_uploads().await.unwrap().is_empty());
+    assert!(!f.queued(&first).await);
+    let second = f.attach("files", "song", b"song".to_vec()).await;
+    assert!(f.queued(&second).await);
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
+    f.close().await;
+}
+
 #[tokio::test]
 async fn manual_retry_drains_recoverable_uploads_early() {
     for failure in [StorageFailure::Network, StorageFailure::Authentication] {

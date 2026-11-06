@@ -18,7 +18,8 @@ use std::time::{Duration, SystemTime};
 pub enum RetrySubject {
     /// A journal operation.
     Operation(OperationId),
-    /// A queued file upload, by its queue id.
+    /// A queued file upload, by its queue id, which is never another
+    /// upload's.
     Upload(i64),
     /// A file a switch to the cloud asked this device to keep, which coven
     /// downloads whole itself (§17.8), by its request's id: a later request

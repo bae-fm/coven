@@ -392,6 +392,7 @@ impl FilesInner {
             .await?
         {
             self.waits.forget(RetrySubject::Upload(id));
+            self.forget_connection_wait(RetrySubject::Upload(id));
         }
         if let Some(blocked @ (Blocked::NotSyncing | Blocked::NoStorage)) = self.blocked() {
             return self.end_blocked(blocked, 0);

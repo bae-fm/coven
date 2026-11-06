@@ -6991,7 +6991,10 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   (§17.3) or is in a deleted circle (§15.9), never starts. Each run of the
   worker first retires those uploads not in flight, paused or not, and with no
   storage connected too. A retired upload's stored bytes, if an earlier attempt
-  left any, are deleted under §17.10.
+  left any, are deleted under §17.10. Its wait goes with it: each upload has
+  its own id, never reused, so a photo Ana adds next starts with no wait,
+  even when the retired upload waited for a new connection after a sign-in
+  failure.
 - **An upload holding a provider session aborts it before it retires.** Ana
   deletes a 300 MB video whose upload sent two parts before the network
   dropped. The provider still holds those parts in the upload's session, and
@@ -9763,7 +9766,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.8) |
-| `_coven_file_uploads` | each stored object this device uploads: its location and key, size, content hash, source, move and provider session, and for a bound upload the number of the write that staged its file, from which this device's writes wait while a file waits for the upload (§17.4, §17.9) |
+| `_coven_file_uploads` | each stored object this device uploads, by id, never reused, so the wait and links that name an upload are never a later one's: its location and key, size, content hash, source, move and provider session, and for a bound upload the number of the write that staged its file, from which this device's writes wait while a file waits for the upload (§17.4, §17.9) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.9) |
 | `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, by the request's own id, never reused, which its wait names, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, the app unpins the file, or the file's record goes or leaves the cloud (§17.8) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
