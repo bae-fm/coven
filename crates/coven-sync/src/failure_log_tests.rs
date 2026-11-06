@@ -14,14 +14,14 @@ const DATABASE: PendingReason = PendingReason::Failed(LocalFailure::Database);
 #[test]
 fn a_failure_logs_once_per_change_of_its_subjects_reason() {
     let log = FailureLog::new();
-    let subject = PendingSubject::Connection;
-    assert!(log.failed(&subject, &DISK, &error("first")));
-    assert!(!log.failed(&subject, &DISK, &error("again")));
-    assert!(log.failed(&subject, &DATABASE, &error("other")));
+    let subject = Logged::Subject(PendingSubject::Connection);
+    assert!(log.failed(subject.clone(), &DISK, &error("first")));
+    assert!(!log.failed(subject.clone(), &DISK, &error("again")));
+    assert!(log.failed(subject.clone(), &DATABASE, &error("other")));
     log.cleared(&subject, |reason| *reason == DISK);
-    assert!(!log.failed(&subject, &DATABASE, &error("kept")));
+    assert!(!log.failed(subject.clone(), &DATABASE, &error("kept")));
     log.cleared(&subject, |_| true);
-    assert!(log.failed(&subject, &DATABASE, &error("new")));
+    assert!(log.failed(subject.clone(), &DATABASE, &error("new")));
 }
 
 /// An operation's failure ends when it advances, or when it no longer exists.
@@ -29,16 +29,18 @@ fn a_failure_logs_once_per_change_of_its_subjects_reason() {
 fn an_operations_failure_ends_when_it_advances_or_ends() {
     use coven_database::OperationId;
     let log = FailureLog::new();
-    let operation = |id| PendingSubject::Operation {
-        id: OperationId(id),
-        kind: crate::OperationKind::RetainFiles,
+    let operation = |id| {
+        Logged::Subject(PendingSubject::Operation {
+            id: OperationId(id),
+            kind: crate::OperationKind::RetainFiles,
+        })
     };
     for id in [1, 2] {
-        log.failed(&operation(id), &DISK, &error("held"));
+        log.failed(operation(id), &DISK, &error("held"));
     }
     log.cleared_operation(OperationId(1));
-    assert!(log.failed(&operation(1), &DISK, &error("new")));
+    assert!(log.failed(operation(1), &DISK, &error("new")));
     log.retain_operations(&[OperationId(1)].into());
-    assert!(!log.failed(&operation(1), &DISK, &error("again")));
-    assert!(log.failed(&operation(2), &DISK, &error("new")));
+    assert!(!log.failed(operation(1), &DISK, &error("again")));
+    assert!(log.failed(operation(2), &DISK, &error("new")));
 }

@@ -10,7 +10,7 @@
 //! subject is due while it lasts, whatever its own wait, and an app retry
 //! overrides only the subject's ordinary wait.
 
-use crate::{PendingReason, PendingSubject, SyncError};
+use crate::{PendingReason, SyncError};
 use coven_database::{Database, DbError, RetrySubject, RetryWait};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::locks::lock_unpoisoned;
@@ -155,21 +155,33 @@ impl RetryWaits {
     /// was logged.
     pub(crate) fn log_failure(
         &self,
-        subject: &PendingSubject,
+        subject: impl Into<crate::failure_log::Logged>,
         reason: &PendingReason,
         error: &(dyn std::error::Error + 'static),
     ) -> bool {
-        self.failures.failed(subject, reason, error)
+        self.failures.failed(subject.into(), reason, error)
+    }
+
+    /// How many failures were logged so far.
+    #[cfg(test)]
+    pub(crate) fn failures_logged(&self) -> usize {
+        self.failures.count()
     }
 
     /// The subject's work advanced past a failure `ended` accepts: a later
     /// failure is new and logs again.
     pub(crate) fn failure_cleared(
         &self,
-        subject: &PendingSubject,
+        subject: impl Into<crate::failure_log::Logged>,
         ended: impl Fn(&PendingReason) -> bool,
     ) {
-        self.failures.cleared(subject, ended);
+        self.failures.cleared(&subject.into(), ended);
+    }
+
+    /// Forget the logged failures of pin requests not in `live`, which have
+    /// ended.
+    pub(crate) fn retain_kept_failures(&self, live: &std::collections::BTreeSet<i64>) {
+        self.failures.retain_kept(live);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, WaitSchedule> {

@@ -7,8 +7,8 @@
 //! downloads from storage. A user's original is never read for the cache.
 
 use super::file_error::{FileReadError, TransferError};
-use super::file_failure::{stored, FileCopy, FileFailure};
-use crate::{files::FilesInner, PendingReason, PendingSubject, Prerequisite, Retry, SyncError};
+use super::file_failure::{stored, FileFailure};
+use crate::{files::FilesInner, PendingReason, Prerequisite, Retry, SyncError};
 use coven_crypto::ContentHasher;
 use coven_database::{
     CacheReservation, DbError, FileLocationKey, FileRef, PinRequest, RetrySubject,
@@ -188,16 +188,18 @@ impl FilesInner {
         let subject = RetrySubject::Pin(request.id);
         self.waits.forget(subject);
         self.forget_connection_wait(subject);
-        self.waits.failure_cleared(&PendingSubject::Keep { file: request.file }, |_| true);
+        let logged = crate::failure_log::Logged::Kept { request: request.id, file: request.file };
+        self.waits.failure_cleared(logged, |_| true);
     }
 
-    /// Let go of the waits this session keeps for pin requests not in
-    /// `live`, which have ended.
+    /// Let go of the waits and logged failures this session keeps for pin
+    /// requests not in `live`, which have ended.
     fn retain_pin_waits(&self, live: &std::collections::BTreeSet<i64>) {
         let ended =
             |subject: &RetrySubject| matches!(subject, RetrySubject::Pin(id) if !live.contains(id));
         self.waits.retain(|subject| !ended(subject));
         self.retain_connection_waits(|subject| !ended(subject));
+        self.waits.retain_kept_failures(live);
     }
 
     /// Record a failed attempt as the pin's record, with its next wait when
@@ -213,8 +215,7 @@ impl FilesInner {
             return Ok(());
         }
         let subject = RetrySubject::Pin(request.id);
-        let pending = PendingSubject::Keep { file: request.file };
-        let record = self.file_failure(pending, FileCopy::Stored, FileFailure::Held(error));
+        let record = self.kept_failure(request, FileFailure::Held(error));
         let needs_connection = record.reason.clears() == Some(crate::pending::Clears::ByPerson);
         let timed = record.retry() == Retry::Automatic
             && record.reason != PendingReason::Waits(Prerequisite::SequenceCatchUp);

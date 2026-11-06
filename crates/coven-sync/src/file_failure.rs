@@ -88,12 +88,32 @@ impl<M: FilesMode> FilesInner<M> {
         copy: FileCopy,
         failure: FileFailure<'_>,
     ) -> PendingRecord {
-        let reason = match &failure {
+        let reason = self.failure_reason(copy, &failure);
+        self.recorded(subject, reason, &failure)
+    }
+
+    /// The record of a failed attempt at the pin `request` asked for, as
+    /// `file_failure` gives one for its file's stored bytes, logged under the
+    /// request: a later request for the same file logs its first failure
+    /// (§19.1).
+    pub(super) fn kept_failure(
+        &self,
+        request: &coven_database::PinRequest,
+        failure: FileFailure<'_>,
+    ) -> PendingRecord {
+        let reason = self.failure_reason(FileCopy::Stored, &failure);
+        let (error, cause) = failure.error();
+        let logged = crate::failure_log::Logged::Kept { request: request.id, file: request.file };
+        self.waits.log_failure(logged, &reason, error);
+        PendingRecord { subject: PendingSubject::Keep { file: request.file }, reason, cause }
+    }
+
+    fn failure_reason(&self, copy: FileCopy, failure: &FileFailure<'_>) -> PendingReason {
+        match failure {
             FileFailure::Held(error) => self.transfer_reason(copy, error),
             FileFailure::Returned(error) => self.transfer_reason(copy, error),
             FileFailure::ReturnedRead(error) => self.read_reason(copy, error),
-        };
-        self.recorded(subject, reason, &failure)
+        }
     }
 
     /// `failure`'s record, `reason` for `subject`, logged as
