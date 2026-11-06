@@ -295,3 +295,67 @@ async fn a_part_refused_before_any_request_leaves_the_saved_plan_unmarked() {
         assert_eq!(storage.read(&path).await.unwrap(), b"data");
     }
 }
+
+/// Keeps every session the upload saves.
+#[derive(Default)]
+struct SavingSource {
+    saved: Vec<coven_crypto::SecretBytes>,
+}
+
+impl UploadSource for SavingSource {
+    type Error = StorageError;
+    async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, StorageError> {
+        Ok(b"data"[offset as usize..offset as usize + length].to_vec())
+    }
+    async fn save(&mut self, session: UploadSession) -> Result<(), StorageError> {
+        self.saved.push(session.encode()?);
+        Ok(())
+    }
+    fn keep_going(&self) -> bool {
+        true
+    }
+}
+
+/// A claim's first part is admitted, so its plan is saved marked, and then
+/// sync falls behind while the start waits to go out: the publication gate,
+/// checked again as the request goes, refuses it having sent nothing. The
+/// plan is saved unmarked again before the failure returns, so the next
+/// attempt goes on from it at the shared slot (§17.9, Appendix E.10).
+#[tokio::test]
+async fn a_start_refused_as_it_goes_out_saves_its_plan_unmarked() {
+    let behind = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let storage = coven_storage::test_utils::MemoryStorage::builder()
+        .build()
+        .unwrap()
+        .with_publication_gate(Arc::new(CatchingUp(behind.clone())));
+    let path = ObjectPath::slot(coven_storage::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
+    let target = UploadTarget::Create(path.clone());
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_request_of(
+            coven_storage::test_utils::MemoryRequest::Other("initiate_upload"),
+            started,
+            held,
+        )
+        .await;
+    let mut source = SavingSource::default();
+    let falling_behind = async {
+        waiting.await.unwrap();
+        behind.store(true, std::sync::atomic::Ordering::SeqCst);
+        resume.send(()).unwrap();
+    };
+    let (refused, ()) =
+        tokio::join!(upload(&storage, &target, 4, None, &mut source), falling_behind);
+    assert_eq!(refused.unwrap_err().failure(), StorageFailure::CatchUpRequired);
+    assert!(storage.unfinished_uploads().await.is_empty(), "nothing was started");
+    assert_eq!(source.saved.len(), 3, "the plan, marked, then unmarked again");
+    let plan = UploadSession::decode(source.saved[2].as_bytes()).unwrap();
+
+    behind.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut source =
+        RecordingSource { events: Arc::new(Mutex::new(Vec::new())), fail_save: None, saves: 0 };
+    let stored = upload(&storage, &target, 4, Some(plan), &mut source).await.unwrap();
+    assert!(matches!(stored, Uploaded::Stored(None)));
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}

@@ -176,7 +176,7 @@ pub(crate) enum PlanStart {
     /// been sent: this process knows nothing is at the name yet.
     Starting,
     /// Marked, and the first part may have started an upload at the name: it
-    /// was sent here, or the recording was restored.
+    /// is going out here, or went out, or the recording was restored.
     MayHaveStarted,
 }
 
@@ -193,6 +193,24 @@ impl From<bool> for PlanStart {
 impl From<PlanStart> for bool {
     fn from(start: PlanStart) -> Self {
         start != PlanStart::Unstarted
+    }
+}
+
+/// Whether a planned session's start went out: set where the provider hands
+/// the start's request to the network, past every check made as it goes,
+/// the publication gate's and a provider cooldown's (§17.9, Appendix E.10).
+/// The start's attempts share it, so one that went out before a retry was
+/// refused still counts.
+#[derive(Clone, Default)]
+pub(crate) struct StartSent(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl StartSent {
+    /// The start's request goes out now.
+    pub(crate) fn going(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn went(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -257,6 +275,22 @@ impl UploadSession {
         }
         *started = PlanStart::Starting;
         true
+    }
+    /// Settle a planned session's plan after its start failed. One whose
+    /// request went out may have started an upload, and stays marked; one
+    /// refused before it went out began nothing, so its plan is unmarked
+    /// again, for the caller to save before the failure is reported
+    /// (Appendix E.10).
+    pub(crate) fn start_failed(&mut self, start: &StartSent) {
+        let started = match &mut self.state {
+            SessionState::S3Planned { started, .. } => started,
+            #[cfg(any(test, feature = "test-utils"))]
+            SessionState::MemoryPlanned { started } => started,
+            _ => return,
+        };
+        if !start.went() {
+            *started = PlanStart::Unstarted;
+        }
     }
     /// Whether native initiation must follow recording this identity, before
     /// any part is sent. Resume it and save the returned session first (§20.6).

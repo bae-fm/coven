@@ -1,6 +1,6 @@
 use super::pagination::Pagination;
 use crate::providers::http_client::HttpClient;
-use crate::session::{PlanStart, S3Part, SessionState};
+use crate::session::{PlanStart, S3Part, SessionState, StartSent};
 use crate::*;
 use async_trait::async_trait;
 use aws_sdk_s3::{
@@ -661,10 +661,21 @@ impl ProviderOps for S3Storage {
             if *started == PlanStart::MayHaveStarted {
                 return Err(StorageFailure::SessionIdentityUnknown.into());
             }
+            // Until it settles, the start may go out at any moment.
             *started = PlanStart::MayHaveStarted;
             let token = token.clone();
-            let id = self.initiate(publication, &self.session_key(session)?, &token).await?;
-            session.state = SessionState::S3 { id, token, parts: Vec::new() };
+            let start = StartSent::default();
+            let begun = match self.session_key(session) {
+                Ok(key) => self.initiate(publication, &key, &token, &start).await,
+                Err(error) => Err(error),
+            };
+            match begun {
+                Ok(id) => session.state = SessionState::S3 { id, token, parts: Vec::new() },
+                Err(error) => {
+                    session.start_failed(&start);
+                    return Err(error);
+                }
+            }
         }
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {

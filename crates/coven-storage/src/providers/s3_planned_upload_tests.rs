@@ -158,6 +158,55 @@ async fn a_refused_first_part_leaves_its_plan_unmarked() {
     }
 }
 
+/// The connection admits a claim's first part, and its plan is saved marked;
+/// then sync falls behind before the start goes out. The publication gate,
+/// checked again as the request goes, refuses it having sent nothing, and the
+/// session the caller saves with the failure is unmarked again: restored, it
+/// resumes at the shared slot and publishes. A start that went out stays
+/// marked, even with its reply lost (§17.9, Appendix E.10).
+#[tokio::test]
+async fn a_start_refused_as_it_goes_out_unmarks_its_plan() {
+    for went_out in [false, true] {
+        let (_server, storage, state) = planned_fixture().await;
+        let gate = Arc::new(CatchingUp::default());
+        let storage = StorageConnection::with_gate(
+            storage.provider().clone(),
+            crate::test_utils::DEVICE,
+            gate.clone(),
+            Arc::new(Cooling::default()),
+            Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+        );
+        let path = planned_path();
+        let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+        let permit = storage.admit_part(&mut upload, b"data").unwrap();
+        assert!(permit.marked());
+        if went_out {
+            state.lock().unwrap().lose_initiation_reply = true;
+        } else {
+            gate.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let failed = storage.send_part(permit, &mut upload, &ByteProgress::unread()).await;
+        let mut restored = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+        gate.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        if went_out {
+            assert_eq!(failed.unwrap_err().failure(), StorageFailure::Network);
+            assert_eq!(
+                storage.resume_upload(&mut restored).await.unwrap_err().failure(),
+                StorageFailure::SessionIdentityUnknown
+            );
+            continue;
+        }
+        assert_eq!(failed.unwrap_err().failure(), StorageFailure::CatchUpRequired);
+        assert!(state.lock().unwrap().requests.is_empty(), "the refusal sent nothing");
+        storage.resume_upload(&mut restored).await.unwrap();
+        assert!(state.lock().unwrap().requests.is_empty(), "nothing to look for at the slot");
+        storage.upload_part(&mut restored, b"data").await.unwrap();
+        storage.finish_upload(&mut restored).await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    }
+}
+
 #[tokio::test]
 async fn restored_planned_session_can_confirm_its_completed_publication() {
     let (_server, storage, state) = planned_fixture().await;

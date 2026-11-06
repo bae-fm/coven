@@ -250,6 +250,13 @@ mod sessions {
     fn pausing() -> Value {
         run(false, json!({"kind": "pause"}))
     }
+    /// Sync falls behind as the run's start of a planned session waits to go
+    /// out: the publication gate refuses it, having sent nothing. A catch-up
+    /// wait has no delay of its own; the model's automatic class waits one,
+    /// so each case lets it pass before the next run.
+    fn refusing() -> Value {
+        run(false, json!({"kind": "refuse", "class": "automatic"}))
+    }
     fn event(op: &str) -> Value {
         json!({"op": op})
     }
@@ -331,6 +338,7 @@ mod sessions {
                         .await;
                 }
                 "pause" => return self.pause_as_planned().await,
+                "refuse" => return self.refuse_as_started().await,
                 "none" | "parts" => {}
                 other => panic!("unknown fault {other}"),
             }
@@ -424,6 +432,29 @@ mod sessions {
             let ended = tokio::time::timeout(HANG_GUARD, task).await.expect("the run ends");
             assert_eq!(ended.unwrap().expect("the run"), crate::DrainOutcome::Paused);
             self.f.set_uploads_paused(false).await;
+        }
+
+        /// One run whose start of a planned session the publication gate
+        /// refuses as it goes out: sync falls behind while the start is held,
+        /// and catches up once the run ends.
+        async fn refuse_as_started(&mut self) {
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            let start = coven_storage::test_utils::MemoryRequest::Other("initiate_upload");
+            self.f.storage.hold_next_request_of(start, started, held).await;
+            let inner = self.f.files.inner.clone();
+            let task = tokio::spawn(async move { inner.drain_uploads().await });
+            tokio::time::timeout(HANG_GUARD, observed).await.expect("the run's start").unwrap();
+            self.f.send.set(crate::SequenceStatus::Opening);
+            resume.send(()).unwrap();
+            let ended = tokio::time::timeout(HANG_GUARD, task).await.expect("the run ends");
+            match ended.unwrap() {
+                Ok(_) => {}
+                Err(crate::SyncError::Storage(error))
+                    if error.failure() == StorageFailure::CatchUpRequired => {}
+                Err(error) => panic!("the run: {error:?}"),
+            }
+            self.f.send.set(crate::SequenceStatus::Synced { through: 0 });
         }
 
         async fn apply(&mut self, event: &Value) {
@@ -597,6 +628,12 @@ mod sessions {
             vec![pausing(), failing("automatic"), elapse(), plain()],
             vec![pausing(), failing("automatic"), event("delete"), elapse(), plain()],
             vec![pausing(), losing_begin(), elapse(), plain()],
+            // The start is refused as it goes out, having sent nothing: the
+            // plan is unmarked again, and the next run goes on, or the abort
+            // forgets it, wherever the place is.
+            vec![refusing(), elapse(), plain()],
+            vec![refusing(), event("delete"), elapse(), plain()],
+            vec![pausing(), refusing(), elapse(), plain()],
         ]
     }
 

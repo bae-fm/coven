@@ -162,6 +162,11 @@ task_types = [
     # What one S3 detection read from its responses' headers, shared with
     # the interceptor each of its requests carries (§20.7).
     "HeaderCapture",
+    # Whether one planned upload's start went out, shared with the HTTP
+    # client each of its attempts goes through, and that start as the
+    # in-memory provider lets it out (Appendix E.10).
+    "StartSent",
+    "MemoryStart",
     # One copy being written under its temporary name in the folder the
     # person picked, whose file its blocking writes share (§17.3).
     "CopyWriter",

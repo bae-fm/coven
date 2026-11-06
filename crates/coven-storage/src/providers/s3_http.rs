@@ -6,6 +6,7 @@
 //! there. S3 also shares the stall window (§6.7).
 
 use crate::providers::http_client::{HttpClient, SendError};
+use crate::session::StartSent;
 use crate::ByteProgress;
 use aws_sdk_s3::primitives::SdkBody;
 use aws_smithy_runtime_api::client::{
@@ -61,6 +62,8 @@ impl HttpConnector for S3HttpConnector {
         // An operation that sends an object's bytes names who hears them go
         // (`S3Storage::put`, `upload_part`); reqwest keeps no extension.
         let mut sent = ByteProgress::unread();
+        // A planned upload's start hears when it goes out (Appendix E.10).
+        let mut start = None;
         let request = match request
             .try_into_http1x()
             .map_err(|error| ConnectorError::user(error.into()))
@@ -68,6 +71,7 @@ impl HttpConnector for S3HttpConnector {
                 if let Some(progress) = request.extensions().get::<ByteProgress>() {
                     sent = progress.clone();
                 }
+                start = request.extensions().get::<StartSent>().cloned();
                 reqwest::Request::try_from(request.map(reqwest::Body::wrap))
                     .map_err(connector_error)
             }) {
@@ -76,6 +80,10 @@ impl HttpConnector for S3HttpConnector {
         };
         let client = self.0.clone();
         HttpConnectorFuture::new(async move {
+            // Every check made as the request goes is behind it.
+            if let Some(start) = start {
+                start.going();
+            }
             let response = client.execute(request, &sent).await.map_err(|error| match error {
                 SendError::Http(error) => connector_error(error),
                 SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),

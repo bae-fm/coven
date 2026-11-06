@@ -1,6 +1,22 @@
 //! Atomic conditional publication in the deterministic provider.
 use super::*;
-use crate::session::PlanStart;
+use crate::session::{PlanStart, StartSent};
+
+/// A planned session's start as it goes out: past any hold, the publication
+/// gate is checked again, as S3 checks it as the request goes out, and a start
+/// it lets through has gone out (Appendix E.10).
+pub(super) struct MemoryStart<'a> {
+    publication: &'a PublicationRequest,
+    sent: &'a StartSent,
+}
+
+impl MemoryStart<'_> {
+    pub(super) fn go(&self) -> Result<(), StorageError> {
+        self.publication.check()?;
+        self.sent.going();
+        Ok(())
+    }
+}
 
 pub(super) struct Pending {
     device: coven_foundation::id_source::DeviceId,
@@ -240,18 +256,23 @@ impl MemoryProvider {
         end: u64,
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
-        publication.check()?;
-        // The whole part is taken as the call starts, as for a create.
-        sent.moved(bytes.len() as u64);
         if let SessionState::MemoryPlanned { started } = &mut session.state {
             // A restored marked plan resumes first, and one whose start this
             // process sent may have started a session already.
             if *started == PlanStart::MayHaveStarted {
                 return Err(StorageFailure::SessionIdentityUnknown.into());
             }
+            // Until it settles, the start may go out at any moment.
             *started = PlanStart::MayHaveStarted;
-            self.initiate(session).await?;
+            let start = StartSent::default();
+            if let Err(error) = self.initiate(publication, session, &start).await {
+                session.start_failed(&start);
+                return Err(error);
+            }
         }
+        publication.check()?;
+        // The whole part is taken as the call starts, as for a create.
+        sent.moved(bytes.len() as u64);
         self.before(MemoryRequest::Other("upload_part")).await?;
         let gate = self.state.lock().await.part_gate.clone();
         if let Some(gate) = gate {
@@ -284,9 +305,16 @@ impl MemoryProvider {
         session.confirmed = end;
         Ok(())
     }
-    /// Start a planned session's upload, as its first part does on S3.
-    async fn initiate(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.before(MemoryRequest::Other("initiate_upload")).await?;
+    /// Start a planned session's upload, as its first part does on S3,
+    /// telling `sent` once the start goes out.
+    async fn initiate(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+        sent: &StartSent,
+    ) -> Result<(), StorageError> {
+        let start = MemoryStart { publication, sent };
+        self.before_going(MemoryRequest::Other("initiate_upload"), Some(start)).await?;
         let mut state = self.state.lock().await;
         let id = state.next_id()?;
         state.uploads.insert(

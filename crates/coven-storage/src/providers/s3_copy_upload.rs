@@ -111,12 +111,13 @@ impl S3Storage {
     }
 
     /// Initiate a native multipart upload at `key`, carrying `token` as its
-    /// marker.
+    /// marker; `start` hears each attempt that goes out.
     pub(super) async fn initiate(
         &self,
         publication: &PublicationRequest,
         key: &str,
         token: &SecretText,
+        start: &StartSent,
     ) -> Result<SecretText, StorageError> {
         let response = self
             .client
@@ -127,6 +128,11 @@ impl S3Storage {
             .metadata("coven-revision", token.as_str())
             .customize()
             .interceptor(publication.clone())
+            // The HTTP client says when an attempt goes out (`s3_http`).
+            .mutate_request({
+                let start = start.clone();
+                move |request| request.add_extension(start.clone())
+            })
             .send()
             .await
             .map_err(s3_error)?;
