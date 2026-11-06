@@ -185,8 +185,6 @@ pub(crate) fn frame(
     Ok(bytes)
 }
 
-/// Bootstrap may use a box before knowing its signer's history. The resulting
-/// key is tentative until the original slots and enclosing object authenticate.
 /// A store or circle key opened from a copy routed to this member.
 pub(crate) enum RoutedKey {
     Store(coven_crypto::StoreKey),
@@ -221,14 +219,20 @@ pub(crate) fn routed_key(
     }
     let context =
         SlotObjectPrefix::copy_context(object.prefix.format, object.prefix.key, &copy.routing)?;
-    Ok(Some(match copy.routing.audience {
+    let opened = match copy.routing.audience {
         coven_merge::Audience::Store => {
-            RoutedKey::Store(copy.open_store_key(member, path.as_str(), &context)?)
+            copy.open_store_key(member, path.as_str(), &context).map(RoutedKey::Store)
         }
         coven_merge::Audience::Circle(_) => {
-            RoutedKey::Circle(copy.open_circle_key(member, path.as_str(), &context)?)
+            copy.open_circle_key(member, path.as_str(), &context).map(RoutedKey::Circle)
         }
-    }))
+    };
+    // A box sealed to a pair this member holds that doesn't open at its
+    // slot's path is that slot's damage, as `History::acquire` judges it,
+    // not a local failure.
+    opened
+        .map(Some)
+        .map_err(|error| damaged(&path, Refusal::Decryption { cause: Some(Arc::new(error)) }))
 }
 
 /// Whether `original` is a copy for this member sealed to a pair it doesn't

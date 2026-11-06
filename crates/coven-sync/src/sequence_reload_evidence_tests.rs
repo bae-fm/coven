@@ -214,12 +214,18 @@ fn sealed_floor(
     sealed_stream(&path, &prefix, None, key, &plain, signer).0
 }
 
-/// Ana's store with a note of 64 KiB and her laptop, compacted: past the
-/// grace period her pass announces a store snapshot and retention writes a
-/// floor naming it, deleting the oldest slots. `later` is then admitted, in
-/// slots too young and too small to ask for a newer snapshot (§16.2), so the
-/// floor still names that one. Its announcement slot and coverage.
-async fn compacted(group: &Group, ana: &Device, later: Option<&Device>) -> (Slot, u64) {
+/// Ana's store with a note of 64 KiB, her laptop and `earlier`, compacted:
+/// past the grace period her pass announces a store snapshot and retention
+/// writes a floor naming it, deleting the oldest slots. `later` is then
+/// admitted, in slots too young and too small to ask for a newer snapshot
+/// (§16.2), so the floor still names that one. Its announcement slot and
+/// coverage.
+async fn compacted(
+    group: &Group,
+    ana: &Device,
+    earlier: Option<&Device>,
+    later: Option<&Device>,
+) -> (Slot, u64) {
     group.create(ana).await;
     ana.sync
         .database
@@ -233,6 +239,9 @@ async fn compacted(group: &Group, ana: &Device, later: Option<&Device>) -> (Slot
     let laptop = group.laptop(ana).await;
     ana.sync.pass().await.unwrap();
     laptop.sync.database.close().await.unwrap();
+    if let Some(earlier) = earlier {
+        group.admit(ana, earlier).await;
+    }
     ana.sync.snapshot(Audience::Store).await.unwrap();
     group.clock.set(
         UNIX_EPOCH
@@ -286,7 +295,7 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    let (slot, covers) = compacted(&group, &ana, Some(&ben)).await;
+    let (slot, covers) = compacted(&group, &ana, None, Some(&ben)).await;
     let history = ana.sync.session.lock().await.history.clone();
     assert!(history.added(ben.sync.device).unwrap() > covers);
 
@@ -375,6 +384,92 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
     let moved_path = ObjectPath::slot(group.store, to.try_into().unwrap());
     restore_refused(&group, &ana, |damaged| damaged.path == moved_path.as_str()).await;
     for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// A floor binds its signer and the copies it carries only once verified
+/// against the history through its `at`: its encrypted `author` names the
+/// device whose key must have signed it, that device must belong at `at`,
+/// and each copy opens only at its original slot's path. A restore refuses
+/// a floor signed by Ben, admitted after `at`, as its author or as Ana; one
+/// whose copy for the restoring member is moved to another slot number,
+/// when it routes the copy; and one whose copy for Carol is moved, when it
+/// checks the floor against history. Each such floor is sealed and signed
+/// like the honest one, which a restore loads (format.md D8, D9).
+#[tokio::test]
+async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    compacted(&group, &ana, Some(&carol), Some(&ben)).await;
+    let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
+    let history = ana.sync.session.lock().await.history.clone();
+    assert!(history.added(ben.sync.device).unwrap() > floor.header.at);
+    let path = ObjectPath::floor(group.store);
+    let plant = |header: coven_format::floor::FloorHeader,
+                 copies: Vec<coven_format::floor::OriginalSlot>,
+                 signer: &MemberIdentity| {
+        let bytes = sealed_floor(&ana, header, &copies, &floor.announcements, signer);
+        let (storage, path) = (group.storage.clone(), path.clone());
+        async move { storage.plant(&path, &bytes).await.unwrap() }
+    };
+
+    plant(floor.header.clone(), floor.copies.clone(), &ana.identity).await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
+    laptop.sync.database.close().await.unwrap();
+
+    let by_ben =
+        coven_format::floor::FloorHeader { author: ben.sync.device, ..floor.header.clone() };
+    plant(by_ben, floor.copies.clone(), &ben.identity).await;
+    restore_refused(&group, &ana, |damaged| {
+        damaged.path == path.as_str() && matches!(damaged.failure, Refusal::NotAuthorized)
+    })
+    .await;
+
+    plant(floor.header.clone(), floor.copies.clone(), &ben.identity).await;
+    restore_refused(&group, &ana, |damaged| {
+        damaged.path == path.as_str() && matches!(damaged.failure, Refusal::Signature { .. })
+    })
+    .await;
+
+    // Each copy moved to a slot number between its neighbours' that holds no
+    // original, so the copies keep their order.
+    let originals: Vec<_> = ana
+        .sync
+        .database
+        .original_slots()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|original| original.slot.0)
+        .collect();
+    let routes = |copy: &coven_format::floor::OriginalSlot| {
+        let object = coven_format::sealed_slot::BoundedSlot::decode(&copy.object).unwrap();
+        let coven_format::sealed_slot::SlotKind::KeyCopy(copy) = object.prefix.kind else {
+            panic!("a key copy");
+        };
+        copy.routing.member
+    };
+    let members: Vec<_> = floor.copies.iter().map(routes).collect();
+    assert_eq!(members, [ana.identity.member(), carol.identity.member()]);
+    for index in 0..floor.copies.len() {
+        let below = index.checked_sub(1).map_or(0, |before| floor.copies[before].slot.0);
+        let above = floor.copies.get(index + 1).map_or(floor.header.at + 1, |next| next.slot.0);
+        let to = (below + 1..above).find(|slot| !originals.contains(slot)).unwrap();
+        let mut copies = floor.copies.clone();
+        copies[index].slot = Slot(to);
+        plant(floor.header.clone(), copies, &ana.identity).await;
+        let moved = ObjectPath::slot(group.store, to.try_into().unwrap());
+        restore_refused(&group, &ana, |damaged| {
+            damaged.path == moved.as_str() && matches!(damaged.failure, Refusal::Decryption { .. })
+        })
+        .await;
+    }
+    for device in [&ana, &ben, &carol] {
         device.sync.database.close().await.unwrap();
     }
 }

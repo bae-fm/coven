@@ -1593,6 +1593,10 @@ ephemeral:32 bytes | nonce:24 bytes | ciphertext:bytes | tag:16 bytes
 - The box may be opened tentatively before the store key is held. But
   membership, introduction and slot signatures must verify before anything is
   applied.
+- A box routed to a pair the reader holds opens only at its original slot's
+  path. One that doesn't open makes that slot damaged, wherever the reader found
+  the copy: in the sequence, the floor's `copies` or a store snapshot. It is
+  never a local failure, since the reader's own keys are what it was sealed to.
 - The box's context uses the slot prefix through `sealing`, leaving out the
   ephemeral key and ciphertext. D11 adds the ephemeral key separately.
 
