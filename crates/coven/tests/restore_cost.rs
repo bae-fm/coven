@@ -146,9 +146,7 @@ impl Clock for BenchClock {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), coven::WallTimerError>> + Send>,
     > {
-        Box::pin(std::future::ready(Err(coven::WallTimerError::new(
-            "the bench's clock has no timer for its readings",
-        ))))
+        Box::pin(std::future::ready(Err(coven::WallTimerError::NoTimer)))
     }
 }
 

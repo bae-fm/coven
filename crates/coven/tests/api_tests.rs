@@ -20,9 +20,7 @@ impl Clock for AppClock {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), coven::WallTimerError>> + Send>,
     > {
-        Box::pin(std::future::ready(Err(coven::WallTimerError::new(
-            "a clock fixed at the epoch never reaches a later time",
-        ))))
+        Box::pin(std::future::ready(Err(coven::WallTimerError::NoTimer)))
     }
 }
 

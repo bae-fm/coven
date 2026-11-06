@@ -77,7 +77,7 @@ impl Drop for DispatchTimer {
 pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
     let nanos = at.duration_since(UNIX_EPOCH).expect("the deadline is after the epoch").as_nanos();
     if nanos > MAX_NANOS {
-        return Err(WallTimerError::new("the time is past what libdispatch's wall timer holds"));
+        return Err(WallTimerError::OutOfRange { source: None });
     }
     // `dispatch_walltime` takes a count of one nanosecond or less as
     // `DISPATCH_TIME_FOREVER` (src/time.c); two nanoseconds after the epoch
@@ -131,7 +131,7 @@ impl DispatchTimer {
             let source =
                 dispatch_source_create(&raw const _dispatch_source_type_timer, 0, 0, queue);
             if source.is_null() {
-                return Err(WallTimerError::new("libdispatch could not create a timer source"));
+                return Err(WallTimerError::TimerSource);
             }
             dispatch_source_set_event_handler(source, &handler);
             #[cfg(test)]

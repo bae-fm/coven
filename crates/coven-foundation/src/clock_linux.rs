@@ -39,22 +39,32 @@ pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
     let _released = super::ReleasedOnDrop(at);
     let timer =
         timerfd_create(TimerfdClockId::Realtime, TimerfdFlags::CLOEXEC | TimerfdFlags::NONBLOCK)
-            .map_err(WallTimerError::new)?;
+            .map_err(|errno| WallTimerError::system("timerfd_create", errno))?;
     let expiry = Itimerspec {
         // No interval: the timer fires once.
         it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-        it_value: Timespec::try_from(since).map_err(WallTimerError::new)?,
+        it_value: Timespec::try_from(since)
+            .map_err(|source| WallTimerError::OutOfRange { source: Some(source) })?,
     };
-    timerfd_settime(&timer, TimerfdTimerFlags::ABSTIME, &expiry).map_err(WallTimerError::new)?;
-    let timer = AsyncFd::new(timer).map_err(WallTimerError::new)?;
+    timerfd_settime(&timer, TimerfdTimerFlags::ABSTIME, &expiry)
+        .map_err(|errno| WallTimerError::system("timerfd_settime", errno))?;
+    let timer =
+        AsyncFd::new(timer).map_err(|error| WallTimerError::system("register the timer", error))?;
     loop {
-        let mut ready = timer.readable().await.map_err(WallTimerError::new)?;
+        let mut ready = timer
+            .readable()
+            .await
+            .map_err(|error| WallTimerError::system("wait for the timer", error))?;
         // The timer is readable once it has fired: it reads its expiry
         // count. A read it would block on was a readiness the runtime
         // reported early, which `try_io` clears before waiting again.
         let mut count = [0u8; 8];
         match ready.try_io(|timer| Ok(rustix::io::read(timer, &mut count)?)) {
-            Ok(read) => return read.map(drop).map_err(WallTimerError::new),
+            Ok(read) => {
+                return read
+                    .map(drop)
+                    .map_err(|error| WallTimerError::system("read the timer", error))
+            }
             Err(_would_block) => continue,
         }
     }

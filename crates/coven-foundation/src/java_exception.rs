@@ -35,6 +35,8 @@ impl std::fmt::Display for JavaException {
     }
 }
 
+impl std::error::Error for JavaException {}
+
 /// What a JNI call failed with: the JVM refused it, or a Java exception,
 /// taken off the thread.
 #[derive(Debug)]
@@ -56,6 +58,15 @@ impl std::fmt::Display for JniFailure {
         match self {
             Self::Jni(error) => write!(f, "JNI: {error}"),
             Self::Java(exception) => exception.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for JniFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Jni(error) => Some(error),
+            Self::Java(exception) => Some(exception),
         }
     }
 }

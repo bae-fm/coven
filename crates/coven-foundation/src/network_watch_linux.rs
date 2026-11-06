@@ -58,9 +58,16 @@ impl ManagerWatch {
                 return Ok(None);
             }
         };
-        let bus = zbus::fdo::DBusProxy::new(&connection).await.map_err(NetworkWatchError::new)?;
-        let name = zbus::names::BusName::try_from(SERVICE).map_err(NetworkWatchError::new)?;
-        if !bus.name_has_owner(name).await.map_err(NetworkWatchError::new)? {
+        let bus = zbus::fdo::DBusProxy::new(&connection)
+            .await
+            .map_err(|error| NetworkWatchError::platform("create the bus proxy", error))?;
+        let name = zbus::names::BusName::try_from(SERVICE)
+            .map_err(|error| NetworkWatchError::platform("name NetworkManager", error))?;
+        if !bus
+            .name_has_owner(name)
+            .await
+            .map_err(|error| NetworkWatchError::platform("ask who owns NetworkManager", error))?
+        {
             tracing::warn!(
                 "no NetworkManager: coven can't tell the device's network, and holds no transfer for it"
             );
@@ -72,29 +79,34 @@ impl ManagerWatch {
             .destination(SERVICE)
             .and_then(|builder| builder.path(PATH))
             .and_then(|builder| builder.interface(SERVICE))
-            .map_err(NetworkWatchError::new)?
+            .map_err(|error| NetworkWatchError::platform("address NetworkManager", error))?
             .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .await
-            .map_err(NetworkWatchError::new)?;
+            .map_err(|error| NetworkWatchError::platform("build NetworkManager's proxy", error))?;
         let properties = zbus::fdo::PropertiesProxy::builder(&connection)
             .destination(SERVICE)
-            .map_err(NetworkWatchError::new)?
+            .map_err(|error| NetworkWatchError::platform("address its properties", error))?
             .path(PATH)
-            .map_err(NetworkWatchError::new)?
+            .map_err(|error| NetworkWatchError::platform("address its properties", error))?
             .build()
             .await
-            .map_err(NetworkWatchError::new)?;
+            .map_err(|error| NetworkWatchError::platform("build its properties proxy", error))?;
         // Followed before the first read, so no change falls between them.
         let changed = properties
             .receive_properties_changed()
             .await
-            .map_err(NetworkWatchError::new)?
+            .map_err(|error| NetworkWatchError::platform("follow property changes", error))?
             .map(drop);
-        let owner =
-            manager.receive_owner_changed().await.map_err(NetworkWatchError::new)?.map(drop);
+        let owner = manager
+            .receive_owner_changed()
+            .await
+            .map_err(|error| NetworkWatchError::platform("follow owner changes", error))?
+            .map(drop);
         let mut changes = changed.or(owner);
-        let first = network(&manager).await.map_err(NetworkWatchError::new)?;
+        let first = network(&manager)
+            .await
+            .map_err(|error| NetworkWatchError::platform("read the network", error))?;
         lock_unpoisoned(&sink).observe(first);
         let (stop, stopped) = oneshot::channel::<()>();
         let followed = Arc::clone(&sink);
@@ -134,7 +146,7 @@ impl ManagerWatch {
                     stopped.await.ok();
                 }));
             })
-            .map_err(NetworkWatchError::new)?;
+            .map_err(|error| NetworkWatchError::platform("start the follower thread", error))?;
         Ok(Some(Self { stop: Some(stop), follow: Some(follow) }))
     }
 }

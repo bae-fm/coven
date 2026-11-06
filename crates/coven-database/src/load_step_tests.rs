@@ -33,9 +33,7 @@ impl Clock for Stepping {
                 + Send,
         >,
     > {
-        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::new(
-            "a stepping clock has no timer for its readings",
-        ))))
+        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::NoTimer)))
     }
 }
 

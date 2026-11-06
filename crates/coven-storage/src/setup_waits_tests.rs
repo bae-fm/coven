@@ -24,9 +24,7 @@ impl Clock for Waits {
                 + Send,
         >,
     > {
-        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::new(
-            "a clock fixed at the epoch never reaches a later time",
-        ))))
+        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::NoTimer)))
     }
 }
 

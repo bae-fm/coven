@@ -57,8 +57,8 @@ pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
     let due = ((u128::from(since.as_secs()) + u128::from(FILETIME_EPOCH_SECONDS)) * 10_000_000
         + u128::from(since.subsec_nanos() / 100))
     .try_into()
-    .map_err(|error: std::num::TryFromIntError| {
-        WallTimerError::new(format!("the time is past what a Windows timer holds: {error}"))
+    .map_err(|source: std::num::TryFromIntError| WallTimerError::OutOfRange {
+        source: Some(source),
     })?;
     // Made before the timer, so it drops after the timer's wait is
     // unregistered and its handle closed.
@@ -74,9 +74,8 @@ impl WaitableTimer {
     /// A waitable timer due at `due` and a thread-pool wait whose callback
     /// notifies `fired` when it is.
     fn arm(due: i64) -> Result<Self, WallTimerError> {
-        let failed = |call: &str| {
-            WallTimerError::new(format!("{call}: {}", std::io::Error::last_os_error()))
-        };
+        let failed =
+            |call: &'static str| WallTimerError::system(call, std::io::Error::last_os_error());
         // Safety: each call gets the objects its signature names, and each
         // object made is released on every path after it: by `WaitableTimer`
         // once it holds them, here before.

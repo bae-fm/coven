@@ -25,9 +25,7 @@ impl Clock for SteppedClock {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), crate::clock::WallTimerError>> + Send>,
     > {
-        Box::pin(std::future::ready(Err(crate::clock::WallTimerError::new(
-            "a stepped clock has no timer for its readings",
-        ))))
+        Box::pin(std::future::ready(Err(crate::clock::WallTimerError::NoTimer)))
     }
 }
 

@@ -72,7 +72,7 @@ impl JavaWatch {
             Ok((vm, watch)) => Ok(Self { vm, watch, number, _running: running }),
             Err(failure) => {
                 lock_unpoisoned(&WATCHES).running.remove(&number);
-                Err(NetworkWatchError::new(format!("starting {WATCH_CLASS}: {failure}")))
+                Err(NetworkWatchError::platform("start the Java network watch", failure))
             }
         }
     }

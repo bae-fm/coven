@@ -205,15 +205,33 @@ pub enum NetworkSource {
 
 /// The platform refused to let coven watch the device's network (api.md
 /// E1, E5), such as an Android app without coven's Android library.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("coven can't watch the device's network: {0}")]
-pub struct NetworkWatchError(String);
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum NetworkWatchError {
+    /// The platform's path monitor couldn't be created.
+    #[error("the platform's path monitor could not be created")]
+    MonitorUnavailable,
+    /// The platform's path monitor ended before it described the network.
+    #[error("the platform's path monitor ended before describing the network")]
+    MonitorEnded,
+    /// A call to the platform's network interface failed.
+    #[error("coven can't watch the device's network: `{call}` failed")]
+    Platform {
+        /// The call that failed.
+        call: &'static str,
+        /// What the platform answered.
+        #[source]
+        source: std::sync::Arc<dyn std::error::Error + Send + Sync>,
+    },
+}
 
-#[cfg(any(target_vendor = "apple", target_os = "android", target_os = "linux", windows))]
+#[cfg(any(target_os = "android", target_os = "linux", windows))]
 impl NetworkWatchError {
-    /// The platform's failure, as its text.
-    pub(crate) fn new(failure: impl std::fmt::Display) -> Self {
-        Self(failure.to_string())
+    /// The platform's answer to a failed `call`.
+    pub(crate) fn platform(
+        call: &'static str,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Platform { call, source: std::sync::Arc::new(source) }
     }
 }
 

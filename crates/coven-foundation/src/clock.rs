@@ -55,14 +55,47 @@ pub trait Clock: Send + Sync {
 
 /// A clock couldn't wait for a wall-clock time (§13.2): the system refused
 /// its timer, or the clock has none.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("coven can't wait for a wall-clock time: {0}")]
-pub struct WallTimerError(String);
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum WallTimerError {
+    /// The clock has no timer for a wall-clock time: a platform without one,
+    /// or a clock that can't say when its reading reaches it.
+    #[error("this clock has no wall-clock timer coven can wait on")]
+    NoTimer,
+    /// The time is past what the system's wall timer holds.
+    #[error("the time is past what the system's wall timer holds")]
+    OutOfRange {
+        /// The failed conversion, where the system's timer takes the time
+        /// as an integer of another size.
+        #[source]
+        source: Option<std::num::TryFromIntError>,
+    },
+    /// The system couldn't create its timer source.
+    #[error("the system couldn't create a timer source")]
+    TimerSource,
+    /// A call that arms or waits on the system's timer failed.
+    #[error("the system's `{call}` failed")]
+    System {
+        /// The call that failed.
+        call: &'static str,
+        /// What the system answered.
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+    /// An app's own clock failed to wait.
+    #[error("the clock failed to wait for a wall-clock time")]
+    Clock(#[source] Arc<dyn std::error::Error + Send + Sync>),
+}
 
 impl WallTimerError {
-    /// The failure, as its text.
-    pub fn new(failure: impl std::fmt::Display) -> Self {
-        Self(failure.to_string())
+    /// A failure of an app's own clock, which it reports as this.
+    pub fn clock(failure: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Clock(Arc::new(failure))
+    }
+
+    /// The system's answer to a failed `call`.
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    pub(crate) fn system(call: &'static str, source: impl Into<std::io::Error>) -> Self {
+        Self::System { call, source: Arc::new(source.into()) }
     }
 }
 
@@ -107,9 +140,7 @@ fn wall_timer_sleep(
 fn wall_timer_sleep(
     _at: SystemTime,
 ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
-    Box::pin(std::future::ready(Err(WallTimerError::new(
-        "this platform has no wall-clock timer coven uses",
-    ))))
+    Box::pin(std::future::ready(Err(WallTimerError::NoTimer)))
 }
 
 /// Linux and Android count suspension only in `CLOCK_BOOTTIME`.
@@ -279,9 +310,7 @@ impl<F: Fn() -> SystemTime + Send + Sync> Clock for ClosureClock<F> {
         &self,
         _at: SystemTime,
     ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
-        Box::pin(std::future::ready(Err(WallTimerError::new(
-            "a closure clock has no timer for its readings",
-        ))))
+        Box::pin(std::future::ready(Err(WallTimerError::NoTimer)))
     }
 }
 

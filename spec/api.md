@@ -571,12 +571,26 @@ pub trait Clock: Send + Sync {
 }
 
 /// A clock couldn't wait for a wall-clock time (§13.2): the system refused
-/// its timer, or the clock has none. `new` keeps the cause's text, for an
-/// app's own clock to report its failure.
-pub struct WallTimerError { /* private fields */ }
+/// its timer, or the clock has none. Each failure keeps its cause as the
+/// error's source.
+#[derive(Clone, Debug)]
+pub enum WallTimerError {
+    /// The clock has no timer for a wall-clock time: a platform without one,
+    /// or a clock that can't say when its reading reaches it.
+    NoTimer,
+    /// The time is past what the system's wall timer holds; `source` is the
+    /// failed conversion where the timer takes the time as another integer.
+    OutOfRange { source: Option<TryFromIntError> },
+    /// The system couldn't create its timer source.
+    TimerSource,
+    /// A call that arms or waits on the system's timer failed.
+    System { call: &'static str, source: Arc<std::io::Error> },
+    /// An app's own clock failed to wait; `clock` builds it.
+    Clock(Arc<dyn Error + Send + Sync>),
+}
 
 impl WallTimerError {
-    pub fn new(failure: impl Display) -> Self;
+    pub fn clock(failure: impl Error + Send + Sync + 'static) -> Self;
 }
 
 /// A shared clock supplied when opening a store (Appendix F.2).
@@ -1257,9 +1271,17 @@ pub enum CovenError {
     DeviceLocked { path: PathBuf },
 }
 
-/// Why coven can't watch the device's network (E5): the platform's own
-/// failure, with its text.
-pub struct NetworkWatchError { /* private fields */ }
+/// Why coven can't watch the device's network (E5). Each failure keeps the
+/// platform's own error as its source.
+#[derive(Clone, Debug)]
+pub enum NetworkWatchError {
+    /// The platform's path monitor couldn't be created.
+    MonitorUnavailable,
+    /// The platform's path monitor ended before it described the network.
+    MonitorEnded,
+    /// A call to the platform's network interface failed.
+    Platform { call: &'static str, source: Arc<dyn Error + Send + Sync> },
+}
 
 /// Invalid input to the pure merge; no partially changed state is returned.
 pub enum MergeError {

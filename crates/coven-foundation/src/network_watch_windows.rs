@@ -41,15 +41,15 @@ impl ProfileWatch {
             });
             Ok(())
         });
-        let token =
-            NetworkInformation::NetworkStatusChanged(&handler).map_err(NetworkWatchError::new)?;
+        let token = NetworkInformation::NetworkStatusChanged(&handler)
+            .map_err(|error| NetworkWatchError::platform("NetworkStatusChanged", error))?;
         // Dropped on a failed read, which removes the registration.
         let watch = Self { token };
         let read = {
             let mut sink = lock_unpoisoned(&sink);
             network().map(|network| sink.observe(network))
         };
-        read.map_err(NetworkWatchError::new)?;
+        read.map_err(|error| NetworkWatchError::platform("read the connection profile", error))?;
         Ok(watch)
     }
 }

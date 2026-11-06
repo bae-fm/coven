@@ -82,7 +82,7 @@ impl PathMonitor {
         let watch = unsafe {
             let monitor = nw_path_monitor_create();
             if monitor.is_null() {
-                return Err(NetworkWatchError::new("the path monitor could not be created"));
+                return Err(NetworkWatchError::MonitorUnavailable);
             }
             let queue = dispatch_queue_create(c"fm.coven.network".as_ptr(), std::ptr::null_mut());
             nw_path_monitor_set_queue(monitor, queue);
@@ -90,9 +90,7 @@ impl PathMonitor {
             nw_path_monitor_start(monitor);
             Self { monitor, queue }
         };
-        described.recv().map_err(|_gone| {
-            NetworkWatchError::new("the path monitor ended before describing the path")
-        })?;
+        described.recv().map_err(|_gone| NetworkWatchError::MonitorEnded)?;
         Ok(watch)
     }
 }
