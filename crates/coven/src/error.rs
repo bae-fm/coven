@@ -407,9 +407,13 @@ pub enum StoreKeyUnlockError {
     /// The provider refused or failed a request.
     #[error(transparent)]
     Storage(StorageError),
-    /// An authenticated key could not be opened.
+    /// Unlocking connected while a storage setup past its point of no
+    /// return was still finishing, so it finished that setup (§11.6), and
+    /// making a key or sealing a key copy for an operation settled there
+    /// failed: the device's random source failed, or the recipient's
+    /// sealing key is of low order.
     #[error(transparent)]
-    Crypto(#[from] CryptoError),
+    Crypto(CryptoError),
     /// Custody refused to read or persist keys.
     #[error(transparent)]
     SecureStorage(KeyError),

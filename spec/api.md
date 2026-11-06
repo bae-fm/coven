@@ -5115,7 +5115,11 @@ pub enum StoreKeyUnlockError {
     NoStorage,
     /// Reading the sealed key failed.
     Storage(StorageError),
-    /// The sealed key could not be opened or checked.
+    /// Unlocking connected while a storage setup past its point of no
+    /// return was still finishing, so it finished that setup (§11.6), and
+    /// making a key or sealing a key copy for an operation settled there
+    /// failed: the device's random source failed, or the recipient's
+    /// sealing key is of low order.
     Crypto(CryptoError),
     /// Unlocking or keeping keys in custody failed.
     SecureStorage(KeyError),
