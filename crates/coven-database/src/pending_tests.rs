@@ -42,6 +42,8 @@ enum Reason {
     Refused,
     Update(u32),
     WritesRefused,
+    /// A move's original is missing: the record names the move.
+    Original(i64),
 }
 impl PendingValue for Record {
     fn provider_access(id: OperationId, _account: String, _grant: bool) -> Self {
@@ -91,7 +93,10 @@ impl PendingValue for Record {
         self.operation
     }
     fn move_of(&self) -> Option<crate::MoveId> {
-        None
+        match self.reason {
+            Reason::Original(of) => Some(crate::MoveId(of)),
+            _ => None,
+        }
     }
     fn pin_of(&self) -> Option<coven_foundation::id_source::FileId> {
         None
@@ -108,7 +113,7 @@ impl PendingValue for Record {
     const BUILD: u128 = 1;
     fn can_retry(&self, build: u128, schema: u32) -> bool {
         match self.reason {
-            Reason::Missing => true,
+            Reason::Missing | Reason::Original(_) => true,
             Reason::WritesRefused => false,
             Reason::Refused => build != Self::BUILD,
             Reason::Update(required) => schema >= required,
@@ -124,6 +129,10 @@ impl PendingValue for Record {
 /// A missing-object record about a numbered subject with no operation.
 pub(crate) fn missing(subject: u64) -> Record {
     Record { subject: subject.into(), reason: Reason::Missing, operation: None, cause: None }
+}
+/// A record that a move's original is missing, about a numbered subject.
+pub(crate) fn moving(subject: u64, of: crate::MoveId) -> Record {
+    Record { subject: subject.into(), reason: Reason::Original(of.0), operation: None, cause: None }
 }
 pub(crate) fn operation_record(id: OperationId) -> Record {
     Record {

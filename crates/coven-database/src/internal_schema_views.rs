@@ -102,9 +102,10 @@ pub(super) const SCHEMA: &str = concat!(
     // device: the files an upload switches, or the stored files, and a
     // record about a pin coven keeps names its file. Its cause is the text
     // of the error behind it, when this run met that error and no app call
-    // received it.
-    "CREATE VIEW coven_pending(record,file,position,cause) AS
-        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause
+    // received it. A record about a move names it in `move`, the id
+    // `coven_uploads.move` holds.
+    "CREATE VIEW coven_pending(record,file,position,cause,move) AS
+        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause,e.move
         FROM _coven_pending AS e
         LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.file=e.file
         LEFT JOIN _coven_upload_files AS l ON l.upload=u.id

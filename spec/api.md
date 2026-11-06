@@ -3120,7 +3120,8 @@ pub enum FileSource {
 }
 
 /// One move's identity on this device, never reused (§17.3). ToSql/FromSql
-/// bind/read it as an SQL integer, as `coven_uploads.move` holds it (E4).
+/// bind/read it as an SQL integer, as `coven_uploads.move` and
+/// `coven_pending.move` hold it (E4).
 pub struct MoveId(pub i64);
 
 /// A file of this device, on it only, to move to the cloud (§17.3).
@@ -3474,6 +3475,7 @@ let moved = handle
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
+| | `move` | for a record about a move, such as its original found missing, the move, read as `MoveId` and joined to `coven_uploads.move`; NULL otherwise |
 | `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
@@ -3507,7 +3509,8 @@ impl types::FromSql for OperationKind;
 impl types::FromSql for OperationOutcome;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
-/// Reads `coven_uploads.move`, the move `cancel_move` takes.
+/// Reads `coven_uploads.move` and `coven_pending.move`, the move
+/// `cancel_move` takes.
 impl types::FromSql for MoveId;
 ```
 

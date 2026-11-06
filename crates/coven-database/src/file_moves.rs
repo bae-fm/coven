@@ -13,7 +13,7 @@ use crate::{sqlite::DatabaseConnection, DbError};
 pub struct MoveId(pub i64);
 
 /// A move id bound and read as an SQL integer, as `coven_uploads.move`
-/// holds it for the app's `cancel_move` (E4).
+/// and `coven_pending.move` hold it for the app's `cancel_move` (E4).
 impl rusqlite::ToSql for MoveId {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         Ok(self.0.into())

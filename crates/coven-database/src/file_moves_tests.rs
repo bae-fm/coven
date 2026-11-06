@@ -219,6 +219,43 @@ async fn coven_uploads_names_each_files_move() {
     db.close().await.unwrap();
 }
 
+/// `coven_pending.move` names the move a record is about, so app SQL joins a
+/// move's record to the move's uploads in `coven_uploads`, and is NULL for a
+/// record about no move (E4).
+#[tokio::test]
+async fn coven_pending_names_the_move_a_record_is_about() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let local = stage(&db, &["a"], Place::DeviceOnly).await;
+    let moved = move_files(&db, local.iter().copied().map(MoveFile::App).collect()).await.unwrap();
+    db.record_pending(crate::pending::tests::moving(1, moved)).await.unwrap();
+    db.record_pending(crate::pending::tests::missing(2)).await.unwrap();
+    let listed = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT p.position,p.move FROM coven_pending AS p ORDER BY p.position",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<MoveId>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.iter().map(|(_, of)| *of).collect::<Vec<_>>(), [Some(moved), None]);
+    let joined = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT f.id FROM coven_pending AS p JOIN coven_uploads AS u ON u.move=p.move
+                 JOIN files AS f ON f.file=u.file",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(joined, ["a"]);
+    db.close().await.unwrap();
+}
+
 /// A move takes only files on this device only with no upload queued:
 /// another device's file, a file in the cloud or already moving, and one
 /// this device has no record of are refused.
