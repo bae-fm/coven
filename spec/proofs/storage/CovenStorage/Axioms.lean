@@ -217,6 +217,7 @@ import CovenStorage
 #print axioms CovenStorage.UploadSession.marked_shared_never
 #print axioms CovenStorage.UploadSession.abort_sweeps
 #print axioms CovenStorage.UploadSession.unmarked_aborts
+#print axioms CovenStorage.UploadSession.refusal_unmarks
 #print axioms CovenStorage.UploadSession.retired_no_session
 #print axioms CovenStorage.UploadSession.retire_needs_no_session
 #print axioms CovenStorage.UploadSession.forgotten_by_abort

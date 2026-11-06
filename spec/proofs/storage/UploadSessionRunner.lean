@@ -19,6 +19,7 @@ private def parseFault (fault : Json) : Except String Fault := do
   | "none" => pure .none
   | "expire" => pure .expire
   | "fail" => pure (.fail (← parseClass (← fault.getObjValAs? String "class")))
+  | "refuse" => pure (.refuse (← parseClass (← fault.getObjValAs? String "class")))
   | "lose_begin" => pure .loseBegin
   | "lose_completion" => pure .loseCompletion
   | "pause" => pure .pause

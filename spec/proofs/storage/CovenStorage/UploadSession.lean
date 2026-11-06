@@ -15,7 +15,9 @@ the place is the device's own, the upload's next attempt, or the abort of an
 upload no file waits for, ends every stray there before anything else. Where
 it is shared, nothing tells a stray from another device's session, so a
 marked plan there fails for good; an unmarked one has nothing at its place,
-and resumes or is forgotten anywhere. -/
+and resumes or is forgotten anywhere. A begin refused before its request goes
+out, as when the publication gate closes after the part's admission, began
+nothing, and its failure leaves the plan unmarked. -/
 namespace CovenStorage.UploadSession
 
 /-- api.md E5: how a storage failure clears, which says when an upload retries
@@ -168,6 +170,11 @@ inductive Step where
   /-- The provider begins the session of a marked plan; the reply may be
   lost, and the session it began is then a stray. -/
   | begin (replied : Bool)
+  /-- The begin of a marked plan's session is refused before its request
+  goes out, as when the publication gate closes after the part's admission:
+  nothing began, so the attempt fails with class `c` and the row's plan is
+  unmarked again. -/
+  | refuse (c : Class)
   /-- The attempt stops before its first part, as a pause stops it; the row
   keeps its plan. -/
   | pause
@@ -266,6 +273,13 @@ def Step.apply (s : State) : Step → State
       if r.recorded = .plan true then
         if replied then { s with session := some [], attempt := .holding 0 }
         else failWith { s with stray := s.stray + 1 } .automatic
+      else s
+    | _, _ => s
+  | .refuse c =>
+    match s.row, s.attempt with
+    | some r, .planned =>
+      if r.recorded = .plan true then
+        failWith { s with row := some { r with recorded := .plan false } } c
       else s
     | _, _ => s
   | .pause =>
@@ -602,6 +616,26 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             · intro r'' n held _ _ h; simp [gone] at h
             · intro held h; simp [gone] at h
             · intro _; exact ⟨r, by simp, hplan⟩
+        · simp only [Step.apply, hr, hat, hplan, ite_false]
+          exact g
+      | _ => simpa [Step.apply, hr, hat] using g
+  | refuse c =>
+    cases hr : s.row with
+    | none => simpa [Step.apply, hr] using g
+    | some r =>
+      cases hat : s.attempt with
+      | planned =>
+        obtain ⟨gone, _⟩ := pl hat
+        have clean : s.stray = 0 := sw (by simp [hat])
+        by_cases hplan : r.recorded = .plan true
+        · simp only [Step.apply, hr, hat, hplan, ite_true]
+          apply failWith_good_of
+          · intro held h; simp [gone] at h
+          · intro held h; simp [gone] at h
+          · exact w
+          · intro r'' n held _ _ h; simp [gone] at h
+          · intro held h; simp [gone] at h
+          · intro h; simp [clean] at h
         · simp only [Step.apply, hr, hat, hplan, ite_false]
           exact g
       | _ => simpa [Step.apply, hr, hat] using g
@@ -1012,6 +1046,19 @@ theorem only_mark_marks (s : State) (st : Step) (r r' : Row) (hr : s.row = some 
       (repeat' split at after) <;> (try cases ‹Option Class›) <;>
       (try simp only [Option.some.injEq] at after) <;> (try subst after) <;> simp_all
 
+/-- E.10: a begin refused before its request goes out, as when the publication
+gate closes after the part's admission, leaves the plan unmarked and the
+upload failed by the refusal's class: nothing began, so the row never says a
+session may have. With `unmarked_resumes` and `unmarked_aborts`, the upload
+then goes on, or is forgotten, at any place, the device's own or shared. -/
+theorem refusal_unmarks (s : State) (r : Row) (c : Class) (hr : s.row = some r)
+    (hat : s.attempt = .planned) (marked : r.recorded = .plan true) :
+    (Step.refuse c).apply s =
+      { s with attempt := .idle,
+               row := some { r with recorded := .plan false, failure := some c,
+                                    wait := c.wait } } := by
+  simp [Step.apply, hr, hat, marked, failWith]
+
 /-- Every stray sits at the place of the marked plan the row records, so the
 row finds it again. -/
 theorem stray_named (s : State) (g : Good s) (h : 0 < s.stray) :
@@ -1276,14 +1323,17 @@ inductive PartFault where
   deriving DecidableEq, Repr
 
 /-- What the provider does to one run: nothing; expire its sessions before the
-run's first request; fail that request with a class; lose the reply to the
-begin of a planned session; act on the part after `k` confirmed ones; or lose
-the completion reply. Or the app pauses uploads as the attempt records its
-plan, so it stops before its first part. -/
+run's first request; fail that request with a class; refuse the begin of a
+planned session with a class before its request goes out, as a publication
+gate that closed after the part's admission does; lose the reply to that
+begin; act on the part after `k` confirmed ones; or lose the completion
+reply. Or the app pauses uploads as the attempt records its plan, so it stops
+before its first part. -/
 inductive Fault where
   | none
   | expire
   | fail (c : Class)
+  | refuse (c : Class)
   | loseBegin
   | afterParts (k : Nat) (then_ : PartFault)
   | loseCompletion
@@ -1316,13 +1366,14 @@ def partsPlan (s : State) (fault : Fault) : List Step :=
 /-- What follows the attempt's first request: a resumed session is recorded
 as the provider holds it; a planned one is marked and begun, unless a pause
 stops the attempt first. The begin is the first request of an attempt whose
-open sent none, so a failure meets it there: the start is refused, the plan
-already marked. -/
+open sent none, so a failure meets it there, the plan already marked; one
+refused before its request goes out unmarks the plan again. -/
 def openedPlan (s : State) (fault : Fault) : List Step :=
   match s.attempt with
   | .planned =>
     match fault with
     | .pause => [.pause]
+    | .refuse c => [.mark, .refuse c]
     | .loseBegin => [.mark, .begin false]
     | .fail c => [.mark, .fail c]
     | _ => .mark :: .begin true :: partsPlan (runSteps s [.mark, .begin true]) fault
