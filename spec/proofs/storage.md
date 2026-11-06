@@ -348,6 +348,38 @@ records, the provider's live session and its parts, the sessions it began that
 the row never named, the published object, the switched file and the class of
 the pending failure.
 
+## Sharing with accounts
+
+[ProviderAccess.lean](storage/CovenStorage/ProviderAccess.lean) models one
+account's provider access on the owner's device (§20.9): the access the applied
+sequence intends, the access the device has confirmed, at most one request,
+and the provider's own state. A request fixes its target from the intention
+before it is sent and clears what was confirmed; an entry that changes the
+intention while it runs lets it finish; a request without a conclusive reply
+is reported failed and fixed again on retry; a success reply confirms its
+target and ends the account's work only if the target is still intended,
+otherwise queuing the opposite request in the same commit.
+
+`steps_good` keeps three facts: nothing is confirmed while a request runs,
+confirmed access is what the provider holds, and an account with no work left
+is confirmed at its intention. `settled_matches` follows: whenever the owner's
+device has no request left for an account, the provider holds exactly the
+intended access, however the intention changed while requests ran.
+`obsolete_reversed`: confirming a target the intention has left queues the
+opposite request, and the next request sent targets the intention.
+`settles`: from any work left, a run in which the provider answers reaches no
+work left at the same intention. `no_recheck_reports_stale` is the
+counterexample: ending the work on every success reply reports Dan's access
+settled while the provider still grants it, his removal having applied while
+the grant ran.
+
+The model takes as given that a success reply means the provider applied the
+request, which the live sharing tests check (storage-certification.md). It
+leaves out the invitation a grant returns, grants the provider keeps that
+coven didn't make (`AccessRemains`), changes the person makes at the provider,
+and the order of different accounts' requests, which the owner's device sends
+one at a time.
+
 ## Hybrid timestamps and retry time
 
 [Clocks.lean](storage/CovenStorage/Clocks.lean) orders a local timestamp after

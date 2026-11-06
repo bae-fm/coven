@@ -9465,7 +9465,11 @@ The owner's device keeps actual access close to intent this way:
 - Before each request it reads the current intended access. If a later entry
   changes what's intended while a request runs, it lets that request finish. If
   a completed request has since become obsolete, it records and sends the
-  opposite request before reporting that account's work complete.
+  opposite request before reporting that account's work complete. So an
+  account's work ends only with the provider holding the intended access
+  ([`settled_matches`](proofs/storage/CovenStorage/ProviderAccess.lean)); ending
+  it on every success reply would leave a removed member's grant in place
+  ([`no_recheck_reports_stale`](proofs/storage/CovenStorage/ProviderAccess.lean)).
 - Pending and failed requests stay in the operation journal (§11.4) and the
   pending list (§19.1).
 
@@ -11835,6 +11839,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A copy that checks a free name and then writes it lets two racers both win | `check_then_write_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* A conditional PUT racing a copy can be accepted beside it | `put_racing_copy_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* At most one store's setup passes per location, however far listings lag | `at_most_one_store` | `proofs/storage/CovenStorage/LocationClaim.lean` | §20.3 |
+| *Body.* The owner's device ends an account's sharing work only with the provider holding the intended access, however the intention changed while requests ran; a confirmed request the intention has left queues the opposite one; once the intention holds still the work settles. Assumes a success reply means the provider applied the request | `steps_good`, `settled_matches`, `obsolete_reversed`, `settles` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
+| *Body.* Ending an account's work on every success reply, without comparing the target with the intention, reports a removed member's access settled while the provider still grants it | `no_recheck_reports_stale` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | With an atomic copy, copy publication is create-once: same effect as a create, temporaries hidden, one winner per race, lost replies settled by the marker, a marker means the session's bytes | `copy_is_create`, `stage_hidden`, `race_one_winner`, `lost_reply_settles`, `marker_settles_bytes` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | When every publication of a name is a conditional copy, at most one is accepted in any order, and none if the name was taken | `every_copy_at_most_one`, `copied_at_most` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |

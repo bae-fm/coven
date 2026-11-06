@@ -234,3 +234,9 @@ import CovenStorage
 #print axioms CovenStorage.LocalBytes.delete_spares_rows
 #print axioms CovenStorage.LocalBytes.early_commit_strands
 #print axioms CovenStorage.LocalBytes.unrecorded_file_lost
+
+#print axioms CovenStorage.ProviderAccess.steps_good
+#print axioms CovenStorage.ProviderAccess.settled_matches
+#print axioms CovenStorage.ProviderAccess.obsolete_reversed
+#print axioms CovenStorage.ProviderAccess.settles
+#print axioms CovenStorage.ProviderAccess.no_recheck_reports_stale
