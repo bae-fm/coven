@@ -209,10 +209,14 @@ import CovenStorage
 #print axioms CovenStorage.UploadSession.expired_starts_over
 #print axioms CovenStorage.UploadSession.steps_keep_fixed
 #print axioms CovenStorage.UploadSession.begin_needs_plan
+#print axioms CovenStorage.UploadSession.only_mark_marks
 #print axioms CovenStorage.UploadSession.stray_named
 #print axioms CovenStorage.UploadSession.steps_stray_le
 #print axioms CovenStorage.UploadSession.open_sweeps
+#print axioms CovenStorage.UploadSession.unmarked_resumes
+#print axioms CovenStorage.UploadSession.marked_shared_never
 #print axioms CovenStorage.UploadSession.abort_sweeps
+#print axioms CovenStorage.UploadSession.unmarked_aborts
 #print axioms CovenStorage.UploadSession.retired_no_session
 #print axioms CovenStorage.UploadSession.retire_needs_no_session
 #print axioms CovenStorage.UploadSession.forgotten_by_abort

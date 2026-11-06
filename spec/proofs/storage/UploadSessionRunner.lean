@@ -21,6 +21,7 @@ private def parseFault (fault : Json) : Except String Fault := do
   | "fail" => pure (.fail (← parseClass (← fault.getObjValAs? String "class")))
   | "lose_begin" => pure .loseBegin
   | "lose_completion" => pure .loseCompletion
+  | "pause" => pure .pause
   | "parts" =>
     let k ← fault.getObjValAs? Nat "parts"
     let pf ← match ← fault.getObjValAs? String "then" with
@@ -55,9 +56,11 @@ private def step (s : State) (event : Json) : Except String State := do
   | "reopen" => pure (Step.crash.apply s)
   | other => throw s!"unknown event {other}"
 
+/-- One case: the file's parts and the events, at a place that is the
+device's own, a file's in its folder. -/
 private def runCase (input : Json) : Except String Json := do
   let total ← input.getObjValAs? Nat "total"
-  let mut s := initial total ⟨1, 1, List.range total⟩
+  let mut s := initial total ⟨1, 1, List.range total, true⟩
   let mut seen := #[]
   for event in ← input.getObjValAs? (Array Json) "events" do
     s ← step s event
