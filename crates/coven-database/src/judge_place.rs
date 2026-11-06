@@ -7,10 +7,13 @@
 //! the new one's, at one position, whether the row's own update made it or
 //! the move of an ancestor that carried the row along. So the last earlier
 //! step on any row with that key says where the key is: in that row, at the
-//! incarnation the step made, or nowhere after a delete. Only a change of no
-//! step at all changes a row silently: a migration difference, or a removed
-//! row a move carries, which SQLite's tables never held. Once the write
-//! holds such a change for the key, its steps don't say.
+//! incarnation the step made, or nowhere after a delete.
+//!
+//! The write can also change a row at no step of its own: a migration
+//! difference, or a removed row a move carries, which SQLite's tables never
+//! held and so is never the row the key is in. Such a change leaves the
+//! steps standing unless it may have moved the key where the reference
+//! looks (Lean `Place.resolve_sound`).
 //!
 //! A row change names its parents as the whole write leaves them, at the
 //! generation the write's own record of each parent leaves it at, which an
@@ -28,68 +31,72 @@ pub(crate) enum Place<'a> {
     /// No earlier step touched a row with the key: it is as the authoring
     /// view holds it, which no step carries.
     Untouched,
-    /// No step says where the key is: the write changed a row with it at no
-    /// step of its own, or steps on two of its rows share a position without
-    /// being a move's halves.
+    /// Steps on two of its rows share a position without being a move's
+    /// halves, which no SQL makes.
     Unplaced,
     /// The last earlier step on a row with the key, and that row.
     Last(&'a RowId, &'a Indexed),
 }
 
-/// The parent a row change's reference names for a key (Lean `namedNet`).
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum NetParent {
-    /// No step touched the key: the parent its setter recorded, which an
-    /// action's step through the reference names too.
-    Setter,
-    /// The row the write's steps leave the key in at its end, at the
-    /// generation the write's record of that row leaves it at, when it is
-    /// present there in an audience the reference may name; none otherwise.
-    Named(Option<Parent>),
-}
-
 impl StepIndex {
     /// Where `key` of `table` is before `sequence`, as its rows' last step
-    /// there says: the step itself shows where the key was when it ran, even
-    /// when a change of no step of its own moved the key afterwards.
-    pub(crate) fn last_on_key(&self, table: &str, key: &[u8], sequence: u32) -> Place<'_> {
+    /// there says (Lean `Place.place`).
+    pub(crate) fn place(&self, table: &str, key: &[u8], sequence: u32) -> Place<'_> {
         self.last(table, key, Some(sequence))
     }
 
-    /// Where `key` of `table` is before `sequence`: as [`Self::last_on_key`]
-    /// says, unless the write changed a row with the key at no step of its
-    /// own, which may have moved it since.
-    pub(crate) fn place(&self, table: &str, key: &[u8], sequence: u32) -> Place<'_> {
-        self.placed(table, key, Some(sequence))
+    /// The parent a reference of a row in `child` records for `key` of
+    /// `table`, found at `place` (Lean `Place.resolve`), given the parent
+    /// its setter recorded and the generation a step's row names; none when
+    /// a row with the key the write changed at no step of its own may have
+    /// moved it where the reference looks. A step's row stands unless that
+    /// change was on it. After a delete, or in an audience the reference
+    /// can't name, there is no parent, unless such a change was on a row it
+    /// can name. With no step, the setter's parent stands unless that change
+    /// was on it, and no parent stands unless it was on a row the reference
+    /// can name.
+    pub(crate) fn resolve(
+        &self,
+        table: &str,
+        key: &[u8],
+        place: Place<'_>,
+        child: &Audience,
+        setter: Option<&Parent>,
+        generation: impl Fn(&RowId, &Indexed) -> u64,
+    ) -> Option<Option<Parent>> {
+        let seen = |audience: &Audience| *audience == Audience::Store || audience == child;
+        let marked = |row: &RowId| self.unstepped.contains(row);
+        let reached = self.key_rows(table, key).any(|(row, _)| marked(row) && seen(&row.audience));
+        match place {
+            Place::Unplaced => None,
+            Place::Last(row, step) if step.delete || marked(row) => {
+                let named = !step.delete && seen(&row.audience);
+                (!named && !reached).then_some(None)
+            }
+            Place::Last(row, step) => Some(
+                seen(&row.audience)
+                    .then(|| Parent { row: row.clone(), generation: generation(row, step) }),
+            ),
+            Place::Untouched => match setter {
+                Some(parent) => (!marked(&parent.row)).then(|| Some(parent.clone())),
+                None => (!reached).then_some(None),
+            },
+        }
     }
 
-    /// The parent a row change's reference names for `key` of `table`
-    /// (Lean `namedNet`), given which audiences it may name a parent in;
-    /// none when no step says where the key is.
+    /// The parent a row change's reference of a row in `child` names for
+    /// `key` of `table` (Lean `namedNet`): [`Self::resolve`] where the
+    /// whole write's steps leave the key, at the generation the write's
+    /// record of that row leaves it at.
     pub(crate) fn net_parent(
         &self,
         table: &str,
         key: &[u8],
-        readable: impl Fn(&Audience) -> bool,
-    ) -> Option<NetParent> {
-        match self.placed(table, key, None) {
-            Place::Untouched => Some(NetParent::Setter),
-            Place::Unplaced => None,
-            Place::Last(row, step) => Some(NetParent::Named(
-                (!step.delete && readable(&row.audience))
-                    .then(|| Parent { row: row.clone(), generation: self.rows[row].ends }),
-            )),
-        }
-    }
-
-    /// Where `key` of `table` is before `before`, or once the write's SQL
-    /// has run when `before` is none, unless a row with the key changed at
-    /// no step of its own.
-    fn placed(&self, table: &str, key: &[u8], before: Option<u32>) -> Place<'_> {
-        if self.key_rows(table, key).any(|(row, _)| self.unstepped.contains(row)) {
-            return Place::Unplaced;
-        }
-        self.last(table, key, before)
+        child: &Audience,
+        setter: Option<&Parent>,
+    ) -> Option<Option<Parent>> {
+        let place = self.last(table, key, None);
+        self.resolve(table, key, place, child, setter, |row, _| self.rows[row].ends)
     }
 
     /// The last step on a row with `key` of `table` before `before`, or of

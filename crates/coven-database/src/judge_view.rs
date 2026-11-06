@@ -13,7 +13,7 @@
 //! `heldConsequence`, which `tests::classification_matches_the_model`
 //! compares.
 
-use crate::judge::{Indexed, NetParent, Place, StepIndex};
+use crate::judge::{Indexed, Place, StepIndex};
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sqlite::DatabaseConnection;
@@ -23,7 +23,7 @@ use crate::DbError;
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
 use coven_format::write::{Half, Step};
-use coven_merge::{Audience, Change, ColumnValue, ForeignKey, Operation, Parent, RowId};
+use coven_merge::{Change, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::BTreeMap;
 
 /// The schema a write was authored under: the current one, unless a
@@ -248,7 +248,7 @@ impl<'a> ChildView<'a> {
                 continue;
             }
             let parents: Vec<(RowId, u64)> =
-                match index.last_on_key(&parent_table.name, &written, step.sequence) {
+                match index.place(&parent_table.name, &written, step.sequence) {
                     // The row the key's last step left, at the incarnation
                     // that step ended or the one it made.
                     Place::Last(row, last) => {
@@ -288,8 +288,10 @@ impl<'a> ChildView<'a> {
     /// key, where the write's earlier steps leave it, when it is present
     /// there in the child's audience or the store, and none otherwise; when
     /// no step touched the key, the parent its setter recorded, if the action
-    /// leaves the reference as it was. None when the write does not determine
-    /// that row's incarnation (Lean `Overlapping`).
+    /// leaves the reference as it was (Lean `Place.named`). None when the
+    /// write does not determine that row's incarnation (Lean `Overlapping`):
+    /// a key no step touched under a changed reference, or one a row changed
+    /// at no step may have moved.
     #[allow(clippy::type_complexity)]
     fn recorded(
         &self,
@@ -344,22 +346,29 @@ impl<'a> ChildView<'a> {
             let targets = target_columns(parent_table, other);
             let stored = self.authoring.stored(parent_table, &targets, &values)?;
             let written = parent_key(parent_table, &targets, &stored)?;
-            let parent = match index.place(&parent_table.name, &written, step.sequence) {
-                // A reference names a present parent in its own audience or
-                // the store, as SQLite holds it at this step.
-                Place::Last(row, last) => (!last.delete
-                    && (row.audience == Audience::Store || row.audience == self.row.audience))
-                    .then(|| Parent { row: row.clone(), generation: last.after }),
-                // Left as it was, the reference keeps the parent its setter
-                // recorded.
-                Place::Untouched if unchanged => other_columns
-                    .iter()
-                    .find_map(|c| current[c].as_ref().and_then(|cell| cell.parents.get(&name)))
-                    .cloned(),
-                // Pointed at a row the write never touched, or at one no
-                // step places, it names the authoring view's incarnation,
-                // which no step carries.
-                Place::Untouched | Place::Unplaced => return Ok((carried, None)),
+            let place = index.place(&parent_table.name, &written, step.sequence);
+            // Pointed at a row the write never touched, it names the
+            // authoring view's incarnation, which no step carries.
+            if matches!(place, Place::Untouched) && !unchanged {
+                return Ok((carried, None));
+            }
+            // Left as it was, the reference keeps the parent its setter
+            // recorded.
+            let setter = other_columns
+                .iter()
+                .find_map(|c| current[c].as_ref().and_then(|cell| cell.parents.get(&name)));
+            // A reference names a present parent in its own audience or the
+            // store, as SQLite holds it at this step.
+            let resolved = index.resolve(
+                &parent_table.name,
+                &written,
+                place,
+                &self.row.audience,
+                setter,
+                |_, last| last.after,
+            );
+            let Some(parent) = resolved else {
+                return Ok((carried, None));
             };
             if let Some(parent) = parent {
                 for column in other_columns {
@@ -374,8 +383,9 @@ impl<'a> ChildView<'a> {
     /// over its columns names the parent where the whole write leaves its
     /// key, at the generation the write's record of that row leaves it at,
     /// or, when no step touched the key, the parent the steps name, its
-    /// setter's (Lean `Place.namedNet`). None when no step says where a key
-    /// is.
+    /// setter's (Lean `Place.namedNet`). None when a row with a key the
+    /// write changed at no step of its own may have moved it where the
+    /// reference looks.
     pub(crate) fn net(
         &self,
         index: &StepIndex,
@@ -387,8 +397,6 @@ impl<'a> ChildView<'a> {
         let (Operation::Insert(cells) | Operation::Update(cells)) = &mut effect.operation else {
             return Ok(Some(effect));
         };
-        let readable =
-            |audience: &Audience| *audience == Audience::Store || *audience == self.row.audience;
         for key in &table.foreign_keys {
             let Some(parent_table) = self.authoring.table(&key.target) else {
                 continue;
@@ -408,12 +416,14 @@ impl<'a> ChildView<'a> {
             let targets = target_columns(parent_table, key);
             let stored = self.authoring.stored(parent_table, &targets, &values)?;
             let written = parent_key(parent_table, &targets, &stored)?;
-            let parent = match index.net_parent(&parent_table.name, &written, readable) {
-                None => return Ok(None),
-                Some(NetParent::Setter) => continue,
-                Some(NetParent::Named(parent)) => parent,
-            };
             let name = self.authoring.schema.foreign_key(table, key);
+            let setter =
+                columns.iter().find_map(|column| cells[column].parents.get(&name)).cloned();
+            let resolved =
+                index.net_parent(&parent_table.name, &written, &self.row.audience, setter.as_ref());
+            let Some(parent) = resolved else {
+                return Ok(None);
+            };
             for column in &columns {
                 let parents = &mut cells.get_mut(column).expect("the reference's column").parents;
                 parents.remove(&name);

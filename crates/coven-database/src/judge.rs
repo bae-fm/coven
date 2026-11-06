@@ -34,7 +34,7 @@ use coven_format::write::{Half, PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
-pub(crate) use place::{NetParent, Place};
+pub(crate) use place::Place;
 use rusqlite::params;
 use std::collections::BTreeMap;
 

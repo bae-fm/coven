@@ -6,6 +6,7 @@ use crate::author_judgement::tests::{deliver, value, Pair, ANA};
 use crate::judge::tests::{not_owner, receive, verdict};
 use crate::write::tests::{records, sql};
 use crate::{RowIdentity, SyncedTable};
+use coven_format::snapshot_rows::ChangeVerdict;
 use coven_foundation::id_source::CircleId;
 use coven_merge::Operation;
 
@@ -239,9 +240,9 @@ async fn a_reference_to_a_carried_row_is_an_action() {
 
 /// The same write with the track's moves taken out and the review naming
 /// the store's track, whose incarnation the carry ended: the write now
-/// changes the track at no step of its own, so no step says where the track
-/// is, the action is a direct change of Ana's review, and her device refuses
-/// it (§9.6, §15.4).
+/// changes that track, the row the review names, at no step of its own,
+/// which may have moved it anywhere, so the action is a direct change of
+/// Ana's review, and her device refuses it (§9.6, §15.4).
 #[tokio::test]
 async fn a_reference_to_a_row_changed_at_no_step_is_a_direct_change() {
     let pair = album_pair().await;
@@ -286,6 +287,102 @@ async fn a_reference_to_a_row_changed_at_no_step_is_a_direct_change() {
     }
     receive(&pair.ana, &forged).await;
     assert_eq!(verdict(&pair.ana, &forged, &row), not_owner(ANA));
+    pair.close().await;
+}
+
+/// Ben and Ana each move his track into another circle at once, so the
+/// track is in both and each device shows the one whose move came first,
+/// taking the other out. Ana reviews the shown one. Ben's write then moves
+/// the album of the taken-out track into a third circle, which carries the
+/// taken-out track along, and deletes his pair, which sets the review's
+/// pair NULL. The carried track was never in SQLite's tables, so it doesn't
+/// change where the track Ana's review names is (§8.4, §15.4).
+#[tokio::test]
+async fn a_reference_beside_a_carried_removed_row_is_an_action() {
+    const STORE_ALBUM: &str = "00000000-0000-4000-8000-0000000000f0";
+    let circles = [11u128, 12, 13].map(|n| CircleId(uuid::Uuid::from_u128(n)));
+    let albums: [String; 3] =
+        std::array::from_fn(|i| format!("00000000-0000-4000-8000-0000000000f{}", i + 1));
+    let pair = Pair::with(
+        vec![
+            SyncedTable::new("albums", RowIdentity::IndependentUuid).audience_column("audience"),
+            SyncedTable::new("tracks", RowIdentity::IndependentUuid).audience_from("album"),
+            SyncedTable::new("pairs", RowIdentity::SharedKey).owner_only(),
+            SyncedTable::new("combos", RowIdentity::SharedKey).key_columns(["p", "t"]),
+            SyncedTable::new("reviews", RowIdentity::IndependentUuid)
+                .owner_only()
+                .audience_column("audience"),
+        ],
+        "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL);
+         CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
+           album TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE);
+         CREATE TABLE pairs(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE combos(p TEXT NOT NULL, t TEXT NOT NULL, PRIMARY KEY(p, t));
+         CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
+           a TEXT REFERENCES pairs(id) ON DELETE SET NULL, b TEXT REFERENCES tracks(id),
+           FOREIGN KEY(a, b) REFERENCES combos(p, t))",
+    )
+    .await;
+    for circle in circles {
+        pair.circle(circle);
+    }
+    let setup = format!(
+        "INSERT INTO albums VALUES('{STORE_ALBUM}','store'),('{}','{}'),('{}','{}'),('{}','{}');
+         INSERT INTO tracks VALUES('{TRACK}','{STORE_ALBUM}');
+         INSERT INTO pairs VALUES('p');
+         INSERT INTO combos VALUES('p','{TRACK}')",
+        albums[0], circles[0], albums[1], circles[1], albums[2], circles[2]
+    );
+    let ben = pair.ben.clone();
+    ben.write(move |sql| Ok(sql.execute_batch(&setup)?)).await.unwrap();
+    deliver(&pair.ben, &pair.ana).await;
+    // The concurrent moves: Ben's into the first circle, Ana's into the second.
+    for (db, album) in [(&pair.ben, &albums[0]), (&pair.ana, &albums[1])] {
+        let album = album.clone();
+        db.write(move |sql| {
+            sql.execute("UPDATE tracks SET album=?1 WHERE id=?2", [album.as_str(), TRACK])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    deliver(&pair.ben, &pair.ana).await;
+    deliver(&pair.ana, &pair.ben).await;
+    let shown = value(&pair.ana, "SELECT album FROM tracks").unwrap();
+    assert_eq!(value(&pair.ben, "SELECT album FROM tracks").as_ref(), Some(&shown));
+    let (shown, removed) = if shown == albums[0] { (0, 1) } else { (1, 0) };
+    let audience = circles[shown].to_string();
+    pair.ana
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO reviews VALUES(?1,?2,'p',?3)",
+                [REVIEW, audience.as_str(), TRACK],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    let removed = albums[removed].clone();
+    let carry = circles[2].to_string();
+    pair.ben
+        .write(move |sql| {
+            sql.execute("UPDATE albums SET audience=?1 WHERE id=?2", [&carry, &removed])?;
+            sql.execute("DELETE FROM pairs WHERE id='p'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    deliver(&pair.ben, &pair.ana).await;
+    let write = records(&pair.ben).pop().unwrap();
+    let review = write.parts.iter().flat_map(|part| &part.rows).find(|r| r.row.table == "reviews");
+    assert!(matches!(verdict(&pair.ana, &write, &review.unwrap().row), ChangeVerdict::Derived(_)));
+    // The track taken out keeps its own loss; the review loses nothing.
+    for db in [&pair.ben, &pair.ana] {
+        let review = value(db, "SELECT coalesce(a, 'null') || b FROM reviews");
+        assert_eq!(review, Some(format!("null{TRACK}")));
+        assert!(db.lost_values().await.unwrap().iter().all(|lost| lost.table == "tracks"));
+    }
     pair.close().await;
 }
 
@@ -370,14 +467,15 @@ async fn a_reference_to_a_row_moved_out_and_back_is_an_action() {
 
 /// `StepIndex::place` over the steps the merge model's operations on one
 /// parent key record finds what the model's `place` does, and
-/// `StepIndex::net_parent` what its `namedNet` does (`Place.place_sound`,
-/// `Place.recorded_sound`, `Place.net_sound`).
+/// `StepIndex::resolve` and `StepIndex::net_parent`, given the rows those
+/// operations changed at no step, what its `named` and `namedNet` do
+/// (`Place.place_settles`, `Place.recorded_sound`, `Place.net_sound`).
 mod model {
-    use crate::judge::{Indexed, IndexedRow, NetParent, Place, StepIndex};
+    use crate::judge::{Indexed, IndexedRow, Place, StepIndex};
     use crate::test_utils::tests::run_lean;
     use coven_format::write::Half;
     use coven_foundation::id_source::CircleId;
-    use coven_merge::{Audience, RowId};
+    use coven_merge::{Audience, Parent, RowId};
     use serde_json::{json, Value as Json};
 
     /// A fixed sequence of numbers below a bound.
@@ -414,12 +512,14 @@ mod model {
                 let ops: Vec<Json> = (0..length)
                     .map(|_| {
                         let (audience, inc) = (numbers.below(3), 2 * numbers.below(3) + 1);
-                        match numbers.below(6) {
+                        match numbers.below(8) {
                             0 => json!({"op": "insert", "aud": audience, "inc": inc}),
                             1 => json!({"op": "update"}),
                             2 => json!({"op": "delete"}),
                             3 => json!({"op": "move", "aud": audience, "inc": inc}),
-                            4 => json!({"op": "unstepped", "aud": audience, "inc": inc}),
+                            4 => json!({"op": "unstepped", "to": [audience, inc]}),
+                            5 => json!({"op": "unstepped", "to": null}),
+                            6 => json!({"op": "aside", "aud": audience}),
                             _ => json!({"op": "other"}),
                         }
                     })
@@ -435,9 +535,8 @@ mod model {
 
     /// The index of a write whose steps on the key are `steps`, whose
     /// records leave each audience's row where the case's `ends` says, and
-    /// whose unstepped changes changed the rows they moved the key into at no
-    /// step.
-    fn index(case: &Json, steps: &Json) -> StepIndex {
+    /// that changed the rows of the `marked` audiences at no step.
+    fn index(case: &Json, steps: &Json, marked: &Json) -> StepIndex {
         fn entry<'a>(index: &'a mut StepIndex, case: &Json, audience: u64) -> &'a mut IndexedRow {
             let ends = &case["ends"].as_array().unwrap().iter().find(|end| end[0] == audience);
             index.rows.entry(row(audience)).or_insert(IndexedRow {
@@ -457,8 +556,8 @@ mod model {
                 after: if delete { inc + 1 } else { inc },
             });
         }
-        for op in case["ops"].as_array().unwrap().iter().filter(|op| op["op"] == "unstepped") {
-            let audience = op["aud"].as_u64().unwrap();
+        for audience in marked.as_array().unwrap() {
+            let audience = audience.as_u64().unwrap();
             entry(&mut index, case, audience);
             index.unstepped.insert(row(audience));
         }
@@ -487,19 +586,28 @@ mod model {
         }
     }
 
-    /// The parent a row change in audience 1 names, which may name one in
-    /// its own audience or the store.
-    fn net(index: &StepIndex) -> Json {
-        let readable =
-            |audience: &Audience| *audience == row(0).audience || *audience == row(1).audience;
-        match index.net_parent("tracks", &[1], readable) {
-            None => json!({"kind": "unplaced"}),
-            Some(NetParent::Setter) => json!({"kind": "setter"}),
-            Some(NetParent::Named(parent)) => json!({
-                "kind": "parent",
-                "parent": parent.map(|parent| json!([audience(&parent.row), parent.generation])),
-            }),
+    fn parent(parent: &Option<Parent>) -> Json {
+        parent
+            .as_ref()
+            .map_or(Json::Null, |parent| json!([audience(&parent.row), parent.generation]))
+    }
+
+    fn resolved(resolved: Option<Option<Parent>>) -> Json {
+        match resolved {
+            None => json!({"kind": "refused"}),
+            Some(named) => json!({"kind": "parent", "parent": parent(&named)}),
         }
+    }
+
+    /// The parent a reference of a row in audience 1 records, left as it
+    /// was, before `at`, and the one its row change names, given the parent
+    /// its setter recorded.
+    fn named(index: &StepIndex, at: u32, setter: Option<&Parent>) -> (Json, Json) {
+        let child = row(1).audience;
+        let place = index.place("tracks", &[1], at);
+        let named = index.resolve("tracks", &[1], place, &child, setter, |_, last| last.after);
+        let net = index.net_parent("tracks", &[1], &child, setter);
+        (resolved(named), resolved(net))
     }
 
     #[test]
@@ -516,15 +624,30 @@ mod model {
                 continue;
             }
             let at: u32 = case["at"].as_u64().unwrap().try_into().unwrap();
-            let index = index(case, &lean["steps"]);
+            let index = index(case, &lean["steps"], &lean["marked"]);
             let rust = found(index.place("tracks", &[1], at));
             assert_eq!(rust, lean["place"], "{case}");
             *kinds.entry(rust["kind"].as_str().unwrap().to_owned()).or_default() += 1;
             moves += usize::from(rust["move"] == true);
-            let net = net(&index);
+            let setter = match &lean["setter"] {
+                Json::Null => None,
+                setter => Some(Parent {
+                    row: row(setter[0].as_u64().unwrap()),
+                    generation: setter[1].as_u64().unwrap(),
+                }),
+            };
+            let (named, net) = named(&index, at, setter.as_ref());
+            assert_eq!(named, lean["named"], "{case}");
             assert_eq!(net, lean["net"], "{case}");
-            let named = if net["parent"].is_null() { "none" } else { "parent" };
-            *nets.entry(format!("{}:{named}", net["kind"])).or_default() += 1;
+            let marks = if lean["marked"].as_array().unwrap().is_empty() { "" } else { ":marked" };
+            for resolved in [&named, &net] {
+                let some = if resolved["parent"].is_null() { "none" } else { "parent" };
+                let kind = match resolved["kind"].as_str().unwrap() {
+                    "parent" => format!("{some}{marks}"),
+                    refused => format!("{refused}{marks}"),
+                };
+                *nets.entry(kind).or_default() += 1;
+            }
             // The row change names another incarnation than the key's last step made.
             let last = lean["steps"].as_array().unwrap().last();
             readded +=
@@ -532,9 +655,11 @@ mod model {
                     !net["parent"].is_null() && net["parent"][1] != step["inc"]
                 }));
         }
-        assert!(kinds.values().all(|count| *count >= 100) && kinds.len() == 3, "{kinds:?}");
+        assert!(kinds.values().all(|count| *count >= 100) && kinds.len() == 2, "{kinds:?}");
         assert!(moves >= 50, "{moves} places on a move's half");
-        assert!(nets.values().all(|count| *count >= 100) && nets.len() == 4, "{nets:?}");
+        // Parents and none, with and without rows changed at no step, and
+        // refusals, which only such rows make for a reference left as it was.
+        assert!(nets.values().all(|count| *count >= 100) && nets.len() == 5, "{nets:?}");
         assert!(readded >= 50, "{readded} row changes naming another incarnation");
     }
 }
