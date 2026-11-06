@@ -335,13 +335,20 @@ pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
     work: impl Future<Output = Result<T, E>> + Send + 'static,
 ) -> CompletingTask<Result<T, E>> {
     let (done, completion) = tokio::sync::oneshot::channel();
+    let heard = bugs.clone();
     tokio::spawn(async move {
         if let Err(unheard) = done.send(caught(operation, work).await) {
-            report_unheard(bugs.as_ref(), &unheard);
+            report_unheard(heard.as_ref(), &unheard);
         }
     });
     // The runtime drops a task partway as it shuts down.
-    CompletingTask { operation, dropped: ShutdownOutcome::Unknown, completion }
+    CompletingTask {
+        operation,
+        dropped: ShutdownOutcome::Unknown,
+        bugs,
+        unread: report_unheard::<T, E>,
+        completion,
+    }
 }
 
 /// Run `work`, named `operation`, on the blocking pool, where it runs to its
@@ -355,14 +362,21 @@ pub fn blocking_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
     work: impl FnOnce() -> Result<T, E> + Send + 'static,
 ) -> CompletingTask<Result<T, E>> {
     let (done, completion) = tokio::sync::oneshot::channel();
+    let heard = bugs.clone();
     // The pool runs the closure to its end once it starts, so the closure
     // answers unless the pool dropped it unstarted.
     tokio::task::spawn_blocking(move || {
         if let Err(unheard) = done.send(caught_sync(operation, work)) {
-            report_unheard(bugs.as_ref(), &unheard);
+            report_unheard(heard.as_ref(), &unheard);
         }
     });
-    CompletingTask { operation, dropped: ShutdownOutcome::NotRun, completion }
+    CompletingTask {
+        operation,
+        dropped: ShutdownOutcome::NotRun,
+        bugs,
+        unread: report_unheard::<T, E>,
+        completion,
+    }
 }
 
 /// Hand `bugs` the panic of work nobody waited for, or the bug its error
@@ -378,13 +392,38 @@ fn report_unheard<T, E: CarriesBug>(bugs: &dyn BugSink, unheard: &Result<Result<
 }
 
 /// The result of work [`spawn_completing`] or [`blocking_completing`] runs.
-/// Dropping it leaves the work running.
-#[derive(Debug)]
+/// Dropping it leaves the work running, and the work's panic, or a bug its
+/// error carries, goes to the sink: once the work ends, or as it drops, for
+/// an answer the work gave that no one read.
 pub struct CompletingTask<T> {
     operation: &'static str,
     /// How far the work got if its runtime dropped it.
     dropped: ShutdownOutcome,
+    /// Where an answer no one read reports its bug.
+    bugs: BugSinkRef,
+    /// Hands `bugs` the bug of an answer no one read.
+    unread: fn(&dyn BugSink, &Result<T, Bug>),
     completion: tokio::sync::oneshot::Receiver<Result<T, Bug>>,
+}
+
+impl<T> std::fmt::Debug for CompletingTask<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompletingTask")
+            .field("operation", &self.operation)
+            .field("dropped", &self.dropped)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> Drop for CompletingTask<T> {
+    fn drop(&mut self) {
+        // Closed first, so the work either answered already, and the answer
+        // is read here, or finds no one waiting and reports it itself.
+        self.completion.close();
+        if let Ok(answer) = self.completion.try_recv() {
+            (self.unread)(self.bugs.as_ref(), &answer);
+        }
+    }
 }
 
 impl<T> Future for CompletingTask<T> {

@@ -9072,7 +9072,9 @@ Edge cases:
 - Dropping the future `blocking` or `joined` returns does not stop work
   already spawned: it runs to its end, and its result or panic is dropped.
   Dropping a `spawn_completing` or `blocking_completing` future does not
-  stop its work either, and its panic goes to the bug sink.
+  stop its work either, and its panic goes to the bug sink, as does a bug
+  its error carries. Work that already answered, its answer unread when
+  the future drops, reports that answer's bug as the future drops.
 - A bug sink whose `report` panics is logged at error; its panic goes no
   further, since nothing above it would catch it.
 - Coven's own values never panic as they drop: one dropped during an
@@ -9262,6 +9264,8 @@ pub fn blocking_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
 ) -> CompletingTask<Result<T, E>>;
 
 /// The result of work `spawn_completing` or `blocking_completing` runs, a
-/// future of `Result<T, TaskFailed>`. Dropping it leaves the work running.
+/// future of `Result<T, TaskFailed>`. Dropping it leaves the work running;
+/// the work's bug, or the bug of an answer it gave that no one read, goes to
+/// the sink.
 pub struct CompletingTask<T> { /* private */ }
 ```
