@@ -770,8 +770,11 @@ same role order (D5.6).
 
 **Changes without SQL.** Migration differences have no steps. Nor does a row
 removal rules took out that a move carries along with its ancestor: SQLite's
-tables never held it. A receiver places no reference through a key whose row
-such a change touched (§9.6).
+tables never held it. A receiver places a reference through a key one of whose
+rows such a change touched only while that row can't be where the reference
+looks: not the row the key's last step names, nor the setter's parent, nor,
+where the reference would name no parent, a row in the child's audience or the
+store (§9.6).
 A dismissal records its deletes as steps, a parent before the children whose
 deletes it causes, so receivers can verify the children's permission (§9.6).
 
