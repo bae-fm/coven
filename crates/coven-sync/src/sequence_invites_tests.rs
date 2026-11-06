@@ -713,6 +713,50 @@ async fn a_network_report_ends_an_offline_invite_wait() {
     ana.database().close().await.unwrap();
 }
 
+/// Ana gives Dan her own S3 key in his invite. Coven records the one key id
+/// as both members' access, so removing Dan leaves it Ana's: the app sees
+/// she still uses it, and the key can't be deleted until she replaces it
+/// (§14.3).
+#[tokio::test]
+async fn an_invite_may_carry_a_key_another_member_uses() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+            InviteAccess::S3AccessKey {
+                access_key_id: "ana".into(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+            InviteLifetime::Day,
+        )
+        .await
+        .unwrap();
+    assert_eq!(invite.access, access("ana"));
+    let code = read_invite_code(invite.shown_code()).unwrap();
+    let (temp, directory) = group.directory();
+    let mut request = JoiningIdentity::prepare(&directory, &code, "Dan's phone").unwrap();
+    let dan = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
+    assert!(dan.sync.submit_join(&request).await.unwrap());
+    ana.sync.pass().await.unwrap();
+    ana.sync.approve_join_request(&requests(&ana).await.remove(0)).await.unwrap();
+    assert_eq!(dan.sync.join_outcome(&mut request).await.unwrap(), JoinOutcome::Admitted);
+    let members = ana.database().store_state().await.unwrap().members;
+    assert_eq!(members[&invite.member].access, access("ana"));
+    assert_eq!(members[&ana.identity.member()].access, access("ana"));
+    let removal = coven_format::admin::StoreChange::RemoveMember { member: invite.member };
+    ana.sync.administer(removal).await.unwrap();
+    let members = ana.database().store_state().await.unwrap().members;
+    assert!(members[&invite.member].removed);
+    let ana_member = &members[&ana.identity.member()];
+    assert_eq!((ana_member.removed, &ana_member.access), (false, &access("ana")));
+    for device in [&ana, &dan] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// Cancelling an S3 invite takes back nothing at the provider and records
 /// nothing about its key: the person deletes it in the console (§14.3).
 #[tokio::test]

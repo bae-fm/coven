@@ -2183,7 +2183,7 @@ storage          bytes
 | `initial_key` | the key introduced by creation |
 | `inviting_writer` | the inviting device, whose approval the joiner trusts |
 | `read_through` | the inviting device's applied slot when it issued the invite |
-| `storage` | the code's storage part (below): the provider location, what the new person needs to accept it, and on S3 the joining member's own access key |
+| `storage` | the code's storage part (below): the provider location, what the new person needs to accept it, and on S3 the access key the joining member reaches storage with, which another member may use too (§14.3) |
 
 **Joining.**
 

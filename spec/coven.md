@@ -5019,7 +5019,7 @@ applies the sequence's rules on who counts.
 
 #### 14.3 S3 access keys
 
-On S3, each member reaches storage with their own access key. The person makes
+On S3, each member reaches storage with an access key. The person makes
 every key in the provider's console and gives it to coven: at setup, in an
 invite, or as a replacement. Coven never makes, replaces or deletes a key, and
 never holds the storage account's admin access (§20.10). It records only which
@@ -5044,9 +5044,9 @@ Ana would delete the old key while the new one went on reaching the store
 ([`custody_first_strands`](proofs/sequence/CovenSequence/AccessKeyReplacement.lean)).
 
 **When a key stops being used.** Removing a member, replacing a member's key, or
-ending an invite leaves a key nobody in the store uses. Coven forgets it: it
-records nothing about the key, keeps no notice, and never learns whether the
-person deleted it. The app names the key when the person removes the member or
+ending an invite usually leaves a key nobody in the store uses. Coven forgets
+it: it records nothing about the key, keeps no notice, and never learns
+whether the person deleted it. The app names the key when the person removes the member or
 cancels the invite, so they can delete it in the console then. Until they do,
 the key still reaches the store.
 
@@ -5058,6 +5058,17 @@ Until the person deletes the key, the removed member can still upload into
 their file folder. Nothing they write after the removal counts, so those files
 are never referred to; the app's cleanup of the files of devices gone for good
 (§17.10) deletes them.
+
+**Two members on one key.** An invite may carry a key another member already
+uses. Ana, with no console at hand, gives Dan her own key. Coven records the
+same key id as both members' access; it checks only that the access is an S3
+key, as creation's is (format.md D6), and at the provider the two are one
+credential. Removing Dan then leaves the key in use: deleting it would lock
+Ana out too. So when Ana removes Dan, her app sees in `members()` that she
+still uses his key id, and names her instead of telling her to delete it. Ana
+replaces her own key on each of her devices (above), and then deletes the old
+one. Until she does, Dan's key reaches the store, as any undeleted key does,
+and nothing he writes counts.
 
 **Key replacement is not cut-off.** Replacing a member's keys (§12.3) changes no
 access record or device id. Old-key writes follow the slot cut-off; provider
