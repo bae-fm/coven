@@ -62,7 +62,7 @@ pub use coven_foundation::clock::{Clock, ClockRef, SystemClock, WallTimerError};
 pub use coven_foundation::files::FileProtection;
 #[cfg(all(target_vendor = "apple", any(test, feature = "test-utils")))]
 pub use coven_foundation::files::ProtectionSupport;
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 pub use coven_foundation::files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::files::{
     path_bytes, path_from_bytes, path_text, write_atomic, BootstrapDirectoryError, CopyPathError,
