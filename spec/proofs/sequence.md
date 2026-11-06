@@ -596,6 +596,13 @@ what make one conditional floor write safe.
   snapshot a reader loads is the one the floor names for its audience, which
   needs the audience's key and the body in storage. Without either the reader
   moves at most to its next slot; no step loads an older snapshot instead.
+- Before it holds the store key, a joiner reads slots too, scanning for the
+  copy its approval sealed to it. [`JoinScan`](sequence/CovenSequence/JoinScan.lean)
+  models that scan: `approved_progress` finds a claimed copy while retention
+  deletes the prefix under it, and
+  `JoinScanExamples.exponential_probes_miss_approval` and
+  `missing_below_existing_is_deleted` show why a missing slot below a kept
+  one is read as deleted history, not probed past.
 
 **The coverage argument.** The proof of `read_progress` needs every valid raise or reset of `A`
 above the floor's coverage to cover the floor's snapshot. C6 gives this for a
@@ -1885,7 +1892,6 @@ they do not replace the separate byte-format, merge or queue tests.
     the runner's device/key actions, circle membership changes and store resets,
     and, in `CircleLifecycle` apart from `Model`, a circle's own entries;
   - orphaned batch objects and provider request timing;
-  - joiners reading slots before they hold the store key;
   - the merge's internals, source-verdict calculation and converter callbacks,
     which the merge and queue packages cover. `Inputs` extracts merged
     uniqueness setters; queue admission and the core batch reset filter are
