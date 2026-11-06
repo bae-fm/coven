@@ -1628,8 +1628,14 @@ rest (§6.5). So snapshots carry a second signature, over the prefix alone.
 - It signs `context("coven/prefix-signature/v1", path,
   kind | version | prefix)`.
 - Check it before using the coverage. Verify the final signature before loading.
-- Resolve the snapshot device's key at `covers`, from local history or its store
-  snapshot. An unknown author waits.
+- Resolve the snapshot device's key at `covers`. A store snapshot's author comes
+  from its own original slots (D7.6); any other snapshot's comes from the
+  reader's history through the slot that announced it. Either one holds every
+  admin slot through `covers`, so no slot the reader fetches later can add the
+  author there.
+- So an author that isn't an active device of a present member in that history
+  at `covers` makes the snapshot damaged (`Refusal::NotAuthorized`). Waiting for
+  it would never end.
 - A reader takes the body in one stream after the prefix signature, in order:
   each chunk adds to the digest, then opens, and its frames decode. It uses no
   decoded record until the stream ends. Then it checks, in order, the complete

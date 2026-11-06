@@ -81,3 +81,57 @@ async fn a_floor_naming_snapshots_out_of_order_or_below_its_first_kept_slot_is_d
     }
     ana.sync.database.close().await.unwrap();
 }
+
+/// A snapshot's author is resolved at its coverage from a history that holds
+/// every admin slot through it, so an author that history doesn't hold there
+/// can't appear later: the snapshot is damaged, not waiting (format.md D9).
+/// Ben's store snapshot authenticates against Ana's history, and is refused
+/// against her history cut before the slot that added Ben's device, which
+/// still holds Ben's member.
+#[tokio::test]
+async fn a_snapshot_whose_author_its_history_lacks_at_its_coverage_is_damaged() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let slot = ben.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let history = ana.sync.session.lock().await.history.clone();
+    let announced = history.announcements[&slot].clone();
+    let ring = ana.sync.keys.read().unwrap().unwrap();
+    let object = ana.sync.snapshot_prefix(&announced).await.unwrap();
+    let read = ana
+        .sync
+        .read_snapshot(announced, object, &ring, None, None)
+        .await
+        .map_err(|failure| failure.error)
+        .unwrap();
+    assert_eq!(read.authenticate(&history).unwrap(), ben.identity.member());
+
+    let added = history.added(ben.sync.device).unwrap();
+    let before: Vec<_> = ana
+        .sync
+        .database
+        .original_slots()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|original| original.slot.0 < added)
+        .collect();
+    let mut short_ring = ring.clone();
+    let short = History::restore(&before, group.store, &mut short_ring, &ana.identity).unwrap();
+    assert!(short.belonged(&Audience::Store, &ben.identity.member(), added - 1));
+    let result = read.authenticate(&short);
+    assert!(
+        matches!(
+            &result,
+            Err(SyncError::Damaged(damaged)) if matches!(damaged.failure, Refusal::NotAuthorized)
+        ),
+        "{result:?}"
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
