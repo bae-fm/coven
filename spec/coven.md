@@ -7001,7 +7001,8 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   the queue row is the only record of it: retiring the row alone would leave
   the parts there for good. So the worker's next run, once the failed part's
   retry delay has passed, aborts the session (a temporary staged for it goes
-  too, §20.6), forgets it, and only then retires the upload. Aborting needs
+  too, §20.6), or, if the row records only its plan, every session at the
+  plan's name, forgets it, and only then retires the upload. Aborting needs
   storage, so with none connected the upload stays queued. A failed abort is
   the upload's failure, recorded and retried like an attempt's, and the upload
   stays queued meanwhile; aborting an ended session succeeds, so a retry after
@@ -7167,6 +7168,25 @@ condition in the session, because a retry must not overwrite a competing floor.
 - Pausing an upload is persisted too.
 - After a crash, a session the provider still has continues from its confirmed
   parts; reopening the app forgets none of them.
+- A session is recorded before the provider begins it. Ana's phone sends a
+  300 MB video to S3: the queue row first records the session's plan, the name
+  its multipart upload will have, and only then does the first part start that
+  upload. If the start's reply is lost, or the phone stops before recording
+  the upload it started, the bucket holds an upload no record names. Every
+  unfinished upload at a plan's name is that plan's, so the upload's next
+  attempt aborts each one before starting another, and the abort of an upload
+  no file waits for does the same (Appendix E.10). Without the plan, those
+  parts would stay in her bucket for as long as the phone lives.
+  - On OneDrive the plan names the temporary, and on CloudKit the upload
+    record, which the next attempt finds again; a OneDrive session whose start
+    reply was lost holds no item and expires (Appendix E.2).
+  - Where an S3 name is shared, a slot or the floor on a profile that completes
+    in place, nothing tells this device's upload from another's: coven reports
+    `SessionIdentityUnknown`, and the upload is ended once it can never publish
+    (§17.10).
+  - A Dropbox session's start is itself the request that begins it, and no
+    route lists one, so a plan would name nothing there; Dropbox discards the
+    session 7 days after it began.
 - A session the provider has expired starts over, reading and checking the
   source again, with the same id, key and chunk hashes.
 
@@ -10574,15 +10594,21 @@ object, or the floor. That reserved place is distinct from every coven path.
 
 **Session records.** Every S3 session is recorded with its name before its native
 multipart upload exists. The first part starts the native upload, and the record
-then gains the native id.
+then gains the native id, saved with that part.
 
-- A record made before a start whose reply was lost keeps its unresolved session.
-- Recovery may abort only uploads proven to belong to that session. A shared
-  slot path doesn't establish ownership; a private staging name can identify its
-  own uploads. Ending dead sessions (below) rests on something else: not whose
-  a session is, but that it can never publish.
-- If the native id can't be recovered, coven reports `SessionIdentityUnknown` and
-  keeps the journal until provider evidence settles cleanup.
+- A record without the native id may name an upload that exists: one whose
+  start's reply was lost, or one started before the device stopped. Resuming or
+  aborting such a record at a name the device alone uses (next) first aborts
+  every unfinished upload at that name, then starts over from the name.
+- Recovery may abort only uploads proven to belong to that session. A name the
+  device alone uses proves it: a copy profile's private staging name, or a
+  destination under the device's own file or snapshot folders, which only one
+  upload of that device ever targets. A shared slot or floor path doesn't
+  establish ownership. Ending dead sessions (below) rests on something else:
+  not whose a session is, but that it can never publish.
+- At a shared path the native id can't be recovered: coven reports
+  `SessionIdentityUnknown` and keeps the journal until provider evidence
+  settles cleanup.
 - Aborting never deletes a destination. It ends another claimant's session only
   once that session can never publish (below).
 - Retrying or resuming a record derives the same name, including after multipart
@@ -11613,7 +11639,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Failed(LocalFailure::Bug)` | coven's own code broke its rule or panicked; the work retries under backoff and fails again until the bug is fixed | api.md E15 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
-| `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |
+| `SessionIdentityUnknown` | an S3 upload session at a shared path lost its native id | E.10 |
 
 Which sync state each fact names (§19.1). With several, the state is the first
 of removed, device needs reset, update needed, signed out, no access, folder

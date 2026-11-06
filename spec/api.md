@@ -4829,7 +4829,8 @@ pub enum StorageFailure {
     InvitationMismatch,
     /// The session belongs to another provider or location.
     SessionMismatch,
-    /// A lost multipart-initiation reply left no attributable native session id.
+    /// An S3 session at a shared slot or floor path has no recorded native id,
+    /// and nothing tells its upload from another claimant's (Appendix E.10).
     /// Retain its cleanup journal; never abort another claimant’s session.
     SessionIdentityUnknown,
     /// The recorded upload expired or a publication conflict invalidated it.
