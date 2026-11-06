@@ -7,7 +7,9 @@ use coven_foundation::files::DeviceReset;
 impl SequenceSync {
     /// Carry a discarded installation's provider obligations after loading
     /// storage under its replacement id. Invites use their existing expiry
-    /// cleanup; retained member access still follows the applied history.
+    /// cleanup; retained member access still follows the applied history;
+    /// detection runs keep their records for a later detection or
+    /// connection to clean up after (§20.7).
     pub async fn record_device_reset(
         &self,
         reset: DeviceReset,
@@ -15,7 +17,7 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut operations = Vec::new();
+        let mut operations = crate::DetectionRecord::carried(records);
         let mut accounts = BTreeSet::new();
         for record in records {
             match record.kind.as_str() {

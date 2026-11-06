@@ -118,8 +118,8 @@ pub(super) async fn carry_discarded_provider_work(
 
 /// A store that never set up storage has no stored history and no published
 /// device. Its replacement is an empty database under the fresh id, with its
-/// local creation name and the notice that unsent local work was discarded
-/// (§19.3).
+/// local creation name, the S3 detection runs whose cleanup it still owes
+/// (§20.7), and the notice that unsent local work was discarded (§19.3).
 async fn reset_unconnected(
     builder: CovenBuilder,
     store: StoreId,
@@ -136,6 +136,14 @@ async fn reset_unconnected(
             let name = coven_database::discarded_store_name(replacement.discarded_database_path())
                 .await
                 .map_err(CovenError::from)?;
+            // As a connected reset reads it: a journal SQLite reports
+            // damaged carries nothing.
+            let path = replacement.discarded_database_path();
+            let carried = match coven_database::discarded_operations(path).await {
+                Ok(records) => coven_sync::DetectionRecord::carried(&records),
+                Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
+                Err(error) => return Err(CovenError::from(error).into()),
+            };
             let database =
                 super::open_installation(builder.database(replacement.directory())?, status)
                     .await?;
@@ -146,7 +154,7 @@ async fn reset_unconnected(
                     database.test_fail_device_reset().await.map_err(CovenError::from)?;
                 }
                 database
-                    .record_device_reset::<coven_sync::PendingRecord>(reset, Vec::new(), Vec::new())
+                    .record_device_reset::<coven_sync::PendingRecord>(reset, carried, Vec::new())
                     .await
                     .map_err(CovenError::from)?;
                 Ok::<_, BootstrapError>(())

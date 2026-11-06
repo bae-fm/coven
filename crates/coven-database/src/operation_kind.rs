@@ -29,5 +29,9 @@ pub const SCHEMA_RAISE: &str = "schema-raise";
 /// Setting up storage on this device, from its first write to storage until
 /// it finishes or is undone (§11.6, §20.8); also its `started_by`.
 pub const STORAGE_SETUP: &str = "storage-setup";
+/// An S3 detection run, from before its first probe until a cleanup has
+/// confirmed its probes and uploads gone (§11.6, §20.7); also its
+/// `started_by`.
+pub const S3_DETECTION: &str = "s3-detection";
 /// The `started_by` of an operation coven starts on its own.
 pub const COVEN: &str = "coven";

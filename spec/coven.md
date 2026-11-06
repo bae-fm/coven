@@ -3492,9 +3492,14 @@ storage, is an operation, held to §11.3 and §11.4:
   `discard_store` still deletes the store from the device alone, leaving
   the device registered until someone removes it.
 - **Space isn't state.** A crash can leave behind an object nothing refers to,
-  such as the provider check's test object or a detection probe (§20.8). No
-  state is wrong, only space taken, so coven leaves it; this is not a repair
-  owed by a later pass.
+  such as the provider check's test object (§20.8). No state is wrong, only
+  space taken, so coven leaves it; this is not a repair owed by a later pass.
+  A detection run killed partway can leave more than a few probes: an
+  unfinished multipart upload, whose parts the provider goes on billing until
+  someone aborts it. So detection records its run on the device before its
+  first probe, and a later detection or connection at that bucket removes
+  what the run left (§20.7). Still no state is wrong: the record says only
+  where the space is, and it ends once a cleanup confirms the space freed.
 
 These calls, and the work passes do for them, follow the rule:
 
@@ -3511,6 +3516,7 @@ These calls, and the work passes do for them, follow the rule:
 | Deleting a store from the device and leaving it (`delete_store`, api.md [E1](api.md#e1-opening)) | the deletion's record in the store's directory, then the removal's operation | the record, kept just before the removal's journal |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
 | Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
+| Detecting S3 settings (`detect_s3_settings`, and setup's detection, §20.7) | the run's record, kept before its first probe until a cleanup confirms its probes and uploads gone | none: it writes only probes nothing refers to |
 
 #### 11.7 What the proofs cover
 
@@ -8300,8 +8306,10 @@ laptop in place from her current restore code instead (§13.1).
   began it is still running. An interrupted deletion finishes as any
   deletion from the device does (§11.6).
 - Only owed provider cleanup carries over: owed revocations of account sharing,
-  and the old installation's open invites, which become owed cleanup. They are
-  copied into the new database, with its reset notice, before it opens. A
+  the old installation's open invites, which become owed cleanup, and the
+  records of S3 detection runs whose leftovers no cleanup has confirmed gone
+  (§20.7). They are copied into the new database, with its reset notice,
+  before it opens. A
   journal SQLite reports damaged supplies none. Damage elsewhere in the
   database doesn't stop coven reading the journal.
 - Coven never imports unsent rows or files from the damaged directory.
@@ -8316,9 +8324,9 @@ laptop in place from her current restore code instead (§13.1).
   store refuses opens with `ReplacementUnfinished` (`by: Reset`) until the
   next reset finishes it and commits the notice.
 - A reset with no storage connected creates an empty database with a fresh id,
-  preserving its local creation name. That name must be readable before
-  anything moves, like the other required settings. Competing first setups
-  still contend for slot 1 (§10.3).
+  preserving its local creation name and its detection runs' records. That
+  name must be readable before anything moves, like the other required
+  settings. Competing first setups still contend for slot 1 (§10.3).
 
 Ana's laptop has uploaded through write 12, but its damaged database may hold
 write 13. Resetting loads the stored history through 12 under a new device id.
@@ -8955,6 +8963,19 @@ api.md E5).
   shows up as a published object.
 - Afterwards it deletes its objects and aborts its multipart uploads, also after
   a failed probe. A failed cleanup fails the call, keeping both causes.
+- A run can be cut before its cleanup. Ben's laptop is killed while detection
+  uploads the part of its multipart probe: the unfinished upload stays, and
+  his provider bills its parts until someone aborts it. Nothing lists it, and
+  he never sees it. So detection records its run on the device before its
+  first probe. The next detection at the same bucket and prefix, whatever
+  profile it names, finds the recorded runs there. After its own cleanup it
+  aborts each one's unfinished uploads and deletes its probes, as listing the
+  run's place finds them; a failure there fails the call too. The store's next
+  connection to that bucket does the same. There a failure is logged and the
+  record kept for the next detection or connection, since probes are space
+  and sync doesn't wait on them. A run's record ends once a cleanup confirms
+  its uploads and probes gone, and a device reset carries the records to the
+  new installation (§19.3).
 - It returns the detected `S3Settings` and one typed result per probe: whether
   the behaviour held, with a native outcome that names no key, endpoint or
   object.
@@ -9098,7 +9119,9 @@ credentials it connects with go in a device entry of their own, apart from the
 committed ones. Ben cancels his R2 setup while it detects settings: setup
 undoes what it wrote, fails with `StorageSetupError::Cancelled`, and its
 outcome is `Cancelled`. Detection's probes and the provider check's test object
-are deleted as each check ends; one a crash leaves is space nothing refers to.
+are deleted as each check ends. A test object a crash leaves is space nothing
+refers to; what a detection run a crash cut leaves, the next detection or
+connection at that bucket removes (§20.7).
 
 - **The point of no return** is recording the first claim setup is about to
   send: the location marker or slot 1 when it creates the store (the

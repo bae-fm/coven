@@ -99,12 +99,12 @@ impl S3Storage {
         Ok(left)
     }
 
-    /// Abort a left multipart upload, or delete a staged object. One
-    /// already completed, aborted or deleted succeeds.
+    /// Abort a left multipart upload, or delete a staged object or a
+    /// detection probe. One already completed, aborted or deleted succeeds.
     pub(super) async fn end_left(&self, upload: &LeftUpload) -> Result<(), StorageError> {
         match &upload.0 {
             Left::S3Multipart { key, id } => self.abort_multipart(key, id.as_str(), None).await,
-            Left::Staged(key) => self.delete_key(key).await,
+            Left::Staged(key) | Left::Probe(key) => self.delete_key(key).await,
             // Another provider's: not this one's to end.
             #[cfg(target_vendor = "apple")]
             Left::CloudKitRoot(_) => Err(StorageFailure::SessionMismatch.into()),

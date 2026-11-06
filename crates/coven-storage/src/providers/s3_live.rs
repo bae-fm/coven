@@ -65,16 +65,22 @@ impl LiveS3 {
     /// Production detection from the env location, under a fresh store.
     pub(super) async fn detect(&self) -> Result<crate::S3Detection, StorageError> {
         let store = StoreId(coven_foundation::id_source::IdSource::new_id(&UuidIds));
+        let runs = crate::S3DetectionRuns {
+            run: coven_foundation::id_source::IdSource::new_id(&UuidIds),
+            earlier: Vec::new(),
+        };
         let result = super::detect(
             self.config.clone(),
             self.credentials.clone(),
             store,
+            &runs,
             Arc::new(SystemClock),
             Arc::new(UuidIds),
             crate::providers::tests::http_client(),
             &crate::SetupWaits::default(),
         )
-        .await;
+        .await
+        .detection;
         // Production detection removes current probe objects. Certification
         // additionally removes retained versions and delete markers.
         let settings = match &result {

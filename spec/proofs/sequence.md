@@ -706,8 +706,8 @@ of no return. A cancel, a failure or opening after a crash undoes it only
 before that point. Past it, the claim settles: landed, setup commits the
 connection and finishes; lost, it reads on, and is refused only where every
 claim it sent targets a slot another device holds. Test objects and probes
-setup writes while checking are space nothing refers to, so they are not
-modelled.
+setup writes while checking are space no claim or commit depends on, so they
+are not modelled.
 
 - `step_inv`, `steps_inv`: every step keeps the invariant. Checking, setup has
   sent and committed nothing; the connection is committed only once the claim

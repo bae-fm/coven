@@ -106,7 +106,7 @@ struct SetupCleanup {
     cleanup: SyncError,
 }
 
-fn with_cleanup(operation: StorageSetupError, cleanup: SyncError) -> StorageSetupError {
+pub(super) fn with_cleanup(operation: StorageSetupError, cleanup: SyncError) -> StorageSetupError {
     StorageSetupError::Internal(Box::new(SetupCleanup { operation, cleanup }))
 }
 

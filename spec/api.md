@@ -865,15 +865,21 @@ pub trait StorageConnector: Send + Sync {
         transfers: Arc<coven_storage::TransferBudget>,
     ) -> Result<Arc<coven_storage::StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§20.7), writing only fresh objects under
-    /// the store's `.coven-check` prefix and deleting them, also on failure.
-    /// A connector without native S3 refuses this capability.
+    /// the store's `.coven-check/<run>/` prefix for `runs.run` and deleting
+    /// them, also on failure, then removing what each of `runs.earlier`
+    /// left there. The caller recorded `runs.run` before calling; the answer
+    /// names the runs whose probes and uploads are confirmed gone.
+    /// A connector without native S3 refuses this capability. A rate-limited
+    /// probe is sent again while setup's `waits` allow (§20.8).
     async fn detect_s3(
         &self,
         _config: StorageConfig,
         _credentials: S3Credentials,
         _store: StoreId,
-    ) -> Result<S3Detection, StorageError> {
-        Err(StorageFailure::ProviderUnavailable.into())
+        runs: &S3DetectionRuns,
+        _waits: &SetupWaits,
+    ) -> S3DetectionRun {
+        S3DetectionRun::unwritten(runs, Err(StorageFailure::ProviderUnavailable.into()))
     }
     /// Before a store's first setup at a location it needs to itself (a
     /// Dropbox shared folder, a OneDrive folder, or an S3 bucket whose member
@@ -4144,7 +4150,10 @@ while let Some(Ok(values)) = lost.next().await {
 - `detect_s3_settings` runs the same detection for an app that offers
   advanced settings: it probes the bucket with the supplied key, writing only
   fresh objects under the store's `.coven-check` prefix and deleting them,
-  also on failure. Its `S3Detection` holds the detected settings and one
+  also on failure. Each detection records its run before its first probe, and
+  removes what earlier recorded runs at that bucket and prefix left, so a
+  detection a crash cut leaves no upload billing for good. Its `S3Detection`
+  holds the detected settings and one
   result per probe; the app may prefill and override them, and
   `S3Detection::check` tells whether an override agrees with what was observed.
 - Every S3 setup runs detection and checks the effective settings, detected,
@@ -4619,6 +4628,33 @@ pub struct S3Detection {
     pub results: Vec<S3ProbeResult>,
 }
 
+/// The detection runs one detection cleans up after (§20.7): its own, which
+/// the caller recorded before detection writes its first probe, and the
+/// earlier runs at the same bucket and prefix whose probes and uploads no
+/// cleanup has confirmed gone.
+pub struct S3DetectionRuns {
+    /// This detection's run: its probes go under `.coven-check/<run>/`.
+    pub run: Uuid,
+    /// The earlier runs whose leftovers it removes after its own.
+    pub earlier: Vec<Uuid>,
+}
+
+/// What one detection did (§20.7).
+pub struct S3DetectionRun {
+    /// What it observed, or why it failed; a failed cleanup fails it.
+    pub detection: Result<S3Detection, StorageError>,
+    /// The runs whose probes and uploads it confirmed gone: its own when it
+    /// wrote nothing or its cleanup succeeded, and each earlier run whose
+    /// leftovers it removed.
+    pub cleaned: Vec<Uuid>,
+}
+
+impl S3DetectionRun {
+    /// A detection that wrote nothing: its own run left nothing, and it
+    /// removed no earlier run's leftovers.
+    pub fn unwritten(runs: &S3DetectionRuns, detection: Result<S3Detection, StorageError>) -> Self;
+}
+
 /// Bucket state read through the XML API; a failed read is not Disabled.
 pub enum S3BucketVersioning {
     Disabled,
@@ -4718,6 +4754,10 @@ impl DropboxLocation {
 impl StorageConfig {
     /// Compare provider location and settings, ignoring display-only account labels.
     pub fn same_location(&self, other: &Self) -> bool;
+    /// Whether both are S3 locations holding the same objects: one bucket, at
+    /// one endpoint and region, under one base prefix, whatever profile
+    /// reaches it.
+    pub fn same_s3_objects(&self, other: &Self) -> bool;
 
     /// The provider of this location.
     pub fn provider(&self) -> CloudProvider;
@@ -5369,7 +5409,9 @@ impl CovenHandle {
 
     /// Probes the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
-    /// deleting them, also on failure. Commits nothing.
+    /// deleting them, also on failure, then removing what earlier recorded
+    /// detection runs at that bucket and prefix left. Commits only its run's
+    /// record, kept until its probes and uploads are confirmed gone.
     pub async fn detect_s3_settings(
         &self,
         storage: StorageConfig,

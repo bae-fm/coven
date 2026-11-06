@@ -460,8 +460,9 @@ impl StorageConnections {
         self.connect(&mut live).await
     }
 
-    /// Reach the recorded location with custody's credentials, or finish
-    /// the setup a crash cut past its point of no return (§11.6).
+    /// Reach the recorded location with custody's credentials, removing
+    /// what recorded detection runs left there (§20.7), or finish the setup
+    /// a crash cut past its point of no return (§11.6).
     async fn connect(&self, live: &mut ConnectionState) -> Result<(), SyncError> {
         if self.setup_finishing() {
             if let Some(journal) = coven_sync::SetupJournal::running(&self.database).await? {
@@ -476,7 +477,7 @@ impl StorageConnections {
         let storage = self
             .connector
             .connect(
-                data.location,
+                data.location.clone(),
                 self.codes.provider_auth(data.credentials),
                 self.device,
                 self.state.clone(),
@@ -485,6 +486,7 @@ impl StorageConnections {
             )
             .await?;
         storage.check_bucket(self.store()).await?;
+        s3::end_detection_runs(&self.database, self.store(), &data.location, &storage).await?;
         self.attach(live, storage).await
     }
 

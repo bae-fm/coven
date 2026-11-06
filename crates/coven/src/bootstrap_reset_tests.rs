@@ -499,6 +499,36 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
     handle.close().await.unwrap();
 }
 
+/// Ana's app is killed while it detects her bucket's settings, before she
+/// has set up storage, and she resets the store. The replacement keeps the
+/// cut run's record, so her next detection there still cleans up after it
+/// (§19.3, §20.7).
+#[tokio::test]
+async fn an_unconnected_reset_carries_a_cut_detection_run() {
+    let f = Fixture::new().await;
+    let cut = f.connector.detect(&f.handle, f.storage.config(), true).await;
+    f.handle.close().await.unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
+    let next = f.connector.detect(&handle, f.storage.config(), false).await;
+    assert_eq!(next.earlier, [cut.run]);
+    handle.close().await.unwrap();
+}
+
+/// A connected reset carries a cut detection run's record too: the
+/// replacement's next detection at the store's bucket cleans up after it
+/// (§19.3, §20.7).
+#[tokio::test]
+async fn a_connected_reset_carries_a_cut_detection_run() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    let cut = f.connector.detect(&f.handle, f.storage.config(), true).await;
+    f.handle.close().await.unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
+    let next = f.connector.detect(&handle, f.storage.config(), false).await;
+    assert_eq!(next.earlier, [cut.run]);
+    handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys() {
     let f = Fixture::new().await;

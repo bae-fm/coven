@@ -120,6 +120,9 @@ pub(super) struct Remote {
     pub(super) lagging_listings: usize,
     /// Every listing request served.
     pub(super) listings: usize,
+    /// Never answer a part upload, saying so here first: the client stops
+    /// there, as a process killed mid-upload does.
+    pub(super) stall_parts: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// The server's current second, as a service dates its objects.
@@ -151,6 +154,12 @@ pub(super) async fn serve(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let part = method == Method::PUT && query(&uri).contains_key("uploadId");
+    let stall = state.lock().unwrap().stall_parts.clone().filter(|_| part);
+    if let Some(stalled) = stall {
+        stalled.notify_one();
+        std::future::pending::<()>().await;
+    }
     let mut state = state.lock().unwrap();
     if state.throttle > 0 {
         state.throttle -= 1;

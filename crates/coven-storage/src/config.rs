@@ -105,6 +105,19 @@ impl StorageConfig {
         }
     }
 
+    /// Whether both are S3 locations holding the same objects: one bucket,
+    /// at one endpoint and region, under one base prefix, whatever profile
+    /// reaches it.
+    pub fn same_s3_objects(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::S3 { bucket: ab, region: ar, endpoint: ae, prefix: ap, .. },
+                Self::S3 { bucket: bb, region: br, endpoint: be, prefix: bp, .. },
+            ) => ab == bb && ar == br && ae == be && ap == bp,
+            _ => false,
+        }
+    }
+
     /// Access required to open this location.
     pub fn oauth_access(&self) -> Option<crate::OAuthAccess> {
         match self {

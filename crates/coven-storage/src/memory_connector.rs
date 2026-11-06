@@ -126,21 +126,29 @@ impl crate::providers::StorageConnector for MemoryStorage {
     }
     /// Memory behaves as any settings demand: the detection conforms to the
     /// location's own settings, or to plain S3 settings for detection.
+    /// Memory holds no probes, so no run, this one or an earlier one, has
+    /// left anything.
     async fn detect_s3(
         &self,
         config: StorageConfig,
         _credentials: crate::S3Credentials,
         _store: coven_foundation::id_source::StoreId,
+        runs: &crate::S3DetectionRuns,
         _waits: &crate::SetupWaits,
-    ) -> Result<S3Detection, StorageError> {
-        config.validate()?;
-        let StorageConfig::S3 { endpoint, profile, .. } = &config else {
-            return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
-        };
-        Ok(conforming_detection(
-            crate::providers::s3_settings(endpoint.as_ref(), profile.as_ref())?
-                .unwrap_or(DETECTED_S3_SETTINGS),
-        ))
+    ) -> crate::S3DetectionRun {
+        let detection = async {
+            config.validate()?;
+            let StorageConfig::S3 { endpoint, profile, .. } = &config else {
+                return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
+            };
+            Ok(conforming_detection(
+                crate::providers::s3_settings(endpoint.as_ref(), profile.as_ref())?
+                    .unwrap_or(DETECTED_S3_SETTINGS),
+            ))
+        }
+        .await;
+        let cleaned = std::iter::once(runs.run).chain(runs.earlier.iter().copied()).collect();
+        crate::S3DetectionRun { detection, cleaned }
     }
     /// Memory's objects are one bucket: where the location's member keys
     /// reach the whole bucket, another store's object occupies it.

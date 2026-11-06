@@ -156,9 +156,10 @@ impl StorageConnector for TrackingConnector {
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        runs: &coven_storage::S3DetectionRuns,
         waits: &coven_storage::SetupWaits,
-    ) -> Result<coven_storage::S3Detection, StorageError> {
-        self.storage.detect_s3(config, credentials, store, waits).await
+    ) -> coven_storage::S3DetectionRun {
+        self.storage.detect_s3(config, credentials, store, runs, waits).await
     }
     async fn check_new_s3_store(
         &self,
@@ -613,9 +614,10 @@ impl StorageConnector for Locations {
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        runs: &coven_storage::S3DetectionRuns,
         waits: &coven_storage::SetupWaits,
-    ) -> Result<coven_storage::S3Detection, StorageError> {
-        self.0[0].detect_s3(config, credentials, store, waits).await
+    ) -> coven_storage::S3DetectionRun {
+        self.0[0].detect_s3(config, credentials, store, runs, waits).await
     }
     async fn check_new_s3_store(
         &self,
@@ -683,55 +685,6 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
     f.advance(Duration::from_secs(600));
     synced(&f.handle).await;
     f.handle.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn two_stores_share_one_location_without_reading_each_others_history() {
-    let f = Fixture::new().await;
-    f.setup().await.unwrap();
-    synced(&f.handle).await;
-    let directory = f.app.create_closed_store("Garden", Arc::new(UuidIds)).await.unwrap();
-    let other = builder(&f.app, f.clock.clone(), f.connector.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
-    other
-        .setup_s3_storage(
-            f.storage.config(),
-            "Garden device",
-            "garden-key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
-        .await
-        .unwrap();
-    synced(&other).await;
-    for (handle, body) in [(&f.handle, "Household"), (&other, "Garden")] {
-        handle
-            .write(move |sql| {
-                sql.execute("INSERT INTO notes VALUES('same', ?1)", [body])?;
-                Ok::<_, CovenError>(())
-            })
-            .await
-            .unwrap();
-    }
-    for handle in [&f.handle, &other] {
-        wait_for_sent(handle).await;
-    }
-    for (handle, expected) in [(&f.handle, "Household"), (&other, "Garden")] {
-        let body = handle
-            .read(|sql| {
-                Ok::<_, CovenError>(sql.query_row(
-                    "SELECT body FROM notes WHERE id='same'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(body, expected);
-        handle.close().await.unwrap();
-    }
 }
 
 #[tokio::test]

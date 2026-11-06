@@ -6,7 +6,7 @@
 use crate::*;
 use coven_storage::{test_utils::MemoryStorage, PublicationGate, StorageError};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -73,15 +73,42 @@ impl Drop for ClientGate {
     }
 }
 
-/// The in-memory storage as an app's connector, counting its clients.
+/// The in-memory storage as an app's connector, counting its clients and
+/// keeping the runs each S3 detection was handed.
 pub(crate) struct Connector {
     storage: Arc<MemoryStorage>,
     pub(crate) clients: Clients,
+    /// Each detection's runs, in the order detections ran.
+    detections: std::sync::Mutex<Vec<coven_storage::S3DetectionRuns>>,
+    /// Cut the next detection short, as a crash cuts one: it confirms no
+    /// run gone.
+    cut_next_detection: AtomicBool,
 }
 
 impl Connector {
     pub(crate) fn new(storage: Arc<MemoryStorage>) -> Arc<Self> {
-        Arc::new(Self { storage, clients: Clients::new() })
+        Arc::new(Self {
+            storage,
+            clients: Clients::new(),
+            detections: std::sync::Mutex::new(Vec::new()),
+            cut_next_detection: AtomicBool::new(false),
+        })
+    }
+
+    /// Detect S3 settings at `location` through `handle`, cut short when
+    /// `cut`, and answer the runs the detection was handed.
+    pub(crate) async fn detect(
+        &self,
+        handle: &CovenHandle,
+        location: StorageConfig,
+        cut: bool,
+    ) -> coven_storage::S3DetectionRuns {
+        self.cut_next_detection.store(cut, Ordering::SeqCst);
+        let detected = handle
+            .detect_s3_settings(location, "member-key".into(), SecretText::new("secret".into()))
+            .await;
+        assert_eq!(detected.is_err(), cut, "{:?}", detected.map(drop));
+        self.detections.lock().unwrap().last().expect("a detection ran").clone()
     }
 
     /// Stop `handle`'s sync, which returns after the whole release.
@@ -123,9 +150,17 @@ impl coven_storage::providers::StorageConnector for Connector {
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        runs: &coven_storage::S3DetectionRuns,
         waits: &coven_storage::SetupWaits,
-    ) -> Result<coven_storage::S3Detection, StorageError> {
-        self.storage.detect_s3(config, credentials, store, waits).await
+    ) -> coven_storage::S3DetectionRun {
+        self.detections.lock().unwrap().push(runs.clone());
+        if self.cut_next_detection.swap(false, Ordering::SeqCst) {
+            return coven_storage::S3DetectionRun {
+                detection: Err(coven_storage::StorageFailure::Network.into()),
+                cleaned: Vec::new(),
+            };
+        }
+        self.storage.detect_s3(config, credentials, store, runs, waits).await
     }
     async fn check_new_s3_store(
         &self,

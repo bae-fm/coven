@@ -11,7 +11,7 @@ use axum::{
 };
 use coven_foundation::{
     clock::{Clock, FixedClock, PollingClock},
-    id_source::UuidIds,
+    id_source::{IdSource, UuidIds},
 };
 use std::{
     collections::BTreeMap,
@@ -64,6 +64,7 @@ impl Fixture {
             throttle: 0,
             lagging_listings: 0,
             listings: 0,
+            stall_parts: None,
         }));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
         Self { state, server, clock: Arc::new(PollingClock::new(fixed)) }
@@ -78,10 +79,19 @@ impl Fixture {
         }
     }
     async fn detect(&self, profile: Option<S3Profile>) -> Result<S3Detection, StorageError> {
+        let runs = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: Vec::new() };
+        self.detect_runs(profile, &runs).await.detection
+    }
+    async fn detect_runs(
+        &self,
+        profile: Option<S3Profile>,
+        runs: &crate::S3DetectionRuns,
+    ) -> crate::S3DetectionRun {
         detect(
             self.location(profile),
             credentials(),
             STORE,
+            runs,
             self.clock.clone(),
             Arc::new(UuidIds),
             crate::providers::tests::http_client(),
@@ -337,8 +347,107 @@ async fn a_failed_probe_cleanup_fails_detection_keeping_both_causes() {
 
     let passing = Fixture::new(RUSTFS).await;
     passing.state.lock().unwrap().fail_deletes = true;
-    let error = passing.detect(None).await.map(|_| ()).unwrap_err();
+    let runs = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: Vec::new() };
+    let run = passing.detect_runs(None, &runs).await;
+    let error = run.detection.map(|_| ()).unwrap_err();
     assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+    assert!(run.cleaned.is_empty(), "a run whose cleanup failed isn't confirmed gone");
+}
+
+/// Kill a detection run while it uploads its multipart probe's part, as a
+/// crash would: its unfinished upload and its probes stay behind.
+async fn killed_run(fixture: &Fixture) -> uuid::Uuid {
+    let stalled = Arc::new(tokio::sync::Notify::new());
+    fixture.state.lock().unwrap().stall_parts = Some(stalled.clone());
+    let killed = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: Vec::new() };
+    tokio::select! {
+        run = fixture.detect_runs(None, &killed) => panic!("the part upload never answers: {run:?}"),
+        () = stalled.notified() => {}
+    }
+    let mut state = fixture.state.lock().unwrap();
+    assert_eq!(state.uploads.len(), 1, "the killed run's upload is left");
+    assert!(!state.objects.is_empty(), "the killed run's probes are left");
+    state.stall_parts = None;
+    killed.run
+}
+
+/// Ana's setup is killed while detection uploads a part: that run's
+/// unfinished upload, which her provider keeps billing, and its probes
+/// stay. The next detection, handed that run as an earlier one, aborts the
+/// upload and deletes the probes, and says so (§20.7).
+#[tokio::test]
+async fn the_next_detection_removes_what_a_killed_run_left() {
+    let fixture = Fixture::new(RUSTFS).await;
+    let killed = killed_run(&fixture).await;
+    let next = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: vec![killed] };
+    let run = fixture.detect_runs(None, &next).await;
+    run.detection.unwrap();
+    assert_eq!(run.cleaned, [next.run, killed]);
+    let state = fixture.state.lock().unwrap();
+    assert!(state.uploads.is_empty(), "the killed run's upload is aborted");
+    assert!(state.objects.is_empty(), "the killed run's probes are deleted");
+}
+
+/// The store's connection to the bucket removes what a killed run left
+/// there, as listing the run's prefix finds it, and removing it again finds
+/// nothing (§20.7).
+#[tokio::test]
+async fn a_connection_removes_what_a_killed_run_left() {
+    let fixture = Fixture::new(RUSTFS).await;
+    let killed = killed_run(&fixture).await;
+    let storage = StorageConnection::from_provider(Arc::new(
+        S3Storage::new(
+            fixture.location(Some(S3Profile::Named(S3ProfileName::RustFs))),
+            credentials(),
+            fixture.clock.clone(),
+            Arc::new(UuidIds),
+            std::sync::Arc::new(crate::NoCooldown),
+            crate::providers::tests::http_client(),
+        )
+        .unwrap(),
+    ));
+    storage.end_detection_run(STORE, killed).await.unwrap();
+    {
+        let state = fixture.state.lock().unwrap();
+        assert!(state.uploads.is_empty(), "the killed run's upload is aborted");
+        assert!(state.objects.is_empty(), "the killed run's probes are deleted");
+    }
+    storage.end_detection_run(STORE, killed).await.unwrap();
+}
+
+/// An earlier run whose leftovers can't be removed fails detection and
+/// isn't confirmed gone; a later detection that can remove them confirms
+/// both runs (§20.7).
+#[tokio::test]
+async fn an_earlier_run_is_confirmed_gone_only_once_its_leftovers_are() {
+    let fixture = Fixture::new(RUSTFS).await;
+    let killed = killed_run(&fixture).await;
+    fixture.state.lock().unwrap().fail_deletes = true;
+    let refused = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: vec![killed] };
+    let run = fixture.detect_runs(None, &refused).await;
+    assert_eq!(run.detection.unwrap_err().failure(), StorageFailure::PermissionDenied);
+    assert!(run.cleaned.is_empty(), "{:?}", run.cleaned);
+    fixture.state.lock().unwrap().fail_deletes = false;
+    let last = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: vec![killed, refused.run] };
+    let run = fixture.detect_runs(None, &last).await;
+    run.detection.unwrap();
+    assert_eq!(run.cleaned, [last.run, killed, refused.run]);
+    let state = fixture.state.lock().unwrap();
+    assert!(state.uploads.is_empty() && state.objects.is_empty());
+}
+
+/// Detection that fails before its first write leaves its own run with
+/// nothing to remove, and removes no earlier run's leftovers (§20.7).
+#[tokio::test]
+async fn a_detection_failing_before_its_first_write_confirms_only_its_own_run() {
+    let fixture = Fixture::new(RUSTFS).await;
+    let killed = killed_run(&fixture).await;
+    fixture.state.lock().unwrap().versioning_failure = Some(503);
+    let runs = crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: vec![killed] };
+    let run = fixture.detect_runs(None, &runs).await;
+    assert_eq!(run.detection.unwrap_err().failure(), StorageFailure::Network);
+    assert_eq!(run.cleaned, [runs.run]);
+    assert_eq!(fixture.state.lock().unwrap().uploads.len(), 1);
 }
 
 /// A probe's recorded outcome names no key, endpoint or object: what a
@@ -355,12 +464,14 @@ async fn probe_results_name_no_key_endpoint_or_object() {
                 secret_access_key: SecretText::new("secretDistinctive9".into()),
             },
             STORE,
+            &crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: Vec::new() },
             fixture.clock.clone(),
             Arc::new(UuidIds),
             crate::providers::tests::http_client(),
             &crate::SetupWaits::default(),
         )
         .await
+        .detection
         .unwrap();
         let address = fixture.server.url.trim_start_matches("http://").to_owned();
         assert!(!detection.results.is_empty());
@@ -469,12 +580,14 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
         },
         credentials(),
         STORE,
+        &crate::S3DetectionRuns { run: UuidIds.new_id(), earlier: Vec::new() },
         fixture.clock.clone(),
         Arc::new(UuidIds),
         crate::providers::tests::http_client(),
         &crate::SetupWaits::default(),
     )
     .await
+    .detection
     .unwrap_err();
     assert_eq!(failed.failure(), StorageFailure::Network);
 }

@@ -5,8 +5,8 @@ use super::{
     OneDriveStorage, S3Storage, StorageFolder,
 };
 use crate::{
-    ProviderAuth, ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection,
-    StorageCredentials, StorageError, StorageFailure,
+    ProviderAuth, ProviderOps, S3Credentials, S3DetectionRun, S3DetectionRuns, StorageConfig,
+    StorageConnection, StorageCredentials, StorageError, StorageFailure,
 };
 use coven_foundation::{
     clock::ClockRef,
@@ -93,7 +93,10 @@ pub trait StorageConnector: Send + Sync {
         transfers: Arc<crate::TransferBudget>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§20.7), writing only fresh objects under
-    /// the store's `.coven-check` prefix and deleting them, also on failure.
+    /// the store's `.coven-check/<run>/` prefix for `runs.run` and deleting
+    /// them, also on failure, then removing what each of `runs.earlier`
+    /// left there. The caller recorded `runs.run` before calling; the answer
+    /// names the runs whose probes and uploads are confirmed gone.
     /// A connector without native S3 refuses this capability.
     /// A rate-limited probe is sent again while setup's `waits` allow (§20.8).
     async fn detect_s3(
@@ -101,9 +104,10 @@ pub trait StorageConnector: Send + Sync {
         _config: StorageConfig,
         _credentials: S3Credentials,
         _store: StoreId,
+        runs: &S3DetectionRuns,
         _waits: &crate::SetupWaits,
-    ) -> Result<S3Detection, StorageError> {
-        Err(StorageFailure::ProviderUnavailable.into())
+    ) -> S3DetectionRun {
+        S3DetectionRun::unwritten(runs, Err(StorageFailure::ProviderUnavailable.into()))
     }
     /// Before a store's first setup at an S3 location whose member keys reach
     /// the whole bucket, refuse a bucket holding anything outside the store's
@@ -338,22 +342,30 @@ impl StorageConnector for ProviderConnector {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        runs: &S3DetectionRuns,
         waits: &crate::SetupWaits,
-    ) -> Result<S3Detection, StorageError> {
-        crate::ConnectionCredentials {
+    ) -> S3DetectionRun {
+        let valid = crate::ConnectionCredentials {
             location: config.clone(),
             credentials: StorageCredentials::S3(credentials.clone()),
         }
-        .validate()?;
+        .validate();
+        let http = self
+            .http
+            .clone()
+            .map_err(|source| super::http_client::tls_failure(crate::CloudProvider::S3, source));
+        let http = match valid.and(http) {
+            Ok(http) => http,
+            Err(error) => return S3DetectionRun::unwritten(runs, Err(error)),
+        };
         super::detect_s3(
             config,
             credentials,
             store,
+            runs,
             self.clock.clone(),
             self.ids.clone(),
-            self.http.clone().map_err(|source| {
-                super::http_client::tls_failure(crate::CloudProvider::S3, source)
-            })?,
+            http,
             waits,
         )
         .await

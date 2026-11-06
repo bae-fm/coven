@@ -24,6 +24,8 @@ mod sealed_stream;
 mod sequence_sync;
 mod setup_journal;
 pub use setup_journal::SetupJournal;
+mod detection_record;
+pub use detection_record::DetectionRecord;
 mod sign_in;
 mod slot_object;
 mod snapshot_authorship;

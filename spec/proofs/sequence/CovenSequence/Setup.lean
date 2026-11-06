@@ -21,7 +21,7 @@ no return (spec §11.6):
 - The connection is committed only once its claim has landed.
 
 Test objects and probes setup writes while it checks are space, not state:
-nothing refers to them, so they are not modelled.
+no claim or commit depends on them, so they are not modelled.
 
 The claim's bytes for slot `n` are `ours n`: they name the attempt, so a
 resend is the same attempt.

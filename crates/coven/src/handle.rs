@@ -203,7 +203,9 @@ impl CovenHandle {
     }
     /// Probe the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
-    /// deleting them, also on failure. Commits nothing.
+    /// deleting them, also on failure, then removing what earlier recorded
+    /// detection runs at that bucket and prefix left. Commits only its run's
+    /// record, kept until its probes and uploads are confirmed gone.
     pub async fn detect_s3_settings(
         &self,
         storage: StorageConfig,

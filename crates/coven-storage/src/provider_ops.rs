@@ -176,6 +176,16 @@ pub trait ProviderOps: Send + Sync {
     ) -> Result<Vec<LeftUpload>, StorageError> {
         Ok(Vec::new())
     }
+    /// What S3 detection run `run` left in `store`'s `.coven-check` prefix
+    /// (§20.7): its unfinished multipart uploads, then its probes. Only S3
+    /// detects, so elsewhere no run left anything.
+    async fn detection_leftovers(
+        &self,
+        _store: StoreId,
+        _run: uuid::Uuid,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        Ok(Vec::new())
+    }
     /// End one upload another device left, as this provider listed it: abort
     /// the session, or delete what it staged. One already ended succeeds,
     /// and a published object is never touched.

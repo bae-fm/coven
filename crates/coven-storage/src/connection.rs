@@ -182,6 +182,23 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         }
         Ok(())
     }
+    /// Abort the unfinished multipart uploads S3 detection run `run` left
+    /// in `store`'s `.coven-check` prefix, then delete its probes (§20.7),
+    /// as listing the run's prefix finds them. One already gone succeeds.
+    pub async fn end_detection_run(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        run: uuid::Uuid,
+    ) -> Result<(), StorageError> {
+        self.cooling()?;
+        let left = self
+            .observed(
+                self.send(RequestKind::List, 0, self.provider.detection_leftovers(store, run))
+                    .await,
+            )
+            .await?;
+        self.end_left(&left).await
+    }
     async fn list_checked(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut listing = ObjectListing::new(prefix.clone(), self.config().provider());
         self.send(RequestKind::List, 0, self.provider.list(&mut listing)).await?;

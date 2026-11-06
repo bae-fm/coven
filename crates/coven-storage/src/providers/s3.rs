@@ -768,6 +768,13 @@ impl ProviderOps for S3Storage {
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         self.superseded_floor(floor).await
     }
+    async fn detection_leftovers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        run: uuid::Uuid,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        self.detection_leftovers(store, run).await
+    }
     async fn end_left_upload(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
         self.end_left(upload).await
     }

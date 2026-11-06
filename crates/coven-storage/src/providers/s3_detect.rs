@@ -1,6 +1,7 @@
 //! S3 detection (§20.7): native probes against the user's bucket, under the
-//! store's reserved `<store>/.coven-check/<run>/` prefix, deleted afterwards.
-//! Only fixed labels, status codes and server times enter results.
+//! store's reserved `<store>/.coven-check/<run>/` prefix, deleted afterwards
+//! with what earlier recorded runs left there. Only fixed labels, status
+//! codes and server times enter results.
 use super::*;
 use crate::providers::s3::listing::Page;
 use crate::s3_detection::{COPY_CONDITIONS, SIGNERS, SINGLE_PUTS};
@@ -23,63 +24,79 @@ mod headers;
 
 /// Probe the location's service with these credentials, starting from the
 /// location's own settings, or the plain S3 settings where detection must
-/// supply them. Cleanup runs even after a failed probe; both causes survive.
-/// Each request is a single native request, so a rate-limited one stored
-/// nothing and is sent again while the setup call's `waits` allow (§20.8).
+/// supply them, writing under `runs.run`. Cleanup runs even after a failed
+/// probe; both causes survive. It then removes what each earlier run left,
+/// and a failure there fails detection too. Each request is a single native
+/// request, so a rate-limited one stored nothing and is sent again while
+/// the setup call's `waits` allow (§20.8).
 pub(crate) async fn detect(
     config: StorageConfig,
     credentials: S3Credentials,
     store: StoreId,
+    runs: &crate::S3DetectionRuns,
     clock: ClockRef,
     ids: IdSourceRef,
     http: HttpClient,
     waits: &SetupWaits,
-) -> Result<S3Detection, StorageError> {
-    let StorageConfig::S3 { endpoint, profile, .. } = &config else {
-        return Err(StorageFailure::InvalidConfiguration.with_source("expected S3 configuration"));
-    };
-    let base = profile::settings(endpoint.as_ref(), profile.as_ref())?.unwrap_or(profile::PLAIN);
-    let run = ids.new_id();
-    let mut results = Vec::new();
-    let mut chosen = None;
-    let mut refusal = None;
-    for signing in SIGNERS {
-        let candidate = S3Storage::with_settings(
-            config.clone(),
-            credentials.clone(),
-            clock.clone(),
-            ids.clone(),
-            std::sync::Arc::new(crate::NoCooldown),
-            S3Settings { signing, ..base },
-            http.clone(),
-        )?;
-        let namespace = &namespace(&candidate, store, run);
-        let signer = &candidate;
-        // A rate-limited answer says nothing about the signer: wait it out.
-        let result = waits
-            .resend(clock.as_ref(), move || {
-                signer.list_page(S3Listing::V1, namespace, None, None, Some(0))
-            })
-            .await;
-        results.push(observation(S3Probe::Signing(signing), result.is_ok(), outcome(&result)));
-        match result {
-            Ok(_) if chosen.is_none() || signing == base.signing => chosen = Some(candidate),
-            Ok(_) => {}
-            Err(error) if signing == base.signing || refusal.is_none() => refusal = Some(error),
-            Err(_) => {}
+) -> crate::S3DetectionRun {
+    // Choosing the signer by a read-only listing with each, then reading
+    // the bucket's versioning, writes nothing.
+    let chosen = async {
+        let StorageConfig::S3 { endpoint, profile, .. } = &config else {
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
+            );
+        };
+        let base =
+            profile::settings(endpoint.as_ref(), profile.as_ref())?.unwrap_or(profile::PLAIN);
+        let mut results = Vec::new();
+        let mut chosen = None;
+        let mut refusal = None;
+        for signing in SIGNERS {
+            let candidate = S3Storage::with_settings(
+                config.clone(),
+                credentials.clone(),
+                clock.clone(),
+                ids.clone(),
+                std::sync::Arc::new(crate::NoCooldown),
+                S3Settings { signing, ..base },
+                http.clone(),
+            )?;
+            let namespace = &namespace(&candidate, store, runs.run);
+            let signer = &candidate;
+            // A rate-limited answer says nothing about the signer: wait it out.
+            let result = waits
+                .resend(clock.as_ref(), move || {
+                    signer.list_page(S3Listing::V1, namespace, None, None, Some(0))
+                })
+                .await;
+            results.push(observation(S3Probe::Signing(signing), result.is_ok(), outcome(&result)));
+            match result {
+                Ok(_) if chosen.is_none() || signing == base.signing => chosen = Some(candidate),
+                Ok(_) => {}
+                Err(error) if signing == base.signing || refusal.is_none() => refusal = Some(error),
+                Err(_) => {}
+            }
         }
+        let Some(storage) = chosen else {
+            return Err(refusal.unwrap_or(StorageFailure::Authentication.into()));
+        };
+        let reader = &storage;
+        let versioning =
+            match waits.resend(clock.as_ref(), move || reader.bucket_versioning()).await {
+                Ok(state) => Ok(state),
+                Err(error) if versioning::unknown(&error) => Err(std::sync::Arc::new(error)),
+                Err(error) => return Err(error),
+            };
+        Ok((storage, base, results, versioning))
     }
-    let Some(storage) = chosen else {
-        return Err(refusal.unwrap_or(StorageFailure::Authentication.into()));
-    };
-    let reader = &storage;
-    let versioning = match waits.resend(clock.as_ref(), move || reader.bucket_versioning()).await {
-        Ok(state) => Ok(state),
-        Err(error) if versioning::unknown(&error) => Err(std::sync::Arc::new(error)),
-        Err(error) => return Err(error),
+    .await;
+    let (storage, base, results, versioning) = match chosen {
+        Ok(chosen) => chosen,
+        Err(error) => return crate::S3DetectionRun::unwritten(runs, Err(error)),
     };
     let mut probes = Probes {
-        prefix: namespace(&storage, store, run),
+        prefix: namespace(&storage, store, runs.run),
         s: &storage,
         clock,
         waits,
@@ -89,13 +106,47 @@ pub(crate) async fn detect(
         uploads: Vec::new(),
     };
     let result = probes.run().await;
-    let cleanup = probes.cleanup().await;
-    crate::transfer::with_cleanup(result, cleanup)?;
-    Ok(S3Detection::derive(probes.results, base, versioning))
+    let mut cleanup = probes.cleanup().await;
+    let mut cleaned = Vec::new();
+    if cleanup.is_ok() {
+        cleaned.push(runs.run);
+    }
+    for &earlier in &runs.earlier {
+        let ended = probes.end_run(store, earlier).await;
+        if ended.is_ok() {
+            cleaned.push(earlier);
+        }
+        cleanup = crate::transfer::with_cleanup(cleanup, ended);
+    }
+    let detection = crate::transfer::with_cleanup(result, cleanup)
+        .map(|()| S3Detection::derive(probes.results, base, versioning));
+    crate::S3DetectionRun { detection, cleaned }
 }
 
 fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
     format!("{}{PROBES}/{run}/", storage.prefix.key_prefix_of(&ObjectPrefix::all(store)))
+}
+
+impl S3Storage {
+    /// What detection run `run` left under its prefix: its unfinished
+    /// multipart uploads, then its probe objects. Its probes are listed by
+    /// V1, which every detection's signer probe found accepted.
+    pub(super) async fn detection_leftovers(
+        &self,
+        store: StoreId,
+        run: uuid::Uuid,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        use crate::left_upload::Left;
+        let prefix = namespace(self, store, run);
+        let mut left = Vec::new();
+        for (key, id, _) in self.unfinished_uploads(&prefix, None).await? {
+            left.push(crate::LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
+        }
+        for key in self.keys_under(&prefix, S3Listing::V1).await? {
+            left.push(crate::LeftUpload(Left::Probe(key)));
+        }
+        Ok(left)
+    }
 }
 
 fn observation(probe: S3Probe, held: bool, detail: impl Into<String>) -> S3ProbeResult {
@@ -447,6 +498,21 @@ impl Probes<'_> {
             pages.check(&next)?;
             marker = Some(next);
         }
+    }
+
+    /// Abort an earlier run's unfinished uploads and delete its probes, as
+    /// listing its prefix finds them (§20.7).
+    async fn end_run(&self, store: StoreId, run: uuid::Uuid) -> Result<(), StorageError> {
+        let s = self.s;
+        let left = self.resend(move || s.detection_leftovers(store, run)).await?;
+        let mut result = Ok(());
+        for upload in &left {
+            result = crate::transfer::with_cleanup(
+                result,
+                self.resend(move || s.end_left(upload)).await,
+            );
+        }
+        result
     }
 
     /// Abort every initiation and delete each name recorded before sending.

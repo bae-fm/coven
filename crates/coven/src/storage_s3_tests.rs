@@ -47,13 +47,17 @@ impl StorageConnector for Overwrites {
         _config: StorageConfig,
         _credentials: S3Credentials,
         _store: StoreId,
+        runs: &coven_storage::S3DetectionRuns,
         _waits: &coven_storage::SetupWaits,
-    ) -> Result<S3Detection, StorageError> {
-        Ok(S3Detection {
-            versioning: Ok(coven_storage::S3BucketVersioning::Disabled),
-            settings: DETECTED_S3_SETTINGS,
-            results: Vec::new(),
-        })
+    ) -> coven_storage::S3DetectionRun {
+        coven_storage::S3DetectionRun::unwritten(
+            runs,
+            Ok(S3Detection {
+                versioning: Ok(coven_storage::S3BucketVersioning::Disabled),
+                settings: DETECTED_S3_SETTINGS,
+                results: Vec::new(),
+            }),
+        )
     }
     async fn check_new_s3_store(
         &self,
@@ -94,11 +98,14 @@ impl StorageConnector for BucketState {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        runs: &coven_storage::S3DetectionRuns,
         waits: &coven_storage::SetupWaits,
-    ) -> Result<S3Detection, StorageError> {
-        let mut detection = self.storage.detect_s3(config, credentials, store, waits).await?;
-        detection.versioning = self.versioning.lock().unwrap().clone();
-        Ok(detection)
+    ) -> coven_storage::S3DetectionRun {
+        let mut run = self.storage.detect_s3(config, credentials, store, runs, waits).await;
+        if let Ok(detection) = &mut run.detection {
+            detection.versioning = self.versioning.lock().unwrap().clone();
+        }
+        run
     }
     async fn check_new_s3_store(
         &self,
@@ -258,9 +265,10 @@ impl StorageConnector for ConcurrentSetup {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        runs: &coven_storage::S3DetectionRuns,
         waits: &coven_storage::SetupWaits,
-    ) -> Result<S3Detection, StorageError> {
-        self.storage.detect_s3(config, credentials, store, waits).await
+    ) -> coven_storage::S3DetectionRun {
+        self.storage.detect_s3(config, credentials, store, runs, waits).await
     }
     async fn check_new_s3_store(
         &self,
@@ -502,4 +510,115 @@ async fn setup_reads_and_writes_only_under_its_stores_prefix() {
     for handle in [&f.handle, &other] {
         handle.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn two_stores_share_one_location_without_reading_each_others_history() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    let directory = f.app.create_closed_store("Garden", Arc::new(UuidIds)).await.unwrap();
+    let other = builder(&f.app, f.clock.clone(), f.connector.clone())
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
+    other
+        .setup_s3_storage(
+            f.storage.config(),
+            "Garden device",
+            "garden-key".into(),
+            SecretText::new("secret".into()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    synced(&other).await;
+    for (handle, body) in [(&f.handle, "Household"), (&other, "Garden")] {
+        handle
+            .write(move |sql| {
+                sql.execute("INSERT INTO notes VALUES('same', ?1)", [body])?;
+                Ok::<_, CovenError>(())
+            })
+            .await
+            .unwrap();
+    }
+    for handle in [&f.handle, &other] {
+        wait_for_sent(handle).await;
+    }
+    for (handle, expected) in [(&f.handle, "Household"), (&other, "Garden")] {
+        let body = handle
+            .read(|sql| {
+                Ok::<_, CovenError>(sql.query_row(
+                    "SELECT body FROM notes WHERE id='same'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(body, expected);
+        handle.close().await.unwrap();
+    }
+}
+
+/// Ana's app detects her bucket's settings and is killed mid-detection. Her
+/// detection's run was recorded before its first probe, so after she
+/// reopens the store the next detection there is handed that run to clean
+/// up after; once it confirms the run's leftovers gone, the record ends
+/// and no later detection is handed it again (§20.7).
+#[tokio::test]
+async fn a_cut_detection_run_is_handed_to_the_next_detection_after_reopening() {
+    let connector = crate::tests::Connector::new(Arc::new(
+        MemoryStorage::builder()
+            .location(uncatalogued(Some(S3Profile::Custom(DETECTED_S3_SETTINGS))))
+            .build()
+            .unwrap(),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+    let directory = app.create_closed_store("Loop", Arc::new(UuidIds)).await.unwrap();
+    let handle =
+        builder(&app, clock.clone(), connector.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let cut = connector.detect(&handle, uncatalogued(None), true).await;
+    assert!(cut.earlier.is_empty());
+    handle.close().await.unwrap();
+
+    let handle =
+        builder(&app, clock, connector.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let next = connector.detect(&handle, uncatalogued(None), false).await;
+    assert_eq!(next.earlier, [cut.run]);
+    let last = connector.detect(&handle, uncatalogued(None), false).await;
+    assert!(last.earlier.is_empty(), "{last:?}");
+    handle.close().await.unwrap();
+}
+
+/// A detection run cut short where the store's own bucket is ends once the
+/// store connects there, which removes what it left; one cut short at
+/// another bucket stays recorded for a detection there (§20.7).
+#[tokio::test]
+async fn connecting_ends_the_detection_runs_recorded_at_its_bucket() {
+    let connector = crate::tests::Connector::new(Arc::new(
+        MemoryStorage::builder()
+            .location(uncatalogued(Some(S3Profile::Custom(DETECTED_S3_SETTINGS))))
+            .build()
+            .unwrap(),
+    ));
+    let opened = open(connector.clone()).await;
+    setup(&opened.handle, uncatalogued(None)).await.unwrap();
+    let elsewhere = StorageConfig::S3 {
+        bucket: "elsewhere".into(),
+        region: "us-east-1".into(),
+        endpoint: Some("http://localhost:9000".parse().unwrap()),
+        profile: None,
+        prefix: crate::S3Prefix::default(),
+    };
+    connector.detect(&opened.handle, uncatalogued(None), true).await;
+    let away = connector.detect(&opened.handle, elsewhere.clone(), true).await;
+    opened.handle.unlock_store_key().await.unwrap();
+    let here = connector.detect(&opened.handle, uncatalogued(None), false).await;
+    assert!(here.earlier.is_empty(), "{here:?}");
+    let there = connector.detect(&opened.handle, elsewhere, false).await;
+    assert_eq!(there.earlier, [away.run]);
+    opened.handle.close().await.unwrap();
 }

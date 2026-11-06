@@ -19,6 +19,37 @@ pub struct S3Detection {
     pub results: Vec<S3ProbeResult>,
 }
 
+/// The detection runs one detection cleans up after (§20.7): its own,
+/// which the caller recorded before detection writes its first probe, and
+/// the earlier runs at the same bucket and prefix whose probes and uploads
+/// no cleanup has confirmed gone, such as one a crash cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct S3DetectionRuns {
+    /// This detection's run: its probes go under `.coven-check/<run>/`.
+    pub run: uuid::Uuid,
+    /// The earlier runs whose leftovers it removes after its own.
+    pub earlier: Vec<uuid::Uuid>,
+}
+
+/// What one detection did (§20.7).
+#[derive(Debug)]
+pub struct S3DetectionRun {
+    /// What it observed, or why it failed; a failed cleanup fails it.
+    pub detection: Result<S3Detection, StorageError>,
+    /// The runs whose probes and uploads it confirmed gone: its own when it
+    /// wrote nothing or its cleanup succeeded, and each earlier run whose
+    /// leftovers it removed.
+    pub cleaned: Vec<uuid::Uuid>,
+}
+
+impl S3DetectionRun {
+    /// A detection that wrote nothing: its own run left nothing, and it
+    /// removed no earlier run's leftovers.
+    pub fn unwritten(runs: &S3DetectionRuns, detection: Result<S3Detection, StorageError>) -> Self {
+        Self { detection, cleaned: vec![runs.run] }
+    }
+}
+
 /// One probe's outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct S3ProbeResult {
