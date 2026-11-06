@@ -910,6 +910,28 @@ points Ana's row at an ended incarnation. The author runs the receivers'
 check before its write leaves, so it refuses such a write too
 (`rebuild_refusal_refuses`).
 
+**Where the steps leave a parent.** `ForeignKeyPlace.lean` models how the
+receiver finds that parent. The author's view holds one parent key in at most
+one audience at a time, and each SQL operation on it is a step on its row in
+the audience it is in then; a move is a delete step there and an insert step
+in the new audience, at one position (`emit`). A move that carries the row
+along with its ancestor changes it at no step (`Op.carry`). `place` is
+`StepIndex::place`: with no carry, the latest earlier step on any row with
+the key, a move's insert half after its delete half. `place_sound` proves
+every authoring view the steps are consistent with holds the key where that
+step left it, at its incarnation, or nowhere after a delete, and where it
+was before the write when no step touched it. `recorded_sound` lifts that to
+the recorded parent (`named`): present in the child's audience or the store,
+as the author's capture names it (`capture`), given that a reference the
+action leaves as it was names its setter's parent while that parent is the
+authoring view's row (§9.1). Ben moves his track into Gifts and deletes Ana's
+pair in one write: her review's track reference names Gifts' track, the row
+the move began, as SQLite's view holds it. `untouched_views_differ` and
+`carried_views_differ` are why the receiver refuses the rest: two authoring
+views with the same steps capture different parents. Which key a
+reference's values name, and which rows the write changed at no step of
+their own, are inputs to the model.
+
 **Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
 a copy: a direct change of the mover's write, made without SQL, keeping its
 original creation. `refused_iff` proves a move is permitted exactly when its
@@ -949,8 +971,13 @@ Audience-move destination readability remains separately proved by
 membership. It confers no permission to forge a child's values. Owner identity
 travels with copies. Transporting snapshots, discovering unreadable evidence,
 SQL capture, local commit rollback, schema conversion, and atomic installation
-remain implementation obligations. So do the replayed references and the
-parents each step names: `Trace.refs` and `Step.parents` are inputs, and the
+remain implementation obligations. So do the replayed references:
+`Trace.refs` is an input. The parent a step names for a reference over an
+action's columns is the one `Place.recorded_sound` proves every authoring
+view consistent with the write's steps captures, and the receiver refuses
+where two such views differ (`untouched_views_differ`,
+`carried_views_differ`). Which key a reference's values name, and which rows
+the write changed at no step of their own, stay inputs to that model, and the
 receiver must check that a step's named parent holds the written key at that
 moment, as B18 already requires resolved row identities.
 
@@ -998,6 +1025,13 @@ named parents included. `held_follows_cause` is `follows_cause` for it.
 `judge_view::tests::classification_matches_the_model` requires the
 receiver's cause of every step of the same writes to be the model's. The
 replayed references stay inputs, as `Trace.refs` is.
+The `place` mode runs the model's operations on one parent key from each kind
+of view, inserts, updates, deletes, moves, carries and operations on other
+rows, and returns the steps they record and the model's `place`.
+`judge::place::tests::model::places_match_the_model` builds the receiver's
+step index from those steps for 4,000 such writes and requires
+`StepIndex::place` to find the model's place in each, a move's half among
+them.
 The `admission` mode decides `Admission.check` for one local write, given
 each changed row's table and owner. `local_admission_matches_the_model` runs
 Ben's statements against Ana's rows on SQLite: an authorized cascade, a key
@@ -1016,7 +1050,8 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   author_judgement::tests::local_admission_matches_the_model \
   judge_view::tests::receipt_matches_the_model \
   judge_view::tests::classification_matches_the_model \
-  judge_view::tests::cascade_delete_old_matches_the_model
+  judge_view::tests::cascade_delete_old_matches_the_model \
+  judge::place::tests::model::places_match_the_model
 ```
 
 ### B19 Local keys into values coven updates
