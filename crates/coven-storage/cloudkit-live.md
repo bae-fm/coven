@@ -163,7 +163,13 @@ Select this test with `--exact providers::cloudkit::access::tests::cloudkit_live
 
 Start the owner first. It writes the invitation file with mode 0600 and waits for
 input. Transfer that file privately to the recipient's selected path and start its
-test. After the recipient has accepted, checked its account identity and written
+test. After accepting, the recipient leaves the share by deleting it from its
+shared database and accepts the same URL again, printing its acceptance status,
+its reads and the second acceptance's result (Appendix E.2 of the spec). If
+that acceptance fails, the recipient says so and ends: enter `left` on the
+owner's stdin, which prints whether granting the account again succeeds,
+deletes the test zone and fails the run. After the recipient has accepted,
+checked its account identity and written
 the shared object, enter `accepted` on the owner's stdin. The owner verifies the
 write and removes access. Enter `revoked` on the recipient's stdin; it requires
 its next read to fail. After that test succeeds, enter `verified` on the owner's

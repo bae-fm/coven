@@ -37,9 +37,23 @@ async fn cloudkit_live_sharing() {
             let data = serde_json::to_vec(&(store, invitation)).unwrap();
             file.write_all(&data).unwrap();
             file.sync_all().unwrap();
-            eprintln!("Transfer the private invitation file to the recipient host and run its test. Enter accepted after it verifies shared access.");
+            eprintln!("Transfer the private invitation file to the recipient host and run its test. Enter accepted after it verifies shared access, or left if it could not accept again after leaving.");
             let mut lines = std::io::stdin().lock().lines();
-            assert_eq!(lines.next().unwrap().unwrap(), "accepted");
+            match lines.next().unwrap().unwrap().as_str() {
+                "accepted" => {}
+                "left" => {
+                    // Whether granting again lets a participant that left back in.
+                    let granted = storage.grant_access(&email).await;
+                    println!(
+                        "CloudKit acceptance: owner_grants_again={:?}",
+                        granted.map(|grant| matches!(grant, AccessGrant::Granted { .. }))
+                    );
+                    live_zone::delete(&native).await.unwrap();
+                    std::fs::remove_file(handoff).unwrap();
+                    panic!("the recipient couldn't accept the share again after leaving it");
+                }
+                other => panic!("expected accepted or left, read {other:?}"),
+            }
             assert_eq!(storage.read(&object).await.unwrap(), b"recipient");
             assert!(storage.revoke_access(&email).await.unwrap().is_empty());
             assert_eq!(storage.read(&object).await.unwrap(), b"recipient");
@@ -51,13 +65,46 @@ async fn cloudkit_live_sharing() {
         "recipient" => {
             let (store, invitation): (StoreId, StorageInvitation) =
                 serde_json::from_slice(&std::fs::read(&handoff).unwrap()).unwrap();
-            let native = CloudKitStorage::new(invitation.location().clone(), ids).await.unwrap();
-            let storage = StorageConnection::from_provider(Arc::new(native));
+            let native =
+                Arc::new(CloudKitStorage::new(invitation.location().clone(), ids).await.unwrap());
+            let storage = StorageConnection::from_provider(native.clone());
             storage.join(store, &invitation).await.unwrap();
             storage.join(store, &invitation).await.unwrap();
             assert!(storage.account().await.unwrap().eq_ignore_ascii_case(&email));
             let object = ObjectPath::floor(store);
             assert_eq!(storage.read(&object).await.unwrap(), b"owner");
+            // Probe (Appendix E.2): what leaving the accepted share does, as a
+            // join cancelled before sending would, and whether the same URL
+            // is accepted again. Apple says only that a participant that
+            // deletes the share is removed from it.
+            let status = |name: &'static str| {
+                let native = native.clone();
+                let invitation = invitation.clone();
+                async move {
+                    let status =
+                        native.acceptance_status(&invitation).await.map_err(|e| e.failure());
+                    println!("CloudKit acceptance: {name} status={status:?}");
+                }
+            };
+            let read = || async { storage.read(&object).await.map(drop).map_err(|e| e.failure()) };
+            status("accepted").await;
+            let left = native.leave_share().await.map_err(|error| error.failure());
+            println!("CloudKit acceptance: leave={left:?} read_after_leaving={:?}", read().await);
+            status("after_leaving").await;
+            let rejoined = storage.join(store, &invitation).await;
+            println!(
+                "CloudKit acceptance: rejoin={:?} read={:?}",
+                rejoined.as_ref().map_err(|error| error.failure()),
+                read().await
+            );
+            status("after_rejoining").await;
+            if rejoined.is_err() {
+                eprintln!(
+                    "The share wasn't accepted again after leaving. Tell the owner to enter left."
+                );
+                std::fs::remove_file(handoff).unwrap();
+                return;
+            }
             storage
                 .replace(&storage.status(&object).await.unwrap().unwrap(), b"recipient")
                 .await

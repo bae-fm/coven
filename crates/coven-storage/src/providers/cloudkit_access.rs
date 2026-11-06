@@ -436,6 +436,43 @@ impl CloudKitStorage {
     }
 }
 
+/// What the two-account live run probes of a join's acceptance (Appendix
+/// E.2): the invited account's status in the share, and leaving it.
+#[cfg(test)]
+impl CloudKitStorage {
+    /// The signed-in account's acceptance status in `invitation`'s share, as
+    /// its metadata reads now.
+    async fn acceptance_status(
+        &self,
+        invitation: &StorageInvitation,
+    ) -> Result<CKShareParticipantAcceptanceStatus, StorageError> {
+        let crate::invitation::InvitationAcceptance::CloudKitShare { url } = &invitation.acceptance
+        else {
+            return Err(StorageFailure::InvitationMismatch.into());
+        };
+        let metadata = metadata(&self.container, url)?.wait().await?;
+        Ok(unsafe { metadata.0.participantStatus() })
+    }
+
+    /// Leave the share as a participant does: delete the share record from
+    /// this account's shared database, which removes the account from the
+    /// share (CKShare).
+    async fn leave_share(&self) -> Result<(), StorageError> {
+        native::modify(
+            &self.database,
+            vec![],
+            &[self.record_id(&self.share_name())],
+            CKRecordSavePolicy::IfServerRecordUnchanged,
+            None,
+            vec![],
+            None,
+        )
+        .wait()
+        .await
+        .map(drop)
+    }
+}
+
 #[cfg(test)]
 #[path = "cloudkit_access_tests.rs"]
 mod tests;

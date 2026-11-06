@@ -704,3 +704,131 @@ fn onedrive_live_cached_folders_and_scoped_listing() {
         println!("onedrive_live folders: scoped listing; warm create/read; disappeared folder refused; retry resolved and recreated parent; unrelated floor retained");
     });
 }
+
+/// What the recipient's own account shows of `native`'s folder: whether it is
+/// in the account's shared list, and the account's used space.
+async fn recipient_view(native: &OneDriveStorage) -> String {
+    let listed = async {
+        let mut url = http::endpoint(&native.api, &["me", "drive", "sharedWithMe"], &[])?;
+        loop {
+            let value =
+                http::json(PROVIDER, native.send(Method::GET, &url, Body::Empty).await?).await?;
+            if http::array(&value, "value")?.iter().any(|item| {
+                item["remoteItem"]["id"].as_str() == Some(native.folder.as_str())
+                    && item["remoteItem"]["parentReference"]["driveId"].as_str()
+                        == Some(native.drive.as_str())
+            }) {
+                return Ok::<_, StorageError>(true);
+            }
+            match http::next_link(&value)? {
+                Some(next) => url = next.into(),
+                None => return Ok(false),
+            }
+        }
+    }
+    .await;
+    let used = async {
+        let url = http::endpoint(&native.api, &["me", "drive"], &[("$select", "quota")])?;
+        let value =
+            http::json(PROVIDER, native.send(Method::GET, &url, Body::Empty).await?).await?;
+        Ok::<_, StorageError>(value["quota"]["used"].as_u64())
+    }
+    .await;
+    format!(
+        "shared_list={:?} used_bytes={:?}",
+        listed.map_err(|error| error.failure()),
+        used.map_err(|error| error.failure())
+    )
+}
+
+/// What a join's acceptance leaves in the recipient's OneDrive, and whether
+/// the recipient can give it back while the invite stays usable (Appendix
+/// E.2). Graph documents no recipient call for this, so the probe prints what
+/// it sees rather than asserting it: whether redeeming puts the folder in the
+/// recipient's shared list or changes its used space, which permissions the
+/// recipient reads, and, once it deletes each permission naming it, whether
+/// it still reads the folder, whether the owner still holds an invitation
+/// for it, and whether redeeming the same invite again works.
+#[test]
+#[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV and COVEN_LIVE_ONEDRIVE_B_ENV; probes a join's acceptance"]
+fn onedrive_live_join_acceptance() {
+    run(async |live| {
+        let tokens = tokens("COVEN_LIVE_ONEDRIVE_B_ENV", live.clock.clone()).await;
+        let session = OAuthSession::new(
+            PROVIDER,
+            tokens,
+            Arc::new(crate::test_utils::RefusedRefresh),
+            live.clock.clone(),
+            crate::providers::tests::live_http_client(),
+        )
+        .unwrap();
+        let native = Arc::new(
+            OneDriveStorage::new(live.storage.config(), session, Arc::new(UuidIds)).unwrap(),
+        );
+        let recipient = StorageConnection::from_provider(native.clone());
+        let account = recipient.account().await.unwrap();
+        assert!(
+            account != live.storage.account().await.unwrap(),
+            "the probe requires two accounts"
+        );
+        let path = live.path(1);
+        live.storage.create(&path, b"owner").await.unwrap();
+        let AccessGrant::Granted { invitation } =
+            live.storage.grant_access(&account).await.unwrap()
+        else {
+            panic!("OneDrive did not grant access");
+        };
+        println!("OneDrive acceptance: before_join {}", recipient_view(&native).await);
+        recipient.join(live.store, &invitation).await.unwrap();
+        assert_eq!(recipient.read(&path).await.unwrap(), b"owner");
+        println!("OneDrive acceptance: after_join {}", recipient_view(&native).await);
+        let own = match native.permissions().await {
+            Ok(permissions) => {
+                let named = AccountPermissions::new(&account, &permissions).unwrap();
+                let mut own = Vec::new();
+                for permission in &permissions {
+                    if named.matches(permission).unwrap() {
+                        println!(
+                            "OneDrive acceptance: recipient reads its permission roles={} link_type={} link_scope={}",
+                            permission["roles"], permission["link"]["type"], permission["link"]["scope"]
+                        );
+                        own.push(http::string(permission, "id").unwrap().to_owned());
+                    }
+                }
+                println!(
+                    "OneDrive acceptance: recipient reads {} permissions, {} naming it",
+                    permissions.len(),
+                    own.len()
+                );
+                own
+            }
+            Err(error) => {
+                println!("OneDrive acceptance: recipient permission listing={:?}", error.failure());
+                Vec::new()
+            }
+        };
+        for id in &own {
+            let url = native.item(&native.folder, &["permissions", id]).unwrap();
+            let deleted = match native.send(Method::DELETE, &url, Body::Empty).await {
+                Ok(response) => response.status().to_string(),
+                Err(error) => format!("{:?}", error.failure()),
+            };
+            println!("OneDrive acceptance: recipient deletes its permission: {deleted}");
+        }
+        println!("OneDrive acceptance: after_delete {}", recipient_view(&native).await);
+        println!(
+            "OneDrive acceptance: recipient_read_after_delete={:?}",
+            recipient.read(&path).await.map(drop).map_err(|error| error.failure())
+        );
+        let held = live.storage.provider().invitation(&account).await.unwrap();
+        println!("OneDrive acceptance: owner_holds_invitation_after_delete={}", held.is_some());
+        // The same code entered again redeems the invitation it carries.
+        let rejoined = recipient.join(live.store, &invitation).await;
+        println!(
+            "OneDrive acceptance: rejoin={:?} read={:?}",
+            rejoined.map_err(|error| error.failure()),
+            recipient.read(&path).await.map(drop).map_err(|error| error.failure())
+        );
+        // The enclosing run deletes its folder, and with it every grant.
+    });
+}

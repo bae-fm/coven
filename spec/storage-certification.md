@@ -34,8 +34,8 @@ the run exercised. The linked sections hold the output.
 | Versity Gateway | 1.9.0, POSIX backend | off and on | suite 6, 2026-10-28; sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | |
 | AWS S3 | | | none | No account to run against: uncertified |
 | Dropbox | Full Dropbox app and App folder | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | Listing lag: the suite has no measurement, a probe measured 1.1 to 1.4 s. Unmounting and mounting again (`dropbox_live_account_sharing`), never run |
-| OneDrive (personal) | Microsoft Graph | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([floor replacement](#onedrive-floor-replacement-through-an-upload-session-2026-10-17)) | Personal accounts only were run |
-| CloudKit | `iCloud.fm.bae.desktop`, Development | not applicable | live test, 2026-10-14; one-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)); two-account create-once, 2026-10-16 ([probes](#cross-account-create-once-probes-2026-10-16)) | Sharing on two accounts (`cloudkit_live_sharing`) never run |
+| OneDrive (personal) | Microsoft Graph | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([floor replacement](#onedrive-floor-replacement-through-an-upload-session-2026-10-17)) | Personal accounts only were run. What a join's acceptance leaves and whether the recipient can give it back (`onedrive_live_join_acceptance`), never run |
+| CloudKit | `iCloud.fm.bae.desktop`, Development | not applicable | live test, 2026-10-14; one-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)); two-account create-once, 2026-10-16 ([probes](#cross-account-create-once-probes-2026-10-16)) | Sharing on two accounts (`cloudkit_live_sharing`), with leaving an accepted share and accepting it again, never run |
 
 Garage 2.4.1 failed every race and has no profile
 ([full battery](#full-battery-2026-10-14)); setup refuses it with `CreateOnce`.
@@ -81,6 +81,18 @@ run in every provider's live test; the races are separate tests.
 - **Undoing a join's acceptance:** a Dropbox recipient unmounts the shared
   folder twice, mounts it again and reads, and unmounting after revocation
   is done (coven.md E.2). `dropbox_live.rs` (`dropbox_live_account_sharing`).
+  OneDrive and CloudKit document no undo that keeps the invite usable, so
+  their probes print what they see instead of asserting it. A OneDrive
+  recipient redeems the invite; the probe prints whether the folder joins
+  its shared list and whether its used space changes, the permissions it
+  reads, and, after it deletes each one naming it, whether it still reads
+  the folder, whether the owner still holds an invitation for it, and
+  whether redeeming the same invite works again. `onedrive_live.rs`
+  (`onedrive_live_join_acceptance`). A CloudKit recipient deletes the
+  accepted share from its shared database, which Apple says removes it from
+  the share, then accepts the same URL again; the probe prints its
+  acceptance status, its reads and the second acceptance's result.
+  `cloudkit_live_sharing` in the CloudKit tests.
 - **Cross-account create-once:** writers on two accounts race one name in a
   shared folder or zone. `sequence_live.rs` for Dropbox and OneDrive,
   `cloudkit_race.rs` for CloudKit.
