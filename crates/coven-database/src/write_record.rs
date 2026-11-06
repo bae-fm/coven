@@ -1,7 +1,7 @@
 //! Session changes, audience moves, and one causal write record.
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, counter, timestamp};
+use crate::write_encoding::timestamp;
 use crate::write_rows::{column_name, reference_error, row_id, AppKey, AppValues, AppView};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -11,7 +11,6 @@ use coven_format::{
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId, WriteId};
-use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
@@ -66,8 +65,7 @@ pub(crate) fn moved(
                 let state = stored.row(&child)?;
                 let reference = &state.state.cells()[column_name(table, column)].value.parents
                     [&schema.foreign_key(table, fk)];
-                if reference.row != parent || reference.generation != generation(database, &parent)?
-                {
+                if reference.row != parent || reference.generation != stored.generation(&parent)? {
                     continue;
                 }
                 let key = (child.table.clone(), child.key.clone());
@@ -266,7 +264,7 @@ pub(crate) fn changes(
                     .collect(),
             )?,
         );
-        let generation = generation(database, new)?;
+        let generation = stored.generation(new)?;
         let values = state
             .state
             .cells()
@@ -356,7 +354,7 @@ pub(crate) fn changes(
                 let parent = row_id(key, &after.row(key)?.expect("reference parent"));
                 let generation = match generations.get(&parent) {
                     Some(g) => *g,
-                    None => generation(database, &parent)?,
+                    None => stored.generation(&parent)?,
                 };
                 assert_eq!(generation % 2, 1, "reference has no present parent");
                 for column in &fk.columns {
@@ -385,7 +383,7 @@ pub(crate) fn changes(
                     let parent = crate::file_table::row(file, row.audience.clone())?;
                     let generation = match generations.get(&parent) {
                         Some(g) => *g,
-                        None => generation(database, &parent)?,
+                        None => stored.generation(&parent)?,
                     };
                     if !coven_merge::generation_present(generation) {
                         return Err(crate::file_write::unknown(table, &values, column));
@@ -395,7 +393,7 @@ pub(crate) fn changes(
             }
             for value in columns.values_mut() {
                 for (name, parent) in &mut value.parents {
-                    if parent.generation == generation(database, &parent.row)? {
+                    if parent.generation == stored.generation(&parent.row)? {
                         if let Some(destination) = moved.get(&parent.row) {
                             parent.row = destination.clone();
                             parent.generation = generations[destination];
@@ -503,18 +501,6 @@ fn unordered(
                 dismissals: Vec::new(),
             })
             .collect(),
-    })
-}
-
-pub(crate) fn generation(database: &DatabaseConnection, row: &RowId) -> Result<u64, DbError> {
-    let generation: Option<Vec<u8>> = database.query_row(
-        "SELECT max(generation) FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
-        params![row.table, row.key, audience_text(&row.audience)],
-        |r| r.get(0),
-    )?;
-    Ok(match generation {
-        Some(generation) => counter(generation)?,
-        None => 0,
     })
 }
 

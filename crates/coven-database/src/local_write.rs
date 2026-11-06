@@ -44,7 +44,7 @@ impl DatabaseConnection {
                     let after = crate::write_rows::AppView::after(database, schema);
                     let store = crate::merge_store::MergeStore::new(database, &before);
                     let mut steps = crate::execution_capture::capture(
-                        database, schema, &before, &after, events,
+                        database, schema, &store, &before, &after, events,
                     )?;
                     let changed = before.changes(&after, captured.keys().cloned())?;
                     // The write's own moves already named their shown rows' new

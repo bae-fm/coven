@@ -120,8 +120,22 @@ pub(crate) struct MergeStore<'a> {
     values: RowValues<'a>,
     metadata: WriteMetadata<'a>,
     rows: RowCache<RowId, StoredRow>,
+    /// The generations `generation` read, which a later read of the same
+    /// row's state starts from.
+    generations: RowCache<RowId, Generations>,
     /// The merge rows each app key has, by table and key.
     keys: RowCache<(String, Vec<u8>), KeyRows>,
+}
+
+/// A row's stored generations, oldest first: each one's `_coven_rows` id,
+/// its number, and the write that started it.
+#[derive(Clone)]
+struct Generations(Vec<(i64, u64, WriteId)>);
+
+impl Weight for Generations {
+    fn weight(&self) -> usize {
+        std::mem::size_of_val(self.0.as_slice())
+    }
 }
 
 /// The merge rows one app key has stored, one for each audience.
@@ -148,6 +162,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::App(app),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            generations: RowCache::all(),
             keys: RowCache::all(),
         }
     }
@@ -162,6 +177,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::Schema(schema),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            generations: RowCache::all(),
             keys: RowCache::all(),
         }
     }
@@ -188,6 +204,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::Snapshot(schema, audiences),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            generations: RowCache::all(),
             keys: RowCache::all(),
         }
     }
@@ -201,6 +218,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::Staged(schema),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            generations: RowCache::all(),
             keys: RowCache::all(),
         }
     }
@@ -209,6 +227,7 @@ impl<'a> MergeStore<'a> {
     /// every row value in memory while a connected region is materialized.
     pub(crate) fn without_row_cache(mut self) -> Self {
         self.rows = RowCache::Off;
+        self.generations = RowCache::Off;
         self.keys = RowCache::Off;
         self
     }
@@ -218,6 +237,7 @@ impl<'a> MergeStore<'a> {
     /// run of uses without being held whole (§21.2).
     pub(crate) fn with_recent_rows(mut self) -> Self {
         self.rows = RowCache::recent(crate::row_cache::RECENT);
+        self.generations = RowCache::recent(crate::row_cache::RECENT);
         self.keys = RowCache::recent(crate::row_cache::RECENT);
         self
     }
@@ -283,6 +303,30 @@ impl<'a> MergeStore<'a> {
         Ok(row)
     }
 
+    /// A row's stored generation, zero for a row never held. Nothing changes
+    /// it before the store's write commits, so a local write's capture, its
+    /// record and its merge share one read of each row's.
+    pub(crate) fn generation(&self, id: &RowId) -> Result<u64, DbError> {
+        if let Some(generation) = self.rows.peek(id, |row| row.state.generation()) {
+            return Ok(generation);
+        }
+        let generations = self.generations(id, true)?;
+        Ok(generations.0.last().map_or(0, |(_, generation, _)| *generation))
+    }
+
+    /// A row's generations: those a generation read kept, or read now, and
+    /// kept when `keep`. A read of the row's whole state keeps that instead.
+    fn generations(&self, id: &RowId, keep: bool) -> Result<Generations, DbError> {
+        if let Some(generations) = self.generations.get(id) {
+            return Ok(generations);
+        }
+        let generations = Generations(self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience_text(&id.audience)], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?)?, self.metadata.retain(r,2)?)))?);
+        if keep && self.generations.keeps() {
+            self.generations.insert(id.clone(), generations.clone());
+        }
+        Ok(generations)
+    }
+
     /// Snapshot merge records and loss validation read generations and winning
     /// cells independently of the loss section, without loading prior losses.
     pub(crate) fn row_without_losses(&self, id: &RowId) -> Result<StoredRow, DbError> {
@@ -293,7 +337,7 @@ impl<'a> MergeStore<'a> {
         #[cfg(test)]
         self.database.record_merge_load(&id.table);
         let audience = audience_text(&id.audience);
-        let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?)?, self.metadata.retain(r,2)?)))?;
+        let generations = self.generations(id, false)?.0;
         let current = generations.last().map(|(ordinal, generation, _)| (*ordinal, *generation));
         let mut cells = BTreeMap::new();
         let mut loss = None;

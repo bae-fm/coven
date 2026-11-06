@@ -9482,6 +9482,13 @@ rechecks (§20.5) and any container-existence check count here.
   a row to 127 µs. It can't go higher: the journal moves by writing
   all it holds at once, and SQLite's unix file layer writes less than 128 KiB
   a call.
+- **A local write reads each row's generations once.** Its steps, its record
+  and its merge each need the generation of every row it changes and of every
+  parent its references name. Nothing changes those until the write commits,
+  so coven reads each row's once, and every stage, and the read of the row's
+  whole merge state, uses that read. Reading them again at each stage took 25 statements a
+  row instead of 22 for a write inserting tracks under existing albums, and
+  four or five more for each track a move of its album carried.
 - **Applying a streamed write keeps only the rows it used last.** Merging
   and putting back a region reads each row's merge state and evaluation
   several times, and a region can be the whole write, so it keeps the rows it

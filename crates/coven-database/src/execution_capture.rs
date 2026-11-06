@@ -11,6 +11,7 @@
 //! no row changes audience at no step.
 
 use crate::declaration::AudienceSource;
+use crate::merge_store::MergeStore;
 use crate::schema::{SchemaForeignKey, TableSchema};
 use crate::sqlite::{DatabaseConnection, Event};
 use crate::write_capture::values;
@@ -27,6 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 struct Tracker<'a> {
     db: &'a DatabaseConnection,
     schema: &'a WriteSchema,
+    /// The merge rows as stored before the write.
+    store: &'a MergeStore<'a>,
     before: &'a AppView<'a>,
     after: &'a AppView<'a>,
     /// Values as the operations so far left them.
@@ -34,8 +37,9 @@ struct Tracker<'a> {
     /// Each app row's merge row as of its last operation or the last move
     /// that carried it.
     rows: BTreeMap<AppKey, RowId>,
-    /// Each merge row's generation as of the operations so far.
-    generations: BTreeMap<RowId, u64>,
+    /// The generation of each merge row the operations so far advanced;
+    /// every other row is at its stored one.
+    advanced: BTreeMap<RowId, u64>,
     /// For each row, the rows the operations so far wrote with it as their
     /// audience parent at some moment, which may name another one since.
     followers: BTreeMap<AppKey, BTreeSet<AppKey>>,
@@ -120,19 +124,18 @@ impl Tracker<'_> {
         Ok(RowId { table: key.0.clone(), key: key.1.clone(), audience })
     }
 
-    fn generation(&mut self, row: &RowId) -> Result<u64, DbError> {
-        if let Some(generation) = self.generations.get(row) {
-            return Ok(*generation);
+    /// A merge row's generation as of the operations so far.
+    fn generation(&self, row: &RowId) -> Result<u64, DbError> {
+        match self.advanced.get(row) {
+            Some(generation) => Ok(*generation),
+            None => self.store.generation(row),
         }
-        let generation = crate::write_record::generation(self.db, row)?;
-        self.generations.insert(row.clone(), generation);
-        Ok(generation)
     }
 
     fn advance(&mut self, row: &RowId) -> Result<u64, DbError> {
         let generation = self.generation(row)?;
         let next = generation.checked_add(1).expect("generation exhausted");
-        self.generations.insert(row.clone(), next);
+        self.advanced.insert(row.clone(), next);
         Ok(next)
     }
 
@@ -274,7 +277,7 @@ impl Tracker<'_> {
     /// The written columns with complete reference tuples and their parents
     /// as of this operation. Generated columns are recomputed, not written.
     fn columns(
-        &mut self,
+        &self,
         table: &TableSchema,
         values: &AppValues,
         audience: Option<&Audience>,
@@ -324,6 +327,7 @@ impl Tracker<'_> {
 pub(crate) fn capture(
     db: &DatabaseConnection,
     schema: &WriteSchema,
+    store: &MergeStore<'_>,
     before: &AppView<'_>,
     after: &AppView<'_>,
     events: &[Event],
@@ -331,11 +335,12 @@ pub(crate) fn capture(
     let mut tracker = Tracker {
         db,
         schema,
+        store,
         before,
         after,
         current: BTreeMap::new(),
         rows: BTreeMap::new(),
-        generations: BTreeMap::new(),
+        advanced: BTreeMap::new(),
         followers: BTreeMap::new(),
     };
     let mut operations: BTreeMap<RowId, Vec<Step>> = BTreeMap::new();

@@ -56,13 +56,13 @@ pub(crate) fn changes(
             };
             let old = setter.value.parents.get(&fk);
             if let Some(parent) = old {
-                if crate::write_record::generation(db, &parent.row)? != parent.generation {
+                if store.generation(&parent.row)? != parent.generation {
                     continue;
                 }
             }
             let new = if let Some(key) = new.parents.get(&fk) {
                 let parent = row_id(key, &visible.row(key)?.expect("migration reference parent"));
-                let generation = crate::write_record::generation(db, &parent)?;
+                let generation = store.generation(&parent)?;
                 Some(Parent {
                     row: parent,
                     generation: if !coven_merge::generation_present(generation) {
