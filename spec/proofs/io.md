@@ -15,6 +15,17 @@ Retained or in-flight bytes cannot be fetched again. The model separates
 receiving bytes from applying their contents, and bytes no commit takes are
 never retained (`uncommitted_never_retained`), as a pin's prepare commits none.
 
+[Budget.lean](io/CovenIO/Budget.lean) models a namespace's cache budget as
+`file_cache::trim_entries` enforces it. Over budget, it evicts the least
+recently read entry it may, by last read and then cache file name, until it is
+within budget or nothing more may go (`within_budget`); within budget it evicts
+nothing (`within_budget_keeps_all`). A pinned entry never goes
+(`pinned_kept`), nor a file's header while a chunk of the file is cached, and
+another namespace's entries stay (`other_namespace_kept`). Every evicted entry
+was read no later than every unpinned chunk of the namespace that stays
+(`least_recent_first`). Eviction is a function of the entries, so it never
+fails a read.
+
 [Downloads.lean](io/CovenIO/Downloads.lean) models validated file chunks,
 observable progress and retry disposition. Disk failure preserves validated
 progress. A pin's attempt is its prepare (§17.8): it retains and pins nothing

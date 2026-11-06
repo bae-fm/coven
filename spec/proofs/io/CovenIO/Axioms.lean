@@ -177,3 +177,8 @@ import CovenIO
 #print axioms CovenIO.Reread.damaged_copy_never_refused
 #print axioms CovenIO.Reread.passing_copy_applies
 #print axioms CovenIO.Reread.copy_once_refuses_honest
+#print axioms CovenIO.Budget.within_budget
+#print axioms CovenIO.Budget.pinned_kept
+#print axioms CovenIO.Budget.other_namespace_kept
+#print axioms CovenIO.Budget.within_budget_keeps_all
+#print axioms CovenIO.Budget.least_recent_first
