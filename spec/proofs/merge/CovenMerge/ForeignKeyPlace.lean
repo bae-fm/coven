@@ -7,14 +7,17 @@ rows.
 
 The author's view holds one parent key in at most one audience at a time
 (`View`). Each operation of the write's SQL on the key is a step on its row in
-the audience it is in then (`emit`); a move is the delete of the old
-audience's row and the insert of the new one's, at one position. A move that
-carries the row along with its ancestor (`Op.carry`) changes it at no step.
+the audience it is in then (`emit`). A move is the delete of the old
+audience's row and the insert of the new one's, at one position: an update of
+the row's own audience, and the move of an ancestor that carries the row
+along, record it alike (`Op.move`). Only a change of no step at all
+(`Op.unstepped`), as a migration difference or a forged write has, leaves the
+steps silent.
 
-* `place` is the receiver's rule as `StepIndex::place` runs it: with no carry
-  in the write, the latest earlier step on any row with the key, a move's
-  insert half after its delete half; no step at all leaves the key as the
-  authoring view holds it; a carry leaves it unplaced.
+* `place` is the receiver's rule as `StepIndex::place` runs it: with no
+  unstepped change in the write, the latest earlier step on any row with the
+  key, a move's insert half after its delete half; no step at all leaves the
+  key as the authoring view holds it; an unstepped change leaves it unplaced.
 * `place_sound`: when `place` names a step, every authoring view the steps
   are consistent with holds the key where that step left it, at its
   incarnation, or nowhere after a delete; when no step touched the key, it is
@@ -24,7 +27,12 @@ carries the row along with its ancestor (`Op.carry`) changes it at no step.
   capture names it (`capture`), given that a reference left as it was names
   the parent its setter recorded while that parent is the authoring view's
   row (§9.1's display rule).
-* `untouched_views_differ` and `carried_views_differ` are why the receiver
+* `net_sound` does the same for a row's net change, which names the parent
+  where the steps leave the key at the end of the write, at the incarnation
+  the write's net changes leave that row at (`namedNet`).
+  `readded_net_differs` and `deferred_net_differs` are why that is not the
+  parent an action's step names.
+* `untouched_views_differ` and `unstepped_views_differ` are why the receiver
   refuses the rest: two authoring views with the same steps capture different
   parents. -/
 namespace CovenMerge.Ownership.Classification.Place
@@ -36,13 +44,16 @@ at one incarnation. -/
 abbrev View (A : Type) := Option (A × Nat)
 
 /-- One operation of the write, at its own position. An insert or move names
-the incarnation it begins. -/
+the incarnation it begins. A move is any operation that takes the key's row
+to another audience: an update of its own audience, or a move of an ancestor
+that carries it (§15.4). -/
 inductive Op (A : Type) where
   | insert (a : A) (g : Nat)
   | update
   | delete
   | move (b : A) (g : Nat)
-  | carry (b : A) (g : Nat)
+  /-- A change of the key's row the write made at no step of its own. -/
+  | unstepped (b : A) (g : Nat)
   /-- An operation on another row. -/
   | other
 deriving DecidableEq, Repr
@@ -63,7 +74,7 @@ def apply : Op A → View A → Option (View A)
   | .update, some p => some (some p)
   | .delete, some _ => some none
   | .move b g, some (a, _) => if a = b then none else some (some (b, g))
-  | .carry b g, some (a, _) => if a = b then none else some (some (b, g))
+  | .unstepped b g, some (a, _) => if a = b then none else some (some (b, g))
   | .other, v => some v
   | _, _ => none
 
@@ -84,8 +95,8 @@ def run : List (Op A) → Nat → View A → Option (View A × List (Step A))
       let r ← run ops (i + 1) w
       pure (r.1, emit i op v ++ r.2)
 
-def Op.carries : Op A → Bool
-  | .carry _ _ => true
+def Op.isUnstepped : Op A → Bool
+  | .unstepped _ _ => true
   | _ => false
 
 /-- The view a step leaves. -/
@@ -110,8 +121,8 @@ deriving DecidableEq, Repr
 
 /-- The receiver's rule: where the key is before position `s`, from the write's
 steps and whether the write changed the key at no step of its own. -/
-def place (carried : Bool) (steps : List (Step A)) (s : Nat) : Place A :=
-  if carried then .unplaced else
+def place (unstepped : Bool) (steps : List (Step A)) (s : Nat) : Place A :=
+  if unstepped then .unplaced else
     match latest (steps.filter (·.seq < s)) with
     | none => .untouched
     | some st => .last st
@@ -193,7 +204,7 @@ theorem run_sorted : ∀ (ops : List (Op A)) (i : Nat) (v u : View A) (ss : List
 /-! A run's last step says where it leaves the key. -/
 
 theorem run_last : ∀ (ops : List (Op A)) (i : Nat) (v u : View A) (ss : List (Step A)),
-    run ops i v = some (u, ss) → (∀ op ∈ ops, op.carries = false) →
+    run ops i v = some (u, ss) → (∀ op ∈ ops, op.isUnstepped = false) →
       u = match ss.getLast? with
         | none => v
         | some st => st.view := by
@@ -222,7 +233,7 @@ theorem run_last : ∀ (ops : List (Op A)) (i : Nat) (v u : View A) (ss : List (
           rw [List.getLast?_append, hss]
           have hop := hc op (by simp)
           subst hu
-          cases op <;> cases v <;> simp_all [apply, emit, Op.carries, Step.view] <;>
+          cases op <;> cases v <;> simp_all [apply, emit, Op.isUnstepped, Step.view] <;>
             (try split at hw) <;> simp_all [Step.view]
 
 /-! The steps before position `i + k` are the first `k` operations' steps. -/
@@ -277,15 +288,15 @@ theorem run_take : ∀ (ops : List (Op A)) (k i : Nat) (v u : View A) (ss : List
 def viewAt (ops : List (Op A)) (v : View A) (s : Nat) : Option (View A) :=
   (run (ops.take s) 0 v).map (·.1)
 
-/-- With no carry in the write, the place the receiver finds is where every
+/-- With no unstepped change in the write, the place the receiver finds is where every
 authoring view the steps are consistent with holds the key: where the named
 step left it, or where it was before the write when no step touched it. -/
 theorem place_sound (ops : List (Op A)) (v u : View A) (ss : List (Step A)) (s : Nat)
-    (h : run ops 0 v = some (u, ss)) (hc : ∀ op ∈ ops, op.carries = false) :
+    (h : run ops 0 v = some (u, ss)) (hc : ∀ op ∈ ops, op.isUnstepped = false) :
     (place false ss s = .untouched → viewAt ops v s = some v) ∧
     (∀ st, place false ss s = .last st → viewAt ops v s = some st.view) := by
   obtain ⟨u', hu'⟩ := run_take ops s 0 v u ss h
-  have hc' : ∀ op ∈ ops.take s, op.carries = false := fun o ho => hc o (List.mem_of_mem_take ho)
+  have hc' : ∀ op ∈ ops.take s, op.isUnstepped = false := fun o ho => hc o (List.mem_of_mem_take ho)
   have hl := run_last (ops.take s) 0 v u' _ hu' hc'
   have hs := run_sorted (ops.take s) 0 v u' _ hu'
   simp only [Nat.zero_add] at hl hs hu'
@@ -328,7 +339,7 @@ names in every authoring view consistent with the steps, given that a
 reference left as it was names the authoring view's parent row (§9.1). -/
 theorem recorded_sound (child store : A) (unchanged : Bool) (setter : Option (A × Nat))
     (ops : List (Op A)) (v u : View A) (ss : List (Step A)) (s : Nat)
-    (h : run ops 0 v = some (u, ss)) (hc : ∀ op ∈ ops, op.carries = false)
+    (h : run ops 0 v = some (u, ss)) (hc : ∀ op ∈ ops, op.isUnstepped = false)
     (display : capture child store v = setter) (p : Option (A × Nat))
     (hn : named child store unchanged setter (place false ss s) = some p) :
     (viewAt ops v s).map (capture child store) = some p := by
@@ -360,16 +371,119 @@ theorem untouched_views_differ (child store : A) (g s : Nat) :
     | zero => rfl
     | succ s ih => simp [List.replicate_succ, run, apply, emit, ih]
 
-/-- A carried key: two moves carrying it to different readable audiences give
-the same steps, none, and capture different parents. -/
-theorem carried_views_differ (child store a : A) (g h : Nat) (hca : child ≠ a)
+/-- A key the write changed at no step: two such changes taking it to
+different readable audiences give the same steps, none, and capture different
+parents. -/
+theorem unstepped_views_differ (child store a : A) (g h : Nat) (hca : child ≠ a)
     (hsa : store ≠ a) (hcs : child ≠ store) :
-    run [Op.carry child h] 0 (some (a, g)) = some (some (child, h), []) ∧
-    run [Op.carry store h] 0 (some (a, g)) = some (some (store, h), []) ∧
+    run [Op.unstepped child h] 0 (some (a, g)) = some (some (child, h), []) ∧
+    run [Op.unstepped store h] 0 (some (a, g)) = some (some (store, h), []) ∧
     capture child store (some (child, h)) ≠ capture child store (some (store, h)) := by
   refine ⟨?_, ?_, ?_⟩
   · simp [run, apply, emit, Ne.symm hca]
   · simp [run, apply, emit, Ne.symm hsa]
   · simp [capture, hcs]
+
+/-! The parent a net change names.
+
+A row's net change is not its steps combined. A row the write deletes and
+adds again keeps its incarnation in the net change, an update or no change at
+all, while its steps end that incarnation and begin the next. And a deferred
+reference can name a parent the write adds only after the step that set it.
+So a net change names, for a reference whose values key the parent, the row
+the steps leave the key in at the end of the write, at the incarnation the
+write's net changes leave that row at. -/
+
+/-- The key's view in the incarnations of the write's net changes: `ends a`
+is the incarnation the write's record of audience `a`'s row leaves it at,
+when the write holds one. -/
+def netView (ends : A → Option Nat) : View A → View A
+  | some (a, g) => some (a, (ends a).getD g)
+  | none => none
+
+/-- The parent a receiver expects a net change to name for a reference, or
+none when it refuses: from where the steps leave the key at the end of the
+write, in the net changes' incarnations, or, when no step touched the key,
+the parent its setter recorded. -/
+def namedNet (child store : A) (ends : A → Option Nat) (setter : Option (A × Nat)) :
+    Place A → Option (Option (A × Nat))
+  | .last st => some (capture child store (netView ends st.view))
+  | .untouched => some setter
+  | .unplaced => none
+
+/-- Whatever parent the receiver expects of a net change is the one the
+author's capture of that net change names in every authoring view consistent
+with the steps: the key's view at the end of the write, in the net changes'
+incarnations. A row of the key no step touched has no record in the write
+(`hends`), and a reference left untouched names the authoring view's parent
+(§9.1). -/
+theorem net_sound (child store : A) (ends : A → Option Nat) (setter : Option (A × Nat))
+    (ops : List (Op A)) (v u : View A) (ss : List (Step A))
+    (h : run ops 0 v = some (u, ss)) (hc : ∀ op ∈ ops, op.isUnstepped = false)
+    (hends : ∀ a, (∀ st ∈ ss, st.aud ≠ a) → ends a = none)
+    (display : capture child store v = setter) (p : Option (A × Nat))
+    (hn : namedNet child store ends setter (place false ss ops.length) = some p) :
+    capture child store (netView ends u) = p := by
+  have ⟨hu, hl⟩ := place_sound ops v u ss ops.length h hc
+  have hv : viewAt ops v ops.length = some u := by simp [viewAt, h]
+  cases hp : place false ss ops.length with
+  | untouched =>
+    rw [hp] at hn
+    simp only [namedNet, Option.some.injEq] at hn
+    have hvu : u = v := by
+      have := hu hp
+      rw [hv] at this
+      exact Option.some.inj this
+    have hempty : ss = [] := by
+      have hs := run_sorted ops 0 v u ss h
+      simp only [place, Bool.false_eq_true, ↓reduceIte, latest_getLast _
+        (List.Pairwise.sublist List.filter_sublist hs)] at hp
+      cases hg : (ss.filter (·.seq < ops.length)).getLast? with
+      | some st => rw [hg] at hp; cases hp
+      | none =>
+        rw [List.getLast?_eq_none_iff, List.filter_eq_nil_iff] at hg
+        cases ss with
+        | nil => rfl
+        | cons st rest =>
+          have := (run_seq ops 0 v u _ h st (by simp)).2
+          exact absurd (by simpa using this) (hg st (by simp))
+    subst hvu hempty
+    cases u with
+    | none => simp [netView, ← hn, display]
+    | some p' =>
+      obtain ⟨a, g⟩ := p'
+      simp [netView, hends a (by simp), ← hn, display]
+  | unplaced => rw [hp] at hn; cases hn
+  | last st =>
+    rw [hp] at hn
+    simp only [namedNet, Option.some.injEq] at hn
+    have := hl st hp
+    rw [hv] at this
+    rw [Option.some.inj this, hn]
+
+/-- Ben deletes the combo and adds it again before the cascade: the action's
+step names the incarnation the insert began, and the net change the one the
+write's net change on the combo continues. -/
+theorem readded_net_differs (child store : A) (g g' : Nat) (hg : g ≠ g') :
+    let ops := [Op.delete, Op.insert child g', Op.other]
+    let ss : List (Step A) := [⟨0, child, true, false, g⟩, ⟨1, child, false, false, g'⟩]
+    run ops 0 (some (child, g)) = some (some (child, g'), ss) ∧
+    named child store false none (place false ss 2) = some (some (child, g')) ∧
+    namedNet child store (fun _ => some g) none (place false ss 3) = some (some (child, g)) ∧
+    some (child, g') ≠ some (child, g) := by
+  refine ⟨by simp [run, apply, emit], ?_, ?_, by simp [Ne.symm hg]⟩ <;>
+    simp [named, namedNet, place, latest, later, Step.key, Step.view, capture, netView]
+
+/-- Ben deletes the combo, the cascade sets Ana's deferred reference to its
+key, and he adds it again after: the action's step names no combo, and the
+net change the one he added. -/
+theorem deferred_net_differs (child store : A) (g g' : Nat) :
+    let ops := [Op.delete, Op.other, Op.insert child g']
+    let ss : List (Step A) := [⟨0, child, true, false, g⟩, ⟨2, child, false, false, g'⟩]
+    run ops 0 (some (child, g)) = some (some (child, g'), ss) ∧
+    named child store false none (place false ss 1) = some none ∧
+    namedNet child store (fun _ => some g) none (place false ss 3) = some (some (child, g)) := by
+  refine ⟨by simp [run, apply, emit], ?_, ?_⟩ <;>
+    simp [named, namedNet, place, latest, later, Step.key, Step.view, capture, netView]
 
 end CovenMerge.Ownership.Classification.Place

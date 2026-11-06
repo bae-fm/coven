@@ -914,10 +914,12 @@ check before its write leaves, so it refuses such a write too
 receiver finds that parent. The author's view holds one parent key in at most
 one audience at a time, and each SQL operation on it is a step on its row in
 the audience it is in then; a move is a delete step there and an insert step
-in the new audience, at one position (`emit`). A move that carries the row
-along with its ancestor changes it at no step (`Op.carry`). `place` is
-`StepIndex::place`: with no carry, the latest earlier step on any row with
-the key, a move's insert half after its delete half. `place_sound` proves
+in the new audience, at one position (`emit`), whether an update of the row's
+own audience made it or a move of an ancestor that carries the row along
+(`Op.move`). Only a change of no step at all (`Op.unstepped`), as a migration
+difference or a forged write has, leaves the steps silent. `place` is
+`StepIndex::place`: with no unstepped change, the latest earlier step on any
+row with the key, a move's insert half after its delete half. `place_sound` proves
 every authoring view the steps are consistent with holds the key where that
 step left it, at its incarnation, or nowhere after a delete, and where it
 was before the write when no step touched it. `recorded_sound` lifts that to
@@ -926,15 +928,30 @@ as the author's capture names it (`capture`), given that a reference the
 action leaves as it was names its setter's parent while that parent is the
 authoring view's row (§9.1). Ben moves his track into Gifts and deletes Ana's
 pair in one write: her review's track reference names Gifts' track, the row
-the move began, as SQLite's view holds it. `untouched_views_differ` and
-`carried_views_differ` are why the receiver refuses the rest: two authoring
-views with the same steps capture different parents. Which key a
-reference's values name, and which rows the write changed at no step of
-their own, are inputs to the model.
+the move began, as SQLite's view holds it, and so does the track Ben's album
+carries into Gifts. `untouched_views_differ` and `unstepped_views_differ` are
+why the receiver refuses the rest: two authoring views with the same steps
+capture different parents. Which key a reference's values name, and which
+rows the write changed at no step of their own, are inputs to the model.
+
+**Where the write leaves a parent.** A row's net change names its parents as
+the whole write leaves them, which an action's step need not.
+`readded_net_differs`: Ben deletes a combo and adds it again before the
+cascade into Ana's review, so the step names the incarnation the re-add began,
+while the combo's net change continues its old one and the review's net
+change names that. `deferred_net_differs`: with a deferred key Ben adds the
+combo only after the cascade, so the step names no combo and the net change
+the one he added. `net_sound` proves the receiver's rule for the net change
+(`namedNet`): where the steps leave the key at the end of the write, mapped
+into the incarnation the write's own record of that row leaves it at (`ends`),
+or the setter's parent when no step touched the key, is the parent the
+author's capture of the net change names in every authoring view consistent
+with the steps. So the check that a derived row's net change is its actions'
+combined effect compares values with the steps and parents with that rule.
 
 **Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
-a copy: a direct change of the mover's write, made without SQL, keeping its
-original creation. `refused_iff` proves a move is permitted exactly when its
+a copy: a direct change of the mover's write, recorded as its move's two
+halves, keeping its original creation. `refused_iff` proves a move is permitted exactly when its
 writer may change every present row the declared audience parent carries,
 the root included; `carried_foreign_refuses` refuses Ben's move of his own
 album while it carries Ana's track (`Album.foreign_track_refuses`).
@@ -976,7 +993,8 @@ remain implementation obligations. So do the replayed references:
 action's columns is the one `Place.recorded_sound` proves every authoring
 view consistent with the write's steps captures, and the receiver refuses
 where two such views differ (`untouched_views_differ`,
-`carried_views_differ`). Which key a reference's values name, and which rows
+`unstepped_views_differ`); a net change's is the one `Place.net_sound`
+proves. Which key a reference's values name, and which rows
 the write changed at no step of their own, stay inputs to that model, and the
 receiver must check that a step's named parent holds the written key at that
 moment, as B18 already requires resolved row identities.
@@ -1026,12 +1044,13 @@ named parents included. `held_follows_cause` is `follows_cause` for it.
 receiver's cause of every step of the same writes to be the model's. The
 replayed references stay inputs, as `Trace.refs` is.
 The `place` mode runs the model's operations on one parent key from each kind
-of view, inserts, updates, deletes, moves, carries and operations on other
-rows, and returns the steps they record and the model's `place`.
-`judge::place::tests::model::places_match_the_model` builds the receiver's
-step index from those steps for 4,000 such writes and requires
-`StepIndex::place` to find the model's place in each, a move's half among
-them.
+of view, inserts, updates, deletes, moves, unstepped changes and operations on
+other rows, and returns the steps they record, the model's `place`, and the
+parent `namedNet` expects a net change to name, given the incarnation each
+audience's row ends at. `judge::place::tests::model::places_match_the_model`
+builds the receiver's step index from those steps for 4,000 such writes and
+requires `StepIndex::place` to find the model's place in each, a move's half
+among them, and `StepIndex::net_parent` the model's net parent.
 The `admission` mode decides `Admission.check` for one local write, given
 each changed row's table and owner. `local_admission_matches_the_model` runs
 Ben's statements against Ana's rows on SQLite: an authorized cascade, a key

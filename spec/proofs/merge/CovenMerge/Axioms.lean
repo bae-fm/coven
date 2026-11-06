@@ -296,7 +296,10 @@ open CovenMerge
 #print axioms Ownership.Classification.Place.place_sound
 #print axioms Ownership.Classification.Place.recorded_sound
 #print axioms Ownership.Classification.Place.untouched_views_differ
-#print axioms Ownership.Classification.Place.carried_views_differ
+#print axioms Ownership.Classification.Place.unstepped_views_differ
+#print axioms Ownership.Classification.Place.net_sound
+#print axioms Ownership.Classification.Place.readded_net_differs
+#print axioms Ownership.Classification.Place.deferred_net_differs
 #print axioms Ownership.Classification.Place.run_sorted
 #print axioms Ownership.Classification.Place.run_last
 #print axioms Ownership.Classification.Place.run_take

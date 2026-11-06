@@ -476,7 +476,10 @@ private def runClassify (j : Json) : Except String Json := do
 open Ownership.Classification.Place in
 /-- `place` mode: each case's operations on one parent key, from its view
 before the write, as the steps they record, the place `StepIndex::place`
-must find before position `at`, and the view the operations leave there. -/
+must find before position `at`, the view the operations leave there, and the
+parent a net change of a row in audience 1 names for the key (`namedNet`),
+given the incarnation `ends` says the write's records leave each audience's
+row at. -/
 private def runPlace (j : Json) : Except String Json := do
   let readOp (o : Json) : Except String (Op Nat) := do
     match ← o.getObjValAs? String "op" with
@@ -484,9 +487,9 @@ private def runPlace (j : Json) : Except String Json := do
     | "update" => pure .update
     | "delete" => pure .delete
     | "move" => pure (.move (← natField o "aud") (← natField o "inc"))
-    | "carry" => pure (.carry (← natField o "aud") (← natField o "inc"))
+    | "unstepped" => pure (.unstepped (← natField o "aud") (← natField o "inc"))
     | "other" => pure .other
-    | _ => throw "an operation is insert, update, delete, move, carry or other"
+    | _ => throw "an operation is insert, update, delete, move, unstepped or other"
   let stepJson (st : Step Nat) : List (String × Json) :=
     [("seq", toJson st.seq), ("aud", toJson st.aud), ("delete", toJson st.delete),
       ("move", toJson st.move), ("inc", toJson st.inc)]
@@ -497,15 +500,23 @@ private def runPlace (j : Json) : Except String Json := do
     let start ← c.getObjValAs? (Option (Nat × Nat)) "start"
     let ops ← ((← c.getObjValAs? (Array Json) "ops").mapM readOp).map Array.toList
     let before ← natField c "at"
+    let ends ← c.getObjValAs? (Array (Nat × Nat)) "ends"
+    let endsOf (a : Nat) : Option Nat := (ends.find? (·.1 == a)).map (·.2)
     match Ownership.Classification.Place.run ops 0 start, viewAt ops start before with
     | some (_, steps), some view =>
-      let carried := ops.any (·.carries)
-      let found := match place carried steps before with
+      let unstepped := ops.any (·.isUnstepped)
+      let found := match place unstepped steps before with
         | .untouched => Json.mkObj [("kind", "untouched")]
         | .unplaced => Json.mkObj [("kind", "unplaced")]
         | .last st => Json.mkObj (("kind", "last") :: stepJson st)
+      let atEnd := place unstepped steps ops.length
+      let net := match atEnd, namedNet 1 0 endsOf none atEnd with
+        | .untouched, _ => Json.mkObj [("kind", "setter")]
+        | _, some parent => Json.mkObj [("kind", "parent"), ("parent", viewJson parent)]
+        | _, none => Json.mkObj [("kind", "unplaced")]
       pure (Json.mkObj [("steps", toJson (steps.map fun st => Json.mkObj (stepJson st))),
-        ("carried", toJson carried), ("place", found), ("view", viewJson view)])
+        ("unstepped", toJson unstepped), ("place", found), ("view", viewJson view),
+        ("net", net)])
     | _, _ => pure Json.null
   pure (toJson cases)
 
