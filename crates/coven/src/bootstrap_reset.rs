@@ -141,6 +141,10 @@ async fn reset_unconnected(
                     .await?;
             let recorded = async {
                 database.initialize_store_name(name.clone()).await.map_err(CovenError::from)?;
+                #[cfg(test)]
+                if builder.fail_device_reset_notice {
+                    database.test_fail_device_reset().await.map_err(CovenError::from)?;
+                }
                 database
                     .record_device_reset::<coven_sync::PendingRecord>(reset, Vec::new(), Vec::new())
                     .await

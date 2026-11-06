@@ -54,6 +54,19 @@ impl Database {
         .await
     }
 
+    /// Make every later write of the reset notice fail, as a full disk would.
+    pub async fn test_fail_device_reset(&self) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.batch(
+                    "CREATE TEMP TRIGGER fail_device_reset BEFORE INSERT ON _coven_device_reset
+                     BEGIN SELECT RAISE(ABORT,'injected reset notice failure'); END;",
+                )
+            })
+        })
+        .await
+    }
+
     /// Make every later write of the retry effect fail, as a full disk would.
     pub async fn test_fail_retry_effect(&self) -> Result<(), DbError> {
         self.call(move |inner| {

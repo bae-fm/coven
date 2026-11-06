@@ -48,6 +48,10 @@ pub struct CovenBuilder {
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
+    /// Fail the insert of the device-reset notice a reset commits, as a full
+    /// disk would.
+    #[cfg(test)]
+    fail_device_reset_notice: bool,
     /// Stop a replacement right after its fresh device registered, before
     /// its swap, as if the process ended there.
     #[cfg(test)]
@@ -116,6 +120,8 @@ impl CovenBuilder {
             bugs: Arc::new(crate::task::LoggedBugs),
             #[cfg(test)]
             interrupt_after_swap: false,
+            #[cfg(test)]
+            fail_device_reset_notice: false,
             #[cfg(test)]
             interrupt_after_registering: false,
             #[cfg(test)]
@@ -690,6 +696,13 @@ impl CovenBuilder {
     #[cfg(test)]
     pub(crate) fn interrupt_after_swap(mut self) -> Self {
         self.interrupt_after_swap = true;
+        self
+    }
+
+    /// Make the insert of the next reset's device-reset notice fail.
+    #[cfg(test)]
+    pub(crate) fn fail_device_reset_notice(mut self) -> Self {
+        self.fail_device_reset_notice = true;
         self
     }
 

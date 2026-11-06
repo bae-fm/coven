@@ -8273,6 +8273,10 @@ laptop in place from her current restore code instead (§13.1).
   unsent edits may have been lost, including after reopening. If the notice can't
   be stored, the reset fails: coven never hands back a working handle that hides
   the discarded installation.
+  A reset with no storage connected fails before its swap and the store opens
+  as before. A connected reset has recorded its replacement by then, so the
+  store refuses opens with `ReplacementUnfinished` (`by: Reset`) until the
+  next reset finishes it and commits the notice.
 - A reset with no storage connected creates an empty database with a fresh id,
   preserving its local creation name. That name must be readable before
   anything moves, like the other required settings. Competing first setups

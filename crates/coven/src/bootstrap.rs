@@ -705,6 +705,10 @@ async fn prepare_and_load(
                 // The notice commits before any handle is published (E5).
                 if let Some(replacement) = replacement {
                     check_cancel(cancel)?;
+                    #[cfg(test)]
+                    if builder.fail_device_reset_notice {
+                        database.test_fail_device_reset().await.map_err(CovenError::from)?;
+                    }
                     reset::carry_discarded_provider_work(&sync, &database, replacement).await?;
                 }
                 Ok::<_, BootstrapError>(true)

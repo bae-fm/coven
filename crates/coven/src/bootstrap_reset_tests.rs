@@ -832,3 +832,47 @@ async fn a_reset_completes_when_the_replaced_journal_is_damaged() {
         handle.close().await.unwrap();
     }
 }
+
+/// A reset whose notice can't be stored fails and hands back no handle, so
+/// no working handle hides the discarded installation (§19.3). An unconnected
+/// reset fails before its swap and leaves the store as it was; a connected
+/// one fails once its replacement is recorded, so the store refuses opens
+/// until the next reset finishes it. Either way the next reset records the
+/// notice.
+#[tokio::test]
+async fn a_reset_whose_notice_cannot_be_stored_returns_no_handle() {
+    for connected in [true, false] {
+        let f = Fixture::new().await;
+        if connected {
+            f.setup().await.unwrap();
+            synced(&f.handle).await;
+            uploaded(&f, "kept").await;
+        }
+        f.handle.close().await.unwrap();
+        let old = f.directory.settings().unwrap().device_id;
+        let failed = reopen(&f)
+            .fail_device_reset_notice()
+            .reset_device(f.directory.id(), "Phone", |_| ())
+            .await;
+        assert!(failed.is_err(), "{connected}: a handle came back");
+        let opened = reopen(&f).open(f.directory.id(), |_| ()).await;
+        if connected {
+            let store = f.directory.id();
+            assert!(
+                matches!(&opened, Err(CovenError::Lock(StoreLockError::ReplacementUnfinished {
+                    store: named, by: ReplacedBy::Reset
+                })) if *named == store),
+                "{:?}",
+                opened.map(drop)
+            );
+        } else {
+            let handle = opened.unwrap();
+            assert_eq!(handle.device_reset().await.unwrap(), None);
+            assert_eq!(f.directory.settings().unwrap().device_id, old);
+            handle.close().await.unwrap();
+        }
+        let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
+        assert_eq!(handle.device_reset().await.unwrap().unwrap().old_device, old);
+        handle.close().await.unwrap();
+    }
+}
