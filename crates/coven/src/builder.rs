@@ -364,11 +364,13 @@ impl CovenBuilder {
     pub async fn resume_deletion(self, store: StoreId) -> Result<(), StoreDeletionError> {
         Box::pin(async move {
             let directory = self.directories.store_dir(&store);
-            let unsent = crate::task::blocking("read the deletion record", move || {
-                directory.unfinished_deletion()
-            })
-            .await??
-            .ok_or(StoreDeletionError::NoUnfinishedDeletion(store))?;
+            let bugs = directory.bugs().clone();
+            let unsent =
+                crate::task::blocking_completing("read the deletion record", bugs, move || {
+                    directory.unfinished_deletion()
+                })
+                .await??
+                .ok_or(StoreDeletionError::NoUnfinishedDeletion(store))?;
             let opening = self
                 .open_graph(store, Opening::ToDelete)
                 .await
@@ -549,54 +551,56 @@ impl CovenBuilder {
         let database = self.database(directory.clone())?;
         let lock = directory.lock_for_open().await?;
         let closing = lock.closing_guard();
-        let result = crate::task::blocking("open the store's custody", move || {
-            let mut builder = self;
-            let settings = lock.settings()?;
-            let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
-            // An interrupted replacement resumes only through the call that
-            // began it (§19.3).
-            refuse_unfinished_replacement(&directory, settings.id)?;
-            // A store this device is leaving opens only to finish that.
-            if opening == Opening::ForUse {
-                refuse_unfinished_deletion(&directory, settings.id)?;
-            }
-            // A copy restored without its non-backed-up custody id, or a
-            // keychain that no longer names it, changes nothing (§19.3).
-            if keychain.device_id()? != Some(settings.device_id) {
-                let identity = Self::make_session(
-                    std::mem::replace(
-                        &mut builder.identity,
-                        SessionSource::Configured(CustodyChoice::InMemory),
-                    ),
-                    &directory,
-                    settings.id,
-                    keychain,
-                );
-                let store = settings.id;
-                // Without member keys a connected store can only be restored
-                // with its code; reset_device reads them from custody.
-                let connected = coven_storage::recorded_config(&directory)
-                    .map_err(|error| SettingsError::Corrupt(Box::new(error)))?
-                    .is_some();
-                return Err(match identity?.read()? {
-                    None if connected => CovenError::MemberKeysMissing { store },
-                    _ => CovenError::DeviceKeyMissing { store },
-                });
-            }
-            // Before the database opens, so its WAL and shared-memory files
-            // are made with the class (E1).
-            coven_foundation::files::protect_files(&directory, &lock).map_err(
-                |error| match error {
-                    coven_foundation::files::FileError::DeviceLocked { path } => {
-                        CovenError::DeviceLocked { path }
+        let bugs = directory.bugs().clone();
+        let result =
+            crate::task::blocking_completing("open the store's custody", bugs, move || {
+                let mut builder = self;
+                let settings = lock.settings()?;
+                let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
+                // An interrupted replacement resumes only through the call that
+                // began it (§19.3).
+                refuse_unfinished_replacement(&directory, settings.id)?;
+                // A store this device is leaving opens only to finish that.
+                if opening == Opening::ForUse {
+                    refuse_unfinished_deletion(&directory, settings.id)?;
+                }
+                // A copy restored without its non-backed-up custody id, or a
+                // keychain that no longer names it, changes nothing (§19.3).
+                if keychain.device_id()? != Some(settings.device_id) {
+                    let identity = Self::make_session(
+                        std::mem::replace(
+                            &mut builder.identity,
+                            SessionSource::Configured(CustodyChoice::InMemory),
+                        ),
+                        &directory,
+                        settings.id,
+                        keychain,
+                    );
+                    let store = settings.id;
+                    // Without member keys a connected store can only be restored
+                    // with its code; reset_device reads them from custody.
+                    let connected = coven_storage::recorded_config(&directory)
+                        .map_err(|error| SettingsError::Corrupt(Box::new(error)))?
+                        .is_some();
+                    return Err(match identity?.read()? {
+                        None if connected => CovenError::MemberKeysMissing { store },
+                        _ => CovenError::DeviceKeyMissing { store },
+                    });
+                }
+                // Before the database opens, so its WAL and shared-memory files
+                // are made with the class (E1).
+                coven_foundation::files::protect_files(&directory, &lock).map_err(|error| {
+                    match error {
+                        coven_foundation::files::FileError::DeviceLocked { path } => {
+                            CovenError::DeviceLocked { path }
+                        }
+                        error => DbError::from(error).into(),
                     }
-                    error => DbError::from(error).into(),
-                },
-            )?;
-            Ok(OpeningStore { database, lock, builder, directory, keychain })
-        })
-        .await
-        .unwrap_or_else(|shutdown| Err(shutdown.into()));
+                })?;
+                Ok(OpeningStore { database, lock, builder, directory, keychain })
+            })
+            .await
+            .unwrap_or_else(|shutdown| Err(shutdown.into()));
         closing.disarm();
         result
     }
@@ -772,7 +776,8 @@ impl OpeningStore {
         let waits = Arc::new(
             coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
         );
-        let owners = crate::task::blocking("open the store's owners", move || {
+        let bugs = database.bugs().clone();
+        let owners = crate::task::blocking_completing("open the store's owners", bugs, move || {
             let owners = self.builder.owners(self.directory, self.keychain, Continuing::Fresh)?;
             // The saved restore code's name catches up with this store's
             // when the store's is newer, and an unreadable entry is replaced

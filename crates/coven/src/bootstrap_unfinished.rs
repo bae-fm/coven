@@ -39,7 +39,8 @@ pub(super) async fn kept(
     let kept = read()?;
     if let Kept::Nothing = kept {
         tracing::info!(%store, "reclaiming an unfinished installation nothing refers to");
-        crate::task::blocking("reclaim an unfinished installation", move || {
+        let bugs = builder.directories.bugs().clone();
+        crate::task::blocking_completing("reclaim an unfinished installation", bugs, move || {
             lock.remove_directory()
         })
         .await

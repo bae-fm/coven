@@ -146,7 +146,8 @@ impl Coven {
         store_dir: &StoreDir,
     ) -> Result<Option<crate::StorageConfig>, crate::SyncError> {
         let store_dir = store_dir.clone();
-        crate::task::blocking("read the storage settings", move || {
+        let bugs = store_dir.bugs().clone();
+        crate::task::blocking_completing("read the storage settings", bugs, move || {
             coven_storage::recorded_config(&store_dir)
         })
         .await?
@@ -215,7 +216,8 @@ impl Coven {
         let directory = self.store_dir(&id);
         let (replacement, deletion) = {
             let directory = directory.clone();
-            crate::task::blocking("read the store's records", move || {
+            let bugs = directory.bugs().clone();
+            crate::task::blocking_completing("read the store's records", bugs, move || {
                 Ok::<_, CovenError>((
                     directory.unfinished_replacement()?,
                     directory.unfinished_deletion().map_err(DbError::from)?,
@@ -282,7 +284,8 @@ impl Coven {
     /// entry to `restore_from_saved_code`, which reads its current code and key.
     pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
         let keychain = self.keychain.clone();
-        crate::task::blocking("list saved restore codes", move || {
+        let bugs = self.directories.bugs().clone();
+        crate::task::blocking_completing("list saved restore codes", bugs, move || {
             crate::saved_restore::list(keychain)
         })
         .await?
@@ -300,7 +303,8 @@ impl Coven {
     /// with `BootstrapError::SecureStorage(KeyError::Unsupported)`.
     pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError> {
         let keychain = self.keychain.clone();
-        crate::task::blocking("forget the saved restore code", move || {
+        let bugs = self.directories.bugs().clone();
+        crate::task::blocking_completing("forget the saved restore code", bugs, move || {
             crate::saved_restore::forget(keychain, store)
         })
         .await?
@@ -316,12 +320,15 @@ where
         + From<FileError>
         + From<KeyError>
         + From<crate::task::TaskFailed>
+        + crate::task::CarriesBug
         + Send
         + 'static,
 {
     directory.closed().await?;
     let directory = directory.clone();
-    crate::task::blocking("delete the store", move || delete(&directory, &keys)).await?
+    let bugs = directory.bugs().clone();
+    crate::task::blocking_completing("delete the store", bugs, move || delete(&directory, &keys))
+        .await?
 }
 
 /// Delete the store at `directory` from this device: rename its directory to

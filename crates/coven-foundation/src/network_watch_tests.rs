@@ -110,8 +110,8 @@ fn a_panic_in_a_platform_callback_goes_to_the_bug_sink_and_cannot_tell() {
     let sink = Mutex::new(NetworkSink::new());
     let state = lock_unpoisoned(&sink).subscribe();
     lock_unpoisoned(&sink).observe(Some(UsableNetwork { id: "wifi".into(), metered: false }));
-    let bugs = crate::task::HeardBugs::default();
-    heard(&sink, &bugs, "read the network's path", || panic!("the path has no interfaces"));
+    let bugs = crate::task::HeardBugs::shared();
+    heard(&sink, bugs.as_ref(), "read the network's path", || panic!("the path has no interfaces"));
     assert_eq!(*state.borrow(), NetworkState { usable: None, metered: true, joined: 1 });
     assert_eq!(
         bugs.take(),
@@ -121,7 +121,7 @@ fn a_panic_in_a_platform_callback_goes_to_the_bug_sink_and_cannot_tell() {
         }]
     );
     // The platform saying again tells the network: the same one is no report.
-    heard(&sink, &bugs, "read the network's path", || {
+    heard(&sink, bugs.as_ref(), "read the network's path", || {
         lock_unpoisoned(&sink).observe(Some(UsableNetwork { id: "wifi".into(), metered: false }));
     });
     assert_eq!(*state.borrow(), NetworkState { usable: Some(true), metered: false, joined: 1 });

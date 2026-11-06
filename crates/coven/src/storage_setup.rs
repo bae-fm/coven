@@ -126,7 +126,8 @@ pub(crate) async fn settle_opened(
     }
     let creating = running.as_ref().is_some_and(SetupJournal::creating);
     let (kept, held) = (keychain.clone(), keys.clone());
-    crate::task::blocking("undo storage setup's local state", move || {
+    let bugs = database.bugs().clone();
+    crate::task::blocking_completing("undo storage setup's local state", bugs, move || {
         // Before the point of no return nothing claimed the store key a
         // creation kept.
         if creating {

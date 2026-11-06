@@ -567,12 +567,15 @@ impl CovenHandle {
             let storage = handle.storage.close().await;
             handle.files.close().await;
             let custody = handle.custody.clone();
-            let custody = crate::task::blocking("close custody", move || {
+            let bugs = handle.database.bugs().clone();
+            let custody = crate::task::blocking_completing("close custody", bugs, move || {
                 if let Some(custody) = lock_unpoisoned(&custody).take() {
                     custody.close();
                 }
+                Ok::<_, std::convert::Infallible>(())
             })
-            .await;
+            .await
+            .map(|closed| closed.unwrap_or_else(|never| match never {}));
             let database = handle.database.close().await;
             // Closing the connection can fail while releasing its provider.
             // Finish closing every owner and erase custody before reporting.

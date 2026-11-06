@@ -1107,6 +1107,8 @@ tables = [
     "spawn_owned",
     "spawn_completing",
     "blocking_completing",
+    # A test's bug sink, which the test shares with coven and takes from.
+    "HeardBugs::shared",
 ]
 # A test clock that keeps time by the clock it is given and records what one
 # progress watch holds at each reading.
@@ -1546,6 +1548,13 @@ tables = [
     # Listing finishes each deletion a cut call left recorded, with the
     # store's own entries.
     "Coven::stores",
+    # Each runs its keychain or directory work on the blocking pool to its
+    # end, even once its caller stops waiting; then its bug goes to the
+    # app's sink (E15).
+    "Coven::read_listed",
+    "Coven::saved_restore_codes",
+    "Coven::forget_saved_restore_code",
+    "finish_deletion",
 ]
 # Recovery discovery and forgetting scope the installation's keychain to each
 # store's entries.
@@ -1553,7 +1562,13 @@ tables = [
 "crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
 # Leaving a store runs in a task of its own that finishes even if the app
 # stops waiting: past its removal's journal it only goes forward (§11.6).
-"crates/coven/src/handle_delete.rs" = ["CovenHandle::leave"]
+# Its record and the store's deletion run on the blocking pool to their end,
+# then their bug goes to the app's sink (E15).
+"crates/coven/src/handle_delete.rs" = [
+    "CovenHandle::leave",
+    "CovenHandle::leaving",
+    "CovenHandle::forget_deletion",
+]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
     # A completed sign-in becomes this session's custody.
@@ -1571,10 +1586,16 @@ tables = [
 # Setup connects and composes the candidate's sequence owner; a setup a crash
 # cut past its point of no return connects with the credentials it kept, in a
 # sign-in of this session's (§11.6).
+# Undoing a cut setup's local state runs on the blocking pool to its end
+# (E15).
 "crates/coven/src/storage_setup.rs" = [
     "StorageConnections::setup_connection",
     "StorageConnections::resume_setup",
+    "settle_opened",
 ]
+# Reclaiming an unfinished installation runs on the blocking pool to its end
+# (E15).
+"crates/coven/src/bootstrap_unfinished.rs" = ["kept"]
 # A started loop's connection attempts outlive the start call; close stops
 # and awaits them. Stopping releases the client after the pass.
 "crates/coven/src/storage_control.rs" = [

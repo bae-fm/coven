@@ -15,4 +15,7 @@ disallowed-methods = [
     { path = "reqwest::Client::builder", reason = "build HttpClient instead" },
     { path = "reqwest::Client::execute", reason = "send through HttpClient, under the stall window" },
     { path = "reqwest::RequestBuilder::send", reason = "send through HttpClient, under the stall window" },
+    # A dropped caller of `blocking` loses its work's panic with the join
+    # handle; coven's own work reports it to the app's bug sink (api.md E15).
+    { path = "coven_foundation::task::blocking", reason = "use blocking_completing with the store's bug sink" },
 ]

@@ -13,11 +13,13 @@ impl Drop for SetOnDrop {
 }
 
 #[tokio::test]
+#[expect(clippy::disallowed_methods, reason = "a test of `blocking` itself")]
 async fn blocking_returns_the_work_s_value() {
     assert_eq!(blocking("add", || 2 + 2).await, Ok(4));
 }
 
 #[tokio::test]
+#[expect(clippy::disallowed_methods, reason = "a test of `blocking` itself")]
 async fn blocking_turns_a_panic_into_panicked_with_its_message() {
     let failed = blocking("read the journal", || -> u8 { panic!("journal is empty") })
         .await
@@ -48,6 +50,7 @@ async fn joined_turns_a_cancelled_task_into_shutdown() {
 }
 
 #[test]
+#[expect(clippy::disallowed_methods, reason = "a test of `blocking` itself")]
 fn blocking_sent_after_its_runtime_shut_down_did_not_run() {
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let handle = runtime.handle().clone();
@@ -286,7 +289,10 @@ async fn a_completing_task_whose_caller_stopped_waiting_reports_the_bug_its_erro
     let (go, wait) = tokio::sync::oneshot::channel::<()>();
     let completion = spawn_completing("close custody", Arc::new(SentBugs(sent)), async move {
         wait.await.unwrap();
-        blocking("forget the keys", || -> u8 { panic!("no key session") }).await
+        Err::<u8, _>(TaskFailed::Panicked(Bug {
+            operation: "forget the keys",
+            message: "no key session".into(),
+        }))
     });
     drop(completion);
     go.send(()).unwrap();

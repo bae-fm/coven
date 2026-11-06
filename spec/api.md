@@ -8983,6 +8983,15 @@ forever.
   of `prepare_device_only`'s copies, and removing a replaced installation.
   A caller still waiting gets `FileError::Bug`, or the error that keeps it;
   once none is, the bug goes to the sink.
+- So does the keychain and custody work of coven's other calls: listing
+  the stores, `discard_store`, `storage_config`, the saved restore codes,
+  opening a store's custody and owners, creating a store's custody,
+  reading a read-only open's saved credentials, closing custody, recording,
+  finishing and forgetting a deletion, and undoing a cut storage setup.
+  Ana's app asks for `saved_restore_codes` and drops the call when its
+  screen closes, and the keychain read panics. The sink hears `Bug {
+  operation: "list saved restore codes", .. }`. Coven runs none of its own
+  work with `blocking`.
 
 A panic can also leave state half-changed: a lock held as it unwinds is
 poisoned, and code that SQLite calls can't fail at all. What coven does
@@ -9166,7 +9175,6 @@ pub struct LoggedBugs;
 /// the sink drops fails the test, so a bug no test expected never passes
 /// unseen.
 #[cfg(feature = "test-utils")]
-#[derive(Default)]
 pub struct HeardBugs { /* private */ }
 
 #[cfg(feature = "test-utils")]
@@ -9176,6 +9184,10 @@ impl HeardBugs {
 
     /// Every bug heard since the last take, in the order heard.
     pub fn take(&self) -> Vec<Bug>;
+
+    /// Wait for the first bug not yet taken, and take it: for a test whose
+    /// bug reaches the sink after the call it made returned.
+    pub async fn next(&self) -> Bug;
 }
 
 /// An error that may carry a bug: work its call ran panicked, and the

@@ -90,6 +90,21 @@ pub(super) struct MemoryEntries {
     fail_after: std::collections::VecDeque<usize>,
     /// Refuse this device's calls on the person's entries while set.
     refuse_person: bool,
+    /// Panic in the next read, write, delete or list, as a bug in the
+    /// keychain's code would.
+    panic_next: bool,
+}
+
+/// Panic if a test asked the next read, write, delete or list to, before it
+/// changes anything and with the entries' lock released, so the entries
+/// stay usable after it.
+fn panic_if_asked(backend: &Mutex<MemoryEntries>) {
+    let asked = std::mem::take(
+        &mut backend.lock().expect("in-memory keychain entries lock is poisoned").panic_next,
+    );
+    if asked {
+        panic!("the in-memory keychain's operation panicked");
+    }
 }
 
 impl MemoryEntries {
@@ -163,6 +178,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         service: &str,
         account: &str,
     ) -> Result<Option<SecretBytes>, KeyError> {
+        panic_if_asked(self);
         self.lock().expect("in-memory keychain entries lock is poisoned").change(
             scope,
             |entries| entries.get(account).map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec())),
@@ -180,6 +196,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         account: &str,
         bytes: &[u8],
     ) -> Result<(), KeyError> {
+        panic_if_asked(self);
         self.lock().expect("in-memory keychain entries lock is poisoned").change(
             scope,
             |entries| {
@@ -196,6 +213,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
     }
 
     fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError> {
+        panic_if_asked(self);
         self.lock().expect("in-memory keychain entries lock is poisoned").change(
             scope,
             |entries| {
@@ -212,6 +230,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
     }
 
     fn person_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
+        panic_if_asked(self);
         self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
             match person {
                 MemoryPerson::ICloud(entries) => {
@@ -229,6 +248,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
     }
 
     fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        panic_if_asked(self);
         self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
             match person {
                 MemoryPerson::ICloud(entries) => Ok(entries.groups().copies(account)),
@@ -245,6 +265,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         account: &str,
         bytes: &[u8],
     ) -> Result<(), KeyError> {
+        panic_if_asked(self);
         self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
             match person {
                 MemoryPerson::ICloud(entries) => {
@@ -345,6 +366,7 @@ impl Keychain {
                 person,
                 fail_after: std::collections::VecDeque::new(),
                 refuse_person: false,
+                panic_next: false,
             })),
             host_secrets: Mutex::new(()),
         }))
@@ -373,6 +395,13 @@ impl Keychain {
     /// Panics if this is a native keychain.
     pub fn fail_next_operation(&self) {
         self.fail_operations_after(&[0]);
+    }
+
+    /// Make the fake panic in the next read, write, delete or list before
+    /// changing state, as a bug in the keychain's code would. Panics if
+    /// this is a native keychain.
+    pub fn panic_next_operation(&self) {
+        self.with_memory(|memory| memory.panic_next = true);
     }
 
     /// Refuse successive operations after each given number of successful calls.

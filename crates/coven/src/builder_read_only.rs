@@ -32,13 +32,15 @@ impl CovenBuilder {
         let device = directory.settings().map_err(CovenError::from)?.device_id;
         let oauth = self.oauth_exchange();
         let in_directory = directory.clone();
-        let (credentials, data) = crate::task::blocking("read the saved credentials", move || {
-            let credentials = device_credentials(self.keychain()?, store, in_directory, oauth);
-            let data = credentials.connection()?;
-            Ok::<_, SyncError>((credentials, data))
-        })
-        .await
-        .map_err(SyncError::from)??;
+        let bugs = directory.bugs().clone();
+        let (credentials, data) =
+            crate::task::blocking_completing("read the saved credentials", bugs, move || {
+                let credentials = device_credentials(self.keychain()?, store, in_directory, oauth);
+                let data = credentials.connection()?;
+                Ok::<_, SyncError>((credentials, data))
+            })
+            .await
+            .map_err(SyncError::from)??;
         let storage: Option<Arc<dyn Storage>> = match data {
             Some(data) => {
                 let storage = connector

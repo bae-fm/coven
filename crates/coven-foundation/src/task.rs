@@ -210,19 +210,40 @@ impl BugSink for LoggedBugs {
 /// takes it; one left untaken when the sink drops fails the test, so a bug
 /// no test expected never passes unseen.
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Default)]
-pub struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
+pub struct HeardBugs {
+    heard: std::sync::Mutex<Vec<Bug>>,
+    /// Told of each bug as it is heard.
+    notice: tokio::sync::Notify,
+}
 
 #[cfg(any(test, feature = "test-utils"))]
 impl HeardBugs {
     /// A sink that has heard nothing yet, to share with coven.
     pub fn shared() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::default())
+        std::sync::Arc::new(Self {
+            heard: std::sync::Mutex::new(Vec::new()),
+            notice: tokio::sync::Notify::new(),
+        })
     }
 
     /// Every bug heard since the last take, in the order heard.
     pub fn take(&self) -> Vec<Bug> {
-        std::mem::take(&mut *crate::locks::lock_unpoisoned(&self.0))
+        std::mem::take(&mut *crate::locks::lock_unpoisoned(&self.heard))
+    }
+
+    /// Wait for the first bug not yet taken, and take it: for a test whose
+    /// bug reaches the sink after the call it made returned.
+    pub async fn next(&self) -> Bug {
+        loop {
+            let notified = self.notice.notified();
+            {
+                let mut heard = crate::locks::lock_unpoisoned(&self.heard);
+                if !heard.is_empty() {
+                    return heard.remove(0);
+                }
+            }
+            notified.await;
+        }
     }
 }
 
@@ -230,7 +251,8 @@ impl HeardBugs {
 impl BugSink for HeardBugs {
     fn report(&self, bug: &Bug) {
         tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
-        crate::locks::lock_unpoisoned(&self.0).push(bug.clone());
+        crate::locks::lock_unpoisoned(&self.heard).push(bug.clone());
+        self.notice.notify_waiters();
     }
 }
 

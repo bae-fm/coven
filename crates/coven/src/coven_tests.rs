@@ -740,3 +740,44 @@ async fn a_dropped_read_only_close_releases_its_connections_and_readers_lock() {
     crate::assert_no_open_files_under(root.path());
     assert!(directory.lock_for_deletion().unwrap().is_some());
 }
+
+/// Ana's app lists the saved restore codes, and the keychain's read panics.
+/// A caller still waiting gets the bug as its error; one that dropped the
+/// call is gone, so the app's bug sink hears it instead. Discarding a store
+/// does the same (E15).
+#[tokio::test]
+async fn a_coven_calls_panic_reaches_the_apps_sink_once_its_caller_stops_waiting() {
+    let root = tempfile::tempdir().unwrap();
+    let keychain = coven_crypto::custody::Keychain::in_memory("coven-test").unwrap();
+    let bugs = crate::task::HeardBugs::shared();
+    let app = Coven::with_keychain_reporting_to(root.path().into(), keychain.clone(), bugs.clone());
+    keychain.panic_next_operation();
+    let answered = app.saved_restore_codes().await;
+    assert!(
+        matches!(&answered, Err(BootstrapError::Bug(bug)) if bug.operation == "list saved restore codes"),
+        "{answered:?}"
+    );
+    keychain.panic_next_operation();
+    dropped_at_first_poll(app.saved_restore_codes()).await;
+    let bug = tokio::time::timeout(HANG_GUARD, bugs.next()).await.unwrap();
+    assert_eq!(
+        (bug.operation, bug.message.as_str()),
+        ("list saved restore codes", "the in-memory keychain's operation panicked")
+    );
+    let store = app.create_closed_store("Household", Arc::new(SequentialIds::new())).await.unwrap();
+    keychain.panic_next_operation();
+    dropped_at_first_poll(app.discard_store(&store)).await;
+    let bug = tokio::time::timeout(HANG_GUARD, bugs.next()).await.unwrap();
+    assert_eq!(bug.operation, "delete the store");
+}
+
+/// Poll `call` once, which starts the work it runs apart from its caller,
+/// then drop it, as an app does when the screen that asked goes away.
+async fn dropped_at_first_poll<T: std::fmt::Debug>(call: impl std::future::Future<Output = T>) {
+    let mut call = std::pin::pin!(call);
+    tokio::select! {
+        biased;
+        answer = &mut call => panic!("the call answered at its first poll: {answer:?}"),
+        () = std::future::ready(()) => {}
+    }
+}

@@ -47,6 +47,17 @@ impl Coven {
         Self::testing(app_dir, keychain, crate::task::HeardBugs::shared())
     }
 
+    /// An installation for a test with the keychain `keychain`, whose bugs
+    /// in work nobody waits for go to `bugs` (E15).
+    #[cfg(test)]
+    pub(crate) fn with_keychain_reporting_to(
+        app_dir: PathBuf,
+        keychain: Arc<Keychain>,
+        bugs: crate::task::BugSinkRef,
+    ) -> Self {
+        Self::testing(app_dir, keychain, bugs)
+    }
+
     /// The app directory's stores, for a test that begins a bootstrap or a
     /// replacement itself.
     #[cfg(test)]

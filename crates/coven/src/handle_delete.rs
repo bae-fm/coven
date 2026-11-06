@@ -68,7 +68,8 @@ impl CovenHandle {
                     return Err(StoreDeletionError::Unsent(work));
                 }
                 let directory = self.directory.clone();
-                crate::task::blocking("record the deletion", move || {
+                let bugs = self.database.bugs().clone();
+                crate::task::blocking_completing("record the deletion", bugs, move || {
                     directory.record_deletion(unsent)
                 })
                 .await??;
@@ -88,7 +89,8 @@ impl CovenHandle {
         self.close().await.map_err(StoreDeletionError::Closing)?;
         let directory = self.directory.clone();
         let keychain = self.keychain.clone();
-        crate::task::blocking("delete the store", move || {
+        let bugs = self.database.bugs().clone();
+        crate::task::blocking_completing("delete the store", bugs, move || {
             crate::coven::delete::<StoreDeletionError>(&directory, &keychain)
         })
         .await?
@@ -125,10 +127,13 @@ impl CovenHandle {
     /// journaled. An absent record succeeds.
     async fn forget_deletion(&self) -> Result<(), SyncError> {
         let directory = self.directory.clone();
-        crate::task::blocking("forget the deletion", move || directory.forget_deletion())
-            .await
-            .map_err(SyncError::from)?
-            .map_err(SyncError::from)
+        let bugs = self.database.bugs().clone();
+        crate::task::blocking_completing("forget the deletion", bugs, move || {
+            directory.forget_deletion()
+        })
+        .await
+        .map_err(SyncError::from)?
+        .map_err(SyncError::from)
     }
 }
 
