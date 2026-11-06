@@ -306,6 +306,39 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     }
 }
 
+/// Another copy of this device's installation stops the loop: its last pass
+/// fails with `DeviceIdInUse`, nothing goes on the pending list, and a
+/// requested pass sends no request, since only resetting the device can
+/// help (E5, §19.3).
+#[tokio::test]
+async fn another_copy_of_the_device_stops_the_loop_and_records_nothing() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let (ana, copy) = group.copy(ana).await;
+    insert(ana.database(), "a", "from the original").await;
+    ana.sync.pass().await.unwrap();
+    insert(copy.database(), "b", "never sent").await;
+    let in_use = |last: &Option<LastPass>| {
+        matches!(last, Some(LastPass::Failed { failure: StatusFailure::DeviceIdInUse(_), .. }))
+    };
+    let mut last = LastPass::follow(copy.database());
+    let (copy_codes, _) = codes(&copy, Keychain::in_memory("sync-loop-copy").unwrap());
+    let worker = SyncLoop::new(copy.sync.clone(), copy_codes);
+    worker.start().await.unwrap();
+    last.wait_for(in_use).await;
+    assert!(copy.database().pending::<PendingRecord>().await.unwrap().is_empty());
+    let requests = copy.storage.request_count();
+    worker.sync_now().unwrap();
+    worker.parked_from_now().await;
+    assert_eq!(copy.storage.request_count(), requests, "a stopped copy sends nothing");
+    assert!(copy.database().pending::<PendingRecord>().await.unwrap().is_empty());
+    worker.close().await.unwrap();
+    for device in [&ana, &copy] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// A pass that panics ends the loop as a failure the person sees: the bug
 /// sink hears the bug, the last pass is recorded failed with it, and the
 /// retry the pass took and a later start repeat it as `WorkerFailed`, which
