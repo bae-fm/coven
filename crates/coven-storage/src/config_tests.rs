@@ -26,7 +26,6 @@ fn endpoints_allow_http_but_refuse_credentials_queries_and_fragments() {
         let config = StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "region".into(),
-            prefix: crate::S3Prefix::default(),
             endpoint: Some(url.parse().unwrap()),
             profile: None,
         };
@@ -76,7 +75,6 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
             region: "region".into(),
             endpoint: endpoint.map(|url| url.parse().unwrap()),
             profile,
-            prefix: crate::S3Prefix::default(),
         };
         let result = config.validate();
         assert_eq!(result.is_ok(), accepted, "{endpoint:?} {profile:?}");
@@ -115,7 +113,6 @@ fn locations_select_the_required_initial_access() {
                 region: "region".into(),
                 endpoint: None,
                 profile: None,
-                prefix: crate::S3Prefix::default(),
             },
             None,
         ),
@@ -140,8 +137,8 @@ fn locations_select_the_required_initial_access() {
 fn every_native_location_identifier_is_required() {
     use serde_json::json;
     for (location, field) in [
-        (json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}), "bucket"),
-        (json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}), "region"),
+        (json!({"S3":{"bucket":"bucket","region":"region","endpoint":null}}), "bucket"),
+        (json!({"S3":{"bucket":"bucket","region":"region","endpoint":null}}), "region"),
         (json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}), "drive_id"),
         (json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}), "folder_id"),
         (json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}), "container"),
@@ -170,77 +167,5 @@ fn every_native_location_identifier_is_required() {
             config.validate().unwrap_err().failure(),
             crate::StorageFailure::InvalidConfiguration
         );
-    }
-}
-
-#[test]
-fn a_recorded_s3_location_keeps_its_prefix_canonical() {
-    let typed = StorageConfig::S3 {
-        bucket: "bucket".into(),
-        region: "region".into(),
-        endpoint: None,
-        profile: None,
-        prefix: crate::S3Prefix::parse("/base/nested/").unwrap(),
-    };
-    let bytes = typed.encode().unwrap();
-    assert_eq!(StorageConfig::decode(bytes.as_bytes()).unwrap(), typed);
-    let recorded = |prefix: &str| {
-        format!(
-            r#"{{"S3":{{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"{prefix}"}}}}"#
-        )
-    };
-    assert_eq!(StorageConfig::decode(recorded("base/nested").as_bytes()).unwrap(), typed);
-    for prefix in ["/", "/base", "base/", "base//nested", "base.nested"] {
-        assert_eq!(
-            StorageConfig::decode(recorded(prefix).as_bytes()).unwrap_err().failure(),
-            StorageFailure::Encoding,
-            "{prefix}"
-        );
-    }
-}
-
-#[test]
-fn a_base_prefix_needs_member_keys_limited_to_a_prefix() {
-    let custom = Some(S3Profile::Custom(S3Settings {
-        signing: S3Signing::AwsSigV4,
-        single_put: S3SinglePut::IfNoneMatch,
-        copy_publication: S3CopyPublication::Never,
-        multipart_timestamp: S3MultipartTimestamp::Completion,
-        checksums: S3Checksums::Absent,
-        listing: S3Listing::V2,
-        revision: S3Revision::ETag,
-        response_headers: S3ResponseHeaders::S3,
-        request_checksums: false,
-    }));
-    let named = |name| Some(S3Profile::Named(name));
-    for (endpoint, profile, shared) in [
-        (None, None, true),
-        (Some("https://s3.us-east-1.amazonaws.com"), None, true),
-        (Some("https://storage.googleapis.com"), None, true),
-        (Some("http://localhost:9000"), named(S3ProfileName::RustFs), true),
-        (Some("http://localhost:8333"), named(S3ProfileName::SeaweedFs), true),
-        (Some("https://account.r2.cloudflarestorage.com"), None, false),
-        (Some("http://localhost:9000"), named(S3ProfileName::R2), false),
-        (Some("http://localhost:9000"), custom, false),
-        (Some("http://localhost:9000"), None, false),
-    ] {
-        let config = |prefix: &str| StorageConfig::S3 {
-            bucket: "bucket".into(),
-            region: "region".into(),
-            endpoint: endpoint.map(|url| url.parse().unwrap()),
-            profile,
-            prefix: crate::S3Prefix::parse(prefix).unwrap(),
-        };
-        config("").validate().unwrap();
-        let prefixed = config("stores").validate();
-        if shared {
-            prefixed.unwrap();
-        } else {
-            assert_eq!(
-                prefixed.unwrap_err().failure(),
-                StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Prefix },
-                "{endpoint:?} {profile:?}"
-            );
-        }
     }
 }

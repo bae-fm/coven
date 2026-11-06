@@ -28,7 +28,7 @@ impl S3Storage {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectStream<'static>, StorageError> {
-        let mut request = self.client.get_object().bucket(&self.bucket).key(self.prefix.key(path));
+        let mut request = self.client.get_object().bucket(&self.bucket).key(path.as_str());
         if let Some(range) = range {
             request = request.range(range.header());
         }

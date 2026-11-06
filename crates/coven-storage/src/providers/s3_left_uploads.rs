@@ -16,23 +16,19 @@ impl S3Storage {
         store: StoreId,
         device: DeviceId,
     ) -> Result<Vec<LeftUpload>, StorageError> {
-        let base = self.prefix.key_prefix();
         let folder = self.uploads_folder(store, device);
         let mut left = Vec::new();
         for prefix in [
             folder.clone(),
-            self.prefix.key_prefix_of(&ObjectPrefix::device_files(store, device)),
+            ObjectPrefix::device_files(store, device).as_str().to_owned(),
             // Its snapshots sit in one folder per audience, and storage
             // doesn't know the store's circles: the whole snapshots folder is
             // listed, and a session kept when its path names the device.
-            self.prefix.key_prefix_of(&ObjectPrefix::snapshots(store)),
+            ObjectPrefix::snapshots(store).as_str().to_owned(),
         ] {
             for (key, id, _) in self.unfinished_uploads(&prefix, None).await? {
                 let named = key.starts_with(&folder)
-                    || key
-                        .strip_prefix(&base)
-                        .and_then(|path| ObjectPath::parse(path).ok())
-                        .is_some_and(|path| path.device() == Some(device));
+                    || ObjectPath::parse(&key).is_ok_and(|path| path.device() == Some(device));
                 if named {
                     left.push(LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
                 }
@@ -55,13 +51,11 @@ impl S3Storage {
         if self.settings.copy_publication.multipart().is_some() {
             return Ok(Vec::new());
         }
-        let base = self.prefix.key_prefix();
         let mut left = Vec::new();
-        let slots = self.prefix.key_prefix_of(&ObjectPrefix::slots(store));
-        for (key, id, _) in self.unfinished_uploads(&slots, None).await? {
-            let settled = key
-                .strip_prefix(&base)
-                .and_then(|path| ObjectPath::parse(path).ok())
+        let slots = ObjectPrefix::slots(store);
+        for (key, id, _) in self.unfinished_uploads(slots.as_str(), None).await? {
+            let settled = ObjectPath::parse(&key)
+                .ok()
                 .and_then(|path| path.slot_number())
                 .is_some_and(|slot| slot.0 <= through);
             if settled {
@@ -81,10 +75,10 @@ impl S3Storage {
         &self,
         floor: &StoredObject,
     ) -> Result<Vec<LeftUpload>, StorageError> {
-        let key = self.prefix.key(&floor.path);
+        let key = floor.path.as_str();
         let published = floor.stored_at.seconds();
         let mut left = Vec::new();
-        for (listed, id, initiated) in self.unfinished_uploads(&key, None).await? {
+        for (listed, id, initiated) in self.unfinished_uploads(key, None).await? {
             if listed != key {
                 continue;
             }

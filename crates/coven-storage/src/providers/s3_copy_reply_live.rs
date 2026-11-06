@@ -175,7 +175,7 @@ async fn publish(
         .await
         .map_err(s3_error)?;
     // The request status sends: checksum mode where the profile asks for it.
-    let mut request = s.client.head_object().bucket(&s.bucket).key(s.prefix.key(target));
+    let mut request = s.client.head_object().bucket(&s.bucket).key(target.as_str());
     if s.settings.request_checksums {
         request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
     }

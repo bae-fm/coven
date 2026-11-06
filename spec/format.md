@@ -100,7 +100,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Gone device's marker | `<store>/join-requests/<device>/gone`, beside the device's requests | nothing but its kind and format | D8 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
-| Location marker | `coven-location`, at the root of a location that holds one store: a Dropbox shared folder, a OneDrive folder, or a bucket whose member keys reach all of it | the id of the one store that owns the location, as plain text | D10 |
+| Location marker | `coven-location`, at the root of a location that holds one store: a Dropbox shared folder, a OneDrive folder, or an S3 bucket | the id of the one store that owns the location, as plain text | D10 |
 
 ### Three layers
 
@@ -1759,14 +1759,14 @@ numbered 3 is `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/snapshots/store/4242/3`.
 ### The location marker
 
 On Dropbox and OneDrive a folder is shared with a store's members whole, and on
-a service whose member keys reach a whole bucket, such as R2, each key reaches
-the whole bucket. A member of one store could delete another store's objects in
-the same folder or bucket. So there, every store has its own location: its own
-folder or bucket (§20.3). A listing of the location's root can't enforce that
-alone: an object stored within the listing margin may be missing from it, so two
-stores set up in one location at nearly the same time could both pass. The
-location marker closes that gap. It is one object at the location's root,
-created once, naming the one store that owns the location.
+S3 coven takes each member key to reach the whole bucket. A member of one store
+could delete another store's objects in the same folder or bucket. So there,
+every store has its own location: its own folder or bucket (§20.3). A listing
+of the location's root can't enforce that alone: an object stored within the
+listing margin may be missing from it, so two stores set up in one location at
+nearly the same time could both pass. The location marker closes that gap. It
+is one object at the location's root, created once, naming the one store that
+owns the location.
 
 *Example.* Ana sets up Household in the Dropbox shared folder `Household`. Its
 first setup creates the object `coven-location` at the folder's root, whose
@@ -1779,8 +1779,8 @@ complete bytes are Household's store id as text:
 
 If someone tries to set up Garden in the same folder, its create of
 `coven-location` finds the name taken, reads these bytes, sees another store's
-id, and is refused with `OwnLocationRequired { reason: Occupied }`. A retry of
-Household's own setup reads equal bytes and proceeds. In an R2 bucket the
+id, and is refused with `OwnLocationRequired`. A retry of Household's own setup
+reads equal bytes and proceeds. In an S3 bucket the
 marker is the same object at the bucket's root.
 
 **Rules.**
@@ -1790,11 +1790,12 @@ marker is the same object at the bucket's root.
   signature. It has no `kind | version` prefix (D1).
 - Its path has no store prefix.
 - It exists only in a location that holds one store: a Dropbox shared folder, a
-  OneDrive folder, or a bucket whose member keys reach all of it. A Dropbox App
-  folder has none.
+  OneDrive folder, or an S3 bucket. A Dropbox App folder has none.
 - First setup alone creates it. Reconnect, restore and join require an exact
   match of its bytes (§20.3).
-- It is never replaced or deleted, including by local store deletion.
+- It is never replaced or deleted, including by local store deletion. Only the
+  development tool `empty_s3_bucket`, which empties a whole bucket, removes it
+  ([api.md E14](api.md#e14-development-tools)).
 
 ---
 
@@ -2167,7 +2168,7 @@ reaches it. `coven-storage` writes and checks it; the format's codecs carry it
 as bytes, at most 16 KiB. It is packed from D2's primitives, with no field
 names. As JSON with field names it was most of a code. A restore code with its
 S3 key, for a bucket on a service whose settings setup detected, took 930
-characters with the key as JSON beside it; packed it takes 450, a QR code of
+characters with the key as JSON beside it; packed it takes 444, a QR code of
 version 13 instead of 25.
 
 *Example.* Household on Dropbox, in the shared folder with namespace id
@@ -2187,15 +2188,14 @@ more byte says whether a key follows.
 
 | Tag | Provider | Fields |
 | --- | --- | --- |
-| 0 | S3 | `bucket:text \| region:text \| endpoint:Option<text> \| profile:Option<S3Profile> \| prefix:text` |
+| 0 | S3 | `bucket:text \| region:text \| endpoint:Option<text> \| profile:Option<S3Profile>` |
 | 1 | Dropbox | `0` for the App folder, or `1 \| namespace_id:text` for a shared folder; then `account_label:Option<text>` |
 | 2 | OneDrive | `drive_id:text \| folder_id:text \| account_label:Option<text>` |
 | 3 | CloudKit | `container:text \| owner:text \| zone:text` |
 
 - `endpoint` is the URL as it serializes itself: `https://s3.example.net/`, with
-  its slash. `prefix` is the base prefix in its one spelling, with no slash at
-  either end ([§20.3](coven.md#203-where-a-store-lives)). A reader refuses any
-  other spelling, so a location has one encoding.
+  its slash. A reader refuses any other spelling, so a location has one
+  encoding.
 - `S3Profile` is `0 | name:u8` for a catalogued service, or `1 | settings:u16`
   for custom settings (Appendix E.3). The names are 0 AWS, 1 GCS, 2 R2,
   3 RustFS, 4 SeaweedFS, 5 Ceph RGW and 6 Versity Gateway.

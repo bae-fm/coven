@@ -17,7 +17,6 @@ fn code(store: StoreId) -> RestoreCode {
             region: "us-east-1".into(),
             endpoint: None,
             profile: None,
-            prefix: coven_storage::S3Prefix::parse("libraries").unwrap(),
         })
         .encode()
         .unwrap(),
@@ -235,9 +234,12 @@ fn a_code_too_long_for_block_store_even_unnamed_fails() {
     ours.storage = coven_storage::RestoreStorage::location_only(StorageConfig::S3 {
         bucket: "household".into(),
         region: "us-east-1".into(),
-        endpoint: None,
+        endpoint: Some(
+            format!("https://s3.example.net/{}", vec!["p".repeat(200); 5].join("/"))
+                .parse()
+                .unwrap(),
+        ),
         profile: None,
-        prefix: coven_storage::S3Prefix::parse(&vec!["p".repeat(200); 5].join("/")).unwrap(),
     })
     .encode()
     .unwrap();

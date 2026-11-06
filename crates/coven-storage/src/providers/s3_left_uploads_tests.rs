@@ -40,7 +40,7 @@ async fn another_device_ends_a_devices_sessions_and_temporaries_on_a_copy_profil
     for _ in 0..2 {
         laptop.end_device_uploads(STORE_ID, DEVICE).await.unwrap();
         let state = state.lock().unwrap();
-        let laptops = format!("store/{STORE_ID}/.coven-uploads/9/");
+        let laptops = format!("{STORE_ID}/.coven-uploads/9/");
         assert_eq!(state.uploads.len(), 1);
         assert!(state.uploads.values().all(|upload| upload.key.starts_with(&laptops)));
         assert!(state.objects.keys().all(|key| !key.contains("/.coven-uploads/")));

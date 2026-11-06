@@ -12,9 +12,8 @@ use std::future::Future;
 /// no return (§11.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageSetupStep {
-    /// S3, creating the store where member keys reach a whole bucket:
-    /// listing the bucket's root to check it holds nothing but this store
-    /// (§20.7).
+    /// S3, creating the store: listing the bucket's root to check it holds
+    /// nothing but this store (§20.3).
     CheckingBucket,
     /// S3: probing the service with fresh objects for the settings the
     /// location needs, and checking them against what it does (§20.8).

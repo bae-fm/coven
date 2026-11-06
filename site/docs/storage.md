@@ -52,20 +52,11 @@ Every object path starts with the store's id:
 | `<store>/join-requests/<device>/<invite>` | a join request, under the device that made the invite |
 | `<store>/join-requests/<device>/gone` | the marker of a device gone for good, which turns its requests away |
 
-So several stores can share one Dropbox or OneDrive folder, one CloudKit zone,
-or one S3 bucket and prefix, except on an S3 service whose member keys reach a
-whole bucket ([below](#a-bucket-of-its-own)). Finding the sequence never lists
-anything: reading `seq/41` never enumerates Ana's 20,000 photos, or another
-store's objects.
-
-An S3 location's base prefix is an
-[`S3Prefix`](rustdoc:struct:coven::S3Prefix). Build it with
-`S3Prefix::parse(typed)` from what the person typed: slashes at its ends mean
-nothing, so `/music/stores/` and `music/stores` are one location, and only
-slashes is the bucket's root. Its error,
-[`S3PrefixError`](rustdoc:enum:coven::S3PrefixError), names the folder at fault:
-two slashes in a row, a character other than an ASCII letter or digit, `-` or
-`_`, or a folder name over 255 bytes.
+So several stores can share one Dropbox or OneDrive folder or one CloudKit
+zone. An S3 bucket holds one store, whose paths start at the bucket's root
+([below](#a-bucket-of-its-own)). Finding the sequence never lists anything:
+reading `seq/41` never enumerates Ana's 20,000 photos, or another store's
+objects.
 
 ## Setting up storage
 
@@ -197,17 +188,15 @@ first failed check: `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` or
 
 ### A bucket of its own
 
-Each member has their own S3 access key, limited as narrowly as the service
-allows. On AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway a key can
-be limited to the store's prefix, so stores there can share a bucket. R2's
-API tokens reach a whole bucket (its temporary credentials can be limited to a
-prefix, but last at most 7 days), and so does every custom profile; there, a
-member of one store could delete another store's objects in the same bucket. So on
-those services **every store has its own bucket from creation**. A location
-with a base prefix fails with `StorageFailure::OwnBucketRequired { reason:
-Prefix }`, and creating a store in a bucket that holds anything else fails with
-`reason: Occupied`. Ana creates Household in the R2 bucket `household`;
-creating Garden in that bucket is refused, so Garden gets the bucket `garden`.
+Each member has their own S3 access key, made by hand in the service's
+console. Some services can limit a key to a folder inside a bucket and some
+can't, and coven never sees the key's policy, so it takes every key to reach
+the whole bucket: a member of one store could delete another store's objects
+in the same bucket. So **every S3 store has its own bucket from creation**.
+Creating a store in a bucket that holds anything else, another store or anyone's
+other files, fails with `StorageFailure::OwnLocationRequired`. Ana creates
+Household in the bucket `household`; creating Garden in that bucket is refused,
+so Garden gets the bucket `garden`.
 
 ### Versioned buckets
 

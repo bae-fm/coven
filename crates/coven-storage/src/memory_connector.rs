@@ -150,8 +150,8 @@ impl crate::providers::StorageConnector for MemoryStorage {
         let cleaned = std::iter::once(runs.run).chain(runs.earlier.iter().copied()).collect();
         crate::S3DetectionRun { detection, cleaned }
     }
-    /// Memory's objects are one bucket: where the location's member keys
-    /// reach the whole bucket, another store's object occupies it.
+    /// Memory's objects are one bucket, which another store's object
+    /// occupies.
     async fn check_new_s3_store(
         &self,
         config: StorageConfig,
@@ -160,17 +160,11 @@ impl crate::providers::StorageConnector for MemoryStorage {
         _waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
         config.validate()?;
-        let StorageConfig::S3 { endpoint, profile, .. } = &config else {
+        if config.provider() != crate::CloudProvider::S3 {
             return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
-        };
-        let scope = crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?;
-        if scope == crate::providers::S3KeyScope::Bucket
-            && self.provider.state.lock().await.objects.keys().any(|path| path.store() != store)
-        {
-            return Err(StorageFailure::OwnBucketRequired {
-                reason: crate::OwnBucketReason::Occupied,
-            }
-            .into());
+        }
+        if self.provider.state.lock().await.objects.keys().any(|path| path.store() != store) {
+            return Err(StorageFailure::OwnLocationRequired.into());
         }
         Ok(())
     }

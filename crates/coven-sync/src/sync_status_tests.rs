@@ -6,7 +6,7 @@ use crate::{
 use coven_database::{EntryTarget, OperationRejection, WriteCutoff};
 use coven_foundation::id_source::{DeviceId, FileId, KeyId, MemberId, StoreId};
 use coven_merge::{Audience, Slot};
-use coven_storage::{OAuthAccess, ObjectPath, OwnBucketReason};
+use coven_storage::{OAuthAccess, ObjectPath};
 use serde_json::{json, Value};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -30,7 +30,7 @@ fn failures() -> Vec<StorageFailure> {
         RegionMismatch,
         StoreExists,
         ClockSkew,
-        OwnBucketRequired { reason: OwnBucketReason::Prefix },
+        OwnLocationRequired,
         QuotaExceeded,
         RateLimited,
         InvalidConfiguration,
@@ -76,7 +76,7 @@ fn failure_name(failure: StorageFailure) -> &'static str {
         RegionMismatch => "regionMismatch",
         StoreExists => "storeExists",
         ClockSkew => "clockSkew",
-        OwnBucketRequired { .. } => "ownBucketRequired",
+        OwnLocationRequired => "ownLocationRequired",
         QuotaExceeded => "quotaExceeded",
         RateLimited => "rateLimited",
         InvalidConfiguration => "invalidConfiguration",

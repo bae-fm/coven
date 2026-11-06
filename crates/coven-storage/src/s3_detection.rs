@@ -21,8 +21,8 @@ pub struct S3Detection {
 
 /// The detection runs one detection cleans up after (§20.7): its own,
 /// which the caller recorded before detection writes its first probe, and
-/// the earlier runs at the same bucket and prefix whose probes and uploads
-/// no cleanup has confirmed gone, such as one a crash cut.
+/// the earlier runs at the same bucket whose probes and uploads no cleanup
+/// has confirmed gone, such as one a crash cut.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct S3DetectionRuns {
     /// This detection's run: its probes go under `.coven-check/<run>/`.
@@ -261,7 +261,7 @@ impl S3Detection {
     /// an uncatalogued endpoint naming no profile gets these detected
     /// settings as its custom profile; any other location is kept as given.
     pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageCheckError> {
-        let StorageConfig::S3 { bucket, region, endpoint, profile, prefix } = location else {
+        let StorageConfig::S3 { bucket, region, endpoint, profile } = location else {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("expected S3 configuration")
                 .into());
@@ -277,7 +277,7 @@ impl S3Detection {
             &self.versioning,
         )?;
         self.check(&settings)?;
-        Ok(StorageConfig::S3 { bucket, region, endpoint, profile, prefix })
+        Ok(StorageConfig::S3 { bucket, region, endpoint, profile })
     }
 }
 

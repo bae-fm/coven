@@ -125,7 +125,6 @@ async fn fixture(
             region: "us-east-1".into(),
             endpoint: Some(server.url.parse().unwrap()),
             profile: None,
-            prefix: crate::S3Prefix::default(),
         },
         S3Credentials {
             access_key_id: "access".into(),

@@ -97,7 +97,6 @@ pub(super) fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
             region: "auto".into(),
             endpoint: Some("https://storage.googleapis.com".parse().unwrap()),
             profile: None,
-            prefix: crate::S3Prefix::parse("store").unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -173,10 +172,7 @@ async fn gcs_multipart_copy_preserves_occupied_bytes_and_removes_temporaries() {
     let state = state.lock().unwrap();
     assert_eq!(state.copies, 2);
     assert!(state.uploads.is_empty());
-    assert_eq!(
-        state.objects.keys().collect::<Vec<_>>(),
-        vec![&crate::S3Prefix::parse("store").unwrap().key(&path)]
-    );
+    assert_eq!(state.objects.keys().collect::<Vec<_>>(), vec![path.as_str()]);
 }
 
 #[tokio::test]
@@ -190,12 +186,10 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
         let temporary = storage.provider().session_key(&session).unwrap();
-        assert!(temporary.starts_with(&format!(
-            "store/{STORE_ID}/.coven-uploads/{}/",
-            crate::test_utils::DEVICE.0
-        )));
+        assert!(temporary
+            .starts_with(&format!("{STORE_ID}/.coven-uploads/{}/", crate::test_utils::DEVICE.0)));
         assert_eq!(session.device(), crate::test_utils::DEVICE);
-        assert!(ObjectPath::parse(temporary.strip_prefix("store/").unwrap()).is_err());
+        assert!(ObjectPath::parse(&temporary).is_err());
         storage.upload_part(&mut session, b"data").await.unwrap();
         {
             let mut state = state.lock().unwrap();
@@ -865,8 +859,6 @@ async fn every_temporary_sits_in_the_staging_devices_folder() {
     let created = staged(&state);
     assert_eq!(created.len(), 1);
     assert!(created[0].starts_with(&folder), "{created:?}");
-    // GCS's location keeps its stores under the base prefix `store`.
-    let folder = format!("store/{folder}");
 
     let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;

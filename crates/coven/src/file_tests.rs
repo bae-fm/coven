@@ -214,10 +214,14 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
         connector.stop(&handle).await;
         memory.set_faults(Faults::none()).await;
-        memory.set_online(false);
+        // Connecting reads the bucket's marker, so it happens online; the
+        // pass after it fails offline and leaves the connection in place.
+        creations.add_permits(1 << 20);
         handle.start_sync().await.unwrap();
-        let mut last = handle.test_last_pass();
-        last.wait_for(|last| matches!(last, Some(LastPass::Offline { .. }))).await;
+        passed(&handle).await;
+        memory.set_online(false);
+        let outcome = handle.retry_now().await.unwrap().await;
+        assert!(matches!(outcome, RetryOutcome::Failed(PassFailure::Offline { .. })), "{outcome:?}");
         memory.set_online(true);
         handle.evict_file(uploaded[0].id()).await.unwrap();
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
@@ -529,7 +533,6 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
                 region: "test".into(),
                 endpoint: None,
                 profile: None,
-                prefix: crate::S3Prefix::parse("uploaded").unwrap(),
             })
             .clock(Arc::new(SystemClock))
             .build()

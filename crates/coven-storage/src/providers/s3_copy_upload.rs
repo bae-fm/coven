@@ -52,11 +52,7 @@ impl S3Storage {
         store: coven_foundation::id_source::StoreId,
         device: DeviceId,
     ) -> String {
-        format!(
-            "{}{}/",
-            self.prefix.key_prefix(),
-            coven_format::path::device_uploads(store, device)
-        )
+        format!("{}/", coven_format::path::device_uploads(store, device))
     }
 
     /// Where a session's native upload lives: its destination, or on a copy
@@ -69,7 +65,7 @@ impl S3Storage {
             _ => return Err(StorageFailure::SessionMismatch.into()),
         };
         match self.settings.copy_publication.multipart() {
-            None => Ok(self.prefix.key(session.path())),
+            None => Ok(session.path().as_str().to_owned()),
             Some(_) => self.temporary_key(session.path().store(), session.device, token),
         }
     }
@@ -339,7 +335,7 @@ impl S3Storage {
             .client
             .copy_object()
             .bucket(&self.bucket)
-            .key(path.key(&self.prefix))
+            .key(path.as_str())
             .copy_source(format!("/{}/{temporary}", self.bucket))
             .customize()
             .mutate_request(move |request| {

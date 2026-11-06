@@ -1,26 +1,15 @@
 //! Detection against an in-process S3 server configured as each known
 //! behavior. Times are the test clock's seconds, which detection's waits move.
 use super::*;
+use crate::providers::s3::tests::test_server::*;
 use crate::providers::tests::{query, response, TestServer};
 use crate::{S3Profile, S3ProfileName, StorageCheck, StorageCheckError};
-use axum::{
-    body::{Body, Bytes},
-    extract::State,
-    http::{HeaderMap, Method, Response, Uri},
-    Router,
-};
+use axum::{http::Uri, Router};
 use coven_foundation::{
-    clock::{Clock, FixedClock, PollingClock},
+    clock::{FixedClock, PollingClock},
     id_source::{IdSource, UuidIds},
 };
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
-
-#[path = "s3_detect_server.rs"]
-mod server;
-use server::*;
+use std::sync::{Arc, Mutex};
 
 /// Where the test's clock starts.
 const START: std::time::Duration = std::time::Duration::from_secs(1_790_000_000);
@@ -44,28 +33,7 @@ struct Fixture {
 impl Fixture {
     async fn new(service: Service) -> Self {
         let fixed = Arc::new(FixedClock::new(std::time::UNIX_EPOCH + START));
-        let state = Arc::new(Mutex::new(Remote {
-            clock: fixed.clone(),
-            lost_reply: None,
-            hidden: BTreeSet::new(),
-            versioning: "",
-            versioning_failure: None,
-            service,
-            objects: BTreeMap::new(),
-            uploads: BTreeMap::new(),
-            written: Vec::new(),
-            next: 0,
-            fail_copies: false,
-            fail_deletes: false,
-            frozen: None,
-            empty_v2_listing: None,
-            incomplete_v1_listing: false,
-            bucket_heads: 0,
-            throttle: 0,
-            lagging_listings: 0,
-            listings: 0,
-            stall_parts: None,
-        }));
+        let state = Arc::new(Mutex::new(Remote::new(service, fixed.clone())));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
         Self { state, server, clock: Arc::new(PollingClock::new(fixed)) }
     }
@@ -75,7 +43,6 @@ impl Fixture {
             region: "us-east-1".into(),
             endpoint: Some(self.server.url.parse().unwrap()),
             profile,
-            prefix: crate::S3Prefix::default(),
         }
     }
     async fn detect(&self, profile: Option<S3Profile>) -> Result<S3Detection, StorageError> {
@@ -104,7 +71,13 @@ impl Fixture {
         let state = self.state.lock().unwrap();
         assert!(state.objects.is_empty(), "probe objects remain");
         assert!(state.uploads.is_empty(), "probe uploads remain");
-        assert_eq!(state.bucket_heads, 0, "detection uses only prefix-scoped access");
+        assert_eq!(state.bucket_heads, 0, "detection sends no bucket request");
+        let store = format!("{STORE}/");
+        assert!(
+            state.listed.iter().all(|prefix| prefix.starts_with(&store)),
+            "a listing outside the store's folder: {:?}",
+            state.listed
+        );
         let namespace = format!("{STORE}/.coven-check/");
         let runs: std::collections::BTreeSet<_> = state
             .written
@@ -576,7 +549,6 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
             region: "us-east-1".into(),
             endpoint: Some(outage.url.parse().unwrap()),
             profile: None,
-            prefix: crate::S3Prefix::default(),
         },
         credentials(),
         STORE,
@@ -609,7 +581,7 @@ async fn complete_v2_does_not_pass_when_v1_never_completes() {
     .unwrap();
     let mut probes = Probes {
         s: &storage,
-        prefix: namespace(&storage, STORE, uuid::Uuid::from_bytes([7; 16])),
+        prefix: namespace(STORE, uuid::Uuid::from_bytes([7; 16])),
         clock: clock.clone(),
         waits: &crate::SetupWaits::default(),
         results: Vec::new(),
@@ -718,7 +690,7 @@ async fn a_lagging_listing_is_polled_one_page_at_a_time() {
     .unwrap();
     let mut probes = Probes {
         s: &storage,
-        prefix: namespace(&storage, STORE, uuid::Uuid::from_bytes([8; 16])),
+        prefix: namespace(STORE, uuid::Uuid::from_bytes([8; 16])),
         clock: clock.clone(),
         waits: &crate::SetupWaits::default(),
         results: Vec::new(),

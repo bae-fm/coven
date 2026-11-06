@@ -10,7 +10,7 @@ pub use crate::coven::{Coven, ListedStore, StoreInfo, StoreListError, Unfinished
 pub use crate::coven_error::{CovenError, CovenResult};
 pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
-pub use crate::dev_tools::empty_s3_prefix;
+pub use crate::dev_tools::empty_s3_bucket;
 pub use crate::error::{
     ReadOnlyOpenError, StorageSetupError, StoreCreationError, StoreDeletionError,
     StoreKeyUnlockError,
@@ -92,7 +92,7 @@ pub use coven_storage::providers::{
     StorageFolder,
 };
 #[cfg(feature = "dev-tools")]
-pub use coven_storage::providers::{EmptiedS3Prefix, EmptyS3PrefixError};
+pub use coven_storage::providers::{EmptiedS3Bucket, EmptyS3BucketError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::test_utils::{
     BodyFailure, Faults, MemoryProvider, MemoryRequest, MemoryStorage, MemoryStorageBuilder,
@@ -101,11 +101,11 @@ pub use coven_storage::test_utils::{
 pub use coven_storage::Storage;
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, OAuthAccess,
-    ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, PathError, S3BucketVersioning,
-    S3Checksums, S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
-    S3MultipartTimestamp, S3Prefix, S3PrefixError, S3Probe, S3ProbeResult, S3Profile,
-    S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut,
-    StorageConfig, StorageError, StorageFailure, StoredObject,
+    ObjectChecksum, ObjectPath, ObjectPrefix, PathError, S3BucketVersioning, S3Checksums,
+    S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
+    S3MultipartTimestamp, S3Probe, S3ProbeResult, S3Profile, S3ProfileName, S3ResponseHeaders,
+    S3Revision, S3Settings, S3Signing, S3SinglePut, StorageConfig, StorageError, StorageFailure,
+    StoredObject,
 };
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageCheckError};

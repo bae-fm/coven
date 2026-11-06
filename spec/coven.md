@@ -7309,7 +7309,7 @@ and the reference evidence above alone decides whether it is deleted.
   phone's folder. Several admins' devices may clean up the same folder; deleting
   an absent object succeeds, and each checks the reference evidence itself.
 - **Every admin can.** Every member's provider access reaches the store's
-  objects: an S3 member key may list and delete under the store's prefix
+  objects: an S3 member key may list and delete in the store's bucket
   (Appendix E.12), and Dropbox and OneDrive share the store's folder with each
   member's account, as an editor on Dropbox and with write access on OneDrive.
   On CloudKit coven relies on a participant with write access deleting records
@@ -8666,37 +8666,21 @@ the location marker `coven-location`, at the root of a location that holds one
 store (below).
 [format.md D10](format.md#d10-paths) gives each object exactly one spelling.
 
-So several stores can share one S3 bucket prefix where member keys can be
-limited to a prefix. Ana creates Household and Ben creates Garden in the same
-AWS bucket; their store ids differ, so their first entries land at different
-paths. A Dropbox shared folder or a OneDrive folder holds one store, and so does
-a bucket on an S3 service whose keys reach the whole bucket (below). A CloudKit
-store has a zone of its own, `coven-<store>`, which setup creates: a CloudKit
-share covers its whole zone, so a second store in it would reach the first
-store's members.
+So several stores can share one location where no one else reaches it. Ana
+keeps Household and her Recipes store, neither shared yet, in her Dropbox App
+folder; their store ids differ, so their first entries land at different
+paths. A Dropbox shared folder, a OneDrive folder and an S3 bucket each hold
+one store (below). A CloudKit store has a zone of its own, `coven-<store>`,
+which setup creates: a CloudKit share covers its whole zone, so a second store
+in it would reach the first store's members.
 
-An S3 location names a bucket and a *base prefix*: the folder inside the bucket
-that holds its stores' folders. Ana types `music/stores` when she sets up
-Household on AWS, and Household's objects go under `music/stores/<store>/`.
+An S3 location names a bucket, with the region, endpoint and profile that reach
+it (§20.7). Ana sets up Household in her bucket `household`, and Household's
+objects go under `<store>/` at the bucket's root.
 
-The base prefix is a folder path, so slashes at its ends mean nothing:
-`/music/stores/`, `music/stores/` and `music/stores` are one location. The app
-parses what Ana typed into an `S3Prefix` when it builds the location, and the
-parse drops those slashes once (api.md E5). Every device, restore code and request
-then spells the prefix the same way. Without that, Ben typing `music/stores/` on
-reconnecting would not match the recorded `music/stores`, and setup would refuse
-it as a different location.
-
-- A prefix of only slashes is the bucket's root, as an empty prefix is.
-- What's left is folder names of ASCII letters, digits, `-` and `_`, each at most
-  255 bytes, joined by single slashes. Two slashes in a row, any other character,
-  or a longer folder name is refused with an `S3PrefixError` that names the folder
-  at fault, before any request.
-
-Setup writes and reads only its own store's prefix. Where stores can share a
-prefix-scoped location, other stores and unrelated objects outside this prefix
-don't compete with this store. A few accesses are wider, and none reads another
-store's data:
+Setup writes and reads only under its own store's id. In a location several
+stores share, other stores' objects don't compete with this store. A few
+accesses are wider, and none reads another store's data:
 
 - creating a store that needs its own location lists the location's root, to
   check it holds nothing else, then creates the location marker; later setups
@@ -8714,18 +8698,17 @@ Key copies are ordinary slots, found by reading the sequence, never by listing
 ##### A location of its own
 
 On Dropbox and OneDrive a folder is shared with a store's members whole: each
-member's account reaches everything in it. On an S3 service whose member keys
-reach a whole bucket, each key reaches everything in the bucket (§20.7). If two
-stores shared such a location, a member of one could delete the other's
-encrypted objects. On Dropbox and OneDrive, inviting someone to one store would
-also share everything else in its folder with them. So on these providers
-**every store has its own location from creation:** its own shared folder on
-Dropbox, its own folder on OneDrive, its own bucket on a bucket-scoped S3
-service.
+member's account reaches everything in it. On S3 coven takes each member key
+to reach everything in the bucket, because it can't tell how far a key reaches
+(§20.7). If two stores shared such a location, a member of one could delete the
+other's encrypted objects. On Dropbox and OneDrive, inviting someone to one
+store would also share everything else in its folder with them. So on these
+providers **every store has its own location from creation:** its own shared
+folder on Dropbox, its own folder on OneDrive, its own bucket on S3.
 
 Ana creates Household in the Dropbox shared folder `Household`. Ben then tries
 to create Garden in that same folder, and setup refuses it; Garden gets a
-shared folder of its own, `Garden`. On R2 it is the same with buckets:
+shared folder of its own, `Garden`. On S3 it is the same with buckets:
 Household in the bucket `household`, Garden in `garden`.
 
 The rule applies from creation, even to one-member stores, because moving a
@@ -8737,16 +8720,13 @@ stores can live in the App folder.
 
 It is enforced like this:
 
-- On S3 the location's base prefix must be empty, since the store's location
-  is the whole bucket. Any other prefix fails before any request with
-  `StorageFailure::OwnLocationRequired { reason: Prefix }`. A Dropbox or
-  OneDrive location is the folder itself and has no prefix.
 - A store's first setup, before any location is recorded, lists the location's
   root: the folder on Dropbox and OneDrive, the bucket's root with delimiter
   `/` on S3. It does so before S3 detection or any other write. Any object or
   folder other than the store's own `<store>/` and the location marker
-  `coven-location` refuses setup with `OwnLocationRequired { reason: Occupied }`.
-  A retried creation that already wrote under `<store>/` passes.
+  `coven-location` refuses setup with `StorageFailure::OwnLocationRequired`.
+  A retried creation that already wrote under `<store>/`, S3 detection's
+  probes included, passes.
 - Then, after S3 detection and the provider check pass (§20.8), first setup
   passes its point of no return (§11.6) and claims the location, before slot 1
   and before committing the location: it creates `coven-location` at the
@@ -8755,19 +8735,20 @@ It is enforced like this:
   bytes with no newline ([format.md D10](format.md#the-location-marker)).
 - If that create succeeds, setup proceeds. If the name is taken, setup reads the
   marker exactly: the same bytes mean this is a retry of this store's setup,
-  which proceeds; any other bytes refuse with
-  `OwnLocationRequired { reason: Occupied }`.
+  which proceeds; any other bytes refuse with `OwnLocationRequired`.
 - Reconnecting, restoring and joining use the recorded location. Besides their
   usual checks they read `coven-location` exactly and require it to name this
   store; a missing, malformed or other store's marker refuses with
-  `OwnLocationRequired { reason: Occupied }`. They neither list the location's
-  root nor create a missing marker. A failed read keeps its provider cause.
+  `OwnLocationRequired`. They neither list the location's root nor create a
+  missing marker. A failed read keeps its provider cause.
 - The marker is never replaced or deleted. Setup claims it only past its point
   of no return, so a setup that writes it always finishes, after a crash too;
   an undone setup never wrote one. A marker naming another store undoes setup,
   which then wrote none. Deleting a store from a device (`delete_store` or
   `discard_store`, [api.md E1](api.md#e1-opening)) leaves the marker in storage,
-  like the store's other objects.
+  like the store's other objects. Only the development tool `empty_s3_bucket`
+  ([api.md E14](api.md#e14-development-tools)), which empties a whole bucket,
+  removes it.
 
 Why both checks? The root listing finds objects stored before setup, but only
 those older than the listing margin (§20.4): anything stored within the margin
@@ -8879,12 +8860,11 @@ checksum.
   replacement changed it.
 - **S3's bodyless 404.** An S3 HEAD miss doesn't say whether the object or the
   whole bucket is missing. Coven checks the bucket with a listing that should
-  come back empty: its prefix is the exact object key, under the configured
-  prefix and store id. HEAD Bucket isn't used, because it needs bucket-list
-  permission without a prefix condition, which a store-scoped member key lacks.
-  Absence still comes from the HEAD, never from the listing, so a miss is two
-  requests. Known profiles list with ListObjectsV2; a custom profile using V1
-  lists with ListObjects.
+  come back empty: its prefix is the exact object key. Setup's detection checks
+  that the service answers such a listing (Appendix E.7), so status relies on
+  it rather than HEAD Bucket. Absence still comes from the HEAD, never from the
+  listing, so a miss is two requests. Known profiles list with ListObjectsV2; a
+  custom profile using V1 lists with ListObjects.
 - Any check that the container exists is counted separately (§21.1).
 
 #### 20.6 Publishing a large object
@@ -9003,32 +8983,27 @@ An endpoint that matches no known host and names no profile has no AWS fallback.
 Setup detects its behaviours (below) and records them as the location's custom
 profile; the location setup returns and records carries those settings.
 
-##### A member key's reach, and a bucket of its own
+##### A bucket of its own
 
-Each member has their own S3 access key, limited as narrowly as the service
-allows:
+Each member has their own S3 access key (§20.10). How narrowly a key can be
+limited depends on the service. AWS can limit one to a folder inside a bucket
+with IAM `s3:prefix` conditions; an R2 API token reaches whole buckets, never a
+folder inside one. And the person makes each key by hand in the service's
+console, where coven never looks, so setup can't tell how far a given key
+reaches.
 
-- **To the store's prefix:** AWS, by IAM `s3:prefix` conditions; GCS, by a
-  managed folder per store; RustFS, SeaweedFS, Ceph RGW and Versity Gateway, by
-  policy `s3:prefix` conditions. Stores on these services can share a bucket and
-  base prefix.
-- **Only to a whole bucket:** R2, whose API tokens are limited to buckets, never
-  to a folder inside one. R2's temporary credentials can be limited to prefixes,
-  but they last at most 7 days and are made from a parent token, so they can't
-  serve as a member key made once in the console. A custom profile says nothing
-  about keys, so it is treated the same way.
-
-On a bucket-scoped service a member of one store could delete another store's
-encrypted objects in the same bucket. So there, **every store has its own bucket
-from creation,** whoever makes its keys, by hand in the provider's dashboard or
-through coven. Ana creates Household in the R2 bucket `household`. Creating Garden
-in that bucket is refused; Garden gets the bucket `garden`.
+So coven takes every member key to reach the whole bucket, and **every S3 store
+has its own bucket from creation.** Were Garden in Household's bucket, a member
+of Household could delete Garden's encrypted objects. Ana creates Household in
+the bucket `household`. Creating Garden in that bucket is refused; Garden gets
+the bucket `garden`. Nothing else shares the bucket either: first setup refuses
+a bucket that holds anyone's other files.
 
 Dropbox shared folders and OneDrive folders follow the same rule, for the same
-reason, and §20.3 gives how it is enforced for all three. On S3 the location's
-base prefix must be empty, first setup checks that the bucket's root holds
-nothing else, and the location marker `coven-location` at the bucket's root
-names the one store that owns the bucket.
+reason, and §20.3 gives how it is enforced for all three. On S3 first setup
+checks that the bucket's root holds nothing else, and the location marker
+`coven-location` at the bucket's root names the one store that owns the
+bucket.
 
 ##### Detection
 
@@ -9037,7 +9012,7 @@ person's own bucket with their key. Setup runs it on every S3 location; the app
 may also run it beforehand to prefill advanced settings (`detect_s3_settings`,
 api.md E5).
 
-- It writes only fresh objects under `<prefix>/<store>/.coven-check/<run>/`, where
+- It writes only fresh objects under `<store>/.coven-check/<run>/`, where
   `<run>` is a fresh random UUID. That reserved place is distinct from every
   coven path, and listings exclude it, so a probe left by a killed process never
   shows up as a published object.
@@ -9047,8 +9022,8 @@ api.md E5).
   uploads the part of its multipart probe: the unfinished upload stays, and
   his provider bills its parts until someone aborts it. Nothing lists it, and
   he never sees it. So detection records its run on the device before its
-  first probe. The next detection at the same bucket and prefix, whatever
-  profile it names, finds the recorded runs there. After its own cleanup it
+  first probe. The next detection at the same bucket, whatever profile it
+  names, finds the recorded runs there. After its own cleanup it
   aborts each one's unfinished uploads and deletes its probes, as listing the
   run's place finds them; a failure there fails the call too. The store's next
   connection to that bucket does the same. There a failure is logged and the
@@ -9291,7 +9266,7 @@ can grant another AWS account access, but other services differ), so each member
 gets their own access key (§14.3). Every S3 service manages keys its own way,
 with no standard API, so coven leaves keys to
 the one place every service has: the provider's console. The person makes each
-key there, limited to the store, and deletes it there. Coven never holds the
+key there, limited to the store's bucket, and deletes it there. Coven never holds the
 storage account's admin access and makes no provider call that creates,
 configures or deletes a key, a principal or a bucket.
 
@@ -9300,10 +9275,10 @@ member policy, types it into the invite, and Dan's device reaches storage with
 it. When she removes Dan later, she deletes that key in the console.
 
 **Guided console steps.** `guided_access_key` gives the app what the person needs
-to make a key by hand: the bucket, the store's prefix, and the *member policy*
-filled in for this store (Appendix E.12). A key with that policy reaches only the
-store's prefix. Setup checks the provider with the key before using it
-(§20.8), so a key that reaches too little fails there.
+to make a key by hand: the bucket and the *member policy* filled in for it
+(Appendix E.12). A key with that policy reaches only the store's bucket. Setup
+checks the provider with the key before using it (§20.8), so a key that reaches
+too little fails there.
 
 ### 21. Costs
 
@@ -10223,10 +10198,9 @@ place is distinct from every coven path.
 **Known profiles** are const entries in the adapter's
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs). Each
 holds: its name; its endpoint host or host suffix (none for a self-hosted
-service); the settings it fills; the finest scope a member key can have (§20.7);
-the date and suite version of its last certification; separate certification
-evidence for versioned buckets. Versioning support
-belongs to the profile, never to `S3Settings`.
+service); the settings it fills; the date and suite version of its last
+certification; separate certification evidence for versioned buckets.
+Versioning support belongs to the profile, never to `S3Settings`.
 
 **Choosing by host.**
 
@@ -10569,14 +10543,13 @@ order. Detection never chooses copy publication for every object (E.6).
   unknown owner setting. This exception requires R2's known hostname, not an R2
   name at an arbitrary endpoint.
 - **Permissions.** A member's policy needs bucket-level
-  `s3:GetBucketVersioning`, separately from its prefix-limited object and list
-  permissions. GCS needs
+  `s3:GetBucketVersioning`, beside its object and list permissions. GCS needs
   [`storage.buckets.get`](https://docs.cloud.google.com/storage/docs/using-object-versioning#required_roles).
 
 ### E.10 S3 publication mechanics
 
 **Where uploads go.** A copy-publication profile uploads unconditionally to
-`<prefix>/<store>/.coven-uploads/<device>/<session>`, where `<device>` is the
+`<store>/.coven-uploads/<device>/<session>`, where `<device>` is the
 device whose connection began the upload and `<session>` is the upload's random
 UUID. Other profiles upload at the destination: a slot, another immutable
 object, or the floor. That reserved place is distinct from every coven path.
@@ -10616,7 +10589,7 @@ completion likewise uses `If-Match` for replacement.
 same way:
 
 - One unconditional PUT stages its bytes at
-  `<prefix>/<store>/.coven-uploads/<device>/<create>`, in the creating device's
+  `<store>/.coven-uploads/<device>/<create>`, in the creating device's
   folder, carrying a fresh attempt id as its marker; then one conditional copy
   publishes it.
 - `<create>` is the create's own name: the UUID formed from the first 16 bytes of
@@ -10693,10 +10666,10 @@ place but are excluded from published-object listings.
 good left (§17.10) with three multipart-upload listings and one object listing:
 
 - the multipart uploads in the device's folder,
-  `<prefix>/<store>/.coven-uploads/<device>/`, where a copy profile stages every
+  `<store>/.coven-uploads/<device>/`, where a copy profile stages every
   session;
-- those under `<prefix>/<store>/files/<device>/`, and those under
-  `<prefix>/<store>/snapshots/` whose path names the device, where conditional
+- those under `<store>/files/<device>/`, and those under
+  `<store>/snapshots/` whose path names the device, where conditional
   completion puts a session at its destination;
 - then the objects in the device's folder: assembled temporaries and
   every-copy creates whose copy or deletion never happened.
@@ -10711,7 +10684,7 @@ where no device's id appears and other claimants' sessions share the key. So
 none is ended for being a gone device's. One is ended once it can never
 publish, whoever began it, and that rests on create-once alone: once slot `n`
 is published, the service refuses every other completion at `seq/n`. A device
-that has applied slot `n` lists the multipart uploads under `<prefix>/<store>/seq/`
+that has applied slot `n` lists the multipart uploads under `<store>/seq/`
 and aborts each at a slot up to its applied one, after each floor write and
 when it clears a gone device's storage (§17.10). A copy profile puts no session
 at a slot's key, so it lists nothing there. A claimant whose session was
@@ -10784,27 +10757,20 @@ Notes:
 The person makes each member key in the provider's console (§20.10). Guided
 console steps show this policy filled in for the store.
 
-**The member policy.**
+**The member policy.** The store has the bucket to itself (§20.7), so the
+policy covers the whole bucket.
 
 - Allow `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`,
   `s3:AbortMultipartUpload` and `s3:ListMultipartUploadParts` on
-  `arn:aws:s3:::<bucket>/<prefix>/<store>/*`.
-- Allow `s3:ListBucket` on the bucket under the condition `StringLike`
-  `s3:prefix` `<prefix>/<store>/*`.
-- An unconditioned statement allows `s3:GetBucketVersioning` and
-  `s3:ListBucketMultipartUploads`, which AWS can't limit to a prefix. Neither
-  reads an object. The multipart listing finds an upload whose start reply was
-  lost (E.10), and the uploads a device gone for good left (§17.10), which
-  `s3:AbortMultipartUpload` then ends.
+  `arn:aws:s3:::<bucket>/*`.
+- Allow `s3:ListBucket`, `s3:GetBucketVersioning` and
+  `s3:ListBucketMultipartUploads` on `arn:aws:s3:::<bucket>`. Setup lists the
+  bucket's root and reads the location marker there (§20.3), and checks the
+  owner's versioning setting (E.9). The multipart listing finds an upload whose
+  start reply was lost (E.10), and the uploads a device gone for good left
+  (§17.10), which `s3:AbortMultipartUpload` then ends.
 - On GCS the key's service account has `roles/storage.objectUser` on the
-  store's managed folder. That role holds `storage.multipartUploads.list`, but
-  Google doesn't say whether a grant on a managed folder lets the XML API's
-  multipart listing, a request against the bucket, through. It hasn't been
-  checked live; a refusal there fails the listing visibly as a permission
-  failure (§19.1).
-- Never add a `Deny` on `StringNotLike` `s3:prefix`: a request carrying no
-  prefix, such as a bucket check, matches the negated condition and would be
-  denied.
+  bucket.
 
 ---
 
@@ -11686,9 +11652,7 @@ pass's failure, kept for its retry.
 | `StorageSetupError::SetupRunning` | a setup past its point of no return is still finishing on this device | §20.8 |
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |
 | `ContainerNotFound` | CloudKit's zone is missing | E.1 |
-| `S3PrefixError` | a typed S3 base prefix has two slashes in a row, a folder name with a character other than an ASCII letter or digit, `-` or `_`, or a folder name over 255 bytes | §20.3 |
-| `StorageFailure::OwnLocationRequired { reason: Prefix }` | a bucket-scoped S3 service's location has a base prefix | §20.3, §20.7 |
-| `OwnLocationRequired { reason: Occupied }` | at first setup, the location of a store that needs its own (a Dropbox shared folder, a OneDrive folder, or a bucket-scoped S3 service's bucket) holds anything besides the store's own folder and the location marker, or the marker `coven-location` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.3 |
+| `StorageFailure::OwnLocationRequired` | at first setup, the location of a store that needs its own (a Dropbox shared folder, a OneDrive folder, or an S3 bucket) holds anything besides the store's own folder and the location marker, or the marker `coven-location` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.3 |
 | `InvalidConfiguration` | an S3 location contradicts its host, or has an unknown host outside setup | §20.7, E.3 |
 | `StorageCheckError::S3VersioningUnsupported` | a versioned bucket without a versioned certification | §20.7, E.9 |
 | `S3VersioningUnknown` | an uncertified profile can't read the bucket's versioning state | E.9 |

@@ -1,7 +1,7 @@
 //! The record of an S3 detection run (§11.6, §20.7): kept before the run's
 //! first probe, and ended once a cleanup has confirmed its probes and its
 //! unfinished multipart uploads gone. A run a crash cut leaves its record,
-//! which hands the run to the next detection at that bucket and prefix, or
+//! which hands the run to the next detection at that bucket, or
 //! to the store's next connection there, to clean up after.
 
 use crate::SyncError;
@@ -45,9 +45,8 @@ impl DetectionRecord {
         Ok(Self { id, work })
     }
 
-    /// The recorded runs whose probes sit with `location`'s objects: in
-    /// the same bucket at the same endpoint and region, under the same base
-    /// prefix, whatever profile reached them.
+    /// The recorded runs whose probes sit in `location`'s bucket: the same
+    /// bucket at the same endpoint and region, whatever profile reached them.
     pub async fn at(database: &Database, location: &StorageConfig) -> Result<Vec<Self>, SyncError> {
         let mut records = Vec::new();
         for record in database.operations().await? {
@@ -55,7 +54,7 @@ impl DetectionRecord {
                 continue;
             }
             let work: DetectionWork = serde_json::from_slice(&record.data)?;
-            if work.location.same_s3_objects(location) {
+            if work.location.same_s3_bucket(location) {
                 records.push(Self { id: record.id, work });
             }
         }

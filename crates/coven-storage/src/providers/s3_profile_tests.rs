@@ -62,9 +62,8 @@ async fn scope_policy_controls_head_and_get_without_inferring_a_checksum() {
 
 #[tokio::test]
 async fn listing_profile_selects_v1_and_follows_key_markers() {
-    let keys = [1, 2].map(|n| {
-        crate::S3Prefix::default().key(&ObjectPath::slot(STORE_ID, n.try_into().unwrap()))
-    });
+    let keys =
+        [1, 2].map(|n| ObjectPath::slot(STORE_ID, n.try_into().unwrap()).as_str().to_owned());
     let server = TestServer::new(Router::new().fallback(move |uri: Uri| {
         let keys = keys.clone();
         async move {
@@ -161,7 +160,6 @@ async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
             region: "auto".into(),
             endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
             profile: None,
-            prefix: crate::S3Prefix::parse("store").unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -232,7 +230,6 @@ fn an_uncatalogued_endpoint_without_settings_connects_only_after_detection() {
             region: "us-east-1".into(),
             endpoint: Some("http://localhost:9000".parse().unwrap()),
             profile: None,
-            prefix: crate::S3Prefix::parse("store").unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -259,7 +256,6 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
                 region: "auto".into(),
                 endpoint: Some(server.url.parse().unwrap()),
                 profile: Some(S3Profile::Named(S3ProfileName::Gcs)),
-                prefix: crate::S3Prefix::parse("store").unwrap(),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -343,25 +339,6 @@ async fn absent_policy_reads_without_a_checksum_and_refuses_any_returned_one() {
             StorageFailure::Protocol
         );
     }
-}
-
-#[test]
-fn only_r2_and_uncatalogued_settings_scope_member_keys_to_a_whole_bucket() {
-    for profile in PROFILES {
-        let expected =
-            if profile.name == S3ProfileName::R2 { S3KeyScope::Bucket } else { S3KeyScope::Prefix };
-        assert_eq!(profile.key_scope, expected, "{:?}", profile.name);
-    }
-    let uncatalogued: url::Url = "http://localhost:9000".parse().unwrap();
-    for (profile, expected) in [
-        (None, S3KeyScope::Bucket),
-        (Some(S3Profile::Custom(PLAIN)), S3KeyScope::Bucket),
-        (Some(S3Profile::Named(S3ProfileName::R2)), S3KeyScope::Bucket),
-        (Some(S3Profile::Named(S3ProfileName::RustFs)), S3KeyScope::Prefix),
-    ] {
-        assert_eq!(select(Some(&uncatalogued), profile.as_ref()).unwrap().key_scope(), expected);
-    }
-    assert_eq!(select(None, None).unwrap().key_scope(), S3KeyScope::Prefix);
 }
 
 /// Each profile's entry has the behaviours and the certification its row of

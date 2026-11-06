@@ -1378,9 +1378,9 @@ tables = [
 "crates/coven-storage/src/providers/s3_detect.rs" = ["detect"]
 # A new store's own-bucket check connects one candidate per signer.
 "crates/coven-storage/src/providers/s3_own_bucket.rs" = ["check_new_store"]
-# Emptying an S3 prefix, a development tool, connects to the location with
+# Emptying an S3 bucket, a development tool, connects to the location with
 # its own settings (api.md E14).
-"crates/coven-storage/src/providers/s3_empty.rs" = ["empty_prefix"]
+"crates/coven-storage/src/providers/s3_empty.rs" = ["empty_bucket"]
 
 "crates/coven-sync/src/file_read.rs" = ["FileStream::read", "UploadedFile::open"]
 # Creates a reserved cache file for a pin or an upload's own copy.
@@ -1439,7 +1439,7 @@ tables = [
 
 # The development tool's entry point builds the production connector with the
 # system clock and random ids, as the builder does (api.md E14).
-"crates/coven/src/dev_tools.rs" = ["empty_s3_prefix"]
+"crates/coven/src/dev_tools.rs" = ["empty_s3_bucket"]
 "crates/coven/src/bootstrap.rs" = [
     "bootstrap_device",
     "join_with_invite",

@@ -408,7 +408,7 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
         DropboxAppFolderNotShareable
         | AlreadyExists
         | StoreExists
-        | OwnBucketRequired { .. }
+        | OwnLocationRequired
         | Refused
         | Protocol
         | InvalidPath

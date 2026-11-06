@@ -62,7 +62,7 @@ pub(crate) async fn detect(
                 S3Settings { signing, ..base },
                 http.clone(),
             )?;
-            let namespace = &namespace(&candidate, store, runs.run);
+            let namespace = &namespace(store, runs.run);
             let signer = &candidate;
             // A rate-limited answer says nothing about the signer: wait it out.
             let result = waits
@@ -96,7 +96,7 @@ pub(crate) async fn detect(
         Err(error) => return crate::S3DetectionRun::unwritten(runs, Err(error)),
     };
     let mut probes = Probes {
-        prefix: namespace(&storage, store, runs.run),
+        prefix: namespace(store, runs.run),
         s: &storage,
         clock,
         waits,
@@ -123,8 +123,8 @@ pub(crate) async fn detect(
     crate::S3DetectionRun { detection, cleaned }
 }
 
-fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
-    format!("{}{PROBES}/{run}/", storage.prefix.key_prefix_of(&ObjectPrefix::all(store)))
+fn namespace(store: StoreId, run: uuid::Uuid) -> String {
+    format!("{}{PROBES}/{run}/", ObjectPrefix::all(store).as_str())
 }
 
 impl S3Storage {
@@ -137,7 +137,7 @@ impl S3Storage {
         run: uuid::Uuid,
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         use crate::left_upload::Left;
-        let prefix = namespace(self, store, run);
+        let prefix = namespace(store, run);
         let mut left = Vec::new();
         for (key, id, _) in self.unfinished_uploads(&prefix, None).await? {
             left.push(crate::LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
@@ -415,7 +415,7 @@ impl Probes<'_> {
     }
 
     /// As status does after a bodyless 404: a zero-entry listing at a missing
-    /// object's key, inside the store's prefix. A refused listing is observed
+    /// object's key, inside the store's folder. A refused listing is observed
     /// for the setup check; any other failure stops detection.
     async fn bucket_check(&mut self, listing: S3Listing) -> Result<(), StorageError> {
         let (s, absent) = (self.s, &self.key("absent"));

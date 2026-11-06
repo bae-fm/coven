@@ -278,11 +278,10 @@ mod recovery {
     async fn a_damaged_database_resets_from_setup_credentials_after_checking_them() {
         for config in [
             StorageConfig::S3 {
-                bucket: "test".into(),
+                bucket: "recovery".into(),
                 region: "us-east-1".into(),
                 endpoint: None,
                 profile: None,
-                prefix: crate::S3Prefix::parse("recovery").unwrap(),
             },
             StorageConfig::Dropbox {
                 account_label: None,

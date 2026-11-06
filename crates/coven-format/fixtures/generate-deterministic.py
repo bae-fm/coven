@@ -459,8 +459,8 @@ def code_text(prefix, data):
 
 def s3_location():
     """The storage part's S3 location: provider 0, bucket, region, no endpoint,
-    no profile, then the base prefix."""
-    return u8(0) + text(b"bucket") + text(b"region") + u8(0) + u8(0) + text(b"store")
+    no profile."""
+    return u8(0) + text(b"bucket") + text(b"region") + u8(0) + u8(0)
 
 
 def restore_code():

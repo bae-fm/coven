@@ -78,14 +78,6 @@ impl S3CopyCondition {
         }
     }
 }
-/// The finest scope a member key can have on a service (§20.7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum S3KeyScope {
-    /// A key reaches a whole bucket, so every store has its own bucket.
-    Bucket,
-    /// A key can be limited to the store's prefix, so stores can share a bucket.
-    Prefix,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Certification<'date> {
     Uncertified,
@@ -98,7 +90,6 @@ pub(super) struct CataloguedProfile {
     /// arbitrary endpoint only an explicit profile name can select.
     pub(super) endpoint: Option<EndpointMatch>,
     pub(super) settings: S3Settings,
-    pub(super) key_scope: S3KeyScope,
     /// Separate evidence: a sequential or unversioned run cannot certify this.
     pub(super) versioned_buckets: Certification<'static>,
     pub(super) certification: Certification<'static>,
@@ -137,9 +128,6 @@ const AWS: CataloguedProfile = CataloguedProfile {
         multipart_timestamp: S3MultipartTimestamp::Start,
         ..PLAIN
     },
-    // IAM policies limit a key to the store's prefix with `s3:prefix`
-    // conditions on listing and resource ARNs ending `<prefix>/<store>/*`.
-    key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Uncertified,
     upload_initiation: Certification::Uncertified,
@@ -161,9 +149,6 @@ const GCS: CataloguedProfile = CataloguedProfile {
         response_headers: S3ResponseHeaders::Google,
         request_checksums: false,
     },
-    // A managed folder `<prefix>/<store>/` grants the HMAC key's service
-    // account `roles/storage.objectUser` on that folder alone.
-    key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
     upload_initiation: Certification::Uncertified,
@@ -176,11 +161,6 @@ const R2: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::R2,
     endpoint: Some(EndpointMatch::HostSuffix(".r2.cloudflarestorage.com")),
     settings: S3Settings { checksums: S3Checksums::UnstatedIgnored, ..PLAIN },
-    // An R2 API token is limited to buckets, never to a prefix inside one
-    // (https://developers.cloudflare.com/r2/api/tokens/); only temporary
-    // credentials, made from a parent token and lasting at most 7 days, take a
-    // prefix, so they can't serve as a member key made once in the console.
-    key_scope: S3KeyScope::Bucket,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed { date: "2026-10-14", suite: 5 },
     upload_initiation: Certification::Uncertified,
@@ -198,9 +178,6 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::RustFs,
     endpoint: None,
     settings: S3Settings { checksums: S3Checksums::Absent, request_checksums: false, ..PLAIN },
-    // An access key's IAM policy takes `s3:prefix` conditions and object
-    // resources under the store's prefix.
-    key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
     upload_initiation: Certification::Uncertified,
@@ -226,9 +203,6 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
         request_checksums: false,
         ..PLAIN
     },
-    // An identity's S3 policy takes `s3:prefix` conditions and object
-    // resources under the store's prefix.
-    key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
     upload_initiation: Certification::Uncertified,
@@ -243,9 +217,6 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::CephRgw,
     endpoint: None,
     settings: RUSTFS.settings,
-    // RGW bucket policies honor `s3:prefix` conditions and object resources
-    // under the store's prefix.
-    key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
     upload_initiation: Certification::Uncertified,
@@ -259,9 +230,6 @@ const VERSITY_GW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::VersityGw,
     endpoint: None,
     settings: PLAIN,
-    // Its standalone IAM service enforces a user's inline policy, with
-    // `s3:prefix` conditions and object resources under the store's prefix.
-    key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
     upload_initiation: Certification::Uncertified,
@@ -306,20 +274,12 @@ impl Selected {
             Self::Undetected => None,
         }
     }
-    /// Custom settings say nothing about keys, so they take the
-    /// conservative bucket scope, as does a location detection will make custom.
     /// Whether the service dates an unfinished upload's start so that floor
     /// sessions begun before the current floor can be ended (Appendix E.10):
     /// only a catalogued profile certified for it.
     pub(super) fn dates_upload_initiation(self) -> bool {
         matches!(self, Self::Catalogued(profile)
             if matches!(profile.upload_initiation, Certification::Passed { .. }))
-    }
-    pub(super) fn key_scope(self) -> S3KeyScope {
-        match self {
-            Self::Catalogued(profile) => profile.key_scope,
-            Self::Custom(_) | Self::Undetected => S3KeyScope::Bucket,
-        }
     }
 }
 

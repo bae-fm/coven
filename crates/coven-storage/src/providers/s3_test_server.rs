@@ -1,11 +1,21 @@
-#![cfg(test)]
-
-//! An in-process S3 server for detection's tests, configured as each known
-//! service's native behavior, with faults a test can turn on.
+//! An in-process S3 server for the adapter's tests, configured as each
+//! known service's native behavior, with faults a test can turn on. Its
+//! keys reach the whole bucket, as every member key does (§20.7).
 use super::*;
+use crate::providers::tests::{query, response};
+use axum::{
+    body::{Body, Bytes},
+    extract::State,
+    http::{HeaderMap, Method, Response, Uri},
+};
+use coven_foundation::clock::{Clock, FixedClock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Checksum {
+pub(crate) enum Checksum {
     None,
     Scoped,
     Unscoped,
@@ -14,18 +24,18 @@ pub(super) enum Checksum {
 
 /// One S3 service's native behavior; conditions it does not enforce are ignored.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Service {
-    pub(super) signers: &'static [S3Signing],
-    pub(super) single_put: Option<S3SinglePut>,
-    pub(super) completion_enforced: bool,
-    pub(super) start_timestamp: bool,
-    pub(super) partial_visible: bool,
-    pub(super) copy: Option<S3CopyCondition>,
-    pub(super) checksum: Checksum,
-    pub(super) generation: bool,
-    pub(super) v2: bool,
+pub(crate) struct Service {
+    pub(crate) signers: &'static [S3Signing],
+    pub(crate) single_put: Option<S3SinglePut>,
+    pub(crate) completion_enforced: bool,
+    pub(crate) start_timestamp: bool,
+    pub(crate) partial_visible: bool,
+    pub(crate) copy: Option<S3CopyCondition>,
+    pub(crate) checksum: Checksum,
+    pub(crate) generation: bool,
+    pub(crate) v2: bool,
 }
-pub(super) const AWS: Service = Service {
+pub(crate) const AWS: Service = Service {
     signers: &[S3Signing::AwsSigV4],
     single_put: Some(S3SinglePut::IfNoneMatch),
     completion_enforced: true,
@@ -36,7 +46,7 @@ pub(super) const AWS: Service = Service {
     generation: false,
     v2: true,
 };
-pub(super) const GCS: Service = Service {
+pub(crate) const GCS: Service = Service {
     signers: &[S3Signing::GoogleHmac, S3Signing::AwsSigV4],
     single_put: Some(S3SinglePut::GenerationMatch),
     completion_enforced: false,
@@ -46,25 +56,25 @@ pub(super) const GCS: Service = Service {
     generation: true,
     ..AWS
 };
-pub(super) const R2: Service = Service {
+pub(crate) const R2: Service = Service {
     start_timestamp: false,
     copy: Some(S3CopyCondition::CloudflareIfNoneMatch),
     checksum: Checksum::Unscoped,
     ..AWS
 };
-pub(super) const RUSTFS: Service =
+pub(crate) const RUSTFS: Service =
     Service { start_timestamp: false, copy: None, checksum: Checksum::None, ..AWS };
 /// Enforces conditional completion one request at a time, and the copy
 /// condition. Its racing completions both succeeding is invisible to these
 /// sequential probes.
-pub(super) const SEAWEEDFS: Service =
+pub(crate) const SEAWEEDFS: Service =
     Service { copy: Some(S3CopyCondition::IfNoneMatch), ..RUSTFS };
 /// Enforces conditional completion and the copy condition, dates multipart
 /// objects by completion and states checksum scope: the plain S3 settings.
-pub(super) const VERSITY_GW: Service = Service { start_timestamp: false, ..AWS };
+pub(crate) const VERSITY_GW: Service = Service { start_timestamp: false, ..AWS };
 /// Accepts writes to an occupied name whatever condition is sent, and dates
 /// multipart objects by initiation.
-pub(super) const OVERWRITES: Service = Service {
+pub(crate) const OVERWRITES: Service = Service {
     single_put: None,
     completion_enforced: false,
     copy: None,
@@ -72,82 +82,116 @@ pub(super) const OVERWRITES: Service = Service {
     ..AWS
 };
 
-pub(super) struct Object {
-    pub(super) bytes: Vec<u8>,
-    pub(super) modified: u64,
-    pub(super) etag: u64,
+pub(crate) struct Object {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) modified: u64,
+    pub(crate) etag: u64,
 }
-pub(super) struct Upload {
-    pub(super) key: String,
-    pub(super) started: u64,
-    pub(super) parts: BTreeMap<u32, Vec<u8>>,
+pub(crate) struct Upload {
+    pub(crate) key: String,
+    pub(crate) started: u64,
+    pub(crate) parts: BTreeMap<u32, Vec<u8>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LostReply {
+pub(crate) enum LostReply {
     Put,
     Copy,
     Initiate,
     Complete,
 }
 
-pub(super) struct Remote {
+pub(crate) struct Remote {
     /// The time the server dates objects by, which the test moves.
-    pub(super) clock: Arc<FixedClock>,
-    pub(super) lost_reply: Option<LostReply>,
-    pub(super) hidden: BTreeSet<String>,
-    pub(super) versioning: &'static str,
-    pub(super) versioning_failure: Option<u16>,
-    pub(super) service: Service,
-    pub(super) objects: BTreeMap<String, Object>,
-    pub(super) uploads: BTreeMap<String, Upload>,
+    pub(crate) clock: Arc<FixedClock>,
+    pub(crate) lost_reply: Option<LostReply>,
+    pub(crate) hidden: BTreeSet<String>,
+    pub(crate) versioning: &'static str,
+    pub(crate) versioning_failure: Option<u16>,
+    pub(crate) service: Service,
+    pub(crate) objects: BTreeMap<String, Object>,
+    pub(crate) uploads: BTreeMap<String, Upload>,
     /// Every key ever written, to prove detection stays in its namespace.
-    pub(super) written: Vec<String>,
-    pub(super) next: u64,
-    pub(super) fail_copies: bool,
+    pub(crate) written: Vec<String>,
+    pub(crate) next: u64,
+    pub(crate) fail_copies: bool,
     /// Refuse every delete, as a key without delete permission does.
-    pub(super) fail_deletes: bool,
+    pub(crate) fail_deletes: bool,
     /// The one second every publication is dated, when the server's clock
     /// stands still.
-    pub(super) frozen: Option<u64>,
+    pub(crate) frozen: Option<u64>,
     /// The status a V2 listing with `max-keys=0` answers instead of a page.
-    pub(super) empty_v2_listing: Option<u16>,
-    pub(super) incomplete_v1_listing: bool,
-    pub(super) bucket_heads: usize,
+    pub(crate) empty_v2_listing: Option<u16>,
+    pub(crate) incomplete_v1_listing: bool,
+    pub(crate) bucket_heads: usize,
     /// Answer this many requests with HTTP 429 `SlowDown` before serving.
-    pub(super) throttle: usize,
+    pub(crate) throttle: usize,
     /// This many listing requests omit the newest probe object, as a
     /// lagging listing does.
-    pub(super) lagging_listings: usize,
+    pub(crate) lagging_listings: usize,
     /// Every listing request served.
-    pub(super) listings: usize,
+    pub(crate) listings: usize,
+    /// The prefix of every object listing served, in order.
+    pub(crate) listed: Vec<String>,
+    /// Every request's method and path, in order.
+    pub(crate) requests: Vec<(Method, String)>,
     /// Never answer a part upload, saying so here first: the client stops
     /// there, as a process killed mid-upload does.
-    pub(super) stall_parts: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) stall_parts: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl Remote {
+    /// An empty bucket behaving as `service`, dating objects by `clock`.
+    pub(crate) fn new(service: Service, clock: Arc<FixedClock>) -> Self {
+        Self {
+            clock,
+            lost_reply: None,
+            hidden: BTreeSet::new(),
+            versioning: "",
+            versioning_failure: None,
+            service,
+            objects: BTreeMap::new(),
+            uploads: BTreeMap::new(),
+            written: Vec::new(),
+            next: 0,
+            fail_copies: false,
+            fail_deletes: false,
+            frozen: None,
+            empty_v2_listing: None,
+            incomplete_v1_listing: false,
+            bucket_heads: 0,
+            throttle: 0,
+            lagging_listings: 0,
+            listings: 0,
+            listed: Vec::new(),
+            requests: Vec::new(),
+            stall_parts: None,
+        }
+    }
 }
 
 /// The server's current second, as a service dates its objects.
-pub(super) fn seconds(remote: &Remote) -> u64 {
+pub(crate) fn seconds(remote: &Remote) -> u64 {
     remote.clock.now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
-pub(super) fn date(secs: u64, format: aws_sdk_s3::primitives::DateTimeFormat) -> String {
+pub(crate) fn date(secs: u64, format: aws_sdk_s3::primitives::DateTimeFormat) -> String {
     aws_sdk_s3::primitives::DateTime::from_secs(secs as i64).fmt(format).unwrap()
 }
-pub(super) fn error(status: u16, code: &str) -> Response<Body> {
+pub(crate) fn error(status: u16, code: &str) -> Response<Body> {
     response(status, format!("<Error><Code>{code}</Code></Error>"))
 }
 /// GoogleHmac moves x-amz-* request headers to x-goog-*.
-pub(super) fn header<'a>(headers: &'a HeaderMap, suffix: &str) -> Option<&'a str> {
+pub(crate) fn header<'a>(headers: &'a HeaderMap, suffix: &str) -> Option<&'a str> {
     headers
         .get(format!("x-amz-{suffix}"))
         .or(headers.get(format!("x-goog-{suffix}")))
         .map(|value| value.to_str().unwrap())
 }
-pub(super) fn sent(headers: &HeaderMap, (name, value): (&str, &str)) -> bool {
+pub(crate) fn sent(headers: &HeaderMap, (name, value): (&str, &str)) -> bool {
     headers.get(name).is_some_and(|sent| sent == value)
 }
 
-pub(super) async fn serve(
+pub(crate) async fn serve(
     State(state): State<Arc<Mutex<Remote>>>,
     method: Method,
     uri: Uri,
@@ -161,6 +205,7 @@ pub(super) async fn serve(
         std::future::pending::<()>().await;
     }
     let mut state = state.lock().unwrap();
+    state.requests.push((method.clone(), uri.path().to_owned()));
     if state.throttle > 0 {
         state.throttle -= 1;
         return error(429, "SlowDown");
@@ -210,12 +255,12 @@ pub(super) async fn serve(
             _ => {
                 state.listings += 1;
                 if state.lagging_listings == 0 {
-                    return list(&state, &q);
+                    return list(&mut state, &q);
                 }
                 state.lagging_listings -= 1;
                 let newest = state.written.last().cloned().unwrap_or_default();
                 let fresh = state.hidden.insert(newest.clone());
-                let page = list(&state, &q);
+                let page = list(&mut state, &q);
                 if fresh {
                     state.hidden.remove(&newest);
                 }
@@ -321,7 +366,7 @@ pub(super) async fn serve(
     }
 }
 
-pub(super) fn publish(state: &mut Remote, key: String, bytes: Vec<u8>, modified: u64) {
+pub(crate) fn publish(state: &mut Remote, key: String, bytes: Vec<u8>, modified: u64) {
     let modified = state.frozen.unwrap_or(modified);
     state.next += 1;
     let etag = state.next;
@@ -329,7 +374,7 @@ pub(super) fn publish(state: &mut Remote, key: String, bytes: Vec<u8>, modified:
     state.objects.insert(key, Object { bytes, modified, etag });
 }
 
-pub(super) fn object(state: &Remote, key: &str, head: bool, headers: &HeaderMap) -> Response<Body> {
+pub(crate) fn object(state: &Remote, key: &str, head: bool, headers: &HeaderMap) -> Response<Body> {
     let pending = state.uploads.values().find(|upload| upload.key == key);
     let (bytes, modified, etag) = match (state.objects.get(key), pending) {
         (Some(object), _) => (object.bytes.clone(), object.modified, object.etag),
@@ -362,7 +407,7 @@ pub(super) fn object(state: &Remote, key: &str, head: bool, headers: &HeaderMap)
     reply.body(body).unwrap()
 }
 
-pub(super) fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Body> {
+pub(crate) fn list(state: &mut Remote, q: &BTreeMap<String, String>) -> Response<Body> {
     let v2 = q.get("list-type").is_some_and(|value| value == "2");
     if v2 && !state.service.v2 {
         return error(501, "NotImplemented");
@@ -374,9 +419,7 @@ pub(super) fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Bod
         }
     }
     let prefix = q.get("prefix").map(String::as_str).unwrap_or("");
-    if !prefix.starts_with(&format!("{STORE}/")) {
-        return error(403, "AccessDenied");
-    }
+    state.listed.push(prefix.to_owned());
     let after = q.get(if v2 { "continuation-token" } else { "marker" });
     let limit: usize = q.get("max-keys").map(|value| value.parse().unwrap()).unwrap_or(1000);
     let entries: Vec<_> = state
@@ -391,8 +434,23 @@ pub(super) fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Bod
         .collect();
     let truncated = limit > 0 && entries.len() > limit;
     let page = &entries[..limit.min(entries.len())];
+    // A delimiter folds each key with one after the prefix into its folder,
+    // listed once.
+    let delimiter = q.get("delimiter");
+    let folder = |key: &str| {
+        let delimiter = delimiter?;
+        let rest = &key[prefix.len()..];
+        rest.find(delimiter.as_str())
+            .map(|start| format!("{prefix}{}", &rest[..start + delimiter.len()]))
+    };
+    let folders: BTreeSet<String> = page.iter().filter_map(|(key, _)| folder(key)).collect();
+    let folders: String = folders
+        .iter()
+        .map(|folder| format!("<CommonPrefixes><Prefix>{folder}</Prefix></CommonPrefixes>"))
+        .collect();
     let contents: String = page
         .iter()
+        .filter(|(key, _)| folder(key).is_none())
         .map(|(key, object)| {
             format!(
                 "<Contents><Key>{key}</Key><Size>{}</Size><LastModified>{}</LastModified><ETag>\"{}\"</ETag></Contents>",
@@ -408,6 +466,6 @@ pub(super) fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Bod
     };
     response(
         200,
-        format!("<ListBucketResult><IsTruncated>{truncated}</IsTruncated>{next}{contents}</ListBucketResult>"),
+        format!("<ListBucketResult><IsTruncated>{truncated}</IsTruncated>{next}{contents}{folders}</ListBucketResult>"),
     )
 }

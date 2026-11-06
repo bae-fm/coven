@@ -109,9 +109,9 @@ pub trait StorageConnector: Send + Sync {
     ) -> S3DetectionRun {
         S3DetectionRun::unwritten(runs, Err(StorageFailure::ProviderUnavailable.into()))
     }
-    /// Before a store's first setup at an S3 location whose member keys reach
-    /// the whole bucket, refuse a bucket holding anything outside the store's
-    /// folder or the `coven-bucket` marker (§20.7). Reads only.
+    /// Before a store's first setup at an S3 location, refuse a bucket
+    /// holding anything outside the store's folder or the `coven-bucket`
+    /// marker (§20.3). Reads only.
     /// A connector without native S3 refuses this capability.
     /// A rate-limited listing is sent again while setup's `waits` allow.
     async fn check_new_s3_store(
@@ -153,21 +153,22 @@ impl ProviderConnector {
         self.folder_api = Some(api);
         self
     }
-    /// Delete every object and abort every unfinished upload under an S3
-    /// location's base prefix, with this connector's clock, ids and HTTP
-    /// client (api.md E14). A development tool outside the sync protocol.
+    /// Delete every object and abort every unfinished upload in an S3
+    /// location's bucket, once its root shows it holds only stores, with
+    /// this connector's clock, ids and HTTP client (api.md E14). A
+    /// development tool outside the sync protocol.
     #[cfg(feature = "dev-tools")]
-    pub async fn empty_s3_prefix(
+    pub async fn empty_s3_bucket(
         &self,
         config: StorageConfig,
         credentials: S3Credentials,
-    ) -> Result<super::EmptiedS3Prefix, super::EmptyS3PrefixError> {
+    ) -> Result<super::EmptiedS3Bucket, super::EmptyS3BucketError> {
         let http = self
             .http
             .clone()
             .map_err(|source| super::http_client::tls_failure(crate::CloudProvider::S3, source))
-            .map_err(super::EmptyS3PrefixError::Storage)?;
-        super::empty_s3_prefix(config, credentials, self.clock.clone(), self.ids.clone(), http)
+            .map_err(super::EmptyS3BucketError::Storage)?;
+        super::empty_s3_bucket(config, credentials, self.clock.clone(), self.ids.clone(), http)
             .await
     }
     async fn with_folders<T, F, Fut>(

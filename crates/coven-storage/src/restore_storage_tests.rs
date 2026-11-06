@@ -1,19 +1,18 @@
 use super::*;
 use crate::{
     DropboxLocation, S3Checksums, S3CopyCondition, S3CopyPublication, S3Listing,
-    S3MultipartTimestamp, S3Prefix, S3Profile, S3ProfileName, S3ResponseHeaders, S3Revision,
-    S3Settings, S3Signing, S3SinglePut,
+    S3MultipartTimestamp, S3Profile, S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings,
+    S3Signing, S3SinglePut,
 };
 use coven_crypto::SecretText;
 use coven_format::code_fields::{pack, FieldReader};
 
-fn s3(endpoint: Option<&str>, profile: Option<S3Profile>, prefix: &str) -> StorageConfig {
+fn s3(endpoint: Option<&str>, profile: Option<S3Profile>) -> StorageConfig {
     StorageConfig::S3 {
         bucket: "ana-music".into(),
         region: "us-east-1".into(),
         endpoint: endpoint.map(|url| url.parse().unwrap()),
         profile,
-        prefix: S3Prefix::parse(prefix).unwrap(),
     }
 }
 
@@ -41,20 +40,15 @@ fn key() -> S3Credentials {
 /// One location of each provider and shape, as setup records them.
 fn locations() -> Vec<StorageConfig> {
     vec![
-        s3(None, None, "bae"),
-        s3(None, Some(S3Profile::Named(S3ProfileName::Aws)), ""),
-        s3(Some("https://storage.googleapis.com"), None, "bae"),
+        s3(None, None),
+        s3(None, Some(S3Profile::Named(S3ProfileName::Aws))),
+        s3(Some("https://storage.googleapis.com"), None),
         s3(
             Some("https://0123456789abcdef.r2.cloudflarestorage.com"),
             Some(S3Profile::Named(S3ProfileName::R2)),
-            "",
         ),
-        s3(
-            Some("http://nas.local:9000"),
-            Some(S3Profile::Named(S3ProfileName::RustFs)),
-            "music/bae",
-        ),
-        s3(Some("https://s3.example.net/"), Some(S3Profile::Custom(detected())), ""),
+        s3(Some("http://nas.local:9000"), Some(S3Profile::Named(S3ProfileName::RustFs))),
+        s3(Some("https://s3.example.net/"), Some(S3Profile::Custom(detected()))),
         StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
         StorageConfig::Dropbox {
             location: DropboxLocation::SharedFolder { namespace_id: "12345678901".into() },
@@ -142,13 +136,10 @@ fn every_truncation_bit_change_and_trailing_byte_is_refused_or_canonical() {
 
 #[test]
 fn the_layout_is_the_providers_tag_then_its_own_fields() {
-    // S3, `ana-music`, `us-east-1`, no endpoint, no profile, `store`, no key.
-    assert_eq!(
-        packed(s3(None, None, "store")),
-        b"\0\0\0\0\x09ana-music\0\0\0\x09us-east-1\0\0\0\0\0\x05store\0"
-    );
+    // S3, `ana-music`, `us-east-1`, no endpoint, no profile, no key.
+    assert_eq!(packed(s3(None, None)), b"\0\0\0\0\x09ana-music\0\0\0\x09us-east-1\0\0\0");
     let bytes = RestoreStorage {
-        location: s3(None, None, "store"),
+        location: s3(None, None),
         s3_key: Some(S3Credentials {
             access_key_id: "id".into(),
             secret_access_key: SecretText::new("secret".into()),
@@ -156,7 +147,7 @@ fn the_layout_is_the_providers_tag_then_its_own_fields() {
     }
     .encode()
     .unwrap();
-    assert!(bytes.as_bytes().ends_with(b"\x05store\x01\0\0\0\x02id\0\0\0\x06secret"));
+    assert!(bytes.as_bytes().ends_with(b"us-east-1\0\0\x01\0\0\0\x02id\0\0\0\x06secret"));
     // Only an S3 location says whether a key follows.
     assert_eq!(
         packed(StorageConfig::CloudKit {
@@ -194,7 +185,6 @@ fn the_format_fixtures_storage_part_is_this_encoding() {
             region: "region".into(),
             endpoint: None,
             profile: None,
-            prefix: S3Prefix::parse("store").unwrap(),
         }
     );
     assert!(decoded.s3_key.is_none());
@@ -212,7 +202,7 @@ fn a_key_restores_only_s3_and_must_be_whole() {
     }
     for (id, secret) in [("", "secret"), ("id", "")] {
         let storage = RestoreStorage {
-            location: s3(None, None, "bae"),
+            location: s3(None, None),
             s3_key: Some(S3Credentials {
                 access_key_id: id.into(),
                 secret_access_key: SecretText::new(secret.into()),
@@ -222,7 +212,7 @@ fn a_key_restores_only_s3_and_must_be_whole() {
     }
     // The same key with its one-byte secret cut to nothing is refused on reading.
     let mut bytes = RestoreStorage {
-        location: s3(None, None, "bae"),
+        location: s3(None, None),
         s3_key: Some(S3Credentials {
             access_key_id: "id".into(),
             secret_access_key: SecretText::new("s".into()),
@@ -240,7 +230,7 @@ fn a_key_restores_only_s3_and_must_be_whole() {
 #[test]
 fn spellings_and_tags_the_encoder_never_writes_are_refused() {
     // An endpoint URL that isn't its own serialization: no trailing slash.
-    let canonical = packed(s3(Some("https://s3.example.net"), None, ""));
+    let canonical = packed(s3(Some("https://s3.example.net"), None));
     let url = b"https://s3.example.net/";
     let at = canonical.windows(url.len()).position(|window| window == url).unwrap();
     let mut bytes = canonical[..at - 4].to_vec();
@@ -248,13 +238,8 @@ fn spellings_and_tags_the_encoder_never_writes_are_refused() {
     bytes.extend_from_slice(&url[..url.len() - 1]);
     bytes.extend_from_slice(&canonical[at + url.len()..]);
     assert_eq!(refusal(&bytes), StorageFailure::Encoding);
-    // A base prefix with a slash at its end.
-    let mut bytes = packed(s3(None, None, "bae"));
-    bytes.truncate(bytes.len() - 8);
-    bytes.extend_from_slice(b"\0\0\0\x04bae/\0");
-    assert_eq!(refusal(&bytes), StorageFailure::Encoding);
     // An unknown provider, or Dropbox location.
-    let mut bytes = packed(s3(None, None, "bae"));
+    let mut bytes = packed(s3(None, None));
     bytes[0] = 4;
     assert_eq!(refusal(&bytes), StorageFailure::Encoding);
     let mut bytes = packed(StorageConfig::Dropbox {
@@ -264,7 +249,7 @@ fn spellings_and_tags_the_encoder_never_writes_are_refused() {
     bytes[1] = 2;
     assert_eq!(refusal(&bytes), StorageFailure::Encoding);
     // An unknown profile kind, or catalogued name.
-    let named = packed(s3(None, Some(S3Profile::Named(S3ProfileName::Aws)), ""));
+    let named = packed(s3(None, Some(S3Profile::Named(S3ProfileName::Aws))));
     // Tag, bucket, region and no endpoint come before the profile.
     let profile = 1 + 13 + 13 + 1;
     assert_eq!(&named[profile..profile + 3], b"\x01\0\0");
@@ -274,7 +259,7 @@ fn spellings_and_tags_the_encoder_never_writes_are_refused() {
         assert_eq!(refusal(&bytes), StorageFailure::Encoding);
     }
     // A location that reads but isn't valid: an empty bucket.
-    let mut bytes = packed(s3(None, None, ""));
+    let mut bytes = packed(s3(None, None));
     bytes.splice(1..14, [0, 0, 0, 0]);
     assert_eq!(refusal(&bytes), StorageFailure::InvalidConfiguration);
 }

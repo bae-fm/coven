@@ -5,18 +5,14 @@ use crate::*;
 use coven_storage::Storage;
 
 #[tokio::test]
-async fn guided_steps_fill_the_member_policy_for_this_store() {
+async fn guided_steps_fill_the_member_policy_for_this_stores_bucket() {
     let network = Network::with_schema(CloudProvider::S3, vec![], vec![]).await;
     let owner = &network.devices[0];
     let guided = owner.handle.guided_access_key().await.unwrap();
     let StorageConfig::S3 { bucket, .. } = owner.storage.config() else { panic!("S3 location") };
     assert_eq!(guided.bucket, bucket);
-    assert!(guided.store_prefix.ends_with(&format!("{}/", owner.store)));
     let policy: serde_json::Value = serde_json::from_str(&guided.policy).unwrap();
-    assert_eq!(
-        policy["Statement"][1]["Condition"]["StringLike"]["s3:prefix"],
-        format!("{}*", guided.store_prefix)
-    );
+    assert_eq!(policy["Statement"][0]["Resource"], format!("arn:aws:s3:::{bucket}/*"));
     network.close().await;
 }
 

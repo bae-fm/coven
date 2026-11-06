@@ -272,7 +272,6 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
                 StorageConfig::S3 {
                     bucket: "bucket".into(),
                     region: "region".into(),
-                    prefix: crate::S3Prefix::parse("store").unwrap(),
                     endpoint: None,
                     profile: None,
                 },
@@ -356,7 +355,7 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         let app = Coven::in_memory(root.path().to_owned());
         let directory = app.create_closed_store("setup", Arc::new(UuidIds)).await.unwrap();
         let config = StorageConfig::S3 {
-            bucket: "bucket".into(), region: "region".into(), prefix: crate::S3Prefix::parse("store").unwrap(), endpoint: None, profile: None,
+            bucket: "bucket".into(), region: "region".into(), endpoint: None, profile: None,
         };
         let storage = Arc::new(MemoryStorage::builder().location(config.clone()).clock(Arc::new(SystemClock)).build().unwrap());
         let handle = builder(&app).storage_connector(storage.clone()).open(directory.id(), |_| ()).await.unwrap();

@@ -752,8 +752,8 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
     synced(&f.handle).await;
     stop(&f).await;
     let mut config = f.storage.config();
-    let StorageConfig::S3 { prefix, .. } = &mut config else { unreachable!() };
-    *prefix = crate::S3Prefix::parse("destination").unwrap();
+    let StorageConfig::S3 { bucket, .. } = &mut config else { unreachable!() };
+    *bucket = "destination".into();
     let destination = Arc::new(MemoryStorage::builder().location(config.clone()).build().unwrap());
     let before = f.handle.restore_code().await.unwrap();
     let error = f

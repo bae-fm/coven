@@ -217,7 +217,7 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         | Conflict
         | RegionMismatch
         | StoreExists
-        | OwnBucketRequired { .. }
+        | OwnLocationRequired
         | RateLimited
         | InvalidConfiguration
         | Refused

@@ -38,10 +38,9 @@ impl CloudProvider {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum StorageConfig {
-    /// An existing S3 bucket and a base prefix. Where the service's member
-    /// keys can be limited to a prefix, the base prefix may hold several
-    /// stores; where they reach a whole bucket (R2, and every custom or
-    /// detected profile), the store has the bucket to itself (§20.7).
+    /// An existing S3 bucket, which the store has to itself: coven can't
+    /// tell how far a member's key reaches, so it takes every key to reach
+    /// the whole bucket (§20.7). Paths start at the bucket's root.
     S3 {
         /// Bucket name.
         bucket: String,
@@ -56,10 +55,6 @@ pub enum StorageConfig {
         /// AWS, and setup detects any other endpoint's settings, recording
         /// them as Custom. All run the setup checks.
         profile: Option<crate::S3Profile>,
-        /// The base prefix, parsed where the location is built; paths add
-        /// the store id. Empty where member keys reach a whole bucket;
-        /// otherwise `OwnBucketRequired { reason: Prefix }`.
-        prefix: crate::S3Prefix,
     },
     /// Dropbox's access and location, fixed when cloud storage is created.
     Dropbox {
@@ -105,15 +100,14 @@ impl StorageConfig {
         }
     }
 
-    /// Whether both are S3 locations holding the same objects: one bucket,
-    /// at one endpoint and region, under one base prefix, whatever profile
-    /// reaches it.
-    pub fn same_s3_objects(&self, other: &Self) -> bool {
+    /// Whether both are S3 locations naming the same bucket, at one
+    /// endpoint and region, whatever profile reaches it.
+    pub fn same_s3_bucket(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                Self::S3 { bucket: ab, region: ar, endpoint: ae, prefix: ap, .. },
-                Self::S3 { bucket: bb, region: br, endpoint: be, prefix: bp, .. },
-            ) => ab == bb && ar == br && ae == be && ap == bp,
+                Self::S3 { bucket: ab, region: ar, endpoint: ae, .. },
+                Self::S3 { bucket: bb, region: br, endpoint: be, .. },
+            ) => ab == bb && ar == br && ae == be,
             _ => false,
         }
     }
@@ -139,7 +133,7 @@ impl StorageConfig {
     /// Reject missing location information before making a request.
     pub fn validate(&self) -> Result<(), crate::StorageError> {
         let fields: Vec<&str> = match self {
-            Self::S3 { bucket, region, endpoint, profile, prefix } => {
+            Self::S3 { bucket, region, endpoint, profile } => {
                 if let Some(endpoint) = endpoint {
                     if !crate::web_url::is_web_url(endpoint)
                         || endpoint.query().is_some()
@@ -150,15 +144,7 @@ impl StorageConfig {
                         );
                     }
                 }
-                let scope = crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?;
-                // A key that reaches the whole bucket reaches every store in
-                // it, so such a store occupies the bucket's root (§20.7).
-                if scope == crate::providers::S3KeyScope::Bucket && !prefix.is_empty() {
-                    return Err(crate::StorageFailure::OwnBucketRequired {
-                        reason: crate::OwnBucketReason::Prefix,
-                    }
-                    .into());
-                }
+                crate::providers::check_s3_profile(endpoint.as_ref(), profile.as_ref())?;
                 vec![bucket, region]
             }
             Self::Dropbox { location: crate::DropboxLocation::AppFolder, .. } => vec![],
@@ -189,13 +175,12 @@ impl StorageConfig {
     /// Pack this location's fields into a code's storage part.
     pub(crate) fn pack(&self, out: &mut FieldWriter) -> Result<(), FieldError> {
         match self {
-            Self::S3 { bucket, region, endpoint, profile, prefix } => {
+            Self::S3 { bucket, region, endpoint, profile } => {
                 out.u8(S3)?;
                 out.text(bucket)?;
                 out.text(region)?;
                 out.option(endpoint.as_ref(), |out, url| out.text(url.as_str()))?;
-                out.option(profile.as_ref(), |out, profile| profile.pack(out))?;
-                out.text(prefix.as_str())
+                out.option(profile.as_ref(), |out, profile| profile.pack(out))
             }
             Self::Dropbox { location, account_label } => {
                 out.u8(DROPBOX)?;
@@ -225,7 +210,7 @@ impl StorageConfig {
 
     /// Read a location packed by [`Self::pack`], checked as `validate` checks
     /// one. A text written in a spelling `pack` never writes, such as an
-    /// endpoint URL or base prefix that isn't canonical, is refused.
+    /// endpoint URL that isn't canonical, is refused.
     pub(crate) fn unpack(input: &mut FieldReader<'_>) -> Result<Self, crate::StorageError> {
         let location = match input.u8()? {
             S3 => Self::S3 {
@@ -236,7 +221,6 @@ impl StorageConfig {
                     .map(|text| recorded_url(&text))
                     .transpose()?,
                 profile: input.option(crate::S3Profile::unpack)?,
-                prefix: crate::S3Prefix::recorded(&input.text("prefix")?)?,
             },
             DROPBOX => Self::Dropbox {
                 location: match input.u8()? {

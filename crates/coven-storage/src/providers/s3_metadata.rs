@@ -96,7 +96,7 @@ macro_rules! observation {
             size: $size,
             stored_at: $crate::providers::s3::metadata::stored_at(response.last_modified())?,
             time_resolution: std::time::Duration::from_secs(1),
-            object_id: $storage.prefix.key(&$path),
+            object_id: $path.as_str().to_owned(),
             revision: revision(
                 $storage,
                 $path,

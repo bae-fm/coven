@@ -35,7 +35,7 @@ pub(crate) use error::{response_retry_after, response_status};
 mod profile;
 #[path = "s3_versioning.rs"]
 mod versioning;
-pub(crate) use profile::{settings as s3_settings, S3KeyScope};
+pub(crate) use profile::settings as s3_settings;
 pub(crate) use versioning::check as check_s3_versioning;
 #[path = "s3_checksum_headers.rs"]
 mod checksum_headers;
@@ -67,20 +67,20 @@ mod empty;
 #[path = "s3_own_bucket.rs"]
 mod own_bucket;
 #[cfg(feature = "dev-tools")]
-pub(crate) use empty::empty_prefix;
+pub(crate) use empty::empty_bucket;
 #[cfg(any(test, feature = "dev-tools"))]
-pub use empty::EmptiedS3Prefix;
+pub use empty::EmptiedS3Bucket;
 #[cfg(feature = "dev-tools")]
-pub use empty::EmptyS3PrefixError;
+pub use empty::EmptyS3BucketError;
 pub(crate) use own_bucket::check_new_store;
 
-/// The finest scope a member key has at this location, after refusing a
-/// profile or plain-http endpoint that contradicts the endpoint (Appendix E.3).
-pub(crate) fn s3_key_scope(
+/// Refuse a profile or plain-http endpoint that contradicts the endpoint
+/// (Appendix E.3).
+pub(crate) fn check_s3_profile(
     endpoint: Option<&url::Url>,
     profile: Option<&crate::S3Profile>,
-) -> Result<S3KeyScope, StorageError> {
-    profile::select(endpoint, profile).map(profile::Selected::key_scope)
+) -> Result<(), StorageError> {
+    profile::select(endpoint, profile).map(drop)
 }
 
 /// S3 and compatible endpoints, using owner-provisioned buckets and manually supplied keys.
@@ -89,7 +89,6 @@ pub(crate) struct S3Storage {
     credentials: SigningCredentials,
     config: StorageConfig,
     bucket: String,
-    prefix: crate::S3Prefix,
     ids: IdSourceRef,
     settings: S3Settings,
     /// Whether the profile is certified to date an unfinished upload's start,
@@ -157,7 +156,7 @@ impl S3Storage {
         settings: S3Settings,
         http: HttpClient,
     ) -> Result<Self, StorageError> {
-        let StorageConfig::S3 { bucket, region, endpoint, prefix, .. } = &config else {
+        let StorageConfig::S3 { bucket, region, endpoint, .. } = &config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
             );
@@ -204,7 +203,6 @@ impl S3Storage {
             client,
             credentials,
             bucket: bucket.clone(),
-            prefix: prefix.clone(),
             config,
             ids,
             settings,
@@ -225,7 +223,7 @@ impl S3Storage {
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(path.key(&self.prefix))
+            .key(path.as_str())
             .body(ByteStream::from(bytes.to_vec()));
         if path.is_replaceable() && self.settings.revision == S3Revision::ETag {
             request = request.metadata("coven-revision", self.ids.new_id().to_string());
@@ -297,7 +295,7 @@ impl S3Storage {
             .client
             .head_object()
             .bucket(&self.bucket)
-            .key(path.key(&self.prefix))
+            .key(path.as_str())
             .send()
             .await
             .map_err(s3_error);
@@ -417,7 +415,7 @@ impl ProviderOps for S3Storage {
         .map_err(StorageError::replacement)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        let mut request = self.client.head_object().bucket(&self.bucket).key(self.prefix.key(path));
+        let mut request = self.client.head_object().bucket(&self.bucket).key(path.as_str());
         if self.settings.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
@@ -425,11 +423,10 @@ impl ProviderOps for S3Storage {
             Ok(response) => Ok(Some(metadata::head(self, path, &response)?)),
             Err(error) if error.failure() == StorageFailure::NotFound => {
                 // HEAD's 404 has no body: distinguish the object from its bucket.
-                // A member key's list permission is scoped to this store's prefix;
-                // HEAD Bucket sends no prefix and needs an unconditioned grant.
-                // The zero-entry listing checks the bucket. Object absence comes
-                // from the exact HEAD, never from the listing.
-                self.list_page(self.settings.listing, &self.prefix.key(path), None, None, Some(0))
+                // The zero-entry listing checks the bucket, as detection's
+                // `BucketList` probe showed the service answers it. Object
+                // absence comes from the exact HEAD, never from the listing.
+                self.list_page(self.settings.listing, path.as_str(), None, None, Some(0))
                     .await
                     .map_err(super::http::container_error)?;
                 Ok(None)
@@ -449,12 +446,11 @@ impl ProviderOps for S3Storage {
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
-        let full = self.prefix.key_prefix_of(&prefix);
-        let root = self.prefix.key_prefix();
         let mut marker = None;
         let mut seen = Pagination::new();
         loop {
-            let response = self.list_page(self.settings.listing, &full, None, marker, None).await?;
+            let response =
+                self.list_page(self.settings.listing, prefix.as_str(), None, marker, None).await?;
             if !response.folders.is_empty() {
                 return Err(
                     StorageFailure::Protocol.with_source("S3 returned folders without a delimiter")
@@ -464,11 +460,8 @@ impl ProviderOps for S3Storage {
                 let key = object
                     .key()
                     .ok_or(StorageFailure::Protocol.with_source("S3 list entry omitted key"))?;
-                let relative = key
-                    .strip_prefix(&root)
-                    .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
                 // Upload temporaries and detection probes are outside D10 too.
-                let Some(path) = listing.object_path(relative)? else {
+                let Some(path) = listing.object_path(key)? else {
                     continue;
                 };
                 let size = object
@@ -520,7 +513,7 @@ impl ProviderOps for S3Storage {
     }
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.delete_key(&self.prefix.key(path)).await
+        self.delete_key(path.as_str()).await
     }
     async fn grant_access(&self, _account: &str) -> Result<AccessGrant, StorageError> {
         Ok(AccessGrant::CreateAccessKey)

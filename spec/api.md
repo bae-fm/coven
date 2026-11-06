@@ -882,9 +882,9 @@ pub trait StorageConnector: Send + Sync {
         S3DetectionRun::unwritten(runs, Err(StorageFailure::ProviderUnavailable.into()))
     }
     /// Before a store's first setup at a location it needs to itself (a
-    /// Dropbox shared folder, a OneDrive folder, or an S3 bucket whose member
-    /// keys reach all of it), refuse a location whose root holds anything
-    /// outside the store's folder or the `coven-location` marker (§20.3).
+    /// Dropbox shared folder, a OneDrive folder, or an S3 bucket), refuse a
+    /// location whose root holds anything outside the store's folder or the
+    /// `coven-location` marker (§20.3).
     /// Reads only. A connector without that provider refuses this capability.
     async fn check_new_store(
         &self,
@@ -4055,11 +4055,9 @@ while let Some(Ok(values)) = lost.next().await {
 
 - *Setting up storage* creates the store at a location on a provider, the
   first time it connects, and connects this device to it.
-  - Paths start with this store's id. Other stores can share a CloudKit zone,
-    the Dropbox App folder, or an S3 bucket and base prefix where member keys
-    can be limited to a prefix. A Dropbox shared folder, a OneDrive folder,
-    and a bucket whose member keys reach all of it hold one store each
-    (below).
+  - Paths start with this store's id. Other stores can share a CloudKit zone
+    or the Dropbox App folder. A Dropbox shared folder, a OneDrive folder and
+    an S3 bucket hold one store each (below).
   - Once a location is recorded, setup reconnects at it, such as after this
     device's credentials were lost. It refuses a different location with
     `LocationChangeUnsupported`; setup does not relocate a store already used by other devices. The
@@ -4124,15 +4122,6 @@ while let Some(Ok(values)) = lost.next().await {
   succeeds and a stale revision changes nothing. A request refused as
   `RateLimited` during setup is sent again after its requested wait or the
   ordinary delay, until the setup call has waited a minute in all (§20.8).
-- An S3 location's base prefix is an `S3Prefix`, parsed from what the person
-  typed when the app builds the location (§20.3). Slashes at its ends are
-  dropped, so `/music/stores/`, `music/stores/` and `music/stores` are one
-  location, and a prefix of only slashes is the bucket's root, as an empty one
-  is. Two slashes in a row, a folder name with a character other than an ASCII
-  letter or digit, `-` or `_`, or a folder name over 255 bytes is refused with
-  an `S3PrefixError` naming the folder at fault, before any location exists.
-  A recorded location decodes only the canonical spelling; a recorded `dev/` is
-  `StorageFailure::Encoding`.
 - An S3 location's behaviors are `S3Settings` (§20.7). Its `S3Profile` names a
   known service or carries custom settings; with no profile, the
   endpoint selects (Appendix E.3): no endpoint means AWS S3; `storage.googleapis.com`
@@ -4145,32 +4134,27 @@ while let Some(Ok(values)) = lost.next().await {
   known host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a known host is `InvalidConfiguration`;
   other endpoints may use `http`.
-- A Dropbox shared folder, a OneDrive folder, and a bucket on an S3 service
-  whose member keys reach the whole bucket (R2, and every custom profile,
-  detected or chosen) hold one store each from creation (§20.3): any member
-  reaches everything in them, so a member of one store could delete another
-  store's objects there. On S3 a non-empty base prefix fails validation,
-  before any request, with
-  `StorageFailure::OwnLocationRequired { reason: OwnLocationReason::Prefix }`.
-  A store's first setup lists the location's root before any write and
-  permits only that store's folder and the root `coven-location` marker.
-  Setup later checks that the marker names the same store (§20.3). Any other
-  object causes `OwnLocationRequired { reason: OwnLocationReason::Occupied }`,
+- A Dropbox shared folder, a OneDrive folder and an S3 bucket hold one store
+  each from creation (§20.3): any member reaches everything in them, so a
+  member of one store could delete another store's objects there. On S3 coven
+  can't tell how far a member's key reaches, so it takes every key to reach
+  the whole bucket (§20.7). A store's first setup lists the location's root
+  before any write and permits only that store's folder and the root
+  `coven-location` marker. Setup later checks that the marker names the same
+  store (§20.3). Any other object causes `StorageFailure::OwnLocationRequired`,
   wrapped in `StorageSetupError::Storage`. Reconnecting, restoring and joining
   read that exact marker to verify the location is the store's (§20.3); they
   do not list outside the store's folder. A Dropbox App folder, which can't be
-  shared, has no marker and no check. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and
-  Versity Gateway keys can be limited to the store's prefix, so their stores
-  share buckets and prefixes unchecked.
+  shared, has no marker and no check.
 - An endpoint matching no known host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location
   with them as a custom profile. Reconnecting with that same location and no
   profile reuses the recorded settings.
 - `detect_s3_settings` runs the same detection for an app that offers
   advanced settings: it probes the bucket with the supplied key, writing only
-  fresh objects under the store's `.coven-check` prefix and deleting them,
+  fresh objects under the store's `.coven-check` folder and deleting them,
   also on failure. Each detection records its run before its first probe, and
-  removes what earlier recorded runs at that bucket and prefix left, so a
+  removes what earlier recorded runs at that bucket left, so a
   detection a crash cut leaves no upload billing for good. Its `S3Detection`
   holds the detected settings and one
   result per probe; the app may prefill and override them, and
@@ -4498,10 +4482,9 @@ impl CloudProvider {
 
 /// A store's location, with credentials kept separately (§20.3, E5).
 pub enum StorageConfig {
-    /// An existing S3 bucket and a base prefix. Where the service's member
-    /// keys can be limited to a prefix, the base prefix may hold several
-    /// stores; where they reach a whole bucket (R2, and every custom or
-    /// detected profile), the store has the bucket to itself (§20.3, §20.7).
+    /// An existing S3 bucket, which the store has to itself: coven takes
+    /// every member key to reach the whole bucket (§20.3, §20.7). Paths
+    /// start at the bucket's root.
     S3 {
         /// The bucket's name.
         bucket: String,
@@ -4516,10 +4499,6 @@ pub enum StorageConfig {
         /// AWS, and setup detects any other endpoint's settings, recording
         /// them as Custom. All run the setup checks.
         profile: Option<S3Profile>,
-        /// The base prefix, parsed where the location is built; paths add
-        /// the store id. Empty where member keys reach a whole bucket;
-        /// otherwise `OwnLocationRequired { reason: Prefix }`.
-        prefix: S3Prefix,
     },
     /// Required creation choice: an App folder or a shared-capable namespace,
     /// which holds this store alone (§20.3).
@@ -4545,39 +4524,6 @@ pub enum StorageConfig {
         /// The custom zone containing the store.
         zone: String,
     },
-}
-
-/// An S3 location's base prefix in its one spelling: folder names joined by
-/// single slashes, with no slash at either end. The default is the bucket's
-/// root. Serialized as that string; decoding refuses any other spelling.
-pub struct S3Prefix { /* private fields */ }
-
-impl S3Prefix {
-    /// Parse a prefix as a person typed it, dropping slashes at either end;
-    /// only slashes is the bucket's root (§20.3).
-    pub fn parse(typed: &str) -> Result<Self, S3PrefixError>;
-    /// The canonical spelling.
-    pub fn as_str(&self) -> &str;
-    /// Whether this is the bucket's root.
-    pub fn is_empty(&self) -> bool;
-    /// What every key under this prefix starts with: empty at the bucket's
-    /// root, otherwise the prefix and a slash.
-    pub fn key_prefix(&self) -> String;
-    /// The S3 key of an object in the layout.
-    pub fn key(&self, path: &ObjectPath) -> String;
-    /// The S3 key prefix that selects these objects.
-    pub fn key_prefix_of(&self, objects: &ObjectPrefix) -> String;
-}
-
-/// Why a typed base prefix was refused (§20.3).
-pub enum S3PrefixError {
-    /// Two slashes in a row, as in `music//bae`, leave a folder with no name.
-    EmptySegment,
-    /// A folder name holds a character other than an ASCII letter or digit,
-    /// `-` or `_`: the folder as typed, and its first such character.
-    InvalidCharacter { segment: String, character: char },
-    /// A folder name is longer than 255 bytes.
-    SegmentTooLong { segment: String },
 }
 
 /// An S3 location's behaviors: a known service's, or its own (§20.7).
@@ -4649,8 +4595,8 @@ pub struct S3Detection {
 
 /// The detection runs one detection cleans up after (§20.7): its own, which
 /// the caller recorded before detection writes its first probe, and the
-/// earlier runs at the same bucket and prefix whose probes and uploads no
-/// cleanup has confirmed gone.
+/// earlier runs at the same bucket whose probes and uploads no cleanup has
+/// confirmed gone.
 pub struct S3DetectionRuns {
     /// This detection's run: its probes go under `.coven-check/<run>/`.
     pub run: Uuid,
@@ -4773,10 +4719,9 @@ impl DropboxLocation {
 impl StorageConfig {
     /// Compare provider location and settings, ignoring display-only account labels.
     pub fn same_location(&self, other: &Self) -> bool;
-    /// Whether both are S3 locations holding the same objects: one bucket, at
-    /// one endpoint and region, under one base prefix, whatever profile
-    /// reaches it.
-    pub fn same_s3_objects(&self, other: &Self) -> bool;
+    /// Whether both are S3 locations naming the same bucket, at one endpoint
+    /// and region, whatever profile reaches it.
+    pub fn same_s3_bucket(&self, other: &Self) -> bool;
 
     /// The provider of this location.
     pub fn provider(&self) -> CloudProvider;
@@ -4832,9 +4777,12 @@ pub enum StorageFailure {
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
     /// Every member reaches the whole location (a Dropbox shared folder, a
-    /// OneDrive folder, or an S3 bucket whose member keys reach all of it), so
-    /// a store there needs the location to itself (§20.3).
-    OwnLocationRequired { reason: OwnLocationReason },
+    /// OneDrive folder, or an S3 bucket), so a store there needs the location
+    /// to itself (§20.3). Creating the store found objects outside its own
+    /// folder in the location, or the location marker names another store;
+    /// reconnecting, restoring or joining found the marker missing,
+    /// malformed or naming another store.
+    OwnLocationRequired,
     /// Setting up a store that never had storage found another device's
     /// slot 1: another installation claimed this location first (§10.3, D10).
     /// Restore or join it instead.
@@ -4904,17 +4852,6 @@ pub enum StorageFailure {
 
     /// The installation must complete membership and key-copy catch-up before sending.
     CatchUpRequired,
-}
-
-/// Why a location cannot hold a store that needs it to itself (§20.3).
-pub enum OwnLocationReason {
-    /// The S3 location names a base prefix; the store occupies the bucket's root.
-    Prefix,
-    /// Creating the store found objects outside its own folder in the
-    /// location, or the location marker names another store; reconnecting,
-    /// restoring or joining found the marker missing, malformed or naming
-    /// another store.
-    Occupied,
 }
 
 impl StorageFailure {
@@ -5427,9 +5364,9 @@ impl CovenHandle {
     ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Probes the S3 service at this location with this member's key (§20.7),
-    /// writing only fresh objects under the store's `.coven-check` prefix and
+    /// writing only fresh objects under the store's `.coven-check` folder and
     /// deleting them, also on failure, then removing what earlier recorded
-    /// detection runs at that bucket and prefix left. Commits only its run's
+    /// detection runs at that bucket left. Commits only its run's
     /// record, kept until its probes and uploads are confirmed gone.
     pub async fn detect_s3_settings(
         &self,
@@ -5792,8 +5729,7 @@ pub struct StorageSetup {
 /// than `Loading` is one unit, done when it ends.
 pub enum StorageSetupStep {
     /// Creating a store in a location it needs to itself: a Dropbox shared
-    /// folder, a OneDrive folder, or an S3 bucket whose member keys reach all
-    /// of it.
+    /// folder, a OneDrive folder, or an S3 bucket.
     CheckingLocation,
     /// S3: detecting settings and checking them against the service (§20.8).
     DetectingSettings,
@@ -6883,8 +6819,8 @@ impl CovenHandle {
         role: MemberRole,
     ) -> Result<Option<OperationId>, SyncError>;
 
-    /// The bucket, the store's prefix and the filled member policy for making
-    /// a key in the provider's console (§20.10).
+    /// The store's bucket and the filled member policy for making a key in
+    /// the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError>;
 
     /// Removes a member, in a write of its own (`CovenWrite::remove_member`).
@@ -6950,7 +6886,6 @@ impl CovenWrite<'_> {
 /// Guided console steps for a key made by hand (§20.10).
 pub struct GuidedAccessKey {
     pub bucket: String,
-    pub store_prefix: String,
     pub policy: String,
 }
 
@@ -8785,28 +8720,29 @@ fn migrations() -> Vec<Migration> {
   records nothing about any store. An app enables these calls with coven's
   `dev-tools` feature; a release build leaves the feature off, so they are
   absent from it.
-- Ana works on her app against a test bucket at base prefix `dev`. Each time
-  she resets her development library she wants it to start on an empty
-  remote. Before creating the new store she calls `empty_s3_prefix` with the
-  location and key the store will connect with. It deletes everything under
-  `dev/` that earlier stores left there, and returns how many objects and
-  unfinished uploads went.
-- `empty_s3_prefix` deletes every object whose key starts with the base prefix
-  and a slash, whatever wrote it. That includes other stores, upload
-  temporaries, detection probes and things coven never wrote. A neighbouring
-  prefix such as `dev-old` stays. It also aborts every unfinished multipart
-  upload under the prefix.
+- Ana works on her app against a test bucket, `ana-dev`. Each time she resets
+  her development library she wants it to start on an empty remote: a new
+  store refuses a bucket holding anything else (§20.3). Before creating the
+  new store she calls `empty_s3_bucket` with the location and key the store
+  will connect with. It deletes everything the earlier stores left in
+  `ana-dev`, their location marker included, and returns how many objects
+  and unfinished uploads went.
+- `empty_s3_bucket` first lists the bucket's root with delimiter `/`. Any
+  object there other than the location marker `coven-location`, or any folder
+  not named by a store id, refuses the call with
+  `EmptyS3BucketError::OtherFiles` before anything is removed: the bucket
+  holds files no store wrote, which emptying would destroy. Ana pointing the
+  tool at her photo bucket by mistake gets that refusal.
+- Otherwise it deletes every object in the bucket, whatever wrote it: every
+  store's objects, upload temporaries, detection probes and the marker. It
+  also aborts every unfinished multipart upload.
 - It lists everything before removing anything, so the listing's page markers
-  stay valid, and then lists again. Something still under the prefix means a
+  stay valid, and then lists again. Something still in the bucket means a
   device kept writing there while it ran, and the call fails with
   `StorageFailure::Conflict`.
-- A location with no base prefix is refused with
-  `EmptyS3PrefixError::WholeBucket` before any request. Emptying it would
-  empty the whole bucket. A prefix typed as only slashes is that location too:
-  it parses to the bucket's root (§20.3).
 - The location is validated as setup validates it (E5). A location that is not
   S3, an empty key, or an uncatalogued endpoint with no profile is refused
-  with `EmptyS3PrefixError::Storage`. Listing, aborting and deleting failures
+  with `EmptyS3BucketError::Storage`. Listing, aborting and deleting failures
   keep their provider cause there too.
 
 Edge cases:
@@ -8814,44 +8750,47 @@ Edge cases:
 - The first failure stops the call. What it removed before then stays
   removed. Removal is idempotent: an object already gone counts as deleted,
   and an upload already finished or aborted counts as aborted. So calling
-  again finishes the job.
+  again finishes the job, and a marker already deleted leaves the root
+  holding only store folders, which the listing admits.
 - In a versioned bucket, deleting an object leaves its earlier versions and
   a delete marker. The call leaves those: a member key may not delete
   versions. Only the bucket's own lifecycle or an admin removes them.
-- It needs only what a member key already may do under the prefix (§20.10):
+- It needs only what a member key already may do in the bucket (§20.10):
   list objects and uploads, delete objects and abort uploads.
 
 ```rust
-/// What emptying an S3 prefix removed (E14).
+/// What emptying an S3 bucket removed (E14).
 #[cfg(feature = "dev-tools")]
-pub struct EmptiedS3Prefix {
+pub struct EmptiedS3Bucket {
     /// Objects deleted.
     pub objects: usize,
     /// Unfinished multipart uploads aborted.
     pub uploads: usize,
 }
 
-/// Why an S3 prefix was not emptied (E14).
+/// Why an S3 bucket was not emptied (E14).
 #[cfg(feature = "dev-tools")]
-pub enum EmptyS3PrefixError {
-    /// The location has no base prefix, so emptying it would empty the whole
-    /// bucket. Nothing was sent.
-    WholeBucket,
+pub enum EmptyS3BucketError {
+    /// The bucket's root holds something no store wrote: an object other
+    /// than the location marker, or a folder not named by a store id.
+    /// Nothing was removed.
+    OtherFiles,
     /// The location or key was refused, or a request failed. Whatever was
     /// removed before the failure stays removed; emptying again finishes.
     Storage(StorageError),
 }
 
-/// Delete every object and abort every unfinished upload under an S3
-/// location's base prefix, whatever wrote them, and return how many of each
-/// went (E14). A location with no base prefix is refused before any request
-/// with `EmptyS3PrefixError::WholeBucket`. The first failure stops it;
-/// calling again finishes. Retained versions in a versioned bucket stay.
+/// Delete every object and abort every unfinished upload in an S3
+/// location's bucket, whatever wrote them, and return how many of each went
+/// (E14). A bucket whose root holds anything but stores' folders and the
+/// location marker is refused with `EmptyS3BucketError::OtherFiles` before
+/// anything is removed. The first failure stops it; calling again finishes.
+/// Retained versions in a versioned bucket stay.
 #[cfg(feature = "dev-tools")]
-pub async fn empty_s3_prefix(
+pub async fn empty_s3_bucket(
     location: StorageConfig,
     credentials: S3Credentials,
-) -> Result<EmptiedS3Prefix, EmptyS3PrefixError>;
+) -> Result<EmptiedS3Bucket, EmptyS3BucketError>;
 ```
 
 ### E15 Background work, panics and shutdown

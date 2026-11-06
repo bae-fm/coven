@@ -12,7 +12,6 @@ fn storage(url: &str) -> S3Storage {
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
             profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
-            prefix: crate::S3Prefix::parse("root").unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -33,11 +32,11 @@ async fn listings_skip_stray_keys_and_folders_but_not_keys_outside_the_request()
         let object = |key: &str| {
             format!("<Contents><Key>{key}</Key><Size>5</Size><LastModified>2026-10-06T00:00:00.000Z</LastModified><ETag>\"e\"</ETag></Contents>")
         };
-        let body = if q["prefix"] == format!("root/{STORE_ID}/files/") {
-            object(&format!("root/{STORE_ID}/seq/2"))
+        let body = if q["prefix"] == format!("{STORE_ID}/files/") {
+            object(&format!("{STORE_ID}/seq/2"))
         } else {
             ["seq/1", "seq/01", "seq/1/extra", "Notes.txt", "photos/1", ".coven-uploads/not-a-uuid", ".coven-check/run/marker", "seq/2"]
-            .map(|name| object(&format!("root/{STORE_ID}/{name}"))).concat()
+            .map(|name| object(&format!("{STORE_ID}/{name}"))).concat()
         };
         response(200, format!("<ListBucketResult>{body}<IsTruncated>false</IsTruncated></ListBucketResult>"))
     }))
@@ -61,7 +60,7 @@ async fn a_failed_page_fails_the_listing_rather_than_ending_it() {
         if query(&uri).contains_key("continuation-token") {
             return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
         }
-        response(200, format!("<ListBucketResult><Contents><Key>root/{STORE_ID}/seq/1</Key><Size>5</Size><LastModified>2026-10-06T00:00:00.000Z</LastModified><ETag>\"e\"</ETag></Contents><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken></ListBucketResult>"))
+        response(200, format!("<ListBucketResult><Contents><Key>{STORE_ID}/seq/1</Key><Size>5</Size><LastModified>2026-10-06T00:00:00.000Z</LastModified><ETag>\"e\"</ETag></Contents><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken></ListBucketResult>"))
     }))
     .await;
     let storage = StorageConnection::from_provider(Arc::new(storage(&server.url)));

@@ -11,7 +11,6 @@ fn s3_location() -> StorageConfig {
         region: "us-east-1".into(),
         endpoint: None,
         profile: None,
-        prefix: crate::S3Prefix::parse("libraries").unwrap(),
     }
 }
 

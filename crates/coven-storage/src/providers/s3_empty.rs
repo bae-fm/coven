@@ -1,72 +1,75 @@
-//! Emptying an S3 prefix: a development tool outside the sync protocol
-//! (api.md E14), and the live certification's cleanup of its namespace.
-//! It removes what is under the prefix whatever wrote it, so no store's
-//! layout limits it: current objects, upload temporaries, detection probes
-//! and unfinished multipart uploads alike.
+//! Emptying an S3 bucket: a development tool outside the sync protocol
+//! (api.md E14), and, under one store's folder, the live certification's
+//! cleanup of its namespace. It removes what is there whatever wrote it, so
+//! no store's layout limits it: current objects, upload temporaries,
+//! detection probes and unfinished multipart uploads alike.
+#[cfg(feature = "dev-tools")]
+use super::own_bucket::RootEntry;
 use super::*;
 
-/// What emptying an S3 prefix removed (api.md E14).
+/// What emptying an S3 bucket removed (api.md E14).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EmptiedS3Prefix {
+pub struct EmptiedS3Bucket {
     /// Objects deleted.
     pub objects: usize,
     /// Unfinished multipart uploads aborted.
     pub uploads: usize,
 }
 
-/// Why an S3 prefix was not emptied (api.md E14).
+/// Why an S3 bucket was not emptied (api.md E14).
 #[cfg(feature = "dev-tools")]
 #[derive(Debug, thiserror::Error)]
-pub enum EmptyS3PrefixError {
-    /// The location has no base prefix, so emptying it would empty the whole
-    /// bucket. Nothing was sent.
-    #[error("the S3 location has no base prefix; emptying it would empty the whole bucket")]
-    WholeBucket,
+pub enum EmptyS3BucketError {
+    /// The bucket's root holds something no store wrote: an object other
+    /// than the bucket marker, or a folder not named by a store id. Nothing
+    /// was removed.
+    #[error("the S3 bucket holds files no coven store wrote")]
+    OtherFiles,
     /// The location or key was refused, or a request failed. Whatever was
     /// removed before the failure stays removed; emptying again finishes.
-    #[error("emptying the S3 prefix: {0}")]
+    #[error("emptying the S3 bucket: {0}")]
     Storage(#[source] StorageError),
 }
 
-/// Abort every unfinished upload and delete every object under the
-/// location's base prefix, with the location's own settings. A location
-/// without a base prefix is refused before any request.
+/// Abort every unfinished upload and delete every object in the location's
+/// bucket, with the location's own settings, once its root shows it holds
+/// only stores' folders and the bucket marker.
 #[cfg(feature = "dev-tools")]
-pub(crate) async fn empty_prefix(
+pub(crate) async fn empty_bucket(
     config: StorageConfig,
     credentials: S3Credentials,
     clock: ClockRef,
     ids: IdSourceRef,
     http: HttpClient,
-) -> Result<EmptiedS3Prefix, EmptyS3PrefixError> {
-    let StorageConfig::S3 { prefix, .. } = &config else {
-        return Err(EmptyS3PrefixError::Storage(
-            StorageFailure::InvalidConfiguration.with_source("expected S3 configuration"),
-        ));
-    };
-    if prefix.is_empty() {
-        return Err(EmptyS3PrefixError::WholeBucket);
+) -> Result<EmptiedS3Bucket, EmptyS3BucketError> {
+    crate::ConnectionCredentials {
+        location: config.clone(),
+        credentials: StorageCredentials::S3(credentials.clone()),
     }
-    // The slash keeps a sibling prefix that merely starts with the same
-    // characters, `dev-old` beside `dev`, out of the listing.
-    let under = prefix.key_prefix();
-    let emptied = async {
-        crate::ConnectionCredentials {
-            location: config.clone(),
-            credentials: StorageCredentials::S3(credentials.clone()),
-        }
-        .validate()?;
-        let storage = S3Storage::new(
-            config,
-            credentials,
-            clock,
-            ids,
-            std::sync::Arc::new(crate::NoCooldown),
-            http,
-        )?;
-        storage.empty_under(&under, storage.settings.listing).await
-    };
-    emptied.await.map_err(EmptyS3PrefixError::Storage)
+    .validate()
+    .map_err(EmptyS3BucketError::Storage)?;
+    let storage = S3Storage::new(
+        config,
+        credentials,
+        clock,
+        ids,
+        std::sync::Arc::new(crate::NoCooldown),
+        http,
+    )
+    .map_err(EmptyS3BucketError::Storage)?;
+    let stores_only = storage
+        .root_admits(|entry| match entry {
+            RootEntry::Object(key) => key == crate::bucket_claim::BUCKET_CLAIM,
+            RootEntry::Folder(folder) => folder
+                .strip_suffix('/')
+                .is_some_and(|name| coven_foundation::id_source::canonical_uuid(name).is_ok()),
+        })
+        .await
+        .map_err(EmptyS3BucketError::Storage)?;
+    if !stores_only {
+        return Err(EmptyS3BucketError::OtherFiles);
+    }
+    storage.empty_under("", storage.settings.listing).await.map_err(EmptyS3BucketError::Storage)
 }
 
 impl S3Storage {
@@ -80,7 +83,7 @@ impl S3Storage {
         &self,
         prefix: &str,
         listing: S3Listing,
-    ) -> Result<EmptiedS3Prefix, StorageError> {
+    ) -> Result<EmptiedS3Bucket, StorageError> {
         let uploads = self.unfinished_uploads(prefix, None).await?;
         for (key, id, _) in &uploads {
             self.abort_multipart(key, id, None).await?;
@@ -97,6 +100,6 @@ impl S3Storage {
             return Err(StorageFailure::Conflict
                 .with_source("objects or uploads arrived under the prefix while it was emptied"));
         }
-        Ok(EmptiedS3Prefix { objects: keys.len(), uploads: uploads.len() })
+        Ok(EmptiedS3Bucket { objects: keys.len(), uploads: uploads.len() })
     }
 }

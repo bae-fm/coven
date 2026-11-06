@@ -46,12 +46,12 @@ pub enum StorageFailure {
     /// S3 rejected the device clock after one retry with the offset its
     /// response stated (§20.7).
     ClockSkew,
-    /// The S3 service's member keys reach a whole bucket, so a store there
-    /// needs a bucket of its own (§20.7).
-    OwnBucketRequired {
-        /// What the location shares.
-        reason: OwnBucketReason,
-    },
+    /// The S3 bucket holds something besides this store, so the store
+    /// can't have it to itself (§20.3). At first setup: an object or folder
+    /// outside the store's own, or a bucket marker that doesn't name it. At
+    /// a reconnect, restore or join: a marker that is missing, malformed or
+    /// names another store.
+    OwnLocationRequired,
     /// The provider has no space left.
     QuotaExceeded,
     /// The provider requests a later retry.
@@ -108,15 +108,6 @@ pub enum StorageFailure {
     /// Coven's work for the request panicked: a bug, which the caller
     /// reports (E15). `StorageError::Bug` carries it.
     Bug,
-}
-
-/// Why an S3 location cannot hold a store that needs its own bucket (§20.7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum OwnBucketReason {
-    /// The location names a base prefix; the store occupies the bucket's root.
-    Prefix,
-    /// The bucket holds foreign objects, or its marker does not name this store.
-    Occupied,
 }
 
 /// A storage error preserves its cause without converting it into text.

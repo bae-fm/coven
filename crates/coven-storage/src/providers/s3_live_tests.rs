@@ -371,8 +371,7 @@ async fn listing_lag(
         );
         s.create(&target, b"listing visibility").await?;
         let replied = Instant::now();
-        let stored_at =
-            detect::time(&head(s.provider(), &s.provider().prefix.key(&target)).await?)?;
+        let stored_at = detect::time(&head(s.provider(), target.as_str()).await?)?;
         let all = ObjectPrefix::files(store);
         let object = observe("S3_object", trial, replied, stored_at, || async {
             Ok(s.list(&all).await?.iter().any(|object| object.path == target))
@@ -638,7 +637,6 @@ fn print_profile(
     let StorageConfig::S3 { endpoint, profile, .. } = config else { unreachable!() };
     // Only the hostname is source data, never a URL's credentials, path or query.
     let selected = profile::select(endpoint.as_ref(), profile.as_ref()).unwrap();
-    let key_scope = selected.key_scope();
     let (name, endpoint) = match selected {
         Selected::Catalogued(known) => (
             format!("{:?}", known.name),
@@ -669,7 +667,7 @@ fn print_profile(
         }
     };
     println!(
-        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        copy_publication: {copy_publication},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    key_scope: S3KeyScope::{key_scope:?},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n    upload_initiation: Certification::{initiation},\n}},",
+        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        copy_publication: {copy_publication},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n    upload_initiation: Certification::{initiation},\n}},",
         p.signing, p.single_put, p.multipart_timestamp, p.checksums, p.listing,
         p.revision, p.response_headers, p.request_checksums,
     );

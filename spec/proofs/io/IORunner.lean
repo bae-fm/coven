@@ -303,8 +303,7 @@ private def failures : List (String × CovenIO.SyncState.Failure) := [
     ("regionMismatch", .regionMismatch),
     ("storeExists", .storeExists),
     ("clockSkew", .clockSkew),
-    -- The name the Rust differential sends for this failure.
-    ("ownBucketRequired", .ownLocationRequired),
+    ("ownLocationRequired", .ownLocationRequired),
     ("quotaExceeded", .quotaExceeded),
     ("rateLimited", .rateLimited),
     ("invalidConfiguration", .invalidConfiguration),

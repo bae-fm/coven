@@ -38,22 +38,13 @@ impl LiveS3 {
         let endpoint = settings
             .optional("COVEN_LIVE_S3_ENDPOINT")
             .map(|value| value.as_str().parse().expect("valid live endpoint"));
-        // A service whose member keys reach a whole bucket keeps each store
-        // at the bucket's root (§20.7); the suite's stores share the test bucket.
-        let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())
-            .expect("valid live endpoint")
-        {
-            crate::providers::S3KeyScope::Bucket => crate::S3Prefix::default(),
-            crate::providers::S3KeyScope::Prefix => {
-                crate::S3Prefix::parse("coven-live").expect("a valid base prefix")
-            }
-        };
+        // The suite's stores share the test bucket, each in its own folder
+        // at the root; none claims the bucket.
         let config = StorageConfig::S3 {
             bucket: settings.take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
             region: settings.take("COVEN_LIVE_S3_REGION").as_str().to_owned(),
             endpoint,
             profile,
-            prefix,
         };
         let credentials = S3Credentials {
             access_key_id: settings.take("COVEN_LIVE_S3_ACCESS_KEY_ID").as_str().to_owned(),
@@ -105,7 +96,7 @@ impl LiveS3 {
             Ok(true) => {
                 live_cleanup::cleanup_versions(
                     storage.provider(),
-                    &storage.provider().prefix.key_prefix_of(&ObjectPrefix::all(store)),
+                    ObjectPrefix::all(store).as_str(),
                 )
                 .await
             }

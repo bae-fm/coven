@@ -16,6 +16,10 @@ use std::{
     time::SystemTime,
 };
 
+/// The in-process S3 server the detection, bucket and emptying tests share.
+#[path = "s3_test_server.rs"]
+pub(crate) mod test_server;
+
 pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnection<S3Storage> {
     StorageConnection::from_provider(Arc::new(
         S3Storage::with_settings(
@@ -24,8 +28,6 @@ pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnec
                 region: "us-east-1".into(),
                 endpoint: Some(url.parse().unwrap()),
                 profile: None,
-                // An undetected endpoint's member keys reach the whole bucket (§20.7).
-                prefix: crate::S3Prefix::default(),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -113,8 +115,8 @@ fn respond(
             format!("<Error><Code>{code}</Code><Message>credential-echo</Message></Error>"),
         );
     }
-    // A member key's list grant carries a prefix condition, which refuses
-    // HEAD Bucket; no adapter call may need it.
+    // HEAD Bucket is refused: the adapter tells a missing bucket by a
+    // zero-entry listing, so no adapter call may need it.
     if method == Method::HEAD && uri.path() == "/bucket/" {
         return response(403, Vec::new());
     }
@@ -421,8 +423,6 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
             profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
-            // A custom profile's member keys reach the whole bucket (§20.7).
-            prefix: crate::S3Prefix::default(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -584,7 +584,7 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
     for (size, expected_requests) in [(4, 2), (5, 1)] {
         let requests = Arc::new(AtomicUsize::new(0));
         let received = requests.clone();
-        let key = crate::S3Prefix::default().key(&path);
+        let key = path.as_str().to_owned();
         let server = TestServer::new(Router::new().fallback(move || {
             let page = received.fetch_add(1, Ordering::SeqCst);
             let key = key.clone();
@@ -929,10 +929,7 @@ async fn a_download_carries_its_metadata_in_one_request() {
         let requests = &state.lock().unwrap().requests;
         assert_eq!(requests.len(), 1, "{requests:?}");
         assert_eq!(requests[0].0, Method::GET);
-        assert_eq!(
-            requests[0].1.path(),
-            format!("/bucket/{}", crate::S3Prefix::default().key(&path))
-        );
+        assert_eq!(requests[0].1.path(), format!("/bucket/{}", path.as_str()));
     }
     assert_eq!(read.bytes, b"first");
     assert_eq!(read.metadata, storage.status(&path).await.unwrap().unwrap());

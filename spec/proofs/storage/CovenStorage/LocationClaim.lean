@@ -3,9 +3,8 @@ import CovenStorage.Objects
 namespace CovenStorage.LocationClaim
 
 /-! The location marker uses the same atomic create as slots. A location is a
-Dropbox shared folder, a OneDrive folder, or a bucket whose member keys reach
-all of it; each needs only that create and exact reads, so one model covers
-them. Store ids are their canonical, injective byte encodings. Listings can
+Dropbox shared folder, a OneDrive folder, or an S3 bucket; each needs only
+that create and exact reads, so one model covers them. Store ids are their canonical, injective byte encodings. Listings can
 omit every recent object: they are an additional refusal gate, never evidence
 of ownership.
 No transition replaces or deletes the marker, including local store deletion. -/

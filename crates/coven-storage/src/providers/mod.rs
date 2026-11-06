@@ -20,12 +20,9 @@ mod desktop_oauth;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use desktop_oauth::DesktopOAuthPresenter;
 mod s3;
-/// The prefix policy a member key needs, as guided console steps show it (§20.10).
-pub fn s3_member_policy(
-    config: &crate::StorageConfig,
-    store: coven_foundation::id_source::StoreId,
-) -> Result<String, crate::StorageError> {
-    s3::member_policy(config, store)
+/// The policy a member key needs, as guided console steps show it (§20.10).
+pub fn s3_member_policy(config: &crate::StorageConfig) -> Result<String, crate::StorageError> {
+    s3::member_policy(config)
 }
 /// Whether a provider failure's native cause is a response the provider sent,
 /// even an error one (E5).
@@ -72,14 +69,14 @@ pub(crate) fn retry_after(
     s3::response_retry_after(source)
 }
 #[cfg(feature = "dev-tools")]
-pub(crate) use s3::empty_prefix as empty_s3_prefix;
+pub(crate) use s3::empty_bucket as empty_s3_bucket;
 #[cfg(any(test, feature = "dev-tools"))]
-pub use s3::EmptiedS3Prefix;
+pub use s3::EmptiedS3Bucket;
 #[cfg(feature = "dev-tools")]
-pub use s3::EmptyS3PrefixError;
+pub use s3::EmptyS3BucketError;
 pub(crate) use s3::{
-    check_new_store as check_new_s3_store, check_s3_versioning, detect as detect_s3, s3_key_scope,
-    s3_settings, S3KeyScope, S3Storage,
+    check_new_store as check_new_s3_store, check_s3_profile, check_s3_versioning,
+    detect as detect_s3, s3_settings, S3Storage,
 };
 mod dropbox;
 mod dropbox_access;

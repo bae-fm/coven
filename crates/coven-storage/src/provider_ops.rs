@@ -13,7 +13,7 @@ pub trait ProviderOps: Send + Sync {
     /// Largest complete body accepted by `create` or `replace`.
     fn single_request_limit(&self) -> u64;
     /// Create D10's bucket-root marker with the provider's create-once primitive.
-    /// Only first setup on a bucket-scoped S3 location calls this operation.
+    /// Only first setup on an S3 location calls this operation.
     /// Anything it stages sits in `device`'s reserved folder (D10).
     async fn create_bucket_claim(
         &self,
@@ -23,7 +23,7 @@ pub trait ProviderOps: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
     /// Read the complete bucket marker, bounded to D10's UUID byte count.
-    /// Only bucket-scoped S3 locations call this operation.
+    /// Only S3 locations call this operation.
     async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }

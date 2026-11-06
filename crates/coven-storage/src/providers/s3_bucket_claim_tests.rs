@@ -5,10 +5,7 @@ use coven_foundation::id_source::StoreId;
 const OTHER: StoreId = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
 
 fn occupied(error: StorageError) {
-    assert_eq!(
-        error.failure(),
-        StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Occupied }
-    );
+    assert_eq!(error.failure(), StorageFailure::OwnLocationRequired);
 }
 
 #[tokio::test]

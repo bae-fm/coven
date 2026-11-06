@@ -698,7 +698,7 @@ fn refused(error: &SyncError) -> bool {
         SyncError::Rejected(_) | SyncError::StoreOwner => true,
         SyncError::Storage(error) => matches!(
             error.failure(),
-            StorageFailure::StoreExists | StorageFailure::OwnBucketRequired { .. }
+            StorageFailure::StoreExists | StorageFailure::OwnLocationRequired
         ),
         _ => false,
     }

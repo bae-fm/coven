@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    test_utils::{Faults, MemoryStorage, STORE_ID},
-    S3Profile, S3ProfileName,
-};
+use crate::test_utils::{Faults, MemoryStorage, STORE_ID};
 
 fn location() -> StorageConfig {
     StorageConfig::S3 {
@@ -10,7 +7,6 @@ fn location() -> StorageConfig {
         region: "auto".into(),
         endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
         profile: None,
-        prefix: crate::S3Prefix::default(),
     }
 }
 
@@ -76,32 +72,6 @@ async fn a_lost_create_reply_retains_the_claim_for_retry() {
         storage.check_bucket(STORE_ID).await.unwrap_err().failure(),
         StorageFailure::Network
     );
-}
-
-#[tokio::test]
-async fn prefix_scoped_locations_need_no_marker_requests() {
-    for profile in [
-        S3ProfileName::Aws,
-        S3ProfileName::Gcs,
-        S3ProfileName::RustFs,
-        S3ProfileName::SeaweedFs,
-        S3ProfileName::CephRgw,
-        S3ProfileName::VersityGw,
-    ] {
-        let storage = MemoryStorage::builder()
-            .location(StorageConfig::S3 {
-                bucket: "bucket".into(),
-                region: "auto".into(),
-                endpoint: Some("http://localhost:9000".parse().unwrap()),
-                profile: Some(S3Profile::Named(profile)),
-                prefix: crate::S3Prefix::parse("stores").unwrap(),
-            })
-            .build()
-            .unwrap();
-        storage.claim_bucket(STORE_ID).await.unwrap();
-        storage.check_bucket(STORE_ID).await.unwrap();
-        assert_eq!(storage.request_count(), 0);
-    }
 }
 
 #[tokio::test]

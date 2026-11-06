@@ -1,28 +1,31 @@
 //! S3 setup's detection and safety check at the application boundary (§20.7, §20.8, E5).
 use super::*;
-use coven_storage::{test_utils::DETECTED_S3_SETTINGS, OwnBucketReason, S3Detection, S3Profile};
+use coven_storage::{test_utils::DETECTED_S3_SETTINGS, S3Detection, S3Profile};
 
 fn uncatalogued(profile: Option<S3Profile>) -> StorageConfig {
-    uncatalogued_under(profile, "")
-}
-
-fn uncatalogued_under(profile: Option<S3Profile>, prefix: &str) -> StorageConfig {
     StorageConfig::S3 {
         bucket: "test".into(),
         region: "us-east-1".into(),
         endpoint: Some("http://localhost:9000".parse().unwrap()),
         profile,
-        prefix: crate::S3Prefix::parse(prefix).unwrap(),
     }
 }
 
-fn r2(prefix: &str) -> StorageConfig {
+fn r2() -> StorageConfig {
     StorageConfig::S3 {
         bucket: "test".into(),
         region: "auto".into(),
         endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
         profile: None,
-        prefix: crate::S3Prefix::parse(prefix).unwrap(),
+    }
+}
+
+fn aws() -> StorageConfig {
+    StorageConfig::S3 {
+        bucket: "test".into(),
+        region: "us-east-1".into(),
+        endpoint: None,
+        profile: None,
     }
 }
 
@@ -234,11 +237,11 @@ async fn a_server_that_overwrites_occupied_names_is_refused_before_anything_is_c
     opened.handle.close().await.unwrap();
 }
 
-fn own_bucket_required(error: &StorageSetupError, reason: OwnBucketReason) -> bool {
+fn own_location_required(error: &StorageSetupError) -> bool {
     matches!(
         error,
         StorageSetupError::Storage(source)
-            if source.failure() == StorageFailure::OwnBucketRequired { reason }
+            if source.failure() == StorageFailure::OwnLocationRequired
     )
 }
 
@@ -285,7 +288,7 @@ impl StorageConnector for ConcurrentSetup {
 
 #[tokio::test]
 async fn concurrent_setups_after_empty_root_listings_admit_exactly_one_store() {
-    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let storage = Arc::new(MemoryStorage::builder().location(r2()).build().unwrap());
     storage
         .set_faults(coven_storage::test_utils::Faults {
             hide_listings: true,
@@ -295,54 +298,35 @@ async fn concurrent_setups_after_empty_root_listings_admit_exactly_one_store() {
     let connector = Arc::new(ConcurrentSetup { storage, listed: tokio::sync::Barrier::new(2) });
     let first = open(connector.clone()).await;
     let second = open(connector).await;
-    let results = tokio::join!(setup(&first.handle, r2("")), setup(&second.handle, r2("")));
+    let results = tokio::join!(setup(&first.handle, r2()), setup(&second.handle, r2()));
     let results = [results.0, results.1];
     first.handle.close().await.unwrap();
     second.handle.close().await.unwrap();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
     let error = results.into_iter().find_map(Result::err).unwrap();
-    assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
+    assert!(own_location_required(&error), "{error:?}");
 }
 
 #[tokio::test]
-async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
-    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
-    let first = open(storage.clone()).await;
-    setup(&first.handle, r2("")).await.unwrap();
-    // Every member's key reaches the whole bucket, so a second store there
-    // is refused before setup writes anything.
-    let second = open(storage.clone()).await;
-    let before = storage.request_count();
-    let error = setup(&second.handle, r2("")).await.unwrap_err();
-    assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
-    assert_eq!(storage.request_count(), before);
-    assert_eq!(coven_storage::recorded_config(&second.directory).unwrap(), None);
-    // Reconnecting reads the bucket marker, without listing the root.
-    setup(&first.handle, r2("")).await.unwrap();
-    first.handle.close().await.unwrap();
-    second.handle.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_base_prefix_is_refused_where_member_keys_reach_the_whole_bucket() {
-    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
-    let opened = open(storage.clone()).await;
-    for location in [
-        r2("stores"),
-        uncatalogued_under(Some(S3Profile::Custom(DETECTED_S3_SETTINGS)), "stores"),
-        uncatalogued_under(None, "stores"),
-    ] {
-        let error = setup(&opened.handle, location.clone()).await.unwrap_err();
-        assert!(own_bucket_required(&error, OwnBucketReason::Prefix), "{error:?}");
-        let error = opened
-            .handle
-            .detect_s3_settings(location, "member-key".into(), SecretText::new("secret".into()))
-            .await
-            .unwrap_err();
-        assert!(own_bucket_required(&error, OwnBucketReason::Prefix), "{error:?}");
+async fn a_store_is_created_only_in_a_bucket_of_its_own() {
+    for location in [r2(), aws()] {
+        let storage =
+            Arc::new(MemoryStorage::builder().location(location.clone()).build().unwrap());
+        let first = open(storage.clone()).await;
+        setup(&first.handle, location.clone()).await.unwrap();
+        // Every member's key reaches the whole bucket, so a second store
+        // there is refused before setup writes anything.
+        let second = open(storage.clone()).await;
+        let before = storage.request_count();
+        let error = setup(&second.handle, location.clone()).await.unwrap_err();
+        assert!(own_location_required(&error), "{location:?}: {error:?}");
+        assert_eq!(storage.request_count(), before);
+        assert_eq!(coven_storage::recorded_config(&second.directory).unwrap(), None);
+        // Reconnecting reads the bucket marker, without listing the root.
+        setup(&first.handle, location).await.unwrap();
+        first.handle.close().await.unwrap();
+        second.handle.close().await.unwrap();
     }
-    assert_eq!(storage.request_count(), 0);
-    opened.handle.close().await.unwrap();
 }
 
 /// Ana's first R2 setup claims its bucket, then fails reading the floor:
@@ -351,7 +335,7 @@ async fn a_base_prefix_is_refused_where_member_keys_reach_the_whole_bucket() {
 /// finishes it, and a later setup reconnects.
 #[tokio::test]
 async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
-    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let storage = Arc::new(MemoryStorage::builder().location(r2()).build().unwrap());
     let opened = open(storage.clone()).await;
     storage
         .set_faults(coven_storage::test_utils::Faults {
@@ -362,7 +346,7 @@ async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    assert!(setup(&opened.handle, r2("")).await.is_err());
+    assert!(setup(&opened.handle, r2()).await.is_err());
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
     storage.check_bucket(opened.directory.id()).await.unwrap();
     storage.set_faults(coven_storage::test_utils::Faults::none()).await;
@@ -380,21 +364,21 @@ async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
         .unwrap();
     let outcome = opened.handle.operation_outcome(OperationId(setups[0])).await.unwrap();
     assert_eq!(outcome, OperationOutcome::Landed(coven_merge::Slot(1)));
-    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2("")));
-    setup(&opened.handle, r2("")).await.unwrap();
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2()));
+    setup(&opened.handle, r2()).await.unwrap();
     opened.handle.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
-    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let storage = Arc::new(MemoryStorage::builder().location(r2()).build().unwrap());
     let opened = open(storage.clone()).await;
-    setup(&opened.handle, r2("")).await.unwrap();
+    setup(&opened.handle, r2()).await.unwrap();
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
     storage.plant_bucket_claim(Some(other.to_string().into_bytes())).await;
-    let error = setup(&opened.handle, r2("")).await.unwrap_err();
-    assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
-    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2("")));
+    let error = setup(&opened.handle, r2()).await.unwrap_err();
+    assert!(own_location_required(&error), "{error:?}");
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2()));
     storage.check_bucket(other).await.unwrap();
     opened.handle.close().await.unwrap();
 }
@@ -460,35 +444,14 @@ async fn setup_fails_once_its_minute_of_rate_limit_waits_is_spent() {
     f.handle.close().await.unwrap();
 }
 
-/// Setup reads and writes only under its own store's id: with another
-/// store's object already in the location, two stores set up there touch
-/// only their own paths and leave that object as it was (§20.3).
+/// Setup reads and writes only under its own store's id, besides the bucket
+/// marker it claims (§20.3).
 #[tokio::test]
-async fn setup_reads_and_writes_only_under_its_stores_prefix() {
+async fn setup_reads_and_writes_only_under_its_stores_folder() {
     let f = Fixture::new().await;
-    let unrelated = coven_storage::ObjectPath::floor(StoreId(uuid::Uuid::from_u128(0xabc)));
-    f.storage.plant(&unrelated, b"someone else's floor").await.unwrap();
     f.setup().await.unwrap();
     synced(&f.handle).await;
-
-    let directory = f.app.create_closed_store("Garden", Arc::new(UuidIds)).await.unwrap();
-    let other = builder(&f.app, f.clock.clone(), f.connector.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
-    other
-        .setup_s3_storage(
-            f.storage.config(),
-            "Garden device",
-            "garden-key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
-        .await
-        .unwrap();
-    synced(&other).await;
-
-    let stores = [f.directory.id().to_string(), directory.id().to_string()];
+    let store = format!("{}/", f.directory.id());
     let trace = f.storage.request_trace();
     assert!(!trace.is_empty());
     for request in trace {
@@ -501,64 +464,9 @@ async fn setup_reads_and_writes_only_under_its_stores_prefix() {
             MemoryRequest::List(prefix) => prefix.as_str().to_owned(),
             MemoryRequest::Other(_) => continue,
         };
-        assert!(
-            stores.iter().any(|store| name.starts_with(&format!("{store}/"))),
-            "{request:?} is outside both stores {stores:?}"
-        );
+        assert!(name.starts_with(&store), "{request:?} is outside the store's folder {store}");
     }
-    assert_eq!(f.storage.read(&unrelated).await.unwrap(), b"someone else's floor");
-    for handle in [&f.handle, &other] {
-        handle.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn two_stores_share_one_location_without_reading_each_others_history() {
-    let f = Fixture::new().await;
-    f.setup().await.unwrap();
-    synced(&f.handle).await;
-    let directory = f.app.create_closed_store("Garden", Arc::new(UuidIds)).await.unwrap();
-    let other = builder(&f.app, f.clock.clone(), f.connector.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
-    other
-        .setup_s3_storage(
-            f.storage.config(),
-            "Garden device",
-            "garden-key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
-        .await
-        .unwrap();
-    synced(&other).await;
-    for (handle, body) in [(&f.handle, "Household"), (&other, "Garden")] {
-        handle
-            .write(move |sql| {
-                sql.execute("INSERT INTO notes VALUES('same', ?1)", [body])?;
-                Ok::<_, CovenError>(())
-            })
-            .await
-            .unwrap();
-    }
-    for handle in [&f.handle, &other] {
-        wait_for_sent(handle).await;
-    }
-    for (handle, expected) in [(&f.handle, "Household"), (&other, "Garden")] {
-        let body = handle
-            .read(|sql| {
-                Ok::<_, CovenError>(sql.query_row(
-                    "SELECT body FROM notes WHERE id='same'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(body, expected);
-        handle.close().await.unwrap();
-    }
+    f.handle.close().await.unwrap();
 }
 
 /// Ana's app detects her bucket's settings and is killed mid-detection. Her
@@ -611,7 +519,6 @@ async fn connecting_ends_the_detection_runs_recorded_at_its_bucket() {
         region: "us-east-1".into(),
         endpoint: Some("http://localhost:9000".parse().unwrap()),
         profile: None,
-        prefix: crate::S3Prefix::default(),
     };
     connector.detect(&opened.handle, uncatalogued(None), true).await;
     let away = connector.detect(&opened.handle, elsewhere.clone(), true).await;

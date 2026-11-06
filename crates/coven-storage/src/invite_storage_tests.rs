@@ -1,6 +1,6 @@
 use super::*;
 use crate::invitation::InvitationAcceptance;
-use crate::{DropboxLocation, S3Prefix, StorageConfig};
+use crate::{DropboxLocation, StorageConfig};
 use coven_crypto::SecretText;
 
 fn s3_location() -> StorageConfig {
@@ -9,7 +9,6 @@ fn s3_location() -> StorageConfig {
         region: "region".into(),
         endpoint: None,
         profile: None,
-        prefix: S3Prefix::parse("store").unwrap(),
     }
 }
 

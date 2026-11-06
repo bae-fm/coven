@@ -81,7 +81,7 @@ pub(super) async fn fire(
                 .client
                 .put_object()
                 .bucket(&s.bucket)
-                .key(s.prefix.key(target))
+                .key(target.as_str())
                 .body(ByteStream::from(bytes));
             // Keep the adapter's replacement metadata so the verifying read
             // checks the current object through the real metadata parser too.
@@ -105,7 +105,7 @@ pub(super) async fn fire(
             s.client
                 .copy_object()
                 .bucket(&s.bucket)
-                .key(s.prefix.key(target))
+                .key(target.as_str())
                 .copy_source(format!("/{}/{temporary}", s.bucket))
                 .customize()
                 .mutate_request(move |request| {

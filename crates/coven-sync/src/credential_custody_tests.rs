@@ -55,7 +55,6 @@ fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
             region: "region".into(),
             endpoint: None,
             profile: None,
-            prefix: coven_storage::S3Prefix::parse("store").unwrap(),
         })
         .encode()
         .unwrap(),

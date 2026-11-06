@@ -10,10 +10,9 @@ commit key custody or database state.
 ## Object and transfer contract
 
 Every path and listing prefix begins with the canonical store UUID. Stores can
-share a provider location without sharing object names, except on an S3
-service whose member keys reach a whole bucket (R2, and every custom or
-detected profile): there a store has the bucket to itself, at an empty base
-prefix, and creating it refuses a bucket holding anything else (§20.7). Writers compete for shared sequence slots. `create` refuses an occupied path with
+share a provider location without sharing object names, except on S3: there a
+store has the bucket to itself, its paths start at the bucket's root, and
+creating it refuses a bucket holding anything else (§20.7). Writers compete for shared sequence slots. `create` refuses an occupied path with
 `AlreadyExists`; the caller counts a retry as stored only after comparing the
 occupant's complete bytes (§5.1). Only `<store>/floor` can be replaced, conditioned
 on the fetched native revision; a stale condition returns `Conflict`. Slots use

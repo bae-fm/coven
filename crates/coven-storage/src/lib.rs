@@ -42,8 +42,6 @@ mod restore_storage;
 pub use restore_storage::RestoreStorage;
 mod s3_detection;
 pub use s3_detection::*;
-mod s3_prefix;
-pub use s3_prefix::{S3Prefix, S3PrefixError};
 mod s3_settings;
 pub use s3_settings::*;
 mod byte_progress;

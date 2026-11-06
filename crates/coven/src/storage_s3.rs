@@ -1,6 +1,6 @@
-//! S3 setup: a new store's own-bucket check where member keys reach a whole
-//! bucket, then detection and the safety check of the effective settings
-//! against the service, before the provider check and any commitment (§20.8).
+//! S3 setup: a new store's check that the bucket holds nothing else, then
+//! detection and the safety check of the effective settings against the
+//! service, before the provider check and any commitment (§20.8).
 
 use super::*;
 use coven_storage::{S3Detection, S3DetectionRuns};
@@ -30,9 +30,8 @@ impl StorageConnections {
             owner
                 .run_setup(journal, async |journal| {
                     if journal.creating() {
-                        // Creating the store: where member keys reach the
-                        // whole bucket, the bucket must hold nothing but this
-                        // store (§20.7).
+                        // Creating the store: the bucket must hold nothing
+                        // but this store (§20.3).
                         let checking = owner.connector.check_new_s3_store(
                             config.clone(),
                             credentials.clone(),
@@ -169,7 +168,7 @@ fn recorded_s3(supplied: StorageConfig, recorded: Option<&StorageConfig>) -> Sto
     match recorded {
         Some(recorded)
             if matches!(supplied, StorageConfig::S3 { profile: None, .. })
-                && recorded.same_s3_objects(&supplied) =>
+                && recorded.same_s3_bucket(&supplied) =>
         {
             recorded.clone()
         }

@@ -1,4 +1,7 @@
 use super::*;
+use crate::providers::s3::tests::test_server::{
+    publish, Remote, Service, RUSTFS, SEAWEEDFS, VERSITY_GW,
+};
 use crate::providers::tests::{query, response, TestServer};
 use crate::providers::{ProviderConnector, StorageConnector};
 use crate::test_utils::STORE_ID;
@@ -12,6 +15,7 @@ use axum::{
 use coven_crypto::SecretText;
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::SystemTime,
 };
@@ -84,7 +88,7 @@ impl Fixture {
             TestServer::new(Router::new().fallback(serve).with_state(bucket.clone())).await;
         Self { bucket, server }
     }
-    async fn check(&self, profile: Option<S3Profile>, prefix: &str) -> Result<(), StorageError> {
+    async fn check(&self, profile: Option<S3Profile>) -> Result<(), StorageError> {
         ProviderConnector::new(
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
@@ -95,7 +99,6 @@ impl Fixture {
                 region: "auto".into(),
                 endpoint: Some(self.server.url.parse().unwrap()),
                 profile,
-                prefix: crate::S3Prefix::parse(prefix).unwrap(),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -117,13 +120,13 @@ fn own() -> String {
 fn other() -> String {
     ObjectPrefix::all(OTHER).as_str().to_owned()
 }
-fn refused(result: Result<(), StorageError>, reason: OwnBucketReason) -> bool {
-    matches!(result, Err(error) if error.failure() == StorageFailure::OwnBucketRequired { reason })
+fn refused(result: Result<(), StorageError>) -> bool {
+    matches!(result, Err(error) if error.failure() == StorageFailure::OwnLocationRequired)
 }
 const R2: Option<S3Profile> = Some(S3Profile::Named(S3ProfileName::R2));
 
 #[tokio::test]
-async fn an_r2_bucket_holding_only_this_store_admits_its_creation() {
+async fn a_bucket_holding_only_this_store_admits_its_creation() {
     for pages in [
         vec![],
         vec![vec![own()]],
@@ -131,7 +134,7 @@ async fn an_r2_bucket_holding_only_this_store_admits_its_creation() {
         vec![vec!["coven-bucket".into()], vec![own()]],
     ] {
         let fixture = Fixture::new(pages.clone()).await;
-        fixture.check(R2, "").await.unwrap();
+        fixture.check(R2).await.unwrap();
         // R2's profile lists with V2, following every page.
         let requests = fixture.requests();
         assert_eq!(requests.len(), pages.len().max(1));
@@ -142,7 +145,7 @@ async fn an_r2_bucket_holding_only_this_store_admits_its_creation() {
 }
 
 #[tokio::test]
-async fn an_r2_bucket_holding_anything_else_refuses_creation_before_any_write() {
+async fn a_bucket_holding_anything_else_refuses_creation_before_any_write() {
     for pages in [
         vec![vec![other()]],
         vec![vec![own(), other()]],
@@ -152,31 +155,9 @@ async fn an_r2_bucket_holding_anything_else_refuses_creation_before_any_write() 
         vec![vec![own()], vec![other()]],
     ] {
         let fixture = Fixture::new(pages.clone()).await;
-        assert!(refused(fixture.check(R2, "").await, OwnBucketReason::Occupied));
+        assert!(refused(fixture.check(R2).await));
         assert_eq!(fixture.requests().len(), pages.len());
     }
-}
-
-#[tokio::test]
-async fn a_base_prefix_is_refused_before_any_request_where_keys_reach_the_whole_bucket() {
-    let fixture = Fixture::new(vec![vec![own()]]).await;
-    for profile in [R2, Some(S3Profile::Custom(profile::PLAIN)), None] {
-        assert!(refused(fixture.check(profile, "store").await, OwnBucketReason::Prefix));
-    }
-    assert!(fixture.requests().is_empty());
-}
-
-#[tokio::test]
-async fn prefix_scoped_profiles_share_a_bucket_without_a_check() {
-    let fixture = Fixture::new(vec![vec![other(), "notes.txt".into()]]).await;
-    for name in
-        [S3ProfileName::Aws, S3ProfileName::Gcs, S3ProfileName::RustFs, S3ProfileName::SeaweedFs]
-    {
-        for prefix in ["", "store"] {
-            fixture.check(Some(S3Profile::Named(name)), prefix).await.unwrap();
-        }
-    }
-    assert!(fixture.requests().is_empty());
 }
 
 #[tokio::test]
@@ -184,9 +165,9 @@ async fn an_undetected_endpoint_is_checked_with_the_signer_it_accepts() {
     for (pages, occupied) in [(vec![vec![own()]], false), (vec![vec![other()]], true)] {
         let fixture = Fixture::new(pages).await;
         fixture.bucket.lock().unwrap().refuse_google = true;
-        let result = fixture.check(None, "").await;
+        let result = fixture.check(None).await;
         if occupied {
-            assert!(refused(result, OwnBucketReason::Occupied));
+            assert!(refused(result));
         } else {
             result.unwrap();
         }
@@ -210,6 +191,141 @@ async fn a_bucket_refusing_every_signer_reports_the_plain_signers_failure() {
     }))
     .await;
     let fixture = Fixture { bucket: Arc::default(), server };
-    let error = fixture.check(None, "").await.unwrap_err();
+    let error = fixture.check(None).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::ContainerNotFound);
+}
+
+/// The services whose keys could once be limited to a folder, each with its
+/// catalogued profile: their buckets are a store's own like any other's.
+const SERVICES: [(Service, S3ProfileName); 3] = [
+    (RUSTFS, S3ProfileName::RustFs),
+    (SEAWEEDFS, S3ProfileName::SeaweedFs),
+    (VERSITY_GW, S3ProfileName::VersityGw),
+];
+
+/// A bucket on the shared in-process server, holding `keys`.
+struct Served {
+    state: Arc<Mutex<Remote>>,
+    server: TestServer,
+    profile: S3ProfileName,
+}
+impl Served {
+    async fn new((service, profile): (Service, S3ProfileName), keys: &[String]) -> Self {
+        let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+        let mut remote = Remote::new(service, clock);
+        for key in keys {
+            publish(&mut remote, key.clone(), b"held".to_vec(), 0);
+        }
+        remote.written.clear();
+        let state = Arc::new(Mutex::new(remote));
+        let server = TestServer::new(
+            Router::new()
+                .fallback(crate::providers::s3::tests::test_server::serve)
+                .with_state(state.clone()),
+        )
+        .await;
+        Self { state, server, profile }
+    }
+    fn location(&self) -> StorageConfig {
+        StorageConfig::S3 {
+            bucket: "bucket".into(),
+            region: "us-east-1".into(),
+            endpoint: Some(self.server.url.parse().unwrap()),
+            profile: Some(S3Profile::Named(self.profile)),
+        }
+    }
+    /// A new store's check of the bucket, as setup runs it.
+    async fn check_new(&self) -> Result<(), StorageError> {
+        ProviderConnector::new(
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+            Arc::new(SequentialIds::new()),
+        )
+        .check_new_s3_store(self.location(), credentials(), STORE_ID, &crate::SetupWaits::default())
+        .await
+    }
+    /// The store's connection to the bucket.
+    fn connection(&self) -> crate::StorageConnection<S3Storage> {
+        crate::StorageConnection::from_provider(Arc::new(
+            S3Storage::new(
+                self.location(),
+                credentials(),
+                Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+                Arc::new(SequentialIds::new()),
+                Arc::new(crate::NoCooldown),
+                crate::providers::tests::http_client(),
+            )
+            .unwrap(),
+        ))
+    }
+    fn objects(&self) -> BTreeMap<String, Vec<u8>> {
+        let state = self.state.lock().unwrap();
+        state.objects.iter().map(|(key, object)| (key.clone(), object.bytes.clone())).collect()
+    }
+}
+
+fn credentials() -> S3Credentials {
+    S3Credentials {
+        access_key_id: "access".into(),
+        secret_access_key: SecretText::new("secret".into()),
+    }
+}
+
+#[tokio::test]
+async fn setup_refuses_a_bucket_holding_a_foreign_object() {
+    for service in SERVICES {
+        for foreign in [
+            "notes.txt".to_owned(),
+            "music/song.flac".to_owned(),
+            ObjectPath::floor(OTHER).as_str().to_owned(),
+        ] {
+            let served = Served::new(service, std::slice::from_ref(&foreign)).await;
+            assert!(refused(served.check_new().await), "{:?} holding {foreign}", served.profile);
+            assert!(served.state.lock().unwrap().written.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn setup_accepts_an_empty_bucket_and_claims_it() {
+    for service in SERVICES {
+        let served = Served::new(service, &[]).await;
+        served.check_new().await.unwrap();
+        served.connection().claim_bucket(STORE_ID).await.unwrap();
+        assert_eq!(
+            served.objects(),
+            BTreeMap::from([("coven-bucket".to_owned(), STORE_ID.to_string().into_bytes())]),
+            "{:?}",
+            served.profile
+        );
+    }
+}
+
+/// The store's objects, a detection run's probes in its folder and its
+/// marker are its own: a reconnect reads the marker alone and passes, and
+/// so does a retried creation.
+#[tokio::test]
+async fn a_librarys_own_objects_dont_block_its_reconnect() {
+    let own = [
+        "coven-bucket".to_owned(),
+        ObjectPath::floor(STORE_ID).as_str().to_owned(),
+        ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN).as_str().to_owned(),
+        format!("{STORE_ID}/.coven-check/{}/marker-before", uuid::Uuid::from_bytes([7; 16])),
+    ];
+    for service in SERVICES {
+        let served = Served::new(service, &own).await;
+        served.state.lock().unwrap().objects.get_mut("coven-bucket").unwrap().bytes =
+            STORE_ID.to_string().into_bytes();
+        let connection = served.connection();
+        connection.check_bucket(STORE_ID).await.unwrap();
+        assert_eq!(
+            served.state.lock().unwrap().requests,
+            [(axum::http::Method::GET, "/bucket/coven-bucket".to_owned())],
+            "{:?}",
+            served.profile
+        );
+        let held = served.objects();
+        served.check_new().await.unwrap();
+        connection.claim_bucket(STORE_ID).await.unwrap();
+        assert_eq!(served.objects(), held, "{:?}", served.profile);
+    }
 }

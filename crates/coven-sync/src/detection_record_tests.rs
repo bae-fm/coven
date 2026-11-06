@@ -1,6 +1,6 @@
 use super::*;
 use crate::sequence_sync::tests::Group;
-use coven_storage::{S3Prefix, S3Profile, S3ProfileName};
+use coven_storage::{S3Profile, S3ProfileName};
 
 fn bucket(name: &str, profile: Option<S3Profile>) -> StorageConfig {
     StorageConfig::S3 {
@@ -8,7 +8,6 @@ fn bucket(name: &str, profile: Option<S3Profile>) -> StorageConfig {
         region: "us-east-1".into(),
         endpoint: Some("http://localhost:9000".parse().unwrap()),
         profile,
-        prefix: S3Prefix::default(),
     }
 }
 

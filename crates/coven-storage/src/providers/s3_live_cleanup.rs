@@ -7,12 +7,12 @@ use coven_foundation::id_source::StoreId;
 /// Use native listings so completed temporaries and incomplete uploads are both
 /// removed, including after an assertion or a provider operation fails.
 pub(super) async fn cleanup(storage: &S3Storage, store: StoreId) -> Result<(), StorageError> {
-    let prefix = storage.prefix.key_prefix_of(&ObjectPrefix::all(store));
+    let prefix = ObjectPrefix::all(store);
     // V1 is probed before writes, so cleanup does not depend on V2 support.
-    storage.empty_under(&prefix, S3Listing::V1).await?;
+    storage.empty_under(prefix.as_str(), S3Listing::V1).await?;
     match storage.bucket_versioning().await? {
         S3BucketVersioning::Enabled | S3BucketVersioning::Suspended => {
-            cleanup_versions(storage, &prefix).await
+            cleanup_versions(storage, prefix.as_str()).await
         }
         S3BucketVersioning::Disabled | S3BucketVersioning::Unavailable => Ok(()),
     }

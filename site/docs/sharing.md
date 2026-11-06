@@ -400,7 +400,7 @@ next. Keys the removed member had seen are replaced before new data uses them
 On S3 each member has their own access key. The person makes every key in the
 provider's console and deletes it there; coven never holds the storage
 account's admin access. `guided_access_key()` fills in what the console needs:
-the bucket, the store's prefix and the member policy.
+the store's bucket and the member policy.
 
 ```rust
 handle.replace_access_key(new_key_id, new_secret).await?;

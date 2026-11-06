@@ -44,8 +44,7 @@ live races are separate from these proofs.
 
 [LocationClaim.lean](storage/CovenStorage/LocationClaim.lean) models the
 location marker of a store that needs its location to itself: a Dropbox shared
-folder, a OneDrive folder, or a bucket whose member keys reach all of it
-(coven.md §20.3). Setup creates the marker with the same create as a slot and
+folder, a OneDrive folder, or an S3 bucket (coven.md §20.3). Setup creates the marker with the same create as a slot and
 passes only when the marker names its store; no listing appears in it.
 `at_most_one_store` shows that two setups that both pass, with any creates
 between them, name the same store. `retry_passes` lets a retry of one store's

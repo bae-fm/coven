@@ -47,7 +47,7 @@ async fn emptying_removes_everything_under_the_prefix_across_pages_and_nothing_b
     // The fake lists one key per page, so four objects take four pages.
     let emptied = storage.provider().empty_under("dev/", S3Listing::V2).await.unwrap();
 
-    assert_eq!(emptied, EmptiedS3Prefix { objects: 4, uploads: 1 });
+    assert_eq!(emptied, EmptiedS3Bucket { objects: 4, uploads: 1 });
     assert_eq!(
         remaining(&state),
         (vec!["dev-old/kept".to_owned(), "other/kept".to_owned()], vec!["other/upload".to_owned()])
@@ -55,7 +55,7 @@ async fn emptying_removes_everything_under_the_prefix_across_pages_and_nothing_b
     // Emptying an empty prefix removes nothing and succeeds.
     assert_eq!(
         storage.provider().empty_under("dev/", S3Listing::V2).await.unwrap(),
-        EmptiedS3Prefix { objects: 0, uploads: 0 }
+        EmptiedS3Bucket { objects: 0, uploads: 0 }
     );
 }
 
@@ -138,16 +138,15 @@ async fn a_key_listed_outside_the_prefix_is_refused_before_anything_is_deleted()
 #[cfg(feature = "dev-tools")]
 mod location {
     use super::*;
+    use crate::providers::s3::tests::test_server::{publish, Remote, Upload, VERSITY_GW};
 
-    fn location(url: &str, prefix: &str) -> (StorageConfig, S3Credentials) {
+    fn location(url: &str) -> (StorageConfig, S3Credentials) {
         (
             StorageConfig::S3 {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
                 endpoint: Some(url.parse().unwrap()),
-                // AWS keys can be limited to a prefix, so the location may name one.
-                profile: Some(S3Profile::Named(S3ProfileName::Aws)),
-                prefix: crate::S3Prefix::parse(prefix).unwrap(),
+                profile: Some(S3Profile::Named(S3ProfileName::VersityGw)),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -156,9 +155,28 @@ mod location {
         )
     }
 
-    async fn empty(url: &str, prefix: &str) -> Result<EmptiedS3Prefix, EmptyS3PrefixError> {
-        let (config, credentials) = location(url, prefix);
-        empty_prefix(
+    /// A bucket on the shared server holding `keys` and an upload of the
+    /// store's.
+    async fn bucket(keys: &[String]) -> (Arc<Mutex<Remote>>, TestServer) {
+        let mut remote = Remote::new(VERSITY_GW, Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)));
+        for key in keys {
+            publish(&mut remote, key.clone(), b"bytes".to_vec(), 0);
+        }
+        let key = ObjectPath::floor(STORE_ID).as_str().to_owned();
+        remote.uploads.insert("1".into(), Upload { key, started: 0, parts: BTreeMap::new() });
+        let state = Arc::new(Mutex::new(remote));
+        let server = TestServer::new(
+            Router::new()
+                .fallback(crate::providers::s3::tests::test_server::serve)
+                .with_state(state.clone()),
+        )
+        .await;
+        (state, server)
+    }
+
+    async fn empty(url: &str) -> Result<EmptiedS3Bucket, EmptyS3BucketError> {
+        let (config, credentials) = location(url);
+        empty_bucket(
             config,
             credentials,
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
@@ -169,48 +187,47 @@ mod location {
     }
 
     #[tokio::test]
-    async fn a_location_is_emptied_under_its_base_prefix_and_not_a_sibling_prefix() {
-        // Slashes typed at the prefix's ends name the same prefix.
-        for typed in ["dev", "dev/", "/dev/"] {
-            let state = seeded();
-            let server =
-                TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    async fn a_bucket_holding_only_stores_is_emptied_marker_and_all() {
+        let other = coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16]));
+        let keys = [
+            "coven-bucket".to_owned(),
+            ObjectPath::floor(STORE_ID).as_str().to_owned(),
+            ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN).as_str().to_owned(),
+            ObjectPath::floor(other).as_str().to_owned(),
+        ];
+        let (state, server) = bucket(&keys).await;
 
-            let emptied = empty(&server.url, typed).await.unwrap();
+        let emptied = empty(&server.url).await.unwrap();
 
-            assert_eq!(emptied, EmptiedS3Prefix { objects: 4, uploads: 1 }, "{typed}");
-            assert_eq!(
-                remaining(&state).0,
-                ["dev-old/kept".to_owned(), "other/kept".to_owned()],
-                "{typed}"
-            );
-        }
+        assert_eq!(emptied, EmptiedS3Bucket { objects: 4, uploads: 1 });
+        let state = state.lock().unwrap();
+        assert!(state.objects.is_empty() && state.uploads.is_empty());
     }
 
     #[tokio::test]
-    async fn a_location_without_a_base_prefix_is_refused_before_any_request() {
-        // A prefix of only slashes is the bucket's root too.
-        for typed in ["", "/", "//"] {
-            let state = seeded();
-            let server =
-                TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    async fn a_bucket_holding_other_files_is_refused_before_anything_is_removed() {
+        for other in ["notes.txt", "music/song.flac", "not-a-store/floor"] {
+            let keys = ["coven-bucket".to_owned(), other.to_owned()];
+            let (state, server) = bucket(&keys).await;
 
-            let error = empty(&server.url, typed).await.unwrap_err();
+            let error = empty(&server.url).await.unwrap_err();
 
-            assert!(matches!(error, EmptyS3PrefixError::WholeBucket), "{typed}: {error:?}");
-            assert!(state.lock().unwrap().requests.is_empty(), "{typed}");
+            assert!(matches!(error, EmptyS3BucketError::OtherFiles), "{other}: {error:?}");
+            let state = state.lock().unwrap();
+            assert_eq!(state.objects.len(), 2, "{other}");
+            assert_eq!(state.uploads.len(), 1, "{other}");
         }
     }
 
     #[tokio::test]
     async fn another_provider_is_refused_with_a_storage_error() {
-        let error = empty_prefix(
+        let error = empty_bucket(
             StorageConfig::OneDrive {
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
                 account_label: None,
             },
-            location("http://127.0.0.1:9", "dev").1,
+            location("http://127.0.0.1:9").1,
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
             crate::providers::tests::http_client(),
@@ -218,7 +235,7 @@ mod location {
         .await
         .unwrap_err();
 
-        let EmptyS3PrefixError::Storage(error) = error else {
+        let EmptyS3BucketError::Storage(error) = error else {
             panic!("expected a storage error: {error:?}");
         };
         assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);

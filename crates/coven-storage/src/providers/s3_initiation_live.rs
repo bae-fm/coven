@@ -42,7 +42,7 @@ async fn observe(
     store: StoreId,
 ) -> Result<bool, StorageError> {
     let floor = ObjectPath::floor(store);
-    let key = s.provider().prefix.key(&floor);
+    let key = floor.as_str().to_owned();
     s.create(&floor, b"upload initiation trial=0").await?;
     let clock = coven_foundation::clock::SystemClock;
     let mut held = true;

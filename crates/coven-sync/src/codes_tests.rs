@@ -9,7 +9,6 @@ fn location() -> StorageConfig {
         region: "region".into(),
         endpoint: Some("https://s3.us-east-1.amazonaws.com".parse().unwrap()),
         profile: None,
-        prefix: coven_storage::S3Prefix::parse("store").unwrap(),
     }
 }
 
@@ -240,7 +239,6 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
             region: "us-east-1".into(),
             endpoint: None,
             profile: None,
-            prefix: coven_storage::S3Prefix::parse("bae").unwrap(),
         },
         s3_key(),
     );
@@ -260,7 +258,6 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
                 response_headers: coven_storage::S3ResponseHeaders::S3,
                 request_checksums: false,
             })),
-            prefix: coven_storage::S3Prefix::default(),
         },
         S3Credentials {
             access_key_id: "0040123456789ab0000000001".into(),
@@ -273,7 +270,6 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
             region: "auto".into(),
             endpoint: Some("https://storage.googleapis.com".parse().unwrap()),
             profile: None,
-            prefix: coven_storage::S3Prefix::parse("bae").unwrap(),
         },
         S3Credentials {
             access_key_id: "GOOG1EABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRS".into(),
@@ -366,9 +362,9 @@ fn typical_codes_keep_their_lengths() {
     assert_eq!(
         lengths,
         vec![
-            ("S3", 269, Some(378), 436),
-            ("S3, detected settings", 341, Some(450), 508),
-            ("Google Cloud Storage", 317, Some(492), 549),
+            ("S3", 258, Some(367), 425),
+            ("S3, detected settings", 335, Some(444), 501),
+            ("Google Cloud Storage", 306, Some(481), 538),
             ("Dropbox", 257, None, 316),
             ("OneDrive", 303, None, 501),
             ("iCloud", 372, None, 540),

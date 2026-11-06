@@ -516,8 +516,8 @@ pub fn snapshot_frames() -> Vec<Vec<u8>> {
 }
 /// The S3 location `coven-storage` packs into a code's storage part
 /// (D13): provider 0, bucket `bucket`, region `region`, no endpoint, no
-/// profile, base prefix `store`.
-const S3_LOCATION: &[u8] = b"\0\0\0\0\x06bucket\0\0\0\x06region\0\0\0\0\0\x05store";
+/// profile.
+const S3_LOCATION: &[u8] = b"\0\0\0\0\x06bucket\0\0\0\x06region\0\0";
 
 /// Restore contents with test seeds and that S3 location, without a key.
 pub fn restore() -> RestoreCode {

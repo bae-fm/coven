@@ -10,18 +10,12 @@ pub(super) enum Destination<'a> {
 }
 
 impl Destination<'_> {
+    /// The S3 key of this destination: an object's path, or the bucket
+    /// marker, both from the bucket's root.
     pub(super) fn as_str(&self) -> &str {
         match self {
             Self::Object(path) => path.as_str(),
             Self::BucketClaim(_) => BUCKET_CLAIM,
-        }
-    }
-    /// The S3 key of this destination: an object's path under the base
-    /// prefix, or the bucket marker at the bucket's root.
-    pub(super) fn key(&self, prefix: &crate::S3Prefix) -> String {
-        match self {
-            Self::Object(path) => prefix.key(path),
-            Self::BucketClaim(_) => BUCKET_CLAIM.into(),
         }
     }
     pub(super) fn store(&self) -> StoreId {
