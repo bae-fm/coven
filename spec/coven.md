@@ -9708,7 +9708,10 @@ What they don't cover:
   they don't establish the whole storage protocol built from them. The orders a
   pass's reading, applying and claiming rely on are modelled step by step
   (§6), but no model runs a whole pass, and the limits on what a pass sends,
-  such as one writes slot, are tested, not proved.
+  such as one writes slot, are tested, not proved. So is when a device asks
+  for a snapshot (§16.2): the deletion deadline (Appendix G.1) takes covering
+  announcements as given, which the request once uncovered history passes
+  grace supplies.
 - **What a stopped device sends.** The model proves a stopped device takes no
   apply or reload step (§5.4). The restriction on sending, its bootstrap
   join-request exception, and recovery once the cause clears are outside the model.
