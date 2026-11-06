@@ -513,3 +513,129 @@ async fn the_store_key_state_reads_no_custody() {
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
     f.handle.close().await.unwrap();
 }
+
+/// Reconnect Ana's store with the S3 key `key`, as the app does when she
+/// enters another key, recording the steps setup reports.
+async fn reconnect_with(
+    f: &Fixture,
+    key: &str,
+) -> (Result<StorageSetup, StorageSetupError>, Vec<StorageSetupStep>) {
+    let steps = std::sync::Mutex::new(Vec::new());
+    let result = f
+        .handle
+        .setup_s3_storage(
+            f.storage.config(),
+            "Test device",
+            key.into(),
+            SecretText::new(format!("{key} secret")),
+            |progress| steps.lock().unwrap().push(progress.step),
+        )
+        .await;
+    let steps = steps.into_inner().unwrap();
+    (result, steps)
+}
+
+/// The access key custody holds for the store's connection.
+fn custody_key(f: &Fixture) -> String {
+    let kept = f.app.store_keychain(f.directory.id()).storage_credentials().unwrap().unwrap();
+    let StorageCredentials::S3(keys) = StorageCredentials::decode(kept.as_bytes()).unwrap() else {
+        panic!("S3 credentials");
+    };
+    keys.access_key_id
+}
+
+/// A reconnect reaches the provider with the key it was just given, not the
+/// one it holds: refused there, it changes nothing, and the store keeps its
+/// connection, code and credentials; accepted, its check ran on that key
+/// (E5).
+#[tokio::test]
+async fn a_reconnect_checks_the_provider_with_the_newly_supplied_key() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    stop(&f).await;
+    let code = f.handle.restore_code().await.unwrap();
+    let location = coven_storage::recorded_config(&f.directory).unwrap();
+
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
+    let (refused, _) = reconnect_with(&f, "replacement").await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(f.handle.restore_code().await.unwrap(), code);
+    assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), location);
+    assert_eq!(custody_key(&f), "member-key");
+
+    let connections = f.connector.credentials.lock().unwrap().len();
+    reconnect_with(&f, "replacement").await.0.unwrap();
+    let checked = f.connector.credentials.lock().unwrap()[connections].clone();
+    let StorageCredentials::S3(keys) = checked else { panic!("S3 credentials") };
+    assert_eq!(keys.access_key_id, "replacement");
+    assert_eq!(custody_key(&f), "replacement");
+    f.handle.close().await.unwrap();
+}
+
+/// A reconnect with another key records the member's new access in a
+/// `Set access` entry before it commits the key: when that claim fails, the
+/// store keeps its old key and code; when it lands, the member's access is
+/// the new key's id (E5).
+#[tokio::test]
+async fn a_reconnect_with_another_key_records_set_access_before_committing_it() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    stop(&f).await;
+    let code = f.handle.restore_code().await.unwrap();
+    let next = f
+        .storage
+        .list(&ObjectPrefix::all(f.directory.id()))
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|object| object.path.slot_number())
+        .max()
+        .unwrap()
+        .0
+        + 1;
+    f.storage
+        .set_faults(Faults {
+            create_failures: [(
+                ObjectPath::slot(f.directory.id(), next.try_into().unwrap()),
+                (StorageFailure::PermissionDenied, 403),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    let (failed, steps) = reconnect_with(&f, "new-key").await;
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(steps.contains(&StorageSetupStep::RecordingAccess), "{steps:?}");
+    assert_eq!(custody_key(&f), "member-key");
+    assert_eq!(f.handle.restore_code().await.unwrap(), code);
+
+    // Past its point of no return, the setup finishes once sync starts and
+    // the app retries the refused entry.
+    f.storage.set_faults(Faults::none()).await;
+    let pending = f.handle.pending().await.unwrap();
+    let set_access = |subject: &coven_sync::PendingSubject| {
+        matches!(
+            subject,
+            coven_sync::PendingSubject::Operation { kind: OperationKind::SetAccess, .. }
+        )
+    };
+    let Some(coven_sync::PendingSubject::Operation { id, .. }) =
+        pending.iter().map(|record| record.subject.clone()).find(set_access)
+    else {
+        panic!("the Set access entry waits: {pending:?}");
+    };
+    f.advance(Duration::from_secs(1));
+    f.handle.start_sync().await.unwrap();
+    f.handle.retry_pending_operation(id).await.unwrap();
+    synced_since(&f.handle, f.clock.now()).await;
+    let members = f.handle.members().await.unwrap();
+    let ana = members.iter().find(|member| member.is_self).unwrap();
+    assert_eq!(
+        ana.access,
+        coven_format::MemberAccess::S3AccessKey { access_key_id: "new-key".into() }
+    );
+    assert_eq!(custody_key(&f), "new-key");
+    f.handle.close().await.unwrap();
+}
