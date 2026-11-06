@@ -8978,7 +8978,10 @@ forever.
   runs past the slot's end" }`. The last pass is recorded failed with the
   bug, so the sync status shows it, and sync stops. Ben's retry is answered
   `Failed` with `SyncError::WorkerFailed` carrying the bug, and a later
-  `start_sync` fails with the same `WorkerFailed`. The sink heard the bug
+  `start_sync` fails with the same `WorkerFailed`. So does a command the
+  loop had taken or not yet taken as it panicked, such as a `stop_sync`
+  closing it: the loop catches its own panic while it still holds them,
+  records the bug, and only then answers them. The sink heard the bug
   already, so Ben's app shows these and reports neither.
 - Each worker's owner ends the work it served, so nothing waits on a worker
   that is gone. The sync loop and a connection attempt do as above, and
