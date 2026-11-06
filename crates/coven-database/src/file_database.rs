@@ -604,8 +604,7 @@ impl FileDatabase {
         name: FileName,
     ) -> Result<CacheReservation, DbError> {
         let database = &self.database;
-        let lease = database.writer.file_tasks.clone().read_owned().await;
-        let store = database.inner.clone();
+        let writing = BytesWriting::of(database).await;
         let file = file.clone();
         database
             .call(move |inner| {
@@ -628,7 +627,7 @@ impl FileDatabase {
                     reserved: inner.staging.clone(),
                     file,
                     name,
-                    writing: Some(CacheFileWriting { _lease: lease, _store: store }),
+                    writing: Some(writing),
                 })
             })
             .await
@@ -674,16 +673,27 @@ pub struct CacheReservation {
     file: FileRef,
     name: FileName,
     /// Held until a prepared pin takes the copy or it drops.
-    writing: Option<CacheFileWriting>,
+    writing: Option<BytesWriting>,
 }
-/// What a cache file still being written holds: the lease closing the store
-/// waits for, and the open store, so that once its last handle drops the
-/// store stays closing, and a reopen waits, until the writing ends. Opening
-/// removes recorded names, and would delete bytes this writer still owns
-/// (Appendix C.3, F.4).
-struct CacheFileWriting {
+/// What a reservation holds while its bytes are still written, a pin's
+/// whole cache file or a device-only call's copies: the lease closing the
+/// store waits for, and the open store, so that once its last handle drops
+/// the store stays closing, and a reopen waits, until the writing ends.
+/// Opening removes recorded bytes, and would delete bytes this writer still
+/// owns (Appendix C.3, F.4).
+struct BytesWriting {
     _lease: tokio::sync::OwnedRwLockReadGuard<()>,
     _store: Arc<std::sync::RwLock<Option<DatabaseInner>>>,
+}
+impl BytesWriting {
+    /// Hold `database`'s store while bytes are written, once no close has
+    /// begun waiting for its file work.
+    async fn of(database: &Database) -> Self {
+        Self {
+            _lease: database.writer.file_tasks.clone().read_owned().await,
+            _store: database.inner.clone(),
+        }
+    }
 }
 impl Drop for CacheReservation {
     fn drop(&mut self) {

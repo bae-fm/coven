@@ -3,7 +3,7 @@
 //! their bytes exist, the write switching the call's files to them, and the
 //! removal of what a failing call made.
 
-use super::{Database, FileDatabase};
+use super::{BytesWriting, Database, FileDatabase};
 use crate::{sqlite::DatabaseConnection, DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
@@ -79,10 +79,13 @@ impl FileDatabase {
     /// them (Appendix C.3).
     pub fn prepared_device_only(
         &self,
-        reservation: CopyReservation,
+        mut reservation: CopyReservation,
         copies: Vec<DeviceOnlyCopy>,
         _flushed: Flushed,
     ) -> Result<PreparedDeviceOnly, DbError> {
+        // The copies stay reserved, now for the prepared call, which holds
+        // nothing close or a reopen waits for.
+        let _writing = reservation.writing.take();
         let database = &self.database;
         Ok(PreparedDeviceOnly { database: database.clone(), reservation, copies })
     }
@@ -106,7 +109,9 @@ impl Database {
     /// another call is writing a copy at is `CopyPathTaken`. While the
     /// returned reservation is held, no other write's removal takes the
     /// copies; once it drops without the call's switch, as when the call's
-    /// future is dropped, the next write removes them (Appendix C.3).
+    /// future is dropped, the next write removes them (Appendix C.3). Until
+    /// the copies are prepared or it drops, closing the store waits for it,
+    /// and so does a reopen once the last handle drops.
     pub(crate) async fn record_copies(
         &self,
         copies: Vec<FolderCopy>,
@@ -115,6 +120,7 @@ impl Database {
             .iter()
             .map(|copy| text(&copy.path).map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
+        let writing = BytesWriting::of(self).await;
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db: &DatabaseConnection| {
@@ -144,7 +150,7 @@ impl Database {
                 lock_unpoisoned(&inner.copying).extend(paths.iter().cloned());
                 Ok::<_, DbError>(())
             })?;
-            Ok(CopyReservation { copying: inner.copying.clone(), paths })
+            Ok(CopyReservation { copying: inner.copying.clone(), paths, writing: Some(writing) })
         })
         .await
     }
@@ -259,10 +265,14 @@ pub struct CopyReservation {
     /// closed store's records stay for its next open.
     copying: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
     paths: Vec<String>,
+    /// Held while the copies are written, until they are prepared.
+    writing: Option<BytesWriting>,
 }
 
 impl Drop for CopyReservation {
     fn drop(&mut self) {
+        // The copies go free before the store the writing holds can close.
+        let _writing = self.writing.take();
         crate::database::release_copies(&self.copying, &self.paths);
     }
 }

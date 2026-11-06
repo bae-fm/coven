@@ -46,8 +46,9 @@ async fn opening_removes_what_a_crashed_call_made() {
     .unwrap();
     let observed = folder.observe(&album.join("two.flac")).await.unwrap();
     owner.place_copy(&observed).await.unwrap();
-    // The process ends with the call: its reservation never drops.
-    std::mem::forget(reservation);
+    // The call ends and the store closes with no write between, as when
+    // the process ends with the call: the records are all that is left.
+    drop(reservation);
     db.close().await.unwrap();
     let db = open(&store, Provenance::UserProvided).await;
     assert_eq!(local_count(&db, "_coven_copies"), 0);
@@ -134,6 +135,75 @@ async fn the_next_write_removes_what_a_dropped_call_made() {
     assert!(theirs.exists(), "a folder the call didn't make stays");
     assert_eq!(local_count(&db, "_coven_copies"), 0);
     db.close().await.unwrap();
+}
+
+/// A call's copies are written while its reservation is held: dropping the
+/// store's last handle meanwhile leaves the store closing, and a reopen
+/// waits, until the reservation drops. Otherwise the reopen would remove the
+/// copies the call is still writing (Appendix C.3).
+#[tokio::test]
+async fn reopen_waits_for_a_copy_reservation_after_its_database_owner_drops() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let owner = FileDatabase::new(db.clone());
+    let music = tempfile::tempdir().unwrap();
+    let temporary = music.path().join(".coven-1.download");
+    let reservation = owner
+        .record_copies(vec![FolderCopy {
+            path: music.path().join("one.flac"),
+            temporary: temporary.clone(),
+            folders: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    std::fs::write(&temporary, b"half").unwrap();
+    drop(db);
+    drop(owner);
+    let waits = store.when_open_waits();
+    let mut reopen = Box::pin(open(&store, Provenance::UserProvided));
+    crate::tests::until_waiting(&mut reopen, waits).await;
+    assert!(temporary.exists(), "the call is still writing");
+    drop(reservation);
+    let reopened = reopen.await;
+    assert!(!temporary.exists());
+    assert_eq!(local_count(&reopened, "_coven_copies"), 0);
+    reopened.close().await.unwrap();
+}
+
+/// Closing waits for a call's reservation, so a call failing as the store
+/// closes still removes what it made before its reservation drops.
+#[tokio::test]
+async fn a_closing_store_lets_a_failing_call_remove_its_copies() {
+    use std::{future::Future, task::Poll};
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let owner = FileDatabase::new(db.clone());
+    let music = tempfile::tempdir().unwrap();
+    let (path, temporary) = (music.path().join("one.flac"), music.path().join(".coven-1.download"));
+    let reservation = owner
+        .record_copies(vec![FolderCopy {
+            path: path.clone(),
+            temporary: temporary.clone(),
+            folders: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    std::fs::write(&temporary, b"half").unwrap();
+    let mut closing = Box::pin(db.close());
+    // Polled once, the close has begun: the store is closing.
+    std::future::poll_fn(|cx| {
+        assert!(closing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    owner.abandon_copies(vec![path]).await.unwrap();
+    assert!(!temporary.exists());
+    drop(reservation);
+    drop(owner);
+    closing.await.unwrap();
+    let reopened = open(&store, Provenance::UserProvided).await;
+    assert_eq!(local_count(&reopened, "_coven_copies"), 0);
+    reopened.close().await.unwrap();
 }
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`

@@ -11201,13 +11201,16 @@ the rules above.
   closing before releasing its owners. Blocking work keeps the database
   connections and writer lock until it finishes; subscriptions keep only their
   active database reads.
-- **A pin's cache file still being written** keeps them too, until the
-  prepared pin takes it or the writing stops (§17.8). Ana's app stops
-  preparing a pin of track 7 and drops its handle while coven is still
-  creating the track's cache file on a blocking thread, then opens the store
-  again. The open waits for that creation to end. Otherwise the open would
-  remove the file's recorded name first, and the file created after it would
-  be left with nothing naming it for removal (Appendix C.3).
+- **Bytes still being written for a call** keep them too: a pin's cache
+  file until the prepared pin takes it (§17.8), and a device-only call's
+  copies until the call has prepared them (§17.3), or until the writing
+  stops. Closing waits for them as well, so a call failing as the store
+  closes still removes the copies it made. Ana's app stops preparing a pin
+  of track 7 and drops its handle while coven is still creating the track's
+  cache file on a blocking thread, then opens the store again. The open
+  waits for that creation to end. Otherwise the open would remove the file's
+  recorded name first, and the file created after it would be left with
+  nothing naming it for removal (Appendix C.3).
 - **Reopening in the same process** waits for release, using a process-wide
   registry keyed by the store's canonical directory and id, and a notification
   when the lock handles close. There are no timeouts or polling sleeps. A live
