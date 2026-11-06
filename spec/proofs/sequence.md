@@ -880,6 +880,27 @@ counterexample for each way it left a claim open for good:
   record lands; the share's end it then claims is refused by that open claim,
   and the invite never ends.
 
+[`AccessKeyReplacement`](sequence/CovenSequence/AccessKeyReplacement.lean)
+models a member replacing their S3 key A with B on their own device (§14.3):
+custody's key, a keychain entry, and the key history records, an admin entry
+the device journals and claims. The keychain and the journal share no
+transaction, so a crash can come between any two steps. Under `Rules.correct`
+the call keeps B apart in custody, journals `SetAccess` for B, and connects
+with B only once history records it; settling swaps a kept key history
+records in and lets go of one nothing journals or records:
+
+- `custody_never_ahead`: in every reachable state, custody connects with B
+  only once history records B.
+- `replacement_settles`: from every reachable state, coven's own steps, the claim landing
+  or refused and settling, end with nothing journaled, no key kept apart, and
+  custody on the key history records.
+
+`Rules.before`, which committed B to custody first, has a counterexample:
+
+- `custody_first_strands`: a crash right after the commit leaves custody on
+  B, history on A and nothing journaled, and no step of coven's own changes
+  it.
+
 [`JoinStatus`](sequence/CovenSequence/JoinStatus.lean) models what a waiting
 join reports across its checks and across the calls that resume it: a call
 may stop between checks, or in the check whose copies opened its keys, after

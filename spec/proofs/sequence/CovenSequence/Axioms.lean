@@ -348,6 +348,9 @@ import SequenceApply
 #print axioms CovenSequence.InviteClaims.settles
 #print axioms CovenSequence.InviteClaims.ended_share_strands_claim
 #print axioms CovenSequence.InviteClaims.cancelled_share_strands_claim
+#print axioms CovenSequence.AccessKeyReplacement.custody_never_ahead
+#print axioms CovenSequence.AccessKeyReplacement.replacement_settles
+#print axioms CovenSequence.AccessKeyReplacement.custody_first_strands
 #print axioms CovenSequence.RestoreRegistration.reachable_inv
 #print axioms CovenSequence.RestoreRegistration.registered_listed
 #print axioms CovenSequence.RestoreRegistration.progress
