@@ -6,6 +6,9 @@
 #   scripts/check-fast.sh
 # COVEN_CHECK_PACKAGES may select Cargo packages for clippy and checker
 # diagnostics. Formatting and the checker's analysis still read the workspace.
+# Quick mode (`builds mode`, or HOOK_MODE=quick) replaces clippy with
+# `cargo check --all-targets --all-features` of the same packages and skips the
+# build without features.
 set -euo pipefail
 
 if [ "$#" -ne 0 ]; then
@@ -14,6 +17,9 @@ if [ "$#" -ne 0 ]; then
 fi
 
 cd "$(dirname "$0")/.."
+
+source scripts/hooks/hook-mode.sh
+MODE=$(hook_mode)
 
 step() { echo ""; echo "── $1"; }
 
@@ -38,6 +44,12 @@ scripts/cargo.sh run --quiet -p owner-construction-check -- "${checker_args[@]}"
 
 step "cargo deny check advisories bans licenses: the crates Appendix F.1 refuses and the licenses coven accepts"
 cargo deny check advisories bans licenses
+
+if [ "$MODE" = quick ]; then
+    step "cargo check ${packages[*]} --all-targets --all-features (quick mode: no clippy)"
+    scripts/cargo.sh check "${packages[@]}" --all-targets --all-features
+    exit 0
+fi
 
 step "cargo clippy ${packages[*]} --all-targets --all-features"
 scripts/cargo.sh clippy "${packages[@]}" --all-targets --all-features -- -D warnings

@@ -26,6 +26,12 @@ run_check() {
 }
 
 source "$(dirname "$0")/restage-formatted.sh"
+source "$(dirname "$0")/hook-mode.sh"
+
+# Quick mode (`builds mode`, or HOOK_MODE) replaces clippy with a cargo check;
+# see scripts/hooks/hook-mode.sh and scripts/check-fast.sh.
+MODE=$(hook_mode) || exit 1
+echo "Pre-commit hook mode: $MODE"
 
 # Formatting, clippy and the checker's rules run before every commit (Appendix F.6).
 snapshot_staged_files
@@ -47,7 +53,7 @@ if echo "$CHANGED_FILES" | grep -qE '^scripts/(check-spec\.py|check_spec_tests\.
         exit 1
     }
 fi
-if echo "$CHANGED_FILES" | grep -qE '^scripts/(check-fast\.sh|cargo\.sh|check_fast_tests\.py)$'; then
+if echo "$CHANGED_FILES" | grep -qE '^scripts/(check-fast\.sh|cargo\.sh|check_fast_tests\.py|hooks/hook-mode\.sh)$'; then
     run_check "check-fast.sh's tests" python3 scripts/check_fast_tests.py || {
         echo "Fix the findings above and try again"
         exit 1
