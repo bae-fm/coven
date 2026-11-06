@@ -9163,7 +9163,12 @@ reads.
 **A slot is read from storage once.** A slot never changes once created, so a
 device that already holds all of a slot's bytes uses them and sends no request.
 Say Ana restores her phone from a store with no floor yet: finding her keys
-reads slots 1 to 166, and loading them reads none of those again.
+reads slots 1 to 166, and loading them reads none of those again. Once the
+scan has read a slot, its bytes stay only as bytes the input budget may evict,
+as a slot's do once the reader has applied it. Loading uses them while the
+budget keeps them and reads a slot again once it has evicted it. Were the
+scan to keep them held, a slot loading doesn't read again would stay held for
+good and never be evicted.
 
 **Reading many slots reads ahead.** A device reading consecutive slots starts
 with one read and doubles the reads in flight with each slot storage sends, up

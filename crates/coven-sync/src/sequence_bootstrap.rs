@@ -194,27 +194,36 @@ impl SequenceSync {
                 let path = self.path(next)?;
                 scanned += 1;
                 bytes += input.object().size;
-                let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
-                needed.get_or_insert(prefix.key);
-                if let SlotKind::KeyCopy(copy) = &prefix.kind {
-                    routed_past |=
-                        copy.routing.member == member.member() && !copy.routing.held_by(member);
-                    if copy.routing.held_by(member) {
-                        let object = slot_object::read_exact(
-                            &mut input.local_bytes().await?,
-                            (input.object().size)
-                                .min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
-                                as usize,
-                            &path,
-                        )?;
-                        let original = OriginalSlot { slot: coven_merge::Slot(next), object };
-                        keys.extend(crate::snapshot_object::routed_key(
-                            &original,
-                            self.store(),
-                            member,
-                        )?);
+                let read = async {
+                    let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
+                    needed.get_or_insert(prefix.key);
+                    if let SlotKind::KeyCopy(copy) = &prefix.kind {
+                        routed_past |=
+                            copy.routing.member == member.member() && !copy.routing.held_by(member);
+                        if copy.routing.held_by(member) {
+                            let object = slot_object::read_exact(
+                                &mut input.local_bytes().await?,
+                                (input.object().size)
+                                    .min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
+                                    as usize,
+                                &path,
+                            )?;
+                            let original = OriginalSlot { slot: coven_merge::Slot(next), object };
+                            keys.extend(crate::snapshot_object::routed_key(
+                                &original,
+                                self.store(),
+                                member,
+                            )?);
+                        }
                     }
+                    Ok::<_, SyncError>(())
                 }
+                .await;
+                // The scan is done with the slot's bytes, read or refused:
+                // they stay for the reader that applies the slot, but count
+                // against the input budget only as bytes it may evict (§21.1).
+                input.release().await?;
+                read?;
                 if let Some(scan) = scan.as_deref_mut() {
                     let end = match located {
                         Some(end) => end,

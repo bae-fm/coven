@@ -421,6 +421,33 @@ async fn a_restore_reads_each_slot_once() {
     }
 }
 
+/// Ana restores her laptop from a store with no floor, so the scan for her
+/// copy reads every slot. Each slot's bytes are released once the scan has
+/// read them: a budget of zero evicts them all, where a scan that kept them
+/// held would leave them safe from eviction for good (§21.1).
+#[tokio::test]
+async fn a_restore_scan_releases_each_slot_it_reads() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in ["a", "b", "c"] {
+        insert(&ana.sync.database, id, "before restore").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
+    let found = {
+        let mut session = laptop.sync.session.lock().await;
+        laptop.sync.bootstrap_keys(&mut session, &laptop.identity, None).await.unwrap()
+    };
+    assert!(matches!(found, super::Bootstrap::Keys(_)));
+    assert!(laptop.sync.database.input_budget().await.unwrap().retained > 0);
+    let budget = laptop.sync.database.set_input_budget(0).await.unwrap();
+    assert_eq!(budget.retained, 0);
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Ben's laptop downloads one file at a time, and its restore still keeps 16
 /// slot reads in flight: the sequence's reads don't count against the
 /// download limit, which is for files (§21.1). While slot 20's read is held,
