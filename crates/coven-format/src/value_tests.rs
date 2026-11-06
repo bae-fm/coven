@@ -138,3 +138,55 @@ fn slots_are_positive_unsigned_numbers() {
     }
     assert!(Slot::get(&mut Decoder::new(&[0; 8]).unwrap()).is_err());
 }
+
+fn row_id(table: &str, key: &[u8], audience: Audience) -> RowId {
+    RowId { table: table.into(), key: key.to_vec(), audience }
+}
+
+#[test]
+fn row_ids_order_by_table_then_key_then_audience_with_the_store_first() {
+    let circle = |n: u128| Audience::Circle(CircleId(Uuid::from_u128(n)));
+    // The store sorts before every circle, and circles by id bytes.
+    let audiences = [Audience::Store, circle(1), circle(2), circle(u128::MAX)];
+    for pair in audiences.windows(2) {
+        assert!(pair[0] < pair[1]);
+        assert!(bytes(&pair[0]) < bytes(&pair[1]));
+    }
+    // Each field decides only when the ones before it are equal, so these
+    // are listed in the order the rule gives.
+    let ordered = [
+        row_id("a", b"z", circle(9)),
+        row_id("b", b"a", Audience::Store),
+        row_id("b", b"a", circle(1)),
+        row_id("b", b"a", circle(2)),
+        row_id("b", b"b", Audience::Store),
+        row_id("c", b"a", Audience::Store),
+    ];
+    for pair in ordered.windows(2) {
+        assert!(pair[0] < pair[1], "{:?} sorts before {:?}", pair[0], pair[1]);
+    }
+    // A map writes its keys in that order, and one written in another order
+    // is refused.
+    let write = |keys: &[&RowId]| {
+        let mut out = Encoder::new();
+        (keys.len() as u32).put(&mut out).unwrap();
+        for key in keys {
+            key.put(&mut out).unwrap();
+            1u8.put(&mut out).unwrap();
+        }
+        out.bytes
+    };
+    let read = |encoded: &[u8]| {
+        <std::collections::BTreeMap<RowId, u8> as Wire>::get(&mut Decoder::new(encoded).unwrap())
+    };
+    let sorted = write(&[&ordered[1], &ordered[2], &ordered[4]]);
+    assert_eq!(read(&sorted).unwrap().len(), 3);
+    for swapped in [
+        write(&[&ordered[2], &ordered[1]]),
+        write(&[&ordered[4], &ordered[2]]),
+        write(&[&ordered[5], &ordered[4]]),
+        write(&[&ordered[1], &ordered[1]]),
+    ] {
+        assert!(matches!(read(&swapped), Err(Error::Invalid { rule: Rule::Order, .. })));
+    }
+}
