@@ -106,9 +106,17 @@ pub(crate) fn checked_change(
         | AddCircleMember { circle, .. }
         | RemoveCircleMember { circle, .. }
         | RotateKey { audience: Audience::Circle(circle), .. }
-            if !state.circles.contains_key(circle) || state.deleted(&Audience::Circle(*circle)) =>
+            if state.gone_circle(circle) =>
         {
             Some(EntryTarget::Circle(*circle))
+        }
+        RaiseSchema { .. } | Reset { .. } => {
+            match &boundary.as_ref().expect("resolved boundary").snapshot().audience {
+                Audience::Circle(circle) if state.gone_circle(circle) => {
+                    Some(EntryTarget::Circle(*circle))
+                }
+                _ => None,
+            }
         }
         _ => None,
     };

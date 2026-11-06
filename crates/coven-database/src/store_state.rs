@@ -86,6 +86,12 @@ impl StoreState {
         !self.deleted(audience) && self.reached(audience) < version
     }
 
+    /// Whether `circle` is one this state doesn't hold, or deleted: a change
+    /// aimed at it meets a gone target (§10.4, §15.9).
+    pub fn gone_circle(&self, circle: &CircleId) -> bool {
+        !self.circles.contains_key(circle) || self.circle_deletions.contains_key(circle)
+    }
+
     /// Whether `audience` is a deleted circle (§15.9).
     pub fn deleted(&self, audience: &Audience) -> bool {
         match audience {

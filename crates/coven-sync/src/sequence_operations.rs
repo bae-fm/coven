@@ -287,14 +287,26 @@ impl SequenceSync {
                 {
                     return Ok(false);
                 }
-                if !crate::effects::belongs(
-                    &session.history.state,
-                    &request.audience,
-                    &member.member(),
-                ) || !session.history.state.device_acts_for(&self.device, &member.member())
+                let state = &session.history.state;
+                let author = member.member();
+                if state.active_member(&author).is_none()
+                    || !state.device_acts_for(&self.device, &author)
+                {
+                    return Err(OperationRejection::NotAllowed);
+                }
+                // A snapshot of a gone circle meets a gone target, as every
+                // change aimed at it does (§10.4).
+                if let Audience::Circle(circle) = &request.audience {
+                    if state.gone_circle(circle) {
+                        return Err(OperationRejection::TargetGone(crate::EntryTarget::Circle(
+                            *circle,
+                        )));
+                    }
+                }
+                if !crate::effects::belongs(state, &request.audience, &author)
                     || (request.purpose == Purpose::Reset
                         && request.audience == Audience::Store
-                        && !session.history.state.active_admin(&member.member()))
+                        && !state.active_admin(&author))
                 {
                     return Err(OperationRejection::NotAllowed);
                 }

@@ -778,3 +778,59 @@ fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
     assert!(!history.exposed(&Audience::Store, key(90)));
     assert_eq!(sending(&history), key(90));
 }
+
+/// Ana announces a raise of Gifts and a reset of it, and Ben deletes Gifts
+/// before either entry lands. Every device reads those entries after the
+/// deletion and refuses them as aimed at a gone target, so they change
+/// nothing; each consumes its slot as any refused entry does (§10.4,
+/// §15.9).
+#[test]
+fn a_raise_or_reset_of_a_deleted_circle_finds_its_target_gone() {
+    let mut household = Household::new();
+    let (ana, ben) = (household.ana, household.ben);
+    let gifts = CircleId(uuid::Uuid::from_u128(40));
+    household.entry(
+        1,
+        ana,
+        StoreChange::CreateCircle {
+            circle: gifts,
+            name: "Gifts".into(),
+            breaking_version: 0,
+            key: key(91),
+            key_hash: [2; 32],
+        },
+    );
+    household.entry(1, ana, StoreChange::AddCircleMember { circle: gifts, member: ben });
+    let mut announce = |purpose| {
+        household.slots += 1;
+        let slot = Slot(household.slots);
+        household.history.announcements.insert(
+            slot,
+            SnapshotAnnouncement {
+                snapshot: coven_format::admin::SnapshotId {
+                    audience: Audience::Circle(gifts),
+                    device: DeviceId(1),
+                    number: slot.0,
+                },
+                covers: slot.0 - 1,
+                breaking_version: 0,
+                purpose,
+                digest: [slot.0 as u8; 32],
+            },
+        );
+        slot
+    };
+    let raise = announce(coven_format::sequence::Purpose::Raise(2));
+    let reset = announce(coven_format::sequence::Purpose::Reset);
+    household.entry(2, ben, StoreChange::DeleteCircle { circle: gifts });
+    for change in [
+        StoreChange::RaiseSchema { version: 2, announcement: raise },
+        StoreChange::Reset { announcement: reset },
+    ] {
+        assert_eq!(
+            household.check(1, ana, change.clone()).err(),
+            Some(OperationRejection::TargetGone(coven_database::EntryTarget::Circle(gifts))),
+            "{change:?}"
+        );
+    }
+}

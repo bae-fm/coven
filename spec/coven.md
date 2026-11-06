@@ -3256,9 +3256,11 @@ renames, so loading one recovers the name at its covered prefix.
   a circle that state doesn't hold. Its authority rule asks who owns the device
   or reads the circle, which an absent target can't answer, and `NotAllowed`
   would tell Ana she lacks a right she has. A deleted circle is gone the same
-  way for every change aimed at it, rotating its key included: Ana deletes
-  Gifts and then asks for its key to be replaced, and the rotation is refused
-  with `TargetGone` (§15.9).
+  way for every change aimed at it, including rotating its key and resetting
+  or raising it: Ana deletes Gifts and then asks for its key to be replaced,
+  and the rotation is refused with `TargetGone` (§15.9). A raise or reset entry
+  for Gifts that lands after the deletion is refused the same way on every
+  device and consumes its slot.
 - **Old identities stay known.** Snapshots keep the history of which keys each
   member had, removed members and devices, and every public key ever used. Old
   writes are checked against them, and they stop an id or key being reused.

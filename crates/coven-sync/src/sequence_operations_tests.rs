@@ -930,3 +930,29 @@ async fn dropping_an_operations_call_keeps_its_journal_and_the_rotation_lands_on
     ben.sync.pass().await.unwrap();
     close(&[&ana, &ben]).await;
 }
+
+/// Ana deletes Gifts, then asks for it to be reset. The circle is gone, so
+/// the reset is refused as a gone target, not as a right she lacks, and
+/// nothing is claimed (§10.4, §15.9).
+#[tokio::test]
+async fn resetting_a_deleted_circle_finds_its_target_gone() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync.administer(StoreChange::DeleteCircle { circle }).await.unwrap();
+    let applied = ana.database().applied_slot().await.unwrap();
+    let result = ana.sync.reset(coven_merge::Audience::Circle(circle)).await;
+    assert!(
+        matches!(
+            result,
+            Err(SyncError::Rejected(OperationRejection::TargetGone(
+                crate::EntryTarget::Circle(gone)
+            ))) if gone == circle
+        ),
+        "{result:?}"
+    );
+    assert_eq!(ana.database().applied_slot().await.unwrap(), applied);
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    ana.database().close().await.unwrap();
+}
