@@ -105,6 +105,9 @@ pub struct Database<M: Mode = Writer> {
     /// that can panic, so a panic while it is written leaves it `None`, a
     /// whole state: the lock is taken as it is (E15).
     inner: Arc<RwLock<Option<M::Open>>>,
+    /// Marks the store's lock closing, for a wait in this process on its
+    /// release, once closing begins or the last clone drops.
+    closing: Arc<coven_foundation::files::StoreClosingGuard>,
     /// What only the writer holds beside it.
     writer: M::WriterParts,
 }
@@ -116,6 +119,7 @@ impl<M: Mode> Clone for Database<M> {
             observer: self.observer.clone(),
             bugs: self.bugs.clone(),
             inner: self.inner.clone(),
+            closing: self.closing.clone(),
             writer: self.writer.clone(),
         }
     }
@@ -129,7 +133,6 @@ pub struct WriterParts {
     /// The device's network as this process last heard of it, which
     /// coven's views read (§4).
     network: crate::network_facts::NetworkFacts,
-    closing: Arc<coven_foundation::files::StoreClosingGuard>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
     /// Told when a close finds a call holding the open store and waits for
     /// it to end.
@@ -527,7 +530,7 @@ impl Database {
     /// Mark this instance as closing for a reopen to wait on, though workers
     /// still hold clones of it: the facade's owning scope ended (F.4).
     pub fn begin_close(&self) {
-        self.writer.closing.begin_close();
+        self.closing.begin_close();
     }
     /// Observe new local writes: rows inserted into the outgoing write queue.
     /// Upload confirmation removing a row is this device's own bookkeeping
@@ -840,7 +843,7 @@ impl Database {
     /// Wait for database calls, close all connections, then release the writer lock.
     /// Every subsequent database call, including close, reports `StoreClosed`.
     pub async fn close(&self) -> Result<(), DbError> {
-        self.writer.closing.begin_close();
+        self.closing.begin_close();
         let database = self.clone();
         // Closing runs as its own task so that a caller dropping this future
         // doesn't stop it partway; the runtime dropping that task can.
@@ -896,11 +899,13 @@ impl Database {
 }
 
 impl Database<ReadOnly> {
-    /// Refuse every later call on every clone of this handle with
-    /// `StoreClosed`, at once and before its connections close; a call
-    /// already running answers `StoreClosed` too (E1).
-    pub fn refuse_calls(&self) {
+    /// Begin closing every clone of this handle, at once and before its
+    /// connections close: every later call fails with `StoreClosed`, a call
+    /// already running answers `StoreClosed` too, and a deletion in this
+    /// process waits for the readers' lock to be released (E1).
+    pub fn begin_close(&self) {
         self.observer.close();
+        self.closing.begin_close();
     }
 
     /// Wait for active calls and close every clone of this handle.

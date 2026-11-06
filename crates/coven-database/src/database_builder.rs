@@ -301,10 +301,10 @@ impl DatabaseBuilder {
         }
         Ok(Database {
             observer: observer.clone(),
+            closing: Arc::new(lock.closing_guard()),
             writer: WriterParts {
                 transfers,
                 network,
-                closing: Arc::new(lock.closing_guard()),
                 file_tasks: Arc::new(tokio::sync::RwLock::new(())),
                 #[cfg(test)]
                 close_waits: Arc::new(Mutex::new(None)),
@@ -403,6 +403,7 @@ impl DatabaseBuilder {
         writer.serve(observer.clone());
         Ok(Database {
             observer: observer.clone(),
+            closing: Arc::new(lock.closing_guard()),
             writer: (),
             bugs: self.bugs,
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {

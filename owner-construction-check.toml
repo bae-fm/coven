@@ -1178,6 +1178,9 @@ tables = [
     "acquire_registered",
     # Takes a lock at once or refuses, for a test.
     "try_acquire",
+    # Reserves a reader's lock and takes its file at once, beside the
+    # store's other readers.
+    "acquire_reader",
     # The reserved lock's file, kept with its registration.
     "LockRegistration::acquire_file",
 ]
@@ -1189,10 +1192,11 @@ tables = [
 # A test's clock, which a test hands the builder as it would the system's.
 "crates/coven-foundation/src/clock.rs" = ["FixedClock::new"]
 "crates/coven-foundation/src/clock_polling.rs" = ["PollingClock::new"]
-# A store's writer or bootstrap lock, taken through the registry.
+# A store's writer, reader or bootstrap lock, taken through the registry.
 "crates/coven-foundation/src/files/lock.rs" = [
     "acquire",
     "acquire_for_open",
+    "acquire_reader",
     "acquire_bootstrap",
     # A deletion's locks, with the bootstrap lock it takes or a bootstrap's
     # lease.

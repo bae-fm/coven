@@ -14,6 +14,9 @@ use tokio::sync::watch;
 pub(super) enum LockKind {
     Writer,
     Bootstrap,
+    /// A shared readers' lock: any number of instances hold it at once, and
+    /// no writer or bootstrap waits on one closing.
+    Reader,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,7 +30,7 @@ type StoreKey = (PathBuf, StoreId);
 
 #[derive(Debug)]
 struct Registry {
-    stores: BTreeMap<StoreKey, BTreeMap<LockKind, Arc<LockEntry>>>,
+    stores: BTreeMap<StoreKey, BTreeMap<(LockKind, LockInstance), Arc<LockEntry>>>,
     /// How many locks were reserved: each reservation is the next instance.
     reserved: u64,
 }
@@ -46,7 +49,7 @@ const REGISTRY: &str = "the process's store lock registry";
 
 /// One reservation of a lock: no other reservation in the process, of any
 /// store, has the same instance.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct LockInstance(u64);
 
 #[derive(Debug)]
@@ -81,9 +84,11 @@ impl StoreClosingGuard {
             crate::locks::abort_broken(REGISTRY, "a held lock is registered")
         };
         // A dropped bootstrap owns the installation, including a writer that
-        // may still be opening or running blocking work on its behalf.
-        for (kind, held) in locks {
-            if entry.kind == LockKind::Bootstrap || *kind == entry.kind {
+        // may still be opening or running blocking work on its behalf. Any
+        // other lock closes only its own instance: one reader closing leaves
+        // the others live.
+        for held in locks.values() {
+            if entry.kind == LockKind::Bootstrap || Arc::ptr_eq(held, entry) {
                 held.phase.send_replace(LockPhase::Closing);
             }
         }
@@ -137,6 +142,7 @@ impl LockRegistration {
         let (directory, id) = &self.entry.store;
         let file = match self.entry.kind {
             LockKind::Writer => lock_existing(directory, *id, false)?.1,
+            LockKind::Reader => lock_existing(directory, *id, true)?.1,
             LockKind::Bootstrap => lock_bootstrap(directory, *id)?,
         };
         Ok(RegisteredLock { _file: file, registration: self })
@@ -159,7 +165,7 @@ impl Drop for LockRegistration {
         let Some(locks) = registry.stores.get_mut(&self.entry.store) else {
             crate::locks::abort_broken(REGISTRY, "a held lock is registered")
         };
-        match locks.remove(&self.entry.kind) {
+        match locks.remove(&(self.entry.kind, self.entry.instance)) {
             Some(removed) if Arc::ptr_eq(&removed, &self.entry) => {}
             _ => crate::locks::abort_broken(REGISTRY, "a held lock is registered as itself"),
         }
@@ -170,6 +176,27 @@ impl Drop for LockRegistration {
     }
 }
 
+/// The registered instances of `kind` among one store's locks.
+fn held(
+    locks: &BTreeMap<(LockKind, LockInstance), Arc<LockEntry>>,
+    kind: LockKind,
+) -> impl Iterator<Item = &Arc<LockEntry>> {
+    locks.iter().filter(move |((held, _), _)| *held == kind).map(|(_, entry)| entry)
+}
+
+/// Take a shared readers' lock now, registered so that a deletion in this
+/// process waits for it once its holder begins closing.
+pub(super) fn acquire_reader(
+    directory: &Path,
+    id: StoreId,
+) -> Result<RegisteredLock, StoreLockError> {
+    let registration = {
+        let mut registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
+        reserve(&mut registry, (directory.to_owned(), id), LockKind::Reader)
+    };
+    registration.acquire_file()
+}
+
 fn reserve(registry: &mut Registry, store: StoreKey, kind: LockKind) -> LockRegistration {
     registry.reserved += 1;
     let entry = Arc::new(LockEntry {
@@ -178,7 +205,8 @@ fn reserve(registry: &mut Registry, store: StoreKey, kind: LockKind) -> LockRegi
         instance: LockInstance(registry.reserved),
         phase: watch::channel(LockPhase::Live).0,
     });
-    assert!(registry.stores.entry(store).or_default().insert(kind, entry.clone()).is_none());
+    let key = (kind, entry.instance);
+    assert!(registry.stores.entry(store).or_default().insert(key, entry.clone()).is_none());
     LockRegistration { entry }
 }
 
@@ -191,7 +219,7 @@ pub(super) fn try_acquire(
     let registration = {
         let mut registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
         let store = (directory.to_owned(), id);
-        if registry.stores.get(&store).is_some_and(|locks| locks.contains_key(&kind)) {
+        if registry.stores.get(&store).is_some_and(|locks| held(locks, kind).next().is_some()) {
             return Err(StoreLockError::AlreadyOpen(id));
         }
         reserve(&mut registry, store, kind)
@@ -216,14 +244,17 @@ pub(super) async fn acquire_registered(
             let locks = registry.stores.get(&store);
             // A live holder of the requested lock always refuses immediately,
             // even if a different lock on this directory is closing.
-            if locks
-                .and_then(|locks| locks.get(&kind))
-                .is_some_and(|entry| *entry.phase.borrow() == LockPhase::Live)
-            {
+            if locks.is_some_and(|locks| {
+                held(locks, kind).any(|entry| *entry.phase.borrow() == LockPhase::Live)
+            }) {
                 return Err(StoreLockError::AlreadyOpen(id));
             }
+            // Readers share the store with a writer and a bootstrap, so
+            // neither waits on one closing.
             match locks.and_then(|locks| {
-                locks.values().find(|entry| *entry.phase.borrow() == LockPhase::Closing)
+                locks.values().find(|entry| {
+                    entry.kind != LockKind::Reader && *entry.phase.borrow() == LockPhase::Closing
+                })
             }) {
                 Some(entry) => Acquisition::Waiting(entry.phase.subscribe()),
                 None => Acquisition::Reserved(reserve(&mut registry, store.clone(), kind)),
@@ -241,8 +272,8 @@ pub(super) async fn acquire_registered(
 }
 
 /// Wait until no instance of the store at `directory` in this process is
-/// closing. A live instance is not waited for: whatever lock the caller takes
-/// next refuses it.
+/// closing, a read-only one included. A live instance is not waited for:
+/// whatever lock the caller takes next refuses it.
 pub(super) async fn closed(directory: &Path, id: StoreId) {
     let store = (directory.to_owned(), id);
     loop {
@@ -269,8 +300,8 @@ pub(super) fn bootstrap_running(directory: &Path, id: StoreId, instance: LockIns
     registry
         .stores
         .get(&(directory.to_owned(), id))
-        .and_then(|locks| locks.get(&LockKind::Bootstrap))
-        .is_some_and(|entry| entry.instance == instance && *entry.phase.borrow() == LockPhase::Live)
+        .and_then(|locks| locks.get(&(LockKind::Bootstrap, instance)))
+        .is_some_and(|entry| *entry.phase.borrow() == LockPhase::Live)
 }
 
 #[cfg(test)]

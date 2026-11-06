@@ -56,7 +56,16 @@ impl StoreLock {
 /// A shared lock that prevents deletion while a reader holds store files open.
 #[derive(Debug)]
 pub struct StoreReadLock {
-    _file: FileLock,
+    _file: RegisteredLock,
+}
+
+impl StoreReadLock {
+    /// Mark this reader as closing when its owner begins to close, so a
+    /// deletion in this process waits for its release instead of refusing.
+    /// This guard does not retain the OS lock.
+    pub fn closing_guard(&self) -> StoreClosingGuard {
+        self._file.closing_guard()
+    }
 }
 
 /// A held lock on the cache's range writes: shared by a write in progress,
@@ -336,8 +345,8 @@ pub(crate) fn acquire_reader(
     directory: &Path,
     id: StoreId,
 ) -> Result<StoreReadLock, StoreLockError> {
-    let (_, file) = lock_existing(directory, id, true)?;
-    Ok(StoreReadLock { _file: file })
+    let directory = resolve_directory(directory)?;
+    Ok(StoreReadLock { _file: registry::acquire_reader(&directory, id)? })
 }
 
 pub(super) fn lock_existing(

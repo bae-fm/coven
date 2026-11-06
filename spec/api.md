@@ -1859,8 +1859,10 @@ pub enum StoreLockError {
     /// lock: opening, bootstrapping or discarding returns this error
     /// immediately. If this process's instance is closing, opening,
     /// bootstrapping or discarding the same store waits until its last
-    /// blocking work finishes and its lock handles close,
-    /// then tries to take the lock. The wait uses release notifications, with
+    /// blocking work finishes and its lock handles close, then tries to take
+    /// the lock. Discarding waits so for a closing read-only handle too;
+    /// opening and bootstrapping share the store with readers and don't wait
+    /// on one. The wait uses release notifications, with
     /// no timeout or polling, keyed by canonical directory and store id.
     AlreadyOpen(StoreId),
     /// An unfinished first installation must be resumed by the call that
@@ -3933,8 +3935,10 @@ impl CovenReadHandle {
     /// storage client and their store lock, while the app still holds the
     /// handle. From its first poll every clone refuses calls with
     /// `StoreClosed`, so none runs after closing begins; a call running then
-    /// answers `StoreClosed` too. Reports connection-close failures;
-    /// cancellation does not stop closing, which runs as its own task (E15).
+    /// answers `StoreClosed` too, and discarding the store in this process
+    /// waits for the close to release the readers' lock. Reports
+    /// connection-close failures; cancellation does not stop closing, which
+    /// runs as its own task (E15).
     pub async fn close(&self) -> Result<(), DbError>;
 
     pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>

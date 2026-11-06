@@ -75,7 +75,7 @@ impl CovenReadHandle {
     /// this future doesn't stop it (E1, E15). File streams retain their own
     /// locks.
     pub async fn close(&self) -> Result<(), DbError> {
-        self.database.refuse_calls();
+        self.database.begin_close();
         let handle = self.clone();
         let bugs = self.database.bugs().clone();
         let closing = async move {

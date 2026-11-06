@@ -178,3 +178,29 @@ async fn a_layout_symlink_observes_the_same_closing_writer() {
     drop(lock);
     drop(reopen.await.unwrap());
 }
+
+/// One reader beginning to close leaves the store's other readers live, a
+/// writer opens beside it without waiting, and waiting for the store's
+/// closing instances ends once that reader's lock is released.
+#[tokio::test]
+async fn a_closing_reader_is_waited_for_only_by_closed_and_only_until_released() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(root.path().into());
+    let id = StoreId(uuid::Uuid::from_u128(3));
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
+    let closing = store.lock_read_only().unwrap();
+    let other = store.lock_read_only().unwrap();
+    closing.closing_guard().begin_close();
+    let writer = tokio::time::timeout(HANG_GUARD, store.lock_for_open())
+        .await
+        .expect("a writer doesn't wait on a closing reader")
+        .unwrap();
+    let mut waiting = Box::pin(store.closed());
+    assert!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await.is_pending());
+    drop(closing);
+    tokio::time::timeout(HANG_GUARD, waiting).await.expect("released").unwrap();
+    drop(writer);
+    assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
+    drop(other);
+    assert!(store.lock_for_deletion().unwrap().is_some());
+}

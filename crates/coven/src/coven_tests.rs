@@ -706,3 +706,37 @@ async fn cancelling_a_read_only_close_still_closes_every_clone() {
         assert!(matches!(read, Err(CovenError::Database(DbError::StoreClosed))), "{read:?}");
     }
 }
+
+/// A read-only close dropped after its first poll still closes every
+/// clone's connections and releases the readers' lock, and a deletion in
+/// this process waits for that release instead of refusing (E1, E15).
+#[tokio::test]
+async fn a_dropped_read_only_close_releases_its_connections_and_readers_lock() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    builder(&app).open(directory.id(), |_| ()).await.unwrap().close().await.unwrap();
+    let reader = builder(&app).open_read_only(directory.id()).await.unwrap();
+    let _clone = reader.clone();
+    assert!(matches!(directory.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
+    assert!(!crate::open_files_under(root.path()).is_empty());
+    {
+        let close = reader.close();
+        tokio::pin!(close);
+        poll_fn(|cx| {
+            assert!(close.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    tokio::time::timeout(HANG_GUARD, directory.closed())
+        .await
+        .expect("the dropped close finishes")
+        .unwrap();
+    crate::assert_no_open_files_under(root.path());
+    assert!(directory.lock_for_deletion().unwrap().is_some());
+}
