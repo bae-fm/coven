@@ -475,11 +475,13 @@ private def runClassify (j : Json) : Except String Json := do
 
 open Ownership.Classification.Place in
 /-- `place` mode: each case's operations on one parent key, from its view
-before the write, as the steps they record, the place `StepIndex::place`
-must find before position `at`, the view the operations leave there, and the
-parent a net change of a row in audience 1 names for the key (`namedNet`),
-given the incarnation `ends` says the write's records leave each audience's
-row at. -/
+before the write, as the steps they record, the audiences whose row of the
+key they change at no step (`marks`), the place `StepIndex::place` must find
+before position `at`, the view the operations leave there, and the parent a
+reference of a row in audience 1 names, given the parent its setter recorded
+(the capture of the view before the write): an action's left as it was
+there (`named`), and a net change's (`namedNet`), given the incarnation
+`ends` says the write's records leave each audience's row at. -/
 private def runPlace (j : Json) : Except String Json := do
   let readOp (o : Json) : Except String (Op Nat) := do
     match ← o.getObjValAs? String "op" with
@@ -487,15 +489,19 @@ private def runPlace (j : Json) : Except String Json := do
     | "update" => pure .update
     | "delete" => pure .delete
     | "move" => pure (.move (← natField o "aud") (← natField o "inc"))
-    | "unstepped" => pure (.unstepped (← natField o "aud") (← natField o "inc"))
+    | "unstepped" => pure (.unstepped (← o.getObjValAs? (Option (Nat × Nat)) "to"))
+    | "aside" => pure (.aside (← natField o "aud"))
     | "other" => pure .other
-    | _ => throw "an operation is insert, update, delete, move, unstepped or other"
+    | _ => throw "an operation is insert, update, delete, move, unstepped, aside or other"
   let stepJson (st : Step Nat) : List (String × Json) :=
     [("seq", toJson st.seq), ("aud", toJson st.aud), ("delete", toJson st.delete),
       ("move", toJson st.move), ("inc", toJson st.inc)]
   let viewJson (v : Ownership.Classification.Place.View Nat) : Json := match v with
     | some (a, g) => toJson [a, g]
     | none => Json.null
+  let resolved (r : Option (Option (Nat × Nat))) : Json := match r with
+    | some parent => Json.mkObj [("kind", "parent"), ("parent", viewJson parent)]
+    | none => Json.mkObj [("kind", "refused")]
   let cases ← (← j.getObjValAs? (Array Json) "cases").mapM fun c => do
     let start ← c.getObjValAs? (Option (Nat × Nat)) "start"
     let ops ← ((← c.getObjValAs? (Array Json) "ops").mapM readOp).map Array.toList
@@ -504,19 +510,16 @@ private def runPlace (j : Json) : Except String Json := do
     let endsOf (a : Nat) : Option Nat := (ends.find? (·.1 == a)).map (·.2)
     match Ownership.Classification.Place.run ops 0 start, viewAt ops start before with
     | some (_, steps), some view =>
-      let unstepped := ops.any (·.isUnstepped)
-      let found := match place unstepped steps before with
+      let marked := marks ops start
+      let setter := capture 1 0 start
+      let found := match place steps before with
         | .untouched => Json.mkObj [("kind", "untouched")]
-        | .unplaced => Json.mkObj [("kind", "unplaced")]
         | .last st => Json.mkObj (("kind", "last") :: stepJson st)
-      let atEnd := place unstepped steps ops.length
-      let net := match atEnd, namedNet 1 0 endsOf none atEnd with
-        | .untouched, _ => Json.mkObj [("kind", "setter")]
-        | _, some parent => Json.mkObj [("kind", "parent"), ("parent", viewJson parent)]
-        | _, none => Json.mkObj [("kind", "unplaced")]
       pure (Json.mkObj [("steps", toJson (steps.map fun st => Json.mkObj (stepJson st))),
-        ("unstepped", toJson unstepped), ("place", found), ("view", viewJson view),
-        ("net", net)])
+        ("marked", toJson marked), ("setter", viewJson setter), ("place", found),
+        ("view", viewJson view),
+        ("named", resolved (named 1 0 marked true setter (place steps before))),
+        ("net", resolved (namedNet 1 0 marked endsOf setter (place steps ops.length)))])
     | _, _ => pure Json.null
   pure (toJson cases)
 

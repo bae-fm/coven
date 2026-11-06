@@ -916,23 +916,36 @@ one audience at a time, and each SQL operation on it is a step on its row in
 the audience it is in then; a move is a delete step there and an insert step
 in the new audience, at one position (`emit`), whether an update of the row's
 own audience made it or a move of an ancestor that carries the row along
-(`Op.move`). Only a change of no step at all (`Op.unstepped`), as a migration
-difference or a forged write has, leaves the steps silent. `place` is
-`StepIndex::place`: with no unstepped change, the latest earlier step on any
-row with the key, a move's insert half after its delete half. `place_sound` proves
-every authoring view the steps are consistent with holds the key where that
-step left it, at its incarnation, or nowhere after a delete, and where it
-was before the write when no step touched it. `recorded_sound` lifts that to
-the recorded parent (`named`): present in the child's audience or the store,
-as the author's capture names it (`capture`), given that a reference the
-action leaves as it was names its setter's parent while that parent is the
-authoring view's row (§9.1). Ben moves his track into Gifts and deletes Ana's
-pair in one write: her review's track reference names Gifts' track, the row
-the move began, as SQLite's view holds it, and so does the track Ben's album
-carries into Gifts. `untouched_views_differ` and `unstepped_views_differ` are
-why the receiver refuses the rest: two authoring views with the same steps
-capture different parents. Which key a reference's values name, and which
-rows the write changed at no step of their own, are inputs to the model.
+(`Op.move`). The write can also change a row of the key at no step. A removed
+row (§8.4) a move carries is one: SQLite's tables never held it, so it is
+never the view's row (`Op.aside`). A forged write, or a migration
+difference, can claim the same of a change that moves the key in the view
+(`Op.unstepped`). Either leaves that row's record changed beyond its steps,
+and the receiver sees only which rows (`marks`). `place` is
+`StepIndex::place`: the latest earlier step on any row with the key, a move's
+insert half after its delete half. `place_settles` proves the authoring view
+holds the key where that step left it, at its incarnation, or nowhere after
+a delete, and where it was before the write when no step touched it, unless a
+change at no step moved it since, which marks the row it left and the row it
+entered; with no marks, `place_sound`. `resolve` is the receiver's rule: a
+step's view stands unless its row is marked, a delete's or a view the
+reference can't name stands unless a row it can name is marked, and with no
+step the setter's parent stands unless its row is marked. `resolve_sound`
+proves whatever it accepts is the parent the author's capture names
+(`capture`: present in the child's audience or the store) in every run with
+the same steps and marks, forged ones included, given that the setter's
+parent is the capture of the view before the write (§9.1). `recorded_sound`
+lifts that to the parent an action records (`named`), where a reference the
+action leaves as it was names its setter's parent. Ben moves his track into
+Gifts and deletes Ana's pair in one write: her review's track reference names
+Gifts' track, the row the move began, as SQLite's view holds it, and so does
+the track Ben's album carries into Gifts. When the album he moves also
+carries a removed copy of the track, that copy's row is marked, the shown
+one is not, and the review keeps its parent (`aside_placed`).
+`untouched_views_differ` and `unstepped_views_differ` are why the receiver
+refuses the rest: two authoring views with the same steps and marks capture
+different parents. Which key a reference's values name, and which rows the
+write changed at no step of their own, are inputs to the model.
 
 **Where the write leaves a parent.** A row's net change names its parents as
 the whole write leaves them, which an action's step need not.
@@ -944,10 +957,11 @@ combo only after the cascade, so the step names no combo and the net change
 the one he added. `net_sound` proves the receiver's rule for the net change
 (`namedNet`): where the steps leave the key at the end of the write, mapped
 into the incarnation the write's own record of that row leaves it at (`ends`),
-or the setter's parent when no step touched the key, is the parent the
-author's capture of the net change names in every authoring view consistent
-with the steps. So the check that a derived row's net change is its actions'
-combined effect compares values with the steps and parents with that rule.
+or the setter's parent when no step touched the key, resolved as `resolve`
+does, is the parent the author's capture of the net change names in every
+authoring view consistent with the steps and marks. So the check that a
+derived row's net change is its actions' combined effect compares values with
+the steps and parents with that rule.
 
 **Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
 a copy: a direct change of the mover's write, recorded as its move's two
@@ -991,8 +1005,8 @@ SQL capture, local commit rollback, schema conversion, and atomic installation
 remain implementation obligations. So do the replayed references:
 `Trace.refs` is an input. The parent a step names for a reference over an
 action's columns is the one `Place.recorded_sound` proves every authoring
-view consistent with the write's steps captures, and the receiver refuses
-where two such views differ (`untouched_views_differ`,
+view consistent with the write's steps and marks captures, and the receiver
+refuses where two such views differ (`untouched_views_differ`,
 `unstepped_views_differ`); a net change's is the one `Place.net_sound`
 proves. Which key a reference's values name, and which rows
 the write changed at no step of their own, stay inputs to that model, and the
@@ -1044,13 +1058,16 @@ named parents included. `held_follows_cause` is `follows_cause` for it.
 receiver's cause of every step of the same writes to be the model's. The
 replayed references stay inputs, as `Trace.refs` is.
 The `place` mode runs the model's operations on one parent key from each kind
-of view, inserts, updates, deletes, moves, unstepped changes and operations on
-other rows, and returns the steps they record, the model's `place`, and the
-parent `namedNet` expects a net change to name, given the incarnation each
-audience's row ends at. `judge::place::tests::model::places_match_the_model`
-builds the receiver's step index from those steps for 4,000 such writes and
-requires `StepIndex::place` to find the model's place in each, a move's half
-among them, and `StepIndex::net_parent` the model's net parent.
+of view, inserts, updates, deletes, moves, changes at no step in the view and
+beside it, and operations on other rows, and returns the steps they record,
+the rows they mark, the model's `place`, and the parents `named` and
+`namedNet` resolve for a reference of a row in one circle, given the
+setter's parent and the incarnation each audience's row ends at.
+`judge::place::tests::model::places_match_the_model` builds the receiver's
+step index from those steps and marks for 4,000 such writes and requires
+`StepIndex::place` to find the model's place in each, a move's half among
+them, and `StepIndex::resolve` and `StepIndex::net_parent` the model's
+parents.
 The `admission` mode decides `Admission.check` for one local write, given
 each changed row's table and owner. `local_admission_matches_the_model` runs
 Ben's statements against Ana's rows on SQLite: an authorized cascade, a key
