@@ -54,6 +54,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("one constant row, and the setting's table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned file"),
+("coven_pin_requests", "SELECT * FROM coven_pin_requests", "coven_pin_requests") =>
+    Some("the table lists every file with a pin request"),
 ("coven_upload_queue", "SELECT * FROM coven_upload_queue", "coven_upload_queue") =>
     Some("the table lists every queued file"),
 ("coven_sync_status", "SELECT * FROM coven_sync_status", "coven_sync_status")

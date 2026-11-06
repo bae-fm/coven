@@ -73,6 +73,7 @@ async fn only_the_spec_tables_are_created() {
             views,
             [
                 ("table".into(), "coven_files".into()),
+                ("table".into(), "coven_pin_requests".into()),
                 ("table".into(), "coven_pins".into()),
                 ("table".into(), "coven_retry_effect".into()),
                 ("table".into(), "coven_sync_status".into()),
@@ -95,8 +96,8 @@ async fn only_the_spec_tables_are_created() {
         let tables = sql
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table'
-                 AND name NOT IN('coven_files','coven_pins','coven_upload_queue','coven_sync_status',
-                     'coven_retry_effect')
+                 AND name NOT IN('coven_files','coven_pins','coven_pin_requests','coven_upload_queue',
+                     'coven_sync_status','coven_retry_effect')
                  ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),

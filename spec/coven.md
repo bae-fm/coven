@@ -472,9 +472,9 @@ this member is in.
 So the app's SQL can read it through thirteen views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
 `coven_pending`, `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
-`coven_devices`, `coven_circles` and `coven_circle_members`, and five tables,
-`coven_files`, `coven_pins`, `coven_upload_queue`, `coven_sync_status` and
-`coven_retry_effect` ([api.md E4](api.md#e4-reading) lists their columns).
+`coven_devices`, `coven_circles` and `coven_circle_members`, and six tables,
+`coven_files`, `coven_pins`, `coven_pin_requests`, `coven_upload_queue`,
+`coven_sync_status` and `coven_retry_effect` ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
 ```sql
@@ -511,6 +511,15 @@ whose count falls short through an index, in 0.25 ms. Coven's own triggers on
 the tables behind `coven_pins` change its row in the same statement as the pin,
 so the table is as true in every transaction as a view. Keeping it adds about
 8 µs to each pin, and 4 µs to each write of a file's record.
+
+`coven_pin_requests` is a table for the same reason: it lists each file a
+switch to the cloud asked this device to keep whole, whose pin coven has not
+yet made (§17.8), by its id alone. Ben's music app shows how many tracks of
+each album are still downloading to be kept. A local trigger on
+`coven_pin_requests` keeps each album's count in a device-local table: coven's
+triggers on its own pin requests add the file's row in the statement that
+records the request, and delete it in the one that ends it, by the pin made or
+the file gone.
 
 `coven_upload_queue` is a table for the same reason: it lists each file
 waiting in the upload queue, by its id and place, as `coven_uploads` does,
@@ -2779,8 +2788,8 @@ to "Shopping". Every change coven makes is ordinary SQL, including a late write
 taking a row back out (§8.4), so a count a local trigger keeps stays right.
 
 A local trigger can also follow `coven_files`, `coven_pins`,
-`coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`, the five
-of coven's tables it may (§4). Ben's music app
+`coven_pin_requests`, `coven_upload_queue`, `coven_sync_status` and
+`coven_retry_effect`, the six of coven's tables it may (§4). Ben's music app
 counts each album's pinned tracks:
 
 ```sql
@@ -2881,22 +2890,24 @@ doesn't, when the database opens and after migrating.
 - **Owner tables.** For owner permissions (§9.6), a shared trigger's targets are
   direct changes, even when a foreign-key action fired it, unless a step equals a
   foreign-key action's exact effect.
-- **A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` runs
-  after the change.** Run before it, a trigger could skip coven's change with
-  `RAISE(IGNORE)` and leave the table wrong, so opening or migrating fails with
-  `TriggerTiming` for one that doesn't say `AFTER`. A trigger that names no
-  time runs before.
-- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue`,
-  `coven_sync_status` or `coven_retry_effect` writes only local tables,** and
-  so do the triggers it fires in turn: a pin, a queued file, the sync facts,
+- **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests` or
+  `coven_upload_queue` runs after the change.** Run before it, a trigger could
+  skip coven's change with `RAISE(IGNORE)` and leave the table wrong, so
+  opening or migrating fails with `TriggerTiming` for one that doesn't say
+  `AFTER`. A trigger that names no time runs before.
+- **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_upload_queue`, `coven_sync_status` or `coven_retry_effect` writes
+  only local tables,** and
+  so do the triggers it fires in turn: a pin, a pin request, a queued file,
+  the sync facts,
   the retry effect and what a trigger keeps of a record are this device's
   alone. As a migration ends and as the store opens, coven prepares each
-  change to the five tables, which compiles every
+  change to the six tables, which compiles every
   trigger it would fire. One that writes a synced table fails with
   `TriggerTarget`, and one that writes coven's tables with `InternalTable`.
-- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue`,
-  `coven_sync_status` or `coven_retry_effect` reads only what app SQL
-  reads.** It runs inside coven's own statements, and as coven applies another
+- **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_upload_queue`, `coven_sync_status` or `coven_retry_effect` reads only
+  what app SQL reads.** It runs inside coven's own statements, and as coven applies another
   device's write, and coven judges it there as it judges the app's
   statements. Otherwise a trigger on `coven_pins` could copy
   `_coven_cache`'s paths into an app table, and the app would read coven's
@@ -7414,7 +7425,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 | changes a file reference's binding or size limit | neither: it changes only how this device sends its own writes, which receivers can't tell (§17.4) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
-| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect` (§9.4) | neither: they don't sync |
+| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect` (§9.4) | neither: they don't sync |
 
 A migration that changes rows is breaking because each device would otherwise
 compute those changes from its own rows, and the devices would disagree.
@@ -9644,9 +9655,10 @@ device consistent with the database.
   `coven_devices`, `coven_circles` and `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
   only, since SQLite names the view to the authorizer only for what a join
-  reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables
-  coven's triggers keep, from the internal view `_coven_pin_source` and from
-  the files each upload stores (§4). So do `coven_sync_status`, the one row
+  reads. `coven_pins`, `coven_pin_requests` and `coven_upload_queue` have the
+  same prefix: tables coven's triggers keep, from the internal view
+  `_coven_pin_source`, from `_coven_pin_requests` and from the files each
+  upload stores (§4). So do `coven_sync_status`, the one row
   coven writes as what the sync state is computed from changes (§19.1), and
   `coven_retry_effect`,
   the one row coven writes as what the person's retry would do changes

@@ -1,6 +1,6 @@
 //! The app's triggers that coven's own statements fire: those on the tables
-//! they may follow, `coven_files`, `coven_pins`, `coven_upload_queue`,
-//! `coven_sync_status` and `coven_retry_effect`, and those on the app's
+//! they may follow, `coven_files`, `coven_pins`, `coven_pin_requests`,
+//! `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`, and those on the app's
 //! tables as coven applies writes (§9.4). The authorizer judges what each writes, reads and calls as it
 //! would in an app statement, and a refusal names the trigger.
 
@@ -24,11 +24,14 @@ const FILE_CHANGES: [&str; 3] = [
     "DELETE FROM coven_files",
 ];
 
-/// Each change coven's own triggers make to its pins and its upload queue.
-const QUEUE_AND_PIN_CHANGES: [&str; 6] = [
+/// Each change coven's own triggers make to its pins, pin requests and its upload queue.
+const QUEUE_AND_PIN_CHANGES: [&str; 9] = [
     "INSERT INTO coven_pins(file) VALUES('')",
     "UPDATE coven_pins SET file=file",
     "DELETE FROM coven_pins",
+    "INSERT INTO coven_pin_requests(file) VALUES('')",
+    "UPDATE coven_pin_requests SET file=file",
+    "DELETE FROM coven_pin_requests",
     "INSERT INTO coven_upload_queue(file,position) VALUES('',0)",
     "UPDATE coven_upload_queue SET file=file",
     "DELETE FROM coven_upload_queue",

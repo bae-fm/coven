@@ -301,6 +301,7 @@ mod source {
                     | "authorship_schema.rs"
                     | "internal_schema_views.rs"
                     | "internal_schema_pins.rs"
+                    | "internal_schema_pin_requests.rs"
                     | "internal_schema_upload_queue.rs"
             ) {
                 // The fixture explains each initial DDL statement before executing
@@ -653,6 +654,27 @@ fn the_pins_table_holds_what_its_source_says() {
         differ("SELECT count(*) FROM (SELECT * FROM _coven_pin_source EXCEPT SELECT * FROM coven_pins)"),
         0
     );
+}
+
+/// Coven's triggers keep `coven_pin_requests` the files `_coven_pin_requests`
+/// holds, however the table was filled.
+#[test]
+fn the_pin_requests_table_holds_what_coven_keeps() {
+    let db = fixture::populated();
+    let differ = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert!(differ("SELECT count(*) FROM coven_pin_requests") > 0);
+    for (from, to) in [
+        ("coven_pin_requests", "_coven_pin_requests"),
+        ("_coven_pin_requests", "coven_pin_requests"),
+    ] {
+        assert_eq!(
+            differ(&format!(
+                "SELECT count(*) FROM (SELECT file FROM {from} EXCEPT SELECT file FROM {to})"
+            )),
+            0,
+            "{from} beyond {to}"
+        );
+    }
 }
 
 /// Coven's triggers keep `coven_upload_queue` the files `coven_uploads`

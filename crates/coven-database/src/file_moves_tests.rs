@@ -423,6 +423,67 @@ async fn a_move_kept_here_asks_for_its_pins_in_the_switch() {
     db.close().await.unwrap();
 }
 
+/// The app's local count of the pin requests coven has not yet made, kept
+/// by its triggers on `coven_pin_requests`.
+const KEEPING: &str =
+    "CREATE TABLE keeping(id INTEGER PRIMARY KEY CHECK(id=1), files INTEGER NOT NULL);
+     INSERT INTO keeping VALUES(1,0);
+     CREATE TRIGGER pin_requested AFTER INSERT ON coven_pin_requests BEGIN
+         UPDATE keeping SET files=files+1;
+     END;
+     CREATE TRIGGER pin_request_ended AFTER DELETE ON coven_pin_requests BEGIN
+         UPDATE keeping SET files=files-1;
+     END;";
+
+/// The app reads `coven_pin_requests`, and a local trigger on it follows
+/// coven as it adds a request (the switch to the cloud) and as it ends one
+/// (the file's row is deleted), each in the statement that changes it.
+#[tokio::test]
+async fn a_local_trigger_follows_each_pin_request_coven_adds_and_ends() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            crate::file_write::tests::tables(),
+            vec![
+                crate::Migration::addition(1, "files", crate::file_write::tests::SCHEMA),
+                crate::Migration::addition(2, "keeping", KEEPING),
+            ],
+        )
+        .namespaces(crate::file_write::tests::namespaces(Provenance::AppProvided))
+        .open()
+        .await
+        .unwrap();
+    let kept = |db: &Database| {
+        let db = db.clone();
+        async move {
+            db.read(|sql| {
+                Ok::<_, DbError>((
+                    sql.query_row("SELECT files FROM keeping", [], |r| r.get::<_, i64>(0))?,
+                    sql.query("SELECT file FROM coven_pin_requests", [], |r| {
+                        r.get::<_, String>(0)
+                    })?,
+                ))
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let files = stage(&db, &["kept", "plain"], Place::DeviceOnly).await;
+    move_files(&db, vec![MoveFile::AppKeptHere(files[0]), MoveFile::App(files[1])]).await.unwrap();
+    assert_eq!(kept(&db).await, (0, vec![]));
+    complete(&db, files[0]).await;
+    complete(&db, files[1]).await;
+    assert_eq!(kept(&db).await, (1, vec![files[0].to_string()]));
+    db.write(|sql| {
+        sql.execute("DELETE FROM files WHERE id='kept'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(kept(&db).await, (0, vec![]));
+    db.close().await.unwrap();
+}
+
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {

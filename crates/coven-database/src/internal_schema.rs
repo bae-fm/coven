@@ -232,6 +232,7 @@ pub(crate) fn initial_schema() -> String {
     sql.push_str(row_queries_schema::COLUMN_RELEASE);
     sql.push_str(files::SCHEMA);
     sql.push_str(&pins::schema());
+    sql.push_str(pin_requests::SCHEMA);
     sql.push_str(upload_queue::SCHEMA);
     sql.push_str(sync_status::SCHEMA);
     sql.push_str(retry_effect::SCHEMA);
@@ -269,6 +270,10 @@ pub(crate) use files::FILES;
 mod pins;
 pub(crate) use pins::PINS;
 
+#[path = "internal_schema_pin_requests.rs"]
+mod pin_requests;
+pub(crate) use pin_requests::PIN_REQUESTS;
+
 #[path = "internal_schema_upload_queue.rs"]
 mod upload_queue;
 pub(crate) use upload_queue::UPLOAD_QUEUE;
@@ -286,7 +291,8 @@ pub(crate) use retry_effect::RETRY_EFFECT;
 /// as each record is made, stored or deleted here or merged from another
 /// device, its sync status and retry effect as they change, and the app's
 /// AFTER triggers on them write only local tables.
-pub(crate) const FOLLOWED: [&str; 5] = [FILES, PINS, UPLOAD_QUEUE, SYNC_STATUS, RETRY_EFFECT];
+pub(crate) const FOLLOWED: [&str; 6] =
+    [FILES, PINS, PIN_REQUESTS, UPLOAD_QUEUE, SYNC_STATUS, RETRY_EFFECT];
 
 /// Coven's tables that describe this process's own sync, which only the
 /// handle holding the store's writer lock may read.

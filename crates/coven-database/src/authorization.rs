@@ -785,7 +785,8 @@ impl AuthorizationState {
                 Some(table_name)
             }
             // The app's triggers may follow coven_files, coven_pins,
-            // coven_upload_queue, coven_sync_status and coven_retry_effect,
+            // coven_pin_requests, coven_upload_queue, coven_sync_status and
+            // coven_retry_effect,
             // the tables coven changes row by row (§9.4).
             CreateTrigger { trigger_name, table_name }
             | DropTrigger { trigger_name, table_name }

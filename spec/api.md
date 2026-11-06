@@ -1437,8 +1437,8 @@ pub enum DbError {
     /// consequence of its direct changes (§9.6). Nothing committed.
     InvalidForeignKeyEffect { table: String, key: RowKey },
     /// A local trigger wrote a synced table or a shared trigger a local one,
-    /// including a trigger on `coven_files`, `coven_pins` or
-    /// `coven_upload_queue` and those it fires (§9.4).
+    /// including a trigger on `coven_files`, `coven_pins`,
+    /// `coven_pin_requests` or `coven_upload_queue` and those it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
     /// A bulk write's statement, or a trigger or foreign-key action it would
     /// run, writes a synced table (§4, E3). Nothing committed.
@@ -1764,7 +1764,8 @@ pub enum SchemaError {
     AudienceConstraint { table: String, constraint: String },
     /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
-    /// A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` runs
+    /// A trigger on `coven_files`, `coven_pins`, `coven_pin_requests` or
+    /// `coven_upload_queue` runs
     /// before its change (§9.4).
     TriggerTiming { trigger: String, table: String },
 }
@@ -3362,8 +3363,8 @@ let moved = handle
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 - *Coven's state in SQL.* App SQL reads eleven views of coven's own tables and
-  five tables, `coven_files`, `coven_pins`, `coven_upload_queue`,
-  `coven_sync_status` and `coven_retry_effect`, in reads,
+  six tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -3371,8 +3372,8 @@ let moved = handle
   when coven changes them. The app can't write them, or name an object of its
   own after one.
 - The app's migrations may declare local triggers on `coven_files`,
-  `coven_pins`, `coven_upload_queue`, `coven_sync_status` and
-  `coven_retry_effect`, AFTER their
+  `coven_pins`, `coven_pin_requests`, `coven_upload_queue`,
+  `coven_sync_status` and `coven_retry_effect`, AFTER their
   changes, writing only
   local tables and reading only what app SQL reads
   ([§9.4](coven.md#94-triggers)). A trigger on `coven_files` sees each record
@@ -3461,6 +3462,7 @@ let moved = handle
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
+| `coven_pin_requests`: each file a switch to the cloud asked this device to keep whole, whose pin coven has not yet made (E8); a table, which local triggers can follow: a row appears as the switching write records the request and goes as the request ends, whether by the pin made or the file gone | `file` | the file's id; the copy the request keeps and its wait are coven's, and `pin_requests` reads them |
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |

@@ -226,9 +226,10 @@ impl Schema {
                 }
             }
         }
-        // A trigger on a table the app may follow, coven_files, coven_pins
-        // or coven_upload_queue, follows coven's changes to it; run before
-        // one, it could skip it with RAISE(IGNORE) and leave the table wrong.
+        // A trigger on a table the app may follow, coven_files, coven_pins,
+        // coven_pin_requests or coven_upload_queue, follows coven's changes to it;
+        // run before one, it could skip it with RAISE(IGNORE) and leave the
+        // table wrong.
         for ((kind, name), object) in &self.objects {
             if kind == "trigger"
                 && object.follows()
