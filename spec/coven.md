@@ -6495,11 +6495,16 @@ laptop.
   local. Each copy and folder is recorded before it exists, so after a crash
   before the write the next open removes them (Appendix C.3). While the call
   runs it reserves its copies, so no other write's removal takes them or the
-  folders they lie in. If the app drops the call instead, nothing can wait
-  for disk work as it drops; its reservation goes with it, and the store's
-  next write removes what it made, or the next open. A crash right after the
-  call made a folder, before it recorded that, leaves that folder empty in
-  place.
+  folders they lie in. If the app drops the call instead, it stops waiting
+  at once, but a step already under way finishes with its record: making a
+  folder, creating a copy's file, or renaming the copy to its path. The step
+  keeps the call's copies reserved until it ends, and closing the store
+  waits for it. Then the store's next write removes what the call made, or
+  the next open. Ben's app drops Make Local just as track 3 is renamed into
+  `Music/Abbey Road/`: the rename finishes, the copy is recorded at its path,
+  and Ben's next write removes it. Without this, the copy would stay there
+  with no record naming it. A crash right after the call made a folder,
+  before it recorded that, leaves that folder empty in place.
 - **Who may.** Making a file device-only takes it away from everyone else who
   reads it, so it follows the rules for changing the rows that reference it.
   The device's member must be in the file's audience. A circle's records

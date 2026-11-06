@@ -6386,7 +6386,10 @@ impl CovenHandle {
     /// download, at most a few times a second (`DeviceOnlyStep`). Until it
     /// returns, `cancel` stops the call; a failure, a panic in a download
     /// among them, or a cancel removes every copy and folder it made before
-    /// it returns. A dropped call's copies go with the store's next write.
+    /// it returns. A dropped call stops waiting at once; a step already
+    /// under way, making a folder, creating a copy or renaming it to its
+    /// path, finishes with its record, and closing the store waits for it.
+    /// The store's next write after it removes what the call made.
     pub async fn prepare_device_only(
         &self,
         folder: &Path,

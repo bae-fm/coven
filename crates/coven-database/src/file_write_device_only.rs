@@ -75,7 +75,7 @@ impl FileWrite<'_> {
         &self,
         prepared: crate::PreparedDeviceOnly,
     ) -> Result<(), DbError> {
-        super::held_here(self.files.copying, prepared.paths())?;
+        super::held_here(self.files.copying, &prepared.paths())?;
         let (copies, paths) = prepared.take();
         self.files.held_copies.borrow_mut().extend(paths);
         self.make_device_only(copies)

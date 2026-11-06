@@ -222,6 +222,9 @@ task_types = [
     "PreparedDeviceOnly",
     # The copies one call making files device-only is writing (§17.3).
     "CopyReservation",
+    # Which of them removals skip, until the last of the call's
+    # reservation and the steps it runs drops (§17.3).
+    "CopyNames",
     # One read's body from the in-memory provider, which shares the
     # provider's state to answer the holds a test placed on it.
     "MemoryBody",
@@ -1311,6 +1314,10 @@ tables = [
 "crates/coven-database/src/file_removals.rs" = ["remove_bytes"]
 # The folder the person picked, which the app's call hands in (§17.3).
 "crates/coven-sync/src/file_device_only.rs" = ["Files::prepare_device_only"]
+# A device-only call's step that makes a name in the person's folder runs
+# to its end with its record as its own task, though the call is dropped
+# (§17.3).
+"crates/coven-database/src/file_database_copies.rs" = ["CopyReservation::run_step"]
 "crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
 # A reconfigurable live query makes the request state its handles share;

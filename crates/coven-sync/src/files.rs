@@ -146,6 +146,11 @@ struct FilesInner<M: FilesMode = Writer> {
     /// between the run's check and what it does.
     #[cfg(test)]
     blocked_end_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Holds a device-only call where a copy is renamed to its path and not
+    /// yet recorded placed: it says it got there, then waits to be resumed.
+    #[cfg(test)]
+    placing_gate:
+        Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
@@ -232,6 +237,8 @@ impl<M: FilesMode> FilesInner<M> {
             closed: AtomicBool::new(false),
             #[cfg(test)]
             blocked_end_gate: Mutex::new(None),
+            #[cfg(test)]
+            placing_gate: Mutex::new(None),
         }
     }
 }

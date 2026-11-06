@@ -7,7 +7,8 @@
 use crate::files::Files;
 use crate::FileReadError;
 use coven_database::{
-    DbError, DeviceOnlyCopy, FileHasher, FilePlace, FileRef, FolderCopy, PreparedDeviceOnly,
+    CopyReservation, DbError, DeviceOnlyCopy, FileHasher, FilePlace, FileRef, FolderCopy,
+    PreparedDeviceOnly,
 };
 use coven_foundation::{
     files::{CopyFolder, CopyPathError, FileError, FlushBatch, Flushed, RelativePath},
@@ -15,6 +16,7 @@ use coven_foundation::{
     progress::{Progress, ProgressReport},
 };
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::watch;
 
 /// A step of preparing files to be made device-only (§17.3, E8), which a
@@ -160,8 +162,9 @@ impl Files {
         }
         // Refused before any byte is downloaded; the write checks again.
         let refs = self.inner.database.device_only_files(ids).await?;
-        let folder =
-            CopyFolder::open(folder.to_owned(), self.inner.database.bugs().clone()).await?;
+        let folder = Arc::new(
+            CopyFolder::open(folder.to_owned(), self.inner.database.bugs().clone()).await?,
+        );
         let plan = folder.plan(paths).await?;
         let copies: Vec<FolderCopy> = plan
             .files
@@ -187,7 +190,16 @@ impl Files {
         // what the call made goes before it returns (E15).
         let downloaded = coven_foundation::task::caught(
             "download files to make device-only",
-            download(self, &folder, &plan.folders, &refs, &copies, &mut cancel, &mut report),
+            download(
+                self,
+                &folder,
+                &reservation,
+                &plan.folders,
+                &refs,
+                &copies,
+                &mut cancel,
+                &mut report,
+            ),
         )
         .await;
         let error = match downloaded {
@@ -217,22 +229,34 @@ impl Files {
 /// call, so every copy is on the drive before the write records it
 /// (Appendix C.3). A cancel is heard while waiting for bytes and between
 /// steps, never inside one, so every name a step made is in its record
-/// when the call removes them.
+/// when the call removes them. A step that makes a name, a folder, a copy's
+/// file, or its rename to its path, runs to its end with its record once
+/// started, holding the call's copies, though the call is dropped
+/// meanwhile: what it made is then in its record for the next write or open
+/// to remove.
+#[expect(clippy::too_many_arguments, reason = "the call's parts, each its own")]
 async fn download(
     handle: &Files,
-    folder: &CopyFolder,
+    folder: &Arc<CopyFolder>,
+    reservation: &CopyReservation,
     folders: &[PathBuf],
     files: &[FileRef],
     copies: &[FolderCopy],
     cancel: &mut watch::Receiver<bool>,
     report: &mut ProgressReport<DeviceOnlyStep>,
 ) -> Result<(Vec<DeviceOnlyCopy>, Flushed), DeviceOnlyError> {
+    let bugs = handle.inner.database.bugs().clone();
     for made in folders {
         check(cancel)?;
-        // A folder someone made since planning is theirs, and stays.
-        if folder.create_folder(made.clone()).await? {
-            handle.inner.database.made_folder(made).await?;
-        }
+        let (owner, folder, made) = (handle.inner.clone(), folder.clone(), made.clone());
+        step(reservation, "make a folder for copies", &bugs, async move {
+            // A folder someone made since planning is theirs, and stays.
+            if folder.create_folder(made.clone()).await? {
+                owner.database.made_folder(&made).await?;
+            }
+            Ok(())
+        })
+        .await?;
     }
     let mut switches = Vec::new();
     let mut batch = FlushBatch::new(handle.inner.database.bugs().clone());
@@ -248,7 +272,13 @@ async fn download(
         };
         let location = location.clone();
         let stream = handle.open_file_stream(file).await.map_err(download)?;
-        let mut writer = folder.create_copy(copy.temporary.clone()).await?;
+        let mut writer = {
+            let (folder, temporary) = (folder.clone(), copy.temporary.clone());
+            step(reservation, "create a copy", &bugs, async move {
+                Ok(folder.create_copy(temporary).await?)
+            })
+            .await?
+        };
         // A whole read in order checks the content hash before its last
         // bytes are handed over (§17.7). The bytes written are hashed as
         // they go, for a later move of the copy to check against (§17.3).
@@ -267,9 +297,18 @@ async fn download(
             report.done(done);
         }
         before += file.size();
-        writer.publish(&copy.path, &mut batch).await?;
-        let observed = folder.observe(&copy.path).await.map_err(DbError::from)?;
-        handle.inner.database.place_copy(&observed).await?;
+        batch = {
+            let (owner, folder, path) = (handle.inner.clone(), folder.clone(), copy.path.clone());
+            step(reservation, "place a copy", &bugs, async move {
+                writer.publish(&path, &mut batch).await?;
+                #[cfg(test)]
+                owner.pass_placing_gate().await;
+                let observed = folder.observe(&path).await.map_err(DbError::from)?;
+                owner.database.place_copy(&observed).await?;
+                Ok(batch)
+            })
+            .await?
+        };
         switches.push(DeviceOnlyCopy {
             file: file.id(),
             location,
@@ -279,6 +318,29 @@ async fn download(
     }
     check(cancel)?;
     Ok((switches, batch.flush().await?))
+}
+
+impl crate::files::FilesInner {
+    /// Wait at the gate a test set, if any, once there.
+    #[cfg(test)]
+    async fn pass_placing_gate(&self) {
+        let gate = coven_foundation::locks::lock_unpoisoned(&self.placing_gate).take();
+        if let Some((reached, resume)) = gate {
+            reached.send(()).ok();
+            resume.await.ok();
+        }
+    }
+}
+
+/// Run `work`, a step of the call named `operation`, to its end with its
+/// record once started, holding the call's copies (`run_step`).
+async fn step<T: Send + 'static>(
+    reservation: &CopyReservation,
+    operation: &'static str,
+    bugs: &coven_foundation::task::BugSinkRef,
+    work: impl std::future::Future<Output = Result<T, DeviceOnlyError>> + Send + 'static,
+) -> Result<T, DeviceOnlyError> {
+    reservation.run_step(operation, bugs.clone(), work).await.map_err(FileError::from)?
 }
 
 fn check(cancel: &watch::Receiver<bool>) -> Result<(), DeviceOnlyError> {

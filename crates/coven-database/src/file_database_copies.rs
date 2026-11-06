@@ -6,12 +6,14 @@
 use super::{BytesWriting, Database, FileDatabase};
 use crate::{sqlite::DatabaseConnection, DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::task::{BugSinkRef, CarriesBug, TaskFailed};
 use coven_foundation::{
     files::{Flushed, ObservedFile},
     id_source::FileId,
 };
 use rusqlite::params;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// One copy a call to make files device-only writes (§17.3): its path, the
 /// temporary name in the same folder its bytes are written under, and the
@@ -150,7 +152,13 @@ impl Database {
                 lock_unpoisoned(&inner.copying).extend(paths.iter().cloned());
                 Ok::<_, DbError>(())
             })?;
-            Ok(CopyReservation { copying: inner.copying.clone(), paths, writing: Some(writing) })
+            Ok(CopyReservation {
+                names: Arc::new(CopyNames {
+                    copying: inner.copying.clone(),
+                    paths: Mutex::new(paths),
+                }),
+                writing: Some(Arc::new(writing)),
+            })
         })
         .await
     }
@@ -227,14 +235,14 @@ pub struct PreparedDeviceOnly {
 
 impl PreparedDeviceOnly {
     /// The copies' paths, as the store reserving them records them.
-    pub(crate) fn paths(&self) -> &[String] {
-        &self.reservation.paths
+    pub(crate) fn paths(&self) -> Vec<String> {
+        lock_unpoisoned(&self.reservation.names.paths).clone()
     }
 
     /// The switches, and the copies' paths, for the write making them;
     /// the reservation's release is the write's from here.
     pub(crate) fn take(mut self) -> (Vec<DeviceOnlyCopy>, Vec<String>) {
-        let paths = std::mem::take(&mut self.reservation.paths);
+        let paths = std::mem::take(&mut *lock_unpoisoned(&self.reservation.names.paths));
         (std::mem::take(&mut self.copies), paths)
     }
 
@@ -242,7 +250,7 @@ impl PreparedDeviceOnly {
     /// at the next write or open (§17.3). A failed removal keeps its record,
     /// and the next open removes it.
     pub async fn abandon(self) -> Result<(), DbError> {
-        let paths = self.reservation.paths.clone();
+        let paths = self.paths();
         let database = self.database.clone();
         drop(self);
         database.abandon_copies(paths).await
@@ -258,22 +266,52 @@ impl std::fmt::Debug for PreparedDeviceOnly {
 }
 
 /// The copies one call to make files device-only is writing, which no other
-/// write's removal takes while it is held. Dropping it, whatever became of
-/// the call, lets the next write remove those its switch didn't keep.
+/// write's removal takes while it is held or a step it runs is under way.
+/// Once both end, whatever became of the call, the next write removes those
+/// its switch didn't keep.
 pub struct CopyReservation {
-    /// The copies the store that recorded them keeps out of removals; a
-    /// closed store's records stay for its next open.
-    copying: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
-    paths: Vec<String>,
+    // The names go before the store the writing holds can close.
+    names: Arc<CopyNames>,
     /// Held while the copies are written, until they are prepared.
-    writing: Option<BytesWriting>,
+    writing: Option<Arc<BytesWriting>>,
 }
 
-impl Drop for CopyReservation {
+impl CopyReservation {
+    /// Run `work`, a step of the call named `operation` that makes a name in
+    /// the person's folder, as its own task, holding the call's copies, so
+    /// it runs to its end with its record though the call is dropped
+    /// meanwhile: until it ends, no write's removal takes the call's copies,
+    /// and closing the store waits for it (§17.3). Its panic comes back to a
+    /// caller still waiting, and goes to `bugs` once none is (E15).
+    pub async fn run_step<T: Send + 'static, E: CarriesBug + Send + 'static>(
+        &self,
+        operation: &'static str,
+        bugs: BugSinkRef,
+        work: impl std::future::Future<Output = Result<T, E>> + Send + 'static,
+    ) -> Result<Result<T, E>, TaskFailed> {
+        // The names go before the store the writing holds can close.
+        let held = (self.names.clone(), self.writing.clone());
+        coven_foundation::task::spawn_completing(operation, bugs, async move {
+            let _held = held;
+            work.await
+        })
+        .await
+    }
+}
+
+/// The copies one call is writing, kept out of removals until the last of
+/// its reservation and the steps it runs drops.
+struct CopyNames {
+    /// The copies the store that recorded them keeps out of removals; a
+    /// closed store's records stay for its next open.
+    copying: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// Until a write takes them to release once it has decided.
+    paths: Mutex<Vec<String>>,
+}
+
+impl Drop for CopyNames {
     fn drop(&mut self) {
-        // The copies go free before the store the writing holds can close.
-        let _writing = self.writing.take();
-        crate::database::release_copies(&self.copying, &self.paths);
+        crate::database::release_copies(&self.copying, &lock_unpoisoned(&self.paths));
     }
 }
 

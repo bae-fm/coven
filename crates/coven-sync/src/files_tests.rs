@@ -603,6 +603,8 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
 mod abandoned_tests;
 #[path = "file_cache_tests.rs"]
 mod cache;
+#[path = "file_device_only_tests.rs"]
+mod device_only;
 #[path = "file_keep_tests.rs"]
 mod keep;
 #[path = "file_read_tests.rs"]
