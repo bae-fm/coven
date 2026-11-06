@@ -343,6 +343,30 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     }
 }
 
+/// While a joiner's request waits, reading the routing of later slots for its
+/// copy applies none of them and gives it no key or authority (§13.2, format.md
+/// D13).
+#[tokio::test]
+async fn a_routing_scan_records_no_applied_slot() {
+    let group = Group::shared();
+    let (ana, mut carol) = waiting(&group).await;
+    let before = carol.device.sync.session.lock().await.scanned;
+    for name in ["Family", "Home"] {
+        ana.sync.administer(StoreChange::RenameStore { name: name.into() }).await.unwrap();
+    }
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Waiting
+    );
+    let scanned = carol.device.sync.session.lock().await.scanned;
+    assert!(scanned > before, "the scan read the slots written while the request waited");
+    assert_eq!(carol.device.database().applied_slot().await.unwrap(), 0);
+    assert!(carol.device.sync.keys.read().unwrap().is_none());
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// What `due` reports as it begins or changes its wait, driving it there;
 /// it must not end first.
 async fn reported_while_waiting(
