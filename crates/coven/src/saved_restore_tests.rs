@@ -48,15 +48,18 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
         StorageConfig::Dropbox {
             account_label: Some("ana@example.com".into()),
             location: DropboxLocation::SharedFolder { namespace_id: "ana-shared-folder".into() },
+            folder_label: None,
         },
         StorageConfig::Dropbox {
             account_label: Some("ben@example.com".into()),
             location: DropboxLocation::AppFolder,
+            folder_label: None,
         },
         StorageConfig::OneDrive {
             account_label: Some("ana@work.example".into()),
             drive_id: "ana-drive".into(),
             folder_id: "household-folder".into(),
+            folder_label: None,
         },
         StorageConfig::CloudKit {
             container: "iCloud.notes".into(),
@@ -134,6 +137,7 @@ async fn dropbox_accounts_are_distinguishable_in_both_saved_and_decoded_choices(
         let location = StorageConfig::Dropbox {
             location: DropboxLocation::AppFolder,
             account_label: Some(label.into()),
+            folder_label: None,
         };
         let code = code(index as u128 + 1, &location);
         save(&app, &code);

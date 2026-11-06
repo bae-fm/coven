@@ -6,6 +6,7 @@ fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     let location = StorageConfig::Dropbox {
         account_label: None,
         location: crate::DropboxLocation::SharedFolder { namespace_id: "store".into() },
+        folder_label: None,
     };
     let invitation = StorageInvitation::for_account(location.clone()).unwrap();
     let recorded = invitation.encode().unwrap();
@@ -13,7 +14,7 @@ fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     assert_eq!(decoded.location(), &location);
     decoded.check(&location).unwrap();
     assert!(matches!(
-        decoded.check(&StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::SharedFolder { namespace_id: "other".into() } }),
+        decoded.check(&StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::SharedFolder { namespace_id: "other".into() }, folder_label: None }),
         Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     let valid: serde_json::Value = serde_json::from_slice(recorded.as_bytes()).unwrap();
@@ -37,6 +38,7 @@ fn share_tokens_are_validated_and_not_printed() {
         account_label: None,
         drive_id: "drive".into(),
         folder_id: "folder".into(),
+        folder_label: None,
     };
     assert!(StorageInvitation::new(
         location.clone(),
@@ -80,11 +82,13 @@ fn inviter_and_recipient_labels_do_not_change_the_shared_location() {
         StorageConfig::Dropbox {
             location: crate::DropboxLocation::SharedFolder { namespace_id: "shared".into() },
             account_label: Some("ana@example.com".into()),
+            folder_label: None,
         },
         StorageConfig::OneDrive {
             drive_id: "drive".into(),
             folder_id: "folder".into(),
             account_label: Some("ana@example.com".into()),
+            folder_label: None,
         },
     ] {
         let invitation = StorageInvitation::for_account(location.clone()).unwrap();

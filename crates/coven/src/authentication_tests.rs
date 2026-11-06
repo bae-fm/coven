@@ -431,6 +431,7 @@ mod provider_access_tests {
         let fixture = Fixture::new(StorageConfig::Dropbox {
             account_label: None,
             location: DropboxLocation::AppFolder,
+            folder_label: None,
         })
         .await;
         let handle = fixture.setup(fixture.builder()).await;
@@ -456,6 +457,7 @@ mod provider_access_tests {
         let fixture = Fixture::new(StorageConfig::Dropbox {
             account_label: None,
             location: DropboxLocation::AppFolder,
+            folder_label: None,
         })
         .await;
         let handle = fixture.setup(fixture.builder()).await;
@@ -468,6 +470,7 @@ mod provider_access_tests {
         let shared = StorageConfig::Dropbox {
             account_label: None,
             location: DropboxLocation::SharedFolder { namespace_id: "other-level".into() },
+            folder_label: None,
         };
         let error = handle.setup_oauth_storage(shared, "Laptop", |_| {}).await.unwrap_err();
         assert_eq!(error.to_string(), "storage location change is unsupported");

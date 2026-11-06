@@ -429,6 +429,7 @@ pub(super) fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
             account_label: None,
             drive_id: "drive".into(),
             folder_id: "root".into(),
+            folder_label: None,
         },
         session(PROVIDER),
         Arc::new(coven_foundation::id_source::SequentialIds::new()),

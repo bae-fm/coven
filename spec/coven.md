@@ -8769,6 +8769,26 @@ This lets Ana distinguish stores on her personal and work accounts. The label is
 only for display, never routing or authority, and contains no tokens. S3 has no
 account label, and coven records none for CloudKit (§13.1).
 
+Setup on Dropbox and OneDrive also records the folder's name and web address,
+so the app can show which folder holds the store and open it in a browser. Ana
+sets up Household in her Dropbox shared folder `Household`; her laptop records
+that name and the folder's Dropbox address. A namespace id means nothing to
+her. Setup reads both from the provider with the same sign-in, after the
+account label: Dropbox's `name` and `preview_url` from
+`sharing/get_folder_metadata`, or the OneDrive item's `name` and `webUrl`. An
+address other than https refuses setup with `StorageFailure::Protocol`, so the
+app never opens another kind of link. Like the account label, they are labels
+only: coven never reaches storage through them, and setup replaces any the app
+passed.
+
+Each device keeps them beside its recorded location, never in a synced table
+or a code. A folder's name and address are what one member's account sees; on
+Dropbox a member who renames a shared folder renames it for themselves alone.
+Signing in again and completing setup reads them again, so a folder renamed
+since shows its new name. The Dropbox App folder isn't picked, and has none.
+Joining and restoring record none, since codes don't carry them; setting up
+again on that device reads them.
+
 Token expiry never consults the device clock. Ben sets his laptop's clock back a
 year; his token still works until Dropbox rejects it, and one refresh lets the
 waiting request continue.

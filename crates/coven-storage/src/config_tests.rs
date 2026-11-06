@@ -89,13 +89,18 @@ fn locations_select_the_required_initial_access() {
     use crate::{DropboxAccess, DropboxLocation, OAuthAccess};
     for (config, expected) in [
         (
-            StorageConfig::Dropbox { account_label: None, location: DropboxLocation::AppFolder },
+            StorageConfig::Dropbox {
+                account_label: None,
+                location: DropboxLocation::AppFolder,
+                folder_label: None,
+            },
             Some(OAuthAccess::Dropbox(DropboxAccess::AppFolder)),
         ),
         (
             StorageConfig::Dropbox {
                 account_label: None,
                 location: DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+                folder_label: None,
             },
             Some(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)),
         ),
@@ -104,6 +109,7 @@ fn locations_select_the_required_initial_access() {
                 account_label: None,
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
+                folder_label: None,
             },
             Some(OAuthAccess::OneDrive),
         ),
@@ -162,6 +168,7 @@ fn every_native_location_identifier_is_required() {
         let config = StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: invalid.into() },
+            folder_label: None,
         };
         assert_eq!(
             config.validate().unwrap_err().failure(),

@@ -84,7 +84,11 @@ async fn the_app_folder_holds_several_stores_without_a_marker() {
     let state = Arc::new(Mutex::new(Remote { app_folder: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut provider = DropboxStorage::new(
-        StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::AppFolder },
+        StorageConfig::Dropbox {
+            account_label: None,
+            location: crate::DropboxLocation::AppFolder,
+            folder_label: None,
+        },
         session(PROVIDER),
     )
     .unwrap();

@@ -182,8 +182,10 @@ pub enum Audience {
   those bugs to a log.
 - `Coven::storage_config` reads a closed store's saved location without opening
   its database or custody. The handle's `storage_config` reads the same committed
-  `StorageConfig`, including the member's account label, so an app can show
-  "Dropbox: ana@example.com" without keeping a second copy. Neither returns
+  `StorageConfig`, including the member's account label and, on Dropbox and
+  OneDrive, the folder's `FolderLabel`, so an app can show
+  "Dropbox: ana@example.com", the folder `Household` and a link that opens it,
+  without keeping a second copy. Neither returns
   credentials or contacts storage. Before setup they return
   `None`; once set up, the location stays, and unreadable settings remain an error.
 - Store lock files live beside each store directory: the writer, reader and
@@ -812,6 +814,17 @@ pub trait StorageConnector: Send + Sync {
         _auth: ProviderAuth,
         _cooldown: Arc<dyn Cooldown>,
     ) -> Result<String, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Read the name and web address of the folder `location` names, as
+    /// the signed-in account sees it, before setup records the location.
+    async fn folder_label(
+        &self,
+        _location: &StorageConfig,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<FolderLabel, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
@@ -4104,9 +4117,10 @@ while let Some(Ok(values)) = lost.next().await {
     instead of a bare spinner. Creating a store that needs its location to
     itself first lists the location's root (`CheckingLocation`). S3 then
     detects settings (`DetectingSettings`). iCloud prepares a new store's
-    zone (`PreparingZone`); Dropbox and OneDrive read the account's name
-    (`ReadingAccount`). Every setup then connects and checks the provider
-    (`Connecting`). Creating claims slot 1 (`CreatingStore`). Reconnecting
+    zone (`PreparingZone`); Dropbox and OneDrive read the account's name,
+    then the folder's name and web address (`ReadingAccount`). Every setup
+    then connects and checks the provider (`Connecting`). Creating claims
+    slot 1 (`CreatingStore`). Reconnecting
     loads with loading's own steps and counts (`Loading`, §13.4), then
     publishes changed access (`RecordingAccess`). A step other than `Loading`
     is one unit, done when it ends.
@@ -4465,6 +4479,16 @@ any label in the code. These labels never select a folder, grant access or chang
 an upload's destination. S3 has no account label, and coven records none for
 CloudKit ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 
+Setup then replaces `folder_label` with the folder's name and web address as
+the same sign-in reads them: Dropbox's `name` and `preview_url` from
+`sharing/get_folder_metadata`, or the OneDrive item's `name` and `webUrl`
+([§20.2](coven.md#202-the-providers-and-signing-in)). A missing field, an empty
+name or an address other than https fails setup with `StorageFailure::Protocol`
+before anything is committed; a failed read keeps its provider cause. The
+Dropbox App folder has none, and a location naming it with one is invalid.
+Codes never carry a folder label, so joining and restoring record none; setting
+up again on that device reads it.
+
 ```rust
 /// A provider's current folder name and the location storage setup accepts.
 pub struct StorageFolder {
@@ -4540,6 +4564,8 @@ pub enum StorageConfig {
         location: DropboxLocation,
         /// Display only; None before setup. Coven reads this member's account at setup.
         account_label: Option<String>,
+        /// Display only; None before setup and in the App folder. Setup reads it.
+        folder_label: Option<FolderLabel>,
     },
     /// A OneDrive folder holding this store alone (§20.3); paths within it
     /// start with the store id.
@@ -4548,6 +4574,8 @@ pub enum StorageConfig {
         folder_id: String,
         /// Display only; None before setup. Coven reads this member's account at setup.
         account_label: Option<String>,
+        /// Display only; None before setup. Setup reads it.
+        folder_label: Option<FolderLabel>,
     },
     /// The CloudKit custom zone reached by the built-in adapter.
     CloudKit {
@@ -4558,6 +4586,16 @@ pub enum StorageConfig {
         /// The custom zone containing the store.
         zone: String,
     },
+}
+
+/// A Dropbox shared folder's or a OneDrive folder's name and web address,
+/// as the member's account saw them at setup (§20.2). Never used to reach
+/// storage; kept on this device only.
+pub struct FolderLabel {
+    /// The provider's name for the folder.
+    pub name: String,
+    /// Where the folder opens in a browser: always https.
+    pub web_url: Url,
 }
 
 /// An S3 location's behaviors: a known service's, or its own (§20.7).
@@ -5787,7 +5825,8 @@ pub enum StorageSetupStep {
     DetectingSettings,
     /// iCloud, creating a store: reading the account and saving its zone.
     PreparingZone,
-    /// Dropbox or OneDrive: reading the signed-in account's name.
+    /// Dropbox or OneDrive: reading the signed-in account's name, then the
+    /// folder's name and web address as that account sees them.
     ReadingAccount,
     /// Connecting and checking the provider.
     Connecting,

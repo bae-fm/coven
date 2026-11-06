@@ -226,6 +226,7 @@ mod location {
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
                 account_label: None,
+                folder_label: None,
             },
             location("http://127.0.0.1:9").1,
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),

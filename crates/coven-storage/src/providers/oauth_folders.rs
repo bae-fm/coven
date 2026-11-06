@@ -7,8 +7,8 @@ use super::{
     OAuthSession,
 };
 use crate::{
-    Cooldown, DropboxAccess, DropboxLocation, OAuthAccess, StorageConfig, StorageError,
-    StorageFailure,
+    Cooldown, DropboxAccess, DropboxLocation, FolderLabel, OAuthAccess, StorageConfig,
+    StorageError, StorageFailure,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -45,6 +45,46 @@ impl OAuthFolders {
         crate::cooldown::cooling(self.cooldown.as_ref())?;
         let result = self.session.account_at(&self.api).await;
         crate::cooldown::observed(self.cooldown.as_ref(), result).await
+    }
+
+    /// The name and web address of the folder `location` names, as the
+    /// signed-in account sees it: a Dropbox shared folder's
+    /// `get_folder_metadata`, or a OneDrive folder's item.
+    pub(super) async fn folder_label(
+        &self,
+        location: &StorageConfig,
+    ) -> Result<FolderLabel, StorageError> {
+        location.validate()?;
+        match location {
+            StorageConfig::Dropbox {
+                location: DropboxLocation::SharedFolder { namespace_id },
+                ..
+            } => {
+                self.require(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))?;
+                let url = http::endpoint(&self.api, &["sharing", "get_folder_metadata"], &[])?;
+                let body = json!({"shared_folder_id": namespace_id});
+                let value = self.request(Method::POST, &url, Body::Json(body)).await?;
+                FolderLabel::answered(
+                    http::string(&value, "name")?,
+                    http::string(&value, "preview_url")?,
+                )
+            }
+            StorageConfig::OneDrive { drive_id, folder_id, .. } => {
+                self.require(OAuthAccess::OneDrive)?;
+                let url = http::endpoint(
+                    &self.api,
+                    &["drives", drive_id, "items", folder_id],
+                    &[("$select", "name,webUrl")],
+                )?;
+                let value = self.request(Method::GET, &url, Body::Empty).await?;
+                FolderLabel::answered(
+                    http::string(&value, "name")?,
+                    http::string(&value, "webUrl")?,
+                )
+            }
+            _ => Err(StorageFailure::InvalidConfiguration
+                .with_source("only a Dropbox shared folder or a OneDrive folder has a label")),
+        }
     }
 
     fn require(&self, access: OAuthAccess) -> Result<(), StorageError> {
@@ -144,6 +184,7 @@ impl OAuthFolders {
             for item in http::array(&value, "entries")? {
                 let storage = StorageConfig::Dropbox {
                     account_label: None,
+                    folder_label: None,
                     location: DropboxLocation::SharedFolder {
                         namespace_id: http::string(item, "shared_folder_id")?.into(),
                     },
@@ -201,6 +242,7 @@ fn onedrive_folder(value: &Value, drive: &str, name: &str) -> Result<StorageFold
     }
     let storage = StorageConfig::OneDrive {
         account_label: None,
+        folder_label: None,
         drive_id: drive.into(),
         folder_id: http::string(value, "id")?.into(),
     };

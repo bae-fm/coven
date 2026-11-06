@@ -288,6 +288,7 @@ mod recovery {
                 location: coven_storage::DropboxLocation::SharedFolder {
                     namespace_id: "recovery".into(),
                 },
+                folder_label: None,
             },
             StorageConfig::CloudKit {
                 container: "test".into(),
@@ -344,7 +345,7 @@ mod recovery {
             assert_eq!(code.store, directory.id());
             assert_eq!(
                 coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location,
-                setup.connection.storage
+                crate::tests::as_coded(setup.connection.storage.clone())
             );
             connector.stop(&handle).await;
             handle

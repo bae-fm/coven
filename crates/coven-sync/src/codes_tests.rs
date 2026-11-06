@@ -44,6 +44,7 @@ fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
             StorageConfig::Dropbox {
                 account_label: Some("ana@example.com".into()),
                 location: coven_storage::DropboxLocation::AppFolder,
+                folder_label: None,
             },
             Some(OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder)),
         ),
@@ -53,6 +54,7 @@ fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
                 location: coven_storage::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },
+                folder_label: None,
             },
             Some(OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox)),
         ),
@@ -61,6 +63,7 @@ fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
                 account_label: Some("ana@work.example".into()),
                 drive_id: "drive".into(),
                 folder_id: "household".into(),
+                folder_label: None,
             },
             Some(OAuthAccess::OneDrive),
         ),
@@ -193,6 +196,7 @@ fn invite_metadata_exposes_locations_without_provider_admission_secrets() {
                 drive_id: "drive".into(),
                 folder_id: "household".into(),
                 account_label: Some("ana@example.com".into()),
+                folder_label: None,
             },
             json!({"OneDriveShare":{"token":"provider-admission-secret"}}),
         ),
@@ -279,11 +283,13 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
             namespace_id: "12345678901".into(),
         },
         account_label: Some("ana@example.com".into()),
+        folder_label: None,
     };
     let onedrive = StorageConfig::OneDrive {
         drive_id: "0123456789abcdef".into(),
         folder_id: "0123456789ABCDEF!1234".into(),
         account_label: Some("ana@example.com".into()),
+        folder_label: None,
     };
     let icloud = StorageConfig::CloudKit {
         container: "iCloud.fm.bae.desktop".into(),

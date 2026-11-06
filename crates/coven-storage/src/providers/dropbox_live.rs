@@ -155,6 +155,7 @@ impl Live {
                 StorageConfig::Dropbox {
                     account_label: None,
                     location: DropboxLocation::SharedFolder { namespace_id },
+                    folder_label: None,
                 },
                 session,
             )

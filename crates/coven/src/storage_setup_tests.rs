@@ -396,6 +396,7 @@ async fn the_app_folder_holds_several_stores() {
     let location = StorageConfig::Dropbox {
         account_label: None,
         location: coven_storage::DropboxLocation::AppFolder,
+        folder_label: None,
     };
     let storage = Arc::new(MemoryStorage::builder().location(location.clone()).build().unwrap());
     let household = open(storage.clone()).await;

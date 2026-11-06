@@ -24,6 +24,7 @@ fn onedrive() -> StorageConfig {
         drive_id: "drive".into(),
         folder_id: "folder".into(),
         account_label: Some("ana@example.com".into()),
+        folder_label: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn invites() -> Vec<InviteStorage> {
             StorageInvitation::for_account(StorageConfig::Dropbox {
                 location: DropboxLocation::SharedFolder { namespace_id: "12345678901".into() },
                 account_label: Some("ana@example.com".into()),
+                folder_label: None,
             })
             .unwrap(),
         ),
@@ -187,8 +189,12 @@ fn an_s3_invite_carries_exactly_its_key() {
 #[test]
 fn an_app_folder_or_an_empty_share_never_decodes() {
     let app_folder = coven_format::code_fields::pack(|out| {
-        StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None }
-            .pack(out)
+        StorageConfig::Dropbox {
+            location: DropboxLocation::AppFolder,
+            account_label: None,
+            folder_label: None,
+        }
+        .pack(out)
     })
     .unwrap();
     assert_eq!(

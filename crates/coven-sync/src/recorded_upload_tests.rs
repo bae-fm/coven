@@ -51,6 +51,7 @@ impl Storage for PlannedStorage {
             account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into(),
+            folder_label: None,
         }
     }
     fn single_request_limit(&self) -> u64 {

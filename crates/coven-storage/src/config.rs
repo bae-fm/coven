@@ -62,6 +62,9 @@ pub enum StorageConfig {
         location: crate::DropboxLocation,
         /// Signed-in member's display label; absent before setup. Never routes or authorizes.
         account_label: Option<String>,
+        /// The shared folder's name and web address as setup read them;
+        /// absent before setup and in the App folder (§20.2).
+        folder_label: Option<FolderLabel>,
     },
     /// A OneDrive folder; paths within it start with the store id.
     OneDrive {
@@ -71,6 +74,9 @@ pub enum StorageConfig {
         folder_id: String,
         /// Signed-in member's display label; absent before setup. Never routes or authorizes.
         account_label: Option<String>,
+        /// The folder's name and web address as setup read them; absent
+        /// before setup (§20.2).
+        folder_label: Option<FolderLabel>,
     },
     /// The custom zone reached by the built-in CloudKit adapter.
     CloudKit {
@@ -81,6 +87,43 @@ pub enum StorageConfig {
         /// Custom zone containing the store.
         zone: String,
     },
+}
+
+/// A Dropbox shared folder's or a OneDrive folder's name and web address,
+/// as the member's account saw them at setup (§20.2). Display only: coven
+/// never reaches storage through them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderLabel {
+    /// The provider's name for the folder.
+    pub name: String,
+    /// Where the folder opens in a browser: an https address.
+    pub web_url: url::Url,
+}
+
+impl FolderLabel {
+    /// The label a provider answered with; one this refuses is a protocol
+    /// failure.
+    pub(crate) fn answered(name: &str, web_url: &str) -> Result<Self, crate::StorageError> {
+        let web_url = url::Url::parse(web_url)
+            .map_err(|error| crate::StorageFailure::Protocol.with_source(error))?;
+        let label = Self { name: name.into(), web_url };
+        label.validate().map_err(|error| crate::StorageFailure::Protocol.with_source(error))?;
+        Ok(label)
+    }
+
+    /// Refuse an empty name or an address a browser shouldn't be sent to.
+    fn validate(&self) -> Result<(), crate::StorageError> {
+        if self.name.trim().is_empty() || self.name.chars().any(char::is_control) {
+            return Err(crate::StorageFailure::InvalidConfiguration
+                .with_source("empty or invalid folder name"));
+        }
+        if self.web_url.scheme() != "https" || !crate::web_url::is_web_url(&self.web_url) {
+            return Err(crate::StorageFailure::InvalidConfiguration
+                .with_source("a folder's web address must be https"));
+        }
+        Ok(())
+    }
 }
 
 impl StorageConfig {
@@ -162,12 +205,31 @@ impl StorageConfig {
                 crate::providers::check_s3_profile(endpoint.as_ref(), profile.as_ref())?;
                 vec![bucket, region]
             }
+            Self::Dropbox {
+                location: crate::DropboxLocation::AppFolder,
+                folder_label: Some(_),
+                ..
+            } => {
+                return Err(crate::StorageFailure::InvalidConfiguration
+                    .with_source("the Dropbox App folder has no folder label"));
+            }
             Self::Dropbox { location: crate::DropboxLocation::AppFolder, .. } => vec![],
             Self::Dropbox {
                 location: crate::DropboxLocation::SharedFolder { namespace_id },
+                folder_label,
                 ..
-            } => vec![namespace_id],
-            Self::OneDrive { drive_id, folder_id, .. } => vec![drive_id, folder_id],
+            } => {
+                if let Some(label) = folder_label {
+                    label.validate()?;
+                }
+                vec![namespace_id]
+            }
+            Self::OneDrive { drive_id, folder_id, folder_label, .. } => {
+                if let Some(label) = folder_label {
+                    label.validate()?;
+                }
+                vec![drive_id, folder_id]
+            }
             Self::CloudKit { container, owner, zone } => vec![container, owner, zone],
         };
         if fields.iter().any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
@@ -197,7 +259,8 @@ impl StorageConfig {
                 out.option(endpoint.as_ref(), |out, url| out.text(url.as_str()))?;
                 out.option(profile.as_ref(), |out, profile| profile.pack(out))
             }
-            Self::Dropbox { location, account_label } => {
+            // A code carries no folder label (format.md D13).
+            Self::Dropbox { location, account_label, folder_label: _ } => {
                 out.u8(DROPBOX)?;
                 match location {
                     crate::DropboxLocation::AppFolder => out.u8(0)?,
@@ -208,7 +271,7 @@ impl StorageConfig {
                 }
                 out.option(account_label.as_deref(), FieldWriter::text)
             }
-            Self::OneDrive { drive_id, folder_id, account_label } => {
+            Self::OneDrive { drive_id, folder_id, account_label, folder_label: _ } => {
                 out.u8(ONEDRIVE)?;
                 out.text(drive_id)?;
                 out.text(folder_id)?;
@@ -248,11 +311,13 @@ impl StorageConfig {
                     }
                 },
                 account_label: input.option(|input| input.text("account label"))?,
+                folder_label: None,
             },
             ONEDRIVE => Self::OneDrive {
                 drive_id: input.text("drive id")?,
                 folder_id: input.text("folder id")?,
                 account_label: input.option(|input| input.text("account label"))?,
+                folder_label: None,
             },
             CLOUDKIT => Self::CloudKit {
                 container: input.text("container")?,

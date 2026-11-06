@@ -188,7 +188,9 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
                 .await
                 .unwrap()
             };
-            let expected = owner.handle.storage_config().await.unwrap().unwrap();
+            // A restore records the code's location: no folder label.
+            let expected =
+                crate::tests::as_coded(owner.handle.storage_config().await.unwrap().unwrap());
             assert_eq!(handle.storage_config().await.unwrap(), Some(expected.clone()));
             assert_eq!(
                 crate::tests::readable(

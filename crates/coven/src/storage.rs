@@ -547,15 +547,30 @@ impl StorageConnections {
                     .check_new_location(journal, &storage, auth.clone(), &waits, &mut progress)
                     .await?;
                 let (connector, cooldown) = (owner.connector.as_ref(), &owner.waits);
-                let (location, signed_in) = (&storage, &auth);
-                let reading = waits.resend(owner.clock.as_ref(), move || {
-                    crate::authentication::label_location(
-                        connector,
-                        location.clone(),
-                        signed_in.clone(),
-                        cooldown.clone(),
-                    )
-                });
+                let (location, signed_in, clock) = (&storage, &auth, owner.clock.as_ref());
+                let reading = async {
+                    let location = waits
+                        .resend(clock, move || {
+                            crate::authentication::label_location(
+                                connector,
+                                location.clone(),
+                                signed_in.clone(),
+                                cooldown.clone(),
+                            )
+                        })
+                        .await?;
+                    let location = &location;
+                    waits
+                        .resend(clock, move || {
+                            crate::authentication::label_folder(
+                                connector,
+                                location.clone(),
+                                signed_in.clone(),
+                                cooldown.clone(),
+                            )
+                        })
+                        .await
+                };
                 let storage =
                     setup_step::single(&mut progress, StorageSetupStep::ReadingAccount, reading)
                         .await?;

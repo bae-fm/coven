@@ -290,7 +290,8 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
                     account_label: None,
                     location: coven_storage::DropboxLocation::SharedFolder {
                         namespace_id: "folder".into()
-                    }
+                    },
+                    folder_label: None
                 },
                 "Device",
                 |_| {}

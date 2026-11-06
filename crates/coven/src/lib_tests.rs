@@ -630,6 +630,17 @@ pub(crate) fn saved_entry(
         .map(|bytes| coven_sync::read_saved_code(store, bytes.as_bytes()).unwrap().0)
 }
 
+/// `location` as a code carries it: codes leave out the folder label setup
+/// records (format.md D13).
+pub(crate) fn as_coded(mut location: crate::StorageConfig) -> crate::StorageConfig {
+    match &mut location {
+        crate::StorageConfig::Dropbox { folder_label, .. }
+        | crate::StorageConfig::OneDrive { folder_label, .. } => *folder_label = None,
+        crate::StorageConfig::S3 { .. } | crate::StorageConfig::CloudKit { .. } => {}
+    }
+    location
+}
+
 /// The readable entries of a listing, for fixtures that save only codes coven
 /// reads; an unreadable entry fails the test.
 pub(crate) fn readable(entries: Vec<SavedRestoreEntry>) -> Vec<SavedRestoreCode> {

@@ -27,6 +27,17 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
+    /// Read the name and web address of the folder `location` names, as
+    /// the signed-in account sees it, before setup records the location.
+    async fn folder_label(
+        &self,
+        _location: &StorageConfig,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<crate::FolderLabel, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Read the signed-in OneDrive root.
     async fn onedrive_root(
         &self,
@@ -212,6 +223,20 @@ impl StorageConnector for ProviderConnector {
     ) -> Result<String, StorageError> {
         self.with_folders(auth, cooldown, |folders| async move { folders.account_label().await })
             .await
+    }
+
+    async fn folder_label(
+        &self,
+        location: &StorageConfig,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<crate::FolderLabel, StorageError> {
+        self.with_folders(
+            auth,
+            cooldown,
+            |folders| async move { folders.folder_label(location).await },
+        )
+        .await
     }
 
     /// Read the signed-in OneDrive root.

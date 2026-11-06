@@ -445,6 +445,7 @@ pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
         StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+            folder_label: None,
         },
         session(PROVIDER),
     )
@@ -645,6 +646,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     let elsewhere = StorageInvitation::for_account(StorageConfig::Dropbox {
         account_label: None,
         location: crate::DropboxLocation::SharedFolder { namespace_id: "elsewhere".into() },
+        folder_label: None,
     })
     .unwrap();
     assert!(matches!(

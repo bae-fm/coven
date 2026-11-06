@@ -176,6 +176,7 @@ fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() 
     code.storage = coven_storage::RestoreStorage::location_only(StorageConfig::Dropbox {
         account_label: None,
         location: coven_storage::DropboxLocation::SharedFolder { namespace_id: "folder".into() },
+        folder_label: None,
     })
     .encode()
     .unwrap();

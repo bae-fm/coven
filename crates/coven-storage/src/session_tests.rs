@@ -10,6 +10,7 @@ fn upload_sessions_encode_without_capacity_growth() {
         location: StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+            folder_label: None,
         },
         target: UploadTarget::Create(ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)),
         total: 42,
@@ -36,6 +37,7 @@ fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
             location: StorageConfig::Dropbox {
                 account_label: None,
                 location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+                folder_label: None,
             },
             target: UploadTarget::Create(ObjectPath::floor(STORE_ID)),
             total: 1,
@@ -101,6 +103,7 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
             StorageConfig::Dropbox {
                 account_label: None,
                 location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+                folder_label: None,
             },
             SessionState::Dropbox { id: SecretText::new("session".into()) },
             8 * 1024 * 1024,
@@ -110,6 +113,7 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
                 account_label: None,
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
+                folder_label: None,
             },
             onedrive_state("https://upload.onedrive.com/session"),
             24 * 320 * 1024,
@@ -206,6 +210,7 @@ fn restarting_s3_session_keeps_only_cleanup_identifiers_and_zero_progress() {
     session.location = StorageConfig::Dropbox {
         account_label: None,
         location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+        folder_label: None,
     };
     assert_invalid_recording(&session);
     session.location = s3_recording().location;
@@ -224,6 +229,7 @@ fn session_urls_and_unknown_state_fields_are_refused() {
             account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into(),
+            folder_label: None,
         },
         onedrive_state("https://upload.example/session"),
         24 * 320 * 1024,
@@ -271,6 +277,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
         StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+            folder_label: None,
         },
         SessionState::VerifyPublished,
         8 * 1024 * 1024,
@@ -283,7 +290,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
     assert_invalid_recording(&session);
     session.part_size = 8 * 1024 * 1024;
     assert!(matches!(
-        session.check(&StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() } }),
+        session.check(&StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() }, folder_label: None }),
         Err(error) if error.failure() == StorageFailure::SessionMismatch
     ));
 }
@@ -301,6 +308,7 @@ fn onedrive_publication_phases_require_their_real_progress_and_capability() {
         account_label: None,
         drive_id: "drive".into(),
         folder_id: "folder".into(),
+        folder_label: None,
     };
     for upload in [
         OneDriveUpload::Uploaded { item: "item".into() },
@@ -345,6 +353,7 @@ fn refreshed_account_labels_do_not_change_upload_destinations() {
             StorageConfig::Dropbox {
                 location: crate::DropboxLocation::AppFolder,
                 account_label: Some("old@example.com".into()),
+                folder_label: None,
             },
             SessionState::Dropbox { id: SecretText::new("session".into()) },
             DROPBOX_PART_SIZE,
@@ -354,6 +363,7 @@ fn refreshed_account_labels_do_not_change_upload_destinations() {
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
                 account_label: Some("old@example.com".into()),
+                folder_label: None,
             },
             onedrive_state("https://upload.example/session"),
             ONEDRIVE_PART_SIZE,

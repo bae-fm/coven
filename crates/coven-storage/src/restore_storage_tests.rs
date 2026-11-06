@@ -49,20 +49,27 @@ fn locations() -> Vec<StorageConfig> {
         ),
         s3(Some("http://nas.local:9000"), Some(S3Profile::Named(S3ProfileName::RustFs))),
         s3(Some("https://s3.example.net/"), Some(S3Profile::Custom(detected()))),
-        StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
+        StorageConfig::Dropbox {
+            location: DropboxLocation::AppFolder,
+            account_label: None,
+            folder_label: None,
+        },
         StorageConfig::Dropbox {
             location: DropboxLocation::SharedFolder { namespace_id: "12345678901".into() },
             account_label: Some("ana@example.com".into()),
+            folder_label: None,
         },
         StorageConfig::OneDrive {
             drive_id: "b!drive".into(),
             folder_id: "01FOLDER".into(),
             account_label: Some("ana@example.com".into()),
+            folder_label: None,
         },
         StorageConfig::OneDrive {
             drive_id: "b!drive".into(),
             folder_id: "01FOLDER".into(),
             account_label: None,
+            folder_label: None,
         },
         StorageConfig::CloudKit {
             container: "iCloud.fm.bae".into(),
@@ -161,6 +168,7 @@ fn the_layout_is_the_providers_tag_then_its_own_fields() {
         packed(StorageConfig::Dropbox {
             location: DropboxLocation::SharedFolder { namespace_id: "n".into() },
             account_label: Some("a".into()),
+            folder_label: None,
         }),
         b"\x01\x01\0\0\0\x01n\x01\0\0\0\x01a"
     );
@@ -169,6 +177,7 @@ fn the_layout_is_the_providers_tag_then_its_own_fields() {
             drive_id: "d".into(),
             folder_id: "f".into(),
             account_label: None,
+            folder_label: None,
         }),
         b"\x02\0\0\0\x01d\0\0\0\x01f\0"
     );
@@ -245,6 +254,7 @@ fn spellings_and_tags_the_encoder_never_writes_are_refused() {
     let mut bytes = packed(StorageConfig::Dropbox {
         location: DropboxLocation::AppFolder,
         account_label: None,
+        folder_label: None,
     });
     bytes[1] = 2;
     assert_eq!(refusal(&bytes), StorageFailure::Encoding);

@@ -126,6 +126,14 @@ impl coven_storage::providers::StorageConnector for Connector {
     ) -> Result<String, StorageError> {
         self.storage.account_label(auth, cooldown).await
     }
+    async fn folder_label(
+        &self,
+        location: &StorageConfig,
+        auth: coven_storage::ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<coven_storage::FolderLabel, StorageError> {
+        self.storage.folder_label(location, auth, cooldown).await
+    }
     async fn prepare_cloudkit(
         &self,
         container: &str,

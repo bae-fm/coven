@@ -445,11 +445,13 @@ fn sharing_configs() -> [StorageConfig; 3] {
         StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+            folder_label: None,
         },
         StorageConfig::OneDrive {
             account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into(),
+            folder_label: None,
         },
         StorageConfig::CloudKit {
             container: "container".into(),
@@ -569,6 +571,7 @@ async fn invalid_account_grants_leave_the_fake_unchanged() {
             StorageConfig::Dropbox {
                 account_label: None,
                 location: crate::DropboxLocation::AppFolder,
+                folder_label: None,
             },
             "member",
             StorageFailure::DropboxAppFolderNotShareable,

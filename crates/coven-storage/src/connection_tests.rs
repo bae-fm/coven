@@ -10,7 +10,7 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
     ] {
         let required = OAuthAccess::Dropbox(location.access());
         let storage = MemoryStorage::builder()
-            .location(StorageConfig::Dropbox { account_label: None, location })
+            .location(StorageConfig::Dropbox { account_label: None, location, folder_label: None })
             .build()
             .unwrap();
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
@@ -92,6 +92,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
             StorageConfig::Dropbox {
                 account_label: None,
                 location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+                folder_label: None,
             },
             StorageFailure::SessionMismatch,
         ),
@@ -100,6 +101,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
                 account_label: None,
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
+                folder_label: None,
             },
             StorageFailure::SessionMismatch,
         ),
@@ -110,6 +112,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         session.location = StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() },
+            folder_label: None,
         };
         let before = storage.request_count();
         assert_eq!(storage.upload_part(&mut session, &[]).await.unwrap_err().failure(), expected);
@@ -149,6 +152,7 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
     foreign.location = StorageConfig::Dropbox {
         account_label: None,
         location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() },
+        folder_label: None,
     };
     for error in [
         storage.resume_upload(&mut foreign).await.err().unwrap(),

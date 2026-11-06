@@ -80,6 +80,7 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
                     account_label: None,
                     drive_id: folders.drive.clone(),
                     folder_id,
+                    folder_label: None,
                 },
                 OAuthSession::new(
                     PROVIDER,

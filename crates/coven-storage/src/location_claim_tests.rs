@@ -97,8 +97,11 @@ async fn joining_requires_the_marker_to_name_this_store() {
 #[tokio::test]
 async fn only_locations_every_member_reaches_whole_hold_a_marker() {
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
-    let app_folder =
-        StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::AppFolder };
+    let app_folder = StorageConfig::Dropbox {
+        account_label: None,
+        location: crate::DropboxLocation::AppFolder,
+        folder_label: None,
+    };
     for (builder, marked) in [
         (MemoryStorage::builder().location(location()), true),
         (MemoryStorage::builder().provider(CloudProvider::Dropbox), true),

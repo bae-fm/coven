@@ -93,6 +93,32 @@ impl crate::providers::StorageConnector for MemoryStorage {
         .await
     }
 
+    /// Memory has no folder of its own to read: a Dropbox shared folder or
+    /// a OneDrive folder is named after its id, at an address under
+    /// `storage.example.test`, and the answer sends no request.
+    async fn folder_label(
+        &self,
+        location: &StorageConfig,
+        _auth: crate::ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<crate::FolderLabel, StorageError> {
+        let id = match location {
+            StorageConfig::Dropbox {
+                location: crate::DropboxLocation::SharedFolder { namespace_id },
+                ..
+            } => namespace_id,
+            StorageConfig::OneDrive { folder_id, .. } => folder_id,
+            _ => {
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("only a Dropbox shared folder or a OneDrive folder has a label"))
+            }
+        };
+        let mut web_url = url::Url::parse("https://storage.example.test/folders/")
+            .expect("a fixed address parses");
+        web_url.path_segments_mut().expect("an https address holds paths").pop_if_empty().push(id);
+        Ok(crate::FolderLabel { name: id.clone(), web_url })
+    }
+
     async fn prepare_cloudkit(
         &self,
         container: &str,
