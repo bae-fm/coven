@@ -71,7 +71,11 @@ pub(crate) fn load<P: crate::PendingValue>(
                     }
                     let header =
                         read(database, schema, input, Some(author), progress).map_err(|error| {
-                            SnapshotError::Body { snapshot: id.clone(), error: Box::new(error) }
+                            SnapshotError::Body {
+                                snapshot: id.clone(),
+                                error: Box::new(error),
+                                staged: None,
+                            }
                         })?;
                     crate::download_stage::replace(database, &id.audience)?;
                     let files = crate::database::file_retention::snapshot_references(

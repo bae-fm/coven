@@ -454,10 +454,19 @@ impl SequenceSync {
                 .finish()
                 .await
                 .map_err(|error| crate::write_object::database_failure(path, error))?;
-            object.authenticate(history, &announcement.snapshot, &body.digest, &announcement.digest)
+            Ok(body)
         }
         .await;
-        let author = match read {
+        let body = match read {
+            Ok(body) => body,
+            Err(error) => return Err(self.end_staged(error, staging, announcement, ring).await),
+        };
+        let author = match object.authenticate(
+            history,
+            &announcement.snapshot,
+            &body.digest,
+            &announcement.digest,
+        ) {
             Ok(author) => author,
             Err(error) => {
                 return Err(match staging.discard().await {
@@ -471,10 +480,26 @@ impl SequenceSync {
             history: history.clone(),
             ring: ring.clone(),
         });
-        self.database
+        match self
+            .database
             .validate_snapshot(announcement.snapshot.clone(), staging, author, authorship)
             .await
-            .map_err(|error| crate::write_object::database_failure(path, error))
+        {
+            Ok(files) => Ok(files),
+            Err(coven_database::DbError::Snapshot(coven_database::SnapshotError::Body {
+                error,
+                staged,
+                ..
+            })) => Err(self
+                .judge_staged(
+                    crate::write_object::database_failure(path, *error),
+                    staged,
+                    announcement,
+                    ring,
+                )
+                .await),
+            Err(error) => Err(crate::write_object::database_failure(path, error)),
+        }
     }
 }
 

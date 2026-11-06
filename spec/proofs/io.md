@@ -339,6 +339,24 @@ back that size, and the bytes it lost read as zeros, which fail their check.
 cuts a read's header and chunk entries and a pin's whole copy short, and grows
 one past its end, with the same outcome.
 
+A snapshot's checks read its records as this device staged them on its own disk
+(§16.2), and staging is a function of the snapshot's bytes. `pass` covers them
+with the stagings as its reads, the staging of the stored bytes as what is
+stored, and damage on this device's disk as a fault: a check that refuses a
+staging stages the snapshot again from another read, and the snapshot is
+refused only when the second staging's digest is the first's.
+`sequence_sync::snapshot_staged::tests::a_staged_snapshot_damaged_before_its_load_is_not_refused`
+changes a staged record before a reload's load reads it, and
+`sequence_sync::snapshot_staged::tests::a_staged_snapshot_damaged_while_it_stages_is_not_refused`
+a staged write as its staging checks it;
+`sequence_sync::sequence_files::tests::a_snapshot_staged_for_file_deletion_damaged_here_is_not_refused`
+does both to the snapshot a file deletion reads. Each fails with
+`DamagedDatabase` and records no refusal, and the next one loads the snapshot
+or deletes the file.
+`sequence_sync::snapshot_staged::tests::a_snapshot_whose_stagings_agree_is_refused`
+damages both stagings alike, as a snapshot whose own records fail stages
+them, and the refusal stands, at the staging's check and at the load's.
+
 ## Rechecking a refusal
 
 [Recheck.lean](io/CovenIO/Recheck.lean) models when a refusal is checked again

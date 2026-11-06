@@ -50,6 +50,13 @@ pub(crate) fn table(staging: i64, name: &str) -> String {
     format!("temp._coven_staged_{staging}_{name}")
 }
 
+#[path = "staged_damage.rs"]
+mod damage;
+use damage::with_staged_digest;
+#[cfg(any(test, feature = "test-utils"))]
+pub use damage::StagedDamage;
+pub use damage::StagedDigest;
+
 fn create_staged(
     db: &DatabaseConnection,
     layout: &SnapshotLayout,
@@ -168,6 +175,15 @@ impl InputDatabase {
         Ok((StagedTables { id, tables }, Inserts::new(layout, id)))
     }
 
+    /// The damage a test asked for to the staging finishing now, if any.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn next_finish_damage(&self) -> Option<StagedDamage> {
+        let mut damage = coven_foundation::locks::lock_unpoisoned(&self.damage_finishing);
+        let (made, count) = (*damage)?;
+        *damage = (count > 1).then_some((made, count - 1));
+        Some(made)
+    }
+
     /// Remove a staging's records.
     fn remove_staging(&self, staging: &StagedTables) -> Result<(), DbError> {
         super::with_locked(&self.writer, |writer| writer.transaction(|db| remove(db, staging)))
@@ -186,6 +202,14 @@ impl InputDatabase {
         ) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         super::with_locked(&self.writer, |writer| {
+            #[cfg(any(test, feature = "test-utils"))]
+            if self.damage_staged.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let first = stagings.as_mut().iter().find_map(|staging| staging.tables.as_ref());
+                let first = first.map(|tables| tables.id).ok_or(DbError::Invariant {
+                    what: "a test damages a staging that holds its records",
+                })?;
+                writer.transaction(|db| damage::damage(db, first, StagedDamage::Record))?;
+            }
             let read = writer.transaction(|db| {
                 let inputs = crate::input_preparation::PreparedInputs::new(db)?;
                 let result = consume(&inputs, stagings)?;
@@ -196,6 +220,7 @@ impl InputDatabase {
             let result = match read {
                 Ok(result) => Ok(result),
                 Err(error) => {
+                    let error = with_staged_digest(writer, stagings.as_mut(), error);
                     let removed = writer.transaction(|db| remove_all(db, stagings.as_mut()));
                     match removed {
                         Ok(()) => Err(error),
@@ -348,6 +373,35 @@ impl Database {
         .await
     }
 
+    /// Change a staged record before the next load or file check reads it,
+    /// as damage to this device's disk would (§19.1).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn damage_next_staged_read(&self) -> Result<(), DbError> {
+        self.call(|inner| {
+            inner.inputs.damage_staged.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, DbError>(())
+        })
+        .await
+    }
+
+    /// Make `damage` to each of the next `count` stagings as it finishes,
+    /// before finishing checks it, as damage to this device's disk would
+    /// (§19.1). Damage to two stagings of one snapshot alike stands for a
+    /// snapshot whose own records fail.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn damage_staged_finishes(
+        &self,
+        damage: StagedDamage,
+        count: u32,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            *coven_foundation::locks::lock_unpoisoned(&inner.inputs.damage_finishing) =
+                Some((damage, count));
+            Ok::<_, DbError>(())
+        })
+        .await
+    }
+
     /// The records staged on the input connection now, for every snapshot:
     /// the rows of every staging's tables, and their applied writes.
     #[cfg(any(test, feature = "test-utils"))]
@@ -448,6 +502,10 @@ impl SnapshotStaging {
         let (header, refusal) = self
             .database
             .call(move |inner| {
+                #[cfg(any(test, feature = "test-utils"))]
+                if let Some(made) = inner.inputs.next_finish_damage() {
+                    inner.inputs.write(|db| damage::damage(db, staging, made))?;
+                }
                 inner.inputs.write(|db| {
                     state.decoder.finish().map_err(SnapshotError::Format)?;
                     let header = state

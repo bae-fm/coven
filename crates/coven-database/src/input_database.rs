@@ -12,7 +12,9 @@ mod bytes;
 pub use bytes::RetainedBytes;
 #[path = "snapshot_staging.rs"]
 pub(crate) mod staging;
-pub use staging::SnapshotStaging;
+#[cfg(any(test, feature = "test-utils"))]
+pub use staging::StagedDamage;
+pub use staging::{SnapshotStaging, StagedDigest};
 
 type InputConnection = Arc<Mutex<Option<DatabaseConnection>>>;
 
@@ -32,6 +34,15 @@ pub(crate) struct InputDatabase {
     active: Arc<Mutex<BTreeMap<i64, Weak<InputRead>>>>,
     /// The next snapshot staging's number; 0 is the installing snapshot's.
     stagings: std::sync::atomic::AtomicI64,
+    /// A test's request to change a staged record before the next load or
+    /// file check reads it, as damage on this device's disk would.
+    #[cfg(any(test, feature = "test-utils"))]
+    damage_staged: std::sync::atomic::AtomicBool,
+    /// A test's request to damage the next stagings that finish, and how
+    /// many, before finishing checks them, as damage on this device's disk
+    /// would.
+    #[cfg(any(test, feature = "test-utils"))]
+    damage_finishing: Mutex<Option<(staging::StagedDamage, u32)>>,
 }
 
 struct InputRead {
@@ -185,6 +196,10 @@ impl InputDatabase {
             writer,
             active: Arc::new(Mutex::new(BTreeMap::new())),
             stagings: std::sync::atomic::AtomicI64::new(1),
+            #[cfg(any(test, feature = "test-utils"))]
+            damage_staged: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            damage_finishing: Mutex::new(None),
         })
     }
 

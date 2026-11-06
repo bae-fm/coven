@@ -290,6 +290,7 @@ fn a_snapshots_invalid_write_evidence_refuses_the_snapshot() {
         DbError::Snapshot(SnapshotError::Body {
             snapshot: snapshot.clone(),
             error: Box::new(error.into()),
+            staged: None,
         })
     });
     for error in evidence().map(DbError::Snapshot).into_iter().chain(named) {

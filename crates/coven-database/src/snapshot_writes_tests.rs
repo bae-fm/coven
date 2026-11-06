@@ -409,7 +409,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     assert!(
         matches!(
             &failed,
-            Err(crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error }))
+            Err(crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error, .. }))
                 if *snapshot == id(Audience::Store)
                     && matches!(**error, crate::DbError::Snapshot(
                         crate::SnapshotError::Inconsistent("synced and merge values disagree")

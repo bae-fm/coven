@@ -90,7 +90,13 @@ impl Database {
         let mut stagings = [staging];
         self.call(move |inner| {
             inner.inputs.read_staged(&mut stagings, |inputs, [staging]| {
-                let prepared = staging.prepare(inputs, authorship.as_ref())?;
+                // A failure reading the body names the snapshot.
+                let body = |error: DbError| crate::SnapshotError::Body {
+                    snapshot: id.clone(),
+                    error: Box::new(error),
+                    staged: None,
+                };
+                let prepared = staging.prepare(inputs, authorship.as_ref()).map_err(&body)?;
                 inner.access.with_writer(|writer| {
                     writer.discarded_transaction(|writer| {
                         let schema = &inner.access.write_schema;
@@ -106,7 +112,8 @@ impl Database {
                             prepared,
                             Some(author),
                             &mut progress,
-                        )?;
+                        )
+                        .map_err(&body)?;
                         super::file_retention::snapshot_references(writer, schema, &id.audience)
                     })
                 })
@@ -319,6 +326,7 @@ impl Database {
                                     .map_err(|error| crate::SnapshotError::Body {
                                         snapshot: id.clone(),
                                         error: Box::new(error),
+                                        staged: None,
                                     })?;
                                 crate::SnapshotSource::Stored { id, input, author }
                             }

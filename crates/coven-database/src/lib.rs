@@ -165,9 +165,11 @@ pub use database::file_database::{
     PreparedPin,
 };
 pub use database::file_retention::FileCandidate;
+#[cfg(any(test, feature = "test-utils"))]
+pub use database::input_database::StagedDamage;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,
-    UnprovenFiles,
+    StagedDigest, UnprovenFiles,
 };
 pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder, Mode,

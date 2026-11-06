@@ -8005,7 +8005,18 @@ read, never a refusal.
   those same announced bytes, so a snapshot whose records disagree, or whose
   carried write evidence doesn't authenticate or names an author who couldn't
   write it (§9.6), is refused at its own object, never taken for a failure of
-  the local database.
+  the local database. Those checks read the records as this device staged them
+  (§16.2), a copy on its own disk, so a check that refuses them, as the
+  snapshot stages, loads or has its files read, is not yet a refusal: coven
+  stages the snapshot again from another read, and refuses it only when the
+  second staging holds the same records. Staging is a function of the
+  snapshot's bytes, so different records mean this device's disk changed the
+  first staging: the call fails with `DamagedDatabase`, nothing is refused, and
+  the next reload or pass reads the snapshot again. Say a disk error changes a
+  record Ben's laptop staged while his reload reads its slots: that reload
+  fails, and his next one loads the snapshot
+  ([`refusal_judges_stored`](proofs/io/CovenIO/Reread.lean), with the two
+  stagings as its reads).
 - A file's cached copy is kept only once it checked (§17.8), so a cached header
   or chunk that fails its check changed on this device, and says nothing about
   the stored file. Coven fetches those bytes from storage, judges them as any
@@ -11325,7 +11336,7 @@ maps them are with each provider in Appendix E.
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
 | `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
 | `DbError::StatePersistence` | coven can't save pending state or the sync status; sync and database calls stop | §19.1 |
-| `DbError::DamagedDatabase` | a statement meets damage SQLite reports, or a stored fact doesn't decode; the call fails, opening included | §19.3 |
+| `DbError::DamagedDatabase` | a statement meets damage SQLite reports, a stored fact doesn't decode, or a snapshot's staged records differ from a second staging's; the call fails, opening included | §19.1, §19.3 |
 | `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
 | `DbError::ReservedCollation` | an app collation has the name of one of SQLite's own; the open fails | §4 |
 | `DbError::DuplicateCollation` | the app registered two collations under one name; the open fails | §4 |

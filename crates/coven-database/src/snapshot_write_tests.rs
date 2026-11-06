@@ -205,7 +205,7 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
         .await
         .map(drop)
         .map_err(|error| match error {
-            crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error }) => {
+            crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error, .. }) => {
                 assert_eq!(snapshot, expected);
                 *error
             }

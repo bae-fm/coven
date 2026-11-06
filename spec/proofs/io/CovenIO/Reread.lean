@@ -1,6 +1,8 @@
 /-! What a refusal judges (§19.1, "Refusals and failures"), as
 `SequenceSync::block` confirms a refused slot, a file's fetch confirms a
-refused chunk, and a snapshot's read confirms a refused prefix or body.
+refused chunk, a snapshot's read confirms a refused prefix or body, and
+`SequenceSync::judge_staged` confirms a check that refused a snapshot's
+records as this device staged them, against a second staging.
 
 A refusal claims the stored object fails its check, and stops the device for
 good under its build. But a device judges the bytes a read returned, and a

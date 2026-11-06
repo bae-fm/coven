@@ -114,7 +114,8 @@ pub enum DbError {
     #[error(transparent)]
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
-    /// `SQLITE_NOTADB`), or decoding stored facts found damage (§19.3).
+    /// `SQLITE_NOTADB`), decoding stored facts found damage (§19.3), or a
+    /// snapshot's staged records differ from a second staging's (§19.1).
     #[error("damaged database")]
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's

@@ -13,6 +13,10 @@ pub enum SnapshotError {
         /// The failed read or check.
         #[source]
         error: Box<crate::DbError>,
+        /// The digest of its staged records as the failed read left them,
+        /// read back once it failed, to tell damage on this device from the
+        /// snapshot's own (§19.1); `None` until then.
+        staged: Option<crate::StagedDigest>,
     },
     /// Reading the plaintext supplied by sync failed.
     #[error("reading reload input: {0}")]

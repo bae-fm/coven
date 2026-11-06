@@ -460,6 +460,52 @@ async fn a_refused_file_deletion_keeps_the_file_and_stays_visible() {
     ana.database().close().await.unwrap();
 }
 
+/// The snapshot a deletion decision reads changes on Ana's disk while she
+/// holds it staged, before its check or as its staging checks its writes.
+/// It is what she wrote, so it is not refused: the deletion fails here as
+/// the local database's failure, and its retry deletes the file (§19.1).
+#[tokio::test]
+async fn a_snapshot_staged_for_file_deletion_damaged_here_is_not_refused() {
+    for finishing in [false, true] {
+        let (group, ana, object) = ana_with_an_unreferenced_stored_file().await;
+        if finishing {
+            ana.database()
+                .damage_staged_finishes(coven_database::StagedDamage::Writes, 1)
+                .await
+                .unwrap();
+        } else {
+            ana.database().damage_next_staged_read().await.unwrap();
+        }
+        ana.sync.pass().await.unwrap();
+        assert!(group.storage.status(&object).await.unwrap().is_some(), "the file stays");
+        let operation = ana
+            .database()
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == "sequence-files")
+            .expect("the failed deletion stays journaled")
+            .id;
+        let pending = ana
+            .database()
+            .operation_pending::<crate::PendingRecord>(operation)
+            .await
+            .unwrap()
+            .expect("the failure is reported");
+        assert_eq!(
+            pending.reason,
+            crate::PendingReason::Failed(crate::LocalFailure::Database),
+            "{finishing}: {pending:?}"
+        );
+        ana.sync.retry_pending_operation(operation).await.unwrap();
+        assert!(group.storage.status(&object).await.unwrap().is_none(), "the file is deleted");
+        assert!(ana.database().operation(operation).await.unwrap().is_none());
+        ana.files().close().await;
+        ana.database().close().await.unwrap();
+    }
+}
+
 /// The snapshots a deletion decision reads are the ones announcements and
 /// the floor name, read by their paths: no pass lists a snapshot folder to
 /// find them (§17.10).

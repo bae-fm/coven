@@ -13,8 +13,8 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
-    IncomingSlot, LoadStep, OperationUpdate, SlotContent, SnapshotReload, SnapshotSource,
-    SnapshotStaging,
+    DbError, IncomingSlot, LoadStep, OperationUpdate, SlotContent, SnapshotError, SnapshotReload,
+    SnapshotSource, SnapshotStaging,
 };
 use coven_format::sequence::{Purpose, SlotFrame, SnapshotAnnouncement};
 use coven_foundation::progress::ProgressReport;
@@ -248,7 +248,7 @@ impl SequenceSync {
     }
 
     /// A snapshot's signed prefix, checked against its announcement.
-    async fn snapshot_prefix(
+    pub(crate) async fn snapshot_prefix(
         &self,
         announcement: &SnapshotAnnouncement,
     ) -> Result<SnapshotObject, SyncError> {
@@ -291,7 +291,8 @@ impl SequenceSync {
 
     /// Read a selected snapshot once and stage its records for loading,
     /// reporting it to `progress` as a Streaming step for its audience. A
-    /// failed read removes what it staged before reporting (§16.2).
+    /// failed read removes what it staged before reporting (§16.2), and a
+    /// refusal stands only once a second staging agrees (§19.1).
     async fn select(
         &self,
         announcement: SnapshotAnnouncement,
@@ -308,8 +309,9 @@ impl SequenceSync {
             .database
             .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
             .await?;
-        let read =
-            self.read_snapshot(announcement, object, ring, Some(&mut staging), progress).await;
+        let read = self
+            .read_snapshot(announcement.clone(), object, ring, Some(&mut staging), progress)
+            .await;
         let failed = match read {
             Ok(read) => match staging.finish().await {
                 Ok(()) => return Ok(SelectedSnapshot { read, staging }),
@@ -317,10 +319,7 @@ impl SequenceSync {
             },
             Err(error) => error,
         };
-        Err(match staging.discard().await {
-            Ok(()) => failed,
-            Err(cleanup) => SyncError::cleanup(failed, cleanup.into()),
-        })
+        Err(self.end_staged(failed, staging, &announcement, ring).await)
     }
 
     /// The floor's store snapshot announcement: routing until its original
@@ -781,12 +780,13 @@ impl SequenceSync {
             .collect::<Result<Vec<_>, SyncError>>()?;
         self.follow_person_entries(&session.history, &at_target, member)?;
         self.keys.persist(ring)?;
-        // A failure in a stored start's body is judged at its object (§19.1).
-        let paths: Vec<_> = starts
+        // A failure in a stored start's body is judged at its object, once a
+        // second staging agrees (§19.1).
+        let stored: Vec<_> = starts
             .iter()
             .filter_map(|start| match start {
                 ReloadStart::Stored(selected) => {
-                    Some((selected.announcement().snapshot.clone(), selected.path().clone()))
+                    Some((selected.announcement().clone(), selected.path().clone()))
                 }
                 ReloadStart::Current(_) | ReloadStart::Empty(_) => None,
             })
@@ -810,7 +810,8 @@ impl SequenceSync {
             history: history.clone(),
             ring: ring.clone(),
         });
-        self.database
+        let loaded = self
+            .database
             .load_snapshots::<PendingRecord, _>(
                 SnapshotReload {
                     snapshots: sources,
@@ -829,23 +830,27 @@ impl SequenceSync {
                 },
                 reporting.then(|| ProgressReport::of(&self.progress, self.clock.clone())),
             )
-            .await
-            .map_err(|error| match error {
-                coven_database::DbError::Snapshot(coven_database::SnapshotError::Body {
-                    snapshot,
-                    error,
-                }) => match paths.iter().find(|(id, _)| *id == snapshot) {
-                    Some((_, path)) => database_failure(path, *error),
-                    None => {
-                        coven_database::DbError::Snapshot(coven_database::SnapshotError::Body {
-                            snapshot,
-                            error,
-                        })
-                        .into()
+            .await;
+        if let Err(error) = loaded {
+            return Err(match error {
+                DbError::Snapshot(SnapshotError::Body { snapshot, error, staged }) => {
+                    match stored.iter().find(|(stored, _)| stored.snapshot == snapshot) {
+                        Some((announcement, path)) => {
+                            self.judge_staged(
+                                database_failure(path, *error),
+                                staged,
+                                announcement,
+                                ring,
+                            )
+                            .await
+                        }
+                        None => DbError::Snapshot(SnapshotError::Body { snapshot, error, staged })
+                            .into(),
                     }
-                },
+                }
                 error => error.into(),
-            })?;
+            });
+        }
         tracing::info!(
             store_rows = rows,
             slots = fetched,

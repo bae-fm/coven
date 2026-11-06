@@ -738,6 +738,8 @@ pub(crate) use slot_reads::SlotReads;
 pub(crate) mod snapshot_capture;
 #[path = "snapshot_file_scan.rs"]
 mod snapshot_file_scan;
+#[path = "snapshot_staged.rs"]
+mod snapshot_staged;
 #[path = "snapshot_upload.rs"]
 mod snapshot_upload;
 #[path = "sync_loop.rs"]

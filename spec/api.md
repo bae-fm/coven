@@ -1334,7 +1334,8 @@ pub enum DbError {
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
-    /// `SQLITE_NOTADB`), or decoding stored facts found damage (§19.3).
+    /// `SQLITE_NOTADB`), decoding stored facts found damage (§19.3), or a
+    /// snapshot's staged records differ from a second staging's (§19.1).
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's contract
     /// or a step its state machine cannot reach: a bug, never stored damage.
@@ -1624,8 +1625,11 @@ pub enum DbError {
 
 /// Why snapshots or their gap writes could not be checked or loaded (§16.5, §19.2).
 pub enum SnapshotError {
-    /// Reading or checking a selected snapshot's plaintext failed.
-    Body { snapshot: SnapshotId, error: Box<DbError> },
+    /// Reading or checking a selected snapshot's plaintext failed. `staged`
+    /// is the digest of its staged records as the failed read left them,
+    /// which sync compares with a second staging's to tell damage on this
+    /// device from the snapshot's own (§19.1).
+    Body { snapshot: SnapshotId, error: Box<DbError>, staged: Option<StagedDigest> },
     /// Reading the plaintext supplied by sync failed.
     Read(std::io::Error),
     /// A frame or its merge state failed the format's checks.
@@ -1645,6 +1649,11 @@ pub enum SnapshotError {
     /// has (D9).
     Unauthorized,
 }
+
+/// A digest of one snapshot staging's records as its tables hold them. Two
+/// stagings of the same snapshot hold the same records, so they differ only
+/// where this device's disk changed one (§19.1).
+pub struct StagedDigest(/* private */);
 
 /// What a downloaded write waits for before it can apply (§5.4, §19.1).
 pub enum WriteWait {
