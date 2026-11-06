@@ -197,6 +197,33 @@ impl AtomicFile {
         Ok(())
     }
 
+    /// Give this existing file `length` bytes, cutting it short or adding
+    /// zeros at its end, and hand the change to the drive.
+    pub fn set_len(&self, length: u64) -> Result<(), super::ObservationError> {
+        let path = self.resolved()?;
+        #[cfg(any(test, feature = "test-utils"))]
+        super::reached::reached(&path);
+        let file = owned_options()
+            .open(&path)
+            .map_err(|error| super::ObservationError::at("open owned file", &path, error))?;
+        let regular =
+            file.metadata().map_err(|source| FileError::at("inspect owned file", &path, source))?;
+        if !regular.is_file() {
+            return Err(FileError::at(
+                "resize owned file",
+                &path,
+                io::Error::new(io::ErrorKind::InvalidInput, "a regular file is required"),
+            )
+            .into());
+        }
+        // No directory entry changes, so `sync_all`, which flushes an Apple
+        // drive's cache with `F_FULLFSYNC`, is the whole barrier.
+        file.set_len(length)
+            .and_then(|()| file.sync_all())
+            .map_err(|source| FileError::at("resize owned file", &path, source))?;
+        Ok(())
+    }
+
     /// The path under its canonical parent, which also supplies Windows'
     /// extended-length prefix.
     fn resolved(&self) -> Result<PathBuf, FileError> {

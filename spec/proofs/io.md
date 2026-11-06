@@ -333,6 +333,11 @@ changes a byte of a cached header and of a cached chunk on disk, in a read's
 entries and in a pin's whole copy: the next read or pin fetches them and records
 nothing, a pinned file stays pinned, and the read after it asks storage for
 nothing.
+A cache file of another size than its entry records is such a copy: it takes
+back that size, and the bytes it lost read as zeros, which fail their check.
+`files::tests::read::a_cache_file_of_another_size_is_fetched_and_written_back`
+cuts a read's header and chunk entries and a pin's whole copy short, and grows
+one past its end, with the same outcome.
 
 ## Rechecking a refusal
 

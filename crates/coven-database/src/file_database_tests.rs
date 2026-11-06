@@ -389,6 +389,27 @@ async fn bytes_written_back_land_in_their_chunks_place() {
     db.close().await.unwrap();
 }
 
+/// A cache file cut short on disk takes back the size its row records: the
+/// bytes it kept read as they were, and those it lost as zeros (§17.8).
+#[tokio::test]
+async fn a_cache_file_cut_short_takes_back_its_size() {
+    const CHUNK: usize = 64 * 1024 + 16;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
+    let owner = FileDatabase::new(db.clone());
+    let name = FileName::new("range").unwrap();
+    owner.cache_range(&file, 0, 2, name.clone(), vec![1; 2 * CHUNK]).await.unwrap();
+    let path = store.database_path().parent().unwrap().join("cache").join(name.as_str());
+    std::fs::write(&path, vec![1; CHUNK + 3]).unwrap();
+    assert_eq!(owner.cached(&file, 0).await.unwrap().unwrap(), vec![1; CHUNK]);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 2 * CHUNK as u64);
+    let lost = owner.cached(&file, 1).await.unwrap().unwrap();
+    assert_eq!(lost[..3], [1; 3]);
+    assert!(lost[3..].iter().all(|byte| *byte == 0));
+    db.close().await.unwrap();
+}
+
 /// The namespace total changes with its cache records in their transaction:
 /// publication, eviction, a failed publication and pinning (Appendix C.3).
 #[tokio::test]

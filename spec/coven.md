@@ -6781,7 +6781,10 @@ committed.
 so a cached header or chunk that fails its check changed on this device (§19.1).
 A read or pin that meets one fetches those bytes from storage, checks them as it
 checks any fetch, and writes them back over the copy. The entry, and a pin of
-its whole copy, stay as they were. Dropping the copy instead would end the pin,
+its whole copy, stay as they were. A cache file that lost its end on disk, or
+gained bytes past it, is such a copy too: it takes back the size its entry
+records, and the bytes it lost read as zeros, which fail their check and are
+fetched and written back the same way. Dropping the copy instead would end the pin,
 since a pin is its whole copy, and a read-only handle may not change pins.
 
 **Cached bytes last while a record names them.** Ben's laptop pins photo A,

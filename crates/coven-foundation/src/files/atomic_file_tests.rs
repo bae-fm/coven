@@ -264,3 +264,15 @@ fn overwriting_changes_only_its_range_of_an_existing_file() {
     assert!(matches!(file.overwrite_at(5, b"XY"), Err(crate::files::ObservationError::File(_))));
     assert_eq!(file.read_optional().unwrap().unwrap(), b"abXYef");
 }
+
+#[test]
+fn resizing_cuts_a_file_short_or_adds_zeros() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = AtomicFile::new(directory.path().join("cached"));
+    assert!(matches!(file.set_len(3), Err(crate::files::ObservationError::Missing(_))));
+    file.write_recorded(b"abcdef").unwrap();
+    file.set_len(3).unwrap();
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"abc");
+    file.set_len(5).unwrap();
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"abc\0\0");
+}

@@ -89,7 +89,10 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
 /// The cached bytes of chunk `index`, or the header (-1). The entry is
 /// looked up, and its read recorded, under the writer; its bytes are read
 /// with no writer held (§21.2). An entry evicted between the lookup and
-/// opening its bytes is no longer cached.
+/// opening its bytes is no longer cached. A file whose size isn't the one
+/// its row records lost or gained bytes on this device (§17.8): it takes
+/// back its recorded size first, and bytes it lost read as zeros, which fail
+/// their check, so the reader fetches them and writes them back.
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
@@ -104,13 +107,20 @@ pub(super) fn read<L>(
         return Ok(None);
     };
     let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
-    let reader = match access.directory.file(FileArea::Cache, &name).open_reader() {
+    let length = u64::try_from(length).map_err(|_| DbError::DamagedDatabase)?;
+    let cached = access.directory.file(FileArea::Cache, &name);
+    let mut reader = match cached.open_reader() {
         Ok(reader) => reader,
         Err(ObservationError::Missing(_)) => return evicted(access, &path).map(|()| None),
         Err(error) => return Err(observation(error)),
     };
-    if reader.size() != u64::try_from(length).map_err(|_| DbError::DamagedDatabase)? {
-        return Err(DbError::DamagedDatabase);
+    if reader.size() != length {
+        let resized = cached.set_len(length).and_then(|()| cached.open_reader());
+        reader = match resized {
+            Ok(reader) => reader,
+            Err(ObservationError::Missing(_)) => return evicted(access, &path).map(|()| None),
+            Err(error) => return Err(observation(error)),
+        };
     }
     let (offset, length) = within(file, first, index)?;
     let bytes = reader.read_at(offset, length).map_err(observation)?;
