@@ -588,20 +588,6 @@ pub(crate) async fn join_with_response<T, U>(
     tokio::time::timeout(HANG_GUARD, async { tokio::join!(joining, response) }).await.unwrap()
 }
 
-pub(crate) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
-    owner: &CovenHandle,
-    joining: impl std::future::Future<Output = T>,
-    before: impl FnOnce(JoinRequest) -> F,
-) -> (T, MemberId) {
-    join_with_response(joining, async {
-        let request = next_join_request(owner).await;
-        before(request.clone()).await;
-        approve(owner, &request).await;
-        request.member
-    })
-    .await
-}
-
 /// The objects in storage that `keep` selects, among everything the store holds.
 pub(crate) async fn stored(
     storage: &MemoryStorage,

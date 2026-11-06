@@ -78,6 +78,7 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let slot = ObjectPath::slot(owner.directory.id(), 2.try_into().unwrap());
     owner
         .storage
@@ -88,12 +89,12 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
         .await;
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         |_| {},
     );
-    let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
     assert!(matches!(result, Err(BootstrapError::Sync(SyncError::Storage(_)))), "{result:?}");
     owner.storage.set_faults(Faults::none()).await;
     let reported = std::sync::Mutex::new(Vec::new());
@@ -101,7 +102,7 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
     let handle = install
         .run_recorded(
             &owner,
-            Installation::join_request(&invite),
+            Installation::join_request(&invite, &control),
             owner.recipient(),
             &cancel,
             |status| reported.lock().unwrap().push(status),
@@ -175,9 +176,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     );
     let approve = async {
         waiting.wait_for(|waiting| *waiting).await.unwrap();
-        let request = next_join_request(&owner.handle).await;
-        crate::tests::approve(&owner.handle, &request).await;
-        control.check_now();
+        owner.approve_join(&control).await;
     };
     let (result, ()) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
@@ -213,9 +212,10 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
 #[tokio::test]
 async fn a_join_reports_each_bootstrap_phase_in_order() {
     let owner = Owner::new(CloudProvider::S3, false).await;
+    let started = owner.clock.now();
     let invite = owner.invite().await;
     let install = Installation::new();
-    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let builder = install.builder(&owner, owner.recipient());
     let control = JoinControl::new();
     let reported = std::sync::Mutex::new(Vec::new());
     let (waited, mut waiting) = watch::channel(false);
@@ -241,7 +241,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         waiting.wait_for(|waited| *waited).await.unwrap();
         // Ana's next pass reads the request.
         owner.pass().await;
-        let request = next_join_request(&owner.handle).await;
+        let request = owner.next_join_request().await;
         crate::tests::approve(&owner.handle, &request).await;
         control.check_now();
         request
@@ -268,6 +268,9 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         // The first check runs at once; then checks and waits alternate.
         assert_eq!(matches!(next_check, NextCheck::Checking), index % 2 == 0, "{reported:?}");
     }
+    // The clock moved only as the test moved it, by Ana's one pass: no wait
+    // of hers or Carol's passed on its own.
+    assert_eq!(owner.clock.now(), started + Duration::from_secs(1));
     owner.close().await;
 }
 
@@ -283,8 +286,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    // The joining device's waits end only when the test moves the clock.
-    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let builder = install.builder(&owner, owner.recipient());
     let control = JoinControl::new();
     let reported = std::sync::Mutex::new(Vec::new());
     let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());
@@ -318,7 +320,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         })
         .await
         .unwrap();
-        let request = next_join_request(&owner.handle).await;
+        let request = owner.next_join_request().await;
         // The copy lands in the next slot; the entry after it never does.
         let entry =
             ObjectPath::slot(owner.directory.id(), (owner.applied().await + 2).try_into().unwrap());
@@ -352,17 +354,16 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     // The entry still hasn't landed when Carol's app resumes the join.
     let control = JoinControl::new();
     let reported = std::sync::Mutex::new(Vec::new());
-    let resumed =
-        install.builder(&owner, owner.recipient()).clock(owner.clock.clone()).resume_join(
-            owner.directory.id(),
-            |status| {
-                let mut reported = reported.lock().unwrap();
-                if reported.last() != Some(&status) {
-                    reported.push(status);
-                }
-            },
-            &control,
-        );
+    let resumed = install.builder(&owner, owner.recipient()).resume_join(
+        owner.directory.id(),
+        |status| {
+            let mut reported = reported.lock().unwrap();
+            if reported.last() != Some(&status) {
+                reported.push(status);
+            }
+        },
+        &control,
+    );
     let check_twice = async {
         checked(&owner, &request_path, &control).await;
         checked(&owner, &request_path, &control).await;
@@ -395,8 +396,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    // The joining device's waits end only when the test moves the clock.
-    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let builder = install.builder(&owner, owner.recipient());
     let control = JoinControl::new();
     let reported = std::sync::Mutex::new(Vec::new());
     let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());

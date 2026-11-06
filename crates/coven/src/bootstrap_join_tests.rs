@@ -93,9 +93,15 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let invite = owner.invite().await;
     let first = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let joining =
-        first.run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {});
-    let (result, carol) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let control = JoinControl::new();
+    let joining = first.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, carol) = owner.join_and_approve(joining, &control, |_| async {}).await;
     let lost = result.unwrap().unwrap();
     let old_code = lost.restore_code().await.unwrap();
     let recovery = crate::tests::invite(
@@ -110,14 +116,15 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     .await;
     assert_eq!(recovery.member, carol);
     let second = Installation::new();
+    let control = JoinControl::new();
     let joining = second.run(
         &owner,
-        Installation::join_request(&recovery),
+        Installation::join_request(&recovery, &control),
         owner.recipient(),
         &cancel,
         |_| {},
     );
-    let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
     assert_eq!(member, carol);
     let handle = result.unwrap().unwrap();
     let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
@@ -183,8 +190,15 @@ async fn a_refused_join_request_is_sent_again() {
         .await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let refused = install
-        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
         .await;
     assert!(
         matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
@@ -195,12 +209,12 @@ async fn a_refused_join_request_is_sent_again() {
     owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         |_| {},
     );
-    let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
     result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }
@@ -258,7 +272,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
         |_| {},
         &control,
     );
-    let (handle, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let (handle, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
     let handle = handle.unwrap().unwrap();
     assert_eq!(handle.store_name().await.unwrap(), "After snapshot");
     handle.close().await.unwrap();
@@ -304,10 +318,11 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
 }
 
 /// Ana's own sync pass approves an in-person invite's request: Carol's join
-/// loads the store with no call from Ana's app (§13.2). Ana's invite polls
-/// for the request, and Carol's join for its approval, by backoff; both are
-/// held, so Ana's pass reads the request once Carol waits, and Carol's
-/// Check now runs once the invite has ended with its approval landed.
+/// loads the store with no call from Ana's app (§13.2). Ana's invite looks
+/// for the request, and Carol's join for its approval, between backoffs
+/// the test holds: Ana's pass reads the request once Carol waits, and
+/// Carol's Check now runs once the invite has ended with its approval
+/// landed.
 #[tokio::test]
 async fn an_in_person_join_loads_without_an_approval_call() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -321,9 +336,8 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         InviteDelivery::InPerson,
     )
     .await;
-    owner.hold_waits();
     let install = Installation::new();
-    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let builder = install.builder(&owner, owner.recipient());
     let control = JoinControl::new();
     let (waits, mut waiting) = watch::channel(false);
     let joining = join_with_invite(
@@ -370,8 +384,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    // The joining device's waits end only when the test moves the clock.
-    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let builder = install.builder(&owner, owner.recipient());
     let control = JoinControl::new();
     let (waits, mut waiting) = watch::channel(false);
     let joining = join_with_invite(
@@ -390,9 +403,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     );
     let approve = async {
         waiting.wait_for(|waiting| *waiting).await.unwrap();
-        let request = next_join_request(&owner.handle).await;
-        crate::tests::approve(&owner.handle, &request).await;
-        control.check_now();
+        owner.approve_join(&control).await;
     };
     let (result, ()) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
@@ -410,15 +421,16 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         |_| {},
     );
     let approve = async {
-        let request = next_join_request(&owner.handle).await;
+        let request = owner.next_join_request().await;
         owner.stop_sync().await;
         let binding = owner
             .handle
@@ -462,6 +474,7 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
         assert_eq!(owner.rows().await.iter().filter(|(id, _)| id == "approval").count(), 1);
         owner.handle.start_sync().await.unwrap();
         crate::tests::landed(&owner.handle, Some(binding)).await;
+        control.check_now();
     };
     let (result, ()) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
@@ -479,9 +492,10 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let (loading, mut loaded) = watch::channel(false);
+    let control = JoinControl::new();
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         |status| {
@@ -499,14 +513,15 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
             changed = loaded.wait_for(|loading| *loading) => drop(changed.unwrap()),
         }
     };
-    let approve = async {
-        let request = next_join_request(&owner.handle).await;
-        crate::tests::approve(&owner.handle, &request).await;
-        request.member
-    };
-    let ((), member) = join_with_response(stopped, approve).await;
+    let ((), member) = join_with_response(stopped, owner.approve_join(&control)).await;
     let handle = install
-        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
         .await
         .unwrap()
         .expect("the approved join loads");
@@ -531,13 +546,13 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
     let (stop, cancel) = watch::channel(false);
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &JoinControl::new()),
         owner.recipient(),
         &cancel,
         |_| {},
     );
     let cancel_join = async {
-        let request = next_join_request(&owner.handle).await;
+        let request = owner.next_join_request().await;
         stop.send(true).unwrap();
         request
     };
@@ -559,9 +574,11 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
     );
     let control = JoinControl::new();
     let resumed = builder.resume_join(owner.directory.id(), |_| {}, &control);
-    let approve = owner.handle.approve_join_request(&request);
-    let (result, approved) = join_with_response(resumed, approve).await;
-    approved.unwrap();
+    let approve = async {
+        crate::tests::approve(&owner.handle, &request).await;
+        control.check_now();
+    };
+    let (result, ()) = join_with_response(resumed, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }
@@ -577,14 +594,13 @@ async fn cancelling_a_join_before_its_request_is_sent_removes_every_local_value(
 
 async fn cancel_before_sending(provider: CloudProvider) {
     let owner = Owner::new(provider, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let (stop, cancel) = watch::channel(false);
     let result = install
-        .run_held(
+        .run(
             &owner,
-            Installation::join_request(&invite),
+            Installation::join_request(&invite, &JoinControl::new()),
             owner.recipient(),
             &cancel,
             cancel_at(Phase::Connecting, &stop),
@@ -606,19 +622,26 @@ async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (stop, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         cancel_at(Phase::Loading, &stop),
     );
-    let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
     assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
     assert!(install.app.stores().await.unwrap().is_empty());
     let (_, cancel) = watch::channel(false);
     let handle = install
-        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
         .await
         .unwrap()
         .unwrap();
@@ -652,11 +675,12 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
     assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.shown_code());
     let control = JoinControl::new();
     let resumed = builder.resume_join(store, |_| {}, &control);
-    let (result, _) = join_and_approve(&owner.handle, resumed, |request| async move {
-        // The resumed request is the one Carol's phone made, with its name.
-        assert_eq!(request.device_name, "Carol's phone");
-    })
-    .await;
+    let (result, _) = owner
+        .join_and_approve(resumed, &control, |request| async move {
+            // The resumed request is the one Carol's phone made, with its name.
+            assert_eq!(request.device_name, "Carol's phone");
+        })
+        .await;
     let handle = result.unwrap().unwrap();
     assert!(saved_code(&install, store).is_none());
     let builder = install.builder(&owner, owner.recipient());
@@ -670,7 +694,9 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
 }
 
 /// A closed join that Ana declines resumes to `None`, and its saved code and
-/// installation are gone (§13.2).
+/// installation are gone (§13.2). Ana's pass after the decline puts the
+/// marker in the request's place, which the resumed join's first check
+/// finds.
 #[tokio::test]
 async fn a_closed_join_declined_meanwhile_resumes_to_none_and_forgets_its_code() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -678,8 +704,10 @@ async fn a_closed_join_declined_meanwhile_resumes_to_none_and_forgets_its_code()
     let install = Installation::new();
     let store = owner.directory.id();
     waiting_join(&owner, &install, &invite).await;
-    let request = next_join_request(&owner.handle).await;
+    let request = owner.next_join_request().await;
     owner.handle.decline_join_request(&request).await.unwrap();
+    owner.pass_now().await;
+    assert!(crate::tests::no_request(&owner.storage, &crate::tests::request_path(&invite)).await);
     let control = JoinControl::new();
     let result =
         install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
@@ -729,15 +757,14 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         .flat_map(|provider| ["decline", "cancel", "expiry"].map(|ending| (provider, ending)))
     {
         let owner = Owner::new(provider, false).await;
-        owner.hold_waits();
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
         let control = JoinControl::new();
         let (waiting, mut waits) = waiting_for_approval();
-        let joining = install.run_held(
+        let joining = install.run(
             &owner,
-            Installation::checked_join_request(&invite, &control),
+            Installation::join_request(&invite, &control),
             owner.recipient(),
             &cancel,
             waiting,
@@ -750,7 +777,7 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         }
         let settle = async {
             waits.wait_for(|waiting| *waiting).await.unwrap();
-            let request = owner.read_join_request().await;
+            let request = owner.next_join_request().await;
             match ending {
                 "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
                 "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
@@ -830,22 +857,21 @@ fn retained_grant(
 #[tokio::test]
 async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let control = JoinControl::new();
     let (waiting, mut waits) = waiting_for_approval();
-    let joining = install.run_held(
+    let joining = install.run(
         &owner,
-        Installation::checked_join_request(&invite, &control),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         waiting,
     );
     let (result, member) = join_with_response(joining, async {
         waits.wait_for(|waiting| *waiting).await.unwrap();
-        approve_held(&owner, &control).await
+        owner.approve_join(&control).await
     })
     .await;
     result.unwrap().unwrap().close().await.unwrap();
@@ -895,7 +921,13 @@ async fn a_join_after_the_invite_ended_sends_no_request() {
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let result = install
-        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .run(
+            &owner,
+            Installation::join_request(&invite, &JoinControl::new()),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
         .await;
     assert!(matches!(result, Ok(None)), "{result:?}");
     install.absent(owner.directory.id()).await;
@@ -925,12 +957,19 @@ async fn a_join_request_whose_create_reply_was_lost_ends_as_settled() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
+    let control = JoinControl::new();
     let lost = install
-        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
         .await;
     assert!(matches!(&lost, Err(BootstrapError::Sync(SyncError::Storage(_)))), "{:?}", lost.err());
     owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
-    let request = next_join_request(&owner.handle).await;
+    let request = owner.next_join_request().await;
     owner.handle.decline_join_request(&request).await.unwrap();
     // Ana's pass deletes the request and puts the ended invite's marker in its place.
     owner.sync().await;
@@ -946,7 +985,13 @@ async fn a_join_request_whose_create_reply_was_lost_ends_as_settled() {
     };
     let before = creates();
     let retried = install
-        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
         .await;
     assert!(matches!(retried, Ok(None)), "{:?}", retried.err());
     assert_eq!(creates(), before, "the retry sent no second request");

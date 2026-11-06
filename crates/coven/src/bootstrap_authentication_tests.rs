@@ -81,12 +81,11 @@ async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
 #[tokio::test]
 async fn join_requires_the_shared_folder_access_before_contacting_storage() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let sign_in = SignIn::new().await;
     let recipient = Arc::new(owner.recipient().for_device());
-    let mut builder = sign_in.configure(install.held_builder(&owner, recipient.clone()));
+    let mut builder = sign_in.configure(install.builder(&owner, recipient.clone()));
     sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await;
     let before = recipient.request_count();
     let control = JoinControl::new();
@@ -105,17 +104,12 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
 #[tokio::test]
 async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_replacement() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let sign_in = SignIn::new().await;
     let (sleeping, mut asleep) = watch::channel(false);
     let (resume, resumed) = watch::channel(false);
-    let clock = Arc::new(JoinClock {
-        clock: crate::tests::PollingClock::new(owner.clock.clone()),
-        sleeping,
-        resume: resumed,
-    });
+    let clock = Arc::new(JoinClock { clock: owner.clock.clone(), sleeping, resume: resumed });
     let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()).clock(clock));
     sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await;
     let control = JoinControl::new();
@@ -123,7 +117,7 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
     let (joined, ()) = join_with_response(join, async {
         // The join waits for approval once its request is made.
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();
-        let request = owner.read_join_request().await;
+        let request = owner.next_join_request().await;
         // The waiting join keeps only its sign-in (§13.2).
         let kept = install.only_kept_sign_in(owner.directory.id()).await;
         assert_eq!(kept.unwrap().access_token.as_str(), "access-0");
@@ -219,11 +213,10 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
 #[tokio::test]
 async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
-    held_waiting_join(&owner, &install, &invite).await;
+    waiting_join(&owner, &install, &invite).await;
     let kept = install.only_kept_sign_in(store).await.expect("a kept sign-in");
     let [listed] =
         &install.builder(&owner, owner.recipient()).unfinished_joins().await.unwrap()[..]
@@ -234,10 +227,10 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
     // the kept one.
     assert_eq!(listed.metadata.oauth_access, owner.storage.config().oauth_access());
     let sign_in = SignIn::new().await;
-    let builder = sign_in.configure(install.held_builder(&owner, owner.recipient()));
+    let builder = sign_in.configure(install.builder(&owner, owner.recipient()));
     let control = JoinControl::new();
     let resumed = builder.resume_join(store, |_| {}, &control);
-    let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
+    let (result, _) = join_with_response(resumed, owner.approve_join(&control)).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(sign_in.presentation_count(), 0);
     assert_eq!(
@@ -255,17 +248,16 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
 /// resumed join starts from the refreshed token, and the joined store keeps
 /// it (§13.2, §20.2). Carol's waits end only when the test moves the clock,
 /// so each check after the first runs when the test asks for it. Ana's are
-/// held from before the invite: a backoff of hers passing would move the
-/// clock under Carol's requests and end their stall windows.
+/// held too: a backoff of hers passing would move the clock under Carol's
+/// requests and end their stall windows.
 #[tokio::test]
 async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
     let sign_in = SignIn::new().await;
-    let mut builder = sign_in.configure(install.held_builder(&owner, owner.recipient()));
+    let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
     sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await;
     let control = JoinControl::new();
     let (waited, mut waits) = watch::channel(0_usize);
@@ -301,10 +293,9 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     assert_eq!(sign_in.request_count(), 2);
     let kept = install.only_kept_sign_in(store).await.unwrap();
     assert_eq!(kept.access_token.as_str(), "access-1");
-    let resumed =
-        install.held_builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
+    let resumed = install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
     // Ana's pass reads the request the join made before it closed.
-    let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
+    let (result, _) = join_with_response(resumed, owner.approve_join(&control)).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-1");
     assert_eq!(sign_in.request_count(), 2);
@@ -318,13 +309,12 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
 #[tokio::test]
 async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
     let sign_in = SignIn::new().await;
     let signed_in = |access| {
-        let mut builder = sign_in.configure(install.held_builder(&owner, owner.recipient()));
+        let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
         let owner = &owner;
         async move {
             sign_in_held(owner, &mut builder, OAuthAccess::Dropbox(access)).await;
@@ -345,7 +335,7 @@ async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     );
     assert_eq!(kept().await.as_str(), "access-0");
     let resumed = signed_in(DropboxAccess::FullDropbox).await.resume_join(store, |_| {}, &control);
-    let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
+    let (result, _) = join_with_response(resumed, owner.approve_join(&control)).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-2");
     handle.close().await.unwrap();
@@ -358,11 +348,10 @@ async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
 #[tokio::test]
 async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
-    held_waiting_join(&owner, &install, &invite).await;
+    waiting_join(&owner, &install, &invite).await;
     // A kept sign-in without a refresh token: its rejection can't be refreshed.
     let mut refused = install.only_kept_sign_in(store).await.unwrap();
     refused.access_token = SecretText::new("refused-access".into());
@@ -374,7 +363,7 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
     let sign_in = SignIn::new().await;
     let control = JoinControl::new();
     let result = sign_in
-        .configure(install.held_builder(&owner, owner.recipient()))
+        .configure(install.builder(&owner, owner.recipient()))
         .resume_join(store, |_| {}, &control)
         .await;
     assert!(
@@ -384,7 +373,7 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
         ),
         "{result:?}"
     );
-    let builder = install.held_builder(&owner, owner.recipient());
+    let builder = install.builder(&owner, owner.recipient());
     assert_eq!(builder.unfinished_joins().await.unwrap().len(), 1);
     assert_eq!(
         install.only_kept_sign_in(store).await.unwrap().access_token.as_str(),
@@ -393,7 +382,7 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
     let mut builder = sign_in.configure(builder);
     sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await;
     let resumed = builder.resume_join(store, |_| {}, &control);
-    let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
+    let (result, _) = join_with_response(resumed, owner.approve_join(&control)).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-0");
     handle.close().await.unwrap();
@@ -410,12 +399,11 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
 async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
     for sign_in_removed in [false, true] {
         let owner = Owner::new(CloudProvider::Dropbox, false).await;
-        owner.hold_waits();
         let invite = owner.invite().await;
         let install = Installation::new();
         let store = owner.directory.id();
-        held_waiting_join(&owner, &install, &invite).await;
-        let request = owner.read_join_request().await;
+        waiting_join(&owner, &install, &invite).await;
+        let request = owner.next_join_request().await;
         owner.handle.decline_join_request(&request).await.unwrap();
         let pending = install.app.directories().begin_bootstrap(store, &UuidIds).await.unwrap();
         // The first deletion that fails: the sign-in's, the sixth keychain
@@ -428,7 +416,7 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         );
         assert!(matches!(ended, Err(BootstrapError::SecureStorage(_))), "{ended:?}");
         drop(pending);
-        let builder = install.held_builder(&owner, owner.recipient());
+        let builder = install.builder(&owner, owner.recipient());
         assert_eq!(builder.unfinished_joins().await.unwrap().len(), 1);
         assert_eq!(install.only_kept_sign_in(store).await.is_none(), sign_in_removed);
         let sign_in = SignIn::new().await;
@@ -436,7 +424,7 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         let mut builder = sign_in.configure(builder);
         if sign_in_removed {
             let asked = sign_in
-                .configure(install.held_builder(&owner, owner.recipient()))
+                .configure(install.builder(&owner, owner.recipient()))
                 .resume_join(store, |_| {}, &control)
                 .await;
             assert!(

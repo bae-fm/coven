@@ -43,7 +43,7 @@ async fn restore_code_api_never_discloses_storage_credentials() {
 }
 
 struct JoinClock {
-    clock: crate::tests::PollingClock,
+    clock: Arc<FixedClock>,
     sleeping: watch::Sender<bool>,
     resume: watch::Receiver<bool>,
 }
@@ -145,15 +145,14 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         CloudProvider::CloudKit,
     ] {
         let owner = Owner::new(provider, false).await;
-        owner.hold_waits();
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
         let control = JoinControl::new();
         let (waiting, mut waits) = waiting_for_approval();
-        let joining = install.run_held(
+        let joining = install.run(
             &owner,
-            Installation::checked_join_request(&invite, &control),
+            Installation::join_request(&invite, &control),
             owner.recipient(),
             &cancel,
             waiting,
@@ -162,7 +161,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         let kept = std::sync::Mutex::new(None);
         let (result, member) = join_with_response(joining, async {
             waits.wait_for(|waiting| *waiting).await.unwrap();
-            let request = owner.read_join_request().await;
+            let request = owner.next_join_request().await;
             assert_eq!(request.device_name, "New phone");
             // While it waits, a join keeps nothing in custody but a Dropbox
             // or OneDrive sign-in, beside its code (§13.2).
@@ -276,7 +275,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let request = tokio::time::timeout(HANG_GUARD, async {
         tokio::select! {
             result = &mut joining => panic!("join returned before approval: {result:?}"),
-            request = next_join_request(&owner.handle) => request,
+            request = owner.next_join_request() => request,
         }
     })
     .await
@@ -291,7 +290,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     install.absent(owner.directory.id()).await;
     let resumed = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         |_| {},
@@ -299,6 +298,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let approve = async {
         assert_eq!(owner.storage.read(&crate::tests::request_path(&invite)).await.unwrap(), bytes);
         crate::tests::approve(&owner.handle, &request).await;
+        control.check_now();
     };
     let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
@@ -322,22 +322,21 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
 #[tokio::test]
 async fn permission_revocation_while_joining_keeps_the_provider_failure() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let control = JoinControl::new();
     let (waiting, mut waits) = waiting_for_approval();
-    let joining = install.run_held(
+    let joining = install.run(
         &owner,
-        Installation::checked_join_request(&invite, &control),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         waiting,
     );
     let revoke = async {
         waits.wait_for(|waiting| *waiting).await.unwrap();
-        owner.read_join_request().await;
+        owner.next_join_request().await;
         owner.storage.revoke_access("join@example.com").await.unwrap();
         control.check_now();
     };
@@ -491,7 +490,6 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
 #[tokio::test]
 async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
-    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
@@ -500,17 +498,13 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let (sleeping, mut asleep) = watch::channel(false);
     let (check, checking) = watch::channel(false);
     // The joiner's next check waits until approval has published both slots.
-    let clock = Arc::new(JoinClock {
-        clock: crate::tests::PollingClock::new(owner.clock.clone()),
-        sleeping,
-        resume: checking,
-    });
+    let clock = Arc::new(JoinClock { clock: owner.clock.clone(), sleeping, resume: checking });
     // Approval claims the store key's copy and then the binding.
     let after = owner.applied().await + 3;
     let joining = async {
         Box::pin(bootstrap_device(
-            install.held_signed_in_builder(&owner, owner.recipient()).await.clock(clock),
-            Installation::join_request(&invite),
+            install.authenticated_builder(&owner, owner.recipient()).await.clock(clock),
+            Installation::join_request(&invite, &JoinControl::new()),
             |_| {},
             &cancel,
         ))
@@ -519,7 +513,7 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let remove = async {
         // The joiner sleeps in its check wait once its request is made.
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();
-        let request = owner.read_join_request().await;
+        let request = owner.next_join_request().await;
         crate::tests::approve(&owner.handle, &request).await;
         // The owner's own passes read that slot too: only the joiner's read
         // is held.
@@ -575,9 +569,10 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
             resumed,
         )
         .await;
+    let control = JoinControl::new();
     let joining = install.run(
         &owner,
-        Installation::join_request(&invite),
+        Installation::join_request(&invite, &control),
         owner.recipient(),
         &cancel,
         |_| {},
@@ -585,9 +580,10 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     let approve = async {
         listing.await.unwrap();
         owner.handle.start_sync().await.unwrap();
-        let request = next_join_request(&owner.handle).await;
+        let request = owner.next_join_request().await;
         crate::tests::approve(&owner.handle, &request).await;
         resume.send(()).unwrap();
+        control.check_now();
     };
     let (result, ()) = join_with_response(joining, approve).await;
     assert!(
@@ -604,14 +600,15 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
+        let control = JoinControl::new();
         let joining = install.run(
             &owner,
-            Installation::join_request(&invite),
+            Installation::join_request(&invite, &control),
             owner.recipient(),
             &cancel,
             |_| {},
         );
-        let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+        let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
         let handle = result.unwrap().unwrap();
         let replace = || {
             handle.replace_access_key("new-member-key".into(), SecretText::new("new-secret".into()))
@@ -829,10 +826,11 @@ async fn joining_retains_the_approved_member_in_session_custody() {
         .key_custody(CustodyChoice::InMemory)
         .identity_custody(CustodyChoice::InMemory);
     let joining = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
-    let (handle, member) = join_and_approve(&owner.handle, joining, |_| async {
-        install.absent(owner.directory.id()).await;
-    })
-    .await;
+    let (handle, member) = owner
+        .join_and_approve(joining, &control, |_| async {
+            install.absent(owner.directory.id()).await;
+        })
+        .await;
     let handle = handle.unwrap().unwrap();
     assert_eq!(
         coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap().member,

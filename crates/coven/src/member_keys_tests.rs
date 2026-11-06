@@ -13,15 +13,22 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     let invite = owner.invite().await;
     let first = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let joining =
-        first.run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {});
+    let control = JoinControl::new();
+    let joining = first.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
     let requested = std::sync::Mutex::new(None);
-    let (result, carol) = join_and_approve(&owner.handle, joining, |request| {
-        assert_eq!(request.member, invite.member);
-        *requested.lock().unwrap() = Some(request.keys);
-        async {}
-    })
-    .await;
+    let (result, carol) = owner
+        .join_and_approve(joining, &control, |request| {
+            assert_eq!(request.member, invite.member);
+            *requested.lock().unwrap() = Some(request.keys);
+            async {}
+        })
+        .await;
     let handle = result.unwrap().unwrap();
     let old_code = handle.restore_code().await.unwrap();
     let old = coven_sync::read_restore_code(&old_code).unwrap();

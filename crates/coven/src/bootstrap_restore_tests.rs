@@ -176,9 +176,15 @@ async fn a_restore_whose_registration_is_refused_ends_and_removes_its_installati
     let invite = owner.invite().await;
     let joined = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let joining =
-        joined.run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {});
-    let (result, carol) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let control = JoinControl::new();
+    let joining = joined.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, carol) = owner.join_and_approve(joining, &control, |_| async {}).await;
     let carol_phone = result.unwrap().unwrap();
     let code = carol_phone.restore_code().await.unwrap();
     carol_phone.close().await.unwrap();
@@ -313,18 +319,17 @@ async fn a_restore_whose_device_was_removed_ends_and_removes_its_installation() 
 async fn a_restore_refuses_a_waiting_joins_installation() {
     for provider in [CloudProvider::S3, CloudProvider::Dropbox] {
         let owner = Owner::new(provider, false).await;
-        owner.hold_waits();
         let invite = owner.invite().await;
         let install = Installation::new();
         let store = owner.directory.id();
-        held_waiting_join(&owner, &install, &invite).await;
+        waiting_join(&owner, &install, &invite).await;
         let kept = install
             .only_kept_sign_in(store)
             .await
             .map(|tokens| tokens.access_token.as_str().to_owned());
         let (stop, cancel) = watch::channel(false);
         let ended = restore_from_code(
-            install.held_signed_in_builder(&owner, owner.storage.clone()).await,
+            install.authenticated_builder(&owner, owner.storage.clone()).await,
             &owner.code.to_text().unwrap(),
             owner.s3_credentials(),
             "Ana’s laptop",
@@ -352,8 +357,8 @@ async fn a_restore_refuses_a_waiting_joins_installation() {
         );
         let control = JoinControl::new();
         let resumed =
-            install.held_builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
-        let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
+            install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
+        let (result, _) = join_with_response(resumed, owner.approve_join(&control)).await;
         result.unwrap().unwrap().close().await.unwrap();
         owner.close().await;
     }

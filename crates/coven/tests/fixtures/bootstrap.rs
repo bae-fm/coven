@@ -1,5 +1,5 @@
 use super::*;
-pub(super) use crate::tests::{join_and_approve, join_with_response, next_join_request};
+pub(super) use crate::tests::join_with_response;
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::RecordingClock;
 
@@ -27,8 +27,17 @@ pub(super) struct Owner {
 }
 
 impl Owner {
+    /// Ana's store with two rows of notes, the first in a snapshot when
+    /// `snapshot` says. Her waits are held from her store's setup on: a
+    /// backoff or cooldown of hers ends only as the test moves the clock or
+    /// asks for a pass. A sent invite looks for its request between passes,
+    /// and each look's backoff would otherwise move every device's clock,
+    /// as many times as her loop turns before the test's next step.
     pub(super) async fn new(provider: CloudProvider, snapshot: bool) -> Self {
         let network = crate::tests::Network::with_schema(provider, tables(), migrations()).await;
+        let waited = network.polling.waited();
+        assert!(waited.is_empty(), "waits passed before Ana's were held: {waited:?}");
+        network.polling.hold_waits();
         let device = &network.devices[0];
         let handle = device.handle.clone();
         let directory = device.app.store_dir(&device.store);
@@ -71,22 +80,59 @@ impl Owner {
         self.network.sync(0).await;
     }
 
-    /// End Ana's later backoffs and cooldowns only as the test moves the
-    /// clock or asks for a retry, so a wait that polls for what the test
-    /// does next can't run ahead of it.
-    pub(super) fn hold_waits(&self) {
-        self.network.polling.hold_waits();
+    /// The request a join sent on one of Ana's invites, once her pass has
+    /// read it. Her invite looks for the request only in a pass, her waits
+    /// being held: once the provider holds a request at a waiting invite's
+    /// path, this asks for one. Unlike [`Self::pass`] it leaves the clock
+    /// where it is: a move would also pass the time the join next checks
+    /// at, and start its check before Ana approves.
+    pub(super) async fn next_join_request(&self) -> JoinRequest {
+        let invites = self.handle.read(Invite::list).await.unwrap();
+        if let Some(request) = invites.iter().find_map(|invite| invite.shown_request().cloned()) {
+            return request;
+        }
+        let waiting: Vec<_> = invites
+            .iter()
+            .filter(|invite| matches!(invite.stage, InviteStage::Waiting { request: None, .. }))
+            .map(crate::tests::request_path)
+            .collect();
+        tokio::time::timeout(
+            HANG_GUARD,
+            self.storage.wait_for_object(|path| waiting.contains(path)),
+        )
+        .await
+        .expect("a join sends its request");
+        self.pass_now().await;
+        crate::tests::next_join_request(&self.handle).await
     }
 
-    /// Ana's pass reading the request Carol's join made, then the request.
-    /// With her waits held, her invite looks for it only when a pass is
-    /// asked for, so Carol's join must have made it first. Unlike
-    /// [`Self::pass`] it leaves the clock where it is: a move would also
-    /// pass the time Carol's join next checks at, and start her check
-    /// before Ana approves.
-    pub(super) async fn read_join_request(&self) -> JoinRequest {
-        self.pass_now().await;
-        next_join_request(&self.handle).await
+    /// Ana reads the request a join sent, approves it, and `control` asks
+    /// the join to check for that approval now: its waits are held, so its
+    /// next check runs only then or once the test moves the clock.
+    pub(super) async fn approve_join(&self, control: &JoinControl) -> MemberId {
+        let request = self.next_join_request().await;
+        crate::tests::approve(&self.handle, &request).await;
+        control.check_now();
+        request.member
+    }
+
+    /// Run `joining` while Ana reads its request, hands it to `before`, and
+    /// approves it as [`Self::approve_join`] does; returns what the join
+    /// returned and the approved member.
+    pub(super) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
+        &self,
+        joining: impl std::future::Future<Output = T>,
+        control: &JoinControl,
+        before: impl FnOnce(JoinRequest) -> F,
+    ) -> (T, MemberId) {
+        join_with_response(joining, async {
+            let request = self.next_join_request().await;
+            before(request.clone()).await;
+            crate::tests::approve(&self.handle, &request).await;
+            control.check_now();
+            request.member
+        })
+        .await
     }
 
     /// One pass of Ana's at the clock's current time, which runs her
@@ -181,48 +227,29 @@ impl Installation {
         Self { root, app, keychain }
     }
 
+    /// A builder on the test's clock itself: its waits end only as the test
+    /// moves the clock or asks a join to check, as Ana's do.
     pub(super) fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
         self.app
             .builder()
             .synced_tables(tables())
             .migrations(migrations())
-            .clock(Arc::new(crate::tests::PollingClock::new(owner.clock.clone())))
+            .clock(owner.clock.clone())
             .storage_connector(storage)
     }
 
-    /// A builder on the test's clock itself: its waits end only as the test
-    /// moves the clock or asks a join to check, as Ana's do once held.
-    pub(super) fn held_builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
-        self.builder(owner, storage).clock(owner.clock.clone())
-    }
-
-    /// A held builder signed in as the owner's provider asks, through
+    /// A builder signed in as the owner's provider asks, through
     /// [`sign_in_held`].
-    pub(super) async fn held_signed_in_builder(
-        &self,
-        owner: &Owner,
-        storage: Arc<MemoryStorage>,
-    ) -> CovenBuilder {
-        let mut builder = self.held_builder(owner, storage);
-        if let Some(access) = owner.storage.config().oauth_access() {
-            let sign_in = crate::authentication::SignIn::new().await;
-            builder = sign_in.configure(builder);
-            sign_in_held(owner, &mut builder, access).await;
-        }
-        builder
-    }
-
     pub(super) async fn authenticated_builder(
         &self,
         owner: &Owner,
         storage: Arc<MemoryStorage>,
     ) -> CovenBuilder {
         let mut builder = self.builder(owner, storage);
-        let provider = owner.storage.config().provider();
-        if provider.signs_in_with_oauth() {
+        if let Some(access) = owner.storage.config().oauth_access() {
             let sign_in = crate::authentication::SignIn::new().await;
             builder = sign_in.configure(builder);
-            builder.authenticate(owner.storage.config().oauth_access().unwrap()).await.unwrap();
+            sign_in_held(owner, &mut builder, access).await;
         }
         builder
     }
@@ -239,25 +266,6 @@ impl Installation {
         // ride in the test's own future on the test thread's stack.
         Box::pin(bootstrap_device(
             self.authenticated_builder(owner, storage).await,
-            request,
-            status,
-            cancel,
-        ))
-        .await
-    }
-
-    /// A bootstrap, as [`Self::run`] runs it, through a held, signed-in
-    /// builder.
-    pub(super) async fn run_held(
-        &self,
-        owner: &Owner,
-        request: BootstrapRequest,
-        storage: Arc<MemoryStorage>,
-        cancel: &watch::Receiver<bool>,
-        status: impl Fn(BootstrapStatus),
-    ) -> Result<Option<CovenHandle>, BootstrapError> {
-        Box::pin(bootstrap_device(
-            self.held_signed_in_builder(owner, storage).await,
             request,
             status,
             cancel,
@@ -314,19 +322,15 @@ impl Installation {
         }
     }
 
-    /// A join request as [`Self::join_request`] makes, which `control` asks
-    /// to check for approval now.
-    pub(super) fn checked_join_request(invite: &Invite, control: &JoinControl) -> BootstrapRequest {
+    /// A join with `invite`'s code, which `control` asks to check for
+    /// approval now: its waits are held, so a check after its first runs
+    /// only then or once the test moves the clock.
+    pub(super) fn join_request(invite: &Invite, control: &JoinControl) -> BootstrapRequest {
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(invite.shown_code()).unwrap(),
             name: DeviceName::Given("New phone".into()),
             check: control.check.subscribe(),
         }
-    }
-
-    pub(super) fn join_request(invite: &Invite) -> BootstrapRequest {
-        // Nobody asks this join to check now.
-        Self::checked_join_request(invite, &JoinControl::new())
     }
 
     /// Nothing of the store is listed or in custody.
@@ -443,7 +447,7 @@ pub(super) fn cancel_at(phase: Phase, stop: &watch::Sender<bool>) -> impl Fn(Boo
 /// installation's builder does; a host reading the loading watch sees only
 /// the newest value, and can miss a step that ends between two reads.
 pub(super) fn loading_recorder(owner: &Owner) -> Arc<RecordingClock<LoadStep>> {
-    Arc::new(RecordingClock::new(Arc::new(crate::tests::PollingClock::new(owner.clock.clone()))))
+    Arc::new(RecordingClock::new(owner.clock.clone()))
 }
 
 /// Every loading report is honest: steps come in the order loading runs
@@ -516,12 +520,6 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     .unwrap();
 }
 
-/// Start Carol's join through a held, signed-in builder and stop it while it
-/// waits, as when the app is closed.
-pub(super) async fn held_waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
-    waiting_join_with(install.held_signed_in_builder(owner, owner.recipient()).await, invite).await;
-}
-
 /// A join's status callback that tells the returned watch once the join
 /// waits for approval, its request made.
 pub(super) fn waiting_for_approval() -> (impl Fn(BootstrapStatus), watch::Receiver<bool>) {
@@ -534,18 +532,9 @@ pub(super) fn waiting_for_approval() -> (impl Fn(BootstrapStatus), watch::Receiv
     (status, waits)
 }
 
-/// Ana reads the request Carol's join made and approves it, then `control`
-/// asks the join, whose waits are held, to check for that approval now.
-pub(super) async fn approve_held(owner: &Owner, control: &JoinControl) -> MemberId {
-    let request = owner.read_join_request().await;
-    crate::tests::approve(&owner.handle, &request).await;
-    control.check_now();
-    request.member
-}
-
 /// Sign `builder` in for `access`, checking that nothing moved the clock
 /// meanwhile. The sign-in races its deadline, and its token request a stall
-/// window, on that clock; with Ana's waits held, her backoffs between looks
+/// window, on that clock; with every wait held, Ana's backoffs between looks
 /// for Carol's request can't move it under them.
 pub(super) async fn sign_in_held(
     owner: &Owner,
