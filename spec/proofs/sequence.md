@@ -635,6 +635,10 @@ side of the rule that a part counts only at a version its audience has reached.
   its audience at the part's version meets that rule at any later landing slot.
 - `ahead_part_refused`: a circle at version 1 refuses a part at version 2 and
   counts the same part at version 1.
+- `closed_step_version`, `closed_version`, `closed_part_never_counts`: an
+  audience no one may raise from some slot on, such as a deleted circle, keeps
+  its version from that slot, so a part ahead of it never meets the version
+  rule at any later landing slot.
 
 [`RaiseBody`](sequence/CovenSequence/RaiseBody.lean) compares the model's raise
 body with the one coven writes. The model's is the rows at the raise's coverage,

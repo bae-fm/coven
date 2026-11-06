@@ -7442,6 +7442,13 @@ circle never raised, its base (§15.5). An operation that finds the version it
 wanted already established adopts the announced state instead of claiming another
 raise. A higher raise is checked against that state.
 
+Nobody raises a deleted circle (§15.9). A device whose migration captured a
+circle that is deleted before its raise goes out drops that capture once the
+deletion has applied, as it drops a capture for an audience another device has
+raised. Ana's phone migrates while its history still shows Garden. Ben's
+deletion of Garden applies on her next pass, and her phone raises nothing for
+Garden.
+
 An update that runs several breaking migrations makes one migration write (§18.4)
 and raises the store once, to the newest version.
 
@@ -7580,6 +7587,16 @@ it are new-version writes and wait behind it.
   raised; his pin in Garden waits until Ana's update raises it (§18.3). A pass
   decides what it sends from the slots it applied before reading, so the pass
   that applies the raise sends the pin on the next one.
+- **A deleted circle holds no write.** Nobody can raise it, so it stays at
+  its version for good, and a part ahead of it would never count however long
+  it waited
+  ([`closed_part_never_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
+  Its parts are taken out wherever they land anyway (§15.9). So a write waits
+  only for audiences that aren't deleted. Applying the deletion ends a record
+  waiting for that circle in the same commit. If the write is still below
+  another audience's version, it records that wait instead. If Ana deletes
+  Garden before anyone raises it, Ben's pin goes out on his next pass and is
+  taken out with Garden's other rows.
 - **Before uploading the raise snapshot,** the device confirms the captured
   writes and the marker have landed. The snapshot leaves out app writes without a
   slot and includes the migration's effects over the slots it covers. Those are
@@ -11229,6 +11246,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A device that started reading a circle after migrating holds only converted parts, not the migrated rows a raise covering them must carry | `joiner_cannot_raise` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience's version never goes down, so a part sent once its audience reached its version counts on that rule wherever it lands | `step_version`, `version_mono`, `waiting_part_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
+| *Body.* An audience no one may raise, such as a deleted circle, keeps its version, so a part ahead of it never meets the version rule wherever it lands | `closed_step_version`, `closed_version`, `closed_part_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |

@@ -183,7 +183,8 @@ pub(crate) fn prepare(
 
 /// This device's first queued write that waits for a raise: one made at or
 /// after its newest breaking migration, with a part in an audience that
-/// hasn't reached that migration's version. Every device would refuse that
+/// hasn't reached that migration's version and can still be raised
+/// ([`crate::StoreState::awaits_raise`]). Every device would refuse that
 /// part until the audience has, so it waits, and the writes behind it with it
 /// (§18.5). A raise's captured prefix goes out before its raise; while one
 /// waits, it holds everything after it already.
@@ -196,7 +197,7 @@ pub(crate) fn first_ahead(
         return Ok(None);
     }
     let state = crate::store_state_tables::read(db)?;
-    let below = |audience: &Audience| state.reached(audience) < breaking;
+    let below = |audience: &Audience| state.awaits_raise(audience, breaking);
     if !below(&Audience::Store) && !state.circles.keys().any(|c| below(&Audience::Circle(*c))) {
         return Ok(None);
     }
@@ -230,16 +231,16 @@ pub(crate) fn record_ahead<P: crate::PendingValue>(
     Ok(())
 }
 
-/// End every raise wait the installed store state has reached, in the
-/// commit that installs it; a write still below another audience's version
-/// records that wait instead.
+/// End every raise wait the installed store state has reached or whose
+/// circle it deleted, in the commit that installs it; a write still below
+/// another audience's version records that wait instead.
 pub(crate) fn end_raise_waits<P: crate::PendingValue>(
     db: &DatabaseConnection,
 ) -> Result<(), DbError> {
     let state = crate::store_state_tables::read(db)?;
     for record in crate::pending::read::<P>(db)? {
         if let Some((write, audience, version)) = record.raise_awaited() {
-            if state.reached(audience) >= version {
+            if !state.awaits_raise(audience, version) {
                 crate::pending::clear(db, record.subject())?;
                 record_ahead::<P>(db, write.device)?;
             }

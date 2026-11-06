@@ -78,6 +78,18 @@ impl StoreState {
         })
     }
 
+    /// Whether a part at `version` in `audience` waits for a raise: the
+    /// audience is below that version and can still be raised. Nobody can
+    /// raise a deleted circle, and its parts are taken out wherever they land
+    /// (§15.9, §18.5).
+    pub fn awaits_raise(&self, audience: &Audience, version: u32) -> bool {
+        let deleted = match audience {
+            Audience::Store => false,
+            Audience::Circle(circle) => self.circle_deletions.contains_key(circle),
+        };
+        !deleted && self.reached(audience) < version
+    }
+
     /// Every audience `member` reads: the store's, then each of
     /// [`Self::readable_circles`] in id order.
     pub fn readable_audiences(&self, member: &MemberId) -> Vec<Audience> {

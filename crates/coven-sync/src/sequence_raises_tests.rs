@@ -281,3 +281,69 @@ async fn a_raise_that_leaves_a_write_below_another_circle_records_that_wait() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben's pin in Garden waits for Garden's raise, and he deletes Garden
+/// instead. Nobody can raise a deleted circle, so the pin waits for nothing:
+/// applying the deletion ends its record, his next pass sends it and the
+/// note behind it, and Garden takes the pin out with its other rows (§15.9,
+/// §18.5).
+#[tokio::test]
+async fn a_write_into_a_circle_deleted_below_its_version_waits_no_more() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    pin(ben.database(), "00000000-0000-4000-8000-000000000001", garden, "seeds").await;
+    insert(ben.database(), "00000000-0000-4000-8000-000000000002", "after the pin").await;
+    ben.sync.pass().await.unwrap();
+    let waiting = async |ben: &Device| ben.database().waiting_snapshot_headers().await.unwrap();
+    let raise_waits = async |ben: &Device| {
+        ben.database()
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    record.reason,
+                    crate::PendingReason::Waits(crate::Prerequisite::Raise { .. })
+                )
+            })
+            .count()
+    };
+    assert_eq!(waiting(&ben).await.len(), 2);
+    assert_eq!(raise_waits(&ben).await, 1);
+
+    ben.sync
+        .administer(coven_format::admin::StoreChange::DeleteCircle { circle: garden })
+        .await
+        .unwrap();
+    assert_eq!(raise_waits(&ben).await, 0, "applying the deletion ended the wait");
+    ben.sync.pass().await.unwrap();
+    assert!(waiting(&ben).await.is_empty());
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(pins(ana.database()).await.is_empty());
+    assert!(rows(ana.database())
+        .await
+        .contains(&("00000000-0000-4000-8000-000000000002".into(), "after the pin".into())));
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

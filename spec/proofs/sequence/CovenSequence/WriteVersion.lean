@@ -10,7 +10,9 @@ a part only once the audience has reached the part's version in the prefix it
 has applied sends a part that counts at whatever later slot it lands
 (`waiting_part_counts`). One sent earlier is refused: a device that started
 reading a circle at version 1 after its app reached version 2 writes parts at
-version 2, which the circle refuses until its raise (`ahead_part_refused`).
+version 2, which the circle refuses until its raise (`ahead_part_refused`). An audience no one may raise, such as a deleted
+circle, keeps its version (`closed_version`), so a part ahead of it never meets
+the rule however long it waits (`closed_part_never_counts`).
 -/
 
 namespace CovenSequence.WriteVersion
@@ -63,6 +65,52 @@ theorem waiting_part_counts (seq : Nat → Slot S) (A : S.Aud) (j k v : Nat)
     (reached : v ≤ (audAt R seq A j).version) (after : j < k) :
     v ≤ (audAt R seq A (k - 1)).version :=
   Nat.le_trans reached (version_mono R seq A j (k - 1) (by omega))
+
+/-- A slot where no boundary of `A` is allowed leaves `A`'s version as it was. -/
+theorem closed_step_version (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) (x : Slot S)
+    (closed : ∀ d kind, R.boundaryAllowed L d A kind = false) :
+    (audStep R L P k A x).version = P.version := by
+  unfold audStep
+  split
+  · split
+    · rename_i valid
+      cases x with
+      | boundary d a kind c p =>
+        simp only [audValid, closed, Bool.and_false, Bool.false_and] at valid
+        exact absurd valid Bool.false_ne_true
+      | writes d g parts =>
+        simp only [audEffect]
+        split <;> rfl
+      | _ => simp [audEffect]
+    · simp [refuseAud]
+  · rfl
+
+/-- **An audience no one may raise keeps its version.** From slot `j` on no
+boundary of `A` is allowed, as for a deleted circle (coven.md §15.9), so `A`
+stays at its version after slot `j`. -/
+theorem closed_version (seq : Nat → Slot S) (A : S.Aud) (j : Nat)
+    (closed : ∀ i, j ≤ i → ∀ d kind, R.boundaryAllowed (ledgerAt R seq i) d A kind = false) :
+    ∀ k, j ≤ k → (audAt R seq A k).version = (audAt R seq A j).version
+  | k, hk => by
+    induction k with
+    | zero =>
+      have : j = 0 := by omega
+      subst this; rfl
+    | succ k ih =>
+      by_cases hj : j = k + 1
+      · subst hj; rfl
+      · rw [audAt_succ, closed_step_version R _ _ _ _ _ (closed k (by omega))]
+        exact ih (by omega)
+
+/-- **A part ahead of an audience no one may raise never meets its version
+rule.** Holding it back waits for a version the audience never reaches, and
+wherever it lands it is refused alike, so waiting gains the part nothing. -/
+theorem closed_part_never_counts (seq : Nat → Slot S) (A : S.Aud) (j k v : Nat)
+    (closed : ∀ i, j ≤ i → ∀ d kind, R.boundaryAllowed (ledgerAt R seq i) d A kind = false)
+    (ahead : (audAt R seq A j).version < v) (after : j ≤ k) :
+    ¬ v ≤ (audAt R seq A k).version := by
+  rw [closed_version R seq A j closed k after]
+  omega
 
 end General
 

@@ -28,7 +28,8 @@ impl SequenceSync {
 
     /// Raise every captured audience to its migration's version through the
     /// operation path, then finish the migration's journal. An audience
-    /// another device already raised to that version keeps no capture.
+    /// another device already raised to that version, or a circle deleted
+    /// since the capture, keeps no capture (§15.9, §18.5).
     pub(crate) async fn publish_raises(
         &self,
         session: &mut Session,
@@ -62,7 +63,7 @@ impl SequenceSync {
             })
             .collect();
         for capture in self.database.raise_captures().await? {
-            if session.history.state.reached(&capture.audience) >= capture.version {
+            if !session.history.state.awaits_raise(&capture.audience, capture.version) {
                 self.database.discard_raise_capture(capture.audience, capture.version).await?;
                 continue;
             }
