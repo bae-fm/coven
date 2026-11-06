@@ -253,15 +253,18 @@ proved in [IO](io.md#removed-device-file-scan).
 
 [UploadSession.lean](storage/CovenStorage/UploadSession.lean) models one queued
 upload going up in parts (coven.md §17.9): the provider's live session, with the
-parts it holds in the order they arrived, and the published object; the queue
-row, with whether a file still waits for it, the confirmed parts of the session
-it records, its pending failure and what that failure waits for; and the attempt
-this process is running, in memory only. A part is its index. The steps are the
-upload worker's: start an attempt when the upload is due, resume the recorded
-session or begin one, record it, send a part, publish, complete, fail with a
-class, crash, abort and forget the session of an upload no file waits for, and
-retire one that records none. The provider may lose a part's reply, drop a part,
-expire its session or lose the completion reply.
+parts it holds in the order they arrived, the sessions it began that the row
+never named, and the published object; the queue row, with whether a file
+still waits for it, what it records of its session (nothing, a plan naming
+where the next session will be, or the session with its confirmed parts), its
+pending failure and what that failure waits for; and the attempt this process
+is running, in memory only. A part is its index. The steps are the upload
+worker's: start an attempt when the upload is due, resume the recorded session
+or record a plan, begin the planned session, record a session, send a part,
+publish, complete, fail with a class, crash, abort and forget what an upload no
+file waits for records, and retire one that records nothing. The provider may
+lose the reply to a begin or a part, drop a part, expire its sessions or lose
+the completion reply.
 
 `steps_good` carries one invariant through every step. The provider's session
 holds parts `0 … n-1` in order (`held_nodup`), and the published object is
@@ -270,20 +273,30 @@ attempts and expired sessions. The part an attempt sends next is the first the
 provider lacks (`next_part_new`). The recorded parts are always ones the
 provider holds, so the progress `uploads()` and `coven_uploads` show, which is
 the recorded session's, is never ahead of them (`progress_never_ahead`). A
-crash forgets only memory (`crash_keeps`); after it, a session the provider
-still has continues from the parts it holds (`resume_continues`), and one it
-expired starts over from its first part (`expired_starts_over`). No step
+crash forgets only memory (`crash_keeps`): every session the provider holds
+stays, one the row doesn't name yet as a stray. After it, a session the
+provider still has continues from the parts it holds (`resume_continues`), and
+one it expired starts over with a new plan (`expired_starts_over`). No step
 changes the location, key and chunk hashes the staging write fixed
 (`steps_keep_fixed`).
 
-A recorded session is forgotten only by aborting it, which ends the provider's
-session first (`forgotten_by_abort`), and an upload retires only once it
-records none (`retire_needs_no_session`), so it retires with no session left
-at the provider (`retired_no_session`). A failed abort keeps the upload queued
-with its session, as the upload's failure (`failed_abort_queued`). Each
-failure waits as its class says (`failure_waits_by_class`): `Automatic` for
-its delay, `AppAction` for new credentials or a new connection, `Never` for
-nothing. An attempt starts only when the upload is due, or the app's early
+The row records a plan before the provider begins a session
+(`begin_needs_plan`). A session begun whose name the row never recorded,
+because the begin's reply was lost or the process stopped before the record,
+is a stray, and only those steps leave one (`steps_stray_le`). Every stray sits
+at the place of the plan the row still records (`stray_named`), so the
+attempt's first request ends them all before anything else (`open_sweeps`), as
+does the abort of an upload no file waits for (`abort_sweeps`), and the
+upload's next run on a provider that fails nothing leaves none
+(`next_run_sweeps`). What a row records is forgotten only by aborting it,
+which ends the provider's session and every stray first
+(`forgotten_by_abort`), and an upload retires only once it records nothing
+(`retire_needs_no_session`), so it retires with no session left at the
+provider, named or stray (`retired_no_session`). A failed abort keeps the
+upload queued with what it records, as the upload's failure
+(`failed_abort_queued`). Each failure waits as its class says
+(`failure_waits_by_class`): `Automatic` for its delay, `AppAction` for new
+credentials or a new connection, `Never` for nothing. An attempt starts only when the upload is due, or the app's early
 retry covers it (`start_needs_due`), and an abort only once its wait is over
 (`abort_needs_ready`). `wait_ends` shows a delay ends only when it passes and a
 connection wait only on a new connection, a reopened store's included, and
@@ -291,18 +304,21 @@ connection wait only on a new connection, a reopened store's included, and
 the app: no step sends anything for the upload or changes its failure or its
 recorded session.
 
-Beginning a session and recording it are one step here. A session the
-provider began whose record never committed, because its reply was lost or the
-device stopped first, is outside the model, as are the provider's own
-behaviour, which the model takes as truthful, and the length of each delay,
-which [Clocks](#hybrid-timestamps-and-retry-time) bounds.
+The first part goes before the record names the session, as an S3 upload's
+first part starts its native upload (coven.md Appendix E.10); a failure then
+records the session the attempt holds. Ending the sessions at a plan's place
+assumes the provider can list them there and that they are this upload's
+alone; coven.md §17.9 names the places where that holds. Outside the model are
+the provider's own behaviour, which the model takes as truthful, and the length
+of each delay, which [Clocks](#hybrid-timestamps-and-retry-time) bounds.
 `uploadSessionRunner` runs the worker's runs, `run` in the model, against the
 upload worker over coven-storage's in-memory provider through
 `COVEN_UPLOAD_SESSION_LEAN`:
 `files::tests::abandoned_tests::sessions::upload_sessions_match_the_storage_model` in
 coven-sync compares, after each run, the queue row, the parts its session
-records, the provider's live session and its parts, the published object, the
-switched file and the class of the pending failure.
+records, the provider's live session and its parts, the sessions it began that
+the row never named, the published object, the switched file and the class of
+the pending failure.
 
 ## Hybrid timestamps and retry time
 

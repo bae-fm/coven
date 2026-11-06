@@ -19,6 +19,7 @@ private def parseFault (fault : Json) : Except String Fault := do
   | "none" => pure .none
   | "expire" => pure .expire
   | "fail" => pure (.fail (← parseClass (← fault.getObjValAs? String "class")))
+  | "lose_begin" => pure .loseBegin
   | "lose_completion" => pure .loseCompletion
   | "parts" =>
     let k ← fault.getObjValAs? Nat "parts"
@@ -31,13 +32,15 @@ private def parseFault (fault : Json) : Except String Fault := do
   | other => throw s!"unknown fault {other}"
 
 /-- What the Rust test can see after each event: the queue row and its
-recorded parts, the provider's live session and its parts, the published
-object, the switched file and the pending failure's class. -/
+recorded parts, the provider's live session and its parts, the sessions it
+began that the row never named, the published object, the switched file and
+the pending failure's class. -/
 private def observe (s : State) : Json :=
   Json.mkObj [
     ("queued", toJson s.row.isSome),
     ("recorded", toJson s.progress),
     ("held", toJson (s.session.map List.length)),
+    ("stray", toJson s.stray),
     ("published", toJson s.published.isSome),
     ("stored", toJson s.stored),
     ("failure", toJson ((s.row.bind (·.failure)).map className))]
