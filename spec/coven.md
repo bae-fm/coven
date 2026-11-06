@@ -1850,7 +1850,10 @@ Unrelated commits and finished passes don't reset the delay.
   applies to, before any affected worker retries. It applies to every request it
   affects, including retries inside the provider's SDK and explicit retries from
   the app. Restarting, `sync_now`, a network report and the app's retry never
-  discard it.
+  discard it. An app call that needs storage, such as `replace_access_key`
+  retrying its journaled entry, sends nothing while it lasts and fails with
+  `RateLimited`; what it had journaled keeps its record and wait, and a pass
+  runs it once the cooldown ends.
 - **A failed save.** If saving the delay fails, the work that started it fails and
   won't retry on its own.
 

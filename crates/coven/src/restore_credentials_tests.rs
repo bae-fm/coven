@@ -560,3 +560,70 @@ async fn retrying_a_refused_replacement_with_its_key_finishes_it_once() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// A provider's cooldown holds a retried replacement as it holds every
+/// request: the call sends nothing and fails `RateLimited`, and the
+/// journaled entry and the kept key stay for a pass to finish once the
+/// cooldown ends (§6.7, §14.3).
+#[tokio::test]
+async fn a_cooldown_holds_a_retried_replacement() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.stop_sync().await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let next = crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
+        path.slot_number().is_some()
+    })
+    .await
+    .iter()
+    .filter_map(|object| object.path.slot_number())
+    .map(|slot| slot.0)
+    .max()
+    .unwrap()
+        + 1;
+    owner
+        .storage
+        .set_faults(Faults {
+            create_failures: [(
+                ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(next).unwrap()),
+                (StorageFailure::PermissionDenied, 403),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    let replacement = supplied_key("replacement");
+    let (id, secret) = (&replacement.access_key_id, &replacement.secret_access_key);
+    let refused = handle.replace_access_key(id.clone(), secret.clone()).await;
+    assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
+    // The provider answers the next request with 429 and Retry-After.
+    owner
+        .storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::RateLimited,
+            retry_after: Some(200),
+            ..Faults::none()
+        })
+        .await;
+    let rate_limited = |result: &Result<(), SyncError>| {
+        matches!(result, Err(SyncError::Storage(error))
+            if error.failure() == StorageFailure::RateLimited)
+    };
+    let answered = handle.replace_access_key(id.clone(), secret.clone()).await;
+    assert!(rate_limited(&answered), "{answered:?}");
+    handle.test_parked().await;
+    let requests = owner.storage.request_count();
+    let held = handle.replace_access_key(id.clone(), secret.clone()).await;
+    assert!(rate_limited(&held), "{held:?}");
+    handle.test_parked().await;
+    assert_eq!(owner.storage.request_count(), requests, "the retry sent a request");
+    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
+    let kept = custody.replacing_access_key().unwrap().unwrap();
+    assert_eq!(S3Credentials::decode(kept.as_bytes()).unwrap().access_key_id, "replacement");
+    assert_key(&install, directory.id(), &owner.s3_credentials().unwrap());
+    assert!(!handle.pending().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}
