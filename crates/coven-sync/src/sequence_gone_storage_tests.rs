@@ -1,11 +1,11 @@
 use crate::sequence_sync::tests::*;
 use coven_format::admin::StoreChange;
-use coven_foundation::id_source::FileId;
+use coven_foundation::id_source::ObjectId;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, Storage};
 
 fn photo(group: &Group, device: &Device, number: u128) -> ObjectPath {
-    ObjectPath::file(group.store, device.sync.device, FileId(uuid::Uuid::from_u128(number)))
+    ObjectPath::file(group.store, device.sync.device, ObjectId(uuid::Uuid::from_u128(number)))
 }
 
 /// Ana's phone was sending a photo in parts when Ana's laptop removed it, so

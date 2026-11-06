@@ -9,14 +9,14 @@ fn references_use_canonical_decimal_uuid_and_lowercase_key_encoding() {
     for device in [0, 1, 42, u64::MAX] {
         let reference = FileReference {
             device: DeviceId(device),
-            id: FileId(uuid::Uuid::from_u128(0x00112233445566778899aabbccddeeff)),
+            object: ObjectId(uuid::Uuid::from_u128(0x00112233445566778899aabbccddeeff)),
             key: FileKey::from_bytes(std::array::from_fn(|i| (i % 16) as u8 * 17)),
         };
         let expected = format!("file {device} {ID} {KEY}");
         assert_eq!(reference.encode().as_str(), expected);
         let decoded = FileReference::decode(&expected).unwrap();
         assert_eq!(decoded.device, reference.device);
-        assert_eq!(decoded.id, reference.id);
+        assert_eq!(decoded.object, reference.object);
         assert_eq!(
             decoded.key.to_secret_bytes().as_bytes(),
             reference.key.to_secret_bytes().as_bytes()
@@ -121,13 +121,16 @@ fn file_reference_matches_the_pinned_text_and_path() {
     assert!(fixture.next().is_none());
     let reference = FileReference {
         device: DeviceId(1),
-        id: FileId(uuid::Uuid::from_bytes([0x11; 16])),
+        object: ObjectId(uuid::Uuid::from_bytes([0x11; 16])),
         key: FileKey::from_bytes([0x77; 32]),
     };
     assert_eq!(reference.encode().as_str(), text);
     let decoded = FileReference::decode(text).unwrap();
     assert_eq!(decoded.encode().as_str(), text);
-    assert_eq!(crate::path::ObjectPath::file(STORE_ID, decoded.device, decoded.id).as_str(), path);
+    assert_eq!(
+        crate::path::ObjectPath::file(STORE_ID, decoded.device, decoded.object).as_str(),
+        path
+    );
 }
 
 #[test]

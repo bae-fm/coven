@@ -71,7 +71,7 @@ async fn lost_copy_reply_requires_byte_verification() {
     let path = ObjectPath::file(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xff; 16])),
     );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     let recorded = upload.encode().unwrap();

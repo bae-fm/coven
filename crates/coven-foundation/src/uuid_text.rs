@@ -1,7 +1,8 @@
 //! Coven's ids at the SQL value boundary, without database access: UUIDs as
-//! canonical text, and device ids as the eight big-endian bytes coven stores.
+//! canonical text, stored objects' ids as their sixteen bytes, and device ids
+//! as the eight big-endian bytes coven stores.
 
-use crate::id_source::{CircleId, DeviceId, FileId, MemberId};
+use crate::id_source::{CircleId, DeviceId, FileId, MemberId, ObjectId};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef};
 use rusqlite::ToSql;
 use uuid::Uuid;
@@ -70,6 +71,24 @@ impl ToSql for FileId {
 impl FromSql for FileId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         UuidText::column_result(value).map(|id| Self(id.0))
+    }
+}
+
+/// A stored object's id as its sixteen bytes, as coven's object columns hold
+/// it.
+impl ToSql for ObjectId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Blob(self.0.as_bytes())))
+    }
+}
+
+impl FromSql for ObjectId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let bytes = value.as_blob()?;
+        let bytes = <[u8; 16]>::try_from(bytes).map_err(|_wrong_size| {
+            FromSqlError::InvalidBlobSize { expected_size: 16, blob_size: bytes.len() }
+        })?;
+        Ok(Self(Uuid::from_bytes(bytes)))
     }
 }
 

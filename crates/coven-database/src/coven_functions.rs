@@ -104,7 +104,7 @@ pub(crate) fn register(
         Ok(stored(ctx)?.map(|location| location.uploader().0.to_be_bytes().to_vec()))
     })?;
     add(connection, authorization, "_coven_stored_object", 1, INTERNAL, |ctx| {
-        Ok(stored(ctx)?.map(|location| location.object().0.as_bytes().to_vec()))
+        Ok(stored(ctx)?.map(|location| location.object()))
     })?;
     add(connection, authorization, "_coven_stored_cache_id", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| {

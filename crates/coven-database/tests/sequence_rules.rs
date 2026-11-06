@@ -24,12 +24,12 @@ impl PendingValue for Pending {
     fn subject(&self) -> &u64 {
         &self.subject
     }
-    fn file(
+    fn object(
         &self,
     ) -> Option<(
         coven_database::FileWork,
         coven_foundation::id_source::DeviceId,
-        coven_foundation::id_source::FileId,
+        coven_foundation::id_source::ObjectId,
     )> {
         None
     }

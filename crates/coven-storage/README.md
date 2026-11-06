@@ -16,7 +16,7 @@ creating it refuses a bucket holding anything else (§20.7). Writers compete for
 `AlreadyExists`; the caller counts a retry as stored only after comparing the
 occupant's complete bytes (§5.1). Only `<store>/floor` can be replaced, conditioned
 on the fetched native revision; a stale condition returns `Conflict`. Slots use
-`<store>/seq/<n>` and exact reads. Files use foundation `FileId` UUIDs. Listings
+`<store>/seq/<n>` and exact reads. Stored files use foundation `ObjectId` UUIDs. Listings
 serve file scans and provider setup, not sequence discovery. A range is half-open and must fit
 inside the complete object; callers may combine neighbouring encrypted chunks
 in a request up to 1 MiB.

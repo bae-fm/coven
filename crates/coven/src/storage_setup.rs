@@ -367,7 +367,7 @@ impl StorageConnections {
         if !journal.creating() {
             setup.check_location_claim(self.store()).await?;
         }
-        let path = ObjectPath::file(self.store(), self.device, FileId(self.ids.new_id()));
+        let path = ObjectPath::file(self.store(), self.device, ObjectId(self.ids.new_id()));
         let plaintext = b"coven storage check";
         let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
         let key = coven_crypto::FileKey::generate()

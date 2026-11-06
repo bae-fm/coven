@@ -138,7 +138,7 @@ fn file_fixture_opens_and_reseals_each_chunk() {
     assert_eq!(reference.next().unwrap(), PATH);
     let reference =
         crate::file_reference::FileReference::decode(reference.next().unwrap()).unwrap();
-    let path = crate::path::ObjectPath::file(STORE_ID, reference.device, reference.id);
+    let path = crate::path::ObjectPath::file(STORE_ID, reference.device, reference.object);
     assert_eq!(path.as_str(), PATH);
     let key = reference.key;
     let header = FileHeader::decode(&bytes[..FILE_HEADER_LEN]).unwrap();

@@ -2,11 +2,11 @@ use crate::file_write::tests::{complete_uploads, namespaces, open, stage, tables
 use crate::tests::TestStore;
 use crate::DbError;
 use crate::{Migration, Provenance};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 
 /// Stage one file for row `7`: the file, and its upload's uploader and
 /// stored object, which transfers in flight name.
-async fn queued(db: &crate::Database) -> (FileId, DeviceId, FileId) {
+async fn queued(db: &crate::Database) -> (FileId, DeviceId, ObjectId) {
     let file = stage(db, b"take".to_vec(), true).await.unwrap();
     let upload = crate::FileDatabase::new(db.clone()).uploads().await.unwrap().remove(0);
     (file, upload.location.uploader(), upload.location.object())
@@ -166,7 +166,7 @@ async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::
     let sending = (1..=3)
         .map(|i| {
             let id = uuid::Uuid::from_u128(i * (files as u128 / 4));
-            db.uploads_in_flight().start(DeviceId(0), FileId(id), Vec::new(), PROGRESS)
+            db.uploads_in_flight().start(DeviceId(0), ObjectId(id), Vec::new(), PROGRESS)
         })
         .collect();
     (store, db, sending)
@@ -223,10 +223,10 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     for statement in [
-        "SELECT _coven_sending_files()",
+        "SELECT _coven_sending_objects()",
         "SELECT _coven_sending(zeroblob(16))",
-        "SELECT value FROM json_each(_coven_sending_files())",
-        "SELECT _coven_downloading_files()",
+        "SELECT value FROM json_each(_coven_sending_objects())",
+        "SELECT _coven_downloading_objects()",
     ] {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
@@ -246,7 +246,7 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
                 Migration::addition(
                     2,
                     "sending",
-                    "CREATE VIEW mine AS SELECT _coven_sending_files() AS files;
+                    "CREATE VIEW mine AS SELECT _coven_sending_objects() AS files;
                      CREATE TABLE copied(files TEXT); INSERT INTO copied SELECT files FROM mine",
                 ),
             ],
@@ -328,7 +328,7 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
     assert_eq!(downloads.current().into_iter().collect::<Vec<_>>(), [object]);
     drop(second);
     assert!(next(&mut rows).await.is_empty());
-    let _unnamed = downloads.start(uploader, FileId(uuid::Uuid::nil()), Vec::new(), PROGRESS);
+    let _unnamed = downloads.start(uploader, ObjectId(uuid::Uuid::nil()), Vec::new(), PROGRESS);
     let listed = db
         .read(|sql| {
             Ok::<_, DbError>(
@@ -354,10 +354,11 @@ fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     let handle = crate::observation::CommitObserver::new();
     let transfers = super::TransfersInFlight::new(handle.clone());
     let uploads = transfers.uploads();
-    let file = FileId(uuid::Uuid::from_u128(1));
+    let object = ObjectId(uuid::Uuid::from_u128(1));
+    let file = FileId(uuid::Uuid::from_u128(2));
     let progress = super::TransferProgress { bytes_transferred: 0, bytes_total: 1 };
-    let attempt = uploads.start(DeviceId(1), file, vec![file], progress);
-    uploads.state().files.remove(&file);
+    let attempt = uploads.start(DeviceId(1), object, vec![file], progress);
+    uploads.state().objects.remove(&object);
     drop(attempt);
     assert!(
         matches!(handle.error(), Some(crate::DbError::Bug(bug)) if bug.operation == "end a transfer in flight"),

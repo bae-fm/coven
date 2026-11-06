@@ -204,7 +204,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     assert_eq!(cached(ana), 0, "the switch takes the cached bytes");
     // No record names the stored bytes now: on Ana's laptop, which uploaded
     // them, they are deletion candidates nothing local protects.
-    let candidates: Vec<(DeviceId, FileId)> = ana
+    let candidates: Vec<(DeviceId, ObjectId)> = ana
         .handle
         .database
         .file_candidates([ana.handle.device_id()].into())
@@ -212,7 +212,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         .unwrap()
         .into_iter()
         .filter(|candidate| !candidate.protected)
-        .map(|candidate| (candidate.device, candidate.file))
+        .map(|candidate| (candidate.device, candidate.object))
         .collect();
     for file in &stored {
         let FilePlace::Cloud { location, .. } = file.place() else { unreachable!() };

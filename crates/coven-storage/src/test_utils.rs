@@ -499,7 +499,7 @@ impl MemoryProvider {
     /// while `Faults::panic_file_uploads` counts panics left; any other path
     /// goes through.
     async fn refuse_file_upload(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        if path.file_id().is_none() {
+        if path.object_id().is_none() {
             return Ok(());
         }
         let mut state = self.state.lock().await;

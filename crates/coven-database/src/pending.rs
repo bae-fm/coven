@@ -1,7 +1,7 @@
 //! Typed persistence for sync-owned pending values, without depending on providers.
 
 use crate::{sqlite::DatabaseConnection, DbError, OperationId};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Which of this device's work on a file's stored bytes a record is about.
@@ -45,10 +45,10 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn subject(&self) -> &Self::Subject;
     /// The journal row, if this record describes an operation.
     fn operation(&self) -> Option<OperationId>;
-    /// The stored bytes this record describes, by their uploader and id,
-    /// and which work on them, if any: how coven's views join a record to
+    /// The stored object this record describes, by its uploader and id,
+    /// and which work on it, if any: how coven's views join a record to
     /// the rows whose file it is.
-    fn file(&self) -> Option<(FileWork, DeviceId, FileId)>;
+    fn object(&self) -> Option<(FileWork, DeviceId, ObjectId)>;
     /// The move this record describes, if any: cancelling the move ends it.
     fn move_of(&self) -> Option<crate::MoveId>;
     /// The file whose pin coven keeps this record describes, if any: the
@@ -99,7 +99,7 @@ impl rusqlite::types::FromSql for SubjectKey {
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,object,work,device,file,build,move,pin,cause,id FROM _coven_pending";
+    "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id FROM _coven_pending";
 
 struct StoredRecord {
     /// Its place in the order the records arose.
@@ -107,8 +107,8 @@ struct StoredRecord {
     subject: SubjectKey,
     value: Vec<u8>,
     operation: Option<i64>,
-    object: Option<Vec<u8>>,
-    file: Option<(String, Vec<u8>, Vec<u8>)>,
+    slot_key: Option<Vec<u8>>,
+    object: Option<(String, DeviceId, ObjectId)>,
     /// The build of coven that recorded it.
     build: u128,
     moved: Option<i64>,
@@ -121,13 +121,13 @@ impl StoredRecord {
             subject: row.get(0)?,
             value: row.get(1)?,
             operation: row.get(2)?,
-            object: row.get(3)?,
-            file: match (
+            slot_key: row.get(3)?,
+            object: match (
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<Vec<u8>>>(5)?,
-                row.get(6)?,
+                row.get::<_, Option<DeviceId>>(5)?,
+                row.get::<_, Option<ObjectId>>(6)?,
             ) {
-                (Some(work), Some(device), Some(file)) => Some((work, device, file)),
+                (Some(work), Some(device), Some(object)) => Some((work, device, object)),
                 (None, None, None) => None,
                 _ => return Err(crate::write_encoding::damaged(4, rusqlite::types::Type::Text)),
             },
@@ -144,12 +144,12 @@ impl StoredRecord {
             || record.operation().map(|id| id.0) != self.operation
             || record.move_of().map(|id| id.0) != self.moved
             || record.pin_of().map(|file| file.to_string()) != self.pin
-            || stored_object(&record) != self.object
-            || stored_file(&record)
+            || stored_slot_key(&record) != self.slot_key
+            || stored_object(&record)
                 != self
-                    .file
+                    .object
                     .as_ref()
-                    .map(|(work, device, file)| (work.as_str(), device.clone(), file.clone()))
+                    .map(|(work, device, object)| (work.as_str(), *device, *object))
         {
             return Err(DbError::DamagedDatabase);
         }
@@ -178,20 +178,20 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
     db.pending_change(|| {
         let subject = SubjectKey::of(record.subject())?;
         let value = serde_json::to_vec(record).map_err(DbError::StateEncoding)?;
-        let (work, device, file) = match stored_file(record) {
-            Some((work, device, file)) => (Some(work), Some(device), Some(file)),
+        let (work, device, object) = match stored_object(record) {
+            Some((work, device, object)) => (Some(work), Some(device), Some(object)),
             None => (None, None, None),
         };
         // A download of bytes no file over them names any more records
         // nothing: no pin or read can try them again. The cause is the
         // record's, written with it.
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,build,move,pin,cause)
+            "INSERT INTO _coven_pending(subject,value,operation,slot_key,work,device,object,build,move,pin,cause)
              SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,build=excluded.build,move=excluded.move,pin=excluded.pin,cause=excluded.cause
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,slot_key=excluded.slot_key,work=excluded.work,device=excluded.device,object=excluded.object,build=excluded.build,move=excluded.move,pin=excluded.pin,cause=excluded.cause
              WHERE value!=excluded.value OR build!=excluded.build OR cause IS NOT excluded.cause",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
+            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_slot_key(record), work, device, object, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
         )?;
         Ok(())
     })
@@ -299,26 +299,26 @@ pub(crate) fn set_build(db: &DatabaseConnection, build: u128) -> Result<(), DbEr
     })
 }
 
-fn object_key(slot: coven_merge::Slot, covered: bool) -> Vec<u8> {
+fn slot_key(slot: coven_merge::Slot, covered: bool) -> Vec<u8> {
     let mut key = vec![u8::from(covered)];
     key.extend(slot.0.to_be_bytes());
     key
 }
 const COVERED_SLOT: u8 = 1;
 
-/// The record's stored bytes and work on them, as `_coven_pending` holds them.
-fn stored_file<P: PendingValue>(record: &P) -> Option<(&'static str, Vec<u8>, Vec<u8>)> {
-    record.file().map(|(work, device, file)| {
+/// The record's stored object and work on it, as `_coven_pending` holds them.
+fn stored_object<P: PendingValue>(record: &P) -> Option<(&'static str, DeviceId, ObjectId)> {
+    record.object().map(|(work, device, object)| {
         let work = match work {
             FileWork::Upload => "upload",
             FileWork::Download => "download",
         };
-        (work, device.0.to_be_bytes().to_vec(), file.0.as_bytes().to_vec())
+        (work, device, object)
     })
 }
 
-fn stored_object<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
-    Some(object_key(record.slot()?, record.ends_when_covered()))
+fn stored_slot_key<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
+    Some(slot_key(record.slot()?, record.ends_when_covered()))
 }
 
 /// An applied reset clears data-related observations permanently (§19.4).
@@ -330,15 +330,12 @@ pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
 }
 
 /// Kept progress removes only this installation's condition, in its transaction.
-pub(crate) fn clear_slot(
-    db: &DatabaseConnection,
-    object: coven_merge::Slot,
-) -> Result<(), DbError> {
+pub(crate) fn clear_slot(db: &DatabaseConnection, slot: coven_merge::Slot) -> Result<(), DbError> {
     db.pending_change(|| {
         for covered in [false, true] {
             db.internal_execute(
-                "DELETE FROM _coven_pending WHERE object=?1",
-                [object_key(object, covered)],
+                "DELETE FROM _coven_pending WHERE slot_key=?1",
+                [slot_key(slot, covered)],
             )?;
         }
         Ok(())
@@ -349,7 +346,7 @@ pub(crate) fn clear_slot(
 /// wait in the same transaction. Verdicts on a write's bytes remain (§19.1).
 pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError> {
     let waiting = db.query(
-        "SELECT object FROM _coven_pending WHERE object>=?1 AND object<?2",
+        "SELECT slot_key FROM _coven_pending WHERE slot_key>=?1 AND slot_key<?2",
         ([COVERED_SLOT].as_slice(), [COVERED_SLOT + 1].as_slice()),
         |row| row.get::<_, Vec<u8>>(0),
     )?;
@@ -358,10 +355,10 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
     }
     let applied = crate::sequence::applied(db)?;
     db.pending_change(|| {
-        for object in waiting {
-            let slot = u64::from_be_bytes(object[1..].try_into().expect("eight-byte slot"));
+        for key in waiting {
+            let slot = u64::from_be_bytes(key[1..].try_into().expect("eight-byte slot"));
             if slot <= applied {
-                db.internal_execute("DELETE FROM _coven_pending WHERE object=?1", [object])?;
+                db.internal_execute("DELETE FROM _coven_pending WHERE slot_key=?1", [key])?;
             }
         }
         Ok(())

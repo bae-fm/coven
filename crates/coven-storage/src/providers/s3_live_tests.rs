@@ -367,7 +367,7 @@ async fn listing_lag(
         let target = ObjectPath::file(
             store,
             DeviceId(31),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(trial.into())),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(trial.into())),
         );
         s.create(&target, b"listing visibility").await?;
         let replied = Instant::now();

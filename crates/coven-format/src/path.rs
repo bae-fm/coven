@@ -4,7 +4,7 @@
 //! prefixes here. Native provider adapters map these validated paths into
 //! their provider's object names.
 
-use coven_foundation::id_source::{DeviceId, FileId, InviteId, StoreId};
+use coven_foundation::id_source::{DeviceId, InviteId, ObjectId, StoreId};
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -50,9 +50,9 @@ impl ObjectPath {
     ) -> Self {
         Self(format!("{store}/snapshots/{}/{}/{number}", audience, device.0))
     }
-    /// Encrypted file bytes named by a random UUID (§17.5).
-    pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
-        Self(format!("{store}/files/{}/{name}", device.0))
+    /// A stored object: encrypted file bytes named by a random id (§17.5).
+    pub fn file(store: StoreId, device: DeviceId, object: ObjectId) -> Self {
+        Self(format!("{store}/files/{}/{object}", device.0))
     }
     /// An encrypted join request under the device that made its invite and
     /// the invite's id (§13.2).
@@ -104,10 +104,10 @@ impl ObjectPath {
         }
     }
 
-    /// The fixed id of a stored file's path.
-    pub fn file_id(&self) -> Option<FileId> {
+    /// The stored object's id, the last part of a stored file's path.
+    pub fn object_id(&self) -> Option<ObjectId> {
         match self.relative().split('/').collect::<Vec<_>>().as_slice() {
-            ["files", _, name] => Some(FileId(name.parse().expect("validated file id"))),
+            ["files", _, object] => Some(ObjectId(object.parse().expect("validated object id"))),
             _ => None,
         }
     }

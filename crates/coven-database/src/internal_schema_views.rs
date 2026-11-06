@@ -62,14 +62,14 @@ pub(super) const SCHEMA: &str = concat!(
         SELECT l.file,u.id,z.paused IS NOT NULL AND u.holds IS NULL,
             w.unmetered_only IS NOT NULL AND _coven_network_metered() AND u.holds IS NULL,
             _coven_unix_ms(r.not_before),e.value,
-            u.bytes_confirmed,u.bytes_total,_coven_sending(u.file),
+            u.bytes_confirmed,u.bytes_total,_coven_sending(u.object),
             CASE WHEN u.holds IS NULL THEN u.move END
         FROM _coven_upload_files AS l
         JOIN _coven_file_uploads AS u ON u.id=l.upload
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_unmetered_only AS w
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
-        LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.file=u.file;",
+        LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.object=u.object;",
     // Whether the app paused uploads, as one row whether or not anything is
     // queued. The pause table's one row, if any, joins a constant one.
     "CREATE VIEW coven_upload_pause(paused) AS
@@ -89,15 +89,15 @@ pub(super) const SCHEMA: &str = concat!(
     // planning the few files innermost, behind a scan of the queue.
     "CREATE VIEW coven_sending(file,position) AS
         SELECT l.file,u.id
-        FROM json_each(_coven_sending_files()) AS j
+        FROM json_each(_coven_sending_objects()) AS j
         CROSS JOIN _coven_file_uploads AS u
-            ON u.device=unhex(substr(j.value,1,16)) AND u.file=unhex(substr(j.value,17))
+            ON u.device=unhex(substr(j.value,1,16)) AND u.object=unhex(substr(j.value,17))
         CROSS JOIN _coven_upload_files AS l ON l.upload=u.id;",
     // The stored files this process is downloading now to keep whole, by
     // each download in flight, each found by its stored bytes.
     "CREATE VIEW coven_downloading(file) AS
         SELECT f.file
-        FROM json_each(_coven_downloading_files()) AS j
+        FROM json_each(_coven_downloading_objects()) AS j
         CROSS JOIN _coven_stored_files AS f
             ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
     // Every pending record (§19.1), in the order the records arose; a
@@ -110,10 +110,10 @@ pub(super) const SCHEMA: &str = concat!(
     "CREATE VIEW coven_pending(record,file,position,cause,move) AS
         SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause,e.move
         FROM _coven_pending AS e
-        LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.file=e.file
+        LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.object=e.object
         LEFT JOIN _coven_upload_files AS l ON l.upload=u.id
         LEFT JOIN _coven_stored_files AS f ON u.id IS NULL
-            AND f.device=e.device AND f.object=e.file;",
+            AND f.device=e.device AND f.object=e.object;",
     // This device's invites that haven't ended, in the order they were made,
     // from the operations journal: each from the write that makes it, while
     // its share is recorded and its access granted, its request is awaited

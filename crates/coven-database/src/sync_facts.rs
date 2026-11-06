@@ -71,7 +71,7 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
              FROM _coven_file_uploads AS u
              LEFT JOIN _coven_retries AS r ON r.upload=u.id
              LEFT JOIN _coven_pending AS e
-                 ON e.work='upload' AND e.device=u.device AND e.file=u.file
+                 ON e.work='upload' AND e.device=u.device AND e.object=u.object
              WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
              ORDER BY u.id",
             [],

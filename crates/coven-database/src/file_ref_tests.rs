@@ -1,6 +1,6 @@
 use crate::file_write::tests::{complete_uploads, namespaces, open, stage, tables, SCHEMA};
 use crate::{tests::TestStore, *};
-use coven_foundation::id_source::{CircleId, DeviceId, FileId};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, ObjectId};
 
 /// A file reference reads the file's record by its id: one that is still
 /// uploading is on this device only, and one stored names its location.
@@ -56,7 +56,7 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
         panic!("stored");
     };
     assert_eq!(location.uploader(), DeviceId(1));
-    assert_eq!(location.object(), FileId(id));
+    assert_eq!(location.object(), ObjectId(id));
     // Only a file this device uploads has a local source.
     assert!(db.open_local_file(&uploaded).await.unwrap().is_none());
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
@@ -94,7 +94,7 @@ async fn stored_paths_are_found_by_retention() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stage(&db, b"original".to_vec(), true).await.unwrap();
-    let queued: (DeviceId, FileId) = db.inspect_writer(|sql| {
+    let queued: (DeviceId, ObjectId) = db.inspect_writer(|sql| {
         sql.query_row("SELECT location FROM _coven_file_uploads", [], |r| r.get::<_, String>(0))
             .map(|text| {
                 let location = crate::FileLocation::decode(&text).unwrap();
@@ -118,7 +118,7 @@ async fn stored_paths_are_found_by_retention() {
     // The record's stored path, and the queued upload's.
     assert_eq!(
         db.retained_files().await.unwrap().references,
-        [(DeviceId(1), FileId(uuid::Uuid::from_bytes([0x11; 16]))), queued].into()
+        [(DeviceId(1), ObjectId(uuid::Uuid::from_bytes([0x11; 16]))), queued].into()
     );
     db.close().await.unwrap();
 }

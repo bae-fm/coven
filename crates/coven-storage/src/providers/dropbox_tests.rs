@@ -416,7 +416,7 @@ async fn lost_completion_requires_byte_verification() {
     let path = ObjectPath::file(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xcc; 16])),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xcc; 16])),
     );
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();

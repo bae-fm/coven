@@ -99,7 +99,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("unfiltered EXISTS stops at the first row; the pause table holds at most one row"),
 ("file_queue.rs", "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)", "_coven_uploads" | "_coven_file_uploads") =>
     Some("deleting a store counts every waiting write and file, once"),
-("sync_facts.rs", "SELECT u.id,u.stored,u.holds IS NOT NULL,r.not_before,e.id FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id LEFT JOIN _coven_pending AS e ON e.work='upload' AND e.device=u.device AND e.file=u.file WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
+("sync_facts.rs", "SELECT u.id,u.stored,u.holds IS NOT NULL,r.not_before,e.id FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id LEFT JOIN _coven_pending AS e ON e.work='upload' AND e.device=u.device AND e.object=u.object WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
     Some("the sync state reads every queued upload, in queue order; each lookup is indexed"),
 ("sync_facts.rs", "SELECT EXISTS(SELECT 1 FROM _coven_uploads)", "_coven_uploads") =>
     Some("unfiltered EXISTS stops at the first row"),

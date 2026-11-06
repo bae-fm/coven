@@ -14,19 +14,19 @@ macro_rules! coven_pending_tables {
                 subject BLOB NOT NULL UNIQUE,
                 value BLOB NOT NULL,
                 operation INTEGER REFERENCES _coven_operations(id),
-                object BLOB CHECK(object IS NULL OR length(object)=9),
+                slot_key BLOB CHECK(slot_key IS NULL OR length(slot_key)=9),
                 work TEXT CHECK(work IN ('upload','download')),
                 device BLOB CHECK(device IS NULL OR length(device)=8),
-                file BLOB CHECK(file IS NULL OR length(file)=16),
+                object BLOB CHECK(object IS NULL OR length(object)=16),
                 build BLOB NOT NULL CHECK(length(build)=16),
                 move INTEGER REFERENCES _coven_moves(id),
                 pin TEXT REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
                 cause TEXT,
-                CHECK((device IS NULL)=(file IS NULL)),
+                CHECK((device IS NULL)=(object IS NULL)),
                 CHECK((work IS NULL)=(device IS NULL))
             ) STRICT;
-            CREATE INDEX _coven_pending_object ON _coven_pending(object);
-            CREATE INDEX _coven_pending_file ON _coven_pending(device,file) WHERE device IS NOT NULL;
+            CREATE INDEX _coven_pending_slot_key ON _coven_pending(slot_key);
+            CREATE INDEX _coven_pending_object ON _coven_pending(device,object) WHERE device IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_move ON _coven_pending(move) WHERE move IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_pin ON _coven_pending(pin) WHERE pin IS NOT NULL;
@@ -36,12 +36,12 @@ macro_rules! coven_pending_tables {
             CREATE TRIGGER _coven_stored_files_removed AFTER DELETE ON _coven_stored_files
             WHEN NOT EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=OLD.device AND s.object=OLD.object)
             BEGIN
-                DELETE FROM _coven_pending WHERE work='download' AND device=OLD.device AND file=OLD.object;
+                DELETE FROM _coven_pending WHERE work='download' AND device=OLD.device AND object=OLD.object;
             END;
             CREATE TRIGGER _coven_stored_files_moved AFTER UPDATE OF device,object ON _coven_stored_files
             WHEN NOT EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=OLD.device AND s.object=OLD.object)
             BEGIN
-                DELETE FROM _coven_pending WHERE work='download' AND device=OLD.device AND file=OLD.object;
+                DELETE FROM _coven_pending WHERE work='download' AND device=OLD.device AND object=OLD.object;
             END;
         ");
     };

@@ -15,7 +15,7 @@ use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
 use coven_database::{DownloadedPartStream, FileEvidence, NewOperation, Slot, UnprovenFiles};
 use coven_format::{sealed_write::WriteObjectPrefix, sequence::SnapshotAnnouncement};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_storage::{ObjectPath, StorageFailure};
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -237,7 +237,7 @@ impl SequenceSync {
         let protected: Vec<_> = candidates
             .iter()
             .filter(|file| file.protected)
-            .map(|file| (file.device, file.file))
+            .map(|file| (file.device, file.object))
             .collect();
         self.database.settle_file_candidates(protected, Vec::new()).await?;
         // A device's reads only advance, so what it has read now it has read
@@ -271,13 +271,15 @@ impl SequenceSync {
             .file_candidates(candidates.iter().map(|file| file.device).collect())
             .await?
         {
-            if file.protected || !seen(file.since) || referenced.contains(&(file.device, file.file))
+            if file.protected
+                || !seen(file.since)
+                || referenced.contains(&(file.device, file.object))
             {
                 continue;
             }
-            self.storage.delete(&ObjectPath::file(self.store(), file.device, file.file)).await?;
+            self.storage.delete(&ObjectPath::file(self.store(), file.device, file.object)).await?;
             self.database
-                .settle_file_candidates(Vec::new(), vec![(file.device, file.file)])
+                .settle_file_candidates(Vec::new(), vec![(file.device, file.object)])
                 .await?;
         }
         Ok(())
@@ -287,7 +289,7 @@ impl SequenceSync {
         &self,
         evidence: FileEvidence,
         id: coven_database::OperationId,
-    ) -> Result<BTreeSet<(DeviceId, FileId)>, SyncError> {
+    ) -> Result<BTreeSet<(DeviceId, ObjectId)>, SyncError> {
         match evidence {
             FileEvidence::Complete(files) => Ok(files),
             FileEvidence::Unproven(reason) => {
@@ -444,7 +446,7 @@ impl SequenceSync {
         history: &History,
         ring: &StoreKeyring,
         mut staging: coven_database::SnapshotStaging,
-    ) -> Result<BTreeSet<(DeviceId, FileId)>, SyncError> {
+    ) -> Result<BTreeSet<(DeviceId, ObjectId)>, SyncError> {
         let path = object.path();
         let read = async {
             let body = object

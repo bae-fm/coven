@@ -10,7 +10,7 @@ use coven_format::{
     loss::{Loss, LossValues},
     value::Value,
 };
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use rusqlite::params;
 use std::collections::BTreeSet;
 
@@ -29,7 +29,7 @@ pub(crate) fn location(table: &str) -> Option<&'static str> {
 /// The stored path a coordinates value names, if it names one.
 pub(crate) fn value(
     value: &Value,
-    references: &mut BTreeSet<(DeviceId, FileId)>,
+    references: &mut BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {
     if let Place::Cloud(location) = Place::decode(value)? {
         references.insert((location.uploader(), location.object()));
@@ -40,7 +40,7 @@ pub(crate) fn value(
 /// The stored paths a loss keeps. A record's own lost coordinates keep
 /// nothing: nothing restores coven's records, so bytes a lost switch to
 /// the cloud names go once nothing else names them.
-pub(crate) fn loss(loss: &Loss, references: &mut BTreeSet<(DeviceId, FileId)>) {
+pub(crate) fn loss(loss: &Loss, references: &mut BTreeSet<(DeviceId, ObjectId)>) {
     if !loss.frozen {
         return;
     }
@@ -125,8 +125,8 @@ pub(crate) fn retain_loss(
 ) -> Result<(), DbError> {
     let mut paths = BTreeSet::new();
     loss(record, &mut paths);
-    for (device, file) in &paths {
-        db.internal_execute("INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,file.0.as_bytes(),record.row.table,record.row.key])?;
+    for (device, object) in &paths {
+        db.internal_execute("INSERT INTO _coven_row_file_refs(device,object,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,object,record.row.table,record.row.key])?;
     }
     let mut files = BTreeSet::new();
     loss_files(schema, record, |_, _| true, &mut files);
@@ -341,22 +341,22 @@ fn refresh_record(
     // its file a retention candidate (§17.10) although nothing released it.
     let previous: BTreeSet<_> = db
         .query(
-            "SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",
+            "SELECT device,object FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",
             params![key.0, key.1],
-            |r| Ok((r.get::<_, DeviceId>(0)?, FileId(uuid::Uuid::from_bytes(r.get(1)?)))),
+            |r| Ok((r.get::<_, DeviceId>(0)?, r.get::<_, ObjectId>(1)?)),
         )?
         .into_iter()
         .collect();
-    for (device, file) in previous.difference(&references) {
+    for (device, object) in previous.difference(&references) {
         db.internal_execute(
-            "DELETE FROM _coven_row_file_refs WHERE device=?1 AND file=?2 AND table_name=?3 AND key=?4",
-            params![device, file.0.as_bytes(), key.0, key.1],
+            "DELETE FROM _coven_row_file_refs WHERE device=?1 AND object=?2 AND table_name=?3 AND key=?4",
+            params![device, object, key.0, key.1],
         )?;
     }
-    for (device, file) in references.difference(&previous) {
+    for (device, object) in references.difference(&previous) {
         db.internal_execute(
-            "INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4)",
-            params![device, file.0.as_bytes(), key.0, key.1],
+            "INSERT INTO _coven_row_file_refs(device,object,table_name,key) VALUES(?1,?2,?3,?4)",
+            params![device, object, key.0, key.1],
         )?;
     }
     let id = file_table::file_of_key(&key.1)?;
@@ -376,7 +376,7 @@ fn refresh_record(
                 id,
                 namespace,
                 location.uploader(),
-                location.object().0.as_bytes(),
+                location.object(),
                 crate::database::file_database::file_cache_id(location.uploader(), location.object()),
                 hash.as_bytes().as_slice()
             ],
@@ -504,10 +504,10 @@ pub(crate) fn migrate(
 
 // A historical value need not belong to a current file declaration. Recognize
 // the complete canonical encoding; all other text is ordinary application data.
-fn potential_reference(value: &Value, references: &mut BTreeSet<(DeviceId, FileId)>) {
+fn potential_reference(value: &Value, references: &mut BTreeSet<(DeviceId, ObjectId)>) {
     if let Value::Text(text) = value {
         if let Ok(reference) = FileReference::decode(text) {
-            references.insert((reference.device, reference.id));
+            references.insert((reference.device, reference.object));
         }
     }
 }
@@ -531,8 +531,8 @@ pub(crate) fn queued(
             potential_reference(value, &mut references);
         }
     }
-    for (device, file) in references {
-        db.internal_execute("INSERT INTO _coven_queued_file_refs(device,file,writer,number) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,file.0.as_bytes(),record.header.position.device,record.header.position.number.to_be_bytes()])?;
+    for (device, object) in references {
+        db.internal_execute("INSERT INTO _coven_queued_file_refs(device,object,writer,number) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,object,record.header.position.device,record.header.position.number.to_be_bytes()])?;
     }
     Ok(())
 }

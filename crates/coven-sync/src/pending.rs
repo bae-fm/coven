@@ -4,7 +4,7 @@ use super::pending_encoding as encoding;
 use crate::{OperationId, OperationKind, Refusal};
 use coven_database::PendingValue;
 use coven_format::{admin::SnapshotId, path::ObjectPath};
-use coven_foundation::id_source::{DeviceId, FileId, KeyId, MemberId};
+use coven_foundation::id_source::{DeviceId, FileId, KeyId, MemberId, ObjectId};
 use coven_merge::{Audience, Slot, WriteId};
 use coven_storage::{CloudProvider, RetainedAccess, StorageFailure};
 use serde::{Deserialize, Serialize};
@@ -81,21 +81,21 @@ pub enum PendingSubject {
     },
     /// A numbered snapshot.
     Snapshot(#[serde(with = "crate::pending_encoding::snapshot_id")] SnapshotId),
-    /// This device's upload of stored bytes, and its reads of their staged
+    /// This device's upload of a stored object, and its reads of its staged
     /// original while the upload waits.
     Upload {
-        /// This device, which uploads them.
+        /// This device, which uploads it.
         device: DeviceId,
-        /// The stored bytes' identity.
-        file: FileId,
+        /// The stored object's id.
+        object: ObjectId,
     },
-    /// This device's downloads of stored bytes, for an app's pins: a read's
-    /// failure goes to its caller and leaves no record (§17.7).
+    /// This device's downloads of a stored object, for an app's pins: a
+    /// read's failure goes to its caller and leaves no record (§17.7).
     Download {
-        /// The device that uploaded them.
+        /// The device that uploaded it.
         device: DeviceId,
-        /// The stored bytes' identity.
-        file: FileId,
+        /// The stored object's id.
+        object: ObjectId,
     },
     /// A file a switch to the cloud asked this device to keep whole, which
     /// coven downloads itself: its pin is work coven drives, not an app
@@ -604,13 +604,13 @@ impl PendingValue for PendingRecord {
             _ => None,
         }
     }
-    fn file(&self) -> Option<(coven_database::FileWork, DeviceId, FileId)> {
+    fn object(&self) -> Option<(coven_database::FileWork, DeviceId, ObjectId)> {
         match self.subject {
-            PendingSubject::Upload { device, file } => {
-                Some((coven_database::FileWork::Upload, device, file))
+            PendingSubject::Upload { device, object } => {
+                Some((coven_database::FileWork::Upload, device, object))
             }
-            PendingSubject::Download { device, file } => {
-                Some((coven_database::FileWork::Download, device, file))
+            PendingSubject::Download { device, object } => {
+                Some((coven_database::FileWork::Download, device, object))
             }
             _ => None,
         }

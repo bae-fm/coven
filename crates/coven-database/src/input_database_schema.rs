@@ -37,8 +37,8 @@ macro_rules! coven_input_tables {
     CREATE TABLE _coven_input_files (
         object INTEGER NOT NULL REFERENCES _coven_input_objects(id) ON DELETE CASCADE,
         device BLOB NOT NULL CHECK(length(device)=8),
-        file BLOB NOT NULL CHECK(length(file)=16),
-        PRIMARY KEY(object,device,file)
+        stored_object BLOB NOT NULL CHECK(length(stored_object)=16),
+        PRIMARY KEY(object,device,stored_object)
     ) STRICT, WITHOUT ROWID;
         "
         );

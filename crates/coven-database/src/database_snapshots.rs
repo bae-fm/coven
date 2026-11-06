@@ -78,7 +78,7 @@ impl Database {
     ) -> Result<
         std::collections::BTreeSet<(
             coven_foundation::id_source::DeviceId,
-            coven_foundation::id_source::FileId,
+            coven_foundation::id_source::ObjectId,
         )>,
         DbError,
     > {

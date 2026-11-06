@@ -3,7 +3,7 @@
 use crate::error::{bound, require, Error, Rule};
 use crate::wire::{get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
 use coven_crypto::{SealingKey, SigningKey};
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, MemberId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId, StoreId};
 pub use coven_merge::Slot;
 use coven_merge::{Audience, RowId, Timestamp, WriteId};
 use uuid::Uuid;
@@ -27,7 +27,7 @@ macro_rules! uuid_id {
         }
     )* };
 }
-uuid_id!(StoreId, CircleId, InviteId, KeyId, FileId, MemberId);
+uuid_id!(StoreId, CircleId, InviteId, KeyId, MemberId);
 
 impl Wire for SigningKey {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {

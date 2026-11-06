@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_utils::DEVICE;
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_merge::Audience;
 use std::num::NonZeroU64;
 
@@ -59,7 +59,7 @@ async fn another_device_ends_a_devices_sessions_at_destinations_naming_it() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let settings = profile::CataloguedProfile::named(S3ProfileName::R2).settings;
     let phone = profile_provider(&server.url, settings);
-    let file = |device| ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_u128(5)));
+    let file = |device| ObjectPath::file(STORE_ID, device, ObjectId(uuid::Uuid::from_u128(5)));
     let snapshot = ObjectPath::snapshot(STORE_ID, Audience::Store, DEVICE, NonZeroU64::MIN);
     for path in [file(DEVICE), snapshot, slot(1)] {
         let mut session = phone.begin_upload(&path, 4).await.unwrap();

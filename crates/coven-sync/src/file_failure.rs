@@ -39,13 +39,13 @@ pub(super) enum FileFailure<'a> {
 /// The pending subject of this device's upload of stored bytes, which every
 /// file over them shares.
 pub(super) fn upload_subject(location: &FileLocation) -> PendingSubject {
-    PendingSubject::Upload { device: location.uploader(), file: location.object() }
+    PendingSubject::Upload { device: location.uploader(), object: location.object() }
 }
 
 /// The pending subject of this device's downloads of stored bytes, which
 /// every file over them shares.
 pub(super) fn download_subject(location: &FileLocation) -> PendingSubject {
-    PendingSubject::Download { device: location.uploader(), file: location.object() }
+    PendingSubject::Download { device: location.uploader(), object: location.object() }
 }
 
 /// A stored file's location and content hash. A file only on one device has

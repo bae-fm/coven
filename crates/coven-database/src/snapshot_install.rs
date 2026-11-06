@@ -43,7 +43,7 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
          CREATE TEMP TABLE _coven_install_lost(table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(table_name,key)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_protected(table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(table_name,key)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_references(file TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(file,table_name,key,column_name)) WITHOUT ROWID;
-         CREATE TEMP TABLE _coven_install_stored(device BLOB NOT NULL,file BLOB NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(device,file,table_name,key)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_stored(device BLOB NOT NULL,object BLOB NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(device,object,table_name,key)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_released(file TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_records(file TEXT PRIMARY KEY NOT NULL,namespace TEXT,cache_id TEXT) WITHOUT ROWID;",
     )

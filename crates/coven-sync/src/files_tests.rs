@@ -294,10 +294,10 @@ impl Fixture {
     /// file's bytes.
     async fn subjects(&self, file: &FileRef) -> [crate::PendingSubject; 2] {
         let location = self.location(file).await;
-        let (device, file) = (location.uploader(), location.object());
+        let (device, object) = (location.uploader(), location.object());
         [
-            crate::PendingSubject::Upload { device, file },
-            crate::PendingSubject::Download { device, file },
+            crate::PendingSubject::Upload { device, object },
+            crate::PendingSubject::Download { device, object },
         ]
     }
     /// This device's pending reasons about its moves, in subject order.

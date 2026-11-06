@@ -1,7 +1,7 @@
 //! Authenticated inputs installed at one fixed store slot.
 use crate::{BoundaryCoverage, IncomingSlot, OperationUpdate, StoreState};
 use coven_format::admin::{SnapshotId, StoreChange};
-use coven_foundation::id_source::{DeviceId, FileId, MemberId};
+use coven_foundation::id_source::{DeviceId, MemberId, ObjectId};
 use coven_merge::{Audience, Slot};
 use std::collections::BTreeSet;
 
@@ -26,7 +26,7 @@ pub struct LoadedSnapshot {
     /// Snapshot identity.
     pub id: SnapshotId,
     /// Fixed file paths in its rows and losses.
-    pub files: BTreeSet<(DeviceId, FileId)>,
+    pub files: BTreeSet<(DeviceId, ObjectId)>,
 }
 /// Complete checked input for an atomic reload. Sync derives the administrative
 /// projection from the original signed history carried by the store snapshot

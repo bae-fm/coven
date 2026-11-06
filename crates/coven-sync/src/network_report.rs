@@ -126,10 +126,7 @@ fn record_for<'a>(
         }
         RetrySubject::Upload(id) => {
             let location = &uploads.iter().find(|upload| upload.id == id)?.location;
-            PendingSubject::Upload {
-                device: location.uploader(),
-                file: location.object(),
-            }
+            PendingSubject::Upload { device: location.uploader(), object: location.object() }
         }
         RetrySubject::Pin(id) => {
             PendingSubject::Keep { file: pins.iter().find(|request| request.id == id)?.file }

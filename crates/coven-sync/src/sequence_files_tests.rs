@@ -51,7 +51,7 @@ async fn scan_paths(
             .await
             .unwrap()
             .into_iter()
-            .map(|candidate| u64::try_from(candidate.file.0.as_u128()).unwrap())
+            .map(|candidate| u64::try_from(candidate.object.0.as_u128()).unwrap())
             .collect::<Vec<_>>()),
     }
 }
@@ -119,7 +119,7 @@ async fn io_differential_file_scan() {
                         &ObjectPath::file(
                             group.store,
                             ben.sync.device,
-                            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(
+                            coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(
                                 file.as_u64().unwrap().into(),
                             )),
                         ),
@@ -585,7 +585,7 @@ async fn file_deletion_reads_the_snapshots_the_floor_names_and_lists_no_snapshot
 /// only the first: every device's unreferenced object goes (§17.10).
 #[tokio::test]
 async fn removing_a_member_lists_the_folder_of_each_of_their_devices() {
-    use coven_foundation::id_source::FileId;
+    use coven_foundation::id_source::ObjectId;
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -598,7 +598,7 @@ async fn removing_a_member_lists_the_folder_of_each_of_their_devices() {
         let orphan = ObjectPath::file(
             group.store,
             device.sync.device,
-            FileId(uuid::Uuid::from_u128(n as u128 + 100)),
+            ObjectId(uuid::Uuid::from_u128(n as u128 + 100)),
         );
         group.storage.create(&orphan, b"never named").await.unwrap();
         orphans.push(orphan);

@@ -174,7 +174,7 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
     let kept_location = f.location(&kept).await;
     let only_kept = [crate::PendingSubject::Download {
         device: kept_location.uploader(),
-        file: kept_location.object(),
+        object: kept_location.object(),
     }];
     let subjects = |records: Vec<crate::PendingRecord>| {
         records.into_iter().map(|record| record.subject).collect::<Vec<_>>()
@@ -185,7 +185,7 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
         .inner
         .database
         .fail_download(crate::PendingRecord::new(
-            crate::PendingSubject::Download { device: failed.uploader(), file: failed.object() },
+            crate::PendingSubject::Download { device: failed.uploader(), object: failed.object() },
             crate::PendingReason::NoStorage,
         ))
         .await

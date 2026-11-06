@@ -277,7 +277,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         let item = f.files.inner.database.uploads().await.unwrap().remove(0);
         let session = UploadSession::decode(item.session.as_ref().unwrap().as_bytes()).unwrap();
         assert_eq!(session.confirmed_bytes(), 0);
-        let coven_format::file_reference::FileReference { id, key, .. } =
+        let coven_format::file_reference::FileReference { object, key, .. } =
             item.location.reference().unwrap();
         let expected_size = 11 + (CHUNK * 5 + 18) as u64 + 6 * 16;
         f.reopen().await;
@@ -291,7 +291,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         let location = super::stored(&uploaded);
         assert_eq!(location, &item.location);
         let reference = location.reference().unwrap();
-        assert_eq!(reference.id, id);
+        assert_eq!(reference.object, object);
         assert_eq!(reference.key.to_secret_bytes().as_bytes(), key.to_secret_bytes().as_bytes());
         let encrypted = f.storage.read(&location.path(f.directory.id())).await.unwrap();
         assert_eq!(encrypted.len() as u64, expected_size);

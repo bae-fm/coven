@@ -398,7 +398,7 @@ mod sessions {
             };
             let subject = crate::PendingSubject::Upload {
                 device: self.location.uploader(),
-                file: self.location.object(),
+                object: self.location.object(),
             };
             let failure = self
                 .f

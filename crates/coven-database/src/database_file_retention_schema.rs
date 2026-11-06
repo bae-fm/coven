@@ -40,24 +40,24 @@ macro_rules! coven_file_retention_tables {
         $visit!(_coven_file_candidates, "
             CREATE TABLE _coven_file_candidates (
                 device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
+                object BLOB NOT NULL CHECK(length(object)=16),
                 since BLOB NOT NULL CHECK(length(since)=8),
-                PRIMARY KEY(device,file)
+                PRIMARY KEY(device,object)
             ) STRICT, WITHOUT ROWID;
-            CREATE VIEW _coven_file_protection(device,file) AS
-                SELECT device,file FROM _coven_row_file_refs UNION ALL SELECT device,file FROM _coven_published_file_refs
-                UNION ALL SELECT device,file FROM _coven_queued_file_refs UNION ALL SELECT device,file FROM _coven_file_uploads;
+            CREATE VIEW _coven_file_protection(device,object) AS
+                SELECT device,object FROM _coven_row_file_refs UNION ALL SELECT device,object FROM _coven_published_file_refs
+                UNION ALL SELECT device,object FROM _coven_queued_file_refs UNION ALL SELECT device,object FROM _coven_file_uploads;
             CREATE TRIGGER _coven_row_file_ref_released AFTER DELETE ON _coven_row_file_refs BEGIN
-                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.object,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND object=OLD.object) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
             END;
             CREATE TRIGGER _coven_published_file_ref_released AFTER DELETE ON _coven_published_file_refs BEGIN
-                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.object,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND object=OLD.object) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
             END;
             CREATE TRIGGER _coven_queued_file_ref_released AFTER DELETE ON _coven_queued_file_refs BEGIN
-                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.object,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND object=OLD.object) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
             END;
             CREATE TRIGGER _coven_file_upload_released AFTER DELETE ON _coven_file_uploads BEGIN
-                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.object,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND object=OLD.object) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
             END;
         ");
     };

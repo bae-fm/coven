@@ -57,7 +57,7 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
     assert_eq!(db.input_budget().await.unwrap().retained, 2);
     // Each new verdict replaces the previous one whole: no unopened part or
     // reference of an earlier verdict survives it.
-    let files = BTreeSet::from([(DeviceId(5), FileId(uuid::Uuid::from_u128(6)))]);
+    let files = BTreeSet::from([(DeviceId(5), ObjectId(uuid::Uuid::from_u128(6)))]);
     for evidence in [
         FileEvidence::Complete(files.clone()),
         FileEvidence::Unproven(UnprovenFiles::Schema(9)),
@@ -94,7 +94,7 @@ async fn eviction_keeps_authenticated_file_references() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let input = input(&db, "snapshot", 1, false).await;
-    let files = BTreeSet::from([(DeviceId(5), FileId(uuid::Uuid::from_u128(6)))]);
+    let files = BTreeSet::from([(DeviceId(5), ObjectId(uuid::Uuid::from_u128(6)))]);
     input.keep_files(FileEvidence::Complete(files.clone())).await.unwrap();
     input.keep_range(0, vec![1, 2]).await.unwrap();
     input.release_ranges().await.unwrap();

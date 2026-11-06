@@ -41,7 +41,7 @@ macro_rules! coven_file_uploads_tables {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 location TEXT NOT NULL UNIQUE,
                 device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
+                object BLOB NOT NULL CHECK(length(object)=16),
                 size INTEGER NOT NULL CHECK(size>=0),
                 hash BLOB NOT NULL CHECK(length(hash)=32),
                 original BLOB,
@@ -54,7 +54,7 @@ macro_rules! coven_file_uploads_tables {
                 session BLOB,
                 bytes_confirmed INTEGER CHECK(bytes_confirmed>=0),
                 bytes_total INTEGER CHECK(bytes_total>=bytes_confirmed),
-                UNIQUE(device,file),
+                UNIQUE(device,object),
                 CHECK((original IS NULL)=(modified_at IS NULL)),
                 CHECK((original IS NULL)!=(copy IS NULL)),
                 CHECK((session IS NULL)=(bytes_confirmed IS NULL)
@@ -84,11 +84,11 @@ macro_rules! coven_file_uploads_tables {
             "
             CREATE TABLE _coven_file_chunks (
                 device BLOB NOT NULL,
-                file BLOB NOT NULL,
+                object BLOB NOT NULL,
                 chunk INTEGER NOT NULL CHECK(chunk>=0),
                 hash BLOB NOT NULL CHECK(length(hash)=32),
-                PRIMARY KEY(device,file,chunk),
-                FOREIGN KEY(device,file) REFERENCES _coven_file_uploads(device,file)
+                PRIMARY KEY(device,object,chunk),
+                FOREIGN KEY(device,object) REFERENCES _coven_file_uploads(device,object)
                     ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         "

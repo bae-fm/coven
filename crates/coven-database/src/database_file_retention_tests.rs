@@ -1,12 +1,13 @@
 use super::*;
 use crate::{tests::TestStore, FileColumn, RowIdentity, SyncedTable};
 use coven_format::write::RowChange;
+use coven_foundation::id_source::FileId;
 
 #[tokio::test]
 async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
     let store = TestStore::new();
     let db = store.schema(vec![files_table()], FILES).await.unwrap();
-    let file = FileId(uuid::Uuid::from_u128(7));
+    let file = ObjectId(uuid::Uuid::from_u128(7));
     for operation in [
         Operation::Update(BTreeMap::from([
             (
@@ -111,7 +112,7 @@ pub(crate) fn files_table() -> SyncedTable {
 const RECORD: FileId = FileId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0046));
 
 /// Coordinates naming `object`, stored by `device`.
-pub(crate) fn stored(device: u64, object: FileId, key: &str) -> Value {
+pub(crate) fn stored(device: u64, object: ObjectId, key: &str) -> Value {
     Value::Text(format!("file {device} {object} {}", key.repeat(32)))
 }
 
@@ -190,13 +191,13 @@ pub(crate) fn write(
 /// Device 2 and device 3 each, unaware of the other, record `RECORD` over
 /// bytes of their own: the record shows device 3's, and device 2's
 /// coordinates are lost. Returns device 2's object.
-async fn file_loss_fixture() -> (TestStore, Database, FileId) {
+async fn file_loss_fixture() -> (TestStore, Database, ObjectId) {
     let store = TestStore::new();
     let db = store.schema(vec![files_table()], FILES).await.unwrap();
-    let file = FileId(uuid::Uuid::from_u128(7));
+    let file = ObjectId(uuid::Uuid::from_u128(7));
     for record in [
         write(2, 1, stored(2, file, "ab")),
-        write(3, 2, stored(3, FileId(uuid::Uuid::from_u128(8)), "cd")),
+        write(3, 2, stored(3, ObjectId(uuid::Uuid::from_u128(8)), "cd")),
     ] {
         assert_eq!(db.receive(record.into()).await.unwrap(), crate::ApplyOutcome::Applied);
     }
@@ -211,10 +212,10 @@ async fn a_records_lost_coordinates_protect_nothing() {
     let (_store, db, file) = file_loss_fixture().await;
     let references = db.retained_files().await.unwrap().references;
     assert!(!references.contains(&(DeviceId(2), file)));
-    assert!(references.contains(&(DeviceId(3), FileId(uuid::Uuid::from_u128(8)))));
+    assert!(references.contains(&(DeviceId(3), ObjectId(uuid::Uuid::from_u128(8)))));
     assert_eq!(
         db.file_candidates(candidates_of(DeviceId(2))).await.unwrap(),
-        vec![FileCandidate { device: DeviceId(2), file, protected: false, since: Slot(2) }]
+        vec![FileCandidate { device: DeviceId(2), object: file, protected: false, since: Slot(2) }]
     );
 }
 
@@ -241,8 +242,8 @@ async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
     assert_eq!(candidate(&db).await, [(false, Slot(2))]);
     let later = [
         write(4, 3, stored(2, file, "ab")),
-        write(5, 4, stored(5, FileId(uuid::Uuid::from_u128(9)), "ef")),
-        write(6, 5, stored(6, FileId(uuid::Uuid::from_u128(10)), "01")),
+        write(5, 4, stored(5, ObjectId(uuid::Uuid::from_u128(9)), "ef")),
+        write(6, 5, stored(6, ObjectId(uuid::Uuid::from_u128(10)), "01")),
     ];
     db.receive(later[0].clone().into()).await.unwrap();
     assert_eq!(candidate(&db).await, [(true, Slot(2))]);
@@ -253,7 +254,7 @@ async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
     let source = source_store.schema(vec![files_table()], FILES).await.unwrap();
     for record in [
         write(2, 1, stored(2, file, "ab")),
-        write(3, 2, stored(3, FileId(uuid::Uuid::from_u128(8)), "cd")),
+        write(3, 2, stored(3, ObjectId(uuid::Uuid::from_u128(8)), "cd")),
     ]
     .into_iter()
     .chain(later)
@@ -280,9 +281,9 @@ async fn frozen_loss(
     db: Database,
     tables: Vec<SyncedTable>,
     change: &'static str,
-) -> (Database, FileId) {
+) -> (Database, ObjectId) {
     let db = migrate(store, db, tables, change).await;
-    let file = FileId(uuid::Uuid::from_u128(9));
+    let file = ObjectId(uuid::Uuid::from_u128(9));
     db.receive(write(4, 3, stored(4, file, "ef")).into()).await.unwrap();
     (db, file)
 }
@@ -337,8 +338,8 @@ async fn frozen_losses_keep_file_paths_after_the_apps_declaration_is_removed() {
     db.dismiss_lost_values(&db.lost_values().await.unwrap()).await.unwrap();
     let row_references: i64 = db.inspect_writer(|db| {
         db.query_row(
-            "SELECT count(*) FROM _coven_row_file_refs WHERE device=?1 AND file=?2",
-            (DeviceId(4).0.to_be_bytes(), file.0.as_bytes()),
+            "SELECT count(*) FROM _coven_row_file_refs WHERE device=?1 AND object=?2",
+            (DeviceId(4), file),
             |r| r.get(0),
         )
         .unwrap()
@@ -359,7 +360,7 @@ async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_rem
     })
     .await
     .unwrap();
-    let expected = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
+    let expected = (DeviceId(3), ObjectId(uuid::Uuid::from_u128(8)));
     let rows: i64 = db.inspect_writer(|db| {
         db.query_row("SELECT count(*) FROM coven_files", [], |r| r.get(0)).unwrap()
     });
@@ -438,7 +439,7 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(
         db.file_candidates(candidates_of(device)).await.unwrap(),
-        vec![FileCandidate { device, file, protected: false, since: Slot(4) }]
+        vec![FileCandidate { device, object: file, protected: false, since: Slot(4) }]
     );
 }
 
@@ -447,14 +448,14 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
 #[tokio::test]
 async fn protected_candidates_settle_only_while_still_protected() {
     let (_store, db, _) = file_loss_fixture().await;
-    let named = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
-    let orphan = (DeviceId(3), FileId(uuid::Uuid::from_u128(80)));
+    let named = (DeviceId(3), ObjectId(uuid::Uuid::from_u128(8)));
+    let orphan = (DeviceId(3), ObjectId(uuid::Uuid::from_u128(80)));
     db.add_file_candidates(BTreeSet::from([named, orphan])).await.unwrap();
     assert_eq!(
         db.file_candidates(candidates_of(DeviceId(3))).await.unwrap(),
         vec![
-            FileCandidate { device: named.0, file: named.1, protected: true, since: Slot(2) },
-            FileCandidate { device: orphan.0, file: orphan.1, protected: false, since: Slot(2) },
+            FileCandidate { device: named.0, object: named.1, protected: true, since: Slot(2) },
+            FileCandidate { device: orphan.0, object: orphan.1, protected: false, since: Slot(2) },
         ]
     );
     // Other uploaders' candidates are not read.
@@ -462,7 +463,7 @@ async fn protected_candidates_settle_only_while_still_protected() {
     db.settle_file_candidates(vec![named, orphan], Vec::new()).await.unwrap();
     let left = db.file_candidates(candidates_of(DeviceId(3))).await.unwrap();
     assert_eq!(left.len(), 1);
-    assert_eq!((left[0].device, left[0].file), orphan);
+    assert_eq!((left[0].device, left[0].object), orphan);
     db.settle_file_candidates(Vec::new(), vec![orphan]).await.unwrap();
     assert!(db.file_candidates(candidates_of(DeviceId(3))).await.unwrap().is_empty());
 }
@@ -477,8 +478,8 @@ async fn a_scan_needs_a_counted_removal_and_survives_reopening() {
     let uploader = DeviceId(5);
     TestStore::register(&db, uploader, 1);
     let removal = crate::tests::remove_device(&db, uploader).await;
-    let found = FileId(uuid::Uuid::from_u128(11));
-    let later = FileId(uuid::Uuid::from_u128(12));
+    let found = ObjectId(uuid::Uuid::from_u128(11));
+    let later = ObjectId(uuid::Uuid::from_u128(12));
     assert!(!db
         .complete_file_scan(uploader, coven_merge::Slot(removal.0 + 1), [found].into())
         .await
@@ -496,7 +497,7 @@ async fn a_scan_needs_a_counted_removal_and_survives_reopening() {
             .await
             .unwrap()
             .into_iter()
-            .map(|candidate| candidate.file)
+            .map(|candidate| candidate.object)
             .collect::<Vec<_>>(),
         [found, later]
     );
@@ -526,7 +527,7 @@ async fn a_scan_is_recorded_against_a_replacement_of_its_members_keys() {
     )
     .await
     .unwrap();
-    let found = FileId(uuid::Uuid::from_u128(11));
+    let found = ObjectId(uuid::Uuid::from_u128(11));
     assert!(!db.complete_file_scan(other, replaced, [found].into()).await.unwrap());
     assert_eq!(db.file_scan(other).await.unwrap(), None);
     assert!(db.complete_file_scan(uploader, replaced, [found].into()).await.unwrap());
@@ -557,7 +558,7 @@ pub(crate) fn scan_reason(
     match (file, template, relation) {
 ("database_file_retention.rs", "UPDATE _coven_file_candidates SET since=?1", "_coven_file_candidates") =>
     Some("a reload skips the slots it replaces, so every candidate counts from its target"),
-("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_published_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
+("database_file_retention.rs", "SELECT device,object FROM _coven_row_file_refs UNION SELECT device,object FROM _coven_published_file_refs UNION SELECT device,object FROM _coven_queued_file_refs UNION SELECT device,object FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_published_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
     Some("retention enumerates every locally protected file"),
         _ => None,
     }
@@ -583,7 +584,7 @@ async fn a_deleted_circles_lost_value_keeps_its_stored_file() {
         .await
         .unwrap();
     crate::tests::delete_circle(&db, circle).await.unwrap();
-    let file = FileId(uuid::Uuid::from_u128(7));
+    let file = ObjectId(uuid::Uuid::from_u128(7));
     let mut late = write(2, 1, stored(2, file, "ab"));
     let part = &mut late.parts[0];
     part.audience = audience.clone();

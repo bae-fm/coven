@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, Uri},
     Router,
 };
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, ObjectId, StoreId};
 use coven_merge::Audience;
 use serde_json::Value;
 use std::collections::{BTreeSet, VecDeque};
@@ -67,7 +67,7 @@ async fn folder_pages_keep_the_selected_root() {
             }
         };
         let store = StoreId(uuid::Uuid::from_bytes([0xab; 16]));
-        let path = ObjectPath::file(store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
+        let path = ObjectPath::file(store, DeviceId(31), ObjectId(uuid::Uuid::from_u128(1)));
         let item = file_metadata(&path.absolute(), b"entry", &Remote::default());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let received = requests.clone();
@@ -126,8 +126,8 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, 1.try_into().unwrap()),
         ObjectPath::snapshot(STORE_ID, circle, other, 1.try_into().unwrap()),
         ObjectPath::floor(STORE_ID),
-        ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_u128(1))),
-        ObjectPath::file(STORE_ID, other, FileId(uuid::Uuid::from_u128(1))),
+        ObjectPath::file(STORE_ID, device, ObjectId(uuid::Uuid::from_u128(1))),
+        ObjectPath::file(STORE_ID, other, ObjectId(uuid::Uuid::from_u128(1))),
         ObjectPath::join_request(STORE_ID, DeviceId(1), InviteId(uuid::Uuid::from_u128(1))),
         ObjectPath::device_gone(STORE_ID, DeviceId(1)),
         ObjectPath::join_request(STORE_ID, device, InviteId(uuid::Uuid::from_u128(1))),

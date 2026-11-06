@@ -30,9 +30,9 @@ fn stored(file: &FileRef) -> Result<(&crate::FileLocation, coven_crypto::Content
 /// computes too (Appendix C.1).
 pub(crate) fn file_id(
     uploader: coven_foundation::id_source::DeviceId,
-    file: coven_foundation::id_source::FileId,
+    object: coven_foundation::id_source::ObjectId,
 ) -> String {
-    format!("{}/{}", uploader.0, file)
+    format!("{}/{}", uploader.0, object)
 }
 fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
     db.query_row("SELECT coalesce(max(last_read),0)+1 FROM _coven_cache", [], |r| r.get(0))

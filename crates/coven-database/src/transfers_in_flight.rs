@@ -9,7 +9,7 @@
 //! hears it, by file (E7, E8).
 
 use crate::observation::{CommitObserver, RowChange};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::functions::FunctionFlags;
 use std::collections::BTreeMap;
@@ -32,31 +32,31 @@ struct Direction {
     /// What a start or end changes, as live queries read it: a view's
     /// column, or a view whose rows it changes.
     read_as: &'static [(&'static str, &'static str)],
-    /// `name(object)`, whether the stored object with these 16 id bytes is in
-    /// flight, for a view that asks of each of its rows.
+    /// `name(object)`, whether the stored object with this id is in flight,
+    /// for a view that asks of each of its rows.
     contains: Option<&'static str>,
     /// `name()`, the objects in flight as a JSON array of hex text, each
     /// one's uploader's eight id bytes and then its own sixteen: what a view
     /// joins by index.
-    files: &'static str,
+    objects: &'static str,
 }
 
 const SENDING: Direction = Direction {
     read_as: &[("coven_uploads", "sending"), ("coven_sending", "")],
     contains: Some("_coven_sending"),
-    files: "_coven_sending_files",
+    objects: "_coven_sending_objects",
 };
 
 const DOWNLOADING: Direction = Direction {
     read_as: &[("coven_downloading", "")],
     contains: None,
-    files: "_coven_downloading_files",
+    objects: "_coven_downloading_objects",
 };
 
 /// Coven's functions that read the files in flight, which app SQL reaches
 /// only through coven's views.
 pub(crate) const FUNCTIONS: [&str; 3] =
-    ["_coven_sending", "_coven_sending_files", "_coven_downloading_files"];
+    ["_coven_sending", "_coven_sending_objects", "_coven_downloading_objects"];
 
 /// Both ways files go: one owner per open store, whose clones share it.
 #[derive(Clone)]
@@ -115,7 +115,7 @@ struct InFlightShared {
 #[derive(Default)]
 struct InFlightState {
     /// Each object in flight, with its uploader and its attempts.
-    files: BTreeMap<FileId, Entry>,
+    objects: BTreeMap<ObjectId, Entry>,
     /// The next attempt's number, so an ended attempt is never taken for a
     /// later one of the same object.
     next: u64,
@@ -135,7 +135,7 @@ impl InFlightState {
     /// shows.
     fn progress(&self) -> BTreeMap<FileId, TransferProgress> {
         let mut progress = BTreeMap::new();
-        for entry in self.files.values() {
+        for entry in self.objects.values() {
             for (_, files, moved) in &entry.attempts {
                 for file in files {
                     progress.insert(*file, *moved);
@@ -163,8 +163,8 @@ impl InFlight {
     }
 
     /// The stored objects in flight now.
-    pub fn current(&self) -> std::collections::BTreeSet<FileId> {
-        self.state().files.keys().copied().collect()
+    pub fn current(&self) -> std::collections::BTreeSet<ObjectId> {
+        self.state().objects.keys().copied().collect()
     }
 
     /// Mark the stored object, which `device` uploaded, as in flight for
@@ -172,17 +172,18 @@ impl InFlight {
     pub fn start(
         &self,
         device: DeviceId,
-        object: FileId,
+        object: ObjectId,
         files: Vec<FileId>,
         progress: TransferProgress,
     ) -> Transferring {
-        let file = object;
         let (attempt, started) = {
             let mut state = self.state();
             let attempt = state.next;
             state.next += 1;
-            let entry =
-                state.files.entry(file).or_insert_with(|| Entry { device, attempts: Vec::new() });
+            let entry = state
+                .objects
+                .entry(object)
+                .or_insert_with(|| Entry { device, attempts: Vec::new() });
             entry.attempts.push((attempt, files, progress));
             let started = entry.attempts.len() == 1;
             self.shared.progress.send_replace(state.progress());
@@ -191,7 +192,7 @@ impl InFlight {
         if started {
             self.changed();
         }
-        Transferring { owner: self.clone(), file, attempt }
+        Transferring { owner: self.clone(), object, attempt }
     }
 
     /// Hear how far each file in flight has got: all of them first, then
@@ -205,9 +206,9 @@ impl InFlight {
 
     /// The attempt has got `bytes` of the way; an attempt that ended moves
     /// nothing.
-    fn reached(&self, file: FileId, attempt: u64, bytes: u64) {
+    fn reached(&self, object: ObjectId, attempt: u64, bytes: u64) {
         let mut state = self.state();
-        let Some(progress) = state.files.get_mut(&file).and_then(|entry| {
+        let Some(progress) = state.objects.get_mut(&object).and_then(|entry| {
             entry
                 .attempts
                 .iter_mut()
@@ -245,21 +246,19 @@ impl InFlight {
         if let Some(name) = self.shared.direction.contains {
             let owner = self.clone();
             connection.create_scalar_function(name, 1, flags, move |ctx| {
-                // Anything but an object id's 16 bytes fails the statement.
-                let file = uuid::Uuid::from_slice(&ctx.get::<Vec<u8>>(0)?)
-                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
-                Ok(owner.state().files.contains_key(&FileId(file)))
+                // Anything but an object id fails the statement.
+                Ok(owner.state().objects.contains_key(&ctx.get::<ObjectId>(0)?))
             })?;
         }
         let owner = self.clone();
-        connection.create_scalar_function(self.shared.direction.files, 0, flags, move |_| {
-            let files: Vec<String> = owner
+        connection.create_scalar_function(self.shared.direction.objects, 0, flags, move |_| {
+            let objects: Vec<String> = owner
                 .state()
-                .files
+                .objects
                 .iter()
-                .map(|(file, entry)| format!("{:016x}{}", entry.device.0, file.0.simple()))
+                .map(|(object, entry)| format!("{:016x}{}", entry.device.0, object.0.simple()))
                 .collect();
-            serde_json::to_string(&files)
+            serde_json::to_string(&objects)
                 .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
         })
     }
@@ -269,14 +268,14 @@ impl InFlight {
 /// attempt is cancelled, ends the attempt.
 pub struct Transferring {
     owner: InFlight,
-    file: FileId,
+    object: ObjectId,
     attempt: u64,
 }
 
 impl Transferring {
     /// What tells this attempt's progress, for whatever moves its bytes.
     pub fn meter(&self) -> TransferMeter {
-        TransferMeter { owner: self.owner.clone(), file: self.file, attempt: self.attempt }
+        TransferMeter { owner: self.owner.clone(), object: self.object, attempt: self.attempt }
     }
 }
 
@@ -285,14 +284,14 @@ impl Transferring {
 #[derive(Clone)]
 pub struct TransferMeter {
     owner: InFlight,
-    file: FileId,
+    object: ObjectId,
     attempt: u64,
 }
 
 impl TransferMeter {
     /// The attempt has got `bytes` of the way through the file's object.
     pub fn reached(&self, bytes: u64) {
-        self.owner.reached(self.file, self.attempt, bytes);
+        self.owner.reached(self.object, self.attempt, bytes);
     }
 }
 
@@ -300,12 +299,12 @@ impl Drop for Transferring {
     fn drop(&mut self) {
         let ended = {
             let mut state = self.owner.state();
-            match state.files.get_mut(&self.file) {
+            match state.objects.get_mut(&self.object) {
                 Some(entry) => {
                     entry.attempts.retain(|(attempt, _, _)| *attempt != self.attempt);
                     let ended = entry.attempts.is_empty();
                     if ended {
-                        state.files.remove(&self.file);
+                        state.objects.remove(&self.object);
                     }
                     self.owner.shared.progress.send_replace(state.progress());
                     Some(ended)
@@ -316,13 +315,13 @@ impl Drop for Transferring {
         match ended {
             Some(true) => self.owner.changed(),
             Some(false) => {}
-            // An attempt in flight keeps its file's entry; without it the
+            // An attempt in flight keeps its object's entry; without it the
             // progress watches read is wrong. This drop may run during an
             // unwind, so it fails the store's handle instead of panicking.
             None => self.owner.shared.observer.fail(crate::observation::HandleFailure::Bug(
                 coven_foundation::task::Bug {
                     operation: "end a transfer in flight",
-                    message: "an attempt in flight lost its file's entry".into(),
+                    message: "an attempt in flight lost its object's entry".into(),
                 },
             )),
         }

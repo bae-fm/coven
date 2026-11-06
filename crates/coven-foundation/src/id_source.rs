@@ -112,7 +112,8 @@ impl std::fmt::Display for InviteId {
     }
 }
 
-/// An uploaded file's random identity, independent of its content (§17.5).
+/// A file record's random identity, independent of its content and of where
+/// its bytes are stored (§17.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FileId(
@@ -121,6 +122,21 @@ pub struct FileId(
 );
 
 impl std::fmt::Display for FileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A stored object's random id, the last part of its path
+/// `<store>/files/<uploader>/<object>` (§17.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObjectId(
+    /// The object's UUID, supplied by the id source.
+    pub Uuid,
+);
+
+impl std::fmt::Display for ObjectId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }

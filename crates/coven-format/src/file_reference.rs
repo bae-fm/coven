@@ -2,7 +2,7 @@
 
 use crate::{error::Rule, Error};
 use coven_crypto::{FileKey, SecretText};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, ObjectId};
 use zeroize::Zeroizing;
 
 /// A file's fixed uploader, random storage name and decryption key.
@@ -11,8 +11,8 @@ use zeroize::Zeroizing;
 pub struct FileReference {
     /// Device responsible for uploading the object.
     pub device: DeviceId,
-    /// Random object name.
-    pub id: FileId,
+    /// The stored object's random id, its name in storage (§17.5).
+    pub object: ObjectId,
     /// Key carried only inside encrypted rows and writes.
     pub key: FileKey,
 }
@@ -28,20 +28,24 @@ impl FileReference {
         let invalid = || Error::Invalid { field: "file reference", rule: Rule::KeyEncoding };
         let rest = text.strip_prefix("file ").ok_or_else(invalid)?;
         let (device, rest) = rest.split_once(' ').ok_or_else(invalid)?;
-        let (id, key) = rest.split_once(' ').ok_or_else(invalid)?;
+        let (object, key) = rest.split_once(' ').ok_or_else(invalid)?;
         let number = crate::path::canonical_decimal(device).ok_or_else(invalid)?;
-        let uuid = coven_foundation::id_source::canonical_uuid(id).map_err(|_| invalid())?;
+        let uuid = coven_foundation::id_source::canonical_uuid(object).map_err(|_| invalid())?;
         let mut bytes = Zeroizing::new([0; 32]);
         hex::decode_to_slice(key, bytes.as_mut()).map_err(|_| invalid())?;
         if key.bytes().any(|b| b.is_ascii_uppercase()) {
             return Err(invalid());
         }
-        Ok(Self { device: DeviceId(number), id: FileId(uuid), key: FileKey::from_bytes(*bytes) })
+        Ok(Self {
+            device: DeviceId(number),
+            object: ObjectId(uuid),
+            key: FileKey::from_bytes(*bytes),
+        })
     }
 
     /// Encode into secret text so diagnostics cannot reveal the file key.
     pub fn encode(&self) -> SecretText {
-        let mut text = format!("file {} {} ", self.device.0, self.id);
+        let mut text = format!("file {} {} ", self.device.0, self.object);
         let mut key = Zeroizing::new([0; 64]);
         hex::encode_to_slice(self.key.to_secret_bytes().as_bytes(), key.as_mut())
             .expect("64 hex digits for a 32-byte key");

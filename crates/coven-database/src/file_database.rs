@@ -11,7 +11,7 @@ use coven_crypto::SecretBytes;
 use coven_foundation::task::CarriesBug;
 use coven_foundation::{
     files::{FileName, StoreDir},
-    id_source::{DeviceId, FileId},
+    id_source::{DeviceId, FileId, ObjectId},
 };
 use std::sync::Arc;
 
@@ -317,7 +317,7 @@ impl FileDatabase {
     /// protects it (§17.10). Returns the retired queue ids.
     pub async fn retire_unlinked<S: serde::Serialize + Send + 'static>(
         &self,
-        in_flight: std::collections::BTreeSet<FileId>,
+        in_flight: std::collections::BTreeSet<ObjectId>,
         subject: impl Fn(&crate::FileLocation) -> S + Send + 'static,
     ) -> Result<Vec<i64>, DbError> {
         // An idle run writes nothing: only work found takes the writer.
@@ -373,7 +373,7 @@ impl FileDatabase {
     /// discard its in-memory timer.
     pub async fn clear_upload_pending<P: crate::PendingValue>(
         &self,
-        object: (DeviceId, FileId),
+        object: (DeviceId, ObjectId),
         subject: P::Subject,
         checked: impl Fn(&P) -> bool + Send + 'static,
     ) -> Result<Option<crate::RetrySubject>, DbError>
@@ -709,7 +709,7 @@ fn complete(
 fn open_upload_source<L>(
     access: &DatabaseAccess<L>,
     upload: i64,
-    object: FileId,
+    object: ObjectId,
     size: u64,
 ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
     let source = access.with_writer(|db| file_ref::queued_source(db, upload))?;

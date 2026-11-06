@@ -16,7 +16,7 @@ fn file(number: u64) -> ObjectPath {
     ObjectPath::file(
         STORE_ID,
         DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(number.into())),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(number.into())),
     )
 }
 
@@ -103,7 +103,7 @@ async fn scoped_listing_counts_only_requested_folder_pages() {
             &ObjectPath::file(
                 STORE_ID,
                 DeviceId(32),
-                coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([3; 16])),
+                coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([3; 16])),
             ),
             b"unrelated file",
         )
@@ -227,7 +227,7 @@ async fn failed_page_does_not_publish_partial_folder_discovery() {
         &ObjectPath::file(
             STORE_ID,
             DeviceId(32),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1)),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(1)),
         ),
         b"other",
     )

@@ -3,7 +3,7 @@ use super::record::{
     record_name, upload_name,
 };
 use super::*;
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId, UuidIds};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, ObjectId, StoreId, UuidIds};
 use coven_merge::Audience;
 use objc2_cloud_kit::{
     CKErrorCode, CKErrorDomain, CKPartialErrorsByItemIDKey, CKQueryOperation, CKRecord,
@@ -75,7 +75,7 @@ fn a_published_object_names_its_root_in_a_devices_folder() {
 
 #[test]
 fn prefix_conversion_rejects_another_writer_or_store() {
-    let path = ObjectPath::file(path().store(), DeviceId(7), FileId(uuid::Uuid::from_u128(1)));
+    let path = ObjectPath::file(path().store(), DeviceId(7), ObjectId(uuid::Uuid::from_u128(1)));
     let prefix = ObjectPrefix::device_files(path.store(), DeviceId(7));
     check_prefix(&prefix, path.as_str()).unwrap();
     for other in [
@@ -260,7 +260,7 @@ async fn cloudkit_live() {
     let native = Arc::new(live_zone::prepare(store, "cloudkit_live", ids.clone()).await.unwrap());
     let config = native.config();
     let storage = StorageConnection::from_provider(native.clone());
-    let first = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+    let first = ObjectPath::file(store, DeviceId(7), ObjectId(ids.new_id()));
     let floor = ObjectPath::floor(store);
     assert!(storage.status(&first).await.unwrap().is_none());
     storage.create(&first, b"encrypted bytes").await.unwrap();
@@ -297,7 +297,7 @@ async fn cloudkit_live() {
     assert_eq!(changed.metadata.size, replaced.size);
     assert_ne!(changed.metadata.revision, replaced.revision);
     assert_eq!(storage.status(&floor).await.unwrap().unwrap(), changed.metadata);
-    let large = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+    let large = ObjectPath::file(store, DeviceId(7), ObjectId(ids.new_id()));
     let mut session = storage.begin_upload(&large, PART_SIZE as u64 + 3).await.unwrap();
     let before = session.encode().unwrap();
     let part = vec![42; PART_SIZE];
@@ -333,7 +333,7 @@ async fn cloudkit_live() {
         [42, b'e', b'n', b'd']
     );
 
-    let abandoned_path = ObjectPath::file(store, DeviceId(7), FileId(native.ids.new_id()));
+    let abandoned_path = ObjectPath::file(store, DeviceId(7), ObjectId(native.ids.new_id()));
     let mut abandoned = storage.begin_upload(&abandoned_path, PART_SIZE as u64 + 1).await.unwrap();
     storage.upload_part(&mut abandoned, &part).await.unwrap();
     storage.abort_upload(&abandoned).await.unwrap();
@@ -391,7 +391,7 @@ async fn cloudkit_live_response_evidence() {
         live_zone::prepare(store, "cloudkit_live_response_evidence", ids.clone()).await.unwrap(),
     );
     let storage = StorageConnection::from_provider(native.clone());
-    let path = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+    let path = ObjectPath::file(store, DeviceId(7), ObjectId(ids.new_id()));
     let absent = storage.read(&path).await.unwrap_err();
     assert_eq!(absent.failure(), StorageFailure::NotFound);
     assert!(absent.answered());
@@ -531,7 +531,7 @@ impl Discovery {
         let storage = StorageConnection::from_provider(native.clone());
         let mut paths = Vec::new();
         for device in 100..100 + native::QUERY_PAGE_SIZE as u64 {
-            let path = ObjectPath::file(store, DeviceId(device), FileId(native.ids.new_id()));
+            let path = ObjectPath::file(store, DeviceId(device), ObjectId(native.ids.new_id()));
             storage.create(&path, b"file").await.unwrap();
             paths.push(path);
         }
@@ -540,7 +540,7 @@ impl Discovery {
             for path in [
                 ObjectPath::snapshot(store, Audience::Store, device, NonZeroU64::MIN),
                 ObjectPath::snapshot(store, circle.clone(), device, NonZeroU64::MIN),
-                ObjectPath::file(store, device, FileId(native.ids.new_id())),
+                ObjectPath::file(store, device, ObjectId(native.ids.new_id())),
             ] {
                 storage.create(&path, b"scoped").await.unwrap();
                 paths.push(path);
@@ -554,7 +554,7 @@ impl Discovery {
         let mut pending = Vec::new();
         for path in [
             ObjectPath::slot(store, NonZeroU64::new(1000).unwrap()),
-            ObjectPath::file(store, DeviceId(71), FileId(native.ids.new_id())),
+            ObjectPath::file(store, DeviceId(71), ObjectId(native.ids.new_id())),
         ] {
             let mut session = storage.begin_upload(&path, PART_SIZE as u64 + 1).await.unwrap();
             storage.upload_part(&mut session, &vec![42; PART_SIZE]).await.unwrap();

@@ -77,13 +77,13 @@ impl SequenceSync {
 
     pub(crate) async fn scan_uploaders(&self, scans: Vec<UploaderScan>) -> Result<(), SyncError> {
         for scan in scans {
-            let mut files = BTreeSet::new();
-            for object in
+            let mut objects = BTreeSet::new();
+            for listed in
                 self.storage.list(&ObjectPrefix::device_files(self.store(), scan.device)).await?
             {
-                match (object.path.device(), object.path.file_id()) {
-                    (Some(device), Some(file)) if device == scan.device => {
-                        files.insert(file);
+                match (listed.path.device(), listed.path.object_id()) {
+                    (Some(device), Some(object)) if device == scan.device => {
+                        objects.insert(object);
                     }
                     _ => {
                         return Err(StorageFailure::Protocol
@@ -92,7 +92,7 @@ impl SequenceSync {
                     }
                 }
             }
-            if !self.database.complete_file_scan(scan.device, scan.stop, files).await? {
+            if !self.database.complete_file_scan(scan.device, scan.stop, objects).await? {
                 return Err(StorageFailure::CatchUpRequired.into());
             }
         }

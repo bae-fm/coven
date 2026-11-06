@@ -2,7 +2,7 @@
 
 use super::{with_locked, Database};
 use crate::{sqlite::DatabaseConnection, DbError};
-use coven_foundation::id_source::{DeviceId, FileId, KeyId};
+use coven_foundation::id_source::{DeviceId, KeyId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -646,14 +646,9 @@ impl RetainedInput {
                 }
                 (Some(true), _) => Some(FileEvidence::Complete(
                     db.query(
-                        "SELECT device,file FROM _coven_input_files WHERE object=?1 ORDER BY device,file",
+                        "SELECT device,stored_object FROM _coven_input_files WHERE object=?1 ORDER BY device,stored_object",
                         [id],
-                        |r| {
-                            Ok((
-                                r.get::<_, DeviceId>(0)?,
-                                FileId(uuid::Uuid::from_bytes(r.get(1)?)),
-                            ))
-                        },
+                        |r| Ok((r.get::<_, DeviceId>(0)?, r.get::<_, ObjectId>(1)?)),
                     )?
                     .into_iter()
                     .collect(),
@@ -684,10 +679,10 @@ impl RetainedInput {
             )?;
             match files {
                 FileEvidence::Complete(files) => {
-                    for (device, file) in files {
+                    for (device, object) in files {
                         db.internal_execute(
-                            "INSERT INTO _coven_input_files(object,device,file) VALUES(?1,?2,?3)",
-                            (id, device, file.0.as_bytes().as_slice()),
+                            "INSERT INTO _coven_input_files(object,device,stored_object) VALUES(?1,?2,?3)",
+                            (id, device, object),
                         )?;
                     }
                 }
@@ -721,7 +716,7 @@ impl RetainedInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileEvidence {
     /// Every fixed file path the bytes name, after complete authentication.
-    Complete(BTreeSet<(DeviceId, FileId)>),
+    Complete(BTreeSet<(DeviceId, ObjectId)>),
     /// The bytes cannot prove any file absent, and are not read again for that
     /// purpose until this prerequisite changes.
     Unproven(UnprovenFiles),

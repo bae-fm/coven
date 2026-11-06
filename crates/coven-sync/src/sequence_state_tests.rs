@@ -1,12 +1,12 @@
 use super::*;
-use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+use coven_foundation::id_source::{DeviceId, ObjectId, StoreId};
 use std::{future::Future, task::Poll};
 
 fn check_object() -> ObjectPath {
     ObjectPath::file(
         StoreId(uuid::Uuid::from_u128(1)),
         DeviceId(2),
-        FileId(uuid::Uuid::from_u128(3)),
+        ObjectId(uuid::Uuid::from_u128(3)),
     )
 }
 

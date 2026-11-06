@@ -162,7 +162,7 @@ pub(crate) async fn validate_one<R: std::io::Read + Send + 'static>(
 ) -> Result<
     std::collections::BTreeSet<(
         coven_foundation::id_source::DeviceId,
-        coven_foundation::id_source::FileId,
+        coven_foundation::id_source::ObjectId,
     )>,
     crate::DbError,
 > {

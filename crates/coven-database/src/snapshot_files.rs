@@ -121,7 +121,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
     let present = table.column("present");
     db.internal_execute(
         &format!(
-            "INSERT INTO temp._coven_install_stored(device,file,table_name,key)
+            "INSERT INTO temp._coven_install_stored(device,object,table_name,key)
              SELECT _coven_stored_device(i.{column}),_coven_stored_object(i.{column}),?1,i.{key}
              FROM temp._coven_install_protected p CROSS JOIN {installed} AS i ON i.{key}=p.key
              WHERE p.table_name=?1 AND i.{present}=1 AND i.{setter_device} IS NOT NULL
@@ -133,16 +133,16 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
         [&table.table],
     )?;
     db.internal_execute(
-        "DELETE FROM _coven_row_file_refs WHERE (device,file,table_name,key) IN (
-           SELECT r.device,r.file,r.table_name,r.key FROM temp._coven_install_protected p
+        "DELETE FROM _coven_row_file_refs WHERE (device,object,table_name,key) IN (
+           SELECT r.device,r.object,r.table_name,r.key FROM temp._coven_install_protected p
            CROSS JOIN _coven_row_file_refs r ON r.table_name=p.table_name AND r.key=p.key
            WHERE p.table_name=?1 AND NOT EXISTS(SELECT 1 FROM temp._coven_install_stored s
-             WHERE s.device=r.device AND s.file=r.file AND s.table_name=r.table_name AND s.key=r.key))",
+             WHERE s.device=r.device AND s.object=r.object AND s.table_name=r.table_name AND s.key=r.key))",
         [&table.table],
     )?;
     db.internal_execute(
-        "INSERT INTO _coven_row_file_refs(device,file,table_name,key)
-         SELECT device,file,table_name,key FROM temp._coven_install_stored WHERE table_name=?1
+        "INSERT INTO _coven_row_file_refs(device,object,table_name,key)
+         SELECT device,object,table_name,key FROM temp._coven_install_stored WHERE table_name=?1
          ON CONFLICT DO NOTHING",
         [&table.table],
     )?;

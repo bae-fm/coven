@@ -5,7 +5,7 @@ use crate::internal_schema::FILE_NAMED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use std::time::SystemTime;
 
 /// One durable upload of one stored object; its plaintext chunk hashes are
@@ -333,12 +333,12 @@ pub(crate) fn first_held(db: &DatabaseConnection) -> Result<Option<u64>, DbError
 pub(crate) fn upload_id(
     db: &DatabaseConnection,
     uploader: DeviceId,
-    object: FileId,
+    object: ObjectId,
 ) -> Result<Option<i64>, DbError> {
     Ok(db
         .query(
-            "SELECT id FROM _coven_file_uploads WHERE device=?1 AND file=?2",
-            (uploader, object.0.as_bytes()),
+            "SELECT id FROM _coven_file_uploads WHERE device=?1 AND object=?2",
+            (uploader, object),
             |row| row.get(0),
         )?
         .pop())
@@ -386,8 +386,8 @@ pub(crate) fn chunk_hash(
         .map_err(|_| DbError::Invariant { what: "a chunk index fits SQLite" })?;
     let hash = db
         .query_row(
-            "SELECT hash FROM _coven_file_chunks WHERE device=?1 AND file=?2 AND chunk=?3",
-            (location.uploader(), location.object().0.as_bytes(), index),
+            "SELECT hash FROM _coven_file_chunks WHERE device=?1 AND object=?2 AND chunk=?3",
+            (location.uploader(), location.object(), index),
             |r| r.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| match error {
@@ -511,7 +511,7 @@ pub(crate) fn enqueue(
     })?;
     let size = crate::sqlite::integer("file size", size)?;
     let device = location.uploader();
-    let object = location.object().0;
+    let object = location.object();
     let (original, modified_at, copy) = match source {
         crate::file_write::StagedSource::Original(original) => (
             Some(coven_foundation::files::path_bytes(&original.path)),
@@ -521,12 +521,12 @@ pub(crate) fn enqueue(
         crate::file_write::StagedSource::Copy(name) => (None, None, Some(name.as_str())),
     };
     let upload = db.query_row(
-        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,move,queued_at,holds)
+        "INSERT INTO _coven_file_uploads(location,device,object,size,hash,original,modified_at,copy,move,queued_at,holds)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) RETURNING id",
         rusqlite::params![
             location.text(),
             device,
-            object.as_bytes(),
+            object,
             size,
             hashes.content.as_bytes().as_slice(),
             original,
@@ -540,8 +540,8 @@ pub(crate) fn enqueue(
     )?;
     for (index, hash) in hashes.chunks().iter().enumerate() {
         db.internal_execute(
-            "INSERT INTO _coven_file_chunks(device,file,chunk,hash) VALUES(?1,?2,?3,?4)",
-            rusqlite::params![device, object.as_bytes(), index as i64, hash.as_bytes().as_slice()],
+            "INSERT INTO _coven_file_chunks(device,object,chunk,hash) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![device, object, index as i64, hash.as_bytes().as_slice()],
         )?;
     }
     for (file, keep) in files {

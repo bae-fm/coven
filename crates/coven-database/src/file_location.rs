@@ -6,7 +6,7 @@ use coven_crypto::{FileKey, SecretText};
 use coven_format::{
     coordinates::Coordinates, file_reference::FileReference, path::ObjectPath, value::Value,
 };
-use coven_foundation::id_source::{DeviceId, FileId, IdSource, StoreId};
+use coven_foundation::id_source::{DeviceId, IdSource, ObjectId, StoreId};
 
 /// A stored file's fixed location: the uploader, the stored object's id and
 /// the file's key. Equality compares the whole text, so another object or
@@ -14,7 +14,7 @@ use coven_foundation::id_source::{DeviceId, FileId, IdSource, StoreId};
 #[derive(Clone, Debug)]
 pub struct FileLocation {
     uploader: DeviceId,
-    object: FileId,
+    object: ObjectId,
     text: SecretText,
 }
 
@@ -26,7 +26,7 @@ impl FileLocation {
 
     /// The stored object's id, the last part of its path
     /// `<store>/files/<uploader>/<object>`.
-    pub fn object(&self) -> FileId {
+    pub fn object(&self) -> ObjectId {
         self.object
     }
 
@@ -40,13 +40,13 @@ impl FileLocation {
     pub(crate) fn new(device: DeviceId, ids: &dyn IdSource) -> Result<Self, DbError> {
         Self::from_reference(&FileReference {
             device,
-            id: FileId(ids.new_id()),
+            object: ObjectId(ids.new_id()),
             key: FileKey::generate().map_err(DbError::FileKey)?,
         })
     }
 
     fn from_reference(reference: &FileReference) -> Result<Self, DbError> {
-        Ok(Self { uploader: reference.device, object: reference.id, text: reference.encode() })
+        Ok(Self { uploader: reference.device, object: reference.object, text: reference.encode() })
     }
 
     #[expect(

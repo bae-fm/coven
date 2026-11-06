@@ -41,8 +41,8 @@ macro_rules! coven_published_tables {
         $visit!(_coven_published_file_refs, "
             CREATE TABLE _coven_published_file_refs (
                 device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
-                PRIMARY KEY(device,file)
+                object BLOB NOT NULL CHECK(length(object)=16),
+                PRIMARY KEY(device,object)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_published_creations, "

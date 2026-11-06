@@ -144,9 +144,9 @@ impl FilesInner {
         copy: &FileName,
     ) -> Result<CacheReservation, TransferError> {
         let (location, content_hash) = stored(file)?;
-        let coven_format::file_reference::FileReference { device, id, key } =
+        let coven_format::file_reference::FileReference { device, object, key } =
             location.reference().map_err(FileReadError::from)?;
-        let path = ObjectPath::file(self.directory.id(), device, id);
+        let path = ObjectPath::file(self.directory.id(), device, object);
         let source = self.database.open_pin_copy(file, copy).await.map_err(FileReadError::from)?;
         let header = FileHeader::new(file.size());
         let (reservation, mut writer) = self.create_cache_file(file).await?;

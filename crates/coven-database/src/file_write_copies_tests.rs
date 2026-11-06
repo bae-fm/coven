@@ -13,7 +13,7 @@ use crate::{
     DbError, FileCandidate, FileColumn, FilePlace, Migration, Place, Provenance, RowIdentity,
     SyncedTable,
 };
-use coven_foundation::id_source::{CircleId, FileId, SequentialIds};
+use coven_foundation::id_source::{CircleId, FileId, ObjectId, SequentialIds};
 use std::collections::BTreeSet;
 
 const CIRCLE: &str = "00000000-0000-4000-8000-000000000002";
@@ -99,13 +99,13 @@ fn record(db: &crate::Database, file: FileId) -> crate::file_table::Record {
 async fn unprotected(
     db: &crate::Database,
     device: coven_foundation::id_source::DeviceId,
-) -> Vec<FileId> {
+) -> Vec<ObjectId> {
     db.file_candidates(BTreeSet::from([device]))
         .await
         .unwrap()
         .into_iter()
         .filter(|FileCandidate { protected, .. }| !protected)
-        .map(|candidate| candidate.file)
+        .map(|candidate| candidate.object)
         .collect()
 }
 

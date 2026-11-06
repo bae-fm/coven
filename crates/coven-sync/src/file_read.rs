@@ -359,9 +359,9 @@ impl<M: FilesMode> UploadedFile<M> {
         )
         .await
         .map_err(coven_foundation::files::FileError::from)??;
-        let coven_format::file_reference::FileReference { device, id, key } =
+        let coven_format::file_reference::FileReference { device, object, key } =
             location.reference()?;
-        let path = ObjectPath::file(owner.directory.id(), device, id);
+        let path = ObjectPath::file(owner.directory.id(), device, object);
         let opened = Self {
             header: FileHeader::new(file.size()),
             header_checked: std::sync::atomic::AtomicBool::new(false),

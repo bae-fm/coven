@@ -293,7 +293,7 @@ Appendix G lists them.
   not alter or withhold it. It sees object sizes, counts and timing, and which
   account writes each object. For files and snapshots it also sees which device
   uploaded them, because their paths name that device:
-  `<store>/files/<device>/<file>` and
+  `<store>/files/<device>/<object>` and
   `<store>/snapshots/<audience>/<device>/<n>`, which also names the snapshot's
   audience ([format.md D10](format.md#d10-paths)). It doesn't see which device
   claimed a slot: that is sealed inside the slot (§12). A thief holding storage
@@ -578,8 +578,8 @@ each download starts or ends, and a reopened store lists none. A read that
 fetches a range into the cache isn't keeping a file whole, so it isn't listed.
 
 App SQL reaches what is being transferred only through these three views. The
-functions behind them, `_coven_sending`, `_coven_sending_files` and
-`_coven_downloading_files`, refuse a direct call, or one in the app's own view
+functions behind them, `_coven_sending`, `_coven_sending_objects` and
+`_coven_downloading_objects`, refuse a direct call, or one in the app's own view
 or trigger, with `StatementForbidden`: a live query learns that it read them
 from the views' columns, and would never run again otherwise. A read-only
 handle transfers nothing, so it shows every file waiting and none
@@ -2935,7 +2935,7 @@ doesn't, when the database opens and after migrating.
   trigger on `coven_pins` could copy `_coven_cache`'s paths into an app table,
   and the app would read coven's tables after all. The same preparing at open
   refuses a trigger that reads coven's tables with `InternalTable`, and one
-  that calls what only coven's views may, such as `_coven_sending_files`, with
+  that calls what only coven's views may, such as `_coven_sending_objects`, with
   `StatementForbidden`.
 - **Following `coven_files` changes only this device.** The trigger writes no
   synced table and changes no record, so a migration that makes or drops one
@@ -7362,7 +7362,7 @@ photos and she deletes them. A photo a retained record still names stays.
 **Uploads a device gone for good never finished.** Ben's phone is sending a
 200 MB video to the store's R2 bucket in parts when Ben's laptop replaces his
 keys. R2 holds the parts in an unfinished multipart upload at the video's path,
-`<store>/files/<phone>/<file>`. The phone will never finish or abort it, and its
+`<store>/files/<phone>/<object>`. The phone will never finish or abort it, and its
 completion couldn't count anyway. The laptop's next pass aborts it, and the
 parts go.
 
@@ -9753,7 +9753,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_move_files` | the files each moving or failed move lists, by file, since a file is in at most one move: written in the write that records the move, and as a new file over a moving file's bytes joins it; a file leaves as its record goes, and a switch or a cancel ends the move's list, while a failure keeps it (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 
@@ -9892,7 +9892,7 @@ A member's keys are two key pairs, kept together:
 | A confirmation number | SHA-256 of a label, the invite id and the request's two public keys, reduced to six digits |
 | Key introductions | SHA-256 of the key's exact 32 bytes, with a random key id |
 | Slot signatures | over the path and a SHA-256 hash of every preceding byte |
-| A file | a random key of its own; its storage name is a random id (§17.5) |
+| A file | a random key of its own; its storage name is a random object id (§17.5) |
 
 ### D.3 What authentication binds
 

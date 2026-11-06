@@ -44,7 +44,7 @@ fn all_layouts_are_canonical_and_store_scoped() {
         ObjectPath::floor(STORE_ID),
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, NonZeroU64::MIN),
         ObjectPath::snapshot(STORE_ID, Audience::Circle(CircleId(id)), device, NonZeroU64::MIN),
-        ObjectPath::file(STORE_ID, device, FileId(id)),
+        ObjectPath::file(STORE_ID, device, ObjectId(id)),
         ObjectPath::join_request(STORE_ID, device, InviteId(id)),
         ObjectPath::device_gone(STORE_ID, device),
     ] {
@@ -75,7 +75,7 @@ fn file_scans_keep_device_prefixes_and_snapshot_paths_keep_their_audience() {
     let path = ObjectPath::parse(fixture.lines().next().unwrap()).unwrap();
     let reference =
         crate::file_reference::FileReference::decode(fixture.lines().nth(1).unwrap()).unwrap();
-    assert_eq!(ObjectPath::file(STORE_ID, reference.device, reference.id), path);
+    assert_eq!(ObjectPath::file(STORE_ID, reference.device, reference.object), path);
     assert_eq!(path.device(), Some(DeviceId(1)));
     assert!(ObjectPrefix::files(STORE_ID).contains(&path));
     assert!(ObjectPrefix::device_files(STORE_ID, DeviceId(1)).contains(&path));

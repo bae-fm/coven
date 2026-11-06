@@ -472,7 +472,7 @@ impl Database {
     /// with it.
     pub(crate) async fn clear_pending_if<P: crate::PendingValue>(
         &self,
-        object: (coven_foundation::id_source::DeviceId, coven_foundation::id_source::FileId),
+        object: (coven_foundation::id_source::DeviceId, coven_foundation::id_source::ObjectId),
         subject: P::Subject,
         checked: impl Fn(&P) -> bool + Send + 'static,
     ) -> Result<Option<crate::RetrySubject>, DbError>

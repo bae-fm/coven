@@ -45,7 +45,7 @@ pub(crate) fn capture_rows<'a>(
         put_row(db, store.row_without_losses(row)?.state)?;
         keep_losses(db, row)?;
         db.internal_execute("INSERT INTO _coven_published_creations SELECT * FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",params![row.table,row.key,audience])?;
-        db.internal_execute("INSERT INTO _coven_published_file_refs SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key])?;
+        db.internal_execute("INSERT INTO _coven_published_file_refs SELECT device,object FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key])?;
     }
     Ok(())
 }

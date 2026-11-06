@@ -80,12 +80,12 @@ impl PendingValue for Record {
     fn subject(&self) -> &Subject {
         &self.subject
     }
-    fn file(
+    fn object(
         &self,
     ) -> Option<(
         crate::FileWork,
         coven_foundation::id_source::DeviceId,
-        coven_foundation::id_source::FileId,
+        coven_foundation::id_source::ObjectId,
     )> {
         None
     }
@@ -596,7 +596,7 @@ async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,build)
+        "INSERT INTO _coven_pending(subject,value,operation,slot_key,work,device,object,build)
            SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
                   CAST(x'00' || n AS BLOB),CASE WHEN i%4=1 THEN 'upload' WHEN i%4=3 THEN 'download' END,
                   CASE WHEN i%2=1 THEN device END,
@@ -617,7 +617,7 @@ pub(crate) fn scan_reason(
     match (file, template, relation) {
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,object,work,device,file,build,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
 ("pending.rs", "UPDATE _coven_pending SET build=?1", "_coven_pending") =>
     Some("test support: every record becomes another build's"),

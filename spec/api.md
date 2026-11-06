@@ -1085,8 +1085,8 @@ impl ObjectPath {
         number: NonZeroU64,
     ) -> Self;
 
-    /// Encrypted file bytes named by a random UUID (§17.5).
-    pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self;
+    /// A stored object: encrypted file bytes named by a random id (§17.5).
+    pub fn file(store: StoreId, device: DeviceId, object: ObjectId) -> Self;
 
     /// An encrypted join request under its invite id (§13.2).
     pub fn join_request(store: StoreId, invite: InviteId) -> Self;
@@ -1100,8 +1100,8 @@ impl ObjectPath {
     /// The device named by a snapshot or uploaded file path.
     pub fn device(&self) -> Option<DeviceId>;
 
-    /// The fixed id of a stored file's path.
-    pub fn file_id(&self) -> Option<FileId>;
+    /// The stored object's id, the last part of a stored file's path.
+    pub fn object_id(&self) -> Option<ObjectId>;
 
     /// The canonical path components, for providers with folder objects.
     pub fn components(&self) -> Vec<&str>;
@@ -3424,7 +3424,7 @@ let moved = handle
   time an upload starts or ends. So does whether a stored file is being
   downloaded to keep whole, which `coven_downloading` reads, again as each
   download starts or ends. Only these views reach it: calling
-  `_coven_sending`, `_coven_sending_files` or `_coven_downloading_files`
+  `_coven_sending`, `_coven_sending_objects` or `_coven_downloading_objects`
   directly, or in the app's own view or trigger, fails with
   `StatementForbidden`. A read-only handle transfers nothing, and shows every
   file waiting and none downloading.
@@ -5177,12 +5177,12 @@ pub enum PendingSubject {
     KeyCopy { audience: Audience, key: KeyId, member: MemberId, sealing: SealingKey },
 
     Snapshot(SnapshotId),
-    /// This device's upload of stored bytes, and its reads of their staged
+    /// This device's upload of a stored object, and its reads of its staged
     /// original while the upload waits.
-    Upload { device: DeviceId, file: FileId },
-    /// This device's downloads of stored bytes, for the app's pins; a read's
-    /// failure goes to its caller and leaves no record (§17.7).
-    Download { device: DeviceId, file: FileId },
+    Upload { device: DeviceId, object: ObjectId },
+    /// This device's downloads of a stored object, for the app's pins; a
+    /// read's failure goes to its caller and leaves no record (§17.7).
+    Download { device: DeviceId, object: ObjectId },
     /// A pin coven keeps for a file kept here, which it downloads itself
     /// (§17.8).
     Keep { file: FileId },
@@ -6556,7 +6556,7 @@ impl FileLocation {
     /// The device that uploaded the bytes, which owns deleting them.
     pub fn uploader(&self) -> DeviceId;
     /// The stored object's id, the last part of its path.
-    pub fn object(&self) -> FileId;
+    pub fn object(&self) -> ObjectId;
 }
 
 /// Current availability; never persisted in the file's record (§17.6).
@@ -7267,10 +7267,15 @@ pub enum ProviderSignOut {
 /// A one-time invite's UUID, also naming its join-request object (§13.2).
 pub struct InviteId(pub Uuid);
 
-/// A random file id: a file's id, as `coven_files` and the app's file
-/// reference columns hold it (§17.2), or a stored object's, its name in
-/// storage (§17.5). ToSql/FromSql bind/read canonical text.
+/// A file's random id, as `coven_files` and the app's file reference
+/// columns hold it (§17.2). ToSql/FromSql bind/read canonical text.
 pub struct FileId(pub Uuid);
+
+/// A stored object's random id, the last part of its path
+/// `<store>/files/<uploader>/<object>` (§17.5): never a file's id, since
+/// files over the same bytes share one object. ToSql/FromSql bind/read its
+/// 16 bytes.
+pub struct ObjectId(pub Uuid);
 
 /// What the app may show before using a scanned or typed code (E10).
 pub enum CodeInfo {

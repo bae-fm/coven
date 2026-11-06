@@ -1728,7 +1728,7 @@ provider can't move one object into another's place.
 | `<store>/seq/<n>` | One create-once sequence slot |
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement; a device gone for good's folders are listed once, for bodies no announcement names (§16.6) |
-| `<store>/files/<device>/<file>` | An uploaded file |
+| `<store>/files/<device>/<object>` | An uploaded file, by its random object id |
 | `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite, or the marker of its ended invite |
 | `<store>/join-requests/<device>/gone` | The marker of a device gone for good, beside its requests; never deleted |
 | `<store>/.coven-uploads/<device>/<session>` | One upload temporary or provider session of the device whose connection staged it; never a published object (§20.6) |

@@ -403,7 +403,7 @@ fn onedrive_live_listing_lag() {
             ObjectPath::file(
                 live.store,
                 DeviceId(31),
-                coven_foundation::id_source::FileId(uuid::Uuid::from_u128(number.into())),
+                coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(number.into())),
             )
         };
         let seed = path(1);
@@ -665,12 +665,12 @@ fn onedrive_live_cached_folders_and_scoped_listing() {
         let first = ObjectPath::file(
             live.store,
             DeviceId(31),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1)),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(1)),
         );
         let second = ObjectPath::file(
             live.store,
             DeviceId(31),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(2)),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(2)),
         );
         live.storage.create(&first, b"first").await.unwrap();
         live.storage.create(&second, b"second").await.unwrap();

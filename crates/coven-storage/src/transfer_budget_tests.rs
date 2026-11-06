@@ -138,7 +138,7 @@ fn file_path() -> crate::ObjectPath {
     crate::ObjectPath::file(
         crate::test_utils::STORE_ID,
         coven_foundation::id_source::DeviceId(1),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1)),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(1)),
     )
 }
 

@@ -135,11 +135,11 @@ async fn a_replacement_restart_keeps_the_original_revision_after_expiry() {
 /// never publish (§17.10).
 #[tokio::test]
 async fn another_device_ends_the_uploads_a_device_left() {
-    use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+    use coven_foundation::id_source::{DeviceId, ObjectId, StoreId};
     let storage = MemoryStorage::builder().build().unwrap();
     let (phone, laptop) = (DeviceId(7), DeviceId(8));
     let file = |store, device: DeviceId| {
-        ObjectPath::file(store, device, FileId(uuid::Uuid::from_u128(u128::from(device.0))))
+        ObjectPath::file(store, device, ObjectId(uuid::Uuid::from_u128(u128::from(device.0))))
     };
     let elsewhere = StoreId(uuid::Uuid::from_u128(3));
     let phones = storage.with_device(phone);
@@ -165,11 +165,11 @@ async fn another_device_ends_the_uploads_a_device_left() {
 /// another store stays (§17.10).
 #[tokio::test]
 async fn sessions_at_applied_slots_are_ended_whoever_began_them() {
-    use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+    use coven_foundation::id_source::{DeviceId, ObjectId, StoreId};
     let storage = MemoryStorage::builder().build().unwrap();
     let slot = |store, number| ObjectPath::slot(store, std::num::NonZeroU64::new(number).unwrap());
     let elsewhere = StoreId(uuid::Uuid::from_u128(3));
-    let file = ObjectPath::file(STORE_ID, DeviceId(7), FileId(uuid::Uuid::from_u128(1)));
+    let file = ObjectPath::file(STORE_ID, DeviceId(7), ObjectId(uuid::Uuid::from_u128(1)));
     for path in
         [slot(STORE_ID, 1), slot(STORE_ID, 2), slot(STORE_ID, 3), slot(elsewhere, 1), file.clone()]
     {

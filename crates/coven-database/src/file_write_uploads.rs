@@ -8,7 +8,7 @@ use crate::{
     sqlite::DatabaseConnection,
     DbError,
 };
-use coven_foundation::id_source::FileId;
+use coven_foundation::id_source::{FileId, ObjectId};
 
 /// What the transaction completing an upload does once its write applied:
 /// clear the upload's pending record (§17.9).
@@ -113,7 +113,7 @@ impl FileWrite<'_> {
     /// Returns the retired queue ids.
     pub(crate) fn retire_unlinked<S: serde::Serialize + 'static>(
         &self,
-        in_flight: &std::collections::BTreeSet<FileId>,
+        in_flight: &std::collections::BTreeSet<ObjectId>,
         subject: impl Fn(&FileLocation) -> S,
     ) -> Result<Vec<i64>, DbError> {
         let mut retired = Vec::new();

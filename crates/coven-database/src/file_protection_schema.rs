@@ -8,10 +8,10 @@ macro_rules! coven_file_protection_tables {
         $visit!(_coven_row_file_refs, "
             CREATE TABLE _coven_row_file_refs (
                 device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
+                object BLOB NOT NULL CHECK(length(object)=16),
                 table_name TEXT NOT NULL,
                 key BLOB NOT NULL,
-                PRIMARY KEY(device,file,table_name,key)
+                PRIMARY KEY(device,object,table_name,key)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_row_file_refs_row ON _coven_row_file_refs(table_name,key);
         ");
@@ -53,10 +53,10 @@ macro_rules! coven_file_protection_tables {
         $visit!(_coven_queued_file_refs, "
             CREATE TABLE _coven_queued_file_refs (
                 device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
+                object BLOB NOT NULL CHECK(length(object)=16),
                 writer BLOB NOT NULL CHECK(length(writer)=8),
                 number BLOB NOT NULL CHECK(length(number)=8),
-                PRIMARY KEY(device,file,writer,number),
+                PRIMARY KEY(device,object,writer,number),
                 FOREIGN KEY(writer,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_queued_file_refs_write ON _coven_queued_file_refs(writer,number);

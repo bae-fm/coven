@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_utils::STORE_ID;
 use crate::test_utils::{Faults, MemoryStorage};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, ObjectId};
 use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn provider_check_preserves_an_occupied_path() {
 async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
     let storage = MemoryStorage::builder().transfer_limits(1024, 16).build().unwrap();
     storage.set_faults(Faults { fail_duplicate_cleanup: true, ..Faults::none() }).await;
-    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(1)));
     let StorageCheckError::ProviderCheck {
         check: StorageCheck::CreateOnce,
         source: StorageError::Cleanup { operation, cleanup },
@@ -45,7 +45,7 @@ async fn fresh_probe_may_be_omitted_from_setup_listing() {
     ] {
         let storage = MemoryStorage::builder().provider(provider).build().unwrap();
         storage.set_faults(Faults { hide_listings: true, ..Faults::none() }).await;
-        let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(8)));
+        let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(8)));
         check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     }
@@ -104,7 +104,7 @@ async fn rate_limited(refusals: usize, retry_after: Option<u64>) -> (MemoryStora
 async fn rate_limited_requests_are_sent_again_after_the_requested_wait_or_a_backoff() {
     for (retry_after, expected) in [(None, [1, 2]), (Some(5), [5, 5])] {
         let (storage, waits) = rate_limited(2, retry_after).await;
-        let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(2)));
+        let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(2)));
         check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
         assert_eq!(*waits.0.lock().unwrap(), expected.map(Duration::from_secs));
         assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
@@ -114,7 +114,7 @@ async fn rate_limited_requests_are_sent_again_after_the_requested_wait_or_a_back
 #[tokio::test]
 async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent() {
     let (storage, waits) = rate_limited(usize::MAX, None).await;
-    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(3)));
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(3)));
     let StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } =
         check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
     else {
@@ -140,7 +140,7 @@ async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent(
 async fn a_resend_that_meets_its_own_stored_attempt_settles_by_its_bytes() {
     let (storage, waits) = rate_limited(0, None).await;
     storage.set_faults(Faults { refuse_after_storing: 2, ..Faults::none() }).await;
-    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(4)));
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(4)));
     check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
     assert_eq!(*waits.0.lock().unwrap(), [1, 2].map(Duration::from_secs));
     assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
@@ -157,7 +157,7 @@ async fn a_connection_outside_setup_never_resends() {
             ..Faults::none()
         })
         .await;
-    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(5)));
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(5)));
     assert!(matches!(
         check_provider(&storage, &path, b"sealed test bytes").await,
         Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
@@ -179,7 +179,7 @@ async fn only_a_setup_calls_own_connection_resends() {
         ..Faults::none()
     };
     let setup = storage.during_setup(crate::SetupWaits::default());
-    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(6)));
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(6)));
     storage.set_faults(limit()).await;
     check_provider(&setup, &path, b"sealed test bytes").await.unwrap();
     assert_eq!(*clock.0.lock().unwrap(), [Duration::from_secs(1)]);

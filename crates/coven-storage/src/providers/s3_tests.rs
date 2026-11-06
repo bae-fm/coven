@@ -485,7 +485,7 @@ async fn multipart_sizes_parts_for_the_promised_object() {
     let path = ObjectPath::file(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xdd; 16])),
     );
     let total = 1024u64.pow(4);
     let upload = storage.begin_upload(&path, total).await.unwrap();
@@ -819,7 +819,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
         let path = ObjectPath::file(
             STORE_ID,
             coven_foundation::id_source::DeviceId(31),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xab; 16])),
         );
         state.lock().unwrap().broken_check = Some(check);
         let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
@@ -844,7 +844,7 @@ async fn provider_check_preserves_unrelated_contents() {
     let path = ObjectPath::file(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xab; 16])),
     );
     check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
     assert_eq!(

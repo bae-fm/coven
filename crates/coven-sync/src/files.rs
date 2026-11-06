@@ -86,7 +86,7 @@ impl<M: FilesMode> Clone for Files<M> {
 }
 /// One lock per stored object's cache entries, by namespace and object.
 type FileReadLocks = BTreeMap<
-    (String, coven_foundation::id_source::FileId),
+    (String, coven_foundation::id_source::ObjectId),
     std::sync::Weak<tokio::sync::Mutex<()>>,
 >;
 struct FilesInner<M: FilesMode = Writer> {

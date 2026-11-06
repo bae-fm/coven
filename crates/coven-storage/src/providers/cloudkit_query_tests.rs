@@ -1,5 +1,5 @@
 use super::*;
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, ObjectId, StoreId};
 use coven_merge::Audience;
 use std::num::NonZeroU64;
 
@@ -29,7 +29,7 @@ fn every_prefix_selects_exactly_its_objects_by_directory_equality() {
                 ObjectPath::slot(store, NonZeroU64::MIN),
                 ObjectPath::snapshot(store, Audience::Store, device, NonZeroU64::MIN),
                 ObjectPath::snapshot(store, circle.clone(), device, NonZeroU64::MIN),
-                ObjectPath::file(store, device, FileId(uuid)),
+                ObjectPath::file(store, device, ObjectId(uuid)),
                 ObjectPath::floor(store),
             ]);
         }

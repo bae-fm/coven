@@ -4,7 +4,7 @@ use crate::{
     Refusal, RequiredUpdate,
 };
 use coven_database::{EntryTarget, OperationRejection, WriteCutoff};
-use coven_foundation::id_source::{DeviceId, FileId, KeyId, MemberId, StoreId};
+use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
 use coven_merge::{Audience, Slot};
 use coven_storage::{OAuthAccess, ObjectPath};
 use serde_json::{json, Value};
@@ -226,7 +226,7 @@ fn reasons() -> Vec<PendingReason> {
 /// The record of the upload of the `n`th file.
 fn upload_record(n: u128, reason: PendingReason) -> PendingRecord {
     PendingRecord::new(
-        PendingSubject::Upload { device: DeviceId(1), file: FileId(uuid::Uuid::from_u128(n)) },
+        PendingSubject::Upload { device: DeviceId(1), object: ObjectId(uuid::Uuid::from_u128(n)) },
         reason,
     )
 }

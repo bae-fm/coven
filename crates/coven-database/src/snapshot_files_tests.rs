@@ -10,12 +10,16 @@ use crate::write::tests::count;
 use crate::Database;
 use coven_format::value::Value;
 use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
-use coven_foundation::id_source::{DeviceId, FileId, SequentialIds};
+use coven_foundation::id_source::{DeviceId, FileId, ObjectId, SequentialIds};
 use coven_merge::{Audience, Timestamp, WriteId};
 use std::io::Cursor;
 
 fn file(n: u128) -> FileId {
     FileId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | n))
+}
+
+fn object(n: u128) -> ObjectId {
+    ObjectId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | n))
 }
 
 /// `device`'s first write, at `time`, recording `records`, each at its
@@ -164,9 +168,9 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
             2,
             2,
             &[
-                (shared, stored(2, file(11), "ab"), hash()),
+                (shared, stored(2, object(11), "ab"), hash()),
                 (local, Value::Text("device 2".into()), Value::Null),
-                (kept, stored(2, file(13), "ab"), hash()),
+                (kept, stored(2, object(13), "ab"), hash()),
             ],
             &[
                 ("one", reference(shared)),
@@ -176,8 +180,8 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
                 ("five", reference(kept)),
             ],
         ),
-        write(4, 3, stored(4, file(14), "cd")),
-        write(5, 4, stored(5, file(15), "ef")),
+        write(4, 3, stored(4, object(14), "cd")),
+        write(5, 4, stored(5, object(15), "ef")),
     ];
     for db in [&a, &c, &d, &e] {
         for record in received.clone() {
@@ -188,7 +192,7 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
         recorded(
             6,
             1,
-            &[(dropped, stored(6, file(16), "ab"), hash())],
+            &[(dropped, stored(6, object(16), "ab"), hash())],
             &[("five", reference(dropped))],
         )
         .into(),

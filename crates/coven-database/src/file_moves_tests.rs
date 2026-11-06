@@ -365,7 +365,7 @@ async fn a_moved_original_uploads_with_what_its_staging_recorded() {
         let chunks = sql
             .query(
                 "SELECT c.hash FROM _coven_file_chunks AS c JOIN _coven_file_uploads AS u
-                     ON u.device=c.device AND u.file=c.file
+                     ON u.device=c.device AND u.object=c.object
                  WHERE u.id=?1 ORDER BY c.chunk",
                 [upload.id],
                 |r| r.get::<_, Vec<u8>>(0),

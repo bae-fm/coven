@@ -100,7 +100,7 @@ async fn crash_after_accepted_part_and_dropped_part_resumes() {
     let path = ObjectPath::file(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xaa; 16])),
+        coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xaa; 16])),
     );
     let mut session = provider.begin_upload(&path, 10).await.unwrap();
     provider.upload_part(&mut session, b"abcd").await.unwrap();
@@ -599,7 +599,7 @@ async fn paged_listings_charge_every_page() {
         let path = ObjectPath::file(
             STORE_ID,
             coven_foundation::id_source::DeviceId(device),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1)),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(1)),
         );
         storage.create(&path, b"entry").await.unwrap();
     }

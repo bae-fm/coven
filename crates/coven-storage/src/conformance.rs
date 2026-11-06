@@ -1,5 +1,5 @@
 use crate::*;
-use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+use coven_foundation::id_source::{DeviceId, ObjectId, StoreId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -45,8 +45,8 @@ impl Conformance {
     /// Exercise the real provider operations, returning the first violated contract.
     pub async fn run(&self) -> Result<(), StorageError> {
         use coven_foundation::id_source::DeviceId;
-        let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
-        let other = ObjectPath::file(self.store, DeviceId(32), FileId(uuid::Uuid::from_u128(1)));
+        let path = ObjectPath::file(self.store, DeviceId(31), ObjectId(uuid::Uuid::from_u128(1)));
+        let other = ObjectPath::file(self.store, DeviceId(32), ObjectId(uuid::Uuid::from_u128(1)));
         let data = b"encrypted bytes";
         if self.storage.status(&path).await?.is_some() {
             return Err(StorageFailure::Protocol.with_source("absent exact status"));
@@ -246,8 +246,8 @@ impl Conformance {
         advance: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;
-        let first = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
-        let second = ObjectPath::file(self.store, DeviceId(32), FileId(uuid::Uuid::from_u128(1)));
+        let first = ObjectPath::file(self.store, DeviceId(31), ObjectId(uuid::Uuid::from_u128(1)));
+        let second = ObjectPath::file(self.store, DeviceId(32), ObjectId(uuid::Uuid::from_u128(1)));
         storage.create(&first, b"first").await.unwrap();
         storage.create(&second, b"second").await.unwrap();
         let expected = storage.list(&ObjectPrefix::files(self.store)).await.unwrap();
@@ -272,7 +272,7 @@ impl Conformance {
         expire: impl std::future::Future<Output = ()>,
     ) -> StorageError {
         let storage = &self.storage;
-        let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
+        let path = ObjectPath::file(self.store, DeviceId(31), ObjectId(uuid::Uuid::from_u128(1)));
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
         storage.resume_upload(&mut upload).await.unwrap();
         expire.await;
@@ -312,7 +312,7 @@ impl Conformance {
         lose: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;
-        let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
+        let path = ObjectPath::file(self.store, DeviceId(31), ObjectId(uuid::Uuid::from_u128(1)));
         let mut upload = storage.begin_upload(&path, part_size as u64 + 1).await.unwrap();
         assert_eq!(upload.part_size(), part_size);
         storage.resume_upload(&mut upload).await.unwrap();

@@ -266,7 +266,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         // The download limit counts file downloads. The sequence's own reads,
         // its slots, snapshots and floor, are bounded by their one reader
         // instead (§21.1), so they never wait behind a pin's files.
-        let download = match path.file_id() {
+        let download = match path.object_id() {
             Some(_) => Some(self.transfers.download().await),
             None => None,
         };

@@ -175,7 +175,7 @@ impl PublicationGate for SequenceState {
             return Ok(());
         }
         if self.check().is_err()
-            || (path.file_id().is_some() && !*lock_unpoisoned(&self.registered))
+            || (path.object_id().is_some() && !*lock_unpoisoned(&self.registered))
         {
             Err(StorageFailure::CatchUpRequired.into())
         } else {

@@ -7,7 +7,7 @@ use crate::{
     DbError, DownloadedPartStream, DownloadedWriteStream, FileEvidence, Slot, UnprovenFiles,
 };
 use coven_format::{value::Value, write::RowChange};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_merge::{ColumnValue, Operation};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +18,7 @@ use std::ops::RangeInclusive;
 pub(crate) struct FileRetention {
     /// Fixed paths named by rows, losses, published rows, waiting writes or
     /// this device's upload queue.
-    pub references: BTreeSet<(DeviceId, FileId)>,
+    pub references: BTreeSet<(DeviceId, ObjectId)>,
 }
 
 impl Database {
@@ -40,10 +40,10 @@ impl Database {
     pub async fn record_absent_snapshot(
         &self,
         id: coven_format::admin::SnapshotId,
-        files: BTreeSet<(DeviceId, FileId)>,
+        files: BTreeSet<(DeviceId, ObjectId)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| inner.access.with_writer(|writer| writer.transaction(|db| {
-            for (device, file) in files { insert_candidate(db, device, file)?; }
+            for (device, object) in files { insert_candidate(db, device, object)?; }
             db.internal_execute("INSERT INTO _coven_absent_snapshots(audience,device,number) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
                 params![crate::write_encoding::audience_text(&id.audience), id.device, id.number.to_be_bytes()])?;
             Ok(())
@@ -54,7 +54,7 @@ impl Database {
     pub(crate) async fn retained_files(&self) -> Result<FileRetention, DbError> {
         self.call(move |inner| {
             inner.access.with_committed(|db| {
-                let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((r.get::<_, DeviceId>(0)?,FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
+                let references = db.query("SELECT device,object FROM _coven_row_file_refs UNION SELECT device,object FROM _coven_published_file_refs UNION SELECT device,object FROM _coven_queued_file_refs UNION SELECT device,object FROM _coven_file_uploads", [], |r| Ok((r.get::<_, DeviceId>(0)?,r.get::<_, ObjectId>(1)?)))?.into_iter().collect();
                 Ok(FileRetention { references })
             })
         })
@@ -130,12 +130,12 @@ impl Database {
                 let mut candidates = Vec::new();
                 for device in uploaders {
                     candidates.extend(db.query(
-                        "SELECT file,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.file=c.file),since FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.file",
+                        "SELECT object,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.object=c.object),since FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.object",
                         [device],
                         |r| {
                             Ok(FileCandidate {
                                 device,
-                                file: FileId(uuid::Uuid::from_bytes(r.get(0)?)),
+                                object: r.get(0)?,
                                 protected: r.get(1)?,
                                 since: crate::store_state_tables::slot(r, 2)?,
                             })
@@ -183,8 +183,8 @@ impl Database {
     /// again; a deleted one goes after storage confirmed its deletion.
     pub async fn settle_file_candidates(
         &self,
-        protected: Vec<(DeviceId, FileId)>,
-        deleted: Vec<(DeviceId, FileId)>,
+        protected: Vec<(DeviceId, ObjectId)>,
+        deleted: Vec<(DeviceId, ObjectId)>,
     ) -> Result<(), DbError> {
         if protected.is_empty() && deleted.is_empty() {
             return Ok(());
@@ -192,16 +192,16 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    for (device, file) in protected {
+                    for (device, object) in protected {
                         db.internal_execute(
-                            "DELETE FROM _coven_file_candidates WHERE device=?1 AND file=?2 AND EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=?1 AND file=?2)",
-                            params![device, file.0.as_bytes()],
+                            "DELETE FROM _coven_file_candidates WHERE device=?1 AND object=?2 AND EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=?1 AND object=?2)",
+                            params![device, object],
                         )?;
                     }
-                    for (device, file) in deleted {
+                    for (device, object) in deleted {
                         db.internal_execute(
-                            "DELETE FROM _coven_file_candidates WHERE device=?1 AND file=?2",
-                            params![device, file.0.as_bytes()],
+                            "DELETE FROM _coven_file_candidates WHERE device=?1 AND object=?2",
+                            params![device, object],
                         )?;
                     }
                     Ok(())
@@ -216,7 +216,7 @@ impl Database {
     #[cfg(test)]
     pub async fn add_file_candidates(
         &self,
-        files: BTreeSet<(DeviceId, FileId)>,
+        files: BTreeSet<(DeviceId, ObjectId)>,
     ) -> Result<(), DbError> {
         if files.is_empty() {
             return Ok(());
@@ -224,8 +224,8 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    for (device, file) in files {
-                        insert_candidate(db, device, file)?;
+                    for (device, object) in files {
+                        insert_candidate(db, device, object)?;
                     }
                     Ok(())
                 })
@@ -264,7 +264,7 @@ impl Database {
         &self,
         device: DeviceId,
         stop: Slot,
-        files: BTreeSet<FileId>,
+        objects: BTreeSet<ObjectId>,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -277,8 +277,8 @@ impl Database {
                     if !kept {
                         return Ok(false);
                     }
-                    for file in files {
-                        insert_candidate(db, device, file)?;
+                    for object in objects {
+                        insert_candidate(db, device, object)?;
                     }
                     db.internal_execute(
                         "INSERT INTO _coven_file_scans(device,slot) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET slot=excluded.slot",
@@ -300,8 +300,8 @@ impl Database {
 pub struct FileCandidate {
     /// The uploader named by its path.
     pub device: DeviceId,
-    /// The file's fixed id.
-    pub file: FileId,
+    /// The stored object's id, the last part of its path.
+    pub object: ObjectId,
     /// A local row, loss, published row, queued write or upload still names it.
     pub protected: bool,
     /// This device's applied slot when the path last lost its local
@@ -313,11 +313,11 @@ pub struct FileCandidate {
 fn insert_candidate(
     db: &crate::sqlite::DatabaseConnection,
     device: DeviceId,
-    file: FileId,
+    object: ObjectId,
 ) -> Result<(), DbError> {
     db.internal_execute(
-        "INSERT INTO _coven_file_candidates(device,file,since) VALUES(?1,?2,(SELECT applied FROM _coven_sequence WHERE singleton=1)) ON CONFLICT DO UPDATE SET since=max(since,excluded.since)",
-        params![device, file.0.as_bytes()],
+        "INSERT INTO _coven_file_candidates(device,object,since) VALUES(?1,?2,(SELECT applied FROM _coven_sequence WHERE singleton=1)) ON CONFLICT DO UPDATE SET since=max(since,excluded.since)",
+        params![device, object],
     )?;
     Ok(())
 }
@@ -339,7 +339,7 @@ pub(crate) fn snapshot_references(
     db: &crate::sqlite::DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
     audience: &coven_merge::Audience,
-) -> Result<BTreeSet<(DeviceId, FileId)>, DbError> {
+) -> Result<BTreeSet<(DeviceId, ObjectId)>, DbError> {
     let mut references = BTreeSet::new();
     crate::snapshot_install::file_locations(db, schema, audience, |value| {
         retain_value(value, &mut references)
@@ -361,7 +361,7 @@ pub(crate) fn snapshot_references(
 
 fn retain_change(
     row: &RowChange,
-    references: &mut BTreeSet<(DeviceId, FileId)>,
+    references: &mut BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {
     if let Operation::Insert(columns) | Operation::Update(columns) = &row.change.operation {
         retain_columns(&row.row.table, columns, references)?;
@@ -377,7 +377,7 @@ fn retain_change(
 fn retain_columns(
     table: &str,
     columns: &BTreeMap<String, ColumnValue<Value>>,
-    references: &mut BTreeSet<(DeviceId, FileId)>,
+    references: &mut BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {
     if let Some(column) = crate::file_protection::location(table) {
         if let Some(value) = columns.get(column) {

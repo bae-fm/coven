@@ -134,9 +134,9 @@ fn local_failures_retry_slots_and_passes_as_they_clear() {
 /// app's next read or pin, which its call's failure tells it to make (E5).
 #[test]
 fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
-    let (device, file) = (DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
-    let upload = PendingSubject::Upload { device, file };
-    let download = PendingSubject::Download { device, file };
+    let (device, object) = (DeviceId(1), ObjectId(uuid::Uuid::from_u128(1)));
+    let upload = PendingSubject::Upload { device, object };
+    let download = PendingSubject::Download { device, object };
     let storage =
         |failure| PendingReason::Storage { provider: CloudProvider::S3, failure, answered: false };
     for (reason, uploads, downloads) in [
@@ -192,8 +192,8 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
         snapshot(Audience::Store, 2, 1),
         snapshot(Audience::Circle(CircleId(Uuid::from_u128(1))), 1, 9),
         snapshot(Audience::Circle(CircleId(Uuid::from_u128(2))), 1, 1),
-        PendingSubject::Upload { device: DeviceId(1), file: FileId(Uuid::from_u128(1)) },
-        PendingSubject::Download { device: DeviceId(1), file: FileId(Uuid::from_u128(1)) },
+        PendingSubject::Upload { device: DeviceId(1), object: ObjectId(Uuid::from_u128(1)) },
+        PendingSubject::Download { device: DeviceId(1), object: ObjectId(Uuid::from_u128(1)) },
         PendingSubject::Operation { id: OperationId(1), kind: OperationKind::CreateStore },
         PendingSubject::Retention { path: ObjectPath::floor(StoreId(Uuid::from_u128(1))) },
         PendingSubject::Audience(Audience::Store),

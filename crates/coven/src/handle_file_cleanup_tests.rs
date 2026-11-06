@@ -38,7 +38,7 @@ async fn orphan(network: &Network) -> ObjectPath {
     let path = ObjectPath::file(
         ben.store,
         ben.handle.device_id(),
-        FileId(coven_foundation::id_source::UuidIds.new_id()),
+        ObjectId(coven_foundation::id_source::UuidIds.new_id()),
     );
     ben.storage.create(&path, b"never named").await.unwrap();
     path
@@ -198,7 +198,7 @@ async fn an_admin_cleans_up_when_the_owner_has_no_device_left() {
     network.sync(1).await;
     let phone = ana.handle.device_id();
     let orphan =
-        ObjectPath::file(ana.store, phone, FileId(coven_foundation::id_source::UuidIds.new_id()));
+        ObjectPath::file(ana.store, phone, ObjectId(coven_foundation::id_source::UuidIds.new_id()));
     ana.storage.create(&orphan, b"never named").await.unwrap();
     let ben = &network.devices[1];
     ben.handle.remove_device(phone).await.unwrap();

@@ -822,7 +822,7 @@ async fn put_and_part_bytes_are_heard_through_the_object() {
         let path = ObjectPath::file(
             STORE_ID,
             coven_foundation::id_source::DeviceId(31),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
+            coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xdd; 16])),
         );
         let total = 12 * 1024 * 1024;
         let mut upload = storage.begin_upload(&path, total).await.unwrap();
