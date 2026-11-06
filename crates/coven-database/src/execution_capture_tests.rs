@@ -607,3 +607,164 @@ async fn an_insert_carries_the_rows_still_naming_its_key() {
     assert_eq!(shape(&operations.steps[&carried]), vec![(2, Half::Move, 0, false)]);
     db.close().await.unwrap();
 }
+
+/// What recording a write costs per row of a table whose audience follows a
+/// reference (§15.4), as that table grows: each write's wall and CPU time
+/// and SQL statements per row, its full-scan steps, every statement's runs
+/// and virtual machine steps per row, and the machine's load. A measurement,
+/// not a check: run it with `--ignored --nocapture` on two commits and
+/// compare the statements; wall time follows the machine's load.
+mod write_cost {
+    use crate::sqlite::tests::ProfiledStatement;
+    use crate::tests::TestStore;
+    use crate::{RowIdentity, SyncedTable};
+    use coven_foundation::id_source::CircleId;
+    use std::collections::BTreeMap;
+    use std::time::Instant;
+
+    const ALBUMS: usize = 100;
+    const CHUNK: usize = 10_000;
+
+    fn album(i: usize) -> String {
+        format!("00000000-0000-4000-8000-a{i:011x}")
+    }
+
+    fn track(i: usize) -> String {
+        format!("00000000-0000-4000-8000-b{i:011x}")
+    }
+
+    /// The test process's CPU time so far, which other processes' load leaves
+    /// out, in microseconds.
+    fn cpu() -> f64 {
+        let pid = std::process::id().to_string();
+        let out =
+            std::process::Command::new("/bin/ps").args(["-o", "cputime=", "-p", &pid]).output();
+        let text = String::from_utf8_lossy(&out.unwrap().stdout).trim().to_owned();
+        // [[days-]hours:]minutes:seconds.hundredths
+        text.split(':').fold(0.0, |total, part| total * 60.0 + part.parse::<f64>().unwrap()) * 1e6
+    }
+
+    fn load() -> String {
+        let out =
+            std::process::Command::new("/usr/sbin/sysctl").args(["-n", "vm.loadavg"]).output();
+        out.map_or_else(|_| "?".into(), |out| String::from_utf8_lossy(&out.stdout).trim().into())
+    }
+
+    /// Run one write of `rows` rows and print what it cost per row.
+    async fn measure(
+        db: &crate::Database,
+        label: &str,
+        rows: usize,
+        write: impl FnOnce(crate::SqlContext<'_, '_>) -> Result<(), crate::DbError> + Send + 'static,
+    ) {
+        let (started, cpu_started) = (Instant::now(), cpu());
+        db.write(write).await.unwrap();
+        let elapsed = started.elapsed();
+        let cpu = (cpu() - cpu_started) / rows as f64;
+        let statements = db.inspect_writer(|writer| writer.profiled_statements());
+        let fullscan: i64 = statements.iter().map(|s| i64::from(s.fullscan_steps)).sum();
+        println!(
+            "{label}: {rows} rows, {:.1} µs/row, {cpu:.1} CPU µs/row, {:.2} statements/row, \
+             {fullscan} full-scan steps, load {}",
+            elapsed.as_secs_f64() * 1e6 / rows as f64,
+            statements.len() as f64 / rows as f64,
+            load(),
+        );
+        for (sql, (runs, vm, scans)) in heaviest(&statements) {
+            let sql: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            let sql = sql.chars().take(110).collect::<String>();
+            println!(
+                "    {:>6.2}/row {:>8.1} vm/row {scans:>8} scans  {sql}",
+                runs as f64 / rows as f64,
+                vm as f64 / rows as f64
+            );
+        }
+    }
+
+    /// Each statement's executions, virtual machine steps and full-scan steps in
+    /// the write, most steps first.
+    fn heaviest(statements: &[ProfiledStatement]) -> Vec<(String, (i64, i64, i64))> {
+        let mut by_sql: BTreeMap<String, (i64, i32, i32, i64)> = BTreeMap::new();
+        for statement in statements {
+            let entry =
+                by_sql.entry(statement.sql.clone()).or_insert((0, statement.vm_steps, 0, 0));
+            entry.0 += 1;
+            entry.2 = statement.vm_steps;
+            entry.3 += i64::from(statement.fullscan_steps);
+        }
+        let mut out: Vec<_> = by_sql
+            .into_iter()
+            .map(|(sql, (runs, first, last, scans))| (sql, (runs, i64::from(last - first), scans)))
+            .collect();
+        out.sort_by_key(|(_, (_, vm, _))| -vm);
+        out
+    }
+
+    #[tokio::test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    async fn write_cost_per_row_as_the_table_grows() {
+        let store = TestStore::new();
+        let db = store
+            .schema(
+                vec![
+                    SyncedTable::new("albums", RowIdentity::IndependentUuid)
+                        .audience_column("audience"),
+                    SyncedTable::new("tracks", RowIdentity::IndependentUuid).audience_from("album"),
+                ],
+                "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL);
+                 CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
+                   album TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE, title TEXT)",
+            )
+            .await
+            .unwrap();
+        let circle = CircleId(uuid::Uuid::from_u128(11));
+        store.join_circle(&db, circle);
+        db.write(|sql| {
+            for i in 0..ALBUMS {
+                sql.execute("INSERT INTO albums VALUES(?1,'store')", [album(i)])?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut audience = "store".to_owned();
+        for chunk in 0..100_000 / CHUNK {
+            let first = chunk * CHUNK;
+            measure(&db, &format!("insert tracks {first}.."), CHUNK, move |sql| {
+                for i in first..first + CHUNK {
+                    sql.execute(
+                        "INSERT INTO tracks VALUES(?1,?2,'t')",
+                        [track(i), album(i % ALBUMS)],
+                    )?;
+                }
+                Ok(())
+            })
+            .await;
+            let rows = first + CHUNK;
+            if ![20_000, 50_000, 100_000].contains(&rows) {
+                continue;
+            }
+            println!("--- the table holds {rows} tracks");
+            measure(&db, "update 1000 titles", 1000, move |sql| {
+                for i in 0..1000 {
+                    sql.execute(
+                        "UPDATE tracks SET title='u' WHERE id=?1",
+                        [track(i * rows / 1000)],
+                    )?;
+                }
+                Ok(())
+            })
+            .await;
+            audience = if audience == "store" { circle.to_string() } else { "store".to_owned() };
+            let to = audience.clone();
+            measure(&db, "move every album, carrying every track", rows, move |sql| {
+                for i in 0..ALBUMS {
+                    sql.execute("UPDATE albums SET audience=?1 WHERE id=?2", [&to, &album(i)])?;
+                }
+                Ok(())
+            })
+            .await;
+        }
+        db.close().await.unwrap();
+    }
+}
