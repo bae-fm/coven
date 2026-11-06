@@ -112,6 +112,27 @@ theorem closed_part_never_counts (seq : Nat → Slot S) (A : S.Aud) (j k v : Nat
   rw [closed_version R seq A j closed k after]
   omega
 
+/-- **A raise that finds its version reached, or its audience closed, never
+counts.** The raising operation validates against the `j` slots it has
+applied. If `A` has reached `v` there, or no one may raise `A` from `j` on, as
+for a deleted circle, a raise of `A` to `v` is refused at whatever later slot
+it lands. So that operation adopts the state it applied instead of claiming,
+and its preparation is unused (coven.md §15.9, §18.3, §18.8). -/
+theorem satisfied_raise_never_counts (seq : Nat → Slot S) (A : S.Aud) (j k v : Nat)
+    {d : S.Dev} {c : Nat} {p : S.Path} (slot : seq k = .boundary d A (.raise v) c p)
+    (after : j < k)
+    (satisfied : v ≤ (audAt R seq A j).version ∨
+      ∀ i, j ≤ i → ∀ d kind, R.boundaryAllowed (ledgerAt R seq i) d A kind = false) :
+    ¬ AppliedTo R seq A k := by
+  intro ⟨_, valid⟩
+  rw [slot] at valid
+  simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid
+  rcases satisfied with reached | closed
+  · have := version_mono R seq A j (k - 1) (by omega)
+    omega
+  · have := closed (k - 1) (by omega) d (.raise v)
+    simp_all
+
 end General
 
 open ReaderExamples CircleRaise

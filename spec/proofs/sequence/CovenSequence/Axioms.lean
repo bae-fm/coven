@@ -190,6 +190,7 @@ import SequenceApply
 #print axioms CovenSequence.WriteVersion.closed_step_version
 #print axioms CovenSequence.WriteVersion.closed_version
 #print axioms CovenSequence.WriteVersion.closed_part_never_counts
+#print axioms CovenSequence.WriteVersion.satisfied_raise_never_counts
 #print axioms CovenSequence.RaiseBody.one_part_agrees
 #print axioms CovenSequence.RaiseBody.late_part_differs
 

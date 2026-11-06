@@ -768,6 +768,12 @@ side of the rule that a part counts only at a version its audience has reached.
   audience no one may raise from some slot on, such as a deleted circle, keeps
   its version from that slot, so a part ahead of it never meets the version
   rule at any later landing slot.
+- `satisfied_raise_never_counts`: a raise of an audience to a version it has
+  reached in the prefix the raising operation validated against, or of an
+  audience no one may raise from there on, is refused at every later slot.
+  So that operation is already satisfied: it adopts the state it applied and
+  undoes its unused preparation (`operation_outcome`), whose announcement
+  supplies nothing (`preparation_no_effect`).
 
 [`RaiseBody`](sequence/CovenSequence/RaiseBody.lean) compares the model's raise
 body with the one coven writes. The model's is the rows at the raise's coverage,

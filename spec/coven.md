@@ -7746,7 +7746,10 @@ circle. The circle's other devices reload from that one.
 A raise must increase the current version: the last one raised to, or for a
 circle never raised, its base (§15.5). An operation that finds the version it
 wanted already established adopts the announced state instead of claiming another
-raise. A higher raise is checked against that state.
+raise: a raise to a version its audience has reached would be refused wherever
+it landed
+([`satisfied_raise_never_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
+A higher raise is checked against that state.
 
 Nobody raises a deleted circle (§15.9). A device whose migration captured a
 circle that is deleted before its raise goes out drops that capture once the
@@ -11676,7 +11679,7 @@ Write-ups explain each model and state its assumptions:
 | Provider access is set by its own member, or by an admin for an S3 key, and only to the kind of access slot 1 recorded; an entry of the other kind is refused | `applied_access_authorized`, `other_kind_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1, §10.3 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
-| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo, of an action refused or already satisfied, leaves no entry bytes or deletable artifacts | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §10.4, §11.2, §11.7 |
+| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo, of an action refused or already satisfied, leaves no entry bytes or deletable artifacts | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §10.4, §11.2, §11.7, §18.8 |
 | An operation's key copies and announcements claim their own slots, which hold them, before its entry's slot | `preparation_precedes_entry` | `proofs/sequence/CovenSequence/Operation.lean` | §11.1, §11.5 |
 | Once an operation is undoing, because its action is already satisfied or no longer allowed, it stays undoing until its undo is confirmed and then ends with that outcome; it never claims again, and a failed undo keeps its record | `undo_final` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.4 |
 | Operation steps preserve already claimed history, including key copies and announcements after undo | `steps_preserve_history`, `undo_keeps_preparation`, `undone_retains_history` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.7 |
@@ -11743,12 +11746,13 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience's version never goes down, so a part sent once its audience reached its version counts on that rule wherever it lands | `step_version`, `version_mono`, `waiting_part_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience no one may raise, such as a deleted circle, keeps its version, so a part ahead of it never meets the version rule wherever it lands | `closed_step_version`, `closed_version`, `closed_part_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
+| *Body.* A raise to a version its audience has reached in the prefix its operation validated against, or of an audience no one may raise from there on, is refused at every later slot, so that operation adopts the state instead of claiming | `satisfied_raise_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §15.9, §18.3, §18.8 |
 | *Body.* A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3, §18.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |
-| A preparation announcement alone changes no rows, schema version, reset or usable ordinary snapshots, though its coverage still limits later preparations and entries. In one example history, a reset preparation never activated stays out of the snapshots, never becomes a reset, and is never usable | `preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
+| A preparation announcement alone changes no rows, schema version, reset or usable ordinary snapshots, though its coverage still limits later preparations and entries. In one example history, a reset preparation never activated stays out of the snapshots, never becomes a reset, and is never usable | `preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3, §18.8 |
 | Loading a floor snapshot and the slots after it reaches the full state; sound readers at one position agree | `joiner_reaches_head`, `readers_agree` | `proofs/sequence/CovenSequence/Reader.lean` | §16.4, §16.5 |
 | A reload that reads the kept slots through the floor's `at` before checking the floor it reads before committing never refuses an honest floor; for a floor whose `at` is at most the target, checking at the target is the same check | `honest_floor_installs`, `install_eq_atTarget` | `proofs/sequence/CovenSequence/ReloadFloor.lean` | §16.4, §16.5 |
 | *Body.* Checked against only the slots through its target, a reload refuses an honest floor written past it, as after a newer snapshot of a circle a device was just added to | `atTarget_refuses_honest_floor` | `proofs/sequence/CovenSequence/ReloadFloor.lean` | §16.5 |
