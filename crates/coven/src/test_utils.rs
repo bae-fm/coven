@@ -6,7 +6,7 @@ use crate::*;
 use coven_crypto::custody::{Keychain, KeyringCustody, StoreKeychain};
 use coven_foundation::files::StoreDirectories;
 use coven_foundation::network_watch::{NetworkSource, TestNetwork};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -27,6 +27,18 @@ impl Coven {
     /// test that hears them (E15).
     pub fn in_memory_reporting_to(app_dir: PathBuf, bugs: crate::task::BugSinkRef) -> Self {
         Self::testing(app_dir, Keychain::in_memory("coven-test").expect("valid service name"), bugs)
+    }
+
+    /// An installation, as `in_memory` makes, whose keychain's device-only
+    /// entries are the ones `save_device_keychain` saved at `path`: the same
+    /// device again, which opens the stores it had, as a test reopens a kept
+    /// copy of a store in another process. Its person entries start empty.
+    pub fn in_memory_with_saved_keychain(app_dir: PathBuf, path: &Path) -> Result<Self, KeyError> {
+        Ok(Self::testing(
+            app_dir,
+            Keychain::in_memory_with_saved_device_entries("coven-test", path)?,
+            crate::task::HeardBugs::shared(),
+        ))
     }
 
     /// An installation on an Android phone: its person entries behave as
@@ -178,6 +190,14 @@ impl Coven {
     ) -> Result<(), KeyError> {
         let keychain = Arc::new(StoreKeychain::new(self.keychain.clone(), directory.id()));
         Custody::<StoreKeyring>::persist(&KeyringCustody::new(keychain), keys)
+    }
+
+    /// Save this installation's device-only keychain entries at `path`,
+    /// replacing what is there: each store's device id, store keys and
+    /// member keys, which `in_memory_with_saved_keychain` loads. The
+    /// person's entries stay out.
+    pub fn save_device_keychain(&self, path: &Path) -> Result<(), KeyError> {
+        self.keychain.save_device_entries(path)
     }
 
     /// Delete this installation's storage credentials for `store`, as the

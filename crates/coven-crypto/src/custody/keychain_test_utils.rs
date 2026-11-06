@@ -4,6 +4,12 @@ use crate::custody::block_store_test_utils::MemoryBlockStore;
 use crate::custody::person_entries::restore_code_store;
 use crate::custody::KeychainError;
 use std::collections::BTreeMap;
+use std::path::Path;
+use zeroize::Zeroizing;
+
+/// The first bytes of a keychain's saved device-only entries: their magic
+/// and version.
+const SAVED_DEVICE_ENTRIES_MAGIC: &[u8] = b"CVDE\x01";
 
 /// The synced entries iCloud Keychain carries to every device of one person:
 /// each in-memory keychain of the person holds a share, which only a keychain
@@ -297,6 +303,31 @@ impl Keychain {
         )
     }
 
+    /// An isolated in-memory keychain, as `in_memory` makes, whose
+    /// device-only entries are the ones `save_device_entries` saved at
+    /// `path`: the same device again, in another process. Its person entries
+    /// start empty. Bytes `save_device_entries` didn't write fail with
+    /// `KeyError::Material`.
+    pub fn in_memory_with_saved_device_entries(
+        name: impl Into<String>,
+        path: &Path,
+    ) -> Result<Arc<Self>, KeyError> {
+        let bytes = Zeroizing::new(coven_foundation::files::read_existing(path)?);
+        let device = decode_device_entries(&bytes)?;
+        let keychain = Self::in_memory(name)?;
+        keychain.with_memory(|memory| memory.device = device);
+        Ok(keychain)
+    }
+
+    /// Save this keychain's device-only entries at `path`, replacing what is
+    /// there: each store's device id, store keys and member keys, and every
+    /// other entry that never leaves the device. The person's entries stay
+    /// out. Panics if this is a native keychain.
+    pub fn save_device_entries(&self, path: &Path) -> Result<(), KeyError> {
+        let bytes = self.with_memory(|memory| encode_device_entries(&memory.device));
+        Ok(coven_foundation::files::write_atomic(path, &bytes)?)
+    }
+
     /// Another device of the same person: its own empty device-only entries.
     /// With iCloud Keychain it has the same person entries, as iCloud
     /// Keychain carries them between the person's devices; with Block Store
@@ -432,4 +463,43 @@ impl Keychain {
     pub fn refuse_person_entry_operations(&self, refuse: bool) {
         self.with_memory(|memory| memory.refuse_person = refuse);
     }
+}
+
+/// The magic, the number of entries, then each entry's account and bytes,
+/// each after its length.
+fn encode_device_entries(entries: &BTreeMap<String, SecretBytes>) -> Zeroizing<Vec<u8>> {
+    let fields = entries.iter().flat_map(|(account, bytes)| [account.as_bytes(), bytes.as_bytes()]);
+    // Allocate once: growing a secret Vec would abandon an unerased copy.
+    let length = fields.clone().map(|field| 8 + field.len()).sum::<usize>();
+    let mut encoded =
+        Zeroizing::new(Vec::with_capacity(SAVED_DEVICE_ENTRIES_MAGIC.len() + 8 + length));
+    encoded.extend_from_slice(SAVED_DEVICE_ENTRIES_MAGIC);
+    encoded.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for field in fields {
+        encoded.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(field);
+    }
+    encoded
+}
+
+/// Read what `encode_device_entries` wrote.
+fn decode_device_entries(
+    mut encoded: &[u8],
+) -> Result<BTreeMap<String, SecretBytes>, MaterialError> {
+    fn field<'a>(encoded: &mut &'a [u8]) -> Result<&'a [u8], MaterialError> {
+        let length = usize::try_from(wire::number(encoded)?).or(Err(MaterialError::Encoding))?;
+        wire::take(encoded, length)
+    }
+    wire::prefix(&mut encoded, SAVED_DEVICE_ENTRIES_MAGIC)?;
+    let mut entries = BTreeMap::new();
+    for _ in 0..wire::number(&mut encoded)? {
+        let account =
+            String::from_utf8(field(&mut encoded)?.to_vec()).or(Err(MaterialError::Encoding))?;
+        let bytes = SecretBytes::new(field(&mut encoded)?.to_vec());
+        if entries.insert(account, bytes).is_some() {
+            return Err(MaterialError::Encoding);
+        }
+    }
+    wire::end(encoded)?;
+    Ok(entries)
 }

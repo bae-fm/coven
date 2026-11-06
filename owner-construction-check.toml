@@ -1646,6 +1646,8 @@ tables = [
     "Coven::in_memory",
     # An installation whose bugs in work nobody waits for go to the test.
     "Coven::in_memory_reporting_to",
+    # The same device again, over the device-only entries a test saved.
+    "Coven::in_memory_with_saved_keychain",
     # Another of the person's devices shares only the person entries.
     "Coven::another_device",
     # An Android phone keeps the person entries in Block Store, and a new

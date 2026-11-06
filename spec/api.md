@@ -635,6 +635,13 @@ impl Coven {
     /// test that hears them (E15).
     pub fn in_memory_reporting_to(app_dir: PathBuf, bugs: coven::task::BugSinkRef) -> Self;
 
+    /// `in_memory`, whose device-only entries are the ones
+    /// `save_device_keychain` saved at `path`: the same device again, which
+    /// opens the stores it had, as a test reopens a kept copy of a store in
+    /// another process. Its person entries start empty. A file that call
+    /// didn't write fails with `KeyError::Material`.
+    pub fn in_memory_with_saved_keychain(app_dir: PathBuf, path: &Path) -> Result<Self, KeyError>;
+
     /// An installation on an Android phone: the person's entries behave as
     /// Block Store keeps them, this phone's own, with its limits (§13.1).
     pub fn with_block_store(app_dir: PathBuf) -> Self;
@@ -695,6 +702,12 @@ impl Coven {
         directory: &StoreDir,
         keys: &StoreKeyring,
     ) -> Result<(), KeyError>;
+
+    /// Save this installation's device-only keychain entries at `path`,
+    /// replacing what is there: each store's device id, store keys and member
+    /// keys, and every other entry that never leaves the device. The person's
+    /// entries stay out. Nothing reaches the OS keychain.
+    pub fn save_device_keychain(&self, path: &Path) -> Result<(), KeyError>;
 
     /// Delete this installation's storage credentials for one store, as a
     /// keychain entry deleted by hand: the location stays recorded, and the

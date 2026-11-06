@@ -35,6 +35,8 @@ mod settings;
 #[cfg(any(test, feature = "test-utils"))]
 mod tree_copy;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use atomic_file::read_existing;
 pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter};
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;

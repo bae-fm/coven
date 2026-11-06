@@ -562,3 +562,40 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     assert!(ring.store_key_ids().count() > before.store_key_ids().count());
     handle.close().await.unwrap();
 }
+
+/// A store opens in a new installation, as in another process, over a
+/// keychain loaded from the device-only entries its creator saved: the same
+/// device, with its store keys. An installation without them can't open it.
+#[tokio::test]
+async fn a_store_opens_over_the_keychain_its_installation_saved() {
+    let app_dir = tempfile::tempdir().unwrap();
+    let saved = tempfile::tempdir().unwrap();
+    let saved = saved.path().join("keychain");
+    let builder = |app: &Coven| {
+        app.builder()
+            .synced_tables(tables())
+            .namespaces(namespaces())
+            .migrations(vec![Migration::addition(1, "records", SCHEMA)])
+    };
+    let app = Coven::in_memory(app_dir.path().into());
+    let handle = builder(&app).create_store("Kept").await.unwrap();
+    let store = handle.store_id();
+    note(&handle, "kept".into()).await;
+    handle.close().await.unwrap();
+    let keys = StoreKeyring::new(StoreKey::generate(KeyId(SequentialIds::new().new_id())).unwrap());
+    app.keep_store_keys(&app.store_dir(&store), &keys).unwrap();
+    app.save_device_keychain(&saved).unwrap();
+    drop(app);
+
+    let without = Coven::in_memory(app_dir.path().into());
+    let refused = builder(&without).open(store, |_| ()).await;
+    assert!(
+        matches!(refused, Err(CovenError::DeviceKeyMissing { store: missing }) if missing == store)
+    );
+
+    let app = Coven::in_memory_with_saved_keychain(app_dir.path().into(), &saved).unwrap();
+    let handle = builder(&app).open(store, |_| ()).await.unwrap();
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    assert_eq!(read_note(&handle).await, "kept");
+    handle.close().await.unwrap();
+}

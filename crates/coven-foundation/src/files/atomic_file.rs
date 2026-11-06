@@ -458,6 +458,14 @@ pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FileError> {
     }
 }
 
+/// The complete file at `path`, which must exist, for a test reading back
+/// bytes it saved with [`replace`].
+#[cfg(any(test, feature = "test-utils"))]
+pub fn read_existing(path: &Path) -> Result<Vec<u8>, FileError> {
+    read_optional(path)?
+        .ok_or_else(|| FileError::at("read file", path, io::ErrorKind::NotFound.into()))
+}
+
 /// The JSON record at `path`, or `None` when it is absent. Bytes that don't
 /// decode are invalid data, reported as `operation`'s failure.
 pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
