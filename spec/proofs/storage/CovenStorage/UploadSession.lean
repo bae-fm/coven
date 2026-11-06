@@ -888,12 +888,12 @@ theorem stray_named (s : State) (g : Good s) (h : 0 < s.stray) :
     ∃ r, s.row = some r ∧ r.recorded = .plan :=
   g.named h
 
-/-- The steps that can leave a stray: a lost begin reply, and a crash or a
-failure, which strand a session the attempt began that its row doesn't name
-yet. -/
+/-- The steps that can leave a stray: a lost begin reply, and a crash, which
+strands a session the attempt began that its row doesn't name yet. A failure
+records the session the attempt holds instead. -/
 def Step.strands : Step → Bool
   | .begin replied => !replied
-  | .crash | .fail _ => true
+  | .crash => true
   | _ => false
 
 theorem apply_stray_le (s : State) (st : Step) (h : st.strands = false) :
