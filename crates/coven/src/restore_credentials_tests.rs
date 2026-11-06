@@ -455,3 +455,56 @@ async fn a_locked_keychain_is_reported_rather_than_an_absent_key() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// A replacement whose entry is journaled and refused keeps its key apart,
+/// and another key waits for it to end: it is refused with
+/// `ReplacementPending`, keeping nothing (§14.3).
+#[tokio::test]
+async fn another_key_waits_for_a_replacement_under_way() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let next = crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
+        path.slot_number().is_some()
+    })
+    .await
+    .iter()
+    .filter_map(|object| object.path.slot_number())
+    .map(|slot| slot.0)
+    .max()
+    .unwrap()
+        + 1;
+    owner
+        .storage
+        .set_faults(Faults {
+            create_failures: [(
+                ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(next).unwrap()),
+                (StorageFailure::PermissionDenied, 403),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(matches!(
+        handle.replace_access_key("replacement".into(), SecretText::new("secret".into())).await,
+        Err(SyncError::Storage(_))
+    ));
+    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
+    let kept = || {
+        S3Credentials::decode(custody.replacing_access_key().unwrap().unwrap().as_bytes())
+            .unwrap()
+            .access_key_id
+    };
+    assert_eq!(kept(), "replacement");
+    let other =
+        handle.replace_access_key("other".into(), SecretText::new("other-secret".into())).await;
+    assert!(
+        matches!(&other, Err(SyncError::ReplacementPending { access_key_id })
+            if access_key_id == "replacement"),
+        "{other:?}"
+    );
+    assert_eq!(kept(), "replacement");
+    handle.close().await.unwrap();
+    owner.close().await;
+}

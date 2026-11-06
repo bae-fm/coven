@@ -649,10 +649,10 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
     }
 }
 
-#[tokio::test]
 /// A replacement whose record fails to publish keeps the new key apart:
 /// custody connects with the old one until history records the new, and
 /// retrying finishes it once (§14.3).
+#[tokio::test]
 async fn failed_access_publication_keeps_the_key_apart_and_retry_finishes_once() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
