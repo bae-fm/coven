@@ -176,6 +176,13 @@ import SequenceApply
 #print axioms CovenSequence.CircleRaise.fresh_raise_body
 #print axioms CovenSequence.CircleRaise.below_refused_until_raised
 #print axioms CovenSequence.CircleRaise.joiner_cannot_raise
+#print axioms CovenSequence.CircleLifecycle.name_is_latest_rename
+#print axioms CovenSequence.CircleLifecycle.deleted_target_refused
+#print axioms CovenSequence.CircleLifecycle.live_has_member
+#print axioms CovenSequence.CircleLifecycle.leaving_deletes
+#print axioms CovenSequence.CircleLifecycle.member_removal_deletes
+#print axioms CovenSequence.CircleLifecycle.deleted_at_slot
+#print axioms CovenSequence.CircleLifecycle.deleted_stays
 #print axioms CovenSequence.WriteVersion.step_version
 #print axioms CovenSequence.WriteVersion.version_mono
 #print axioms CovenSequence.WriteVersion.waiting_part_counts

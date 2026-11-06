@@ -17,6 +17,9 @@ name = "SequenceKeys"
 name = "SequenceInvites"
 
 [[lean_lib]]
+name = "SequenceCircles"
+
+[[lean_lib]]
 name = "SequenceInput"
 
 [[lean_lib]]

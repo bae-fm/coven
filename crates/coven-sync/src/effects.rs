@@ -1,9 +1,9 @@
 //! Administrative authority and effects at one preceding sequence prefix (§10).
 
-use crate::{EntryTarget, OperationRejection};
+use crate::{circle_effects, EntryTarget, OperationRejection};
 use coven_database::{
-    AdminEffect, Boundary, DeviceState, StoreCircle, StoreDevice, StoreIdentity, StoreMember,
-    StoreState, StoreVersion,
+    AdminEffect, Boundary, DeviceState, StoreDevice, StoreIdentity, StoreMember, StoreState,
+    StoreVersion,
 };
 use coven_format::{
     admin::{MemberRole, StoreChange},
@@ -216,14 +216,7 @@ pub(crate) fn checked_change(
             for device in next.devices.values_mut().filter(|device| device.member == *id) {
                 device.state = DeviceState::Removed;
             }
-            for (circle_id, circle) in &mut next.circles {
-                if !next.circle_deletions.contains_key(circle_id) {
-                    circle.members.remove(id);
-                    if circle.members.is_empty() {
-                        next.circle_deletions.insert(*circle_id, slot);
-                    }
-                }
-            }
+            circle_effects::leave_all(&mut next, id, slot);
         }
         ChangeRole { member: id, role } => {
             let target = next
@@ -286,44 +279,22 @@ pub(crate) fn checked_change(
             target.state = DeviceState::Removed;
         }
         CreateCircle { circle, name, breaking_version, .. } => {
-            if state.circles.contains_key(circle) {
-                return Err(TargetGone(EntryTarget::Circle(*circle)));
-            }
-            next.circles.insert(
-                *circle,
-                StoreCircle {
-                    name: name.clone(),
-                    members: [*author].into(),
-                    base: *breaking_version,
-                },
-            );
+            circle_effects::create(&mut next, *circle, name, *author, *breaking_version)?;
         }
         RenameCircle { circle, name } => {
-            let target = next.circles.get_mut(circle).expect("authorized circle");
-            if target.name == *name {
-                return Ok(None);
-            }
-            target.name = name.clone();
-        }
-        DeleteCircle { circle } => {
-            next.circles.get_mut(circle).expect("authorized circle").members.clear();
-            next.circle_deletions.insert(*circle, slot);
-        }
-        AddCircleMember { circle, member: id } => {
-            if state.active_member(id).is_none() {
-                return Err(TargetGone(EntryTarget::Member(*id)));
-            }
-            if !next.circles.get_mut(circle).expect("authorized circle").members.insert(*id) {
+            if !circle_effects::rename(&mut next, *circle, name) {
                 return Ok(None);
             }
         }
-        RemoveCircleMember { circle, member: id } => {
-            let target = next.circles.get_mut(circle).expect("authorized circle");
-            if !target.members.remove(id) {
+        DeleteCircle { circle } => circle_effects::delete(&mut next, *circle, slot),
+        AddCircleMember { circle, member } => {
+            if !circle_effects::add(&mut next, *circle, *member)? {
                 return Ok(None);
             }
-            if target.members.is_empty() {
-                next.circle_deletions.insert(*circle, slot);
+        }
+        RemoveCircleMember { circle, member } => {
+            if !circle_effects::remove(&mut next, *circle, member, slot) {
+                return Ok(None);
             }
         }
         // An invite's share lives in history, not in the membership state
@@ -366,4 +337,4 @@ pub(crate) fn checked_change(
 
 #[cfg(test)]
 #[path = "effects_tests.rs"]
-mod tests;
+pub(crate) mod tests;

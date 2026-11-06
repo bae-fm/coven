@@ -1,6 +1,7 @@
 //! The shared store sequence, durable operations, snapshots and file transfers.
 
 mod chunk_reader;
+mod circle_effects;
 mod effects;
 mod error;
 mod failure_log;

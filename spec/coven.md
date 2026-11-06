@@ -9675,8 +9675,8 @@ of this document it supports.
 What the models cover:
 
 - **The sequence:** claiming and settling, the floor, reading, deletion,
-  operations, causality, authority, unique values, owners, the cut-off,
-  snapshots, reloads and schema raises.
+  operations, causality, authority, a circle's name, members and deletion,
+  unique values, owners, the cut-off, snapshots, reloads and schema raises.
 - **The merge,** and conversion of old writes.
 - **Snapshot starts:** ordinary snapshots from the floor, and prepared snapshots
   at their raise or reset entries, as §16.3 requires.
@@ -9695,7 +9695,9 @@ What they don't cover:
   is evidence, not proof.
 - **Writing locally and checking the schema.** No model covers how a write is
   captured (§4): its record in the commit's transaction, rowids, a callback
-  that panics, a rollback that fails, read-only connections. Nor do they cover
+  that panics, a rollback that fails, read-only connections, or the refusal of
+  a write into a circle its member isn't in or that was deleted (§15.6,
+  §15.9), though the membership it checks is modelled. Nor do they cover
   the checks that refuse a schema at open (§9.1, §9.2, §9.4), though one
   refusal's reason is proved (Appendix G.3); nor `UuidText`, how a CHECK is
   judged on a merged row (§9.3), or which tables a trigger may write. Tests
@@ -11705,6 +11707,9 @@ Write-ups explain each model and state its assumptions:
 | Writes after a removal, a registration of another installation in the device's place, or a key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |
+| A circle's name is its creation's, then each valid rename's in slot order; once it is deleted, a rename of it, an addition to it or a removal from it is refused because its target is gone | `name_is_latest_rename`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.5 |
+| A live circle always has a member: a circle is deleted at the slot that takes its last member out, whether the member left it or was removed from the store, as the circle's members before that slot decide; no slot records another slot's deletion | `live_has_member`, `leaving_deletes`, `member_removal_deletes`, `deleted_at_slot` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8 |
+| A deletion is permanent: the deleted circle keeps no members and its deletion slot at every later prefix, and making a circle under its id is refused | `deleted_stays`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8, §15.9 |
 
 ### G.5 Snapshots, the floor and reloads (§16)
 

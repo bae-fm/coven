@@ -427,7 +427,7 @@ proofs() {
     fi
     if proof_selected sequence || crate_selected coven-sync; then
         runner=$(runner sequence sequenceRunner)
-        step "Rust / Lean sequence floor checks, authenticated settlement, administration, keys and invites"
+        step "Rust / Lean sequence floor checks, authenticated settlement, administration, circles, keys and invites"
         COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-sync --all-features -- --nocapture \
             sequence_sync::tests::differential::sequence_floor_matches_lean \
             sequence_sync::sequence_read::tests::sequence_read_pass_matches_lean \
@@ -443,6 +443,7 @@ proofs() {
             sequence_sync::sequence_claim::tests::differential::sequence_kept_settlement_matches_lean \
             sequence_sync::sequence_read::tests::sequence_settle_floor_matches_lean \
             effects::tests::sequence_differential::sequence_admin_matches_lean \
+            circle_effects::tests::circle_lifecycle_matches_lean \
             history::tests::sequence_key_selection_matches_lean \
             sequence_sync::sequence_operations::tests::sequence_authored_circle_permission_matches_lean \
             sequence_sync::sequence_keys::tests::key_custody_preparation_matches_lean \

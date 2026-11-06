@@ -19,6 +19,7 @@ import CovenSequence.Authority
 import CovenSequence.Registration
 import CovenSequence.Preparations
 import CovenSequence.CircleRaise
+import CovenSequence.CircleLifecycle
 import CovenSequence.WriteVersion
 import CovenSequence.RaiseBody
 import CovenSequence.QueueReload

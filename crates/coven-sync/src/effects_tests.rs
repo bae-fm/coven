@@ -1,7 +1,8 @@
 use super::*;
+use coven_database::StoreCircle;
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 
-fn id(n: u128) -> MemberId {
+pub(crate) fn id(n: u128) -> MemberId {
     MemberId(uuid::Uuid::from_u128(n))
 }
 fn keys(n: u8) -> coven_crypto::MemberPublicKeys {
@@ -10,10 +11,10 @@ fn keys(n: u8) -> coven_crypto::MemberPublicKeys {
 fn access(n: u8) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey { access_key_id: n.to_string() }
 }
-fn header(device: u64, author: u128, after: u64) -> SlotHeader {
+pub(crate) fn header(device: u64, author: u128, after: u64) -> SlotHeader {
     SlotHeader { device: DeviceId(device), author: id(author), after, claim: after + 1 }
 }
-fn household() -> StoreState {
+pub(crate) fn household() -> StoreState {
     let change = StoreChange::CreateStore {
         store: StoreId(uuid::Uuid::from_u128(10)),
         name: "household".into(),
@@ -726,7 +727,7 @@ fn gifts() -> CircleId {
     CircleId(uuid::Uuid::from_u128(12))
 }
 
-fn create_circle(circle: CircleId, name: &str) -> StoreChange {
+pub(crate) fn create_circle(circle: CircleId, name: &str) -> StoreChange {
     StoreChange::CreateCircle {
         circle,
         name: name.into(),
@@ -869,7 +870,7 @@ fn replacing_a_members_keys_keeps_access_role_circles_and_devices() {
 }
 
 /// Adds member 3, a plain member with a device, to `household()`.
-fn with_a_plain_member(state: &StoreState) -> StoreState {
+pub(crate) fn with_a_plain_member(state: &StoreState) -> StoreState {
     let state = apply(
         state,
         1,

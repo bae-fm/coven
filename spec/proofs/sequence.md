@@ -8,6 +8,7 @@ The Lean package in [`sequence/`](sequence/) backs the normative sequence rules:
 [cut-offs (§14.1)](../coven.md#141-the-cut-off),
 [audience keys and revocation (§12)](../coven.md#12-keys-and-encryption),
 [audience reads (§15.6)](../coven.md#156-writes-into-circles),
+[a circle's name, members and deletion (§15.5, §15.8, §15.9)](../coven.md#155-running-a-circle),
 [snapshots and retention (§16)](../coven.md#16-snapshots-the-floor-and-deleting-history), and
 [operation journals (§11)](../coven.md#11-admin-operations), in the order described by
 [a sync pass (§6)](../coven.md#6-a-sync-pass). Each result has the assumptions and limits
@@ -55,8 +56,10 @@ Checked counterexamples explain the rules:
 members, unique keys, paths, batches, rows, audiences, and admin operations
 other than membership, roles and the store name. Circle renames, access and
 circle membership use `aux`. Authority for membership, store renames, store
-resets, circle actions and provider access is concrete in `Authority`. Other
-rules remain abstract: who may write to an audience, the effect of other
+resets, circle actions and provider access is concrete in `Authority`. A
+circle's own entries are concrete in a separate model, `CircleLifecycle`
+([A circle's name, members and deletion](#a-circles-name-members-and-deletion)).
+Other rules remain abstract: who may write to an audience, the effect of other
 operations, the merge, the converter of old-version parts, and the database
 part of a migration.
 
@@ -436,6 +439,53 @@ The ledger retains retirement history, and member addition checks it regardless
 of the supplied authority policy. The runner examples refuse both reuse and a
 fresh device registration for the retired id; separate examples admit a fresh
 member id and preserve recovery for an active member without devices.
+
+## A circle's name, members and deletion
+
+[`CircleLifecycle`](sequence/CovenSequence/CircleLifecycle.lean) decides the
+admin entries that run a circle, and the store's removal of a member, as
+Rust's `checked_change` decides them (`crates/coven-sync/src/effects.rs`,
+whose circle effects are in `circle_effects.rs`). It
+stands alone rather than filling `Model`'s `aux`. Its state is each member
+id's standing (never added, a member, removed), each circle's name and
+members, and the slot that deleted it. An entry's check refuses it, finds it
+already in place, or gives the state its slot commits; the refusals are
+`NotAllowed` and `TargetGone` naming the circle or the member, in the order
+`checked_change` makes them. A removal's admin authority is `Authority`'s, and
+the author's device acting for the author is §10's check, so the model takes
+the author's standing alone.
+
+- `name_is_latest_rename`: a circle's name is its creation's, then each valid
+  rename's in slot order. A refused rename, by someone outside the circle or
+  after its deletion, leaves the name.
+- `deleted_target_refused`: once a circle is deleted, a rename of it, an
+  addition to it or a removal from it by an active member is refused because
+  its target is gone, as is making a circle under its id; a second deletion
+  changes nothing.
+- `live_has_member`: in every state the entries reach, a live circle has a
+  member, so a circle with none is deleted.
+- `leaving_deletes`, `member_removal_deletes`: a circle is deleted at the slot
+  that takes its last member out, whether the member left it or was removed
+  from the store. The circle's members before the slot decide it: it is
+  deleted exactly when the member taken out was its only one.
+- `deleted_at_slot`: a slot records no deletion but its own.
+- `deleted_stays`: once deleted, a circle keeps its record, with no members,
+  and its deletion slot at every later prefix, so no later entry adds a member
+  to it or takes the deletion back.
+
+These hold for every start whose circles keep `Wf`: a deleted circle was made
+and has no members, and a live one has a member. A store with no circles
+keeps it.
+
+A write into a circle is refused on the writing device with `NotInCircle`
+when its member isn't in the circle or the circle is absent from the
+membership the device has applied, and with `DeletedCircle` when that
+membership deleted it (§15.6, §15.8, §15.9). These are Rust checks of the
+device's committed membership tables in the write's transaction, not
+modelled: `CircleLifecycle` proves what that membership is after each
+applied slot, and `write_permission_at_authored_prefix` that applying the
+write judges it at its author's applied prefix. `coven-database`'s write
+tests check both refusals.
 
 ## Snapshots and deletion
 
@@ -1642,6 +1692,21 @@ rows before and after loading, a candidate key and the queued schema versions.
 credential generations. The runner evaluates `QueueReload` with these inputs;
 SQL execution, signature checks and extraction from snapshots happen in Rust.
 
+**`circleLifecycle`** runs circle histories through
+`CircleLifecycle.effect`, in [`SequenceCircles`](sequence/SequenceCircles.lean).
+`people` lists distinct member ids, `active` those that start as members (the
+rest were never added), and `circles` distinct circle ids; no circle exists at
+the start. `histories` is a list of histories, each a list of entries at slots
+1, 2, and so on: `create` and `rename` (`author`, `circle`, `name`), `delete`
+(`author`, `circle`), `add` and `remove` (`author`, `circle`, `member`), and
+`removeMember` (`member`), the store's removal. Every id must be listed. The
+answer has one list per history, with one entry per slot: `outcome`
+(`applied`, `unchanged`, `notAllowed`, `goneCircle` or `goneMember`), and the
+state after the slot, `standing` (`[member, "absent"|"active"|"removed"]` for
+each of `people`) and `circles` (`[circle, null]` for one not made, else
+`[circle, {name, members, deleted}]`, with sorted `members` and `deleted` the
+deleting slot or null).
+
 **`inviteLifecycle`** runs one invite's events through `InviteLifecycle`'s
 steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).
 `delivery` is `"sent"` or `"inPerson"`, `records` whether approving also
@@ -1709,6 +1774,13 @@ and settlement comparisons also include deterministic seeded cases.
   implementation; Rust avoids claiming a new slot for them.
   Registration targets the slot author in Rust's
   format, so cross-device registrations are tested in the Lean JSON tests.
+- `coven-sync`'s `circle_effects::tests::circle_lifecycle_matches_lean`
+  runs `checked_change` over circle histories from a store with two admins
+  and a member, each with a device, and an id never added, and compares each
+  slot's verdict, circle names, members, deletion slots and member standing
+  with `circleLifecycle`. Every pair of entries over two circles and four ids
+  follows a fixed start that makes one circle with two members and one with
+  one; 256 seeded histories of 14 entries start from no circles.
 - `coven-merge` calls `SlotPast::contains` for every pair of supplied writes,
   including batches and shuffled input order. Histories satisfy the model's
   own-number publication and monotone authored-read premises.
@@ -1789,7 +1861,8 @@ they do not replace the separate byte-format, merge or queue tests.
   journal rules.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, store renames,
-    the runner's device/key actions, circle membership changes and store resets;
+    the runner's device/key actions, circle membership changes and store resets,
+    and, in `CircleLifecycle` apart from `Model`, a circle's own entries;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;
   - the merge's internals, source-verdict calculation and converter callbacks,
