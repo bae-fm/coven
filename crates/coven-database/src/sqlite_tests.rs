@@ -19,6 +19,9 @@ pub(crate) struct ProfiledStatement {
     /// Virtual machine steps of this prepared statement so far, this
     /// execution's included.
     pub(crate) vm_steps: i32,
+    /// Times SQLite prepared this statement again so far, this execution's
+    /// included.
+    pub(crate) reprepares: i32,
 }
 
 impl DatabaseConnection {
@@ -65,6 +68,7 @@ impl DatabaseConnection {
                                 .get_status(rusqlite::StatementStatus::FullscanStep),
                             runs: statement.get_status(rusqlite::StatementStatus::Run),
                             vm_steps: statement.get_status(rusqlite::StatementStatus::VmStep),
+                            reprepares: statement.get_status(rusqlite::StatementStatus::RePrepare),
                         });
                     }
                 }),

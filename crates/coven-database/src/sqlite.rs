@@ -154,6 +154,12 @@ impl DatabaseConnection {
         // table's shadow tables directly, `PRAGMA writable_schema` and
         // `PRAGMA schema_version = N`, and turning the journal off (§4).
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        // A statement's plan never reads the values bound to it. Otherwise
+        // SQLite marks a statement whose plan looked at a bound value, and
+        // the statement cache clearing its bindings as each use ends makes
+        // SQLite parse and plan it again on its next use, once per row of a
+        // commit's lookups.
+        connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
         crate::coven_functions::register(&connection, &authorization)?;
         functions.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;

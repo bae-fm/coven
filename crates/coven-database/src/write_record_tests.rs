@@ -71,6 +71,50 @@ async fn an_inserted_row_is_read_once() {
     db.close().await.unwrap();
 }
 
+/// A write's rows are recorded on statements SQLite prepares once a write,
+/// not once a row: binding each row's table, key and audience to coven's
+/// cached reads of its stored generations and losses never makes SQLite
+/// parse and plan them again, so a write of twenty rows prepares its
+/// statements again exactly as often as one of five.
+#[tokio::test]
+async fn recording_a_writes_rows_prepares_no_statement_again_per_row() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![crate::SyncedTable::new("parents", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY)",
+        )
+        .await
+        .unwrap();
+    let mut prepared_again = Vec::new();
+    for rows in [0..1, 1..6, 6..26] {
+        db.write(move |sql| {
+            for i in rows {
+                sql.execute("INSERT INTO parents VALUES(?1)", [format!("p{i}")])?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        prepared_again.push(reprepares(&db.inspect_writer(|writer| writer.profiled_statements())));
+    }
+    assert_eq!(prepared_again[2], prepared_again[1]);
+    db.close().await.unwrap();
+}
+
+/// How many times SQLite prepared each statement again during one write.
+fn reprepares(statements: &[crate::sqlite::tests::ProfiledStatement]) -> BTreeMap<String, i32> {
+    let mut first = BTreeMap::new();
+    let mut again = BTreeMap::new();
+    for statement in statements {
+        let at = *first.entry(statement.sql.clone()).or_insert(statement.reprepares);
+        if statement.reprepares > at {
+            again.insert(statement.sql.clone(), statement.reprepares - at);
+        }
+    }
+    again
+}
+
 /// A reference already of the type its parent's key column keeps names the
 /// parent as it is, so it isn't staged for SQLite to convert.
 #[tokio::test]
