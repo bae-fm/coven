@@ -26,6 +26,17 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience) -> Self;
+    /// Report this device's queued write held until `audience` is raised to
+    /// `version` (§18.5).
+    fn raise_wait(
+        write: coven_merge::WriteId,
+        audience: coven_merge::Audience,
+        version: u32,
+    ) -> Self;
+    /// The held write, and the audience and version it waits for a raise to,
+    /// if this record is such a wait: a store state that reaches it ends the
+    /// record as it installs.
+    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &coven_merge::Audience, u32)>;
     /// Report one account's unresolved intended sharing change.
     fn provider_access(operation: OperationId, account: String, grant: bool) -> Self;
     /// Stable identity, ordered as the app presents it.

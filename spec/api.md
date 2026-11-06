@@ -5170,6 +5170,10 @@ pub enum Prerequisite {
     SequenceCatchUp,
     /// This audience must reload.
     Reload(Audience),
+    /// This audience must be raised to this schema version: a queued write
+    /// of this device's at that version has a part in it, and every device
+    /// refuses that part until the raise (§18.5).
+    Raise { audience: Audience, version: u32 },
 }
 
 /// One vocabulary for failed object checks in calls and pending records.

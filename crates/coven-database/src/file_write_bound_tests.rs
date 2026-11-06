@@ -189,12 +189,12 @@ async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored()
     point(&db, "photos", "3", first).await.unwrap();
     assert_eq!(waiting(&db).len(), 4);
     assert_eq!(holds(&db).iter().filter(|(_, h)| h.is_some()).count(), 1);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(before));
+    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(before));
     // The completion stores the cover and lifts the hold in one write.
     crate::file_write::tests::complete_uploads(&db).await;
     let newest = *waiting(&db).last().unwrap();
     assert!(newest > held);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
+    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(newest));
     assert!(matches!(db.file_ref(cover).await.unwrap().place(), FilePlace::Cloud { .. }));
     db.close().await.unwrap();
 }
@@ -205,7 +205,10 @@ async fn a_held_write_whose_file_a_later_write_drops_goes_with_that_write() {
     let db = open(&store, FileColumn::new("file").bound()).await;
     let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
     let held = waiting(&db)[0];
-    assert_eq!(db.sendable_through().await.unwrap(), Some(held - 1));
+    assert_eq!(
+        db.sendable_through::<crate::pending::tests::Record>().await.unwrap(),
+        Some(held - 1)
+    );
     // Deleting the row deletes the cover's record: no file waits for the
     // upload any more, so it holds nothing, and both writes may go together.
     db.write(|sql| {
@@ -216,7 +219,7 @@ async fn a_held_write_whose_file_a_later_write_drops_goes_with_that_write() {
     .unwrap();
     assert!(!crate::file_write::tests::has_record(&db, cover));
     let newest = *waiting(&db).last().unwrap();
-    assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
+    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(newest));
     db.close().await.unwrap();
 }
 
@@ -280,15 +283,18 @@ async fn overlapping_bound_uploads_hold_from_the_first_held_write_until_both_are
     // cover's held write, so its own held write still waits too.
     owner.complete_upload(upload(first), ()).await.unwrap();
     assert_eq!(waiting(&db).len(), 3);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(held - 1));
+    assert_eq!(
+        db.sendable_through::<crate::pending::tests::Record>().await.unwrap(),
+        Some(held - 1)
+    );
     owner.complete_upload(upload(second), ()).await.unwrap();
     let newest = *waiting(&db).last().unwrap();
     assert_eq!(waiting(&db).len(), 4);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
+    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(newest));
     // A bound upload queued once none is holds from its own write.
     let third = stage(&db, "covers", "3", b"third".to_vec(), Place::Cloud).await.unwrap();
     assert_eq!(holds(&db), [(vec![third], Some(newest + 1))]);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
+    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(newest));
     db.close().await.unwrap();
 }
 
@@ -313,6 +319,9 @@ async fn a_bound_files_move_cant_be_cancelled() {
         Err(DbError::MoveBound { id }) if id == of
     ));
     assert_eq!(holds(&db), [(vec![cover], Some(held))]);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(held - 1));
+    assert_eq!(
+        db.sendable_through::<crate::pending::tests::Record>().await.unwrap(),
+        Some(held - 1)
+    );
     db.close().await.unwrap();
 }

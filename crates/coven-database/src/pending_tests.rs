@@ -55,6 +55,17 @@ impl PendingValue for Record {
             cause: None,
         }
     }
+    fn raise_wait(write: coven_merge::WriteId, _: coven_merge::Audience, _: u32) -> Self {
+        Self {
+            subject: Subject::Slot(write.number),
+            reason: Reason::Missing,
+            operation: None,
+            cause: None,
+        }
+    }
+    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &coven_merge::Audience, u32)> {
+        None
+    }
     fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
         Self {
             subject: Subject::Slot(slot.0),

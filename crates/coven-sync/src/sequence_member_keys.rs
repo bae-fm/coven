@@ -207,7 +207,7 @@ impl SequenceSync {
             let Some(candidate) = candidate else {
                 // Writes fixed under the pair about to be retired must reach
                 // storage first: after the binding they count for nothing (§12.3).
-                if let Some(through) = self.database.sendable_through().await? {
+                if let Some(through) = self.database.sendable_through::<PendingRecord>().await? {
                     self.send_writes(session, ring, &identity, through).await?;
                     if self.database.waiting_snapshot_headers().await?.last().is_some() {
                         return Err(SyncError::Pending(Box::new(PendingRecord::new(

@@ -7555,7 +7555,12 @@ it are new-version writes and wait behind it.
   ([`ahead_part_refused`](proofs/sequence/CovenSequence/WriteVersion.lean)).
   An ordinary write made at or after the device's newest breaking migration
   waits while any audience it has a part in is below that migration's version,
-  and the writes behind it wait with it. An audience's version never goes
+  and the writes behind it wait with it. Its record says
+  `Waits(Raise { audience, version })`, naming the first such audience, from
+  the pass that finds it held (§19.1). The store state that reaches that
+  version, applied from the raise's slot or loaded with a snapshot, ends the
+  record as it installs, and a write still below another audience's version
+  records that wait in the same commit. An audience's version never goes
   down, so once the device has applied the raise, the part counts wherever it
   lands
   ([`waiting_part_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).

@@ -61,6 +61,12 @@ impl PendingValue for Pending {
     fn reload(_: Audience) -> Self {
         Self { subject: 0, cutoff: None }
     }
+    fn raise_wait(write: coven_merge::WriteId, _: Audience, _: u32) -> Self {
+        Self { subject: write.number, cutoff: None }
+    }
+    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &Audience, u32)> {
+        None
+    }
     fn provider_access(id: OperationId, _: String, _: bool) -> Self {
         Self { subject: id.0 as u64, cutoff: None }
     }

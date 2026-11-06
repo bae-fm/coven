@@ -402,7 +402,7 @@ pub(crate) fn sendable_through(
         return Ok(None);
     };
     let captured = crate::raise_capture::captured_through(db)?;
-    let ahead = crate::raise_capture::first_ahead(db, device)?.map(|first| first - 1);
+    let ahead = crate::raise_capture::first_ahead(db, device)?.map(|(first, _)| first - 1);
     let held = crate::file_queue::first_held(db)?.map(|first| first - 1);
     Ok(Some([captured, ahead, held].into_iter().flatten().fold(newest, u64::min)))
 }

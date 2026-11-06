@@ -194,7 +194,7 @@ impl SequenceSync {
         // bound upload's hold keep later writes waiting (§6.3).
         let sendable = self
             .database
-            .sendable_through()
+            .sendable_through::<PendingRecord>()
             .await?
             .zip(first)
             .filter(|(through, first)| *through >= first.number);
@@ -717,6 +717,8 @@ pub(crate) mod sequence_operations;
 #[path = "sequence_own_membership.rs"]
 mod sequence_own_membership;
 pub use sequence_own_membership::{registration_journaled, removal_journaled};
+#[path = "sequence_raises.rs"]
+mod sequence_raises;
 #[path = "sequence_read.rs"]
 mod sequence_read;
 #[path = "sequence_reload.rs"]

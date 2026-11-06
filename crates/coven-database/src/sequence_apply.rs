@@ -127,6 +127,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                     if let Some(boundary) = effect.boundary {
                         crate::write_boundary::record(db, &boundary)?;
                     }
+                    crate::raise_capture::end_raise_waits::<P>(db)?;
                 }
             }
             SlotContent::KeyCopy(original) => retain(db, "key", &original)?,

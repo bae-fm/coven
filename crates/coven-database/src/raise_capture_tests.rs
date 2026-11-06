@@ -314,7 +314,10 @@ async fn refreshing_coverage_preserves_the_original_captured_prefix() {
     let again = db.prepare_raise_capture(Audience::Store, 2).await.unwrap().unwrap();
     assert_eq!(again.through, capture.through);
     assert_eq!(again.covers, db.applied_slot().await.unwrap());
-    assert_eq!(db.sendable_through().await.unwrap(), Some(capture.through.number));
+    assert_eq!(
+        db.sendable_through::<crate::pending::tests::Record>().await.unwrap(),
+        Some(capture.through.number)
+    );
     assert_eq!(queue(&db).len(), 1);
     assert_eq!(db.unconfirmed_own_prefix(again.through).await.unwrap(), None);
     assert_eq!(db.prepare_raise_capture(Audience::Store, 3).await.unwrap(), None);
@@ -379,7 +382,7 @@ async fn a_second_breaking_migration_captures_the_writes_between_its_markers() {
     assert_eq!(db.unconfirmed_own_prefix(through).await.unwrap(), None);
     assert_eq!(queue(&db).len(), 1);
     assert_eq!(queue(&db)[0].0, 5);
-    assert_eq!(db.sendable_through().await.unwrap(), Some(4));
+    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(4));
     let (header, _) = decode(&raise_frames(&db, 6, 3).await);
     assert_eq!(header.schema_version, 3);
     assert!(db.lost_values().await.unwrap().is_empty());

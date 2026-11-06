@@ -190,7 +190,7 @@ pub(crate) fn prepare(
 pub(crate) fn first_ahead(
     db: &DatabaseConnection,
     device: DeviceId,
-) -> Result<Option<u64>, DbError> {
+) -> Result<Option<(u64, Audience)>, DbError> {
     let breaking = breaking_version(db)?;
     if breaking == 0 || captured_through(db)?.is_some() {
         return Ok(None);
@@ -208,13 +208,44 @@ pub(crate) fn first_ahead(
     for number in queued {
         let write = crate::upload::queued(db, WriteId { device, number })?
             .ok_or(DbError::Invariant { what: "a queued write has its header" })?;
-        if write.header.schema_version >= breaking
-            && write.parts.iter().any(|part| below(&part.audience))
-        {
-            return Ok(Some(number));
+        if write.header.schema_version >= breaking {
+            if let Some(part) = write.parts.iter().find(|part| below(&part.audience)) {
+                return Ok(Some((number, part.audience.clone())));
+            }
         }
     }
     Ok(None)
+}
+
+/// Record why the queue stops at a write ahead of an audience's version, as
+/// [`first_ahead`] finds it (§18.5).
+pub(crate) fn record_ahead<P: crate::PendingValue>(
+    db: &DatabaseConnection,
+    device: DeviceId,
+) -> Result<(), DbError> {
+    if let Some((number, audience)) = first_ahead(db, device)? {
+        let write = WriteId { device, number };
+        crate::pending::save(db, &P::raise_wait(write, audience, breaking_version(db)?))?;
+    }
+    Ok(())
+}
+
+/// End every raise wait the installed store state has reached, in the
+/// commit that installs it; a write still below another audience's version
+/// records that wait instead.
+pub(crate) fn end_raise_waits<P: crate::PendingValue>(
+    db: &DatabaseConnection,
+) -> Result<(), DbError> {
+    let state = crate::store_state_tables::read(db)?;
+    for record in crate::pending::read::<P>(db)? {
+        if let Some((write, audience, version)) = record.raise_awaited() {
+            if state.reached(audience) >= version {
+                crate::pending::clear(db, record.subject())?;
+                record_ahead::<P>(db, write.device)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
