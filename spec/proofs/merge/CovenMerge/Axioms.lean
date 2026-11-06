@@ -17,6 +17,9 @@ open CovenMerge
 #print axioms delete_after_read_wins
 #print axioms deleted_row_has_no_cells
 #print axioms reinsert_after_delete_wins
+#print axioms deleted_returns_only_by_insert
+#print axioms inserted_stays_until_seen_delete
+#print axioms grouped_columns_merge_as_one
 #print axioms write_after_read_wins
 #print axioms packed_stamp_before
 #print axioms stamp_supplies_past_ts

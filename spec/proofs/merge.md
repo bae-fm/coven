@@ -76,7 +76,9 @@ checked permissions, causal records, restoration, and SQL boundary.
   - **assumption 3**: a change's generation was reached on the authoring
     device: it is 0, or some write the author had read moved the row to it;
   - **assumption 4**: an insert is made at an even generation, an update or
-    delete at an odd one.
+    delete at an odd one. A row taken out is present in the merged state, so
+    the app's insert of its key again is recorded as an update of it
+    ([§8.4](../coven.md#84-rows-taken-out-and-rows-that-come-back)).
 - What a device stores for the merged state:
   - each row's current generation;
   - per generation, the write `_coven_rows` names: of the writes that moved
@@ -201,6 +203,21 @@ at.
   earlier delete's generation record, and excludes every old-incarnation
   setter regardless of timestamp. `older_incarnation_not_current` states
   that last fact for every later generation.
+- **A deleted row stays deleted**
+  ([§8.4](../coven.md#84-rows-taken-out-and-rows-that-come-back),
+  [§9.2](../coven.md#92-keys-and-unique-values)): a dismissal and a key change
+  record deletes. `deleted_returns_only_by_insert` proves that once a
+  generation is deleted, the row is present again only through an insert made
+  by a write that had read a delete of it at that generation or a later one; no
+  update, and no reason a removal rule reads, brings it back.
+  `inserted_stays_until_seen_delete` is the other half: a row an insert made
+  stays present unless a write that had read an insert of it deletes it, so
+  two devices changing one key at once both keep their new rows.
+- **References of several columns merge as one value**
+  ([§9.1](../coven.md#91-foreign-keys)): a write that changes any column of
+  such a reference records every column. `grouped_columns_merge_as_one` proves
+  that columns every write sets together hold the same winning write and the
+  same lost values, so the tuple never mixes two writes.
 - **The storage clock supplies the causal stamp inequality**:
   `stamp_supplies_past_ts` invokes the storage package's
   `CovenStorage.Clocks.stamp_after_every_read`. `packed_stamp_before` maps

@@ -4,7 +4,8 @@ import CovenStorage.Clocks
 /-! §7.2 and §8.1: a write made after seeing another wins over it. This is a
 statement about competing values, not about unrelated cells or a third, later
 write. Generation changes keep a deleted incarnation out after re-insertion
-(§8.3). -/
+(§8.3), and a deleted row out until an insert made after seeing a delete of it
+(§8.4, §9.2). Columns every write sets together merge as one value (§9.1). -/
 
 namespace CovenMerge
 
@@ -103,6 +104,89 @@ theorem reinsert_after_delete_wins (valid : Valid M) (hS : IsSpec M S st)
     | some x => exact ⟨x, rfl, (gw_minDel valid hS (del_odd valid deleted) x).1 record⟩
   · intro c a value
     exact older_incarnation_not_current hS value (by omega)
+
+/-- §8.4's dismissal and §9.2's key change record a delete, so the row stays
+deleted: once a generation of `r` is deleted, the row is present again only
+through an insert made at a later generation, by a write that had read a delete
+of the row at that generation or a later one. No update brings it back, and
+nothing a removal rule reads does. -/
+theorem deleted_returns_only_by_insert (valid : Valid M) (hS : IsSpec M S st)
+    {d : W} (deleted : Del M S r d k) (present : st.gen r % 2 = 1) :
+    ∃ x ch, S x ∧ M.chg x r = some ch ∧ ch.kind = .ins ∧ k < ch.gen ∧
+      ∃ y ch', M.past x y = true ∧ M.chg y r = some ch' ∧ ch'.kind = .del ∧
+        k ≤ ch'.gen ∧ ch'.gen + 1 = ch.gen := by
+  have odd := del_odd valid deleted
+  have reached : k + 1 ≤ st.gen r :=
+    gen_ge hS ((genChange_succ_iff_del valid odd d).2 deleted)
+  obtain ⟨x, hx, ch, change, _, moved⟩ := (hS.gen r).2 (st.gen r) (by omega) (Nat.le_refl _)
+  have insert : ch.kind = .ins := (valid.parity x r ch change).2 (by omega)
+  refine ⟨x, ch, hx, change, insert, by omega, ?_⟩
+  rcases valid.gen_seen x r ch change with zero | ⟨y, ch', seen, earlier, notUpdate, before⟩
+  · omega
+  · have notInsert : ch'.kind ≠ .ins := fun h => by
+      have := (valid.parity y r ch' earlier).1 h
+      omega
+    have delete : ch'.kind = .del := by
+      cases moving : ch'.kind <;> simp_all
+    exact ⟨y, ch', seen, earlier, delete, by omega, before⟩
+
+/-- The other half of §9.2's key change: a row an insert made stays present
+unless a write that had read an insert of the row, at that generation or a
+later one, deletes it. Two devices changing one key at once both keep their new
+rows. -/
+theorem inserted_stays_until_seen_delete (valid : Valid M) (hS : IsSpec M S st)
+    {i : W} {chi : Change Col} (hi : S i) (inserted : M.chg i r = some chi)
+    (kind : chi.kind = .ins) (absent : st.gen r % 2 = 0) :
+    ∃ x ch, S x ∧ M.chg x r = some ch ∧ ch.kind = .del ∧ chi.gen < ch.gen ∧
+      ∃ y ch', M.past x y = true ∧ M.chg y r = some ch' ∧ ch'.kind = .ins ∧
+        chi.gen ≤ ch'.gen ∧ ch'.gen + 1 = ch.gen := by
+  have even := (valid.parity i r chi inserted).1 kind
+  have reached : chi.gen + 1 ≤ st.gen r :=
+    gen_ge hS ⟨hi, chi, inserted, by rw [kind]; decide, rfl⟩
+  obtain ⟨x, hx, ch, change, notUpdate, moved⟩ :=
+    (hS.gen r).2 (st.gen r) (by omega) (Nat.le_refl _)
+  have notInsert : ch.kind ≠ .ins := fun h => by
+    have := (valid.parity x r ch change).1 h
+    omega
+  have delete : ch.kind = .del := by
+    cases moving : ch.kind <;> simp_all
+  refine ⟨x, ch, hx, change, delete, by omega, ?_⟩
+  rcases valid.gen_seen x r ch change with zero | ⟨y, ch', seen, earlier, _, before⟩
+  · omega
+  · have insert : ch'.kind = .ins := (valid.parity y r ch' earlier).2 (by omega)
+    exact ⟨y, ch', seen, earlier, insert, by omega, before⟩
+
+/-- Two columns that every write changing the row sets together, as a
+reference of several columns is recorded (§9.1), have the same setters. -/
+theorem setter_together {c₁ c₂ : Col}
+    (together : ∀ x ch, S x → M.chg x r = some ch → ch.sets c₁ = ch.sets c₂)
+    (x : W) (n : Nat) : Setter M S r c₁ x n ↔ Setter M S r c₂ x n := by
+  constructor
+  · rintro ⟨hx, ch, change, notDelete, sets, inc⟩
+    exact ⟨hx, ch, change, notDelete, (together x ch hx change) ▸ sets, inc⟩
+  · rintro ⟨hx, ch, change, notDelete, sets, inc⟩
+    exact ⟨hx, ch, change, notDelete, (together x ch hx change).symm ▸ sets, inc⟩
+
+/-- §9.1's references of several columns merge as one value: a write that
+changes any column of the reference records every column, so one write wins
+them all, a tuple holding NULL included, and they are lost together. -/
+theorem grouped_columns_merge_as_one (hS : IsSpec M S st) {c₁ c₂ : Col}
+    (together : ∀ x ch, S x → M.chg x r = some ch → ch.sets c₁ = ch.sets c₂) :
+    st.cell r c₁ = st.cell r c₂ ∧ ∀ a, st.lost r c₁ a = st.lost r c₂ a := by
+  have setter := setter_together (M := M) (S := S) (r := r) together
+  have maxSetter : ∀ n x, MaxSetter M S r c₁ n x ↔ MaxSetter M S r c₂ n x := by
+    intro n x
+    simp only [MaxSetter, setter]
+  have replacer : ∀ a n y, Replacer M S r c₁ a n y ↔ Replacer M S r c₂ a n y := by
+    intro a n y
+    simp only [Replacer, setter]
+  have lost : ∀ a n x, Lost M S r c₁ a n x ↔ Lost M S r c₂ a n x := by
+    intro a n x
+    simp only [Lost, Canon, setter, replacer, maxSetter]
+  refine ⟨option_eq_of_iff fun x => ?_, fun a => option_eq_of_iff fun p => ?_⟩
+  · rw [hS.cell_some, hS.cell_some, maxSetter]
+  · obtain ⟨n, x⟩ := p
+    rw [hS.lost, hS.lost, lost]
 
 /-- §7.2, §8.1 and §8.3 on every device, quantified over arbitrary causal application
 orders containing the competing cell writes or the later delete. -/
