@@ -115,15 +115,21 @@ impl FilesInner {
         // cancelled await; the blocking task retains its reservation.
         // A panic in the creation, or the pool dropping it unstarted, drops
         // the reservation with it, which leaves the name to its recorded
-        // removal.
-        let (reservation, writer) =
-            coven_foundation::task::blocking("create a cache file", move || {
+        // removal. The reservation comes back with the writer, or with why
+        // it wasn't made, so a caller that stopped waiting drops both, and
+        // only a panic goes to the sink.
+        let (reservation, writer) = coven_foundation::task::blocking_completing(
+            "create a cache file",
+            self.database.bugs().clone(),
+            move || {
                 let writer =
                     directory.create_writer(FileArea::Cache, &name).map_err(FileReadError::from);
-                (reservation, writer)
-            })
-            .await
-            .map_err(coven_foundation::files::FileError::from)?;
+                Ok::<_, std::convert::Infallible>((reservation, writer))
+            },
+        )
+        .await
+        .map_err(coven_foundation::files::FileError::from)?
+        .unwrap_or_else(|never| match never {});
         Ok((reservation, writer?))
     }
 }

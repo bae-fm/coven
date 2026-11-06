@@ -352,9 +352,11 @@ impl<M: FilesMode> UploadedFile<M> {
         let (location, hash) = stored(&file)?;
         let location = location.clone();
         let directory = owner.directory.clone();
-        let lock = coven_foundation::task::blocking("lock the store for reading", move || {
-            directory.lock_read_only()
-        })
+        let lock = coven_foundation::task::blocking_completing(
+            "lock the store for reading",
+            owner.database.bugs().clone(),
+            move || directory.lock_read_only(),
+        )
         .await
         .map_err(coven_foundation::files::FileError::from)??;
         let coven_format::file_reference::FileReference { device, id, key } =
