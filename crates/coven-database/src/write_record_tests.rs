@@ -54,11 +54,11 @@ async fn an_inserted_row_is_read_once() {
         .filter(|s| s.sql.starts_with("SELECT \"id\",\"parent\" FROM main.\"children\""))
         .count();
     assert_eq!(reads, 20);
-    // Its stored generation is read once too, as its operations are
-    // recorded; its change takes it from the row's stored state.
+    // Its stored generations are read once too, by the merge store that its
+    // operations, its record and its merge share.
     let generations = statements
         .iter()
-        .filter(|s| s.sql.starts_with("SELECT max(generation) FROM _coven_rows"))
+        .filter(|s| s.sql.starts_with("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r"))
         .count();
     assert_eq!(generations, 21);
     // And the audiences its key is stored in, once for the merge's views
