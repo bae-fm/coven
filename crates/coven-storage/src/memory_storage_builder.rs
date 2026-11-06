@@ -82,7 +82,7 @@ impl MemoryStorageBuilder {
             account: Account::Owner,
             state: Arc::new(Mutex::new(MemoryState {
                 location_marker: None,
-                objects: BTreeMap::new(),
+                objects: super::memory_objects::MemoryObjects::new(),
                 uploads: BTreeMap::new(),
                 next: 1,
                 accounts: BTreeMap::new(),

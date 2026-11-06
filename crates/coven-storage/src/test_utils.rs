@@ -30,6 +30,8 @@ pub use memory_requests::MemoryRequest;
 
 #[path = "memory_faults.rs"]
 mod memory_faults;
+#[path = "memory_objects.rs"]
+mod memory_objects;
 pub use memory_faults::{Faults, Garble};
 
 struct Object {
@@ -66,7 +68,7 @@ enum AccountAccess {
 }
 struct MemoryState {
     location_marker: Option<Vec<u8>>,
-    objects: BTreeMap<ObjectPath, Object>,
+    objects: memory_objects::MemoryObjects,
     uploads: BTreeMap<u64, Pending>,
     next: u64,
     accounts: BTreeMap<String, AccountAccess>,
@@ -389,6 +391,21 @@ impl MemoryStorage {
             Object { revision, upload_id: None, bytes: bytes.into(), stored_at },
         );
         Ok(())
+    }
+    /// Resolves once the provider holds an object at a path `wanted`
+    /// accepts, with that path; no request is made. A request is in the
+    /// trace as it goes out, before its object is stored, so the trace
+    /// can't tell this.
+    pub async fn wait_for_object(&self, wanted: impl Fn(&ObjectPath) -> bool) -> ObjectPath {
+        let mut changes = self.provider.state.lock().await.objects.watch();
+        loop {
+            let state = self.provider.state.lock().await;
+            if let Some(path) = state.objects.keys().find(|path| wanted(path)) {
+                return path.clone();
+            }
+            drop(state);
+            changes.changed().await;
+        }
     }
     /// Refuse this access token from now on, on every connection, as a
     /// provider 401 would (§20.2).

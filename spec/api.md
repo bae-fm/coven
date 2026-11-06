@@ -714,6 +714,9 @@ impl Coven {
 /// releases it.
 /// The hold_next_* calls and hold_body_at stop one request, or one body at
 /// an offset, tell the test it arrived, and wait for the test to resume it.
+/// wait_for_object resolves once the provider holds an object at a path the
+/// test accepts; a request is recorded as it goes out, before its object is
+/// stored, so the request trace can't tell that.
 #[cfg(feature = "test-utils")]
 pub use coven_storage::test_utils::{
     BodyFailure, Faults, MemoryProvider, MemoryRequest, MemoryStorage,

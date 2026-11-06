@@ -127,6 +127,33 @@ async fn crash_after_accepted_part_and_dropped_part_resumes() {
     reopened.finish_upload(&mut lost_finish).await.unwrap();
     assert_eq!(reopened.read(&path).await.unwrap(), b"abcdefghij");
 }
+/// A wait for an object ends once the object is stored, not when its
+/// create goes out: the trace records the create while it is held before
+/// storing, and the wait stays pending until it is let go.
+#[tokio::test]
+async fn waiting_for_an_object_ends_once_it_is_stored() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    storage.hold_next_request_of(MemoryRequest::Create(path.clone()), started, released).await;
+    let creating = tokio::spawn({
+        let storage = storage.clone();
+        let path = path.clone();
+        async move { storage.create(&path, b"floor").await.unwrap() }
+    });
+    starting.await.unwrap();
+    assert!(storage.request_trace().contains(&MemoryRequest::Create(path.clone())));
+    let wanted = path.clone();
+    let mut waiting = Box::pin(storage.wait_for_object(move |found| *found == wanted));
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    release.send(()).unwrap();
+    creating.await.unwrap();
+    assert_eq!(waiting.await, path);
+    // Once there, the wait ends at once.
+    assert_eq!(storage.wait_for_object(|found| *found == path).await, path);
+}
+
 #[tokio::test]
 async fn faults_are_counted_and_delay_is_awaited() {
     use std::{future::Future, task::Poll, time::SystemTime};

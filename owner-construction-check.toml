@@ -489,6 +489,9 @@ PassMoves = "SequenceState"
 # A test's count of the requests the in-memory provider's connections
 # attempt, to wait on without polling.
 RequestWatch = "MemoryStorage"
+# A test's hearing of each object the in-memory provider stores or
+# removes, to wait for one without polling.
+StoredWatch = "MemoryObjects"
 # The progress one kind of operation reports, such as a store's open or a
 # load from storage, for the host drawing it (api.md E1).
 ProgressWatch = "ProgressChannel"
@@ -1392,6 +1395,8 @@ tables = [
     "MemoryStorageBuilder::new",
     "MemoryStorageBuilder::build",
 ]
+# The in-memory provider's objects, made with its state by its builder.
+"crates/coven-storage/src/memory_objects.rs" = ["MemoryObjects::new"]
 "crates/coven-storage/src/providers/cloudkit.rs" = ["CloudKitStorage::new"]
 "crates/coven-storage/src/providers/dropbox.rs" = ["DropboxStorage::new"]
 "crates/coven-storage/src/providers/oauth.rs" = [
