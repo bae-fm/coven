@@ -109,12 +109,9 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     });
     entered_rx.recv().unwrap();
     let clone = database.clone();
-    let (closing_tx, closing_rx) = std::sync::mpsc::channel();
-    let closing = tokio::spawn(async move {
-        closing_tx.send(()).unwrap();
-        clone.close().await
-    });
-    closing_rx.recv().unwrap();
+    let close_waits = database.observe_close_wait();
+    let closing = tokio::spawn(async move { clone.close().await });
+    coven_foundation::clock::within(close_waits).await.unwrap().unwrap();
     store.assert_writer_locked();
     assert!(!closing.is_finished());
     release_tx.send(()).unwrap();
