@@ -7850,7 +7850,8 @@ by the migration write.
 slot names the migration and holds nothing else; its changes reach other devices
 only in the raise's snapshot. So a device that runs the same migration later and
 then reloads from that snapshot changes nothing anywhere with its own migration
-write, and neither does one that adopts the raise already claimed.
+write, and neither does one that adopts the raise already claimed
+([`marker_changes_nothing`](proofs/sequence/CovenSequence/RaiseQueue.lean)).
 
 **An installation that loads its store makes no migration write.** A joining,
 restoring or reset device opens its new installation before it loads the store,
@@ -7939,10 +7940,20 @@ queued writes, captured version and wait.
 **An addition before the raise.** An update that only adds, run while a raise
 this device captured still waits to publish, moves that raise to the new
 version. Each waiting capture is taken again at the new schema, through the
-device's newest write, with no new marker. A capture is always at the version
-its raise publishes, so the snapshot's header names it. Ana migrates to version
-2 offline, then her app updates to 3, adding `color`. Her raise publishes
-version 3, and Ben's app has to update to 3 to load it.
+device's newest write, with no new marker, so the writes made since the
+marker go out before the raise
+([`addition_sends_newest`](proofs/sequence/CovenSequence/RaiseQueue.lean)). A
+capture is always at the version its raise publishes, so the snapshot's header
+names it
+([`addition_raises_its_version`](proofs/sequence/CovenSequence/RaiseQueue.lean)):
+a raise to the old version with a body taken at the new one would be refused
+([`unmoved_raise_refused`](proofs/sequence/CovenSequence/RaiseQueue.lean)). Ana
+migrates to version 2 offline, then her app updates to 3, adding `color`. Her
+raise publishes version 3, and Ben's app has to update to 3 to load it.
+
+A raise whose snapshot is already taken goes out at the version it was taken
+at ([`addition_keeps_taken`](proofs/sequence/CovenSequence/RaiseQueue.lean)),
+and the moved capture raises again once it applies.
 
 **Nothing in the queue is rewritten.** Migrating keeps every queued write, tried
 or untried: its device, number, timestamp, `read_through`, schema version,
@@ -11835,8 +11846,11 @@ Write-ups explain each model and state its assumptions:
 | Migrating keeps every queued original, tried or untried | `conversions_preserve_uploads`, `conversions_preserve_attempt`, `conversions_preserve_untried` | `proofs/queue/CovenQueue/Conversion.lean` | §18.5 |
 | Capturing freezes the queue through the marker; later writes don't delay it | `captured_prefix`, `later_writes_do_not_delay` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | The captured writes are published once; writes after the marker wait for the raise; originals and their order are kept | `confirm_captured`, `confirmation_not_repeated`, `tail_waits`, `raise_without_waiting`, `originals_preserved` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
-| Uploading the raise snapshot waits for confirmation, and the raise waits for the announcement; no storage or contention deadline is imposed | `preparation_waits_for_confirmation`, `activation_waits_for_announcement` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
+| Taking and uploading the raise snapshot wait for confirmation, and the raise waits for the announcement; no storage or contention deadline is imposed | `preparation_waits_for_confirmation`, `activation_waits_for_announcement` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | A later breaking migration's capture includes both markers and the writes between them | `recapture_includes_waiting` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
+| *Body.* The migration write's record carries no part, so its slot changes no audience's ledger or rows, and rebuilding from the queue applies it as nothing | `marker_changes_nothing`, `marker_replays_nothing` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.4 |
+| *Body.* An update that only adds, run while a capture's snapshot isn't taken, captures through the newest write and raises to the update's version, publishing every queued original in order; once the snapshot is taken it changes nothing, and with no capture it raises nothing | `addition_sends_newest`, `addition_raises_its_version`, `addition_keeps_taken` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
+| *Body.* A raise to the old version whose body was taken at the update's version is refused, and the same body raising to the update's version counts | `unmoved_raise_refused` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | Interpreting a late original from the queue converts it from its own schema version to the applied one. When the next slot carries that original's part unchanged, passes validation, and the reset filter drops nothing from it, applying the slot gives the same rows as that interpretation | `late_original_converted`, `reload_matches_receiver` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | Receipt never reads whether an upload was tried: given, as a premise, that the author's queued records with that status set aside are the history receivers have, its rebuild after adopting a raise gives every receiver's result. Its uploads stay unchanged | `reload_matches_receiver`, `conversions_preserve_uploads` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6, §19.2 |
 | Receiving a write has one result: its verdict is the evaluation of the received history, and two receipts of it under the same conversion, schema view and history, each made after the write's recorded reads were received and not refused, agree. Receipt takes the write's record, never whether its upload was tried | `receive_matches_evaluation`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |

@@ -423,7 +423,7 @@ async fn a_raise_snapshot_after_another_slot_applies_fails_as_capture_changed() 
 /// An addition-only update while a raise waits moves that raise to the
 /// update's version, captured again at its schema so the snapshot's header
 /// names the version it raises to; once no capture waits, an addition raises
-/// nothing (§18.5; queue `RaiseCaptures.capture_at_raise_version`).
+/// nothing (§18.5; sequence `RaiseQueue.addition_raises_its_version`).
 #[tokio::test]
 async fn an_addition_moves_a_waiting_raise_to_its_version() {
     let store = TestStore::new();

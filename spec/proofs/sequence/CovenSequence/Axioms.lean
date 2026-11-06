@@ -237,6 +237,12 @@ import SequenceApply
 #print axioms CovenSequence.RaiseQueue.late_original_converted
 #print axioms CovenSequence.RaiseQueue.reload_matches_receiver
 #print axioms CovenSequence.RaiseQueue.conversion_agreement
+#print axioms CovenSequence.RaiseQueue.addition_sends_newest
+#print axioms CovenSequence.RaiseQueue.addition_raises_its_version
+#print axioms CovenSequence.RaiseQueue.addition_keeps_taken
+#print axioms CovenSequence.RaiseQueue.marker_changes_nothing
+#print axioms CovenSequence.RaiseQueue.marker_replays_nothing
+#print axioms CovenSequence.RaiseQueue.unmoved_raise_refused
 
 #print axioms CovenSequence.Reader.next_eq_some
 #print axioms CovenSequence.Reader.prefix_sound

@@ -718,22 +718,35 @@ installation, including local commits made while loading.
   only extend the queue and preserve the previously visible applied slot.
 
 [`RaiseQueue`](sequence/CovenSequence/RaiseQueue.lean) represents capture,
-confirmation, body upload, preparation announcement and raise activation as
-separate persisted states. Confirmation means the captured writes slot has
+confirmation, taking the body, its upload, preparation announcement and raise
+activation as separate persisted states. Confirmation means the captured writes slot has
 landed under the existing claim protocol; it precedes the raise slot (§18.5).
 
 - `captured_prefix`, `later_writes_do_not_delay`, `confirm_captured`: publication
   selects the frozen prefix through the marker, regardless of later appends or
   their eligibility, then removes exactly that prefix from the local queue.
 - `preparation_waits_for_confirmation`, `activation_waits_for_announcement`:
-  preparation upload requires confirmed originals, and activation requires the
-  uploaded body's announcement. `raise_without_waiting` reaches activation
+  taking and uploading the body require confirmed originals, and activation
+  requires the uploaded body's announcement. `raise_without_waiting` reaches activation
   with any later queue; `tail_waits` keeps that queue waiting in between.
 - `originals_preserved`, `confirmation_not_repeated`: the combined published
   and queued originals retain their order and all fields through the protocol,
   and confirmation cannot publish the prefix twice.
 - `recapture_includes_waiting`: a later breaking migration captures intervening
   writes and both markers, leaving only writes after its marker waiting.
+- `marker_changes_nothing`, `marker_replays_nothing`: the marker, the migration
+  write's record, carries no part, so its slot changes no audience's ledger or
+  rows and a rebuild applies it as nothing. The migration's effect on rows
+  reaches other devices only in the raise's body (`preparedRows`).
+- `addition_sends_newest`, `addition_raises_its_version`, `addition_keeps_taken`:
+  an update that only adds appends no marker. A capture whose body isn't taken
+  yet moves to the update's version, captured through the newest write, so
+  every queued original goes out before the raise, which then raises to the
+  version the body is taken at. A body already taken goes out at its own
+  version. Rust also keeps the moved capture then, which raises again once that
+  raise applies; the model's state holds one raise, so that second raise is a
+  capture of its own. `unmoved_raise_refused` is the checked counterexample: a
+  raise to the old version with a body taken at the new one is refused.
 - `late_original_converted`, `reload_matches_receiver`, `conversion_agreement`:
   interpretation uses the original schema and the applied version. Queue
   replay agrees with the actual next sequence writes slot under the same
