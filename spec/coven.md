@@ -7951,9 +7951,12 @@ a raise to the old version with a body taken at the new one would be refused
 migrates to version 2 offline, then her app updates to 3, adding `color`. Her
 raise publishes version 3, and Ben's app has to update to 3 to load it.
 
-A raise whose snapshot is already taken goes out at the version it was taken
-at ([`addition_keeps_taken`](proofs/sequence/CovenSequence/RaiseQueue.lean)),
-and the moved capture raises again once it applies.
+A raise already started when the update runs, but whose snapshot isn't taken
+yet, has nothing left to raise: it ends, as one that finds its version
+established does, and the moved capture raises the new version. A raise whose
+snapshot is already taken goes out at the version it was taken at
+([`addition_keeps_taken`](proofs/sequence/CovenSequence/RaiseQueue.lean)), and
+the moved capture raises again once it applies.
 
 **Nothing in the queue is rewritten.** Migrating keeps every queued write, tried
 or untried: its device, number, timestamp, `read_through`, schema version,

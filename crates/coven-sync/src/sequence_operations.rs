@@ -596,10 +596,6 @@ impl SequenceSync {
                         Some(route) => OperationStep::Copy(route), None => OperationStep::Claiming,
                     },
                     Request::Snapshot(request) => {
-                        if let Purpose::Raise(version) = request.purpose {
-                            self.database.prepare_raise_capture(request.audience.clone(), version).await?
-                                .ok_or(SyncError::Rejected(OperationRejection::NotAllowed))?;
-                        }
                         let number = self.database.reserve_snapshot_number().await?.get();
                         OperationStep::Capturing(Capture {id: coven_format::admin::SnapshotId {audience: request.audience.clone(),device: self.device,number},
                             purpose: request.purpose, key: session.history.sending_key(ring, member.member(), &request.audience)?, name: format!("snapshot-{number}.sealed")})
@@ -624,7 +620,13 @@ impl SequenceSync {
                                 reason: OperationRejection::NotAllowed,
                             }
                         }
-                        artifact => OperationProgress::Running(OperationStep::Uploading(artifact?)),
+                        // A raise whose capture moved to a later version has
+                        // nothing left to raise; that capture raises it (§18.5).
+                        Ok(None) => OperationProgress::Running(OperationStep::Satisfied),
+                        Ok(Some(artifact)) => {
+                            OperationProgress::Running(OperationStep::Uploading(artifact))
+                        }
+                        Err(error) => return Err(error),
                     };
                     self.database
                         .advance_operation(SequenceOperation { request, progress }.update(&record)?)

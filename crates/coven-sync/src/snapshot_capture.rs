@@ -98,6 +98,11 @@ impl SequenceSync {
         Ok(self.directory.create_writer(FileArea::AppProvided, &artifact_name(name)?)?)
     }
 
+    /// Take `capture`'s snapshot into its artifact. A raise takes its
+    /// capture again from the state just applied, which a pass may have moved
+    /// on since its operation prepared, and gets `None` once that capture
+    /// moved to a later version, as an addition or a later breaking
+    /// migration moves it (§16.3, §18.5).
     #[expect(
         clippy::map_err_ignore,
         reason = "a send fails only when the reader is gone, which BrokenPipe names"
@@ -107,10 +112,16 @@ impl SequenceSync {
         capture: &Capture,
         ring: &StoreKeyring,
         member: &MemberIdentity,
-    ) -> Result<SnapshotArtifact, SyncError> {
+    ) -> Result<Option<SnapshotArtifact>, SyncError> {
         // Capturing precedes any provider request. A partial local file from
         // this journal step has no remote identity and can be replaced.
         self.artifact_file(&capture.name)?.remove()?;
+        if let Purpose::Raise(version) = capture.purpose {
+            let audience = capture.id.audience.clone();
+            if self.database.prepare_raise_capture(audience, version).await?.is_none() {
+                return Ok(None);
+            }
+        }
         let writer = self.artifact_writer(&capture.name)?;
         let path = crate::snapshot_object::path(self.store(), &capture.id)?;
         let key = crate::write_seal::derive(ring, &capture.id.audience, capture.key)?;
@@ -155,14 +166,14 @@ impl SequenceSync {
             Ok(breaking_version) => breaking_version,
         };
         let (covers, digest, size) = consumed?;
-        Ok(SnapshotArtifact {
+        Ok(Some(SnapshotArtifact {
             capture: capture.clone(),
             covers,
             breaking_version,
             digest,
             size,
             session: None,
-        })
+        }))
     }
 }
 

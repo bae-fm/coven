@@ -206,6 +206,7 @@ impl Group {
                         "CREATE INDEX titles ON notes(title)",
                         coven_database::OldWrites::Drop,
                     ),
+                    Migration::addition(3, "colors", "ALTER TABLE notes ADD COLUMN color TEXT"),
                 ]
                 .into_iter()
                 .take(self.version.load(std::sync::atomic::Ordering::SeqCst) as usize)

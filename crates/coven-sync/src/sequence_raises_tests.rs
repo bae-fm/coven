@@ -430,3 +430,45 @@ async fn a_raise_started_before_its_circle_is_deleted_claims_nothing() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana's breaking update journals the store's raise to version 2, and her
+/// phone stops before the raise takes its snapshot. Her app then updates
+/// again, to version 3, adding a column: her capture moves to version 3, so
+/// the snapshot she takes is at version 3, and the journaled raise to 2 has
+/// nothing left to raise. It ends, and the raise publishes version 3, the
+/// version its snapshot is taken at (§18.5).
+#[tokio::test]
+async fn an_addition_moves_a_raise_journaled_before_its_snapshot() {
+    use crate::sequence_sync::sequence_operations::Request;
+    use crate::sequence_sync::snapshot_capture::SnapshotRequest;
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    ana.sync
+        .start_request_row(
+            Request::Snapshot(SnapshotRequest {
+                audience: Audience::Store,
+                purpose: coven_format::sequence::Purpose::Raise(2),
+            }),
+            coven_database::operation_kind::COVEN,
+        )
+        .await
+        .unwrap();
+
+    group.version.store(3, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let moved = ana.database().raise_captures().await.unwrap();
+    assert_eq!(moved.iter().map(|capture| capture.version).collect::<Vec<_>>(), [3]);
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let state = ana.database().store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 3);
+    assert!(ana.database().raise_captures().await.unwrap().is_empty());
+    let operations = ana.database().operations().await.unwrap();
+    assert!(operations.is_empty(), "{operations:?}");
+    ana.sync.database.close().await.unwrap();
+}
