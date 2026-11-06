@@ -1162,8 +1162,18 @@ tables = [
 # One wall-clock wait's timer and the notice its callback gives, which
 # that wait keeps until it ends (§13.2).
 "crates/coven-foundation/src/clock_windows.rs" = ["sleep_until", "WaitableTimer::arm"]
-# Both store listings read the directory on a blocking task.
-"crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
+# The listings and lookups of the stores read the directory on a blocking
+# task, which runs to its end even once its caller stops waiting, and then
+# its bug goes to the app's sink (E15).
+"crates/coven-foundation/src/files/layout.rs" = [
+    "StoreDirectories::listed",
+    "StoreDirectories::lock_unfinished_first",
+    "StoreDirectories::recorded_deletions",
+    "StoreDirectories::deletion_recorded",
+]
+# A copy's file work runs on a blocking task to its end, even once its
+# caller stops waiting, and then its bug goes to the app's sink (E15).
+"crates/coven-foundation/src/files/folder_copy.rs" = ["blocking"]
 # The kernel's type number for file objects, the same for every handle in
 # the process, read once.
 "crates/coven-foundation/src/files/open_files.rs" = ["FILE_TYPE"]
@@ -1186,8 +1196,12 @@ tables = [
     "LockRegistration::acquire_file",
 ]
 # A replacement composes the new installation beside the old one, holding
-# the store's writer lock until it is in place.
-"crates/coven-foundation/src/files/replacement.rs" = ["begin"]
+# the store's writer lock until it is in place. Removing the old one runs on
+# a blocking task to its end, even once its caller stops waiting.
+"crates/coven-foundation/src/files/replacement.rs" = [
+    "begin",
+    "ReplacementStore::remove_replaced",
+]
 # A test's id source, which a test hands the builder as it would random ids.
 "crates/coven-foundation/src/id_source.rs" = ["SequentialIds::new"]
 # A test's clock, which a test hands the builder as it would the system's.

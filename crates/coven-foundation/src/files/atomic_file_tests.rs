@@ -221,7 +221,7 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
     let file = store.file(crate::files::FileArea::Cache, &name);
     let bytes = vec![1; 40960];
     let mut count = 0;
-    let mut batch = crate::files::FlushBatch::new();
+    let mut batch = crate::files::FlushBatch::new(crate::task::HeardBugs::shared());
     store
         .create_writer(crate::files::FileArea::Cache, &name)
         .unwrap()

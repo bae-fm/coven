@@ -38,7 +38,12 @@ async fn opening_removes_what_a_crashed_call_made() {
     owner.made_folder(&album).await.unwrap();
     std::fs::write(album.join(".coven-1.download"), b"half of one").unwrap();
     std::fs::write(album.join("two.flac"), b"all of two").unwrap();
-    let folder = coven_foundation::files::CopyFolder::open(music.path().to_owned()).await.unwrap();
+    let folder = coven_foundation::files::CopyFolder::open(
+        music.path().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
+    )
+    .await
+    .unwrap();
     let observed = folder.observe(&album.join("two.flac")).await.unwrap();
     owner.place_copy(&observed).await.unwrap();
     // The process ends with the call: its reservation never drops.
@@ -69,7 +74,12 @@ async fn abandoning_leaves_a_copy_the_person_changed() {
     let reservation = owner.record_copies(copies.to_vec()).await.unwrap();
     std::fs::create_dir(&album).unwrap();
     owner.made_folder(&album).await.unwrap();
-    let folder = coven_foundation::files::CopyFolder::open(music.path().to_owned()).await.unwrap();
+    let folder = coven_foundation::files::CopyFolder::open(
+        music.path().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
+    )
+    .await
+    .unwrap();
     for copy in &copies {
         std::fs::write(&copy.path, b"downloaded").unwrap();
         let observed = folder.observe(&copy.path).await.unwrap();

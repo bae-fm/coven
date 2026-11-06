@@ -11,7 +11,7 @@ async fn a_plan_makes_each_missing_folder_once_outermost_first() {
     let folder = root.path().join("Music");
     fs::create_dir(&folder).unwrap();
     fs::create_dir(folder.join("Existing")).unwrap();
-    let plan = CopyFolder::open(folder.clone())
+    let plan = CopyFolder::open(folder.clone(), crate::task::HeardBugs::shared())
         .await
         .unwrap()
         .plan(vec![
@@ -46,7 +46,7 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
     let refused = |paths: Vec<&'static str>| {
         let folder = folder.clone();
         async move {
-            CopyFolder::open(folder)
+            CopyFolder::open(folder, crate::task::HeardBugs::shared())
                 .await
                 .unwrap()
                 .plan(paths.into_iter().map(relative).collect())
@@ -76,11 +76,11 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
         CopyPathError::Clash { path, other } if path == relative("album") && other == path
     ));
     assert!(matches!(
-        CopyFolder::open("Music".into()).await,
+        CopyFolder::open("Music".into(), crate::task::HeardBugs::shared()).await,
         Err(CopyPathError::NotAFolder(path)) if path == Path::new("Music")
     ));
     assert!(matches!(
-        CopyFolder::open(root.path().join("missing")).await,
+        CopyFolder::open(root.path().join("missing"), crate::task::HeardBugs::shared()).await,
         Err(CopyPathError::NotAFolder(_))
     ));
 }
@@ -94,7 +94,7 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("Music");
     fs::create_dir_all(folder.join("Existing")).unwrap();
-    let chosen = &CopyFolder::open(folder.clone()).await.unwrap();
+    let chosen = &CopyFolder::open(folder.clone(), crate::task::HeardBugs::shared()).await.unwrap();
     let clash = |paths: [&'static str; 2]| async move {
         match chosen.plan(paths.map(relative).to_vec()).await {
             Err(CopyPathError::Clash { path, other }) => (path, other),
@@ -143,7 +143,7 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
 async fn a_plan_writes_each_name_valid_everywhere() {
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().to_owned();
-    let plan = CopyFolder::open(folder.clone())
+    let plan = CopyFolder::open(folder.clone(), crate::task::HeardBugs::shared())
         .await
         .unwrap()
         .plan(vec![
@@ -174,7 +174,8 @@ async fn a_plan_writes_each_name_valid_everywhere() {
 #[tokio::test]
 async fn a_plan_refuses_paths_that_map_to_one_name() {
     let root = tempfile::tempdir().unwrap();
-    let chosen = &CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let chosen =
+        &CopyFolder::open(root.path().to_owned(), crate::task::HeardBugs::shared()).await.unwrap();
     let clash = |paths: [&[&str]; 2]| {
         let paths = paths.map(|names| RelativePath::new(names.iter().copied()).unwrap());
         async move {
@@ -228,13 +229,19 @@ async fn a_plan_refuses_paths_that_map_to_one_name() {
 #[tokio::test]
 async fn a_rename_onto_a_name_the_volume_holds_as_taken_fails_and_replaces_nothing() {
     let root = tempfile::tempdir().unwrap();
-    let chosen = CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let chosen =
+        CopyFolder::open(root.path().to_owned(), crate::task::HeardBugs::shared()).await.unwrap();
     let theirs = root.path().join("Track.flac");
     fs::write(&theirs, b"the person's").unwrap();
     let ignores_case = root.path().join("track.flac").exists();
     let mut writer = chosen.create_copy(root.path().join(".coven-1.download")).await.unwrap();
     writer.append(b"coven's").await.unwrap();
-    let published = writer.publish(&root.path().join("track.flac"), &mut FlushBatch::new()).await;
+    let published = writer
+        .publish(
+            &root.path().join("track.flac"),
+            &mut FlushBatch::new(crate::task::HeardBugs::shared()),
+        )
+        .await;
     assert_eq!(published.is_err(), ignores_case, "{published:?}");
     assert_eq!(fs::read(&theirs).unwrap(), b"the person's");
 }
@@ -248,7 +255,7 @@ async fn a_plan_refuses_a_link_below_the_folder_but_not_the_folder_itself() {
     let folder = root.path().join("chosen");
     std::os::unix::fs::symlink(&real, &folder).unwrap();
     std::os::unix::fs::symlink(real.join("inside"), real.join("linked")).unwrap();
-    let chosen = CopyFolder::open(folder.clone()).await.unwrap();
+    let chosen = CopyFolder::open(folder.clone(), crate::task::HeardBugs::shared()).await.unwrap();
     let plan = chosen.plan(vec![relative("inside/track.flac")]).await.unwrap();
     assert_eq!(plan.files, vec![folder.join("inside").join("track.flac")]);
     assert!(matches!(
@@ -265,7 +272,8 @@ async fn a_plan_refuses_a_link_below_the_folder_but_not_the_folder_itself() {
 #[tokio::test]
 async fn a_copy_appears_at_its_path_only_whole() {
     let root = tempfile::tempdir().unwrap();
-    let chosen = CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let chosen =
+        CopyFolder::open(root.path().to_owned(), crate::task::HeardBugs::shared()).await.unwrap();
     let album = root.path().join("album");
     assert!(chosen.create_folder(album.clone()).await.unwrap());
     // A folder already there is someone else's: the call didn't make it.
@@ -278,7 +286,7 @@ async fn a_copy_appears_at_its_path_only_whole() {
     writer.append(b"first ").await.unwrap();
     writer.append(b"second").await.unwrap();
     assert!(!path.exists());
-    let mut batch = FlushBatch::new();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
     writer.publish(&path, &mut batch).await.unwrap();
     let _flushed = batch.flush().await.unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"first second");
@@ -286,7 +294,10 @@ async fn a_copy_appears_at_its_path_only_whole() {
     // Publishing never replaces what is at the path.
     let mut writer = chosen.create_copy(album.join(".coven-2.download")).await.unwrap();
     writer.append(b"other").await.unwrap();
-    assert!(writer.publish(&path, &mut FlushBatch::new()).await.is_err());
+    assert!(writer
+        .publish(&path, &mut FlushBatch::new(crate::task::HeardBugs::shared()))
+        .await
+        .is_err());
     assert_eq!(fs::read(&path).unwrap(), b"first second");
     assert!(chosen.create_copy(temporary.clone()).await.is_ok());
     assert!(chosen.create_copy(temporary).await.is_err(), "a copy is a new file");
@@ -302,7 +313,8 @@ async fn a_copy_appears_at_its_path_only_whole() {
 #[tokio::test]
 async fn a_copy_lands_past_the_windows_path_limit() {
     let root = tempfile::tempdir().unwrap();
-    let chosen = CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let chosen =
+        CopyFolder::open(root.path().to_owned(), crate::task::HeardBugs::shared()).await.unwrap();
     let mut names = Vec::new();
     while root.path().join(names.join("/")).as_os_str().len() < 300 {
         names.push("A Long Folder Name For A Deep Album");
@@ -316,7 +328,7 @@ async fn a_copy_lands_past_the_windows_path_limit() {
     assert!(path.as_os_str().len() > 300);
     let mut writer = chosen.create_copy(path.with_file_name(".coven-1.download")).await.unwrap();
     writer.append(b"bytes").await.unwrap();
-    let mut batch = FlushBatch::new();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
     writer.publish(path, &mut batch).await.unwrap();
     let _flushed = batch.flush().await.unwrap();
     assert_eq!(fs::read(path).unwrap(), b"bytes");
@@ -333,7 +345,7 @@ async fn a_folder_swapped_for_a_link_after_planning_redirects_nothing() {
     let elsewhere = root.path().join("elsewhere");
     fs::create_dir_all(music.join("album")).unwrap();
     fs::create_dir(&elsewhere).unwrap();
-    let chosen = CopyFolder::open(music.clone()).await.unwrap();
+    let chosen = CopyFolder::open(music.clone(), crate::task::HeardBugs::shared()).await.unwrap();
     let plan = chosen
         .plan(vec![relative("album/track.flac"), relative("album/new/track.flac")])
         .await
@@ -352,7 +364,7 @@ async fn a_folder_swapped_for_a_link_after_planning_redirects_nothing() {
     writer.append(b"bytes").await.unwrap();
     fs::rename(music.join("album"), root.path().join("moved")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, music.join("album")).unwrap();
-    let mut batch = FlushBatch::new();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
     writer.publish(&music.join("album").join("track.flac"), &mut batch).await.unwrap();
     // The batch syncs the folder the writer opened, wherever it is now.
     let _flushed = batch.flush().await.unwrap();

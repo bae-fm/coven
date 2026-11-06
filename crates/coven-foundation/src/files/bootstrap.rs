@@ -221,7 +221,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve bootstrap layout", root, source))?;
     let path = root.join(id.to_string());
-    let lock = lock::acquire_bootstrap(&path, id).await?;
+    let lock = lock::acquire_bootstrap(&path, id, &bugs).await?;
     let closing = lock.closing_guard();
     let lease = BootstrapLease::new(lock);
     if !exists("inspect bootstrap path", &path)? {
@@ -239,7 +239,7 @@ pub(super) async fn reserve_bootstrap_directory(
     }
     // A published or interrupted installation may still have a live writer,
     // including one in another process. Refuse it before inspecting its data.
-    let _writer = lock::acquire_for_open(&path, id).await?;
+    let _writer = lock::acquire_for_open(&path, id, &bugs).await?;
     // A store in the middle of a swap is finished by the call that began it.
     if let Some(record) =
         device_reset::unfinished(&path, id).map_err(DirectoryCreationError::Settings)?

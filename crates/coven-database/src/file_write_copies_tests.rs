@@ -248,19 +248,26 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     std::fs::write(&path, b"track").unwrap();
     owner
         .place_copy(
-            &coven_foundation::files::CopyFolder::open(music.path().to_owned())
-                .await
-                .unwrap()
-                .observe(&path)
-                .await
-                .unwrap(),
+            &coven_foundation::files::CopyFolder::open(
+                music.path().to_owned(),
+                coven_foundation::task::HeardBugs::shared(),
+            )
+            .await
+            .unwrap()
+            .observe(&path)
+            .await
+            .unwrap(),
         )
         .await
         .unwrap();
     let mut hashes = crate::FileHasher::new();
     hashes.update(b"track");
     // The test wrote the copy itself, outside any batch.
-    let flushed = coven_foundation::files::FlushBatch::new().flush().await.unwrap();
+    let flushed =
+        coven_foundation::files::FlushBatch::new(coven_foundation::task::HeardBugs::shared())
+            .flush()
+            .await
+            .unwrap();
     let prepared = owner
         .prepared_device_only(
             reservation,

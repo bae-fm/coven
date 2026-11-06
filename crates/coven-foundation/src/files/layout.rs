@@ -113,17 +113,21 @@ impl StoreDirectories {
     ) -> Result<Option<StoreDeletionLock>, BootstrapDirectoryError> {
         self.store_dir(&id).closed().await?;
         let path = self.stores().join(id.to_string());
-        crate::task::blocking("lock an unfinished installation", move || {
-            let lock = match super::lock::for_deletion(&path, id, None) {
-                Ok(Some(lock)) => lock,
-                // A call holds it, or nothing of it is left.
-                Ok(None) | Err(StoreLockError::AlreadyOpen(_)) => return Ok(None),
-                Err(error) => return Err(BootstrapDirectoryError::from(error)),
-            };
-            let first =
-                super::bootstrap::is_pending(&path)? && super::device_reset::read(&path)?.is_none();
-            Ok(first.then_some(lock))
-        })
+        crate::task::blocking_completing(
+            "lock an unfinished installation",
+            self.bugs.clone(),
+            move || {
+                let lock = match super::lock::for_deletion(&path, id, None) {
+                    Ok(Some(lock)) => lock,
+                    // A call holds it, or nothing of it is left.
+                    Ok(None) | Err(StoreLockError::AlreadyOpen(_)) => return Ok(None),
+                    Err(error) => return Err(BootstrapDirectoryError::from(error)),
+                };
+                let first = super::bootstrap::is_pending(&path)?
+                    && super::device_reset::read(&path)?.is_none();
+                Ok(first.then_some(lock))
+            },
+        )
         .await
         .map_err(FileError::from)?
     }
@@ -135,22 +139,31 @@ impl StoreDirectories {
     /// deletion leaves (E1).
     pub async fn recorded_deletions(&self) -> Result<Vec<StoreId>, FileError> {
         let root = self.stores();
-        crate::task::blocking("list recorded deletions", move || recorded_deletions(&root)).await?
+        crate::task::blocking_completing("list recorded deletions", self.bugs.clone(), move || {
+            recorded_deletions(&root)
+        })
+        .await?
     }
 
     /// Whether the deletion of the store with `id` is recorded and
     /// unfinished, as `recorded_deletions` reads it.
     pub async fn deletion_recorded(&self, id: StoreId) -> Result<bool, FileError> {
         let published = self.stores().join(id.to_string());
-        crate::task::blocking("inspect a recorded deletion", move || {
-            deletion_recorded(&published, id)
-        })
+        crate::task::blocking_completing(
+            "inspect a recorded deletion",
+            self.bugs.clone(),
+            move || deletion_recorded(&published, id),
+        )
         .await?
     }
 
     async fn listed(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
         let layout = self.clone();
-        crate::task::blocking("list stores", move || layout.list_stores(installations)).await?
+        let bugs = self.bugs.clone();
+        crate::task::blocking_completing("list stores", bugs, move || {
+            layout.list_stores(installations)
+        })
+        .await?
     }
 
     fn list_stores(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {

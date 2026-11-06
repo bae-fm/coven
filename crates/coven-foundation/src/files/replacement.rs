@@ -187,9 +187,11 @@ impl ReplacementStore {
         assert!(self.is_swapped(), "the old installation is removed after the swap");
         let path = self.path.clone();
         let old = self.reset.old_device;
-        crate::task::blocking("remove the replaced installation", move || {
-            device_reset::discard(&path, old)
-        })
+        crate::task::blocking_completing(
+            "remove the replaced installation",
+            self.bugs.clone(),
+            move || device_reset::discard(&path, old),
+        )
         .await
         .map_err(FileError::from)??;
         Ok(())
@@ -252,11 +254,11 @@ pub(super) async fn begin(
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve store layout", root, source))?;
     let path = root.join(id.to_string());
-    let lock = lock::acquire_bootstrap(&path, id).await?;
+    let lock = lock::acquire_bootstrap(&path, id, &bugs).await?;
     let closing = lock.closing_guard();
     let lease = BootstrapLease::new(lock);
     // A live handle, in this process or another, refuses the replacement.
-    let writer = lock::acquire_for_open(&path, id).await?;
+    let writer = lock::acquire_for_open(&path, id, &bugs).await?;
     let current = settings::read(&path, id).map_err(DirectoryCreationError::Settings)?;
     // The device is leaving the store: only finishing that deletion, or
     // discarding the store, ends it.

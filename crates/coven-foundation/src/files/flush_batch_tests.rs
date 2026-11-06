@@ -26,7 +26,7 @@ async fn write(store: &crate::files::StoreDir, area: FileArea, name: &str, batch
 async fn a_batch_keeps_each_folder_once_and_the_store_until_it_is_flushed() {
     let root = tempfile::tempdir().unwrap();
     let store = store(&root);
-    let mut batch = FlushBatch::new();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
     for name in ["one", "two", "three"] {
         write(&store, FileArea::AppProvided, name, &mut batch).await;
     }
@@ -54,12 +54,16 @@ async fn a_failed_flush_fails_the_batch_and_an_empty_one_flushes_nothing() {
         counted.fetch_add(1, Ordering::SeqCst);
         Err(std::io::Error::other("the drive refused the flush"))
     });
-    let _flushed = FlushBatch::new().with_hook(Some(hook.clone())).flush().await.unwrap();
+    let _flushed = FlushBatch::new(crate::task::HeardBugs::shared())
+        .with_hook(Some(hook.clone()))
+        .flush()
+        .await
+        .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
     let root = tempfile::tempdir().unwrap();
     let store = store(&root);
-    let mut batch = FlushBatch::new().with_hook(Some(hook));
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared()).with_hook(Some(hook));
     write(&store, FileArea::AppProvided, "one", &mut batch).await;
     let error = batch.flush().await.unwrap_err();
     assert!(error.to_string().contains("the drive refused the flush"), "{error}");

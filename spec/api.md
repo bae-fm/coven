@@ -8968,6 +8968,12 @@ forever.
   the write runs, and its closure panics with "note 43 has no title". The
   write rolls back and returns `DbError::Bug` to no one, so the sink hears
   `Bug { operation: "write", message: "note 43 has no title" }`.
+- Coven's file work runs the same way: listing the stores and their
+  recorded deletions, taking a store's lock, each write and sync of a
+  staged or cache file, flushing a commit's batch of files, the folder work
+  of `prepare_device_only`'s copies, and removing a replaced installation.
+  A caller still waiting gets `FileError::Bug`, or the error that keeps it;
+  once none is, the bug goes to the sink.
 
 A panic can also leave state half-changed: a lock held as it unwinds is
 poisoned, and code that SQLite calls can't fail at all. What coven does

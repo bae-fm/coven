@@ -306,9 +306,10 @@ pub(crate) fn acquire(directory: &Path, id: StoreId) -> Result<StoreLock, StoreL
 pub(crate) async fn acquire_for_open(
     directory: &Path,
     id: StoreId,
+    bugs: &crate::task::BugSinkRef,
 ) -> Result<StoreLock, StoreLockError> {
     let directory = resolve_directory(directory)?;
-    let file = registry::acquire_registered(&directory, id, LockKind::Writer).await?;
+    let file = registry::acquire_registered(&directory, id, LockKind::Writer, bugs).await?;
     Ok(StoreLock { store: LockedStore { _file: file, directory, id } })
 }
 
@@ -327,8 +328,9 @@ pub(crate) async fn closed(directory: &Path, id: StoreId) -> Result<(), FileErro
 pub(super) async fn acquire_bootstrap(
     directory: &Path,
     id: StoreId,
+    bugs: &crate::task::BugSinkRef,
 ) -> Result<RegisteredLock, StoreLockError> {
-    registry::acquire_registered(directory, id, LockKind::Bootstrap).await
+    registry::acquire_registered(directory, id, LockKind::Bootstrap, bugs).await
 }
 
 fn resolve_directory(directory: &Path) -> Result<PathBuf, FileError> {

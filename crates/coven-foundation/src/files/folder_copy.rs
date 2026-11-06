@@ -19,6 +19,7 @@ use super::flush_batch::BatchFolder;
 use super::observed_file::observe_metadata;
 use super::relative_path::local_name;
 use super::{FileError, FlushBatch, ObservationError, ObservedFile, RelativePath};
+use crate::task::BugSinkRef;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
@@ -99,14 +100,18 @@ pub struct CopyFolder {
     path: PathBuf,
     #[cfg(unix)]
     handle: Arc<rustix::fd::OwnedFd>,
+    /// Where a panic in work its caller stopped waiting for goes (E15).
+    bugs: BugSinkRef,
 }
 
 impl CopyFolder {
     /// Open `folder`, an absolute path to a folder whose path is valid
     /// Unicode. The folder itself may be reached through a link: the person
-    /// picked it.
-    pub async fn open(folder: PathBuf) -> Result<Self, CopyPathError> {
-        blocking("open folder", move || {
+    /// picked it. A panic in the copies' work whose caller stopped waiting
+    /// goes to `bugs` (E15).
+    pub async fn open(folder: PathBuf, bugs: BugSinkRef) -> Result<Self, CopyPathError> {
+        let opened = bugs.clone();
+        blocking("open folder", &opened, move || {
             if !folder.is_absolute() {
                 return Err(CopyPathError::NotAFolder(folder));
             }
@@ -130,10 +135,10 @@ impl CopyFolder {
                     Mode::empty(),
                 )
                 .map_err(|errno| FileError::at("open folder", &folder, errno.into()))?;
-                Ok(Self { path: folder, handle: Arc::new(handle) })
+                Ok(Self { path: folder, handle: Arc::new(handle), bugs })
             }
             #[cfg(windows)]
-            Ok(Self { path: folder })
+            Ok(Self { path: folder, bugs })
         })
         .await
     }
@@ -143,7 +148,7 @@ impl CopyFolder {
     /// checked for links.
     pub async fn plan(&self, paths: Vec<RelativePath>) -> Result<CopyPlan, CopyPathError> {
         let folder = self.path.clone();
-        blocking("plan copies", move || plan(&folder, &paths)).await
+        blocking("plan copies", &self.bugs, move || plan(&folder, &paths)).await
     }
 
     /// Make the folder at `path`, a path of a plan, and sync the folder
@@ -151,13 +156,13 @@ impl CopyFolder {
     /// there already, made by someone else, which the call never removes.
     pub async fn create_folder(&self, path: PathBuf) -> Result<bool, FileError> {
         let folder = self.clone_handle();
-        blocking("make folder", move || folder.make_folder(&path)).await
+        blocking("make folder", &self.bugs, move || folder.make_folder(&path)).await
     }
 
     /// Start a copy's bytes at `temporary`, a new file in its final folder.
     pub async fn create_copy(&self, temporary: PathBuf) -> Result<CopyWriter, FileError> {
         let folder = self.clone_handle();
-        blocking("create copy", move || folder.make_copy(temporary)).await
+        blocking("create copy", &self.bugs, move || folder.make_copy(temporary)).await
     }
 
     /// Observe the copy at `path`, a path below the folder, without reading
@@ -173,6 +178,7 @@ impl CopyFolder {
             path: self.path.clone(),
             #[cfg(unix)]
             handle: self.handle.clone(),
+            bugs: self.bugs.clone(),
         }
     }
 
@@ -262,6 +268,7 @@ impl CopyFolder {
             path: temporary,
             parent: Arc::new(parent),
             name,
+            bugs: self.bugs.clone(),
         })
     }
 
@@ -308,6 +315,7 @@ impl CopyFolder {
             file: Arc::new(tokio::sync::Mutex::new(file)),
             folder: self.clone_handle(),
             path: temporary,
+            bugs: self.bugs.clone(),
         })
     }
 }
@@ -410,6 +418,8 @@ pub struct CopyWriter {
     name: std::ffi::OsString,
     #[cfg(windows)]
     folder: CopyFolder,
+    /// Where a panic in a write its caller stopped waiting for goes (E15).
+    bugs: BugSinkRef,
 }
 
 impl CopyWriter {
@@ -429,7 +439,7 @@ impl CopyWriter {
         #[cfg(unix)]
         {
             let (parent, from) = (self.parent.clone(), self.name.clone());
-            let folder = blocking("rename copy", move || {
+            let folder = blocking("rename copy", &self.bugs, move || {
                 use rustix::fs::RenameFlags;
                 let (name, folder) = match (to.file_name(), to.parent()) {
                     (Some(name), Some(folder)) => (name, folder),
@@ -453,7 +463,7 @@ impl CopyWriter {
         #[cfg(windows)]
         {
             let (folder, from) = (self.folder.clone_handle(), self.path.clone());
-            blocking("rename copy", move || {
+            blocking("rename copy", &self.bugs, move || {
                 folder
                     .check_below(&to)
                     .map_err(|source| FileError::at("rename copy", &to, source))?;
@@ -473,7 +483,7 @@ impl CopyWriter {
         // Acquire before spawning so later calls wait for cancelled work too.
         let mut file = self.file.clone().lock_owned().await;
         let path = self.path.clone();
-        blocking(operation, move || {
+        blocking(operation, &self.bugs, move || {
             run(&mut file).map_err(|source| FileError::at(operation, &path, source))
         })
         .await
@@ -581,12 +591,18 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 
 /// Run `run`, file work named `operation`, on the blocking pool; a panic in
 /// it is `FileError::Bug`, and the pool dropping it unstarted
-/// `FileError::Shutdown`.
-async fn blocking<T: Send + 'static, E: From<FileError> + Send + 'static>(
+/// `FileError::Shutdown`. Once its caller stops waiting, its panic, or a bug
+/// its error carries, goes to `bugs` (E15).
+async fn blocking<T, E>(
     operation: &'static str,
+    bugs: &BugSinkRef,
     run: impl FnOnce() -> Result<T, E> + Send + 'static,
-) -> Result<T, E> {
-    crate::task::blocking(operation, run).await.map_err(FileError::from)?
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<FileError> + crate::task::CarriesBug + Send + 'static,
+{
+    crate::task::blocking_completing(operation, bugs.clone(), run).await.map_err(FileError::from)?
 }
 
 #[cfg(test)]

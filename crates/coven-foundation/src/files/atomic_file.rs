@@ -254,6 +254,8 @@ impl AtomicFile {
 pub struct FileWriter {
     file: Arc<tokio::sync::Mutex<LockedWriter>>,
     path: PathBuf,
+    /// Where a panic in a write its caller stopped waiting for goes (E15).
+    bugs: crate::task::BugSinkRef,
 }
 struct LockedWriter {
     file: fs::File,
@@ -265,14 +267,20 @@ struct LockedWriter {
 impl FileWriter {
     /// Create `file` for asynchronous streaming without replacing anything,
     /// holding `lock`, its store's read lock, until the handle and any
-    /// cancelled I/O finish, or a batch it finishes into flushes.
-    pub(super) fn create(file: &AtomicFile, lock: StoreReadLock) -> Result<Self, FileError> {
+    /// cancelled I/O finish, or a batch it finishes into flushes. A panic in
+    /// a write whose caller stopped waiting goes to `bugs` (E15).
+    pub(super) fn create(
+        file: &AtomicFile,
+        lock: StoreReadLock,
+        bugs: crate::task::BugSinkRef,
+    ) -> Result<Self, FileError> {
         let path = file.resolved()?;
         let file = create_new(&path)
             .map_err(|source| FileError::at("create owned file", &path, source))?;
         Ok(Self {
             file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
             path,
+            bugs,
         })
     }
 
@@ -356,7 +364,7 @@ impl FileWriter {
         // The owned guard carries the OS handle and store lock into the task.
         let mut file = self.file.clone().lock_owned().await;
         let path = self.path.clone();
-        crate::task::blocking(operation, move || {
+        crate::task::blocking_completing(operation, self.bugs.clone(), move || {
             run(&mut file, &path).map_err(|source| FileError::at(operation, &path, source))
         })
         .await?

@@ -3,6 +3,7 @@
 use super::file_lock::FileLock;
 use super::lock::{lock_bootstrap, lock_existing, StoreLockError};
 use crate::id_source::StoreId;
+use crate::task::{blocking_completing, BugSinkRef};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -148,12 +149,15 @@ impl LockRegistration {
         Ok(RegisteredLock { _file: file, registration: self })
     }
 
-    async fn open_on_worker(self) -> Result<RegisteredLock, StoreLockError> {
+    /// Take the lock file on the blocking pool. A caller that stops waiting
+    /// leaves the work to finish, and its panic goes to `bugs` (E15).
+    async fn open_on_worker(self, bugs: &BugSinkRef) -> Result<RegisteredLock, StoreLockError> {
         let closing = self.closing_guard();
-        let result = crate::task::blocking("lock the store", move || self.acquire_file())
-            .await
-            .map_err(|failed| StoreLockError::from(crate::files::FileError::from(failed)))
-            .and_then(|result| result);
+        let result =
+            blocking_completing("lock the store", bugs.clone(), move || self.acquire_file())
+                .await
+                .map_err(|failed| StoreLockError::from(crate::files::FileError::from(failed)))
+                .and_then(|result| result);
         closing.disarm();
         result
     }
@@ -236,6 +240,7 @@ pub(super) async fn acquire_registered(
     directory: &Path,
     id: StoreId,
     kind: LockKind,
+    bugs: &BugSinkRef,
 ) -> Result<RegisteredLock, StoreLockError> {
     let store = (directory.to_owned(), id);
     loop {
@@ -261,7 +266,7 @@ pub(super) async fn acquire_registered(
             }
         };
         let mut released = match acquisition {
-            Acquisition::Reserved(registration) => return registration.open_on_worker().await,
+            Acquisition::Reserved(registration) => return registration.open_on_worker(bugs).await,
             Acquisition::Waiting(released) => released,
         };
         released

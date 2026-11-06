@@ -29,6 +29,8 @@ use std::sync::Arc;
 #[must_use = "a batch's files may still be in the drive's cache until it is flushed"]
 pub struct FlushBatch {
     files: usize,
+    /// Where a panic in a flush its caller stopped waiting for goes (E15).
+    bugs: crate::task::BugSinkRef,
     /// Each folder a file was made in, once, holding the store read lock of
     /// the first file made there until the flush ends.
     #[cfg(unix)]
@@ -88,10 +90,12 @@ impl BatchFolder {
 }
 
 impl FlushBatch {
-    /// An empty batch; flushing it does nothing.
-    pub fn new() -> Self {
+    /// An empty batch; flushing it does nothing. A panic in a flush whose
+    /// caller stopped waiting goes to `bugs` (E15).
+    pub fn new(bugs: crate::task::BugSinkRef) -> Self {
         Self {
             files: 0,
+            bugs,
             #[cfg(unix)]
             folders: Vec::new(),
             #[cfg(any(test, feature = "test-utils"))]
@@ -128,7 +132,8 @@ impl FlushBatch {
         if self.files == 0 {
             return Ok(Flushed(()));
         }
-        crate::task::blocking("flush the batch", move || self.flush_now()).await?
+        let bugs = self.bugs.clone();
+        crate::task::blocking_completing("flush the batch", bugs, move || self.flush_now()).await?
     }
 
     fn flush_now(self) -> Result<Flushed, FileError> {

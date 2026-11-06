@@ -160,7 +160,8 @@ impl Files {
         }
         // Refused before any byte is downloaded; the write checks again.
         let refs = self.inner.database.device_only_files(ids).await?;
-        let folder = CopyFolder::open(folder.to_owned()).await?;
+        let folder =
+            CopyFolder::open(folder.to_owned(), self.inner.database.bugs().clone()).await?;
         let plan = folder.plan(paths).await?;
         let copies: Vec<FolderCopy> = plan
             .files
@@ -234,7 +235,7 @@ async fn download(
         }
     }
     let mut switches = Vec::new();
-    let mut batch = FlushBatch::new();
+    let mut batch = FlushBatch::new(handle.inner.database.bugs().clone());
     let all = files.iter().map(FileRef::size).sum();
     let mut before = 0;
     for (file, copy) in files.iter().zip(copies) {

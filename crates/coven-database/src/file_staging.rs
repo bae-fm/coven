@@ -122,14 +122,14 @@ impl FileStaging {
     pub(super) async fn write(
         mut self,
     ) -> Result<(Self, Result<Flushed, DbError>), coven_foundation::task::TaskFailed> {
-        #[cfg(not(test))]
-        let mut batch = FlushBatch::new();
-        #[cfg(test)]
         let mut batch = {
             let slot = read_unpoisoned(&self.database);
             let inner = slot.as_ref().expect("staging holds close guard");
-            let hook = coven_foundation::locks::lock_unpoisoned(&inner.flush_hook).clone();
-            FlushBatch::new().with_hook(hook)
+            let batch = FlushBatch::new(inner.access.directory.bugs().clone());
+            #[cfg(test)]
+            let batch = batch
+                .with_hook(coven_foundation::locks::lock_unpoisoned(&inner.flush_hook).clone());
+            batch
         };
         while let Some(source) = self.sources.pop_front() {
             let StagingSource { namespace, id, name, source, place } = source;

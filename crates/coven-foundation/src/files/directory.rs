@@ -368,7 +368,7 @@ impl StoreDirAccess for StoreDir {
         Ok(guard)
     }
     async fn lock_for_open(&self) -> Result<StoreLock, StoreLockError> {
-        let guard = lock::acquire_for_open(&self.path, self.id).await?;
+        let guard = lock::acquire_for_open(&self.path, self.id, &self.bugs).await?;
         self.check_published()?;
         Ok(guard)
     }
@@ -411,7 +411,7 @@ impl StoreDirAccess for StoreDir {
     }
     fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError> {
         let lock = self.lock_read_only()?;
-        Ok(FileWriter::create(&self.file(area, name), lock)?)
+        Ok(FileWriter::create(&self.file(area, name), lock, self.bugs.clone())?)
     }
 }
 
