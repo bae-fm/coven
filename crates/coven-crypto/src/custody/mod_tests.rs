@@ -10,9 +10,10 @@ use uuid::Uuid;
 
 fn directory() -> (tempfile::TempDir, StoreDir) {
     let temp = tempfile::tempdir().unwrap();
-    let store = StoreDirectories::new(temp.path().to_owned())
-        .create_store_dir(StoreId(Uuid::from_u128(1)), &SequentialIds::new())
-        .unwrap();
+    let store =
+        StoreDirectories::new(temp.path().to_owned(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(StoreId(Uuid::from_u128(1)), &SequentialIds::new())
+            .unwrap();
     (temp, store)
 }
 

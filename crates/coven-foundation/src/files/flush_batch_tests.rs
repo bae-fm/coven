@@ -4,7 +4,7 @@ use crate::id_source::{StoreId, UuidIds};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn store(root: &tempfile::TempDir) -> crate::files::StoreDir {
-    StoreDirectories::new(root.path().to_owned())
+    StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared())
         .create_store_dir(StoreId(uuid::Uuid::from_u128(123)), &UuidIds)
         .unwrap()
 }

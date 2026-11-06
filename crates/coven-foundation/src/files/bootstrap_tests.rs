@@ -18,7 +18,7 @@ fn creation_failures_preserve_recursive_error_sources() {
 #[tokio::test]
 async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let temp = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(temp.path().into());
+    let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(17));
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let directory = pending.directory();
@@ -90,7 +90,7 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
 #[tokio::test]
 async fn bootstrap_refuses_a_live_writer_before_reporting_an_existing_store() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().into());
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(UuidIds.new_id());
     let directory = layout.create_store_dir(id, &UuidIds).unwrap();
     let writer = directory.lock_for_open().await.unwrap();
@@ -108,7 +108,7 @@ async fn bootstrap_refuses_a_live_writer_before_reporting_an_existing_store() {
 #[tokio::test]
 async fn cancellation_removes_unpublished_bytes_and_permits_a_new_identity() {
     let temp = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(temp.path().into());
+    let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(18));
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let device = pending.directory().settings().unwrap().device_id;
@@ -127,7 +127,7 @@ async fn cancellation_removes_unpublished_bytes_and_permits_a_new_identity() {
 async fn finished_bootstrap_releases_its_lease_even_when_directory_clones_remain() {
     for publish in [false, true] {
         let temp = tempfile::tempdir().unwrap();
-        let layout = StoreDirectories::new(temp.path().into());
+        let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
         let id = StoreId(UuidIds.new_id());
         let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
         let directory = pending.directory();
@@ -160,7 +160,7 @@ async fn finished_bootstrap_releases_its_lease_even_when_directory_clones_remain
 #[tokio::test]
 async fn a_dropped_bootstrap_releases_its_lock_while_its_directories_live() {
     let temp = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(temp.path().into());
+    let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(UuidIds.new_id());
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let directory = pending.directory();
@@ -181,8 +181,10 @@ async fn resumed_bootstrap_refuses_a_symlink_to_another_installation() {
     let root = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let id = StoreId(uuid::Uuid::from_u128(19));
-    let layout = StoreDirectories::new(root.path().into());
-    let other = StoreDirectories::new(target.path().into()).create_store_dir(id, &UuidIds).unwrap();
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
+    let other = StoreDirectories::new(target.path().into(), crate::task::HeardBugs::shared())
+        .create_store_dir(id, &UuidIds)
+        .unwrap();
     let staged = root.path().join("stores");
     std::fs::create_dir_all(&staged).unwrap();
     std::os::unix::fs::symlink(

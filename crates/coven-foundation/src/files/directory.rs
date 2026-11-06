@@ -8,6 +8,7 @@ use crate::files::{
     StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings,
 };
 use crate::id_source::StoreId;
+use crate::task::BugSinkRef;
 
 /// The folder an app names for SQLite's temporary tables (§21.2), outside
 /// coven's directories. It is made where the app's call names it.
@@ -128,7 +129,7 @@ impl FileName {
 
 /// One store's directory, owning the paths to its database, app-provided files,
 /// cache, settings and sibling locks. It never exposes the directory as a raw path.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StoreDir {
     path: PathBuf,
     id: StoreId,
@@ -137,11 +138,29 @@ pub struct StoreDir {
     bootstrap: Option<lock::LockInstance>,
     /// The class its layout gives the store's files (E1).
     protection: Protection,
+    /// Where a bug in the store's work that nobody waits for goes (E15).
+    bugs: BugSinkRef,
+}
+
+impl std::fmt::Debug for StoreDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreDir")
+            .field("path", &self.path)
+            .field("id", &self.id)
+            .field("bootstrap", &self.bootstrap)
+            .field("protection", &self.protection)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoreDir {
-    pub(crate) fn new(path: PathBuf, id: StoreId, protection: Protection) -> Self {
-        Self { path, id, bootstrap: None, protection }
+    pub(crate) fn new(
+        path: PathBuf,
+        id: StoreId,
+        protection: Protection,
+        bugs: BugSinkRef,
+    ) -> Self {
+        Self { path, id, bootstrap: None, protection, bugs }
     }
 
     pub(super) fn bootstrapping(
@@ -149,8 +168,9 @@ impl StoreDir {
         id: StoreId,
         bootstrap: lock::LockInstance,
         protection: Protection,
+        bugs: BugSinkRef,
     ) -> Self {
-        Self { path, id, bootstrap: Some(bootstrap), protection }
+        Self { path, id, bootstrap: Some(bootstrap), protection, bugs }
     }
 
     fn is_bootstrapping(&self) -> bool {
@@ -254,6 +274,9 @@ pub trait StoreDirAccess: Sized {
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
     fn settings(&self) -> Result<StoreSettings, SettingsError>;
+    /// Where a bug in the store's work that nobody waits for goes (E15):
+    /// the app's own reporter, which its directories were given.
+    fn bugs(&self) -> &BugSinkRef;
     /// Probe the OS writer lock without waiting, for lifetime assertions in tests.
     #[cfg(any(test, feature = "test-utils"))]
     fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError>;
@@ -334,6 +357,9 @@ impl StoreDirAccess for StoreDir {
     }
     fn settings(&self) -> Result<StoreSettings, SettingsError> {
         settings::read(&self.path, self.id)
+    }
+    fn bugs(&self) -> &BugSinkRef {
+        &self.bugs
     }
     #[cfg(any(test, feature = "test-utils"))]
     fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {

@@ -30,9 +30,10 @@ async fn each_network_that_appears_is_one_report() {
     let root = tempfile::tempdir().unwrap();
     let ids: IdSourceRef = Arc::new(UuidIds);
     let clock: ClockRef = Arc::new(SystemClock);
-    let directory = StoreDirectories::new(root.path().to_owned())
-        .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref())
-        .unwrap();
+    let directory =
+        StoreDirectories::new(root.path().to_owned(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref())
+            .unwrap();
     let database = DatabaseBuilder::new(directory)
         .id_source(ids)
         .clock(clock.clone())

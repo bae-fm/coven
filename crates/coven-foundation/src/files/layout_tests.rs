@@ -7,7 +7,10 @@ use uuid::Uuid;
 #[tokio::test]
 async fn an_absent_layout_lists_no_stores_without_creating_it() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().join("not-created"));
+    let layout = StoreDirectories::new(
+        directory.path().join("not-created"),
+        crate::task::HeardBugs::shared(),
+    );
     assert!(layout.store_ids().await.unwrap().is_empty());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
 }
@@ -15,7 +18,8 @@ async fn an_absent_layout_lists_no_stores_without_creating_it() {
 #[tokio::test]
 async fn discovery_lists_only_valid_store_directories_in_id_order() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let mut locks = Vec::new();
     for n in [2, 1] {
         let store = layout.create_store_dir(StoreId(Uuid::from_u128(n)), &UuidIds).unwrap();
@@ -58,7 +62,8 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
 async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("stores"), b"not a directory").unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     assert!(matches!(layout.store_ids().await, Err(FileError::Io { .. })));
     assert!(matches!(
         layout.create_store_dir(StoreId(Uuid::nil()), &UuidIds),
@@ -70,7 +75,8 @@ async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
 #[tokio::test]
 async fn discovery_does_not_follow_directory_or_settings_symlinks() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     layout.create_store_dir(id, &UuidIds).unwrap();
     let root = directory.path().join("stores");

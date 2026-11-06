@@ -19,9 +19,12 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();
-        let directory = StoreDirectories::new(temporary.path().to_owned())
-            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new())
-            .unwrap();
+        let directory = StoreDirectories::new(
+            temporary.path().to_owned(),
+            coven_foundation::task::HeardBugs::shared(),
+        )
+        .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new())
+        .unwrap();
         Self {
             _temporary: temporary,
             directory,

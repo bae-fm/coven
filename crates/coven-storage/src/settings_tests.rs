@@ -8,7 +8,8 @@ use std::error::Error;
 #[test]
 fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let temp = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(temp.path().to_owned());
+    let layout =
+        StoreDirectories::new(temp.path().to_owned(), coven_foundation::task::HeardBugs::shared());
     let directory =
         layout.create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new()).unwrap();
     let file = directory.owned_file(StoreFile::StorageSettings);

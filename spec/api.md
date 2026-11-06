@@ -176,6 +176,10 @@ pub enum Audience {
   keychain service and opens the OS keychain, so an invalid name or a
   keychain coven can't reach fails at startup rather than at the first store; an
   application test builds its installation with `Coven::in_memory` instead.
+  `Coven::new` also takes the app's bug sink, its crash reporter, which hears
+  every bug in work nobody waits for, in each store and in the `Coven`'s own
+  calls (E15). There is no default: an app that names no reporter would lose
+  those bugs to a log.
 - `Coven::storage_config` reads a closed store's saved location without opening
   its database or custody. The handle's `storage_config` reads the same committed
   `StorageConfig`, including the member's account label, so an app can show
@@ -619,8 +623,13 @@ impl Clock for SystemClock {
 #[cfg(feature = "test-utils")]
 impl Coven {
     /// An installation with its stores under `app_dir`, no device-only
-    /// entries and none of the person's entries.
+    /// entries and none of the person's entries. Its bug sink keeps each
+    /// bug and logs it at error.
     pub fn in_memory(app_dir: PathBuf) -> Self;
+
+    /// `in_memory`, whose bugs in work nobody waits for go to `bugs`, for a
+    /// test that hears them (E15).
+    pub fn in_memory_reporting_to(app_dir: PathBuf, bugs: coven::task::BugSinkRef) -> Self;
 
     /// An installation on an Android phone: the person's entries behave as
     /// Block Store keeps them, this phone's own, with its limits (§13.1).
@@ -629,7 +638,7 @@ impl Coven {
     /// Another device of the same person, its stores under `app_dir`: its own
     /// empty device-only keychain. It shares the person's entries with this
     /// one as iCloud Keychain would, or with Block Store has its own, empty
-    /// (§13.1).
+    /// (§13.1). It shares this one's bug sink, as do the next two.
     pub fn another_device(&self, app_dir: PathBuf) -> Self;
 
     /// A new phone set up from this one by direct transfer, its stores under
@@ -2208,10 +2217,16 @@ impl Coven {
     /// under the service `keyring_service`, watching the platform's network.
     /// The app creates `app_dir`; coven creates directories only inside it
     /// and never opens a directory above it, which Android refuses. No key is
-    /// read here. An empty service name, or one containing NUL, fails with
+    /// read here. A bug in work nobody waits for, in any store or in this
+    /// `Coven`'s own calls, goes to `bugs`, the app's crash reporter (E15).
+    /// An empty service name, or one containing NUL, fails with
     /// `KeyError::InvalidServiceName`; an OS keychain coven can't reach
     /// fails with its `KeyError`.
-    pub fn new(app_dir: PathBuf, keyring_service: &str) -> Result<Self, KeyError>;
+    pub fn new(
+        app_dir: PathBuf,
+        keyring_service: &str,
+        bugs: coven::task::BugSinkRef,
+    ) -> Result<Self, KeyError>;
 
     /// The stores on this device, ordered by id, with their committed names.
     /// Reads names from their databases. A store whose replacement record or
@@ -2352,12 +2367,6 @@ impl CovenBuilder {
     where
         F: Fn(&FunctionArguments<'_>) -> SqliteResult<T> + Send + Sync + 'static,
         T: Into<types::Value>;
-
-    /// Where a bug in the store's work that nobody waits for goes (E15): a
-    /// panic in its sync loop, upload worker or another worker of its own,
-    /// and one in work whose caller stopped waiting for it. The app passes
-    /// its crash reporter. Unset, each bug is logged at error.
-    pub fn bug_sink(self, bugs: coven::task::BugSinkRef) -> Self;
 
     /// Creates an open store and its member in the chosen custody before
     /// publication; cancellation does not interrupt creation or rollback.
@@ -2720,7 +2729,7 @@ impl FunctionArguments<'_> {
 Example:
 
 ```rust
-let coven = Coven::new(app_dir, "com.example.notes")?;
+let coven = Coven::new(app_dir, "com.example.notes", Arc::new(CrashReports))?; // E15
 let handle = coven.builder()
     .synced_tables(tables())                        // E2
     .namespaces(vec![
@@ -8920,9 +8929,11 @@ long-lived workers run that way: its sync loop, a connection attempt, the
 upload worker, the invite expiry, the network follower and a read-ahead. So
 does work a call runs as its own task once its caller stops waiting, such as
 closing a store. Such a bug goes to the app's bug sink, which the app passes
-with `CovenBuilder::bug_sink`, usually its crash reporter; without one,
-`LoggedBugs` logs each bug at error. Without the sink a worker's panic would
-end it unseen, and the work it served would wait for it forever.
+to `Coven::new`, usually its crash reporter; every store and call of that
+`Coven` reports there. The sink has no default. An app that wants its bugs
+only logged passes `LoggedBugs`, which logs each at error. Without the sink a
+worker's panic would end it unseen, and the work it served would wait for it
+forever.
 
 - Ben pulls to refresh the Household store on his phone, and the sync loop's
   pass panics reading slot 412 with "a chunk runs past the slot's end". The
@@ -9122,7 +9133,7 @@ pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Resu
 
 /// Where a bug in work nobody waits for goes: a store's long-lived workers
 /// and work whose caller stopped waiting for it. The app passes its own
-/// crash reporter with `CovenBuilder::bug_sink`.
+/// crash reporter to `Coven::new`.
 pub trait BugSink: Send + Sync {
     /// Report `bug`, which no caller hears of otherwise.
     fn report(&self, bug: &Bug);
@@ -9131,7 +9142,8 @@ pub trait BugSink: Send + Sync {
 /// A shared `BugSink`.
 pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 
-/// Logs each bug at error: the sink of a store whose app names none.
+/// Logs each bug at error: the sink of an app that wants its bugs only
+/// logged.
 pub struct LoggedBugs;
 
 /// An error that may carry a bug: work its call ran panicked, and the

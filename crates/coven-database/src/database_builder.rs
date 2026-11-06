@@ -19,7 +19,6 @@ pub struct DatabaseBuilder {
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
     progress: ProgressChannel<OpenStep>,
-    bugs: coven_foundation::task::BugSinkRef,
 }
 
 impl DatabaseBuilder {
@@ -37,15 +36,7 @@ impl DatabaseBuilder {
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
             progress: ProgressChannel::new(),
-            bugs: Arc::new(coven_foundation::task::LoggedBugs),
         }
-    }
-
-    /// Where a bug in the store's work that nobody waits for goes (E15).
-    /// Unset, each is logged at error.
-    pub fn bug_sink(mut self, bugs: coven_foundation::task::BugSinkRef) -> Self {
-        self.bugs = bugs;
-        self
     }
 
     /// The steps a writable open reports as it runs them, each with how
@@ -133,7 +124,7 @@ impl DatabaseBuilder {
     /// device identity. The lock must protect this builder's directory.
     pub async fn open_locked(self, lock: StoreLock) -> Result<Database, OpenError> {
         let closing = lock.closing_guard();
-        let bugs = self.bugs.clone();
+        let bugs = self.directory.bugs().clone();
         let result = finish_blocking(
             blocking_completing("open the store", bugs, move || self.open_graph(lock)).await,
         );
@@ -147,7 +138,7 @@ impl DatabaseBuilder {
     /// migrating or rebuilding, including from a second process while the
     /// writer is open.
     pub async fn open_read_only(self) -> Result<Database<ReadOnly>, OpenError> {
-        let bugs = self.bugs.clone();
+        let bugs = self.directory.bugs().clone();
         finish_blocking(
             blocking_completing("open the store read-only", bugs, move || self.open_read_graph())
                 .await,
@@ -311,7 +302,7 @@ impl DatabaseBuilder {
                 #[cfg(test)]
                 abandoned_stagings: Arc::new(Mutex::new(Vec::new())),
             },
-            bugs: self.bugs,
+            bugs: self.directory.bugs().clone(),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 inputs,
                 staging: Arc::new(crate::reserved_names::ReservedNames::new(observer.clone())),
@@ -407,7 +398,7 @@ impl DatabaseBuilder {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: (),
-            bugs: self.bugs,
+            bugs: self.directory.bugs().clone(),
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
                 writer: Arc::new(Mutex::new(writer)),
                 readers: ReadPool::new(readers),

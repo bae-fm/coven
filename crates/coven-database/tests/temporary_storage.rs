@@ -58,9 +58,10 @@ async fn staged_records_spill_to_files_in_the_named_temporary_folder() {
 
     let store = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
-    let directory = StoreDirectories::new(store.path().into())
-        .create_store_dir(StoreId(ids.new_id()), &ids)
-        .unwrap();
+    let directory =
+        StoreDirectories::new(store.path().into(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(StoreId(ids.new_id()), &ids)
+            .unwrap();
     let db = DatabaseBuilder::new(directory)
         .synced_tables(coven_database::test_utils::notes_tables())
         .migrations(coven_database::test_utils::notes_migrations())

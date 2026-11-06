@@ -165,12 +165,12 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
     }
     for (slot, number, object, snapshot, prefix) in cases {
         let temporary = tempfile::tempdir().unwrap();
-        let directory = StoreDirectories::new(temporary.path().to_owned())
-            .create_store_dir(
-                coven_format::test_utils::STORE_ID,
-                &FixtureDevice(SequentialIds::new()),
-            )
-            .unwrap();
+        let directory = StoreDirectories::new(
+            temporary.path().to_owned(),
+            coven_foundation::task::HeardBugs::shared(),
+        )
+        .create_store_dir(coven_format::test_utils::STORE_ID, &FixtureDevice(SequentialIds::new()))
+        .unwrap();
         let device = directory.settings().unwrap().device_id;
         let database = DatabaseBuilder::new(directory)
             .synced_tables(vec![])

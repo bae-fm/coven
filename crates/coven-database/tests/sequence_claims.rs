@@ -26,9 +26,10 @@ fn builder(directory: coven_foundation::files::StoreDir) -> DatabaseBuilder {
 async fn open() -> (tempfile::TempDir, coven_foundation::files::StoreDir, Database) {
     let temporary = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
-    let directory = StoreDirectories::new(temporary.path().into())
-        .create_store_dir(StoreId(ids.new_id()), &ids)
-        .unwrap();
+    let directory =
+        StoreDirectories::new(temporary.path().into(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(StoreId(ids.new_id()), &ids)
+            .unwrap();
     let db = builder(directory.clone()).open().await.unwrap();
     (temporary, directory, db)
 }

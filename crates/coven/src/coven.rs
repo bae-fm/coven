@@ -124,12 +124,17 @@ impl Coven {
     /// under the service `keyring_service`, watching the platform's network.
     /// The app creates `app_dir`; coven creates directories only inside it
     /// and never opens a directory above it, which Android refuses. No key
-    /// is read here. An empty service name, or one containing NUL, fails with
-    /// `KeyError::InvalidServiceName`; an OS keychain coven can't reach
-    /// fails with its `KeyError`.
-    pub fn new(app_dir: PathBuf, keyring_service: &str) -> Result<Self, KeyError> {
+    /// is read here. A bug in work nobody waits for, in any store, goes to
+    /// `bugs`, the app's crash reporter (E15). An empty service name, or one
+    /// containing NUL, fails with `KeyError::InvalidServiceName`; an OS
+    /// keychain coven can't reach fails with its `KeyError`.
+    pub fn new(
+        app_dir: PathBuf,
+        keyring_service: &str,
+        bugs: crate::task::BugSinkRef,
+    ) -> Result<Self, KeyError> {
         Ok(Self {
-            directories: StoreDirectories::new(app_dir),
+            directories: StoreDirectories::new(app_dir, bugs),
             keychain: Keychain::native(keyring_service)?,
             network: NetworkSource::Platform,
         })

@@ -68,6 +68,7 @@ pub(crate) fn create(
     ids: &dyn IdSource,
     unpublished: bool,
     protection: Protection,
+    bugs: crate::task::BugSinkRef,
 ) -> Result<StoreDir, DirectoryCreationError> {
     create_directory(root)
         .map_err(|source| FileError::at("create stores directory", root, source))?;
@@ -132,7 +133,7 @@ pub(crate) fn create(
             DirectoryCreationError::Published { id, source }
         }
     })?;
-    Ok(StoreDir::new(destination, id, protection))
+    Ok(StoreDir::new(destination, id, protection, bugs))
 }
 
 /// Create `path` unless it is already a directory. Its parent must exist:

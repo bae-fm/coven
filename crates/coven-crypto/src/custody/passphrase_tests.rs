@@ -31,9 +31,10 @@ fn an_invalid_internal_derivation_request_panics() {
 fn file() -> (tempfile::TempDir, AtomicFile, StoreId) {
     let temp = tempfile::tempdir().unwrap();
     let id = StoreId(Uuid::from_u128(1));
-    let store = StoreDirectories::new(temp.path().to_owned())
-        .create_store_dir(id, &SequentialIds::new())
-        .unwrap();
+    let store =
+        StoreDirectories::new(temp.path().to_owned(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(id, &SequentialIds::new())
+            .unwrap();
     (temp, store.owned_file(StoreFile::StoreKeys), id)
 }
 
@@ -152,8 +153,11 @@ fn parameters_are_recorded_authenticated_and_bounded_before_derivation() {
 fn file_failures_are_not_absence_or_success() {
     let key_ids = coven_foundation::id_source::SequentialIds::new();
     let temp = tempfile::tempdir().unwrap();
-    let store =
-        StoreDirectories::new(temp.path().join("absent")).store_dir(&StoreId(Uuid::from_u128(1)));
+    let store = StoreDirectories::new(
+        temp.path().join("absent"),
+        coven_foundation::task::HeardBugs::shared(),
+    )
+    .store_dir(&StoreId(Uuid::from_u128(1)));
     let custody = PassphraseCustody::<StoreKeyring>::new(
         Passphrase::new("phrase".into()),
         store.owned_file(StoreFile::StoreKeys),

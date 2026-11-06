@@ -247,6 +247,7 @@ fn panicking_collation_writer() {
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
         path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_COLLATION_PANIC_STORE").unwrap()).unwrap(),
@@ -644,6 +645,7 @@ fn panicking_function_writer() {
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
         path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_FUNCTION_PANIC_STORE").unwrap()).unwrap(),

@@ -77,9 +77,10 @@ impl PendingValue for Pending {
 async fn open(owned: bool) -> (tempfile::TempDir, Database) {
     let dir = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
-    let store = StoreDirectories::new(dir.path().into())
-        .create_store_dir(StoreId(ids.new_id()), &ids)
-        .unwrap();
+    let store =
+        StoreDirectories::new(dir.path().into(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(StoreId(ids.new_id()), &ids)
+            .unwrap();
     let table = SyncedTable::new("items", RowIdentity::SharedKey);
     let table = if owned { table.owner_only() } else { table };
     let db = DatabaseBuilder::new(store)

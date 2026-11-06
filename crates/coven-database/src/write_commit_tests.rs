@@ -456,6 +456,7 @@ fn crashing_writer() {
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
         path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
     );
     let store =
         StoreId(uuid::Uuid::parse_str(&std::env::var("COVEN_CRASH_STORE").unwrap()).unwrap());
@@ -572,6 +573,7 @@ fn crashing_removal_writer() {
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
         path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_REMOVAL_STORE").unwrap()).unwrap(),

@@ -20,7 +20,7 @@ impl std::task::Wake for WakeCount {
 #[test]
 fn cancelling_filesystem_lock_acquisition_keeps_the_runtime_available_for_reopen() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().into());
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(5));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let layout_lock = crate::files::lock::lock_layout(&root.path().join("stores")).unwrap();
@@ -57,7 +57,7 @@ fn cancelling_filesystem_lock_acquisition_keeps_the_runtime_available_for_reopen
 #[tokio::test]
 async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().into());
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_for_open().await.unwrap();
@@ -69,7 +69,8 @@ async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
     );
     drop(clone);
 
-    let alias = StoreDirectories::new(root.path().join(".")).store_dir(&id);
+    let alias = StoreDirectories::new(root.path().join("."), crate::task::HeardBugs::shared())
+        .store_dir(&id);
     let mut first = Box::pin(alias.lock_for_open());
     let mut second = Box::pin(store.lock_for_open());
     let mut cancelled = Box::pin(store.lock_for_open());
@@ -87,8 +88,9 @@ async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
     drop(cancelled);
     // The same id under another layout is unrelated to this closing store.
     let elsewhere = tempfile::tempdir().unwrap();
-    let other =
-        StoreDirectories::new(elsewhere.path().into()).create_store_dir(id, &UuidIds).unwrap();
+    let other = StoreDirectories::new(elsewhere.path().into(), crate::task::HeardBugs::shared())
+        .create_store_dir(id, &UuidIds)
+        .unwrap();
     drop(other.lock_for_open().await.unwrap());
     assert_eq!(first_wakes.0.load(Ordering::SeqCst), 0);
     assert_eq!(second_wakes.0.load(Ordering::SeqCst), 0);
@@ -104,7 +106,7 @@ async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
 #[tokio::test]
 async fn a_released_guard_cannot_mark_a_replacement_as_closing() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().into());
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(2));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_for_open().await.unwrap();
@@ -122,7 +124,7 @@ async fn a_released_guard_cannot_mark_a_replacement_as_closing() {
 async fn bootstrap_reopen_waits_for_both_the_lease_and_the_writer_in_either_drop_order() {
     for writer_first in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreDirectories::new(root.path().into());
+        let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
         let id = StoreId(uuid::Uuid::from_u128(3));
         let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
         let directory = pending.directory();
@@ -165,10 +167,13 @@ async fn a_layout_symlink_observes_the_same_closing_writer() {
     let alias = alias_root.path().join("alias");
     std::os::unix::fs::symlink(root.path(), &alias).unwrap();
     let id = StoreId(uuid::Uuid::from_u128(4));
-    let store = StoreDirectories::new(root.path().into()).create_store_dir(id, &UuidIds).unwrap();
+    let store = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared())
+        .create_store_dir(id, &UuidIds)
+        .unwrap();
     let lock = store.lock_for_open().await.unwrap();
     drop(lock.closing_guard());
-    let aliased_store = StoreDirectories::new(alias).store_dir(&id);
+    let aliased_store =
+        StoreDirectories::new(alias, crate::task::HeardBugs::shared()).store_dir(&id);
     let mut reopen = Box::pin(aliased_store.lock_for_open());
     poll_fn(|cx| {
         assert!(reopen.as_mut().poll(cx).is_pending());
@@ -185,7 +190,7 @@ async fn a_layout_symlink_observes_the_same_closing_writer() {
 #[tokio::test]
 async fn a_closing_reader_is_waited_for_only_by_closed_and_only_until_released() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().into());
+    let layout = StoreDirectories::new(root.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(3));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let closing = store.lock_read_only().unwrap();

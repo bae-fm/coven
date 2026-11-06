@@ -197,7 +197,10 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
         task::Poll,
     };
     let temp = tempfile::tempdir().unwrap();
-    let layout = coven_foundation::files::StoreDirectories::new(temp.path().to_owned());
+    let layout = coven_foundation::files::StoreDirectories::new(
+        temp.path().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
+    );
     let id = coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1));
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let database = DatabaseBuilder::new(pending.directory())
@@ -440,6 +443,7 @@ fn read_only_process() {
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
         path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
+        coven_foundation::task::HeardBugs::shared(),
     );
     let directory = layout.store_dir(&store_id);
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -940,14 +944,9 @@ impl coven_foundation::task::BugSink for SentBugs {
 /// no caller is left to return it to.
 #[tokio::test]
 async fn a_dropped_calls_panic_goes_to_the_bug_sink() {
-    let store = TestStore::new();
     let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .bug_sink(Arc::new(SentBugs(sent)))
-        .open()
-        .await
-        .unwrap();
+    let store = TestStore::reporting_to(Arc::new(SentBugs(sent)));
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     // Run `call` until its work is entered, drop it, then let the work
     // panic, and return the bug the sink heard.
     async fn dropped<T: std::fmt::Debug>(

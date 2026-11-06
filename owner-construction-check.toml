@@ -1574,6 +1574,8 @@ tables = [
     # person deleting the keychain entry by hand does.
     "Coven::lose_storage_credentials",
     "Coven::in_memory",
+    # An installation whose bugs in work nobody waits for go to the test.
+    "Coven::in_memory_reporting_to",
     # Another of the person's devices shares only the person entries.
     "Coven::another_device",
     # An Android phone keeps the person entries in Block Store, and a new

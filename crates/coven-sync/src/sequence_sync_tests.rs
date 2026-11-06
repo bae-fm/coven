@@ -76,7 +76,7 @@ impl Group {
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
         let temp = tempfile::tempdir().unwrap();
-        StoreDirectories::new(temp.path().into())
+        StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
             .create_store_dir(self.store, self.ids.as_ref())
             .unwrap();
         let identity = MemberIdentity::new(
@@ -144,9 +144,10 @@ impl Group {
     /// A new installation's unpublished directory.
     pub(crate) fn directory(&self) -> (tempfile::TempDir, coven_foundation::files::StoreDir) {
         let temp = tempfile::tempdir().unwrap();
-        let directory = StoreDirectories::new(temp.path().into())
-            .create_store_dir(self.store, self.ids.as_ref())
-            .unwrap();
+        let directory =
+            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
+                .create_store_dir(self.store, self.ids.as_ref())
+                .unwrap();
         (temp, directory)
     }
     /// A group on a provider that shares the store with accounts.
@@ -176,7 +177,9 @@ impl Group {
         storage: MemoryStorage,
         clock: coven_foundation::clock::ClockRef,
     ) -> Device {
-        let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
+        let directory =
+            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
+                .store_dir(&self.store);
         let mut database = DatabaseBuilder::new(directory.clone());
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
@@ -231,7 +234,9 @@ impl Group {
         database: Database,
         clock: coven_foundation::clock::ClockRef,
     ) -> Device {
-        let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
+        let directory =
+            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
+                .store_dir(&self.store);
         // As coven's opening does with storage set up, before any loop runs.
         crate::record_opened(
             &database,

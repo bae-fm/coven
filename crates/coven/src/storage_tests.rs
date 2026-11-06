@@ -22,24 +22,15 @@ struct Fixture {
     recorder: Arc<RecordingClock<StorageSetupStep>>,
     directory: StoreDir,
     /// The app's bug sink, which keeps every bug it hears of.
-    bugs: Arc<HeardBugs>,
+    bugs: Arc<crate::task::HeardBugs>,
     _root: tempfile::TempDir,
-}
-
-/// Keeps every bug it hears of, as an app's crash reporter would.
-#[derive(Default)]
-struct HeardBugs(std::sync::Mutex<Vec<crate::task::Bug>>);
-
-impl crate::task::BugSink for HeardBugs {
-    fn report(&self, bug: &crate::task::Bug) {
-        self.0.lock().unwrap().push(bug.clone());
-    }
 }
 
 impl Fixture {
     async fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let app = Coven::in_memory(root.path().into());
+        let bugs = crate::task::HeardBugs::shared();
+        let app = Coven::in_memory_reporting_to(root.path().into(), bugs.clone());
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(
             MemoryStorage::builder()
@@ -61,9 +52,7 @@ impl Fixture {
             held: tokio::sync::Mutex::new(None),
         });
         let recorder = Arc::new(RecordingClock::new(clock.clone()));
-        let bugs = Arc::new(HeardBugs::default());
         let handle = builder(&app, recorder.clone(), connector.clone())
-            .bug_sink(bugs.clone())
             .open(directory.id(), |_| ())
             .await
             .unwrap();
@@ -286,7 +275,7 @@ async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
         matches!(error.downcast_ref::<SyncError>(), Some(SyncError::Bug(heard)) if *heard == bug),
         "{error:?}"
     );
-    assert_eq!(*f.bugs.0.lock().unwrap(), std::slice::from_ref(&bug));
+    assert_eq!(f.bugs.heard(), std::slice::from_ref(&bug));
     last_pass(&f.handle, |last| {
         matches!(last, Some(LastPass::Failed { error, .. }) if error.contains("connecting panicked"))
     })

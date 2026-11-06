@@ -9,7 +9,7 @@ use uuid::Uuid;
 #[test]
 fn deletion_holds_only_sibling_locks_and_removes_them_after_the_directory() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_for_deletion().unwrap().unwrap();
@@ -44,7 +44,8 @@ fn deletion_holds_only_sibling_locks_and_removes_them_after_the_directory() {
 #[test]
 fn a_second_writer_is_refused_until_the_first_guard_drops() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let guard = store.lock_exclusive().unwrap();
@@ -65,7 +66,9 @@ fn a_second_writer_is_refused_until_the_first_guard_drops() {
 #[test]
 fn a_missing_store_is_an_io_error_and_is_not_created_by_locking() {
     let directory = tempfile::tempdir().unwrap();
-    let store = StoreDirectories::new(directory.path().to_owned()).store_dir(&StoreId(Uuid::nil()));
+    let store =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared())
+            .store_dir(&StoreId(Uuid::nil()));
     assert!(
         matches!(store.lock_exclusive(), Err(StoreLockError::File(FileError::Io { source, .. })) if source.downcast_ref::<std::io::Error>().unwrap().kind() == std::io::ErrorKind::NotFound)
     );
@@ -75,7 +78,8 @@ fn a_missing_store_is_an_io_error_and_is_not_created_by_locking() {
 #[test]
 fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let guard = store.lock_exclusive().unwrap();
@@ -93,7 +97,7 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
 #[test]
 fn only_the_matching_lock_can_authorize_open() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let first = layout.create_store_dir(StoreId(Uuid::from_u128(1)), &UuidIds).unwrap();
     let second = layout.create_store_dir(StoreId(Uuid::from_u128(2)), &UuidIds).unwrap();
     let lock = first.lock_exclusive().unwrap();
@@ -107,7 +111,7 @@ fn only_the_matching_lock_can_authorize_open() {
 #[test]
 fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_exclusive().unwrap();
@@ -130,7 +134,7 @@ fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
 #[test]
 fn readers_coexist_with_the_writer_but_all_must_close_before_deletion() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let first = store.lock_read_only().unwrap();
@@ -151,7 +155,8 @@ fn readers_coexist_with_the_writer_but_all_must_close_before_deletion() {
 fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
     for removed_locks in [0, 1, 2] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreDirectories::new(root.path().to_owned());
+        let layout =
+            StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
         let id = StoreId(Uuid::from_u128(1));
         let store = layout.create_store_dir(id, &UuidIds).unwrap();
         let deletion = store.lock_for_deletion().unwrap().unwrap();
@@ -180,7 +185,7 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
 #[test]
 fn failed_unpublication_keeps_the_store_and_its_locks_for_retry() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let deletion = store.lock_for_deletion().unwrap().unwrap();
@@ -206,7 +211,7 @@ fn failed_unpublication_keeps_the_store_and_its_locks_for_retry() {
 #[test]
 fn a_bootstrap_lock_without_its_store_is_refused_while_held_then_removed() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let stores = root.path().join("stores");
     std::fs::create_dir(&stores).unwrap();
@@ -229,7 +234,7 @@ fn a_bootstrap_lock_without_its_store_is_refused_while_held_then_removed() {
 fn deleting_a_store_link_never_removes_its_target() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let stores = root.path().join("stores");
     std::fs::create_dir(&stores).unwrap();
@@ -246,7 +251,7 @@ fn deleting_a_store_link_never_removes_its_target() {
 #[tokio::test]
 async fn lock_file_removal_and_new_locks_wait_for_the_layout_lock() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let stores = root.path().join("stores");

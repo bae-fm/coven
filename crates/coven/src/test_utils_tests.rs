@@ -289,7 +289,11 @@ fn crashing_local_write() {
     let point: usize = std::env::var("COVEN_GUARANTEE_POINT").unwrap().parse().unwrap();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let db = coven_database::DatabaseBuilder::new(
-            coven_foundation::files::StoreDirectories::new(root.into()).store_dir(&store),
+            coven_foundation::files::StoreDirectories::new(
+                root.into(),
+                crate::task::HeardBugs::shared(),
+            )
+            .store_dir(&store),
         )
         .synced_tables(tables())
         .namespaces(namespaces())

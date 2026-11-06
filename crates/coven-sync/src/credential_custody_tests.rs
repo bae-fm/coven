@@ -28,8 +28,11 @@ fn saved(store: &CredentialKeychains) -> (Vec<u8>, String) {
 /// A directory these tests never read: committing credentials leaves the
 /// settings file alone.
 fn unread_directory(id: StoreId) -> coven_foundation::files::StoreDir {
-    coven_foundation::files::StoreDirectories::new(std::env::temp_dir().join("credential-tests"))
-        .store_dir(&id)
+    coven_foundation::files::StoreDirectories::new(
+        std::env::temp_dir().join("credential-tests"),
+        coven_foundation::task::HeardBugs::shared(),
+    )
+    .store_dir(&id)
 }
 
 fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {

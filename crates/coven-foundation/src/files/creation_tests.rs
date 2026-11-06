@@ -7,7 +7,8 @@ use uuid::Uuid;
 #[test]
 fn creation_never_overwrites_a_store_or_even_an_empty_directory() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let original = layout.create_store_dir(id, &UuidIds).unwrap().settings().unwrap();
     assert!(
@@ -30,7 +31,7 @@ fn restored_and_joined_directories_get_fresh_device_ids_for_the_same_store() {
     let [first, restored] = ["first-device", "restored-device"].map(|name| {
         let app_dir = directory.path().join(name);
         fs::create_dir(&app_dir).unwrap();
-        StoreDirectories::new(app_dir)
+        StoreDirectories::new(app_dir, crate::task::HeardBugs::shared())
     });
     let id = StoreId(Uuid::from_u128(1));
     let one = first.create_store_dir(id, &UuidIds).unwrap().settings().unwrap();
@@ -43,7 +44,8 @@ fn restored_and_joined_directories_get_fresh_device_ids_for_the_same_store() {
 #[test]
 fn creation_uses_the_supplied_id_source_for_the_device_id() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let ids = crate::id_source::SequentialIds::new();
     let id = StoreId(ids.new_id());
     let store = layout.create_store_dir(id, &ids).unwrap();
@@ -53,7 +55,8 @@ fn creation_uses_the_supplied_id_source_for_the_device_id() {
 #[test]
 fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let barrier = std::sync::Barrier::new(2);
     let results = std::thread::scope(|scope| {
@@ -117,7 +120,7 @@ fn retrying_directory_creation_repeats_a_failed_durability_barrier() {
 fn creation_needs_the_app_directory_to_exist() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("app");
-    let layout = StoreDirectories::new(missing.clone());
+    let layout = StoreDirectories::new(missing.clone(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(1));
     let Err(DirectoryCreationError::File(error)) = layout.create_store_dir(id, &UuidIds) else {
         panic!("creating a store inside a missing app directory must fail");

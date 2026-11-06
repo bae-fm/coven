@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// The choices for creating or opening a store (E1).
 #[cfg_attr(
     not(feature = "test-utils"),
-    doc = "\nProduction builders cannot replace the random id source.\n```compile_fail\nuse coven::{Coven, UuidIds};\nuse std::sync::Arc;\nlet coven = Coven::new(\"stores\".into(), \"com.example.notes\").unwrap();\nlet _ = coven.builder().id_source(Arc::new(UuidIds));\n```"
+    doc = "\nProduction builders cannot replace the random id source.\n```compile_fail\nuse coven::{Coven, UuidIds};\nuse std::sync::Arc;\nlet coven = Coven::new(\"stores\".into(), \"com.example.notes\", Arc::new(coven::task::LoggedBugs)).unwrap();\nlet _ = coven.builder().id_source(Arc::new(UuidIds));\n```"
 )]
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
@@ -43,8 +43,6 @@ pub struct CovenBuilder {
     identity: SessionSource<MemberIdentity>,
     sqlite: SqliteSettings,
     sql_functions: coven_database::SqlFunctions,
-    /// Where a bug in the store's work that nobody waits for goes (E15).
-    bugs: crate::task::BugSinkRef,
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
@@ -117,7 +115,6 @@ impl CovenBuilder {
             identity: SessionSource::Configured(CustodyChoice::Keyring),
             sqlite: SqliteSettings::default(),
             sql_functions: coven_database::SqlFunctions::default(),
-            bugs: Arc::new(crate::task::LoggedBugs),
             #[cfg(test)]
             interrupt_after_swap: false,
             #[cfg(test)]
@@ -319,21 +316,12 @@ impl CovenBuilder {
         self
     }
 
-    /// Where a bug in the store's work that nobody waits for goes (E15): a
-    /// panic in its sync loop, upload worker or another worker of its own,
-    /// and one in work whose caller stopped waiting for it. The app passes
-    /// its crash reporter. Unset, each bug is logged at error.
-    pub fn bug_sink(mut self, bugs: crate::task::BugSinkRef) -> Self {
-        self.bugs = bugs;
-        self
-    }
-
     /// Create and open a store, initializing its member in the chosen custody
     /// before publication. Cancellation does not interrupt creation or rollback.
     /// Errors carry no handle; a published store is closed before returning.
     pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError> {
         let name = name.to_owned();
-        let bugs = self.bugs.clone();
+        let bugs = self.directories.bugs().clone();
         crate::task::spawn_completing(
             "create the store",
             bugs,
@@ -549,8 +537,7 @@ impl CovenBuilder {
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
             .sqlite_settings(self.sqlite.clone())
-            .sql_functions(self.sql_functions.clone())
-            .bug_sink(self.bugs.clone()))
+            .sql_functions(self.sql_functions.clone()))
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {
@@ -644,9 +631,11 @@ impl CovenBuilder {
         let keys = Self::make_session(self.keys, &directory, settings.id, keychain.clone())?;
         let identity =
             Self::make_session(self.identity, &directory, settings.id, keychain.clone())?;
-        let network =
-            coven_foundation::network_watch::NetworkWatch::start(&self.network, &self.bugs)
-                .map_err(CovenError::NetworkWatch)?;
+        let network = coven_foundation::network_watch::NetworkWatch::start(
+            &self.network,
+            self.directories.bugs(),
+        )
+        .map_err(CovenError::NetworkWatch)?;
         Ok(OpeningOwners {
             directory,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),

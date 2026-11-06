@@ -13,7 +13,7 @@ struct Fixture {
 /// A published store with a database, a stored location and an unsent file.
 fn store(n: u128) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(temp.path().into());
+    let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
     let id = StoreId(uuid::Uuid::from_u128(n));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     std::fs::write(store.database_path(), b"old database").unwrap();

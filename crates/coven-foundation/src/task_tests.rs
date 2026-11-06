@@ -191,25 +191,9 @@ async fn joined_keeps_a_payload_whose_drop_panics_from_unwinding() {
     );
 }
 
-/// Keeps every bug it hears of, as an app's crash reporter would.
-#[derive(Default)]
-pub(crate) struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
-
-impl BugSink for HeardBugs {
-    fn report(&self, bug: &Bug) {
-        self.0.lock().unwrap().push(bug.clone());
-    }
-}
-
-impl HeardBugs {
-    pub(crate) fn heard(&self) -> Vec<Bug> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
 #[tokio::test]
 async fn an_owned_task_s_panic_goes_to_the_sink_then_its_owner_ends_its_work() {
-    let bugs = Arc::new(HeardBugs::default());
+    let bugs = HeardBugs::shared();
     let (ended, owner_heard) = tokio::sync::oneshot::channel();
     let task = spawn_owned(
         "upload files",
@@ -227,7 +211,7 @@ async fn an_owned_task_s_panic_goes_to_the_sink_then_its_owner_ends_its_work() {
 
 #[tokio::test]
 async fn an_owned_task_s_ending_that_panics_goes_to_the_sink_too() {
-    let bugs = Arc::new(HeardBugs::default());
+    let bugs = HeardBugs::shared();
     spawn_owned("sync", bugs.clone(), async { panic!("a pass panicked") }, |_| async {
         panic!("recording the failure panicked")
     })
@@ -239,7 +223,7 @@ async fn an_owned_task_s_ending_that_panics_goes_to_the_sink_too() {
 
 #[tokio::test]
 async fn an_owned_task_that_finishes_reports_nothing() {
-    let bugs = Arc::new(HeardBugs::default());
+    let bugs = HeardBugs::shared();
     spawn_owned("follow the network", bugs.clone(), async {}, |_| async {
         unreachable!("only a panic ends the work")
     })
@@ -250,7 +234,7 @@ async fn an_owned_task_that_finishes_reports_nothing() {
 
 #[tokio::test]
 async fn a_completing_task_s_panic_goes_to_its_waiting_caller_alone() {
-    let bugs = Arc::new(HeardBugs::default());
+    let bugs = HeardBugs::shared();
     let failed = spawn_completing("close the store", bugs.clone(), async {
         panic!("a writer is still held")
     })

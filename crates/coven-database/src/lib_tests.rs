@@ -32,8 +32,17 @@ impl TestStore {
     }
 
     pub(crate) fn with_ids(ids: &dyn IdSource) -> Self {
+        Self::made(ids, coven_foundation::task::HeardBugs::shared())
+    }
+
+    /// A store whose bugs in work nobody waits for go to `bugs`.
+    pub(crate) fn reporting_to(bugs: coven_foundation::task::BugSinkRef) -> Self {
+        Self::made(&SequentialIds::new(), bugs)
+    }
+
+    fn made(ids: &dyn IdSource, bugs: coven_foundation::task::BugSinkRef) -> Self {
         let temporary = tempfile::tempdir().unwrap();
-        let layout = StoreDirectories::new(temporary.path().to_owned());
+        let layout = StoreDirectories::new(temporary.path().to_owned(), bugs);
         // Every test store is a device of the one fixture store that fixture
         // creation entries name. Drawing an id first keeps device ids unchanged.
         ids.new_id();

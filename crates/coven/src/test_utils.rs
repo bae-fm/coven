@@ -20,7 +20,13 @@ impl Coven {
     /// which the test drives. A new one simulates another device; keep one to
     /// test reopening.
     pub fn in_memory(app_dir: PathBuf) -> Self {
-        Self::testing(app_dir, Keychain::in_memory("coven-test").expect("valid service name"))
+        Self::in_memory_reporting_to(app_dir, crate::task::HeardBugs::shared())
+    }
+
+    /// `in_memory`, whose bugs in work nobody waits for go to `bugs`, for a
+    /// test that hears them (E15).
+    pub fn in_memory_reporting_to(app_dir: PathBuf, bugs: crate::task::BugSinkRef) -> Self {
+        Self::testing(app_dir, Keychain::in_memory("coven-test").expect("valid service name"), bugs)
     }
 
     /// An installation on an Android phone: its person entries behave as
@@ -30,6 +36,7 @@ impl Coven {
         Self::testing(
             app_dir,
             Keychain::in_memory_block_store("coven-test").expect("valid service name"),
+            crate::task::HeardBugs::shared(),
         )
     }
 
@@ -37,7 +44,7 @@ impl Coven {
     /// failing on cue.
     #[cfg(test)]
     pub(crate) fn with_keychain(app_dir: PathBuf, keychain: Arc<Keychain>) -> Self {
-        Self::testing(app_dir, keychain)
+        Self::testing(app_dir, keychain, crate::task::HeardBugs::shared())
     }
 
     /// The app directory's stores, for a test that begins a bootstrap or a
@@ -47,9 +54,9 @@ impl Coven {
         &self.directories
     }
 
-    fn testing(app_dir: PathBuf, keychain: Arc<Keychain>) -> Self {
+    fn testing(app_dir: PathBuf, keychain: Arc<Keychain>, bugs: crate::task::BugSinkRef) -> Self {
         Self {
-            directories: StoreDirectories::new(app_dir),
+            directories: StoreDirectories::new(app_dir, bugs),
             keychain,
             network: NetworkSource::Test(TestNetwork::new(true, false)),
         }
@@ -61,21 +68,25 @@ impl Coven {
     /// carries a restore code and S3 key between the person's devices; with
     /// Block Store it has its own, empty.
     pub fn another_device(&self, app_dir: PathBuf) -> Self {
-        Self::testing(app_dir, self.keychain.another_device())
+        Self::testing(app_dir, self.keychain.another_device(), self.directories.bugs().clone())
     }
 
     /// A new phone set up from this one by direct transfer, its stores under
     /// `app_dir`: nothing of this phone's own, and a copy of its Block Store
     /// entries (§13.1). Requires `with_block_store`.
     pub fn set_up_new_device(&self, app_dir: PathBuf) -> Self {
-        Self::testing(app_dir, self.keychain.set_up_new_device())
+        Self::testing(app_dir, self.keychain.set_up_new_device(), self.directories.bugs().clone())
     }
 
     /// A new phone set up from this phone's last cloud backup, its stores
     /// under `app_dir`: the Block Store entries that backup holds (§13.1).
     /// Requires `with_block_store`.
     pub fn restore_new_device_from_cloud(&self, app_dir: PathBuf) -> Self {
-        Self::testing(app_dir, self.keychain.restore_new_device_from_cloud())
+        Self::testing(
+            app_dir,
+            self.keychain.restore_new_device_from_cloud(),
+            self.directories.bugs().clone(),
+        )
     }
 
     /// Google's periodic cloud backup of this phone's Block Store: the entries

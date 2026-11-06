@@ -13,6 +13,7 @@ use crate::files::{
     StoreDirAccess, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
+use crate::task::BugSinkRef;
 
 /// The stores under `app_dir`, one directory each (E1).
 #[cfg_attr(
@@ -21,15 +22,27 @@ use crate::id_source::{IdSource, StoreId};
 Directory-only creation is a test fixture.
 ```compile_fail
 use coven_foundation::{files::StoreDirectories, id_source::{StoreId, UuidIds, IdSource}};
-let layout = StoreDirectories::new("stores".into());
+let layout = StoreDirectories::new("stores".into(), std::sync::Arc::new(coven_foundation::task::LoggedBugs));
 let _ = layout.create_store_dir(StoreId(UuidIds.new_id()), &UuidIds);
 ```"#
 )]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StoreDirectories {
     app_dir: PathBuf,
     /// The class every store's files take, where the app chose one.
     protection: Protection,
+    /// Where a bug in work nobody waits for goes, for every store here
+    /// (E15): the app's own reporter.
+    bugs: BugSinkRef,
+}
+
+impl std::fmt::Debug for StoreDirectories {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreDirectories")
+            .field("app_dir", &self.app_dir)
+            .field("protection", &self.protection)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Which of the store directories a listing reads.
@@ -43,9 +56,16 @@ enum Installations {
 
 impl StoreDirectories {
     /// The stores under `app_dir`, one directory each (E1). The app creates
-    /// `app_dir`; coven creates directories only inside it.
-    pub fn new(app_dir: PathBuf) -> Self {
-        Self { app_dir, protection: Protection::none() }
+    /// `app_dir`; coven creates directories only inside it. A bug in work
+    /// nobody waits for, in any of the stores, goes to `bugs` (E15).
+    pub fn new(app_dir: PathBuf, bugs: BugSinkRef) -> Self {
+        Self { app_dir, protection: Protection::none(), bugs }
+    }
+
+    /// Where a bug in work nobody waits for goes, for every store here
+    /// (E15).
+    pub fn bugs(&self) -> &BugSinkRef {
+        &self.bugs
     }
 
     /// Give the files of every store these directories create, restore,
@@ -189,7 +209,7 @@ impl StoreDirectories {
     /// The directory of the store with `id` (E1). This does not create it,
     /// read settings, or acquire the writer's lock.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir {
-        StoreDir::new(self.stores().join(id.to_string()), *id, self.protection)
+        StoreDir::new(self.stores().join(id.to_string()), *id, self.protection, self.bugs.clone())
     }
 
     /// Publish a directory fixture without initializing member custody.
@@ -199,7 +219,14 @@ impl StoreDirectories {
         id: StoreId,
         ids: &dyn IdSource,
     ) -> Result<StoreDir, DirectoryCreationError> {
-        crate::files::creation::create(&self.stores(), id, ids, false, self.protection)
+        crate::files::creation::create(
+            &self.stores(),
+            id,
+            ids,
+            false,
+            self.protection,
+            self.bugs.clone(),
+        )
     }
 }
 
@@ -268,8 +295,14 @@ impl StoreDirectories {
         id: StoreId,
         ids: &dyn IdSource,
     ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
-        super::bootstrap::reserve_bootstrap_directory(&self.stores(), id, ids, self.protection)
-            .await
+        super::bootstrap::reserve_bootstrap_directory(
+            &self.stores(),
+            id,
+            ids,
+            self.protection,
+            self.bugs.clone(),
+        )
+        .await
     }
 
     /// Replace the installation of a published store, or continue a
@@ -285,7 +318,8 @@ impl StoreDirectories {
         by: super::ReplacedBy,
         ids: &dyn IdSource,
     ) -> Result<super::ReplacementStore, super::BootstrapDirectoryError> {
-        super::replacement::begin(&self.stores(), id, by, ids, self.protection).await
+        super::replacement::begin(&self.stores(), id, by, ids, self.protection, self.bugs.clone())
+            .await
     }
 }
 

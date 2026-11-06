@@ -24,9 +24,10 @@ const CLEAR: &str = "DELETE FROM queue";
 
 async fn open(directory: &tempfile::TempDir) -> Database {
     let ids = SequentialIds::new();
-    let store = StoreDirectories::new(directory.path().into())
-        .create_store_dir(StoreId(ids.new_id()), &ids)
-        .unwrap();
+    let store =
+        StoreDirectories::new(directory.path().into(), coven_foundation::task::HeardBugs::shared())
+            .create_store_dir(StoreId(ids.new_id()), &ids)
+            .unwrap();
     DatabaseBuilder::new(store)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::addition(1, "schema", SCHEMA)])

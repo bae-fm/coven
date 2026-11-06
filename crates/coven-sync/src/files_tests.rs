@@ -63,7 +63,10 @@ impl Fixture {
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
-        let layout = StoreDirectories::new(root.path().to_owned());
+        let layout = StoreDirectories::new(
+            root.path().to_owned(),
+            coven_foundation::task::HeardBugs::shared(),
+        );
         let directory =
             layout.create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref()).unwrap();
         let namespaces = vec![

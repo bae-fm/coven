@@ -54,6 +54,7 @@ pub struct ReplacementStore {
     /// directory; none once it has swapped in.
     loading: Mutex<Option<BootstrapStore>>,
     protection: Protection,
+    bugs: crate::task::BugSinkRef,
 }
 
 impl ReplacementStore {
@@ -77,6 +78,7 @@ impl ReplacementStore {
                 self.id,
                 self.lease.instance(),
                 self.protection,
+                self.bugs.clone(),
             ),
         }
     }
@@ -245,6 +247,7 @@ pub(super) async fn begin(
     by: ReplacedBy,
     ids: &dyn IdSource,
     protection: Protection,
+    bugs: crate::task::BugSinkRef,
 ) -> Result<ReplacementStore, BootstrapDirectoryError> {
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve store layout", root, source))?;
@@ -307,7 +310,8 @@ pub(super) async fn begin(
                 .into());
             }
             let loading =
-                bootstrap::reserve_bootstrap_directory(&area, id, ids, protection).await?;
+                bootstrap::reserve_bootstrap_directory(&area, id, ids, protection, bugs.clone())
+                    .await?;
             let new =
                 loading.directory().settings().map_err(DirectoryCreationError::Settings)?.device_id;
             if new != record.reset.new_device {
@@ -332,7 +336,8 @@ pub(super) async fn begin(
             creation::create_directory(&area)
                 .map_err(|source| FileError::at("create replacement area", &area, source))?;
             let loading =
-                bootstrap::reserve_bootstrap_directory(&area, id, ids, protection).await?;
+                bootstrap::reserve_bootstrap_directory(&area, id, ids, protection, bugs.clone())
+                    .await?;
             let new =
                 loading.directory().settings().map_err(DirectoryCreationError::Settings)?.device_id;
             (DeviceReset { old_device: current.device_id, new_device: new }, Some(loading), None)
@@ -352,6 +357,7 @@ pub(super) async fn begin(
         record: Mutex::new(recorded),
         loading: Mutex::new(loading),
         protection,
+        bugs,
     })
 }
 

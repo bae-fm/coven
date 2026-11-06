@@ -12,7 +12,8 @@ fn cancelled_writes_retain_the_store_until_blocking_io_finishes() {
     runtime.block_on(async {
         for finish in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let layout = StoreDirectories::new(root.path().to_owned());
+            let layout =
+                StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
             let store = layout.create_store_dir(StoreId(Uuid::from_u128(123)), &UuidIds).unwrap();
             let name = FileName::new("cancelled").unwrap();
             let mut writer = store.create_writer(FileArea::Cache, &name).unwrap();
@@ -58,7 +59,8 @@ fn cancelled_writes_retain_the_store_until_blocking_io_finishes() {
 async fn a_streaming_writer_prevents_store_deletion_until_it_closes() {
     for area in [FileArea::AppProvided, FileArea::Cache] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreDirectories::new(root.path().to_owned());
+        let layout =
+            StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
         let id = StoreId(Uuid::from_u128(123));
         let store = layout.create_store_dir(id, &UuidIds).unwrap();
         let name = FileName::new("streamed").unwrap();
@@ -74,7 +76,8 @@ async fn a_streaming_writer_prevents_store_deletion_until_it_closes() {
 #[test]
 fn named_file_capabilities_stay_in_their_own_areas() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(directory.path().to_owned());
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
     let id = StoreId(Uuid::from_u128(123));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let name = FileName::new("attachment.data").unwrap();

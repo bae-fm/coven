@@ -141,7 +141,7 @@ fn open(layout: &StoreDirectories, id: StoreId) -> Result<(), FileError> {
 #[test]
 fn a_new_store_and_everything_made_in_it_take_the_class() {
     let app_dir = tempfile::tempdir().unwrap();
-    let layout = StoreDirectories::new(app_dir.path().to_owned())
+    let layout = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared())
         .file_protection(FileProtection::CompleteUnlessOpen);
     // The folders, the settings and the record are made in the stage after
     // it takes the class, and the files after them, as SQLite makes its WAL,
@@ -156,7 +156,7 @@ fn a_new_store_and_everything_made_in_it_take_the_class() {
 #[test]
 fn opening_a_store_made_without_a_class_gives_it_to_every_file() {
     let app_dir = tempfile::tempdir().unwrap();
-    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let plain = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     let opened = open(&plain.file_protection(FileProtection::Complete), ID);
     if !keeps_classes(app_dir.path()) {
@@ -178,7 +178,8 @@ fn opening_a_store_made_without_a_class_gives_it_to_every_file() {
 #[test]
 fn opening_with_another_class_gives_it_to_every_file() {
     let app_dir = tempfile::tempdir().unwrap();
-    let directories = || StoreDirectories::new(app_dir.path().to_owned());
+    let directories =
+        || StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let Some(store) = classed_store_with_files(
         &directories().file_protection(FileProtection::CompleteUnlessOpen),
         app_dir.path(),
@@ -201,7 +202,7 @@ fn opening_with_another_class_gives_it_to_every_file() {
 #[test]
 fn an_open_with_the_recorded_class_walks_nothing() {
     let app_dir = tempfile::tempdir().unwrap();
-    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let plain = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     record(&store, FileProtection::Complete).unwrap();
     // A walk would fail at a file it can't open for writing.
@@ -218,7 +219,7 @@ fn an_open_with_the_recorded_class_walks_nothing() {
 #[test]
 fn a_walk_that_stops_partway_is_not_recorded_and_the_next_open_finishes_it() {
     let app_dir = tempfile::tempdir().unwrap();
-    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let plain = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     let layout = plain.file_protection(FileProtection::Complete);
     // A file the walk can't open for writing stops it.
@@ -251,7 +252,7 @@ fn a_walk_that_stops_partway_is_not_recorded_and_the_next_open_finishes_it() {
 #[test]
 fn an_installation_inside_the_store_gets_its_record_rewritten() {
     let app_dir = tempfile::tempdir().unwrap();
-    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let plain = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     // A replacement loading inside the store's directory, made with another
     // class, as one a swap would move into the store's place.
@@ -280,7 +281,8 @@ fn an_installation_inside_the_store_gets_its_record_rewritten() {
 #[test]
 fn without_a_class_files_keep_theirs() {
     let app_dir = tempfile::tempdir().unwrap();
-    let directories = || StoreDirectories::new(app_dir.path().to_owned());
+    let directories =
+        || StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let Some(store) = classed_store_with_files(
         &directories().file_protection(FileProtection::CompleteUnlessOpen),
         app_dir.path(),
@@ -304,7 +306,7 @@ fn without_a_class_files_keep_theirs() {
 #[test]
 fn without_a_class_any_volume_opens() {
     let app_dir = tempfile::tempdir().unwrap();
-    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let plain = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     open(&plain, ID).unwrap();
     assert_eq!(recorded(&store).unwrap(), None);
@@ -313,7 +315,8 @@ fn without_a_class_any_volume_opens() {
 #[tokio::test]
 async fn a_resumed_installation_takes_the_class() {
     let app_dir = tempfile::tempdir().unwrap();
-    let directories = || StoreDirectories::new(app_dir.path().to_owned());
+    let directories =
+        || StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     // A restore or join that loaded files, then stopped.
     let store = app_dir.path().join("stores").join(ID.to_string());
     drop(directories().begin_bootstrap(ID, &UuidIds).await.unwrap());
@@ -343,7 +346,7 @@ async fn a_resumed_installation_takes_the_class() {
 #[tokio::test]
 async fn a_replacement_gives_the_class_to_both_installations() {
     let app_dir = tempfile::tempdir().unwrap();
-    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let plain = StoreDirectories::new(app_dir.path().to_owned(), crate::task::HeardBugs::shared());
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     let replacement = plain
         .file_protection(FileProtection::Complete)

@@ -185,8 +185,8 @@ pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Resu
 
 /// Where a bug in work nobody waits for goes (E15): a store's long-lived
 /// workers, such as its sync loop and upload worker, and work whose caller
-/// stopped waiting for it. The app passes its own crash reporter with
-/// `CovenBuilder::bug_sink`.
+/// stopped waiting for it. The app passes its own crash reporter to
+/// `Coven::new`.
 pub trait BugSink: Send + Sync {
     /// Report `bug`, which no caller hears of otherwise.
     fn report(&self, bug: &Bug);
@@ -195,12 +195,40 @@ pub trait BugSink: Send + Sync {
 /// A shared [`BugSink`].
 pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 
-/// Logs each bug at error: the sink of a store whose app names none.
+/// Logs each bug at error: the sink of an app that wants its bugs only
+/// logged.
 pub struct LoggedBugs;
 
 impl BugSink for LoggedBugs {
     fn report(&self, bug: &Bug) {
         tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
+    }
+}
+
+/// Keeps every bug it hears of, and logs each at error, as an app's crash
+/// reporter would: the sink a test gives coven, reading back what it heard.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Default)]
+pub struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
+
+#[cfg(any(test, feature = "test-utils"))]
+impl HeardBugs {
+    /// A sink that has heard nothing yet, to share with coven.
+    pub fn shared() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// Every bug heard so far, in the order heard.
+    pub fn heard(&self) -> Vec<Bug> {
+        crate::locks::lock_unpoisoned(&self.0).clone()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl BugSink for HeardBugs {
+    fn report(&self, bug: &Bug) {
+        tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
+        crate::locks::lock_unpoisoned(&self.0).push(bug.clone());
     }
 }
 

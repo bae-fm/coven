@@ -82,8 +82,11 @@ fn custody(
         store.clone(),
         Arc::new(PersonEntries::new(keychain.clone(), id)),
         // Sign-in never reads the store's directory, so it is only named.
-        coven_foundation::files::StoreDirectories::new(std::env::temp_dir().join("sign-in-tests"))
-            .store_dir(&id),
+        coven_foundation::files::StoreDirectories::new(
+            std::env::temp_dir().join("sign-in-tests"),
+            coven_foundation::task::HeardBugs::shared(),
+        )
+        .store_dir(&id),
         Some(server.clients()),
     ));
     (keychain, store, device)

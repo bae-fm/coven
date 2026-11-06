@@ -95,6 +95,7 @@ pub struct BootstrapStore {
     id: StoreId,
     lease: BootstrapLease,
     protection: Protection,
+    bugs: crate::task::BugSinkRef,
 }
 
 /// The bootstrap lock, which the bootstrap or replacement that took it holds
@@ -124,7 +125,13 @@ impl BootstrapStore {
     /// The unpublished directory, which opens the store while this bootstrap
     /// holds its lock.
     pub fn directory(&self) -> StoreDir {
-        StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.instance(), self.protection)
+        StoreDir::bootstrapping(
+            self.path.clone(),
+            self.id,
+            self.lease.instance(),
+            self.protection,
+            self.bugs.clone(),
+        )
     }
 
     /// Publish the loaded, open store by removing its durable marker.
@@ -207,6 +214,7 @@ pub(super) async fn reserve_bootstrap_directory(
     id: StoreId,
     ids: &dyn IdSource,
     protection: Protection,
+    bugs: crate::task::BugSinkRef,
 ) -> Result<BootstrapStore, BootstrapDirectoryError> {
     creation::create_directory(root)
         .map_err(|source| FileError::at("create bootstrap layout", root, source))?;
@@ -217,7 +225,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let closing = lock.closing_guard();
     let lease = BootstrapLease::new(lock);
     if !exists("inspect bootstrap path", &path)? {
-        creation::create(&root, id, ids, true, protection)?;
+        creation::create(&root, id, ids, true, protection, bugs.clone())?;
     }
     let metadata = fs::symlink_metadata(&path)
         .map_err(|source| FileError::at("inspect unpublished store", &path, source))?;
@@ -243,7 +251,7 @@ pub(super) async fn reserve_bootstrap_directory(
     }
     // A resumed installation may have been made with another class (E1).
     protection.apply(&path)?;
-    let store = BootstrapStore { _closing: closing, path, id, lease, protection };
+    let store = BootstrapStore { _closing: closing, path, id, lease, protection, bugs };
     store.directory().settings().map_err(DirectoryCreationError::Settings)?;
     Ok(store)
 }

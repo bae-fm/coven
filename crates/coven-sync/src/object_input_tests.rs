@@ -211,9 +211,10 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let directory = StoreDirectories::new(temp.path().into())
-            .create_store_dir(store(), &SequentialIds::new())
-            .unwrap();
+        let directory =
+            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
+                .create_store_dir(store(), &SequentialIds::new())
+                .unwrap();
         let db = coven_database::DatabaseBuilder::new(directory.clone())
             .synced_tables(vec![])
             .migrations(vec![])
