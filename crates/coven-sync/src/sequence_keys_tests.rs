@@ -685,3 +685,29 @@ async fn a_member_removed_from_a_circle_keeps_its_rows_and_keys() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Ana deletes Gifts, then asks for its key to be replaced. The circle is
+/// gone, so the rotation is refused as a gone target, not as a right she
+/// lacks, and nothing is claimed (§10.4, §15.9).
+#[tokio::test]
+async fn rotating_a_deleted_circles_key_finds_its_target_gone() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync.administer(StoreChange::DeleteCircle { circle }).await.unwrap();
+    let applied = ana.database().applied_slot().await.unwrap();
+    let result = ana.sync.rotate_key(Audience::Circle(circle)).await;
+    assert!(
+        matches!(
+            result,
+            Err(SyncError::Rejected(crate::OperationRejection::TargetGone(
+                crate::EntryTarget::Circle(gone)
+            ))) if gone == circle
+        ),
+        "{result:?}"
+    );
+    assert_eq!(ana.database().applied_slot().await.unwrap(), applied);
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    ana.database().close().await.unwrap();
+}
