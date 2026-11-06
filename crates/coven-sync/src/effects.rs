@@ -93,9 +93,10 @@ pub(crate) fn checked_change(
             return Ok(None);
         }
     }
-    // A target the state doesn't hold refuses the change whoever asks: its
-    // authority rule names the target's owner or members, which an absent
-    // target doesn't have, and the app shows the true reason.
+    // A target the state doesn't hold, or a circle it deleted, refuses the
+    // change whoever asks: its authority rule names the target's owner or
+    // members, which a gone target doesn't have, and the app shows the true
+    // reason (§15.5).
     let absent = match change {
         RemoveDevice { device } if !state.devices.contains_key(device) => {
             Some(EntryTarget::Device(*device))
@@ -104,7 +105,7 @@ pub(crate) fn checked_change(
         | DeleteCircle { circle }
         | AddCircleMember { circle, .. }
         | RemoveCircleMember { circle, .. }
-            if !state.circles.contains_key(circle) =>
+            if !state.circles.contains_key(circle) || state.deleted(&Audience::Circle(*circle)) =>
         {
             Some(EntryTarget::Circle(*circle))
         }

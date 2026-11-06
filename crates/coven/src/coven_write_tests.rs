@@ -180,7 +180,8 @@ async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
     device.handle.close().await.unwrap();
     let ana = network.reopen(&device).open(device.store, |_| ()).await.unwrap();
     ana.start_sync().await.unwrap();
-    let rejected = OperationOutcome::Rejected(OperationRejection::NotAllowed);
+    let rejected =
+        OperationOutcome::Rejected(OperationRejection::TargetGone(EntryTarget::Circle(gifts)));
     assert_eq!(crate::tests::outcome(&ana, rename).await, rejected);
     ana.close().await.unwrap();
     let ana = network.reopen(&device).open(device.store, |_| ()).await.unwrap();

@@ -965,8 +965,8 @@ fn circle_renames_apply_in_slot_order_and_the_latest_valid_one_names_it() {
 }
 
 /// A circle left empty is deleted at that slot, whether its last member left
-/// it or was removed from the store; no later entry can add a member to a
-/// deleted circle (§15.8).
+/// it or was removed from the store. A later entry that adds, removes or
+/// renames finds its target gone (§15.5, §15.8).
 #[test]
 fn a_circle_left_empty_is_deleted_at_that_slot() {
     let left = apply(
@@ -985,8 +985,13 @@ fn a_circle_left_empty_is_deleted_at_that_slot() {
     for state in [left, removed] {
         assert_eq!(state.circle_deletions[&gifts()], Slot(4));
         assert!(state.circles[&gifts()].members.is_empty());
-        let readded =
-            apply(&state, 1, StoreChange::AddCircleMember { circle: gifts(), member: id(2) });
-        assert!(readded.is_err(), "a deleted circle takes no member");
+        for change in [
+            StoreChange::AddCircleMember { circle: gifts(), member: id(2) },
+            StoreChange::RemoveCircleMember { circle: gifts(), member: id(3) },
+            StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() },
+        ] {
+            let gone = Some(OperationRejection::TargetGone(EntryTarget::Circle(gifts())));
+            assert_eq!(apply(&state, 1, change).err(), gone, "a deleted circle is gone");
+        }
     }
 }
