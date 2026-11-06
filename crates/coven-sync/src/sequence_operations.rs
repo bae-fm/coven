@@ -204,6 +204,18 @@ impl SequenceSync {
                     return Ok(None);
                 }
             }
+            // Recording a key the journal already records runs that record
+            // now: a second one's claim would meet the first's open claim
+            // (§14.3).
+            if let Request::Change(StoreChange::SetAccess { member: recorded, access }) = &request {
+                if let Some(id) = owner.access_operation(*recorded, access).await? {
+                    owner.retry_operation(id).await?;
+                    return owner
+                        .run_administration(&mut session, &mut ring, &member, id)
+                        .await
+                        .and_then(crate::operation_outcome::into_slot);
+                }
+            }
             let creation = matches!(request, Request::Change(StoreChange::CreateStore { .. }));
             match owner
                 .start_request(&mut session, &mut ring, &member, request, "operation")

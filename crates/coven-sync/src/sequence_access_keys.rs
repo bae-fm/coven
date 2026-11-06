@@ -5,7 +5,9 @@
 use super::sequence_operations::{Request, SequenceOperation};
 use super::SequenceSync;
 use crate::SyncError;
+use coven_database::OperationId;
 use coven_format::{admin::StoreChange, MemberAccess};
+use coven_foundation::id_source::MemberId;
 use coven_storage::StorageFailure;
 use std::sync::Arc;
 
@@ -23,10 +25,13 @@ impl SequenceSync {
         .await
     }
 
-    /// Whether the journal runs an operation recording `access` as this
-    /// member's (§14.3).
-    pub(crate) async fn journals_access(&self, access: &MemberAccess) -> Result<bool, SyncError> {
-        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?.member();
+    /// The operation the journal runs recording `access` as `member`'s, if
+    /// any (§14.3).
+    pub(crate) async fn access_operation(
+        &self,
+        member: MemberId,
+        access: &MemberAccess,
+    ) -> Result<Option<OperationId>, SyncError> {
         for record in self.database.operations().await? {
             if record.kind != coven_database::operation_kind::SEQUENCE {
                 continue;
@@ -36,10 +41,17 @@ impl SequenceSync {
                 &work.request
             {
                 if *recorded == member && journaled == access {
-                    return Ok(true);
+                    return Ok(Some(record.id));
                 }
             }
         }
-        Ok(false)
+        Ok(None)
+    }
+
+    /// Whether the journal runs an operation recording `access` as this
+    /// member's (§14.3).
+    pub(crate) async fn journals_access(&self, access: &MemberAccess) -> Result<bool, SyncError> {
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?.member();
+        Ok(self.access_operation(member, access).await?.is_some())
     }
 }

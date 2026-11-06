@@ -508,3 +508,55 @@ async fn another_key_waits_for_a_replacement_under_way() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// Retrying a replacement with the key it keeps apart, after its entry was
+/// journaled and its claim refused, runs the journaled entry now rather
+/// than journaling a second one, and finishes it once (§14.3, E9).
+#[tokio::test]
+async fn retrying_a_refused_replacement_with_its_key_finishes_it_once() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let slots = || async {
+        crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
+            path.slot_number().is_some()
+        })
+        .await
+        .iter()
+        .filter_map(|object| object.path.slot_number())
+        .map(|slot| slot.0)
+        .collect::<Vec<_>>()
+    };
+    let before = slots().await;
+    let next = before.iter().max().unwrap() + 1;
+    owner
+        .storage
+        .set_faults(Faults {
+            create_failures: [(
+                ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(next).unwrap()),
+                (StorageFailure::PermissionDenied, 403),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    let replacement = supplied_key("replacement");
+    let (id, secret) = (&replacement.access_key_id, &replacement.secret_access_key);
+    let refused = handle.replace_access_key(id.clone(), secret.clone()).await;
+    assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
+    handle.close().await.unwrap();
+    owner.storage.set_faults(Faults::none()).await;
+
+    let handle = install.handle(directory.clone(), &owner).await;
+    let retried = handle.replace_access_key(id.clone(), secret.clone()).await;
+    assert!(retried.is_ok(), "{retried:?}");
+    assert_key(&install, directory.id(), &replacement);
+    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
+    assert!(custody.replacing_access_key().unwrap().is_none());
+    assert!(handle.pending().await.unwrap().is_empty());
+    owner.sync().await;
+    assert_eq!(slots().await.len(), before.len() + 1);
+    handle.close().await.unwrap();
+    owner.close().await;
+}

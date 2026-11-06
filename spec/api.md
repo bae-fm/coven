@@ -6854,8 +6854,9 @@ impl CovenHandle {
     /// Requires connected storage. Custody keeps the new key apart, and the
     /// connection uses the old one, until the entry lands; then this device
     /// connects with the new key. A failed or uncertain claim stays
-    /// journaled, and passes retry it; retrying with the same key finishes
-    /// it too. Another key fails with `ReplacementPending` until it ends.
+    /// journaled, and passes retry it; retrying with the same key runs that
+    /// entry at once, without waiting out its retry wait, and returns its
+    /// result. Another key fails with `ReplacementPending` until it ends.
     /// An invalidated operation settles any uncertain claim before undo (§11).
     /// Once this member's removal applies, returns Removed and saves nothing.
     pub async fn replace_access_key(
