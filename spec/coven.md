@@ -3088,13 +3088,23 @@ its table has an owner. A failure on another member's row names that member, as
   consequence, made before SQLite's action reaches the row, is that action's exact
   effect and counts as the action.
 - **References that share columns.** An action also records the columns another
-  reference of the row shares with its own, and that reference's parent: the
-  parent it held, when the action leaves those values unchanged, or else the row
-  its new values name, as the write's earlier steps leave it. When the write never
-  touched that row, or a recorded reference's parent may have ended before the
-  write, the step depends on rows of the author's view that no step carries. Then
-  it isn't an action. It is a direct change, refused only where the author may
-  not change that row directly.
+  reference of the row shares with its own, and that reference's parent. That is
+  the row its values name where the write's earlier steps leave that key, a
+  move's two steps included (§15.4), when the row is present there in the child's
+  audience or the store; when those steps deleted it or left it in another
+  audience, the reference records no parent. When no step touched a row with that
+  key, the reference keeps the parent it held if the action leaves its values
+  unchanged. Otherwise the step depends on rows of the author's view that no step
+  carries: a row the write never touched, a row a move carried along with its
+  ancestor, or a recorded reference's parent that may have ended before the
+  write. Then it isn't an action. It is a direct change, refused only where the
+  author may not change that row directly.
+- **A parent the write moved.** Ben moves his track from the store into Gifts and
+  deletes it in one write. Ana's review in Gifts cascades from the delete of
+  Gifts' track, the row the move began, since the move's two steps say where the
+  track went. Without them a receiver would look for the store's track, which
+  the move ended, and refuse SQLite's own cascade as a direct change of Ana's
+  review.
 - **Exact match.** The recomputed action must match the exact row, generation,
   operation and every changed column and value, including all components of a
   composite key. An action's delete shows the values its replaced setters wrote

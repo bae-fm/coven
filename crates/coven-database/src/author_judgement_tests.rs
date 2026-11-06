@@ -39,8 +39,8 @@ pub(crate) fn tables() -> Vec<SyncedTable> {
 }
 
 pub(crate) struct Pair {
-    ana: Database,
-    ben: Database,
+    pub(crate) ana: Database,
+    pub(crate) ben: Database,
     _stores: (TestStore, TestStore),
 }
 
@@ -78,7 +78,7 @@ impl Pair {
         Self { ana, ben, _stores: (ana_store, ben_store) }
     }
 
-    fn circle(&self, circle: coven_foundation::id_source::CircleId) {
+    pub(crate) fn circle(&self, circle: coven_foundation::id_source::CircleId) {
         self._stores.0.join_circle(&self.ana, circle);
         self._stores.1.join_circle(&self.ben, circle);
     }
@@ -126,7 +126,7 @@ fn refused_for(error: DbError, table: &str, owner: u8) {
     }
 }
 
-fn value(db: &Database, sql: &'static str) -> Option<String> {
+pub(crate) fn value(db: &Database, sql: &'static str) -> Option<String> {
     db.inspect_writer(|c| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 

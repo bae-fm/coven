@@ -34,6 +34,7 @@ use coven_format::write::{Half, PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
+pub(crate) use place::Place;
 use rusqlite::params;
 use std::collections::BTreeMap;
 
@@ -65,6 +66,8 @@ impl Indexed {
 #[derive(Default)]
 pub(crate) struct StepIndex {
     rows: BTreeMap<RowId, Vec<Indexed>>,
+    /// Rows the write changed beyond what their steps did.
+    unstepped: std::collections::BTreeSet<RowId>,
     sequences: BTreeMap<u32, Vec<RowId>>,
     /// The first delete of each table's rows: no reference into a table can
     /// act before it.
@@ -77,6 +80,9 @@ impl StepIndex {
         let mut index = Self::default();
         originals.visit(|record| {
             let row = record.row().clone();
+            if place::unstepped(&record) {
+                index.unstepped.insert(row.clone());
+            }
             let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
             for step in &steps {
                 index.sequences.entry(step.sequence).or_default().push(row.clone());
@@ -109,11 +115,6 @@ impl StepIndex {
             .into_iter()
             .flat_map(|steps| steps.iter().rev())
             .filter(move |step| step.sequence < sequence)
-    }
-
-    /// The row's last step before `sequence`.
-    pub(crate) fn last_before(&self, row: &RowId, sequence: u32) -> Option<&Indexed> {
-        self.before(row, sequence).next()
     }
 
     /// The new key's half of the primary-key update whose old half is
@@ -523,6 +524,9 @@ pub(crate) fn stored(
         }
     }
 }
+
+#[path = "judge_place.rs"]
+mod place;
 
 #[cfg(test)]
 #[path = "judge_tests.rs"]

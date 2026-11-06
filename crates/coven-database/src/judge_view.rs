@@ -6,14 +6,14 @@
 //! authenticated original record wrote. A missing record waits, unless no
 //! history holds it, as for a migration write another raise replaced: then
 //! the cell has no known value, and the change is lost anyway. A reference
-//! names its parent by the parent the setter recorded, or, when none was
-//! recorded, by its values as the parent's key, at the incarnation the
-//! write's earlier steps leave that row. The references a step's row holds
+//! names the row its values key where the write's earlier steps leave that
+//! key, moves included, or, when no step touched it, the parent its setter
+//! recorded ([`StepIndex::place`]). The references a step's row holds
 //! and the step an action through each records are Lean's `Held` and
 //! `heldConsequence`, which `tests::classification_matches_the_model`
 //! compares.
 
-use crate::judge::{Indexed, StepIndex};
+use crate::judge::{Indexed, Place, StepIndex};
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sqlite::DatabaseConnection;
@@ -193,10 +193,9 @@ impl<'a> ChildView<'a> {
     /// which an earlier step deleted, whose columns hold a complete key now,
     /// and, for an update, whose columns the step writes. An insert, the old
     /// half of the row's own key update, and a half of its move are never
-    /// actions. A reference
-    /// names the parent its setter recorded, which must hold its key, or else
-    /// the row its values key in the child's audience or the store, at the
-    /// incarnation the write's earlier steps leave it.
+    /// actions. A reference names the row its key's last earlier step left,
+    /// at the incarnation that step ended or made, or, when no step touched
+    /// the key, the parent its setter recorded, which must hold its key.
     pub(crate) fn held(
         &self,
         index: &StepIndex,
@@ -242,31 +241,27 @@ impl<'a> ChildView<'a> {
             let raw: Vec<Value> = values.iter().map(|cell| cell.value.clone()).collect();
             let stored = self.authoring.stored(parent_table, &targets, &raw)?;
             let written = parent_key(parent_table, &targets, &stored)?;
-            let parents: Vec<(RowId, u64)> = match link {
-                // The parent a reference names must hold its written key.
-                Some(parent)
-                    if parent.row.table != parent_table.name || parent.row.key != written =>
-                {
-                    continue
-                }
-                Some(parent) => vec![(parent.row.clone(), parent.generation)],
-                // A reference recorded without a parent names, by its values,
-                // the row as the write's earlier steps leave it: the
-                // incarnation its last step ended, or the one it made.
-                None => [self.row.audience.clone(), Audience::Store]
-                    .into_iter()
-                    .filter_map(|audience| {
-                        let row = RowId {
-                            table: parent_table.name.clone(),
-                            key: written.clone(),
-                            audience,
-                        };
-                        let last = index.last_before(&row, step.sequence)?;
-                        let generation = if last.delete { last.generation } else { last.after };
-                        Some((row, generation))
-                    })
-                    .collect(),
-            };
+            // The parent a reference names must hold its written key.
+            if link.is_some_and(|parent| {
+                parent.row.table != parent_table.name || parent.row.key != written
+            }) {
+                continue;
+            }
+            let parents: Vec<(RowId, u64)> =
+                match index.last_on_key(&parent_table.name, &written, step.sequence) {
+                    // The row the key's last step left, at the incarnation
+                    // that step ended or the one it made.
+                    Place::Last(row, last) => {
+                        vec![(row.clone(), if last.delete { last.generation } else { last.after })]
+                    }
+                    // As the authoring view holds it: the parent its setter
+                    // recorded, if any.
+                    Place::Untouched => link
+                        .map(|parent| (parent.row.clone(), parent.generation))
+                        .into_iter()
+                        .collect(),
+                    Place::Unplaced => continue,
+                };
             let (carried, others) = match &step.change.operation {
                 Operation::Update(recorded) => {
                     self.recorded(index, table, key, &columns, recorded, step)?
@@ -289,11 +284,12 @@ impl<'a> ChildView<'a> {
     /// What an action through `key` records besides the key's own columns
     /// (D5): every other column sharing a reference with them, with the value
     /// it holds now, and the parent each other reference over the recorded
-    /// columns names, given the values `recorded` holds. A reference the
-    /// action leaves as it was keeps the parent it names; one the action
-    /// points elsewhere names the row its new values key, as the write's
-    /// earlier steps leave it. None when the write does not determine that
-    /// row's incarnation (Lean `Overlapping`).
+    /// columns names, given the values `recorded` holds: the row its values
+    /// key, where the write's earlier steps leave it, when it is present
+    /// there in the child's audience or the store, and none otherwise; when
+    /// no step touched the key, the parent its setter recorded, if the action
+    /// leaves the reference as it was. None when the write does not determine
+    /// that row's incarnation (Lean `Overlapping`).
     #[allow(clippy::type_complexity)]
     fn recorded(
         &self,
@@ -342,23 +338,28 @@ impl<'a> ChildView<'a> {
                 .iter()
                 .zip(&values)
                 .all(|(c, value)| current[c].as_ref().is_some_and(|cell| cell.value == *value));
-            let parent = if unchanged {
-                // The reference keeps the parent its setter recorded, unless
-                // an earlier step of this write ended it.
-                other_columns
+            let Some(parent_table) = self.authoring.table(&other.target) else {
+                return Ok((carried, None));
+            };
+            let targets = target_columns(parent_table, other);
+            let stored = self.authoring.stored(parent_table, &targets, &values)?;
+            let written = parent_key(parent_table, &targets, &stored)?;
+            let parent = match index.place(&parent_table.name, &written, step.sequence) {
+                // A reference names a present parent in its own audience or
+                // the store, as SQLite holds it at this step.
+                Place::Last(row, last) => (!last.delete
+                    && (row.audience == Audience::Store || row.audience == self.row.audience))
+                    .then(|| Parent { row: row.clone(), generation: last.after }),
+                // Left as it was, the reference keeps the parent its setter
+                // recorded.
+                Place::Untouched if unchanged => other_columns
                     .iter()
                     .find_map(|c| current[c].as_ref().and_then(|cell| cell.parents.get(&name)))
-                    .cloned()
-                    .and_then(|parent| match index.last_before(&parent.row, step.sequence) {
-                        Some(last) if last.delete => None,
-                        Some(last) => Some(Parent { row: parent.row, generation: last.after }),
-                        None => Some(parent),
-                    })
-            } else {
-                match self.retargeted(index, other, &values, step)? {
-                    Some(parent) => parent,
-                    None => return Ok((carried, None)),
-                }
+                    .cloned(),
+                // Pointed at a row the write never touched, or at one no
+                // step places, it names the authoring view's incarnation,
+                // which no step carries.
+                Place::Untouched | Place::Unplaced => return Ok((carried, None)),
             };
             if let Some(parent) = parent {
                 for column in other_columns {
@@ -367,38 +368,6 @@ impl<'a> ChildView<'a> {
             }
         }
         Ok((carried, Some(others)))
-    }
-
-    /// The parent a reference names once an action gives it `values`: the
-    /// row they key in the child's audience or the store, as the write's
-    /// earlier steps leave it, or none when those steps deleted it. None at
-    /// all when the write never touched a row that may hold that key: its
-    /// incarnation is the authoring view's, which no step carries.
-    fn retargeted(
-        &self,
-        index: &StepIndex,
-        key: &SchemaForeignKey,
-        values: &[Value],
-        step: &Step,
-    ) -> Result<Option<Option<Parent>>, DbError> {
-        let Some(parent_table) = self.authoring.table(&key.target) else {
-            return Ok(None);
-        };
-        let targets = target_columns(parent_table, key);
-        let stored = self.authoring.stored(parent_table, &targets, values)?;
-        let written = parent_key(parent_table, &targets, &stored)?;
-        let mut untouched = false;
-        for audience in [self.row.audience.clone(), Audience::Store] {
-            let row = RowId { table: parent_table.name.clone(), key: written.clone(), audience };
-            match index.last_before(&row, step.sequence) {
-                Some(last) if !last.delete => {
-                    return Ok(Some(Some(Parent { row, generation: last.after })))
-                }
-                Some(_) => {}
-                None => untouched = true,
-            }
-        }
-        Ok((!untouched).then_some(None))
     }
 
     /// The operation an action through `held` on the parent's step records,
