@@ -476,7 +476,7 @@ mod source {
             "CREATE TEMP TABLE _coven_install_generations",
         ) + &select_constant(
             &sources["download_stage.rs"].strings,
-            "CREATE TEMP TABLE _coven_download_rows",
+            "CREATE TEMP TABLE IF NOT EXISTS _coven_download_rows",
         );
         // One synced table's install table, laid out as `TableLayout` lays
         // out every one: a column of values, setters and parents each.
