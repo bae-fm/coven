@@ -414,6 +414,9 @@ import SequenceApply
 #print axioms CovenSequence.RetentionConfirm.unconfirmed_not_landed
 #print axioms CovenSequence.RetentionConfirm.confirmed_deletes
 #print axioms CovenSequence.RetentionConfirm.moved_floor_confirms
+#print axioms CovenSequence.Retention.choose_kept
+#print axioms CovenSequence.Retention.kept_replacement
+#print axioms CovenSequence.Retention.kept_candidates_same_first
 #print axioms CovenSequence.JoinScan.readOrDamage_undamaged
 #print axioms CovenSequence.JoinScan.damaged_not_passed
 #print axioms CovenSequence.JoinScan.stop_strands_scan

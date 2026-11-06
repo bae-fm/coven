@@ -465,6 +465,149 @@ theorem floor_write_rules (relevant : List Aud) (catalog : Aud → List Snapshot
 
 end Floor
 
+/-- The announcements at or after the first kept slot `current`: their slots
+are still in storage. -/
+def kept (current : Nat) (snapshots : List Snapshot) : List Snapshot :=
+  snapshots.filter (fun s => decide (current ≤ s.slot))
+
+/-- Choosing among the kept announcements picks what choosing among all of
+them does, unless that choice was announced before `current`; then it picks
+none. -/
+theorem choose_kept (usable : Snapshot → Bool) (grace time current : Nat) :
+    ∀ (snapshots : List Snapshot),
+      snapshots.Pairwise (fun newer older => older.slot ≤ newer.slot) →
+      choose (kept current snapshots) usable grace time = choose snapshots usable grace time ∨
+      (choose (kept current snapshots) usable grace time = none ∧
+        ∃ s, choose snapshots usable grace time = some s ∧ s.slot < current)
+  | [], _ => Or.inl rfl
+  | head :: tail, ordered => by
+    rw [List.pairwise_cons] at ordered
+    by_cases he : eligible usable grace time head = true
+    · by_cases hk : current ≤ head.slot
+      · left
+        simp [choose, kept, hk, he]
+      · right
+        have hnil : kept current tail = [] := by
+          rw [kept, List.filter_eq_nil_iff]
+          intro s hs
+          have := ordered.1 s hs
+          simp only [decide_eq_true_eq]
+          omega
+        refine ⟨?_, head, by simp [choose, he], by omega⟩
+        rw [choose, show kept current (head :: tail) = kept current tail by simp [kept, hk], hnil]
+        rfl
+    · have hrest := choose_kept usable grace time current tail ordered.2
+      have hall : choose (head :: tail) usable grace time = choose tail usable grace time := by
+        simp [choose, he]
+      have hkept : choose (kept current (head :: tail)) usable grace time =
+          choose (kept current tail) usable grace time := by
+        by_cases hk : current ≤ head.slot
+        · simp [choose, kept, hk, he]
+        · simp [choose, kept, hk]
+      rw [hall, hkept]
+      exact hrest
+
+/-- **A kept replacement is the one choosing among all would find.** A
+snapshot body is deleted once a replacement has passed grace; finding it among
+the kept announcements only, retention deletes no body it wouldn't delete
+choosing among all of them, and keeps one whose only replacement past grace
+was announced before `current`. -/
+theorem kept_replacement (usable : Snapshot → Bool) (grace time current : Nat)
+    {snapshots : List Snapshot}
+    (ordered : snapshots.Pairwise (fun newer older => older.slot ≤ newer.slot)) {s : Snapshot}
+    (h : choose (kept current snapshots) usable grace time = some s) :
+    choose snapshots usable grace time = some s := by
+  rcases choose_kept usable grace time current snapshots ordered with he | ⟨hnone, _⟩
+  · rw [← he, h]
+  · rw [hnone] at h; cases h
+
+/-- Two coverage choices that differ only where the first has none and the
+second a coverage before `current`. -/
+def SameFirst (current : Nat) (x y : Option Nat) : Prop :=
+  x = y ∨ (x = none ∧ ∃ n, y = some n ∧ n + 1 ≤ current)
+
+/-- `SameFirst` at each position of two coverage lists. -/
+inductive SameFirsts (current : Nat) : List (Option Nat) → List (Option Nat) → Prop
+  | nil : SameFirsts current [] []
+  | cons {x y : Option Nat} {a b : List (Option Nat)} :
+      SameFirst current x y → SameFirsts current a b → SameFirsts current (x :: a) (y :: b)
+
+theorem sameFirst_eq {current : Nat} :
+    ∀ {a b : List (Option Nat)}, SameFirsts current a b → none ∉ a → a = b
+  | [], [], _, _ => rfl
+  | x :: a, y :: b, SameFirsts.cons hxy rest, hn => by
+    have hx : x ≠ none := fun h => hn (h ▸ List.mem_cons_self)
+    have hy : x = y := by
+      rcases hxy with h | ⟨h, _⟩
+      · exact h
+      · exact absurd h hx
+    rw [hy, sameFirst_eq rest (fun h => hn (List.mem_cons_of_mem _ h))]
+
+theorem sameFirst_none {current : Nat} :
+    ∀ {a b : List (Option Nat)}, SameFirsts current a b → none ∈ a →
+      ∃ y ∈ b, y = none ∨ ∃ n, y = some n ∧ n + 1 ≤ current
+  | x :: a, y :: b, SameFirsts.cons hxy rest, hn => by
+    rcases List.mem_cons.mp hn with h | h
+    · subst h
+      rcases hxy with h | ⟨_, n, hn, hle⟩
+      · exact ⟨y, List.mem_cons_self, Or.inl h.symm⟩
+      · exact ⟨y, List.mem_cons_self, Or.inr ⟨n, hn, hle⟩⟩
+    · obtain ⟨z, hz, hp⟩ := sameFirst_none rest h
+      exact ⟨z, List.mem_cons_of_mem _ hz, hp⟩
+
+/-- Coverage choices that differ only by announcements before `current` give
+the same `first`: such an announcement covers less than `current - 1`, so it
+can't move `first` past `current`. -/
+theorem floorFirst_sameFirst {current : Nat} {a b : List (Option Nat)}
+    (h : SameFirsts current a b) : floorFirst current a = floorFirst current b := by
+  by_cases hn : none ∈ a
+  · have ha : floorFirst current a = current := by
+      simp [floorFirst, floor_requires_every_audience a hn]
+    obtain ⟨y, hy, hp⟩ := sameFirst_none h hn
+    rw [ha]
+    unfold floorFirst
+    split
+    · next f hf =>
+      obtain ⟨n', hn', hle⟩ := floor_covered b f hf y hy
+      rcases hp with hnone | ⟨n, hsome, hlt⟩
+      · rw [hnone] at hn'; cases hn'
+      · rw [hsome] at hn'
+        cases hn'
+        omega
+    · rfl
+  · rw [sameFirst_eq h hn]
+
+section Kept
+variable {Aud : Type}
+
+/-- **Choosing only kept announcements gives the same `first`.** Each
+announcement follows its coverage, and the catalog is newest first. Choosing
+among the announcements at or after the first kept slot `current` moves
+`first` exactly as choosing among all of them does: retention never needs the
+slot of an announcement retention may have deleted. -/
+theorem kept_candidates_same_first (relevant : List Aud) (catalog : Aud → List Snapshot)
+    (usable : Aud → Snapshot → Bool) (grace time current : Nat)
+    (ordered : ∀ a ∈ relevant, (catalog a).Pairwise (fun newer older => older.slot ≤ newer.slot))
+    (announced : ∀ a ∈ relevant, ∀ s ∈ catalog a, s.covers < s.slot) :
+    floorFirst current (selectedCoverage relevant (fun a => kept current (catalog a)) usable grace time) =
+      floorFirst current (selectedCoverage relevant catalog usable grace time) := by
+  apply floorFirst_sameFirst
+  induction relevant with
+  | nil => exact SameFirsts.nil
+  | cons a rest ih =>
+    refine SameFirsts.cons ?_ (ih (fun b hb => ordered b (List.mem_cons_of_mem _ hb))
+      (fun b hb => announced b (List.mem_cons_of_mem _ hb)))
+    rcases choose_kept (usable a) grace time current (catalog a) (ordered a List.mem_cons_self) with
+      h | ⟨hnone, s, hs, hlt⟩
+    · exact Or.inl (by simp only [h])
+    · refine Or.inr ⟨by simp only [hnone, Option.map_none], s.covers,
+        by simp only [hs, Option.map_some], ?_⟩
+      have := announced a List.mem_cons_self s (chosen_mature _ _ grace time hs).1
+      omega
+
+end Kept
+
+
 /-- An idle circle still needs a snapshot: its membership and boundaries are
 history even when no data-write part belongs to it. -/
 theorem idle_audience_blocks_floor :

@@ -168,7 +168,7 @@ impl Group {
     ) -> Device {
         self.open_with_clock(temp, identity, ring, storage, self.clock.clone()).await
     }
-    async fn open_with_clock(
+    pub(crate) async fn open_with_clock(
         &self,
         temp: tempfile::TempDir,
         identity: MemberIdentity,

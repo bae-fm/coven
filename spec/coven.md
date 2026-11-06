@@ -5758,13 +5758,22 @@ absences a full reload; correctness, including a joiner's key scan, does not nee
 it. Grace bounds only `first`. No new device waits for it: the floor names each
 new snapshot as soon as it is announced.
 
-Reading that publication time can find the announcement's slot missing. A slot
-at or above `first` is kept, and storage in good order holds every kept slot,
-so the device reports the slot as damaged, as a pass does when it can't find a
-kept slot (§6.1). Ben's laptop reloaded from a floor with `first` 9 and holds
-the announcement at slot 9 in the floor snapshot's history without having read
-the slot; if slot 9 is gone, retention reports slot 9 damaged rather than a
-failed request that would only be tried again.
+That publication time is read from the announcement's slot, so retention
+considers only announcements at or above `first`, whose slots are kept. The slot
+of one below `first` may be deleted, and its publication time with it. Leaving
+those out changes nothing `first` could become: an announcement below `first`
+covers less than `first - 1`. A body only such an announcement would replace
+stays until a kept replacement passes grace. Ben's laptop, whose clock runs
+behind the provider's, reloads from a floor with `first` 40 and holds Ana's
+announcements at slots 30 and 40 in the floor snapshot's history without having
+read their slots. By his clock the one at 40 hasn't passed grace; slot 30 is
+gone, so he doesn't consider it, and keeps his own older snapshot's body until
+the one at 40 passes grace by his clock.
+
+A slot at or above `first` that's missing from storage is damage, since storage
+in good order holds every kept slot: the device reports it damaged, as a pass
+does when it can't find a kept slot (§6.1), rather than as a failed request that
+would only be tried again.
 
 The rules:
 
@@ -11328,6 +11337,7 @@ Write-ups explain each model and state its assumptions:
 | A floor check reads only kept slots: after the device's own while the floor's `first` is at most its next slot, otherwise after the floor's store snapshot's coverage. In storage in good order every slot it reads is present, and it accepts an honest floor | `check_reads_kept`, `check_from_floor` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §5.3, §16.4, §16.6 |
 | *Body.* Past a floor whose `first` has passed a device's next slot, reading forward from its own slots needs a deleted slot, and the floor is refused against those slots | `history_needs_deleted_slot` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §16.4 |
 | The floor check a settling claim runs, reading the slots after where it starts in order and reporting the first missing one, accepts an honest floor in storage in good order | `honest_floor_accepted` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §5.2, §5.3 |
+| Retention considers only announcements at or after the first kept slot: choosing among them gives the same `first` as choosing among all, and a replacement found among them is the one found among all | `choose_kept`, `kept_candidates_same_first`, `kept_replacement` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | Settling a lost floor reply: a landed write is always confirmed, at the `first` of the floor read, which can be past its own; a write not confirmed did not land; the deletions a confirmed verdict makes are storage steps then and after any later storage steps | `landed_confirms`, `unconfirmed_not_landed`, `confirmed_deletes`, `moved_floor_confirms` | `proofs/sequence/CovenSequence/RetentionConfirm.lean` | §16.6 |
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |

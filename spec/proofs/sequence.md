@@ -448,6 +448,16 @@ snapshot past grace. `floor_write_rules` shows the combined floor meets
 and every name covers `first - 1`. So `store_good` and the reader theorems apply
 to a floor whose names are fresh while `first` lags.
 
+`kept` keeps the announcements at or after the current first kept slot, whose
+slots are still in storage. `choose_kept`: choosing among them picks what
+choosing among all does, or none when that choice was announced before
+`current`. `kept_candidates_same_first`: with each announcement after its
+coverage, `floorFirst` over the kept announcements equals `floorFirst` over all
+of them, since one announced before `current` covers less than `current - 1`.
+`kept_replacement`: a replacement found among the kept announcements is the one
+found among all, so choosing among the kept ones deletes no body choosing among
+all would keep.
+
 `fresh_head_starves` and `daily_announcements_starve` refute choosing the newest
 usable snapshot before checking grace for `first`; the names have no grace to
 starve. Daily snapshots keep the old rule waiting
