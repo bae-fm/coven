@@ -13,7 +13,7 @@ fn dropbox_live_sequence() {
                     tokens.clone(),
                     Arc::new(crate::test_utils::RefusedRefresh),
                     live.clock.clone(),
-                    crate::providers::tests::http_client(),
+                    crate::providers::tests::live_http_client(),
                 )
                 .unwrap();
                 writers.push(Arc::new(StorageConnection::from_provider(Arc::new(
@@ -66,7 +66,7 @@ fn dropbox_live_account_sharing() {
             recipient_tokens,
             Arc::new(crate::test_utils::RefusedRefresh),
             live.clock.clone(),
-            crate::providers::tests::http_client(),
+            crate::providers::tests::live_http_client(),
         )
         .unwrap();
         let recipient = Arc::new(StorageConnection::from_provider(Arc::new(

@@ -453,9 +453,22 @@ pub(crate) async fn compare_create_model(storage: &dyn crate::Storage, copy: boo
 #[path = "access_live.rs"]
 mod access_live;
 
-/// The providers' HTTP client on the system clock. Many tests give providers
-/// a clock whose pauses return at once; the stall window must not run on it.
+/// The providers' HTTP client for exchanges with a local server, its stall
+/// window on a fixed clock nothing moves, so a minute of a busy machine is
+/// never read as a stall. Many tests give providers a clock whose pauses
+/// return at once; the stall window runs on its own clock, not theirs. The
+/// tests of the stall window move a clock they hold (`http_client_tests`,
+/// `s3_http_tests`).
 pub(crate) fn http_client() -> crate::providers::http_client::HttpClient {
+    crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
+        coven_foundation::clock::FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
+    ))
+    .unwrap()
+}
+
+/// The providers' HTTP client for a live provider's network, its stall
+/// window on the system clock, as the app's.
+pub(crate) fn live_http_client() -> crate::providers::http_client::HttpClient {
     crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
         coven_foundation::clock::SystemClock,
     ))

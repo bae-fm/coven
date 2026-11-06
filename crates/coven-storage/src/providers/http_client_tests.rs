@@ -306,7 +306,7 @@ fn stalled(error: &(dyn std::error::Error + 'static)) -> bool {
 /// `Debug`, and in every cause below it.
 #[tokio::test]
 async fn an_unreachable_server_names_every_layer_of_its_cause() {
-    let client = HttpClient::new(Arc::new(coven_foundation::clock::SystemClock)).unwrap();
+    let client = crate::providers::tests::http_client();
     for (url, origin, cause) in [
         (
             "https://ana:hunter2@coven-test.invalid/2/files/Gifts.txt?token=deadbeef",

@@ -41,7 +41,7 @@ async fn provider_access_live_dropbox_app_folder() {
         tokens.clone(),
         Arc::new(crate::test_utils::RefusedRefresh),
         clock.clone(),
-        crate::providers::tests::http_client(),
+        crate::providers::tests::live_http_client(),
     )
     .unwrap();
     let connector = ProviderConnector::new(clock.clone(), Arc::new(UuidIds));

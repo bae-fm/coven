@@ -4,10 +4,7 @@ use axum::Router;
 
 /// GET `url` through the providers' client, as a OneDrive call.
 async fn get(url: &str) -> Result<reqwest::Response, StorageError> {
-    let client = crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
-        coven_foundation::clock::SystemClock,
-    ))
-    .unwrap();
+    let client = crate::providers::tests::http_client();
     client.send(CloudProvider::OneDrive, client.request(reqwest::Method::GET, url)).await
 }
 

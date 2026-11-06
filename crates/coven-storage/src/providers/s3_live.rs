@@ -67,7 +67,7 @@ impl LiveS3 {
             &runs,
             Arc::new(SystemClock),
             Arc::new(UuidIds),
-            crate::providers::tests::http_client(),
+            crate::providers::tests::live_http_client(),
             &crate::SetupWaits::default(),
         )
         .await
@@ -116,7 +116,7 @@ impl LiveS3 {
                 Arc::new(UuidIds),
                 std::sync::Arc::new(crate::NoCooldown),
                 settings,
-                crate::providers::tests::http_client(),
+                crate::providers::tests::live_http_client(),
             ),
             None => S3Storage::new(
                 config,
@@ -124,7 +124,7 @@ impl LiveS3 {
                 Arc::new(SystemClock),
                 Arc::new(UuidIds),
                 std::sync::Arc::new(crate::NoCooldown),
-                crate::providers::tests::http_client(),
+                crate::providers::tests::live_http_client(),
             ),
         }
         .expect("live S3 connection");
