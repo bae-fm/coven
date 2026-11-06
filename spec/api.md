@@ -141,8 +141,11 @@ pub enum Audience {
 ### E1 Opening
 
 - A store lives in one directory on the device, its `StoreDir`, which holds
-  the database, coven's copies of files, the cache, and the store's
-  settings: its id and name, this device's id, and its storage settings.
+  the database, coven's copies of files, the cache, the store's settings
+  (its id and this device's id), and its storage settings, which
+  coven-storage keeps in a file of their own. The store's name is not a setting: a rename is synced, so the name is
+  the database's committed state, which listing the stores reads without
+  opening the store (`StoreInfo::name`, E9).
 - Creating, restoring or joining a store makes the directory and writes
   the settings, so the app never chooses a device id ([§10](coven.md#10-members-roles-and-devices)).
 - A `create_store` error carries no open handle. If the store becomes visible
