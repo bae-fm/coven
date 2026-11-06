@@ -703,7 +703,7 @@ and each later operation takes the next number, except as below.
 *Example.* If Ana's write 3 updated note 42 first and then deleted the tag, note
 42's step is at 0 and the tag's step at 1.
 
-- Only the two halves of one operation that changes two rows share a position:
+- Only the steps of one operation that changes several rows share a position:
   - A primary-key update is a delete of the old key, with `half` 1, and an
     insert of the new one. The old key's foreign keys follow their ON UPDATE
     actions, not ON DELETE (§9.2).
@@ -712,6 +712,11 @@ and each later operation takes the next number, except as below.
     with `half` 2. SQLite still holds the row, so no foreign key acts on that
     delete. When the new audience has a removed row with that key, the insert
     half is an update setting every column, as inserting a removed row's key is.
+  - Each descendant the move carries along, a row of the app's tables whose
+    audience follows from the moved row through any chain of audience parents,
+    moves the same way at the same position, a descendant the write inserted
+    earlier included. So does each row an insert carries, when it adds the
+    audience parent of rows still naming a parent the write deleted.
 - `half` is 0 everywhere else.
 - A receiver checks that each row's steps are in strictly increasing sequence
   order. It doesn't check that the write's positions start at 0 or run without
@@ -741,8 +746,17 @@ and each later operation takes the next number, except as below.
 - A delete step sets none.
 - Inserting a removed row's key is an update step setting every column.
 - Generated columns are never set (D5.5).
-- Operations on a row after a move carried it into this audience in the same
-  write start at the generation that move began.
+
+**Steps and the row change.** A step's references name their parents as the
+write's earlier operations left them. The row change's own name them as the
+whole write leaves them, at the incarnation the write's net changes leave each
+parent at. The two can differ. Ben deletes a combo, adds it again and changes
+his pair's key, which cascades into Ana's review: the cascade's step names the
+combo at generation 3, which the re-add began, while the combo's net change, if
+any, is an update at generation 1, so the review's row change names generation
+1. With a deferred key, the combo can be added only after the cascade: the step
+names no combo, the row change the one he added. A receiver checks each against
+its own moment (§9.6).
 
 **No labels.** No step says whether a statement, a trigger or a foreign-key
 action made it. A receiver reconstructs that from the original schema and the
@@ -754,8 +768,10 @@ steps, through the references as replayed up to each step.
 are the sources the steps used beyond those the net change already names, in the
 same role order (D5.6).
 
-**Changes without SQL.** A row a move carries along with its moved ancestor, and
-migration differences, have no steps.
+**Changes without SQL.** Migration differences have no steps. Nor does a row
+removal rules took out that a move carries along with its ancestor: SQLite's
+tables never held it. A receiver places no reference through a key whose row
+such a change touched (§9.6).
 A dismissal records its deletes as steps, a parent before the children whose
 deletes it causes, so receivers can verify the children's permission (§9.6).
 
@@ -2332,6 +2348,6 @@ supports. coven.md Appendix G lists every other proof.
 | --- | --- | --- | --- |
 | Conversions leave the queued uploads unchanged. Two receptions of the same write, under the same conversion, schema view and history, each meeting the receipt's prerequisites, reach the same record and verdict, and the same lost value | `conversions_preserve_uploads`, `receive_losses_converge` | `proofs/queue/CovenQueue/Conversion.lean` | D5.2 |
 | Ben's example: an untried upload stays untried with its original record through conversions, and two receptions of a write under the same conversion, schema view and history, each meeting the receipt's prerequisites, agree | `conversions_preserve_untried`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | D5.2 |
-| A step counts as a foreign-key action exactly when it equals the schema's consequence of an earlier step, through a reference its row holds at that moment; the classification reads only the steps, the replayed references and the schema, never a sender's label. In the model's construction of steps and their parents, a classified step names, in every reference it writes, the row and incarnation whose step caused it. A reference over columns another reference shares names the parent every author view consistent with the steps holds where they leave its key, a move's halves included | `action_iff`, `follows_cause`, `Place.place_sound`, `Place.recorded_sound` | `proofs/merge/CovenMerge/ForeignKeyClassification.lean`, `proofs/merge/CovenMerge/ForeignKeyPlace.lean` | D5.8 |
+| A step counts as a foreign-key action exactly when it equals the schema's consequence of an earlier step, through a reference its row holds at that moment; the classification reads only the steps, the replayed references and the schema, never a sender's label. In the model's construction of steps and their parents, a classified step names, in every reference it writes, the row and incarnation whose step caused it. A reference over columns another reference shares names the parent every author view consistent with the steps holds where they leave its key, a move's halves included, and a row change's reference the parent where the whole write's steps leave its key, in the write's net incarnations | `action_iff`, `follows_cause`, `Place.place_sound`, `Place.recorded_sound`, `Place.net_sound` | `proofs/merge/CovenMerge/ForeignKeyClassification.lean`, `proofs/merge/CovenMerge/ForeignKeyPlace.lean` | D5.8 |
 | The merge model's row is one table, key and audience, so equal keys must be one row; binary collation and D3 make equal keys equal bytes. The model abstracts keys, so B2 doesn't prove the byte order: Rust compares `RowId` keys as bytes, and `coven-format`'s key tests show D3's bytes sort as SQLite does | write-up B2 | [`proofs/merge.md`](proofs/merge.md#b2-terms) | D3 |
 | The data rule: receive order, progress, and dropping a change by its data, whose evidence section 5 and lost-value cause 3 supply | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | D7.3 |

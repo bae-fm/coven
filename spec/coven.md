@@ -3072,12 +3072,13 @@ target, a generation, a set of values or a list of causes counts for nothing.
 **The same check on every row.** A row a write changes only through foreign-key
 actions must have their exact combined effect as its net change, in any table,
 owned or not. Such a row falls with its causes (§9.5), so it must hold nothing
-they didn't make. A row whose steps cause actions must have its net change where
-its steps end, since those steps are what the actions rest on. Without this on
-every row, whether a cascaded row falls with its cause would depend on whether
-its table has an owner. A failure on another member's row names that member, as
-`NotOwner`. On a row nobody owns, or the author's own, it is
-`InvalidForeignKeyEffect`.
+they didn't make. Its net change's references name the parents where the whole
+write leaves their keys, which the actions' steps need not name (below). A row
+whose steps cause actions must have its net change where its steps end, since
+those steps are what the actions rest on. Without this on every row, whether a
+cascaded row falls with its cause would depend on whether its table has an
+owner. A failure on another member's row names that member, as `NotOwner`. On
+a row nobody owns, or the author's own, it is `InvalidForeignKeyEffect`.
 
 **Edge cases.**
 
@@ -3096,16 +3097,32 @@ its table has an owner. A failure on another member's row names that member, as
   audience, the reference records no parent. When no step touched a row with that
   key, the reference keeps the parent it held if the action leaves its values
   unchanged. Otherwise the step depends on rows of the author's view that no step
-  carries: a row the write never touched, a row a move carried along with its
-  ancestor, or a recorded reference's parent that may have ended before the
-  write. Then it isn't an action. It is a direct change, refused only where the
-  author may not change that row directly.
+  carries: a row the write never touched, a row the write changed at no step of
+  its own (a migration difference, or a removed row a move carries along), or a
+  recorded reference's parent that may have ended before the write. Then it
+  isn't an action. It is a direct change, refused only where the author may not
+  change that row directly.
 - **A parent the write moved.** Ben moves his track from the store into Gifts and
   deletes it in one write. Ana's review in Gifts cascades from the delete of
   Gifts' track, the row the move began, since the move's two steps say where the
   track went. Without them a receiver would look for the store's track, which
   the move ended, and refuse SQLite's own cascade as a direct change of Ana's
-  review.
+  review. A track that moves only because Ben moves its album is recorded the
+  same way, at the album's move (§15.4).
+- **A parent the write deletes and adds again.** Ben deletes the combo Ana's
+  review will point at, adds it again, and changes his pair's key, which
+  cascades into her review. The action's step names the combo the re-add began:
+  that is the row SQLite's view holds then. But a row change records the whole
+  write's net effect ([format.md D5.9](format.md#d59-execution-records-kind-13)),
+  so the combo's is an update of the incarnation it already had, or no change
+  at all, and the review's net change names that incarnation. Likewise, with a
+  deferred key, Ben can delete the combo, change the pair's key and only then
+  add the combo again: the step names no combo, since none holds the key then,
+  while the net change names the one he added. So the net change's references
+  are checked against where the write's steps leave each key at its end, in the
+  incarnation the write's own record of that row leaves it at, not against the
+  steps' parents. Comparing them with the steps' parents would refuse SQLite's
+  own cascade.
 - **Exact match.** The recomputed action must match the exact row, generation,
   operation and every changed column and value, including all components of a
   composite key. An action's delete shows the values its replaced setters wrote
@@ -5140,8 +5157,8 @@ insert of them in the new one:
 - which rows move is worked out against the database as it was before the write;
 - moving them back later is a re-add (§8.3);
 - the write's steps (D5.8) record the update that moved a row as that delete and
-  that insert, at one position, so receivers replay where the row went; a
-  descendant the move carries has no steps of its own.
+  that insert, at one position, and each descendant the move carries the same
+  way at the same position, so receivers replay where every row went.
 
 Ana moves note 42 and its attachments from the store into Gifts. Carol's devices
 delete them; Ana's and Ben's insert them in Gifts. Each moved attachment gets a
@@ -5155,6 +5172,14 @@ audience and generation. A move ends the row in one audience and starts it in th
 other. Ana moves note 1 into Gifts; Carol, outside it, sees it deleted and adds
 note 1 to the store again. The store's note 1 and Gifts' note 1 are now two rows,
 each with its own generations, and Ben's edit in Gifts changes only Gifts' one.
+
+**Steps follow SQLite's view.** Which rows a write's row changes move is worked
+out before the write, but its steps follow each operation as SQLite runs it.
+Ana adds an attachment to note 42 and then moves the note into Gifts, in one
+write. The attachment's steps are its insert in the store and, at the note's
+move, a delete there and an insert in Gifts; its row change is an insert in
+Gifts. A row removal rules took out (§8.4) has no steps when a move carries it,
+since SQLite's tables never held it.
 
 **One key in two audiences.** When one key is present in two audiences on a
 device, the app's table shows one of them, and the other is taken out like a
@@ -11371,7 +11396,8 @@ Write-ups explain each model and state its assumptions:
 | An accepted effect is one the schema actually implies | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | Owner authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | Why a step that depends on rows of the author's view that no step carries must be refused: two author views with the same write make different steps, and a receiver reading only the write accepts at most one of them. An action that keeps the shared reference's values, or points it at a row an earlier step made, is classified from the write alone | `one_view_misjudged`, `Untouched.views_differ`, `Stale.views_differ`, `Overlap.kept_classified`, `Retargeted.retargeted_classified`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
-| A shared reference's parent is the row its values key where the write's earlier steps leave that key, a move's two steps included: every author view consistent with the steps holds it there, at that incarnation, or nowhere after a delete, so the parent the receiver records is the one the author's capture names. Where no step touched the key and the action changes the reference, or a move carried the key at no step of its own, two such views capture different parents, and the receiver refuses | `Place.place_sound`, `Place.recorded_sound`, `Place.untouched_views_differ`, `Place.unstepped_views_differ`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
+| A shared reference's parent is the row its values key where the write's earlier steps leave that key, a move's two steps included, whether the row's own update or an ancestor's move made them: every author view consistent with the steps holds it there, at that incarnation, or nowhere after a delete, so the parent the receiver records is the one the author's capture names. Where no step touched the key and the action changes the reference, or the write changed the key's row at no step of its own, two such views capture different parents, and the receiver refuses | `Place.place_sound`, `Place.recorded_sound`, `Place.untouched_views_differ`, `Place.unstepped_views_differ`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
+| A net change's reference names the row its values key where the whole write's steps leave that key, at the incarnation the write's own record of that row leaves it at: every author view consistent with the steps captures that parent for the net change. It is not the parent an action's step names: a parent deleted and added again in the write keeps its incarnation in its net change, and a deferred reference's parent can be added after the action | `Place.net_sound`, `Place.readded_net_differs`, `Place.deferred_net_differs`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 
 ### G.4 People (§10–§15)
 
