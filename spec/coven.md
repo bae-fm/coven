@@ -7445,7 +7445,10 @@ raise. A higher raise is checked against that state.
 Nobody raises a deleted circle (§15.9). A device whose migration captured a
 circle that is deleted before its raise goes out drops that capture once the
 deletion has applied, as it drops a capture for an audience another device has
-raised. Ana's phone migrates while its history still shows Garden. Ben's
+raised. A raise already started, such as one waiting to upload its snapshot,
+claims nothing once the deletion has applied: like a raise that finds its
+version established, it deletes its snapshot and ends satisfied, not
+rejected. Ana's phone migrates while its history still shows Garden. Ben's
 deletion of Garden applies on her next pass, and her phone raises nothing for
 Garden.
 

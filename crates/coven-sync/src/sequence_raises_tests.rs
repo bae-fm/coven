@@ -347,3 +347,86 @@ async fn a_write_into_a_circle_deleted_below_its_version_waits_no_more() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana's update starts raising Garden, and storage refuses the raise's
+/// snapshot, so the raise stays journaled. Ben deletes Garden before it
+/// resumes. Nobody raises a deleted circle, so on resuming the raise finds
+/// nothing to claim: it adopts that state as it would an established
+/// version, deletes its snapshot and ends satisfied, not rejected (§15.9,
+/// §18.3).
+#[tokio::test]
+async fn a_raise_started_before_its_circle_is_deleted_claims_nothing() {
+    use coven_storage::test_utils::Faults;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+
+    let ana = group.reopen(ana).await;
+    let refused: std::collections::BTreeMap<_, _> = (1..=8)
+        .map(|number| {
+            let path = coven_storage::ObjectPath::snapshot(
+                group.store,
+                coven_merge::Audience::Circle(garden),
+                ana.sync.device,
+                std::num::NonZeroU64::new(number).unwrap(),
+            );
+            (path, (coven_storage::StorageFailure::Network, 503))
+        })
+        .collect();
+    ana.storage.set_faults(Faults { create_failures: refused, ..Faults::none() }).await;
+    ana.sync.pass().await.unwrap();
+    let raise = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == coven_database::operation_kind::SEQUENCE)
+        .expect("the raise stays journaled, waiting to upload its snapshot");
+    ana.storage.set_faults(Faults::none()).await;
+
+    ben.sync
+        .administer(coven_format::admin::StoreChange::DeleteCircle { circle: garden })
+        .await
+        .unwrap();
+    // The pass applies the deletion; the raise waits for its retry.
+    ana.sync.pass().await.unwrap();
+    ana.sync.retry_operation(raise.id).await.unwrap();
+    let member = ana.sync.member.read().unwrap().unwrap();
+    let mut session = ana.sync.session.lock().await;
+    let mut ring = ana.sync.ring(&mut session, &member).await.unwrap();
+    let outcome =
+        ana.sync.run_administration(&mut session, &mut ring, &member, raise.id).await.unwrap();
+    assert_eq!(outcome, crate::OperationOutcome::Satisfied);
+    drop(session);
+    let operations = ana.database().operations().await.unwrap();
+    assert!(operations.is_empty(), "{operations:?}");
+    let session = ana.sync.session.lock().await;
+    assert!(!session
+        .history
+        .announcements
+        .values()
+        .any(
+            |announcement| announcement.snapshot.audience == coven_merge::Audience::Circle(garden)
+        ));
+    drop(session);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

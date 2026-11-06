@@ -279,6 +279,14 @@ impl SequenceSync {
                 )
                 .map(|effect| effect.is_some()),
             Request::Snapshot(request) => {
+                // Nobody raises a deleted circle: a raise started before the
+                // deletion applied finds nothing to claim, and adopts that
+                // state as it would an established version (§15.9, §18.3).
+                if matches!(request.purpose, Purpose::Raise(_))
+                    && session.history.state.deleted(&request.audience)
+                {
+                    return Ok(false);
+                }
                 if !crate::effects::belongs(
                     &session.history.state,
                     &request.audience,

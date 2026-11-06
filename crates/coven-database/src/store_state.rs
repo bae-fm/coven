@@ -83,11 +83,15 @@ impl StoreState {
     /// raise a deleted circle, and its parts are taken out wherever they land
     /// (§15.9, §18.5).
     pub fn awaits_raise(&self, audience: &Audience, version: u32) -> bool {
-        let deleted = match audience {
+        !self.deleted(audience) && self.reached(audience) < version
+    }
+
+    /// Whether `audience` is a deleted circle (§15.9).
+    pub fn deleted(&self, audience: &Audience) -> bool {
+        match audience {
             Audience::Store => false,
             Audience::Circle(circle) => self.circle_deletions.contains_key(circle),
-        };
-        !deleted && self.reached(audience) < version
+        }
     }
 
     /// Every audience `member` reads: the store's, then each of
