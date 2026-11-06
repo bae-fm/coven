@@ -64,8 +64,13 @@ impl StoreKey {
     }
 
     pub(crate) fn decode(bytes: &mut &[u8]) -> Result<Self, MaterialError> {
-        let id = KeyId(Uuid::from_bytes(wire::array(bytes)?));
-        Ok(Self::from_bytes(id, wire::array(bytes)?))
+        Ok(Self::from_encoded(&Zeroizing::new(wire::array::<{ Self::ENCODED_LEN }>(bytes)?)))
+    }
+
+    /// Read the encoding [`Self::encode_into`] writes.
+    pub(crate) fn from_encoded(encoded: &[u8; Self::ENCODED_LEN]) -> Self {
+        let id = KeyId(Uuid::from_bytes(std::array::from_fn(|i| encoded[i])));
+        Self::from_bytes(id, std::array::from_fn(|i| encoded[16 + i]))
     }
 }
 
@@ -132,10 +137,15 @@ impl CircleKey {
     }
 
     pub(crate) fn decode(bytes: &mut &[u8]) -> Result<Self, MaterialError> {
-        Ok(Self {
-            circle: CircleId(Uuid::from_bytes(wire::array(bytes)?)),
-            key: StoreKey::decode(bytes)?,
-        })
+        Ok(Self::from_encoded(&Zeroizing::new(wire::array::<{ Self::ENCODED_LEN }>(bytes)?)))
+    }
+
+    /// Read the encoding [`Self::encode_into`] writes.
+    pub(crate) fn from_encoded(encoded: &[u8; Self::ENCODED_LEN]) -> Self {
+        Self {
+            circle: CircleId(Uuid::from_bytes(std::array::from_fn(|i| encoded[i]))),
+            key: StoreKey::from_encoded(&Zeroizing::new(std::array::from_fn(|i| encoded[16 + i]))),
+        }
     }
 }
 

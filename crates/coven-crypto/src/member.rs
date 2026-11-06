@@ -237,11 +237,9 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<StoreKey, CryptoError> {
-        let plaintext = self.open_box(b"store", StoreKey::ENCODED_LEN, path, prefix, sealed)?;
-        let mut bytes = plaintext.as_slice();
-        let key = StoreKey::decode(&mut bytes)?;
-        wire::end(bytes)?;
-        Ok(key)
+        let plaintext =
+            self.open_box::<{ StoreKey::ENCODED_LEN }>(b"store", path, prefix, sealed)?;
+        Ok(StoreKey::from_encoded(&plaintext))
     }
 
     /// Open a circle-key box, authenticating the exact path and opaque clear prefix.
@@ -254,33 +252,37 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<CircleKey, CryptoError> {
-        let plaintext = self.open_box(b"circle", CircleKey::ENCODED_LEN, path, prefix, sealed)?;
-        let mut bytes = plaintext.as_slice();
-        let key = CircleKey::decode(&mut bytes)?;
-        wire::end(bytes)?;
-        Ok(key)
+        let plaintext =
+            self.open_box::<{ CircleKey::ENCODED_LEN }>(b"circle", path, prefix, sealed)?;
+        Ok(CircleKey::from_encoded(&plaintext))
     }
 
-    fn open_box(
+    /// Open a box holding exactly `N` plaintext bytes; any other length is
+    /// malformed.
+    fn open_box<const N: usize>(
         &self,
         kind: &[u8],
-        plaintext_length: usize,
         path: &str,
         prefix: &[u8],
         sealed: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-        if sealed.len() != KEY_BOX_HEAD_LEN + plaintext_length + KEY_BOX_TAG_LEN {
+    ) -> Result<Zeroizing<[u8; N]>, CryptoError> {
+        let (sender, rest) = sealed.split_first_chunk::<32>().ok_or(CryptoError::Malformed)?;
+        let (nonce, rest) =
+            rest.split_first_chunk::<{ cipher::NONCE_LEN }>().ok_or(CryptoError::Malformed)?;
+        let (ciphertext, rest) = rest.split_first_chunk::<N>().ok_or(CryptoError::Malformed)?;
+        let (tag, rest) =
+            rest.split_first_chunk::<KEY_BOX_TAG_LEN>().ok_or(CryptoError::Malformed)?;
+        if !rest.is_empty() {
             return Err(CryptoError::Malformed);
         }
-        let sender: [u8; 32] = sealed[..32].try_into().expect("checked box length");
         let recipient = self.public_keys().sealing;
-        let shared = self.sealing.diffie_hellman(&PublicKey::from(sender));
+        let shared = self.sealing.diffie_hellman(&PublicKey::from(*sender));
         if !shared.was_contributory() {
             return Err(CryptoError::WeakSealingKey);
         }
-        let context = box_context(kind, path, prefix, &sender, recipient.as_bytes());
+        let context = box_context(kind, path, prefix, sender, recipient.as_bytes());
         let key = derivation::derive(shared.as_bytes(), &context);
-        Ok(Zeroizing::new(cipher::open_random(&key, &context, &sealed[32..])?))
+        cipher::open_exact(&key, nonce, &context, ciphertext, tag)
     }
 }
 

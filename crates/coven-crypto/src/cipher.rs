@@ -2,9 +2,10 @@
 
 use crate::{randomness, CryptoError};
 use chacha20poly1305::{
-    aead::{array::typenum::Unsigned, consts::U24, Aead, AeadCore, Payload},
+    aead::{array::typenum::Unsigned, consts::U24, Aead, AeadCore, AeadInOut, Payload},
     KeyInit, XChaCha20Poly1305,
 };
+use zeroize::Zeroizing;
 
 /// Bytes added to a file chunk: its authentication tag, without a stored nonce.
 pub const FILE_CHUNK_TAG_LEN: usize = <XChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
@@ -78,6 +79,23 @@ pub(crate) fn open_random(
     let (nonce, ciphertext) =
         sealed.split_first_chunk::<NONCE_LEN>().ok_or(CryptoError::Malformed)?;
     open(key, nonce, aad, ciphertext)
+}
+
+/// Open a ciphertext whose length the caller fixed into a plaintext of the
+/// same length, erased on drop.
+pub(crate) fn open_exact<const N: usize>(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8; N],
+    tag: &[u8; FILE_CHUNK_TAG_LEN],
+) -> Result<Zeroizing<[u8; N]>, CryptoError> {
+    let mut plaintext = Zeroizing::new(*ciphertext);
+    XChaCha20Poly1305::new(key.into())
+        .decrypt_inout_detached(nonce.into(), aad, plaintext.as_mut_slice().into(), tag.into())
+        // AEAD's error is a unit: authentication failed, and nothing more.
+        .map_err(|chacha20poly1305::aead::Error| CryptoError::Authentication)?;
+    Ok(plaintext)
 }
 
 #[cfg(test)]

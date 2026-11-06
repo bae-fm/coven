@@ -24,9 +24,6 @@ pub enum CryptoError {
     /// The member's signature did not verify.
     #[error("signature verification failed")]
     Signature,
-    /// Authenticated key material did not have the expected shape.
-    #[error("invalid key material: {0}")]
-    Material(#[from] MaterialError),
 }
 
 /// A key or serialized secret violates its representation.

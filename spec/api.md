@@ -2162,8 +2162,6 @@ pub enum CryptoError {
     InvalidSigningKey,
     /// The member's signature did not verify.
     Signature,
-    /// Authenticated key material had the wrong shape.
-    Material(MaterialError),
 }
 
 /// A key or encoded secret has an invalid representation, or isn't held (§12.4).
