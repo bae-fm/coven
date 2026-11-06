@@ -3,6 +3,7 @@ use crate::tests::TestStore;
 use crate::write::tests::{records, sql};
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::write::{Half, RowExecution};
+use coven_foundation::id_source::CircleId;
 
 const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
 CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE, body TEXT);
@@ -454,7 +455,7 @@ async fn a_move_is_two_halves_at_one_position() {
         )
         .await
         .unwrap();
-    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let circle = CircleId(uuid::Uuid::from_u128(10));
     store.join_circle(&db, circle);
     sql(&db, "INSERT INTO notes VALUES('00000000-0000-4000-8000-0000000000a1','store','draft')")
         .await
@@ -481,5 +482,128 @@ async fn a_move_is_two_halves_at_one_position() {
     assert_eq!(columns["audience"].value, Value::Text(circle.to_string()));
     assert_eq!(later.change.generation, 1);
     assert!(operations.causes.is_empty());
+    db.close().await.unwrap();
+}
+
+const ALBUM: &str = "00000000-0000-4000-8000-0000000000a2";
+const OLD_TRACK: &str = "00000000-0000-4000-8000-0000000000a3";
+const NEW_TRACK: &str = "00000000-0000-4000-8000-0000000000a4";
+
+/// Albums whose audience their tracks follow, one album in the store with
+/// one track, on a device in a circle.
+async fn albums(store: &TestStore, deferred: bool) -> (Database, CircleId) {
+    let schema = if deferred {
+        "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL);
+         CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
+           album TEXT NOT NULL REFERENCES albums(id) DEFERRABLE INITIALLY DEFERRED, body TEXT)"
+    } else {
+        "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL);
+         CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
+           album TEXT NOT NULL REFERENCES albums(id), body TEXT)"
+    };
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("albums", RowIdentity::IndependentUuid)
+                    .audience_column("audience"),
+                SyncedTable::new("tracks", RowIdentity::IndependentUuid).audience_from("album"),
+            ],
+            schema,
+        )
+        .await
+        .unwrap();
+    let circle = CircleId(uuid::Uuid::from_u128(10));
+    store.join_circle(&db, circle);
+    sql(
+        &db,
+        "INSERT INTO albums VALUES('00000000-0000-4000-8000-0000000000a2','store');
+         INSERT INTO tracks VALUES('00000000-0000-4000-8000-0000000000a3',
+           '00000000-0000-4000-8000-0000000000a2','draft')",
+    )
+    .await
+    .unwrap();
+    (db, circle)
+}
+
+/// Each step's position, half, generation and whether it deletes.
+fn shape(steps: &[Step]) -> Vec<(u32, Half, u64, bool)> {
+    steps
+        .iter()
+        .map(|step| {
+            let delete = step.change.operation == Operation::Delete;
+            (step.sequence, step.half, step.change.generation, delete)
+        })
+        .collect()
+}
+
+/// The album's move carries its tracks at its own position: the track that
+/// was there before the write, and the one the write inserted before the
+/// move, each a delete of its store row and an insert of its circle row. A
+/// later update of a carried track continues from that insert (§15.4, D5).
+#[tokio::test]
+async fn a_move_carries_the_rows_that_follow_its_audience() {
+    let store = TestStore::new();
+    let (db, circle) = albums(&store, false).await;
+    let audience = circle.to_string();
+    db.write(move |sql| {
+        sql.execute("INSERT INTO tracks VALUES(?1,?2,'new')", [NEW_TRACK, ALBUM])?;
+        sql.execute("UPDATE albums SET audience=?1 WHERE id=?2", [audience.as_str(), ALBUM])?;
+        sql.execute("UPDATE tracks SET body='later' WHERE id=?1", [OLD_TRACK])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let operations = Classified::last(&db);
+    let moved = |table: &str, key: &str| {
+        let stored = row(table, key);
+        let carried = RowId { audience: Audience::Circle(circle), ..stored.clone() };
+        (shape(&operations.steps[&stored]), shape(&operations.steps[&carried]))
+    };
+    assert_eq!(
+        moved("albums", ALBUM),
+        (vec![(1, Half::Move, 1, true)], vec![(1, Half::Move, 0, false)])
+    );
+    assert_eq!(
+        moved("tracks", OLD_TRACK),
+        (
+            vec![(1, Half::Move, 1, true)],
+            vec![(1, Half::Move, 0, false), (2, Half::Whole, 1, false)]
+        )
+    );
+    assert_eq!(
+        moved("tracks", NEW_TRACK),
+        (
+            vec![(0, Half::Whole, 0, false), (1, Half::Move, 1, true)],
+            vec![(1, Half::Move, 0, false)]
+        )
+    );
+    assert!(operations.causes.is_empty());
+    db.close().await.unwrap();
+}
+
+/// A track whose album the write deletes and adds again in the circle,
+/// under a deferred key, stays where it was while it has no album, and
+/// follows the album at its insert (§15.4, D5).
+#[tokio::test]
+async fn an_insert_carries_the_rows_still_naming_its_key() {
+    let store = TestStore::new();
+    let (db, circle) = albums(&store, true).await;
+    let audience = circle.to_string();
+    db.write(move |sql| {
+        sql.execute("DELETE FROM albums WHERE id=?1", [ALBUM])?;
+        sql.execute("UPDATE tracks SET body='orphan' WHERE id=?1", [OLD_TRACK])?;
+        sql.execute("INSERT INTO albums VALUES(?1,?2)", [ALBUM, audience.as_str()])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let operations = Classified::last(&db);
+    let stored = row("tracks", OLD_TRACK);
+    let carried = RowId { audience: Audience::Circle(circle), ..stored.clone() };
+    assert_eq!(
+        shape(&operations.steps[&stored]),
+        vec![(1, Half::Whole, 1, false), (2, Half::Move, 1, true)]
+    );
+    assert_eq!(shape(&operations.steps[&carried]), vec![(2, Half::Move, 0, false)]);
     db.close().await.unwrap();
 }

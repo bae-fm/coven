@@ -4,11 +4,13 @@
 //! An app row's key is in one audience at a time, and every operation of
 //! the write's SQL on it is a step on the merge row of the audience it is in
 //! then: a move is the delete of the old audience's row and the insert of
-//! the new one's, at one position. So the last earlier step on any row with
-//! that key says where the key is: in that row, at the incarnation the step
-//! made, or nowhere after a delete. Only a move that carried the row along
-//! with its ancestor, or a migration difference, changes a row with no step;
-//! once the write holds such a change for the key, its steps don't say.
+//! the new one's, at one position, whether the row's own update made it or
+//! the move of an ancestor that carried the row along. So the last earlier
+//! step on any row with that key says where the key is: in that row, at the
+//! incarnation the step made, or nowhere after a delete. Only a change of no
+//! step at all changes a row silently: a migration difference, or a removed
+//! row a move carries, which SQLite's tables never held. Once the write
+//! holds such a change for the key, its steps don't say.
 //!
 //! A row change names its parents as the whole write leaves them, at the
 //! generation the write's own record of each parent leaves it at, which an
@@ -133,9 +135,8 @@ impl StepIndex {
 /// Whether the write changed this row beyond what its steps did: a net
 /// change with no steps, or steps that don't begin at the generation the
 /// change begins at or leave the row present where the change leaves it
-/// absent, or the other way, as when a move carried the row in or out. An
-/// execution record has no net change, so its steps leave the row as
-/// present as they found it.
+/// absent, or the other way. An execution record has no net change, so its
+/// steps leave the row as present as they found it.
 pub(super) fn unstepped(record: &OriginalRow) -> bool {
     let steps = &record.execution().steps;
     let (Some(first), Some(last)) = (steps.first(), steps.last()) else {

@@ -11,6 +11,7 @@ use coven_merge::Operation;
 
 const TRACK: &str = "00000000-0000-4000-8000-0000000000e1";
 const REVIEW: &str = "00000000-0000-4000-8000-0000000000e2";
+const ALBUM: &str = "00000000-0000-4000-8000-0000000000e3";
 
 fn circle() -> CircleId {
     CircleId(uuid::Uuid::from_u128(10))
@@ -182,16 +183,10 @@ async fn a_retargeted_reference_to_a_deleted_row_names_no_parent() {
     accepted(pair, write, "SELECT a FROM reviews", Some("r")).await;
 }
 
-/// Ben's album carries his track into their circle at no step of the track's
-/// own, so no step says where the track is when the pair's delete sets the
-/// review's pair NULL: the action records a parent no step carries, and is a
-/// direct change of Ana's review, which Ben may not make. A write naming the
-/// store's track, whose incarnation the move ended, is refused on Ana's
-/// device too (§9.6, §15.4).
-#[tokio::test]
-async fn a_reference_to_a_carried_row_is_a_direct_change() {
-    const ALBUM: &str = "00000000-0000-4000-8000-0000000000e3";
-    let pair = pair(
+/// Albums whose audience their tracks follow, and Ana's review of Ben's
+/// track in their circle, pointing at a pair and combo of his.
+async fn album_pair() -> Pair {
+    pair(
         vec![
             SyncedTable::new("albums", RowIdentity::IndependentUuid)
                 .owner_only()
@@ -220,21 +215,45 @@ async fn a_reference_to_a_carried_row_is_a_direct_change() {
          INSERT INTO combos VALUES('p','00000000-0000-4000-8000-0000000000e1')",
         "p",
     )
+    .await
+}
+
+/// Ben's album carries his track into their circle, and his pair's delete
+/// then sets the review's pair NULL: the move of the album records the
+/// track's move too, so the action names the circle's track, the row the
+/// carry began.
+#[tokio::test]
+async fn a_reference_to_a_carried_row_is_an_action() {
+    let write = vec![
+        format!("UPDATE albums SET audience='{}' WHERE id='{ALBUM}'", circle()),
+        "DELETE FROM pairs WHERE id='p'".to_owned(),
+    ];
+    accepted(
+        album_pair().await,
+        write,
+        "SELECT coalesce(a, 'null') || b FROM reviews",
+        Some(&format!("null{TRACK}")),
+    )
     .await;
+}
+
+/// The same write with the track's moves taken out and the review naming
+/// the store's track, whose incarnation the carry ended: the write now
+/// changes the track at no step of its own, so no step says where the track
+/// is, the action is a direct change of Ana's review, and her device refuses
+/// it (§9.6, §15.4).
+#[tokio::test]
+async fn a_reference_to_a_row_changed_at_no_step_is_a_direct_change() {
+    let pair = album_pair().await;
     let audience = circle().to_string();
-    let error = pair
-        .ben
+    pair.ben
         .write(move |sql| {
             sql.execute("UPDATE albums SET audience=?1 WHERE id=?2", [audience.as_str(), ALBUM])?;
             sql.execute("DELETE FROM pairs WHERE id='p'", [])?;
             Ok(())
         })
         .await
-        .unwrap_err();
-    assert!(
-        matches!(&error, crate::DbError::NotOwner { table, .. } if table == "reviews"),
-        "{error:?}"
-    );
+        .unwrap();
     let (mut forged, _) = pair.ben.inspect_writer(|c| c.take_judged().unwrap());
     let insert = records(&pair.ana).pop().unwrap();
     let setter = insert.parts.iter().flat_map(|part| &part.rows).find(|r| r.row.table == "reviews");
@@ -247,6 +266,10 @@ async fn a_reference_to_a_carried_row_is_a_direct_change() {
         .filter(|(_, parent)| parent.row.table == "tracks")
         .map(|(name, parent)| (name.clone(), parent.clone()))
         .collect();
+    let rows = forged.parts.iter_mut().flat_map(|part| &mut part.rows);
+    for track in rows.filter(|r| r.row.table == "tracks") {
+        track.execution = Default::default();
+    }
     let review = forged
         .parts
         .iter_mut()

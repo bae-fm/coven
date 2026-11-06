@@ -3,6 +3,12 @@
 //! The steps travel in the write without saying what produced them. Every
 //! device, the author included, tells foreign-key actions from direct targets
 //! with the same label-free rule over the steps ([`crate::judge`]).
+//!
+//! An app row's merge row follows its audience as each operation leaves it.
+//! An operation that changes a row's audience moves the row and every row
+//! whose audience follows from it, each a delete of its old audience's row
+//! and an insert of its new one's at the operation's position (§15.4), so
+//! no row changes audience at no step.
 
 use crate::declaration::AudienceSource;
 use crate::schema::{SchemaForeignKey, TableSchema};
@@ -25,10 +31,14 @@ struct Tracker<'a> {
     after: &'a AppView<'a>,
     /// Values as the operations so far left them.
     current: BTreeMap<AppKey, Option<AppValues>>,
-    /// Each app row's merge row as of its last operation.
+    /// Each app row's merge row as of its last operation or the last move
+    /// that carried it.
     rows: BTreeMap<AppKey, RowId>,
     /// Each merge row's generation as of the operations so far.
     generations: BTreeMap<RowId, u64>,
+    /// For each row, the rows the operations so far wrote with it as their
+    /// audience parent at some moment, which may name another one since.
+    followers: BTreeMap<AppKey, BTreeSet<AppKey>>,
 }
 
 impl Tracker<'_> {
@@ -95,7 +105,7 @@ impl Tracker<'_> {
             Some(audience) => audience,
             None => match self.rows.get(key) {
                 Some(row) => row.audience.clone(),
-                None => match self.after.row(key)?.or(self.before.row(key)?) {
+                None => match self.before.row(key)?.or(self.after.row(key)?) {
                     Some(row) => row.audience,
                     None => {
                         return Err(crate::write_rows::reference_error(
@@ -126,26 +136,139 @@ impl Tracker<'_> {
         Ok(next)
     }
 
-    /// The merge row an existing app row is in now. When an earlier
-    /// operation moved its audience parent into another audience, carrying
-    /// the row with no step of its own, that move ended the old merge row
-    /// and began this one (§15.4).
-    fn existing(&mut self, key: &AppKey, values: &AppValues) -> Result<RowId, DbError> {
-        let now = self.row(key, values)?;
-        let last = match self.rows.get(key) {
-            Some(row) => Some(row.clone()),
-            None => self.before.row(key)?.map(|row| crate::write_rows::row_id(key, &row)),
-        };
-        if let Some(last) = last.filter(|last| *last != now) {
-            if coven_merge::generation_present(self.generation(&last)?) {
-                self.advance(&last)?;
-            }
-            if !coven_merge::generation_present(self.generation(&now)?) {
-                self.advance(&now)?;
+    /// The merge row an existing app row is in now: where its last
+    /// operation, or the last move that carried it, left it, or where it was
+    /// before the write. Every move is recorded when it happens, so the
+    /// audience rule puts the row there too.
+    fn existing(&self, key: &AppKey, values: &AppValues) -> Result<RowId, DbError> {
+        let last = self.last(key)?;
+        if self.row(key, values)? != last {
+            return Err(DbError::Invariant { what: "a row changes audience only at a step" });
+        }
+        Ok(last)
+    }
+
+    /// The merge row a present app row was last left in.
+    fn last(&self, key: &AppKey) -> Result<RowId, DbError> {
+        if let Some(row) = self.rows.get(key) {
+            return Ok(row.clone());
+        }
+        let before = self.before.row(key)?;
+        let before = before.ok_or(DbError::Invariant { what: "a present row existed" })?;
+        Ok(crate::write_rows::row_id(key, &before))
+    }
+
+    /// Record the values an operation left an app row with, and the row its
+    /// audience follows now.
+    fn set(&mut self, key: &AppKey, values: Option<AppValues>) -> Result<(), DbError> {
+        let table = self.schema.table(&key.0);
+        if let (Some(values), AudienceSource::ForeignKey(column)) =
+            (&values, &self.schema.declaration(&table.name).audience)
+        {
+            if let Some(parent) = self.parent(table, table.audience_key(column), values)? {
+                self.followers.entry(parent).or_default().insert(key.clone());
             }
         }
-        self.rows.insert(key.clone(), now.clone());
-        Ok(now)
+        self.current.insert(key.clone(), values);
+        Ok(())
+    }
+
+    /// The two halves of an app row's move, with these values, from one
+    /// merge row to another at `sequence` (§15.4): the delete of the old
+    /// audience's row and the insert of the new one's, setting every
+    /// column. A removed row the move lands on is updated, every column
+    /// set, as inserting its key does (§8.4).
+    fn halves(
+        &mut self,
+        key: &AppKey,
+        values: &AppValues,
+        (from, to): (RowId, RowId),
+        sequence: u32,
+    ) -> Result<[(RowId, Step); 2], DbError> {
+        let generation = self.generation(&from)?;
+        self.advance(&from)?;
+        let delete = Step {
+            sequence,
+            change: Change { generation, operation: Operation::Delete },
+            half: Half::Move,
+        };
+        let all = values.keys().cloned().collect::<Vec<_>>();
+        let columns = self.columns(self.schema.table(&key.0), values, Some(&to.audience), all)?;
+        let generation = self.generation(&to)?;
+        let operation = if coven_merge::generation_present(generation) {
+            Operation::Update(columns)
+        } else {
+            self.advance(&to)?;
+            Operation::Insert(columns)
+        };
+        self.rows.insert(key.clone(), to.clone());
+        let insert = Step { sequence, change: Change { generation, operation }, half: Half::Move };
+        Ok([(from, delete), (to, insert)])
+    }
+
+    /// Move every row the audience change of `parent` at `sequence` carries
+    /// along (§15.4): each row present now whose audience parent is
+    /// `parent`, and through it any chain of descendants, that the audience
+    /// rule now puts in another merge row.
+    fn carry(
+        &mut self,
+        parent: &AppKey,
+        sequence: u32,
+        steps: &mut Vec<(RowId, Step)>,
+    ) -> Result<(), DbError> {
+        let schema = self.schema;
+        for declaration in &schema.declarations {
+            let AudienceSource::ForeignKey(column) = &declaration.audience else {
+                continue;
+            };
+            let table = schema.table(&declaration.name);
+            let key = table.audience_key(column);
+            if !key.target.eq_ignore_ascii_case(&parent.0) {
+                continue;
+            }
+            for child in self.children(table, key, parent)? {
+                let Some(values) = self.values(&child)? else {
+                    continue;
+                };
+                if self.parent(table, key, &values)?.as_ref() != Some(parent) {
+                    continue;
+                }
+                let from = self.last(&child)?;
+                let to = self.row(&child, &values)?;
+                if from == to {
+                    continue;
+                }
+                steps.extend(self.halves(&child, &values, (from, to), sequence)?);
+                self.carry(&child, sequence, steps)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The rows of `table` that may have `parent` as their audience parent
+    /// through `key`: those the operations so far wrote with it, and those
+    /// whose stored reference names its row as it was before the write.
+    fn children(
+        &self,
+        table: &TableSchema,
+        key: &SchemaForeignKey,
+        parent: &AppKey,
+    ) -> Result<BTreeSet<AppKey>, DbError> {
+        let mut children: BTreeSet<AppKey> = self
+            .followers
+            .get(parent)
+            .into_iter()
+            .flatten()
+            .filter(|child| child.0 == table.name)
+            .cloned()
+            .collect();
+        if let Some(row) = self.before.row(parent)? {
+            let row = crate::write_rows::row_id(parent, &row);
+            let name = self.schema.foreign_key(table, key);
+            let stored = crate::row_queries::children(self.db, table, &name, &row)?;
+            children.extend(stored.into_iter().map(|child| (child.table, child.key)));
+        }
+        Ok(children)
     }
 
     /// The written columns with complete reference tuples and their parents
@@ -213,6 +336,7 @@ pub(crate) fn capture(
         current: BTreeMap::new(),
         rows: BTreeMap::new(),
         generations: BTreeMap::new(),
+        followers: BTreeMap::new(),
     };
     let mut operations: BTreeMap<RowId, Vec<Step>> = BTreeMap::new();
     let mut sequence: u32 = 0;
@@ -248,7 +372,7 @@ pub(crate) fn capture(
                     .filter(|(name, value)| old.get(*name) != Some(*value))
                     .map(|(name, _)| name.clone())
                     .collect();
-                tracker.current.insert(old_key.clone(), Some(new.clone()));
+                tracker.set(old_key, Some(new.clone()))?;
                 let to = tracker.row(old_key, new)?;
                 if to == from {
                     let columns = tracker.columns(table, new, Some(&to.audience), changed)?;
@@ -262,39 +386,10 @@ pub(crate) fn capture(
                         },
                     ));
                 } else {
-                    // An update changing the row's own audience moves it: a
-                    // delete of the old audience's row and an insert of the
-                    // new one's, at one position (§15.4).
-                    let generation = tracker.generation(&from)?;
-                    tracker.advance(&from)?;
-                    steps.push((
-                        from,
-                        Step {
-                            sequence,
-                            change: Change { generation, operation: Operation::Delete },
-                            half: Half::Move,
-                        },
-                    ));
-                    let all = new.keys().cloned().collect::<Vec<_>>();
-                    let columns = tracker.columns(table, new, Some(&to.audience), all)?;
-                    let generation = tracker.generation(&to)?;
-                    // A removed row the move lands on is updated, every
-                    // column set, as inserting its key does (§8.4).
-                    let operation = if coven_merge::generation_present(generation) {
-                        Operation::Update(columns)
-                    } else {
-                        tracker.advance(&to)?;
-                        Operation::Insert(columns)
-                    };
-                    tracker.rows.insert(old_key.clone(), to.clone());
-                    steps.push((
-                        to,
-                        Step {
-                            sequence,
-                            change: Change { generation, operation },
-                            half: Half::Move,
-                        },
-                    ));
+                    // An update changing the row's own audience moves it,
+                    // and the rows that follow its audience (§15.4).
+                    steps.extend(tracker.halves(old_key, new, (from, to), sequence)?);
+                    tracker.carry(old_key, sequence, &mut steps)?;
                 }
             }
             _ => {
@@ -303,7 +398,7 @@ pub(crate) fn capture(
                     let generation = tracker.generation(&row)?;
                     tracker.advance(&row)?;
                     tracker.rows.remove(key);
-                    tracker.current.insert(key.clone(), None);
+                    tracker.set(key, None)?;
                     steps.push((
                         row,
                         Step {
@@ -314,7 +409,7 @@ pub(crate) fn capture(
                     ));
                 }
                 if let (Some(key), Some(new)) = (&new_key, &new) {
-                    tracker.current.insert(key.clone(), Some(new.clone()));
+                    tracker.set(key, Some(new.clone()))?;
                     let row = tracker.row(key, new)?;
                     let all = new.keys().cloned().collect::<Vec<_>>();
                     let columns = tracker.columns(table, new, Some(&row.audience), all)?;
@@ -336,6 +431,9 @@ pub(crate) fn capture(
                             half: Half::Whole,
                         },
                     ));
+                    // Rows still naming the key, whose parent the write
+                    // deleted, follow the audience it is inserted in.
+                    tracker.carry(key, sequence, &mut steps)?;
                 }
             }
         }

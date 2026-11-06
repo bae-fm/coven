@@ -230,9 +230,10 @@ impl RowChange {
 /// record steps; no step says which of them produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
-    /// The operation's position in the write. Only the two halves of one
-    /// operation share a position: of a primary-key update, or of a row's
-    /// move to another audience.
+    /// The operation's position in the write. Only the steps of one
+    /// operation on several rows share a position: the halves of a
+    /// primary-key update, or of the moves to another audience of a row and
+    /// of the rows that follow its audience.
     pub sequence: u32,
     /// The row's generation before the operation, and the columns it set,
     /// with the parents its references named at that moment.
@@ -250,8 +251,9 @@ pub enum Half {
     /// their ON UPDATE actions, not ON DELETE (§9.2).
     OldKey,
     /// The delete in the old audience, or the insert in the new one, of a
-    /// row whose own operation changed its audience (§15.4). SQLite still
-    /// holds the row, so no foreign key acts on its delete.
+    /// row whose audience an operation changed: its own update, or one of an
+    /// ancestor it follows (§15.4). SQLite still holds the row, so no foreign
+    /// key acts on its delete.
     Move,
 }
 
@@ -296,9 +298,7 @@ impl crate::wire::Wire for Step {
     }
 }
 /// A row's operations in execution order, with the sources they replaced
-/// that its net change, if any, does not already name (§9.5, D5). An
-/// operation after a move carried the row into this audience in the same
-/// write starts from the generation that move began, not the net change's.
+/// that its net change, if any, does not already name (§9.5, D5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Execution {
     /// In increasing sequence order, each starting at the previous one's
