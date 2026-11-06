@@ -13,7 +13,7 @@
 //! `heldConsequence`, which `tests::classification_matches_the_model`
 //! compares.
 
-use crate::judge::{Indexed, Place, StepIndex};
+use crate::judge::{Indexed, NetParent, Place, StepIndex};
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sqlite::DatabaseConnection;
@@ -23,7 +23,7 @@ use crate::DbError;
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
 use coven_format::write::{Half, Step};
-use coven_merge::{Audience, ColumnValue, ForeignKey, Operation, Parent, RowId};
+use coven_merge::{Audience, Change, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::BTreeMap;
 
 /// The schema a write was authored under: the current one, unless a
@@ -368,6 +368,59 @@ impl<'a> ChildView<'a> {
             }
         }
         Ok((carried, Some(others)))
+    }
+
+    /// The row change the steps' combined `effect` makes: each reference
+    /// over its columns names the parent where the whole write leaves its
+    /// key, at the generation the write's record of that row leaves it at,
+    /// or, when no step touched the key, the parent the steps name, its
+    /// setter's (Lean `Place.namedNet`). None when no step says where a key
+    /// is.
+    pub(crate) fn net(
+        &self,
+        index: &StepIndex,
+        mut effect: Change<Value>,
+    ) -> Result<Option<Change<Value>>, DbError> {
+        let Some(table) = self.authoring.table(&self.row.table) else {
+            return Ok(Some(effect));
+        };
+        let (Operation::Insert(cells) | Operation::Update(cells)) = &mut effect.operation else {
+            return Ok(Some(effect));
+        };
+        let readable =
+            |audience: &Audience| *audience == Audience::Store || *audience == self.row.audience;
+        for key in &table.foreign_keys {
+            let Some(parent_table) = self.authoring.table(&key.target) else {
+                continue;
+            };
+            let columns = key_names(table, key);
+            // A row change sets all of a reference's columns or none (D5.5).
+            let Some(values) = columns
+                .iter()
+                .map(|column| cells.get(column).map(|cell| cell.value.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if values.contains(&Value::Null) {
+                continue;
+            }
+            let targets = target_columns(parent_table, key);
+            let stored = self.authoring.stored(parent_table, &targets, &values)?;
+            let written = parent_key(parent_table, &targets, &stored)?;
+            let parent = match index.net_parent(&parent_table.name, &written, readable) {
+                None => return Ok(None),
+                Some(NetParent::Setter) => continue,
+                Some(NetParent::Named(parent)) => parent,
+            };
+            let name = self.authoring.schema.foreign_key(table, key);
+            for column in &columns {
+                let parents = &mut cells.get_mut(column).expect("the reference's column").parents;
+                parents.remove(&name);
+                parents.extend(parent.clone().map(|parent| (name.clone(), parent)));
+            }
+        }
+        Ok(Some(effect))
     }
 
     /// The operation an action through `held` on the parent's step records,

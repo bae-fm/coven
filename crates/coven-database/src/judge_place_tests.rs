@@ -172,19 +172,7 @@ async fn a_retargeted_reference_names_its_parent_after_a_move() {
 /// combo; the second names the one he added.
 #[tokio::test]
 async fn a_retargeted_reference_to_a_deleted_row_names_no_parent() {
-    let pair = pair(
-        combo_tables(false),
-        "CREATE TABLE pairs(id TEXT NOT NULL PRIMARY KEY);
-         CREATE TABLE combos(p TEXT NOT NULL, t TEXT NOT NULL, PRIMARY KEY(p, t));
-         CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
-           a TEXT REFERENCES pairs(id) ON UPDATE CASCADE, b TEXT,
-           FOREIGN KEY(a, b) REFERENCES combos(p, t) DEFERRABLE INITIALLY DEFERRED)",
-        "INSERT INTO pairs VALUES('p');
-         INSERT INTO combos VALUES('p','00000000-0000-4000-8000-0000000000e1'),
-           ('q','00000000-0000-4000-8000-0000000000e1')",
-        "p",
-    )
-    .await;
+    let pair = pair(combo_tables(false), combos(true), TWO_COMBOS, "p").await;
     let write = vec![
         "DELETE FROM combos WHERE p='q'".to_owned(),
         "UPDATE pairs SET id='q' WHERE id='p'".to_owned(),
@@ -278,11 +266,91 @@ async fn a_reference_to_a_carried_row_is_a_direct_change() {
     pair.close().await;
 }
 
+/// Combos keyed by pair and track, the review's combo key checked at each
+/// statement or, `deferred`, at commit.
+fn combos(deferred: bool) -> &'static str {
+    if deferred {
+        "CREATE TABLE pairs(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE combos(p TEXT NOT NULL, t TEXT NOT NULL, PRIMARY KEY(p, t));
+         CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
+           a TEXT REFERENCES pairs(id) ON UPDATE CASCADE, b TEXT,
+           FOREIGN KEY(a, b) REFERENCES combos(p, t) DEFERRABLE INITIALLY DEFERRED)"
+    } else {
+        "CREATE TABLE pairs(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE combos(p TEXT NOT NULL, t TEXT NOT NULL, PRIMARY KEY(p, t));
+         CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
+           a TEXT REFERENCES pairs(id) ON UPDATE CASCADE, b TEXT,
+           FOREIGN KEY(a, b) REFERENCES combos(p, t))"
+    }
+}
+
+const TWO_COMBOS: &str = "INSERT INTO pairs VALUES('p');
+     INSERT INTO combos VALUES('p','00000000-0000-4000-8000-0000000000e1'),
+       ('q','00000000-0000-4000-8000-0000000000e1')";
+
+/// Ben deletes the combo the cascade points the review at and adds it again
+/// before changing the pair's key: the action names the combo the re-add
+/// began, and the review's net change the incarnation the combo's net change
+/// continues.
+#[tokio::test]
+async fn a_reference_to_a_row_deleted_and_added_again_is_an_action() {
+    let pair = pair(combo_tables(false), combos(false), TWO_COMBOS, "p").await;
+    let write = vec![
+        "DELETE FROM combos WHERE p='q'".to_owned(),
+        format!("INSERT INTO combos VALUES('q','{TRACK}')"),
+        "UPDATE pairs SET id='q' WHERE id='p'".to_owned(),
+    ];
+    accepted(pair, write, "SELECT a FROM reviews", Some("q")).await;
+}
+
+/// Ben deletes the combo the cascade points the review at, and adds it
+/// again only after: the deferred reference names no combo at the cascade,
+/// and the one he added once the write's SQL has run.
+#[tokio::test]
+async fn a_deferred_reference_to_a_row_added_later_is_an_action() {
+    let pair = pair(combo_tables(false), combos(true), TWO_COMBOS, "p").await;
+    let write = vec![
+        "DELETE FROM combos WHERE p='q'".to_owned(),
+        "UPDATE pairs SET id='q' WHERE id='p'".to_owned(),
+        format!("INSERT INTO combos VALUES('q','{TRACK}')"),
+    ];
+    accepted(pair, write, "SELECT a FROM reviews", Some("q")).await;
+}
+
+/// Ben moves the combo the cascade points the review at into their circle
+/// and back before changing the pair's key: the action names the store's
+/// row the second move began, and the review's net change the incarnation
+/// the store's combo had.
+#[tokio::test]
+async fn a_reference_to_a_row_moved_out_and_back_is_an_action() {
+    let pair = pair(
+        combo_tables(true),
+        "CREATE TABLE pairs(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE combos(p TEXT NOT NULL, t TEXT NOT NULL, audience TEXT NOT NULL,
+           PRIMARY KEY(p, t));
+         CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
+           a TEXT REFERENCES pairs(id) ON UPDATE CASCADE, b TEXT,
+           FOREIGN KEY(a, b) REFERENCES combos(p, t))",
+        "INSERT INTO pairs VALUES('p');
+         INSERT INTO combos VALUES('p','00000000-0000-4000-8000-0000000000e1','store'),
+           ('q','00000000-0000-4000-8000-0000000000e1','store')",
+        "p",
+    )
+    .await;
+    let write = vec![
+        format!("UPDATE combos SET audience='{}' WHERE p='q'", circle()),
+        "UPDATE combos SET audience='store' WHERE p='q'".to_owned(),
+        "UPDATE pairs SET id='q' WHERE id='p'".to_owned(),
+    ];
+    accepted(pair, write, "SELECT a FROM reviews", Some("q")).await;
+}
+
 /// `StepIndex::place` over the steps the merge model's operations on one
-/// parent key record finds what the model's `place` does
-/// (`Place.place_sound`, `Place.recorded_sound`).
+/// parent key record finds what the model's `place` does, and
+/// `StepIndex::net_parent` what its `namedNet` does (`Place.place_sound`,
+/// `Place.recorded_sound`, `Place.net_sound`).
 mod model {
-    use crate::judge::{Indexed, Place, StepIndex};
+    use crate::judge::{Indexed, IndexedRow, NetParent, Place, StepIndex};
     use crate::test_utils::tests::run_lean;
     use coven_format::write::Half;
     use coven_foundation::id_source::CircleId;
@@ -328,24 +396,37 @@ mod model {
                             1 => json!({"op": "update"}),
                             2 => json!({"op": "delete"}),
                             3 => json!({"op": "move", "aud": audience, "inc": inc}),
-                            4 => json!({"op": "carry", "aud": audience, "inc": inc}),
+                            4 => json!({"op": "unstepped", "aud": audience, "inc": inc}),
                             _ => json!({"op": "other"}),
                         }
                     })
                     .collect();
-                json!({"start": start, "ops": ops, "at": numbers.below(length + 1)})
+                // The generation the write's record of each audience's row
+                // leaves it at.
+                let ends: Vec<Json> =
+                    (0..3).map(|audience| json!([audience, 2 * numbers.below(3) + 1])).collect();
+                json!({"start": start, "ops": ops, "at": numbers.below(length + 1), "ends": ends})
             })
             .collect()
     }
 
-    /// The index of a write whose steps on the key are `steps`, and whose
-    /// carries changed the rows they moved the key into at no step.
+    /// The index of a write whose steps on the key are `steps`, whose
+    /// records leave each audience's row where the case's `ends` says, and
+    /// whose unstepped changes changed the rows they moved the key into at no
+    /// step.
     fn index(case: &Json, steps: &Json) -> StepIndex {
+        fn entry<'a>(index: &'a mut StepIndex, case: &Json, audience: u64) -> &'a mut IndexedRow {
+            let ends = &case["ends"].as_array().unwrap().iter().find(|end| end[0] == audience);
+            index.rows.entry(row(audience)).or_insert(IndexedRow {
+                steps: Vec::new(),
+                ends: ends.unwrap()[1].as_u64().unwrap(),
+            })
+        }
         let mut index = StepIndex::default();
         for step in steps.as_array().unwrap() {
             let inc = step["inc"].as_u64().unwrap();
             let delete = step["delete"].as_bool().unwrap();
-            index.rows.entry(row(step["aud"].as_u64().unwrap())).or_default().push(Indexed {
+            entry(&mut index, case, step["aud"].as_u64().unwrap()).steps.push(Indexed {
                 sequence: step["seq"].as_u64().unwrap().try_into().unwrap(),
                 delete,
                 half: if step["move"].as_bool().unwrap() { Half::Move } else { Half::Whole },
@@ -353,12 +434,19 @@ mod model {
                 after: if delete { inc + 1 } else { inc },
             });
         }
-        for op in case["ops"].as_array().unwrap().iter().filter(|op| op["op"] == "carry") {
-            let carried = row(op["aud"].as_u64().unwrap());
-            index.rows.entry(carried.clone()).or_default();
-            index.unstepped.insert(carried);
+        for op in case["ops"].as_array().unwrap().iter().filter(|op| op["op"] == "unstepped") {
+            let audience = op["aud"].as_u64().unwrap();
+            entry(&mut index, case, audience);
+            index.unstepped.insert(row(audience));
         }
         index
+    }
+
+    fn audience(row: &RowId) -> u64 {
+        match &row.audience {
+            Audience::Store => 0,
+            Audience::Circle(circle) => circle.0.as_u128() as u64,
+        }
     }
 
     fn found(place: Place<'_>) -> Json {
@@ -368,13 +456,25 @@ mod model {
             Place::Last(row, step) => json!({
                 "kind": "last",
                 "seq": step.sequence,
-                "aud": match &row.audience {
-                    Audience::Store => 0,
-                    Audience::Circle(circle) => circle.0.as_u128() as u64,
-                },
+                "aud": audience(row),
                 "delete": step.delete,
                 "move": step.half == Half::Move,
                 "inc": if step.delete { step.generation } else { step.after },
+            }),
+        }
+    }
+
+    /// The parent a row change in audience 1 names, which may name one in
+    /// its own audience or the store.
+    fn net(index: &StepIndex) -> Json {
+        let readable =
+            |audience: &Audience| *audience == row(0).audience || *audience == row(1).audience;
+        match index.net_parent("tracks", &[1], readable) {
+            None => json!({"kind": "unplaced"}),
+            Some(NetParent::Setter) => json!({"kind": "setter"}),
+            Some(NetParent::Named(parent)) => json!({
+                "kind": "parent",
+                "parent": parent.map(|parent| json!([audience(&parent.row), parent.generation])),
             }),
         }
     }
@@ -386,18 +486,32 @@ mod model {
         let cases = cases();
         let lean = run_lean(&runner, &json!({"mode": "place", "cases": cases}));
         let mut kinds = std::collections::BTreeMap::<String, usize>::new();
-        let mut moves = 0;
+        let mut nets = std::collections::BTreeMap::<String, usize>::new();
+        let (mut moves, mut readded) = (0, 0);
         for (case, lean) in cases.iter().zip(lean.as_array().unwrap()) {
             if lean.is_null() {
                 continue;
             }
             let at: u32 = case["at"].as_u64().unwrap().try_into().unwrap();
-            let rust = found(index(case, &lean["steps"]).place("tracks", &[1], at));
+            let index = index(case, &lean["steps"]);
+            let rust = found(index.place("tracks", &[1], at));
             assert_eq!(rust, lean["place"], "{case}");
             *kinds.entry(rust["kind"].as_str().unwrap().to_owned()).or_default() += 1;
             moves += usize::from(rust["move"] == true);
+            let net = net(&index);
+            assert_eq!(net, lean["net"], "{case}");
+            let named = if net["parent"].is_null() { "none" } else { "parent" };
+            *nets.entry(format!("{}:{named}", net["kind"])).or_default() += 1;
+            // The row change names another incarnation than the key's last step made.
+            let last = lean["steps"].as_array().unwrap().last();
+            readded +=
+                usize::from(last.is_some_and(|step| {
+                    !net["parent"].is_null() && net["parent"][1] != step["inc"]
+                }));
         }
         assert!(kinds.values().all(|count| *count >= 100) && kinds.len() == 3, "{kinds:?}");
         assert!(moves >= 50, "{moves} places on a move's half");
+        assert!(nets.values().all(|count| *count >= 100) && nets.len() == 4, "{nets:?}");
+        assert!(readded >= 50, "{readded} row changes naming another incarnation");
     }
 }

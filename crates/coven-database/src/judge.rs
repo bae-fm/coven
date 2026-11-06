@@ -34,7 +34,7 @@ use coven_format::write::{Half, PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
-pub(crate) use place::Place;
+pub(crate) use place::{NetParent, Place};
 use rusqlite::params;
 use std::collections::BTreeMap;
 
@@ -62,10 +62,20 @@ impl Indexed {
     }
 }
 
+/// One row's record in the write, as the index keeps it.
+#[derive(Debug)]
+pub(crate) struct IndexedRow {
+    /// Its steps, in sequence order.
+    pub(crate) steps: Vec<Indexed>,
+    /// The generation the record leaves the row at: its net change's, or,
+    /// for an execution record, the one its steps began at.
+    pub(crate) ends: u64,
+}
+
 /// Every step of the write's opened parts, by row and by sequence.
 #[derive(Default)]
 pub(crate) struct StepIndex {
-    rows: BTreeMap<RowId, Vec<Indexed>>,
+    rows: BTreeMap<RowId, IndexedRow>,
     /// Rows the write changed beyond what their steps did.
     unstepped: std::collections::BTreeSet<RowId>,
     sequences: BTreeMap<u32, Vec<RowId>>,
@@ -84,6 +94,15 @@ impl StepIndex {
                 index.unstepped.insert(row.clone());
             }
             let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
+            let ends = match &record {
+                OriginalRow::Change(change) => {
+                    change.change.after().expect("a decoded change's generation advances")
+                }
+                OriginalRow::Execution(execution) => {
+                    let first = execution.execution.steps.first();
+                    first.expect("an execution record has a step").change.generation
+                }
+            };
             for step in &steps {
                 index.sequences.entry(step.sequence).or_default().push(row.clone());
                 if step.delete {
@@ -91,7 +110,7 @@ impl StepIndex {
                     *first = (*first).min(step.sequence);
                 }
             }
-            index.rows.insert(row, steps);
+            index.rows.insert(row, IndexedRow { steps, ends });
             Ok(())
         })?;
         Ok(index)
@@ -113,7 +132,7 @@ impl StepIndex {
         self.rows
             .get(row)
             .into_iter()
-            .flat_map(|steps| steps.iter().rev())
+            .flat_map(|indexed| indexed.steps.iter().rev())
             .filter(move |step| step.sequence < sequence)
     }
 
@@ -124,7 +143,7 @@ impl StepIndex {
             if row == old || row.table != old.table {
                 return None;
             }
-            let step = self.rows[row].iter().find(|s| s.sequence == sequence)?;
+            let step = self.rows[row].steps.iter().find(|s| s.sequence == sequence)?;
             (!step.delete).then_some((row, step))
         })
     }
@@ -247,10 +266,13 @@ pub(crate) fn judge(
             view.apply(step);
         }
         let all = !execution.steps.is_empty() && derived == execution.steps.len();
+        // The row change names its parents as the whole write leaves them,
+        // which its actions' steps need not (Lean `Place.net_sound`).
         let exact = match &record {
-            OriginalRow::Change(change) if all => {
-                combined(&execution.steps).is_some_and(|effect| effect == change.change)
-            }
+            OriginalRow::Change(change) if all => match combined(&execution.steps) {
+                Some(effect) => view.net(&index, effect)?.is_some_and(|net| net == change.change),
+                None => false,
+            },
             _ => true,
         };
         let normalized = match &record {

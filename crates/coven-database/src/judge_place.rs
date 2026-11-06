@@ -1,4 +1,4 @@
-//! Where the write's earlier steps leave the row a reference's values key
+//! Where the write's steps leave the row a reference's values key
 //! (§9.6, §15.4, D5).
 //!
 //! An app row's key is in one audience at a time, and every operation of
@@ -9,11 +9,17 @@
 //! made, or nowhere after a delete. Only a move that carried the row along
 //! with its ancestor, or a migration difference, changes a row with no step;
 //! once the write holds such a change for the key, its steps don't say.
+//!
+//! A row change names its parents as the whole write leaves them, at the
+//! generation the write's own record of each parent leaves it at, which an
+//! action's step need not: a parent deleted and added again keeps its
+//! incarnation in its row change, and a deferred reference's parent can be
+//! added after the step (Lean `Place.net_sound`).
 
-use super::{Indexed, StepIndex};
+use super::{Indexed, IndexedRow, StepIndex};
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::write::Half;
-use coven_merge::{Audience, RowId};
+use coven_merge::{Audience, Parent, RowId};
 
 /// A key's row as the write's steps before one step leave it.
 pub(crate) enum Place<'a> {
@@ -28,14 +34,69 @@ pub(crate) enum Place<'a> {
     Last(&'a RowId, &'a Indexed),
 }
 
+/// The parent a row change's reference names for a key (Lean `namedNet`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NetParent {
+    /// No step touched the key: the parent its setter recorded, which an
+    /// action's step through the reference names too.
+    Setter,
+    /// The row the write's steps leave the key in at its end, at the
+    /// generation the write's record of that row leaves it at, when it is
+    /// present there in an audience the reference may name; none otherwise.
+    Named(Option<Parent>),
+}
+
 impl StepIndex {
     /// Where `key` of `table` is before `sequence`, as its rows' last step
     /// there says: the step itself shows where the key was when it ran, even
     /// when a change of no step of its own moved the key afterwards.
     pub(crate) fn last_on_key(&self, table: &str, key: &[u8], sequence: u32) -> Place<'_> {
+        self.last(table, key, Some(sequence))
+    }
+
+    /// Where `key` of `table` is before `sequence`: as [`Self::last_on_key`]
+    /// says, unless the write changed a row with the key at no step of its
+    /// own, which may have moved it since.
+    pub(crate) fn place(&self, table: &str, key: &[u8], sequence: u32) -> Place<'_> {
+        self.placed(table, key, Some(sequence))
+    }
+
+    /// The parent a row change's reference names for `key` of `table`
+    /// (Lean `namedNet`), given which audiences it may name a parent in;
+    /// none when no step says where the key is.
+    pub(crate) fn net_parent(
+        &self,
+        table: &str,
+        key: &[u8],
+        readable: impl Fn(&Audience) -> bool,
+    ) -> Option<NetParent> {
+        match self.placed(table, key, None) {
+            Place::Untouched => Some(NetParent::Setter),
+            Place::Unplaced => None,
+            Place::Last(row, step) => Some(NetParent::Named(
+                (!step.delete && readable(&row.audience))
+                    .then(|| Parent { row: row.clone(), generation: self.rows[row].ends }),
+            )),
+        }
+    }
+
+    /// Where `key` of `table` is before `before`, or once the write's SQL
+    /// has run when `before` is none, unless a row with the key changed at
+    /// no step of its own.
+    fn placed(&self, table: &str, key: &[u8], before: Option<u32>) -> Place<'_> {
+        if self.key_rows(table, key).any(|(row, _)| self.unstepped.contains(row)) {
+            return Place::Unplaced;
+        }
+        self.last(table, key, before)
+    }
+
+    /// The last step on a row with `key` of `table` before `before`, or of
+    /// all when `before` is none.
+    fn last(&self, table: &str, key: &[u8], before: Option<u32>) -> Place<'_> {
         let mut last: Option<(&RowId, &Indexed)> = None;
-        for (row, steps) in self.key_rows(table, key) {
-            let Some(step) = steps.iter().rev().find(|step| step.sequence < sequence) else {
+        for (row, indexed) in self.key_rows(table, key) {
+            let earlier = |step: &&Indexed| before.is_none_or(|before| step.sequence < before);
+            let Some(step) = indexed.steps.iter().rev().find(earlier) else {
                 continue;
             };
             last = match last {
@@ -57,22 +118,12 @@ impl StepIndex {
         last.map_or(Place::Untouched, |(row, step)| Place::Last(row, step))
     }
 
-    /// Where `key` of `table` is before `sequence`: as [`Self::last_on_key`]
-    /// says, unless the write changed a row with the key at no step of its
-    /// own, which may have moved it since.
-    pub(crate) fn place(&self, table: &str, key: &[u8], sequence: u32) -> Place<'_> {
-        if self.key_rows(table, key).any(|(row, _)| self.unstepped.contains(row)) {
-            return Place::Unplaced;
-        }
-        self.last_on_key(table, key, sequence)
-    }
-
     /// The write's rows with `key` of `table`, in every audience.
     fn key_rows(
         &self,
         table: &str,
         key: &[u8],
-    ) -> impl Iterator<Item = (&RowId, &Vec<Indexed>)> + use<'_> {
+    ) -> impl Iterator<Item = (&RowId, &IndexedRow)> + use<'_> {
         let first = RowId { table: table.to_owned(), key: key.to_vec(), audience: Audience::Store };
         let (table, key) = (first.table.clone(), first.key.clone());
         self.rows.range(first..).take_while(move |(row, _)| row.table == table && row.key == key)
