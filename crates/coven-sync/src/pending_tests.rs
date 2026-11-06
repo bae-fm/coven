@@ -77,6 +77,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
         (PendingReason::Failed(LocalFailure::Operation), Retry::Never),
         (storage(StorageFailure::Network), Retry::Automatic),
         (storage(StorageFailure::QuotaExceeded), Retry::Automatic),
+        (storage(StorageFailure::File), Retry::Automatic),
         (storage(StorageFailure::Authentication), Retry::AppAction),
         (storage(StorageFailure::PermissionDenied), Retry::AppAction),
         (storage(StorageFailure::Refused), Retry::Never),
@@ -142,6 +143,7 @@ fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
     for (reason, uploads, downloads) in [
         (storage(StorageFailure::Network), Retry::Automatic, Retry::AppAction),
         (storage(StorageFailure::QuotaExceeded), Retry::Automatic, Retry::AppAction),
+        (storage(StorageFailure::File), Retry::Automatic, Retry::AppAction),
         (storage(StorageFailure::Authentication), Retry::AppAction, Retry::AppAction),
         (storage(StorageFailure::Protocol), Retry::Never, Retry::Never),
         (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic, Retry::AppAction),
