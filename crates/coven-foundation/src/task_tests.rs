@@ -350,19 +350,15 @@ async fn blocking_work_answers_a_caller_still_waiting() {
 #[tokio::test]
 async fn a_completing_task_dropped_with_its_answer_unread_reports_the_answer_s_bug() {
     let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
-    let answered = Arc::new(AtomicBool::new(false));
-    let completion = spawn_completing("stop sync", Arc::new(SentBugs(sent)), {
-        let answered = answered.clone();
-        async move {
-            answered.store(true, Ordering::SeqCst);
-            loop_is_gone()
-        }
+    let (answering, answered) = tokio::sync::oneshot::channel();
+    let completion = spawn_completing("stop sync", Arc::new(SentBugs(sent)), async move {
+        answering.send(()).unwrap();
+        loop_is_gone()
     });
-    // The work answers in the same poll that sets the flag, so the answer
-    // is in hand once the flag shows.
-    while !answered.load(Ordering::SeqCst) {
-        tokio::task::yield_now().await;
-    }
+    // The work answers in the same poll that tells, and on this one-thread
+    // runtime the test runs again only after that poll: the answer is in
+    // hand once the test hears.
+    crate::clock::within(answered).await.unwrap().unwrap();
     drop(completion);
     assert_eq!(
         reported.try_recv(),

@@ -710,6 +710,7 @@ async fn a_large_writes_slot_is_visible_only_once_complete() {
     let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
     group.storage.gate_parts(gate.clone()).await;
     let traced = ana.storage.request_trace().len();
+    let mut requests = ana.storage.subscribe_requests();
     let sending = tokio::spawn({
         let sync = ana.sync.clone();
         async move { sync.pass().await }
@@ -718,9 +719,11 @@ async fn a_large_writes_slot_is_visible_only_once_complete() {
     let parts = || ana.storage.request_trace()[traced..].iter().filter(|r| **r == part).count();
     // The first part is stored; the second is held with its bytes taken.
     for held in 1..=2 {
+        // Each request is traced before it is counted, so the trace holds
+        // every request the count has heard of.
         let arrived = async {
-            while parts() < held && !sending.is_finished() {
-                tokio::task::yield_now().await;
+            while parts() < held {
+                requests.changed().await.unwrap();
             }
         };
         coven_foundation::clock::within(arrived).await.expect("a part reaches storage");
