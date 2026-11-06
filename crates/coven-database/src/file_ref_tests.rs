@@ -258,3 +258,99 @@ async fn an_absent_file_returns_an_error_without_panicking() {
     assert!(matches!(db.file_ref(absent).await, Err(DbError::StoreClosed)));
     assert!(matches!(db.user_file(absent).await, Err(DbError::StoreClosed)));
 }
+
+/// Open `reference`'s bytes here, running `meanwhile` after the read has
+/// found where they are and before it opens them.
+async fn open_local_around(
+    db: &Database,
+    reference: FileRef,
+    meanwhile: impl std::future::Future<Output = ()>,
+) -> Result<Option<LocalFileStream>, LocalFileError> {
+    let (found, finding) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    db.test_gate_local_open(move || {
+        found.send(()).unwrap();
+        released.recv().unwrap();
+    })
+    .await;
+    let reading = tokio::spawn({
+        let db = db.clone();
+        async move { db.open_local_file(&reference).await }
+    });
+    finding.await.unwrap();
+    meanwhile.await;
+    release.send(()).unwrap();
+    reading.await.unwrap()
+}
+
+/// A read finds where a file's bytes are here from one committed state and
+/// opens them after it. The upload completing between the two switches the
+/// file to its stored bytes and deletes coven's copy: the read finds the
+/// file's bytes here no more, and the file reads as its record now says,
+/// from storage, never as damage (§17.7, Appendix C.3).
+#[tokio::test]
+async fn a_copy_its_upload_deletes_as_a_read_opens_it_reads_from_storage() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"avatar".to_vec(), true).await.unwrap();
+    let uploading = db.file_ref(file).await.unwrap();
+    assert_eq!(uploading.place(), FilePlace::DeviceOnly { device: store.device() });
+    let opened = open_local_around(&db, uploading, async {
+        complete_uploads(&db).await;
+        assert!(crate::file_write::tests::owned_paths(&store).is_empty(), "the copy is gone");
+    })
+    .await;
+    assert!(opened.unwrap().is_none(), "the bytes are read from storage");
+    assert!(matches!(db.file_ref(file).await.unwrap().place(), FilePlace::Cloud { .. }));
+    db.close().await.unwrap();
+}
+
+/// The same for a person's original, which they may delete once its upload
+/// has stored it: the read that found it before then reads from storage.
+#[tokio::test]
+async fn an_original_deleted_after_its_upload_as_a_read_opens_it_reads_from_storage() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("photo");
+    std::fs::write(&path, b"original").unwrap();
+    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let file = db
+        .write_as::<_, _, crate::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(file)
+        })
+        .await
+        .unwrap();
+    let uploading = db.file_ref(file).await.unwrap();
+    assert_eq!(uploading.place(), FilePlace::DeviceOnly { device: store.device() });
+    let opened = open_local_around(&db, uploading, async {
+        complete_uploads(&db).await;
+        std::fs::remove_file(&path).unwrap();
+    })
+    .await;
+    assert!(opened.unwrap().is_none(), "the bytes are read from storage");
+    db.close().await.unwrap();
+}
+
+/// Coven's copy missing while the file's record still names it is damage:
+/// nothing of coven's deletes bytes a record names (Appendix C.3).
+#[tokio::test]
+async fn a_copy_missing_while_its_record_names_it_is_damage() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"avatar".to_vec(), true).await.unwrap();
+    let uploading = db.file_ref(file).await.unwrap();
+    let [copy] = crate::file_write::tests::owned_paths(&store).try_into().unwrap();
+    let opened = open_local_around(&db, uploading, async {
+        std::fs::remove_file(&copy).unwrap();
+    })
+    .await;
+    assert!(
+        matches!(&opened, Err(LocalFileError::Integrity { id }) if *id == file.to_string()),
+        "{:?}",
+        opened.map(|stream| stream.is_some())
+    );
+    db.close().await.unwrap();
+}

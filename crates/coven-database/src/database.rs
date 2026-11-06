@@ -201,6 +201,11 @@ pub struct DatabaseAccess<L> {
     directory: StoreDir,
     device: DeviceId,
     lock: L,
+    /// Runs once, where the next read of a file on this device only has
+    /// found where its bytes are and is about to open them, so a test can
+    /// commit between the two.
+    #[cfg(test)]
+    local_open_gate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<L> DatabaseAccess<L> {
@@ -272,23 +277,42 @@ impl<L> DatabaseAccess<L> {
         failures
     }
 
+    /// The bytes here of a file its record says is on this device only.
+    /// They are found in one committed state and opened after it, and a
+    /// write committing between the two, such as its upload's completion,
+    /// can release them, which coven deletes as that write returns (Appendix
+    /// C.3). Bytes are released only once no record names them, so bytes
+    /// missing or changed are judged by the record as it stands after the
+    /// open: one that no longer names bytes here means the file left this
+    /// device only meanwhile, and `None` sends the read to the cache or
+    /// storage; one that still names them leaves the failure standing.
     fn open_local_file(
         &self,
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        // The bytes open inside the read that found them.
-        self.readers.acquire_reader().read_snapshot(|sql| {
-            sql.device_only_source(self.device, reference)?
-                .map(|source| {
-                    crate::file_ref::open_source(
-                        &self.directory,
-                        &reference.id().to_string(),
-                        reference.size(),
-                        source,
-                    )
-                })
-                .transpose()
-        })
+        let file = reference.id();
+        let source = || {
+            self.readers
+                .acquire_reader()
+                .read_snapshot(|sql| sql.device_only_source(self.device, file))
+        };
+        let Some(found) = source()? else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if let Some(gate) = lock_unpoisoned(&self.local_open_gate).take() {
+            gate();
+        }
+        match crate::file_ref::open_source(
+            &self.directory,
+            &file.to_string(),
+            reference.size(),
+            found,
+        ) {
+            Ok(stream) => Ok(Some(stream)),
+            Err(error) if error.judges_bytes() && source()?.is_none() => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {

@@ -20,6 +20,17 @@ impl Database {
         .unwrap();
     }
 
+    /// Run `gate` once, where the next read of a file on this device only
+    /// has found where its bytes are and is about to open them.
+    pub(crate) async fn test_gate_local_open(&self, gate: impl FnOnce() + Send + 'static) {
+        self.call(move |inner| {
+            *lock_unpoisoned(&inner.access.local_open_gate) = Some(Box::new(gate));
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+    }
+
     /// Run `hook` where each write's staged files have been flushed, before
     /// its commit; an error from it fails the flush.
     pub(crate) async fn test_on_file_flush(&self, hook: coven_foundation::files::FlushHook) {

@@ -132,8 +132,9 @@ impl<M: Mode> Files<M> {
                         },
                     ))
                 }
-                // Its upload completed meanwhile, and its bytes are stored, or
-                // it is only on another device.
+                // Its upload completed meanwhile, even as it opened, and its
+                // bytes are stored; or its record went, or says another
+                // device has it.
                 Ok(None) => file = self.inner.current(&file).await?,
                 Err(error) => {
                     return match &uploading {

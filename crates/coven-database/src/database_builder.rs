@@ -323,6 +323,8 @@ impl DatabaseBuilder {
                     directory: self.directory,
                     device: settings.device_id,
                     lock,
+                    #[cfg(test)]
+                    local_open_gate: Mutex::new(None),
                 },
                 checkpoints,
                 migrations: outcomes,
@@ -414,6 +416,8 @@ impl DatabaseBuilder {
                 write_schema: schema,
                 directory: self.directory,
                 device: settings.device_id,
+                #[cfg(test)]
+                local_open_gate: Mutex::new(None),
             }))),
         })
     }

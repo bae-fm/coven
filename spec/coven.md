@@ -6599,6 +6599,18 @@ seeking within it are reads of different ranges.
     then return what's on disk, as any file read does. Hashing the whole file at
     each open would make Ana's laptop read all of a song still waiting to upload
     before playing its first second.
+  - Opening finds where the bytes are from the record, then opens them, and
+    the file's upload can complete in between. Ana's app shows her new avatar
+    just as its upload finishes: the open found coven's copy, and the write
+    that switched the record to storage deleted it before the open reached
+    it. Coven deletes bytes only once no record names them (Appendix C.3), so
+    bytes missing or changed are judged by the record as it stands then. A
+    record that no longer keeps the file on this device only means the file
+    moved on, and the read takes its bytes from the cache or storage, as the
+    record now says. A record that still names the bytes leaves the failure
+    standing: `UserFileMissing` or `UserFileChanged` for an original, and
+    `Integrity` for coven's copy. Without this, a read at that moment would
+    report damage that isn't there.
 - **A stored file not in the cache** is read by fetching only the chunks that
   cover the range, with ranged requests to the provider.
   - Its checked header is reused across opens while it stays cached. If it's
@@ -9663,6 +9675,13 @@ pins) consistent with its database across crashes.
   transaction. A record naming bytes a row still uses would delete them, so
   the step that records it is where that's checked, and deleting needs no
   check of its own.
+- A read finds bytes by the rows it reads, then opens them after that read,
+  so the deletion of bytes a write released in between can come first.
+  Bytes missing where a row named them are judged by the rows as they stand
+  after: when none names them any more, they went as released, and the read
+  goes where its record now points. A cache entry evicted meanwhile reads as
+  not cached, and a file whose upload completed meanwhile reads from storage
+  (§17.7). When a row still names them, they are damage.
 - Owed local deletions run after writes and on opening. A failure keeps the
   record. A committed write still returns its result; opening reports the cleanup
   failure.

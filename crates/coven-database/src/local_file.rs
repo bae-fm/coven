@@ -1,6 +1,5 @@
 //! Resolve a file still on this device only to its one local byte source.
 
-use super::FileRef;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::task::{Bug, CarriesBug};
@@ -89,6 +88,17 @@ impl From<StoreLockError> for LocalFileError {
             StoreLockError::Bug(bug) => Self::Bug(bug),
             error => Self::Lock(error),
         }
+    }
+}
+
+impl LocalFileError {
+    /// Whether this failure judges the bytes a source holds: missing, or
+    /// changed from what its record says, rather than a failure to look.
+    pub(crate) fn judges_bytes(&self) -> bool {
+        matches!(
+            self,
+            Self::UserFileMissing { .. } | Self::UserFileChanged { .. } | Self::Integrity { .. }
+        )
     }
 }
 
@@ -183,19 +193,23 @@ impl LocalFileReader {
     }
 }
 
-/// Where the bytes of a file on this device only are, as its record here
-/// keeps them: the user's original, or coven's copy. Any other file,
-/// including one this device has finished uploading, returns `None`: its
-/// bytes are read from the cache or storage (§17.1). Reads only the database.
+/// Where the bytes of `file` are while its record, as this read finds it,
+/// says it is on this device only: the user's original, or coven's copy.
+/// Any other file, including one this device has finished uploading since
+/// a reference to it was taken, and one whose record is gone, returns
+/// `None`: its bytes are read from the cache or storage, or it fails as its
+/// record says (§17.7). Reads only the database.
 pub(crate) fn device_only_source(
     db: &DatabaseConnection,
     device: DeviceId,
-    reference: &FileRef,
+    file: coven_foundation::id_source::FileId,
 ) -> Result<Option<LocalSource>, DbError> {
-    if reference.place() != (crate::FilePlace::DeviceOnly { device }) {
-        return Ok(None);
+    match crate::file_table::Record::read(db, file)? {
+        Some(record) if record.place == crate::file_location::Place::DeviceOnly(device) => {
+            file_source(db, file)
+        }
+        _ => Ok(None),
     }
-    file_source(db, reference.id())
 }
 
 /// Where a file's bytes are on this device: the user's original, as

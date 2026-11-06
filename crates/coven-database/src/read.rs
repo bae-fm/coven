@@ -39,13 +39,14 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.app_query(sql, params, map)
     }
 
-    /// Where this device keeps the bytes of a file on this device only.
+    /// Where this device keeps the bytes of `file`, while its record says
+    /// it is on this device only.
     pub(crate) fn device_only_source(
         &self,
         device: coven_foundation::id_source::DeviceId,
-        reference: &crate::FileRef,
+        file: coven_foundation::id_source::FileId,
     ) -> Result<Option<crate::file_ref::LocalSource>, crate::DbError> {
-        crate::file_ref::device_only_source(self.database, device, reference)
+        crate::file_ref::device_only_source(self.database, device, file)
     }
 
     pub(crate) fn file_ref(
