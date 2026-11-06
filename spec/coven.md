@@ -249,8 +249,8 @@ remains (§10). The Lean models assume the cryptography is secure; they don't pr
 
 Commits and operation journals (§5.1, §11) survive crashes, as long as the
 database and the key custody (§12.4) stay usable. If an installation becomes
-unusable, the person can reset it, and coven reports which unsent edits it
-discarded (§19.3).
+unusable, the person can reset it, and coven gives the app a notice that unsent
+edits may have been lost (§19.3).
 
 Queued writes eventually claim a slot, given that their prerequisites succeed,
 storage works, and the device isn't always beaten to the next slot. Nothing bounds
@@ -8172,7 +8172,8 @@ Restoring never rescues the old installation's queue (§13.1).
 `CovenBuilder::reset_device` ([api.md E1](api.md#e1-opening)). Coven never
 resets a device on its own. A reset discards the local database and unsent work,
 takes a fresh id, loads storage, registers the new id as replacing the old one,
-and tells the app what was discarded. While it runs, it tells the app how far
+and gives the app a notice naming both ids, which says unsent edits may have
+been lost. While it runs, it tells the app how far
 it has come, as restoring and joining do, so the app shows that instead of a
 bare spinner.
 
