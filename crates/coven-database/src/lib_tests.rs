@@ -58,6 +58,15 @@ impl TestStore {
         self.directory.clone()
     }
 
+    /// Told once an open of this store finds an instance of it closing and
+    /// waits for that instance to release the store.
+    pub(crate) fn when_open_waits(&self) -> tokio::sync::oneshot::Receiver<()> {
+        coven_foundation::files::when_reached(&coven_foundation::files::writer_lock(
+            self.directory.database_path().parent().unwrap(),
+            self.id(),
+        ))
+    }
+
     pub(crate) fn database_path(&self) -> std::path::PathBuf {
         self.directory.database_path()
     }
@@ -496,3 +505,18 @@ pub(crate) fn lean_model(runner: &std::ffi::OsStr, input: serde_json::Value) -> 
 }
 
 pub(crate) use crate::sequence::tests::*;
+
+/// Run `opening` until `waits` tells that it waits for a closing instance of
+/// its store, failing if it finishes first.
+pub(crate) async fn until_waiting<F: std::future::Future>(
+    opening: &mut std::pin::Pin<Box<F>>,
+    waits: tokio::sync::oneshot::Receiver<()>,
+) {
+    tokio::select! {
+        biased;
+        waited = coven_foundation::clock::within(waits) => {
+            waited.expect("the open waits").unwrap();
+        }
+        _ = opening.as_mut() => panic!("the open finished without waiting"),
+    }
+}

@@ -192,10 +192,6 @@ async fn settings_failure_remains_distinct() {
 
 #[tokio::test]
 async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
-    use std::{
-        future::{poll_fn, Future},
-        task::Poll,
-    };
     let temp = tempfile::tempdir().unwrap();
     let layout = coven_foundation::files::StoreDirectories::new(
         temp.path().to_owned(),
@@ -222,13 +218,16 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     }
     drop(read);
     drop(database);
+    let lease = coven_foundation::files::bootstrap_lock(
+        coven_foundation::files::StoreDirAccess::database_path(&pending.directory())
+            .parent()
+            .unwrap(),
+        id,
+    );
     drop(pending);
+    let waits = coven_foundation::files::when_reached(&lease);
     let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
-    poll_fn(|cx| {
-        assert!(reopen.as_mut().poll(cx).is_pending(), "reopen must await the held read");
-        Poll::Ready(())
-    })
-    .await;
+    crate::tests::until_waiting(&mut reopen, waits).await;
     release.send(()).unwrap();
     let resumed = reopen.await.unwrap();
     let database = DatabaseBuilder::new(resumed.directory())
@@ -270,12 +269,9 @@ async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
             drop(closing);
         }
         drop(database);
+        let waits = store.when_open_waits();
         let mut reopen = Box::pin(store.builder(notes_tables(), notes_migrations()).open());
-        poll_fn(|cx| {
-            assert!(reopen.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        crate::tests::until_waiting(&mut reopen, waits).await;
         assert_other_process_refuses_writer(&store);
         release.send(()).unwrap();
         read.await.unwrap();
@@ -287,10 +283,6 @@ async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
 
 #[tokio::test]
 async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
-    use std::{
-        future::{poll_fn, Future},
-        task::Poll,
-    };
     let store = TestStore::new();
     let (entered, entry) = tokio::sync::oneshot::channel();
     let entered = Mutex::new(Some(entered));
@@ -313,6 +305,7 @@ async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
         result = entry => result.unwrap(),
     }
     drop(opening);
+    let waits = store.when_open_waits();
     let mut reopen = Box::pin(
         store
             .builder(
@@ -323,11 +316,7 @@ async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
             )
             .open(),
     );
-    poll_fn(|cx| {
-        assert!(reopen.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
+    crate::tests::until_waiting(&mut reopen, waits).await;
     release.send(()).unwrap();
     let reopened = reopen.await.unwrap();
     assert_eq!(reopened.schema_version().await.unwrap(), 1);
@@ -336,10 +325,6 @@ async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
 
 #[tokio::test]
 async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
-    use std::{
-        future::{poll_fn, Future},
-        task::Poll,
-    };
     let store = TestStore::new();
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -359,10 +344,12 @@ async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
     }
     drop(write);
     drop(database);
+    let waits = store.when_open_waits();
     let mut reopen = Box::pin(store.builder(notes_tables(), notes_migrations()).open());
-    let waiting = poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
+    // Blocking work does not keep its dropped caller live: the reopen waits
+    // for it as for a closing instance.
+    crate::tests::until_waiting(&mut reopen, waits).await;
     release.send(()).unwrap();
-    assert!(waiting, "blocking work must not keep its dropped caller live");
     let reopened = reopen.await.unwrap();
     assert_eq!(
         reopened
@@ -394,12 +381,9 @@ async fn cancelling_close_while_file_work_is_held_does_not_cancel_release() {
     })
     .await;
     drop(closing);
+    let waits = store.when_open_waits();
     let mut reopen = Box::pin(store.builder(vec![], vec![]).open());
-    poll_fn(|cx| {
-        assert!(reopen.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
+    crate::tests::until_waiting(&mut reopen, waits).await;
     drop(lease);
     let reopened = reopen.await.unwrap();
     assert!(matches!(database.schema_version().await, Err(DbError::StoreClosed)));

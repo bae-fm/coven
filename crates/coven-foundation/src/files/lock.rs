@@ -386,6 +386,33 @@ fn bootstrap_lock_path(directory: &Path, id: StoreId) -> PathBuf {
     directory.with_file_name(format!(".coven-bootstrap-{id}.lock"))
 }
 
+/// The writer lock file of the store at `directory`, which a test waits on
+/// (`when_reached`) to know an open finds the store's writer closing and
+/// waits for it.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn writer_lock(directory: &Path, id: StoreId) -> PathBuf {
+    let [writer, _] = lock_paths(directory, id);
+    writer
+}
+
+/// The bootstrap lock file of the store at `directory`, which a test waits
+/// on to know a bootstrap finds the store's bootstrap or writer closing and
+/// waits for it.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn bootstrap_lock(directory: &Path, id: StoreId) -> PathBuf {
+    bootstrap_lock_path(directory, id)
+}
+
+/// The file `kind` of the store's locks is held on.
+#[cfg(any(test, feature = "test-utils"))]
+pub(super) fn kind_lock(directory: &Path, id: StoreId, kind: LockKind) -> PathBuf {
+    match kind {
+        LockKind::Writer => writer_lock(directory, id),
+        LockKind::Reader => lock_paths(directory, id)[1].clone(),
+        LockKind::Bootstrap => bootstrap_lock(directory, id),
+    }
+}
+
 /// Take the bootstrap lock without waiting. Under the layout lock, so a
 /// deletion never removes the file between this open and this lock.
 pub(super) fn lock_bootstrap(directory: &Path, id: StoreId) -> Result<FileLock, StoreLockError> {

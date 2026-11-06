@@ -78,13 +78,20 @@ async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
     let second_wakes = Arc::new(WakeCount::default());
     let first_waker = std::task::Waker::from(first_wakes.clone());
     let second_waker = std::task::Waker::from(second_wakes.clone());
+    let writer = crate::files::writer_lock(store.database_path().parent().unwrap(), id);
+    let mut waits = crate::files::when_reached(&writer);
     assert!(first.as_mut().poll(&mut std::task::Context::from_waker(&first_waker)).is_pending());
+    waits.try_recv().expect("the alias waits for the closing writer");
+    let mut waits = crate::files::when_reached(&writer);
     assert!(second.as_mut().poll(&mut std::task::Context::from_waker(&second_waker)).is_pending());
+    waits.try_recv().expect("the second open waits for the closing writer");
+    let mut waits = crate::files::when_reached(&writer);
     poll_fn(|cx| {
         assert!(cancelled.as_mut().poll(cx).is_pending());
         Poll::Ready(())
     })
     .await;
+    waits.try_recv().expect("the cancelled open waited for the closing writer");
     drop(cancelled);
     // The same id under another layout is unrelated to this closing store.
     let elsewhere = tempfile::tempdir().unwrap();
@@ -129,13 +136,16 @@ async fn bootstrap_reopen_waits_for_both_the_lease_and_the_writer_in_either_drop
         let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
         let directory = pending.directory();
         let writer = directory.lock_for_open().await.unwrap();
+        let lease = crate::files::bootstrap_lock(directory.database_path().parent().unwrap(), id);
         drop(pending);
         let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
+        let mut waits = crate::files::when_reached(&lease);
         poll_fn(|cx| {
             assert!(reopen.as_mut().poll(cx).is_pending());
             Poll::Ready(())
         })
         .await;
+        waits.try_recv().expect("the reopen waits for the closing lease and writer");
         if writer_first {
             drop(writer);
             poll_fn(|cx| {
@@ -175,11 +185,16 @@ async fn a_layout_symlink_observes_the_same_closing_writer() {
     let aliased_store =
         StoreDirectories::new(alias, crate::task::HeardBugs::shared()).store_dir(&id);
     let mut reopen = Box::pin(aliased_store.lock_for_open());
+    let mut waits = crate::files::when_reached(&crate::files::writer_lock(
+        store.database_path().parent().unwrap(),
+        id,
+    ));
     poll_fn(|cx| {
         assert!(reopen.as_mut().poll(cx).is_pending());
         Poll::Ready(())
     })
     .await;
+    waits.try_recv().expect("the aliased open waits for the closing writer");
     drop(lock);
     drop(reopen.await.unwrap());
 }

@@ -267,7 +267,11 @@ pub(super) async fn acquire_registered(
         };
         let mut released = match acquisition {
             Acquisition::Reserved(registration) => return registration.open_on_worker(bugs).await,
-            Acquisition::Waiting(released) => released,
+            Acquisition::Waiting(released) => {
+                #[cfg(any(test, feature = "test-utils"))]
+                super::reached::reached(&super::lock::kind_lock(directory, id, kind));
+                released
+            }
         };
         released
             .wait_for(|phase| *phase == LockPhase::Released)

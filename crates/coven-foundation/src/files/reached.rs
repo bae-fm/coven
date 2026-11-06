@@ -1,5 +1,6 @@
 //! Where a test hears that file work reached a path: about to open it, or
-//! finding its lock held and about to wait for it. A stalled disk, such as a
+//! finding its lock held, by another holder or by an instance of this
+//! process that is closing, and about to wait for it. A stalled disk, such as a
 //! FIFO in a file's place, then holds the work there, and the test knows it
 //! is held rather than giving it time to get there.
 

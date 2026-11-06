@@ -13,10 +13,6 @@ use std::sync::{
 
 #[tokio::test]
 async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
-    use std::{
-        future::{poll_fn, Future},
-        task::Poll,
-    };
     let store = TestStore::new();
     let database = store.builder(vec![], vec![]).open().await.unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -33,10 +29,12 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
         result = entry => result.unwrap(),
     }
     drop(database);
+    let waits = store.when_open_waits();
     let mut reopen = Box::pin(store.builder(vec![], vec![]).open());
-    let waiting = poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
+    // A subscription does not keep its dropped instance live: the reopen
+    // waits for it as for a closing instance.
+    crate::tests::until_waiting(&mut reopen, waits).await;
     release.send(()).unwrap();
-    assert!(waiting, "a subscription must not keep its dropped instance live");
     let reopened = reopen.await.unwrap();
     assert_eq!(query.next().await.expect("the live query answers").unwrap(), 17);
     assert!(matches!(

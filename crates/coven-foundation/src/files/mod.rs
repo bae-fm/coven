@@ -52,7 +52,7 @@ pub use flush_batch::{FlushBatch, Flushed};
 pub use folder_copy::{CopyFolder, CopyPathError, CopyPlan, CopyWriter, MadeFolder, RecordedCopy};
 pub use layout::StoreDirectories;
 #[cfg(any(test, feature = "test-utils"))]
-pub use lock::cache_writes_lock;
+pub use lock::{bootstrap_lock, cache_writes_lock, writer_lock};
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };
