@@ -46,7 +46,7 @@ impl SequenceSync {
         match recorded_upload::upload(self.storage.as_ref(), &target, total, recorded, &mut source)
             .await?
         {
-            Uploaded::Stored => Ok(()),
+            Uploaded::Stored(_) => Ok(()),
             Uploaded::Paused => unreachable!("retention owns its active request"),
             Uploaded::Occupied(_) => {
                 unreachable!("a mutable floor is settled by authenticated reading")

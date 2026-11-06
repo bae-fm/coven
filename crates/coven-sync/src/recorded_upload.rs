@@ -1,6 +1,9 @@
-//! Resumable publication of repeatable file, snapshot, claim, and floor bytes.
+//! Publication of repeatable file, snapshot, claim, and floor bytes: in one
+//! request or through a recorded session, as storage decides.
 
-use coven_storage::{Storage, StorageError, StorageFailure, UploadSession, UploadTarget};
+use coven_storage::{
+    ObjectPath, Storage, StorageError, StorageFailure, StoredObject, UploadSession, UploadTarget,
+};
 
 /// Repeatable byte reads, durable session progress, and a caller's pause state.
 pub(crate) trait UploadSource: Send {
@@ -22,11 +25,12 @@ pub(crate) trait UploadSource: Send {
     }
 }
 
-/// How a recorded upload ended for this invocation.
+/// How an upload ended for this invocation.
 #[derive(Debug)]
 pub(crate) enum Uploaded {
-    /// The provider confirmed these bytes at the path.
-    Stored,
+    /// The provider confirmed these bytes at the path, with the object's
+    /// metadata when a one-request reply carried it (§21.1).
+    Stored(Option<StoredObject>),
     /// A paused session remains intact for the next invocation.
     Paused,
     /// The path was already occupied. The caller compares the occupant with
@@ -52,6 +56,30 @@ async fn source_digest<S: UploadSource>(source: &mut S, total: u64) -> Result<Up
 
 fn occupied(target: &UploadTarget, error: &StorageError) -> bool {
     !target.path().is_replaceable() && error.own_failure() == Some(StorageFailure::AlreadyExists)
+}
+
+/// Create the source's bytes at `path`. An object storage sends in one
+/// request, with no session recorded for it, is read whole and created;
+/// any other goes through the recorded session (§17.9, §20.6).
+pub(crate) async fn create<S: UploadSource>(
+    storage: &dyn Storage,
+    path: &ObjectPath,
+    total: u64,
+    recorded: Option<UploadSession>,
+    source: &mut S,
+) -> Result<Uploaded, S::Error> {
+    let target = UploadTarget::Create(path.clone());
+    if recorded.is_some() || coven_storage::goes_in_parts(storage, total) {
+        return upload(storage, &target, total, recorded, source).await;
+    }
+    let bytes = source.read(0, total as usize).await?;
+    match storage.create_reporting(path, &bytes, &source.sent()).await {
+        Ok(object) => Ok(Uploaded::Stored(object)),
+        Err(error) if occupied(&target, &error) => {
+            Ok(Uploaded::Occupied(crate::identity::digest(&bytes)))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Persist every confirmed session before continuing; read only its next part.
@@ -125,7 +153,7 @@ pub(crate) async fn upload<S: UploadSource>(
         return Err(error.into());
     }
     source.save(session).await?;
-    Ok(Uploaded::Stored)
+    Ok(Uploaded::Stored(None))
 }
 
 async fn begin(

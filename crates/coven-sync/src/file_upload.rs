@@ -79,43 +79,18 @@ impl FilesInner {
         };
         let mut transfer =
             FileTransfer { owner: self, item, source, key: &key, path: &path, total, meter, sent };
-        // One request within the provider's limit holds the whole encrypted
-        // file; past the buffered bound a session holds one part at a time.
-        if item.session.is_none()
-            && total <= coven_storage::buffered_request_limit(storage.as_ref())
-        {
-            let bytes = transfer.read_encrypted(0, total as usize).await?;
-            match storage.create_reporting(&path, &bytes, &transfer.sent).await {
-                Ok(_) => {}
-                Err(error)
-                    if error.own_failure()
-                        == Some(coven_storage::StorageFailure::AlreadyExists) =>
-                {
-                    self.settle_occupied(storage.as_ref(), &path, crate::identity::digest(&bytes))
-                        .await?;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            let session = item
-                .session
-                .as_ref()
-                .map(|bytes| UploadSession::decode(bytes.as_bytes()))
-                .transpose()?;
-            match crate::recorded_upload::upload(
-                storage.as_ref(),
-                &coven_storage::UploadTarget::Create(path.clone()),
-                total,
-                session,
-                &mut transfer,
-            )
+        let session = item
+            .session
+            .as_ref()
+            .map(|bytes| UploadSession::decode(bytes.as_bytes()))
+            .transpose()?;
+        match crate::recorded_upload::create(storage.as_ref(), &path, total, session, &mut transfer)
             .await?
-            {
-                crate::recorded_upload::Uploaded::Stored => {}
-                crate::recorded_upload::Uploaded::Paused => return Ok(Attempted::Queued),
-                crate::recorded_upload::Uploaded::Occupied(expected) => {
-                    self.settle_occupied(storage.as_ref(), &path, expected).await?;
-                }
+        {
+            crate::recorded_upload::Uploaded::Stored(_) => {}
+            crate::recorded_upload::Uploaded::Paused => return Ok(Attempted::Queued),
+            crate::recorded_upload::Uploaded::Occupied(expected) => {
+                self.settle_occupied(storage.as_ref(), &path, expected).await?;
             }
         }
         // Storage holds bytes the source gave: whatever was recorded

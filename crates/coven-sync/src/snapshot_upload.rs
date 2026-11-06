@@ -12,7 +12,7 @@ use crate::{
 };
 use coven_database::OperationRecord;
 use coven_foundation::files::StoreDirAccess;
-use coven_storage::{StorageFailure, UploadSession};
+use coven_storage::UploadSession;
 
 struct SnapshotUploadSource<'a> {
     sync: &'a SequenceSync,
@@ -55,40 +55,24 @@ impl SequenceSync {
         let reader = self.artifact_file(&artifact.capture.name)?.open_reader()?;
         let mut source =
             SnapshotUploadSource { sync: self, record, request, artifact, reader, _lock: lock };
-        let mut publication = None;
-        if source.artifact.size <= self.storage.single_request_limit().min(32 * 1024 * 1024) {
-            let bytes = source.reader.read_at(0, source.artifact.size as usize)?;
-            match self.storage.create(&path, &bytes).await {
-                Ok(object) => publication = object,
-                Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                    crate::identity::settle_occupied(
-                        self.storage.as_ref(),
-                        &path,
-                        crate::identity::digest(&bytes),
-                    )
-                    .await?
-                }
-                Err(error) => return Err(error.into()),
+        let total = source.artifact.size;
+        let recorded = source.artifact.session.clone();
+        let publication = match recorded_upload::create(
+            self.storage.as_ref(),
+            &path,
+            total,
+            recorded,
+            &mut source,
+        )
+        .await?
+        {
+            Uploaded::Stored(object) => object,
+            Uploaded::Occupied(expected) => {
+                crate::identity::settle_occupied(self.storage.as_ref(), &path, expected).await?;
+                None
             }
-        } else {
-            let total = source.artifact.size;
-            let recorded = source.artifact.session.clone();
-            match recorded_upload::upload(
-                self.storage.as_ref(),
-                &coven_storage::UploadTarget::Create(path.clone()),
-                total,
-                recorded,
-                &mut source,
-            )
-            .await?
-            {
-                Uploaded::Stored => (),
-                Uploaded::Occupied(expected) => {
-                    crate::identity::settle_occupied(self.storage.as_ref(), &path, expected).await?
-                }
-                Uploaded::Paused => unreachable!("an operation owns its active request"),
-            }
-        }
+            Uploaded::Paused => unreachable!("an operation owns its active request"),
+        };
         let object = match publication {
             Some(object) => object,
             None => self.immutable_metadata(&path).await?,

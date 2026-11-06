@@ -3,23 +3,25 @@ use std::future::Future;
 
 /// Most bytes a caller collects in memory for one request body, matching
 /// [`crate::BUFFERED_READ_LIMIT`] for response bodies. A single request
-/// carries its whole body, so an object assembled from a bounded source — a
-/// file read and checked chunk by chunk, a write sealed piece by piece — goes
-/// in one request only up to this, and past it through a recorded session one
-/// part at a time: a large object never has to fit in memory (§17.1).
+/// carries its whole body, so no object goes in one request past this, even
+/// on a provider accepting more: a large object goes one part at a time and
+/// never has to fit in memory (§17.1).
 pub const BUFFERED_REQUEST_LIMIT: u64 = 32 * 1024 * 1024;
 
-/// The largest assembled object sent in one request: the provider's
-/// single-request limit, within [`BUFFERED_REQUEST_LIMIT`]. The 64-KiB
-/// encryption chunk plays no part; a larger object needs a session (§17.9).
-pub fn buffered_request_limit(storage: &(impl Storage + ?Sized)) -> u64 {
-    storage.single_request_limit().min(BUFFERED_REQUEST_LIMIT)
+/// Whether an object of `size` bytes goes up in parts rather than in one
+/// request: past the provider's single-request limit or
+/// [`BUFFERED_REQUEST_LIMIT`], whichever is less (§20.6). The 64-KiB
+/// encryption chunk plays no part. Every upload routes by this alone: a
+/// create of complete bytes, and a caller sending a repeatable source, which
+/// reads it whole only for one request and otherwise records a session.
+pub fn goes_in_parts(storage: &(impl Storage + ?Sized), size: u64) -> bool {
+    size > storage.single_request_limit().min(BUFFERED_REQUEST_LIMIT)
 }
 
-/// Route complete bytes through the provider's single-request call or its
-/// recorded-session operations, telling `sent` how far through them the
-/// parts reach. Callers needing crash continuation use the session
-/// operations directly and persist each returned recording.
+/// Send complete bytes in the provider's single request or, when
+/// [`goes_in_parts`] says so, through its session operations, telling `sent`
+/// how far through them the parts reach. Callers needing crash continuation
+/// use the session operations directly and persist each returned recording.
 pub(crate) async fn upload_bytes(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
@@ -27,7 +29,7 @@ pub(crate) async fn upload_bytes(
     sent: &crate::ByteProgress,
     single_request: impl Future<Output = Result<Option<crate::StoredObject>, StorageError>> + Send,
 ) -> Result<Option<crate::StoredObject>, StorageError> {
-    if bytes.len() as u64 <= storage.single_request_limit() {
+    if !goes_in_parts(storage, bytes.len() as u64) {
         return single_request.await;
     }
     let mut session = storage

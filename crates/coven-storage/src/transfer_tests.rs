@@ -39,16 +39,21 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
     assert_eq!(storage.read(&path).await.unwrap(), [7; 17]);
 }
 
+/// One request carries an object up to the provider's limit, or the
+/// buffered bound on a provider accepting more; one byte past it goes in
+/// parts (§20.6).
 #[test]
-fn an_assembled_body_uses_the_providers_limit_within_the_buffered_bound() {
-    for (provider, expected) in [
+fn an_object_goes_in_parts_one_byte_past_the_smaller_limit() {
+    for (provider, one_request) in [
         (BUFFERED_REQUEST_LIMIT - 1, BUFFERED_REQUEST_LIMIT - 1),
         (BUFFERED_REQUEST_LIMIT, BUFFERED_REQUEST_LIMIT),
         (BUFFERED_REQUEST_LIMIT + 1, BUFFERED_REQUEST_LIMIT),
         (5 * 1024 * 1024 * 1024, BUFFERED_REQUEST_LIMIT),
     ] {
         let storage = MemoryStorage::builder().transfer_limits(provider, 4).build().unwrap();
-        assert_eq!(buffered_request_limit(&storage), expected);
+        assert!(!goes_in_parts(&storage, 0), "{provider}");
+        assert!(!goes_in_parts(&storage, one_request), "{provider}");
+        assert!(goes_in_parts(&storage, one_request + 1), "{provider}");
     }
 }
 

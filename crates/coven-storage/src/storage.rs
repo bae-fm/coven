@@ -124,9 +124,11 @@ pub trait Storage: Send + Sync {
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
-    /// Largest complete encrypted body sent in one request, in bytes. Larger
-    /// objects use recorded resumable or multipart uploads. Buffered floor
-    /// replacements accept complete bodies up to this limit; OneDrive stages
+    /// Largest complete encrypted body the provider takes in one request, in
+    /// bytes. Objects past it, or past [`crate::BUFFERED_REQUEST_LIMIT`], go
+    /// in parts through resumable or multipart uploads
+    /// ([`crate::goes_in_parts`]). Buffered floor replacements accept
+    /// complete bodies up to this limit; OneDrive stages
     /// the body in a revision-bound session before conditional publication.
     /// Callers retaining sessions across crashes record `begin_upload` or
     /// `begin_replace` sessions.
@@ -141,7 +143,7 @@ pub trait Storage: Send + Sync {
     /// Create a complete encrypted object, refusing an occupied path with
     /// [`StorageFailure::AlreadyExists`]. Occupation alone proves nothing: a
     /// retry compares the occupant's complete bytes itself (§5.1, §19.3).
-    /// Bodies above [`Self::single_request_limit`] use a session; a writes
+    /// Bodies [`crate::goes_in_parts`] sends in parts use a session; a writes
     /// slot can contain multiple writes in one object.
     /// A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.

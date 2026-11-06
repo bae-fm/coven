@@ -27,7 +27,8 @@ Dropbox 150 MiB, OneDrive 250,000,000 bytes, and CloudKit 8 MiB. OneDrive uses
 a decimal byte count conservatively from its published MB value; these are
 adapter routing thresholds, not live measurements of server enforcement.
 [OneDrive content upload](https://learn.microsoft.com/en-us/graph/api/driveitem-put-content?view=graph-rest-1.0).
-Larger creates use
+Creates past it, or
+past 32 MiB on any provider (`goes_in_parts`), use
 resumable or multipart transfer for every object family, including writes and
 snapshots. Transfer failure aborts the unfinished session; `StorageError::Cleanup`
 retains both causes if abort fails too. Floor replacements use one conditional request; an oversized replacement
@@ -59,7 +60,7 @@ the top-level `lastModifiedDateTime`, CloudKit the publication record's server
 time, and S3 `LastModified`. OneDrive copy preserves the temporary's creation
 time, so its modification time records publication. AWS's native multipart
 timestamp records initiation and remains a publication-time limitation (§20.6).
-Writes slots can exceed the single-request limit; a provider profile must supply
+Writes slots can go up in parts; a provider profile must supply
 complete-publication time through conditional completion or conditional copy.
 [AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
 

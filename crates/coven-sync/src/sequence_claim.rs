@@ -118,37 +118,22 @@ impl SequenceSync {
         let claim = self.database.current_claim().await?.ok_or(coven_database::DbError::NoClaim)?;
         let path = claim.attempts.last().expect("claim has an attempt");
         let upload = self.database.claim_upload().await?;
-        let mut publication = None;
-        let created = if upload.size <= self.storage.single_request_limit().min(32 * 1024 * 1024) {
-            let bytes = self.database.claim_range(0, upload.size as usize).await?;
-            match self.storage.create(path, &bytes).await {
-                Ok(object) => {
-                    publication = object;
-                    true
-                }
-                Err(error) if error.failure() == StorageFailure::AlreadyExists => false,
-                Err(error) => return Err(error.into()),
+        let recorded = upload.session.map(|bytes| serde_json::from_slice(&bytes)).transpose()?;
+        let publication = match recorded_upload::create(
+            self.storage.as_ref(),
+            path,
+            upload.size,
+            recorded,
+            &mut ClaimSource { database: self.database.clone() },
+        )
+        .await?
+        {
+            Uploaded::Stored(object) => object,
+            Uploaded::Occupied(_) => {
+                return Ok(self.settle_open(session, ring, member).await?.expect("open journal"))
             }
-        } else {
-            let recorded =
-                upload.session.map(|bytes| serde_json::from_slice(&bytes)).transpose()?;
-            match recorded_upload::upload(
-                self.storage.as_ref(),
-                &coven_storage::UploadTarget::Create(path.clone()),
-                upload.size,
-                recorded,
-                &mut ClaimSource { database: self.database.clone() },
-            )
-            .await?
-            {
-                Uploaded::Stored => true,
-                Uploaded::Occupied(_) => false,
-                Uploaded::Paused => unreachable!("claims retain their initiation until settlement"),
-            }
+            Uploaded::Paused => unreachable!("claims retain their initiation until settlement"),
         };
-        if !created {
-            return Ok(self.settle_open(session, ring, member).await?.expect("open journal"));
-        }
         let (result, floor) = self
             .settle_attempt(session, ring, member, path, async |_, _| {
                 Ok(self.database.settle_claim(ClaimRead::Created).await?)

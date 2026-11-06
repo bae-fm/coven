@@ -7018,9 +7018,9 @@ depends on it.
 **One request or many.** A file up to the provider's single-request limit, or
 32 MiB, whichever is less, uploads in one create. A larger one goes up in parts,
 through the provider's resumable or multipart upload. Providers require this
-above a size: Dropbox, for example, above 150 MiB per request. Any object past the
-provider's single-request limit goes up this way, a large writes slot, snapshot
-or floor included. A floor keeps its original absent or observed-revision
+above a size: Dropbox, for example, above 150 MiB per request. Any object past
+that size goes up this way (§20.6), a large writes slot, snapshot or floor
+included. A floor keeps its original absent or observed-revision
 condition in the session, because a retry must not overwrite a competing floor.
 
 - The upload session records each part the provider confirms, and its byte count,
@@ -8388,8 +8388,8 @@ devices would each believe they hold slot 41 and history would split.
   published in parts. Deletion below the floor frees the path: a stale create
   can occupy it again, but the subsequent floor check makes those bytes void
   (§5.2). Physical reuse cannot replace the slot's valid historical content.
-- It covers objects created in one request and, past the provider's
-  single-request limit, objects sent through its resumable upload (§20.6).
+- It covers objects created in one request and objects sent in parts through
+  its resumable upload (§20.6).
 - A slot path has competing writers. Each claim attempt fixes its bytes, and
   different bytes there are ordinary contention (§5.1).
 - A path that carries one device's id, such as its files and snapshots, has one
@@ -8772,8 +8772,12 @@ checksum.
 #### 20.6 Publishing a large object
 
 A small object is one create request, and create-once applies to it directly. A
-large one, past the provider's single-request limit, goes up in parts. That opens
-three gaps, and coven closes each:
+large one goes up in parts: past the provider's single-request limit, or past
+32 MiB on a provider accepting more. A request carries its whole body, so
+without the 32 MiB bound Ana's laptop would hold a 2 GB snapshot in memory to
+send it to S3 in one request. Every upload goes by this one size, a create of
+bytes already in memory included. Going up in parts opens three gaps, and coven
+closes each:
 
 - **Unfinished uploads can be visible.** If a half-sent slot could be read, a
   device could apply a fragment.
@@ -10482,7 +10486,7 @@ same way:
 - `<create>` is the create's own name: the UUID formed from the first 16 bytes of
   SHA-256 over `coven/copy-temporary/v1`, the destination path's length as a
   big-endian u64, the path, and the bytes.
-- Slots below the single-request limit are such creates, each still dated by one
+- Slots sent in one request are such creates, each still dated by one
   request's completion: the copy's.
 - A refused copy, or one whose reply was lost, settles as stored when the
   destination carries its marker; otherwise the copy's answer stands.

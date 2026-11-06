@@ -183,7 +183,7 @@ async fn identity_and_native_capability_are_saved_before_their_first_use() {
         let result = upload(&storage, &UploadTarget::Create(path), 4, None, &mut source).await;
         let expected = match fail_save {
             None => {
-                assert!(matches!(result, Ok(Uploaded::Stored)));
+                assert!(matches!(result, Ok(Uploaded::Stored(None))));
                 vec![
                     "plan",
                     "save planned",

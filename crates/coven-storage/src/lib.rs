@@ -59,7 +59,7 @@ pub use token_custody::{ProviderAuth, TokenCustody};
 mod transfer_budget;
 pub use transfer_budget::{TransferBudget, TransferLimits};
 mod transfer;
-pub use transfer::{buffered_request_limit, BUFFERED_REQUEST_LIMIT};
+pub use transfer::{goes_in_parts, BUFFERED_REQUEST_LIMIT};
 mod web_url;
 
 pub use config::*;
