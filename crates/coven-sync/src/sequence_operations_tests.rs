@@ -956,3 +956,19 @@ async fn resetting_a_deleted_circle_finds_its_target_gone() {
     assert!(ana.database().operations().await.unwrap().is_empty());
     ana.database().close().await.unwrap();
 }
+
+/// A journaled operation whose stored state doesn't decode can't resume:
+/// the pass fails with `OperationData`, keeping the decoder's cause (E5).
+#[tokio::test]
+async fn an_operation_whose_journal_data_does_not_decode_fails_with_operation_data() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let rename = journal(&ana, StoreChange::RenameStore { name: "Ana's".into() }).await;
+    let record = ana.database().operation(rename).await.unwrap().unwrap();
+    let update = record.next_step(b"not the operation's state".to_vec()).unwrap();
+    ana.database().advance_operation(update).await.unwrap();
+    let pass = ana.sync.pass().await;
+    assert!(matches!(&pass, Err(SyncError::OperationData(_))), "{pass:?}");
+    ana.database().close().await.unwrap();
+}
