@@ -3645,13 +3645,16 @@ These calls, and the work passes do for them, follow the rule:
 
 #### 11.7 What the proofs cover
 
-The model follows the entry claim and deletable preparation. The entry occupies
-at most one slot and lands only after validation against its preceding slots.
-Confirmed undo leaves no entry bytes or deletable artifacts; already claimed
-key copies and announcements remain.
+The model follows the entry claim, the claims of key copies and announcements,
+and deletable preparation. The entry occupies at most one slot and lands only
+after validation against its preceding slots, after every key copy and
+announcement the operation claimed. An operation already satisfied, or no
+longer allowed, undoes its deletable preparation and ends with no entry. It
+never claims again, and a failed undo keeps its record and retries. Already
+claimed key copies and announcements remain.
 
-The model keeps all slots. It does not model the separate claims that publish
-preparation, or prove eventual completion; §5.3 covers settlement after deletion.
+The model keeps all slots. It doesn't prove eventual completion; §5.3 covers
+settlement after deletion.
 
 ### 12. Keys and encryption
 
@@ -11627,7 +11630,9 @@ Write-ups explain each model and state its assumptions:
 | Provider access is set by its own member, or by an admin for an S3 key, and only to the kind of access slot 1 recorded; an entry of the other kind is refused | `applied_access_authorized`, `other_kind_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1, §10.3 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
-| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
+| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo, of an action refused or already satisfied, leaves no entry bytes or deletable artifacts | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §10.4, §11.2, §11.7 |
+| An operation's key copies and announcements claim their own slots, which hold them, before its entry's slot | `preparation_precedes_entry` | `proofs/sequence/CovenSequence/Operation.lean` | §11.1, §11.5 |
+| Once an operation is undoing, because its action is already satisfied or no longer allowed, it stays undoing until its undo is confirmed and then ends with that outcome; it never claims again, and a failed undo keeps its record | `undo_final` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.4 |
 | Operation steps preserve already claimed history, including key copies and announcements after undo | `steps_preserve_history`, `undo_keeps_preparation`, `undone_retains_history` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.7 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
 | Storage setup's claim occupies at most one slot; its connection is committed only once its claim landed; an undone setup has no committed connection and no bytes in the sequence, now or later | `step_inv`, `steps_inv`, `setup_outcome` | `proofs/sequence/CovenSequence/Setup.lean` | §11.6 |

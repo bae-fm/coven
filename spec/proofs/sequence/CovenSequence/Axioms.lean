@@ -48,6 +48,8 @@ import SequenceApply
 #print axioms CovenSequence.Operation.undo_keeps_preparation
 #print axioms CovenSequence.Operation.undone_retains_history
 #print axioms CovenSequence.Operation.operation_outcome
+#print axioms CovenSequence.Operation.preparation_precedes_entry
+#print axioms CovenSequence.Operation.undo_final
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
 

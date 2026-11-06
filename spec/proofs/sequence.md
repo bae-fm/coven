@@ -699,8 +699,9 @@ and moves its coverage forward over them.
 
 ## Operations
 
-[`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim
-and deletable preparation in a journal:
+[`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim,
+the claims of its key copies and announcements, and its deletable preparation
+in a journal:
 
 - it records each deletable artifact before sending its create;
 - it records the slot it claims before sending the claim, and resolves that
@@ -712,12 +713,14 @@ and a restart takes the same steps. Sent claim requests survive crashes and can
 land at any later time. So can artifact creates, until each ends by landing,
 failing or being cancelled. The undo runs only after every create it sent has
 ended. It deletes by recorded name and confirms absence before deleting the
-journal. Other devices claim slots at any time. Validation (`allowed`) reads
-only slots `1..n-1`.
+journal. Other devices claim slots at any time. Validation (`check`) reads
+only slots `1..n-1`, and says the operation may claim, is already satisfied,
+or is no longer allowed. An operation already satisfied undoes its deletable
+preparation as a refused one does, and ends satisfied with no entry.
 
 Key copies and snapshot announcements are sequence slots, never deletable
-artifacts. Their separate publication claims are outside this model; already
-published preparation is included in its starting history.
+artifacts. While it prepares, the operation claims them at the head, one slot
+each; a slot another device took first is that device's.
 
 This operation model retains sequence slots. Its results are safety properties,
 not a promise that storage requests or contention eventually succeed. Settlement
@@ -729,8 +732,15 @@ after slot deletion is proved separately below.
 - `operation_outcome`: over any interleaving, the operation's entry occupies at
   most one slot. A landed entry's bytes are at its slot; the slots before
   it were filled when it validated, and validation held against them. An
-  undone operation has no entry bytes in the sequence, now or later, and none
-  of its recorded deletable artifacts remains in storage.
+  undone or already satisfied operation has no entry bytes in the sequence,
+  now or later, and none of its recorded deletable artifacts remains in
+  storage.
+- `preparation_precedes_entry`: each slot the operation's key copies and
+  announcements landed in holds them, and a landed entry's slot comes after
+  every one of them.
+- `undo_final`: once undoing, the operation stays undoing until its undo is
+  confirmed, then ends satisfied or rejected as it began. It never claims
+  again; a failed undo is a step not taken, so its record stays and it retries.
 - `steps_preserve_history`, `undo_keeps_preparation`: operation steps retain
   every occupied history slot. `undone_retains_history` exhibits an undo that
   deletes a snapshot body while its announcement and a key copy remain.
