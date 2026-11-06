@@ -184,3 +184,5 @@ import CovenIO
 #print axioms CovenIO.Budget.least_recent_first
 #print axioms CovenIO.Retired.member_cutoff_covers
 #print axioms CovenIO.Retired.every_gone_folder_cleaned
+#print axioms CovenIO.Keep.original_only_here
+#print axioms CovenIO.Keep.stored_reads_no_original

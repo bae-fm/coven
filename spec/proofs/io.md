@@ -60,6 +60,13 @@ for a file kept here reads (§17.8). An app file's attempt reads coven's copy an
 reads storage only if the copy doesn't check out (`copy_reads_no_storage`,
 `failed_copy_downloads`); a user's file's attempt downloads (`user_downloads`);
 and no attempt reads a user's original (`original_never_read`).
+The same file models where a read's bytes come from (§17.1, §17.7):
+`openRead` finds the file where its record says, and judges bytes missing at
+the open by the record as it then stands. `original_only_here` proves a read
+reaches a user's original only while the record keeps the file on this device
+and its bytes are there; `stored_reads_no_original` that a stored file reads
+the cache or storage. So once the upload switches the record to storage, no
+read reads the original again.
 `files::tests::keep::io_differential_keep` runs the real attempt for an app
 file whose copy checks out, one whose copy was damaged, and a user's file whose
 original was moved away, and compares whether storage was read with the
