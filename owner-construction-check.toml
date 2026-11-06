@@ -1385,6 +1385,8 @@ tables = [
 # Creates a reserved cache file for a pin or an upload's own copy.
 "crates/coven-sync/src/file_cache.rs" = ["FilesInner::create_cache_file"]
 "crates/coven-sync/src/files.rs" = ["Files::new", "Files::read_only", "FilesInner::new"]
+# The writer's copies of the upload settings, composed with its file owner.
+"crates/coven-sync/src/file_upload_settings.rs" = ["UploadSettings::new"]
 # The reason last logged for each subject's failure, which the store's retry
 # waits keep.
 "crates/coven-sync/src/failure_log.rs" = ["FailureLog::new"]

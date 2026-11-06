@@ -28,6 +28,8 @@ mod file_upload_pool;
 mod file_upload_queue;
 #[path = "file_upload_retry.rs"]
 mod file_upload_retry;
+#[path = "file_upload_settings.rs"]
+mod file_upload_settings;
 use crate::SyncError;
 pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase, Mode, ReadOnly, Writer};
@@ -40,10 +42,11 @@ pub use file_read::{FileRangeStream, FileStream, ReadProgress};
 pub use file_status::FileStatus;
 pub use file_upload_pool::DrainOutcome;
 pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};
+pub use file_upload_settings::UploadSettings;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -52,17 +55,31 @@ use tokio::sync::{watch, Notify};
 use coven_storage::TransferBudget;
 pub use coven_storage::TransferLimits;
 
+/// What a handle's mode adds to its file owner: the writer's upload
+/// settings, which the upload runs and the app's setting changes use, and
+/// nothing for a read-only handle, which runs no upload. Sealed with `Mode`.
+pub trait FilesMode: Mode {
+    /// The mode's upload state, beside what every file read uses.
+    type Uploads: Send + Sync + 'static;
+}
+impl FilesMode for Writer {
+    type Uploads = UploadSettings;
+}
+impl FilesMode for ReadOnly {
+    type Uploads = ();
+}
+
 /// Owns storage, database file operations and the device's file area
 /// (Appendix F.3), for the store's writer or a read-only handle
 /// (`Files<ReadOnly>`), which only reads files and keeps its cache. The
 /// writer's starts one commit-driven worker, for uploads and pins; no sync
 /// loop or timer is created. Call `close` before closing the database.
-pub struct Files<M: Mode = Writer> {
+pub struct Files<M: FilesMode = Writer> {
     inner: Arc<FilesInner<M>>,
     worker: Arc<FileWorker>,
 }
 // Written out: `derive(Clone)` would ask the mode to be `Clone`.
-impl<M: Mode> Clone for Files<M> {
+impl<M: FilesMode> Clone for Files<M> {
     fn clone(&self) -> Self {
         Self { inner: self.inner.clone(), worker: self.worker.clone() }
     }
@@ -72,7 +89,7 @@ type FileReadLocks = BTreeMap<
     (String, coven_foundation::id_source::FileId),
     std::sync::Weak<tokio::sync::Mutex<()>>,
 >;
-struct FilesInner<M: Mode = Writer> {
+struct FilesInner<M: FilesMode = Writer> {
     database: FileDatabase<M>,
     directory: StoreDir,
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
@@ -84,26 +101,13 @@ struct FilesInner<M: Mode = Writer> {
     ids: IdSourceRef,
     /// Paces the progress a long call reports.
     clock: coven_foundation::clock::ClockRef,
-    /// The persisted pause setting as of the last upload run or app change;
-    /// parts check it between sends.
-    paused: AtomicBool,
+    /// The mode's upload state: the writer's copies of the upload settings,
+    /// and nothing for a read-only handle.
+    uploads: M::Uploads,
     /// The persisted setting to move files only on unmetered networks, as
     /// of the last upload run or app change; parts and pins' downloads
     /// check it, with the network, between requests (§17.9).
     unmetered_only: AtomicBool,
-    /// Whether a self-replacement pauses this device's writes, as of the last
-    /// read of the upload queue or a completion it refused (§12.3).
-    writes_paused: AtomicBool,
-    /// How many app retries had been asked when the write pause was last
-    /// read: only those can be answered that it holds writes.
-    writes_paused_read_after: AtomicU64,
-    /// How many app retries have been asked.
-    retries_asked: AtomicU64,
-    /// Held by an app's change of either setting, and by an upload run from
-    /// its read of the persisted settings until it has acted on them, so
-    /// neither the copies above nor a retry's answer comes from a setting
-    /// already replaced.
-    hold_change: tokio::sync::Mutex<()>,
     /// The device's network, as the store's watch says it is (§6.7).
     network: coven_foundation::network_watch::NetworkView,
     /// Wakes a pin's download waiting for the network as the setting
@@ -142,15 +146,6 @@ struct FilesInner<M: Mode = Writer> {
     /// between the run's check and what it does.
     #[cfg(test)]
     blocked_end_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Holds the next upload run once it has read the persisted settings,
-    /// telling the test, until the test resumes it.
-    #[cfg(test)]
-    pub(crate) settings_read_gate:
-        Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
-    /// How many times an app's change of a setting, or a run, has found
-    /// `hold_change` held and waited.
-    #[cfg(test)]
-    change_waits: tokio::sync::watch::Sender<usize>,
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
@@ -178,14 +173,23 @@ impl Files<ReadOnly> {
         network: coven_foundation::network_watch::NetworkView,
     ) -> Self {
         let inner = Arc::new(FilesInner::new(
-            database, directory, storage, send, waits, ids, transfers, clock, network,
+            database,
+            directory,
+            storage,
+            send,
+            waits,
+            ids,
+            transfers,
+            clock,
+            network,
+            (),
         ));
         let worker =
             FileWorker { stop: watch::channel(false).0, task: tokio::sync::Mutex::new(None) };
         Self { inner, worker: Arc::new(worker) }
     }
 }
-impl<M: Mode> FilesInner<M> {
+impl<M: FilesMode> FilesInner<M> {
     fn new(
         database: FileDatabase<M>,
         directory: StoreDir,
@@ -196,6 +200,7 @@ impl<M: Mode> FilesInner<M> {
         transfers: Arc<TransferBudget>,
         clock: coven_foundation::clock::ClockRef,
         network: coven_foundation::network_watch::NetworkView,
+        uploads: M::Uploads,
     ) -> Self {
         Self {
             database,
@@ -206,12 +211,8 @@ impl<M: Mode> FilesInner<M> {
             connection_waits: Mutex::new(BTreeSet::new()),
             ids,
             clock,
-            paused: AtomicBool::new(false),
+            uploads,
             unmetered_only: AtomicBool::new(false),
-            writes_paused: AtomicBool::new(false),
-            writes_paused_read_after: AtomicU64::new(0),
-            retries_asked: AtomicU64::new(0),
-            hold_change: tokio::sync::Mutex::new(()),
             network,
             hold_wake: Notify::new(),
             #[cfg(test)]
@@ -231,14 +232,10 @@ impl<M: Mode> FilesInner<M> {
             closed: AtomicBool::new(false),
             #[cfg(test)]
             blocked_end_gate: Mutex::new(None),
-            #[cfg(test)]
-            settings_read_gate: Mutex::new(None),
-            #[cfg(test)]
-            change_waits: tokio::sync::watch::channel(0).0,
         }
     }
 }
-impl<M: Mode> Files<M> {
+impl<M: FilesMode> Files<M> {
     /// Stop background work, wait for in-flight database and transfer work,
     /// then release the storage client, while clones of this owner live on.
     /// An app retry still waiting fails as the store closes, as does a read
@@ -284,7 +281,16 @@ impl Files {
         let uploads_changes = database.queued_work_changes();
         let (stop, _) = watch::channel(false);
         let inner = Arc::new(FilesInner::new(
-            database, directory, storage, send, waits, ids, transfers, clock, network,
+            database,
+            directory,
+            storage,
+            send,
+            waits,
+            ids,
+            transfers,
+            clock,
+            network,
+            UploadSettings::new(),
         ));
         // A panic in the worker goes to the store's bug sink, and fails the
         // app retries it would have served.
@@ -342,7 +348,7 @@ impl Files {
             // The write's effects run on its blocking thread, where waiting
             // for the run is allowed.
             let change = inner.hold_change_blocking();
-            inner.paused.store(paused, Ordering::Release);
+            inner.set_paused(paused);
             drop(change);
             if !paused {
                 inner.upload_wake.notify_one();
@@ -530,7 +536,7 @@ async fn serve_uploads(
     }
 }
 
-impl<M: Mode> FilesInner<M> {
+impl<M: FilesMode> FilesInner<M> {
     fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
         !lock_unpoisoned(&self.connection_waits).contains(&subject)
     }
@@ -577,33 +583,6 @@ impl<M: Mode> FilesInner<M> {
             Ok(())
         }
     }
-    /// What holds trailing uploads now (§12.3, §17.4, §17.9): the app's
-    /// pause, a self-replacement's pause of this device's writes, or a
-    /// metered network while the app moves files only on unmetered ones.
-    pub(crate) fn trailing_hold(&self) -> Option<TrailingHold> {
-        if self.paused.load(Ordering::Acquire) {
-            Some(TrailingHold::Paused)
-        } else if self.writes_paused.load(Ordering::Acquire) {
-            Some(TrailingHold::MemberKeysChanging)
-        } else if self.metered_holds(false) {
-            Some(TrailingHold::Metered)
-        } else {
-            None
-        }
-    }
-    /// How many app retries had been asked when the write pause was last read.
-    pub(crate) fn writes_paused_read_after(&self) -> u64 {
-        self.writes_paused_read_after.load(Ordering::Acquire)
-    }
-    /// A trailing upload's completion was refused: the pause holds the lane
-    /// until a read of the queue finds it ended.
-    pub(crate) fn writes_were_paused(&self) {
-        self.writes_paused.store(true, Ordering::Release);
-    }
-    /// Whether anything holds trailing uploads now.
-    pub(crate) fn trailing_held(&self) -> bool {
-        self.trailing_hold().is_some()
-    }
     /// Whether the setting to move files only on unmetered networks holds a
     /// transfer now: it is on, the network is metered, and it holds this
     /// transfer, which for an upload depends on whether it is bound.
@@ -611,38 +590,6 @@ impl<M: Mode> FilesInner<M> {
         self.unmetered_only.load(Ordering::Acquire)
             && self.network.current().metered
             && held_on_metered(bound)
-    }
-    /// `hold_change`, for a run; a test hears each wait for it.
-    pub(crate) async fn lock_hold_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        #[cfg(test)]
-        match self.hold_change.try_lock() {
-            Ok(change) => return change,
-            Err(_) => self.change_waits.send_modify(|waits| *waits += 1),
-        }
-        self.hold_change.lock().await
-    }
-    /// `hold_change`, for a setting's change on its write's blocking
-    /// thread; a test hears each wait for it.
-    fn hold_change_blocking(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        #[cfg(test)]
-        match self.hold_change.try_lock() {
-            Ok(change) => return change,
-            Err(_) => self.change_waits.send_modify(|waits| *waits += 1),
-        }
-        self.hold_change.blocking_lock()
-    }
-    /// Wait until a setting's change or a run finds `hold_change` held and
-    /// waits, after this call.
-    #[cfg(test)]
-    pub(crate) fn change_waits_from_now(&self) -> impl std::future::Future<Output = ()> {
-        let mut waits = self.change_waits.subscribe();
-        let now = *waits.borrow_and_update();
-        async move {
-            coven_foundation::clock::within(waits.wait_for(|waits| *waits > now))
-                .await
-                .expect("a change waits for the run")
-                .expect("the waits are kept");
-        }
     }
     /// Whether a pin's download waits for the network now (§17.8).
     pub(crate) fn downloads_held(&self) -> bool {
@@ -679,14 +626,6 @@ impl<M: Mode> FilesInner<M> {
     }
 }
 impl FilesInner {
-    /// Read whether a self-replacement pauses this device's writes.
-    pub(crate) async fn read_writes_paused(&self) -> Result<(), DbError> {
-        let asked = self.retries_asked.load(Ordering::Acquire);
-        let paused = self.database.writes_paused().await?;
-        self.writes_paused.store(paused, Ordering::Release);
-        self.writes_paused_read_after.store(asked, Ordering::Release);
-        Ok(())
-    }
     /// Take the persisted setting to move files only on unmetered networks
     /// as this owner's copy, as an upload run does for both settings: a pin
     /// prepared as the store opens holds as the setting says, before any

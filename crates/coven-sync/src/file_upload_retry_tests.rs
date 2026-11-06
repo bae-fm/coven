@@ -492,8 +492,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     // The app pauses while the first part is in flight: the upload stops at
     // the next part boundary, keeping its session.
     let inner = f.files.inner.clone();
-    *storage.on_part.lock().unwrap() =
-        Some(Box::new(move || inner.paused.store(true, std::sync::atomic::Ordering::Release)));
+    *storage.on_part.lock().unwrap() = Some(Box::new(move || inner.set_paused(true)));
     assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused);
     f.set_uploads_paused(true).await;
     assert_eq!(confirmed(&f).await, CHUNK as u64);
@@ -599,8 +598,7 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     let (mut f, _clock, storage) = stepping(0).await;
     f.attach("files", "large", three_parts()).await;
     let inner = f.files.inner.clone();
-    *storage.on_part.lock().unwrap() =
-        Some(Box::new(move || inner.paused.store(true, std::sync::atomic::Ordering::Release)));
+    *storage.on_part.lock().unwrap() = Some(Box::new(move || inner.set_paused(true)));
     assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused);
     f.set_uploads_paused(true).await;
     let before = f.queue().await;

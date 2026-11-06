@@ -240,7 +240,7 @@ impl FilesInner {
             if let Some(ended) = self.worker_ended.get() {
                 return Err(ended.error());
             }
-            let asked = self.retries_asked.fetch_add(1, Ordering::AcqRel);
+            let asked = self.retry_asked();
             retries.push(AppRetry { covers: None, uploaded: 0, asked, reply });
         }
         self.upload_wake.notify_one();
@@ -402,12 +402,12 @@ impl FilesInner {
         // with the pause.
         let change = self.lock_hold_change().await;
         let paused = self.database.uploads_paused().await?;
-        self.paused.store(paused, Ordering::Release);
+        self.set_paused(paused);
         let unmetered_only = self.database.unmetered_only().await?;
         self.unmetered_only.store(unmetered_only, Ordering::Release);
         #[cfg(test)]
         {
-            let gate = lock_unpoisoned(&self.settings_read_gate).take();
+            let gate = self.take_settings_read_gate();
             if let Some((read, resume)) = gate {
                 read.send(()).expect("the test waits for the read");
                 resume.await.expect("the test resumes the run");

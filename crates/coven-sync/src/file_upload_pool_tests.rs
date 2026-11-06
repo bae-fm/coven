@@ -335,7 +335,7 @@ async fn a_retry_after_resuming_is_never_answered_paused() {
     f.set_uploads_paused(true).await;
     let (read, reading) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    *f.files.inner.settings_read_gate.lock().unwrap() = Some((read, held));
+    f.files.inner.hold_after_settings_read((read, held));
     // The attachment wakes the worker, whose run reads the pause.
     f.attach("files", "photo", photo(1)).await;
     tokio::time::timeout(HANG_GUARD, reading).await.expect("the run reads the settings").unwrap();

@@ -3622,7 +3622,23 @@ pub enum LiveQueryCause {
 /// Retaining a stream prevents store deletion, including after the store closes.
 /// A read-only handle's stream (`FileStream<ReadOnly>`) reads the same way
 /// and records nothing: a failed read goes to its caller only.
-pub struct FileStream<M: Mode = Writer> { /* private fields */ }
+pub struct FileStream<M: FilesMode = Writer> { /* private fields */ }
+
+/// What a mode adds to its file owner (sealed with `Mode`): the writer's
+/// upload settings, and nothing for a read-only handle, which runs no upload.
+pub trait FilesMode: Mode {
+    /// The mode's upload state, beside what every file read uses.
+    type Uploads: Send + Sync + 'static;
+}
+impl FilesMode for Writer {
+    type Uploads = UploadSettings;
+}
+impl FilesMode for ReadOnly {
+    type Uploads = ();
+}
+/// The writer's copies of the upload settings (§17.4, §17.9); the app changes
+/// them through `CovenHandle`, never through this type.
+pub struct UploadSettings { /* private fields */ }
 
 impl CovenHandle {
     /// A read of one consistent snapshot, run when awaited. Attach `process`
@@ -6547,7 +6563,7 @@ pub enum FileMissingReason {
     Source(FileSourceFailure),
 }
 
-impl<M: Mode> FileStream<M> {
+impl<M: FilesMode> FileStream<M> {
     /// The file's whole size in bytes.
     pub fn plaintext_size(&self) -> u64;
 
@@ -6586,9 +6602,9 @@ impl ReadProgress {
 }
 
 /// A borrowed stream of bounded authenticated plaintext buffers.
-pub struct FileRangeStream<'a, M: Mode = Writer> { /* private */ }
+pub struct FileRangeStream<'a, M: FilesMode = Writer> { /* private */ }
 
-impl<M: Mode> FileRangeStream<'_, M> {
+impl<M: FilesMode> FileRangeStream<'_, M> {
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, FileReadError>;
 }
 

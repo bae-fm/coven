@@ -1,5 +1,6 @@
 //! Authenticated, bounded ranged reads with cached ciphertext and read-ahead.
 
+use super::FilesMode;
 use crate::{
     files::file_failure::stored,
     files::file_status::Uploading,
@@ -10,7 +11,7 @@ use coven_crypto::{ContentHash, ContentHasher, FileKey};
 use coven_database::{
     CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferMeter,
 };
-use coven_database::{FileLocationKey, Mode, Writer};
+use coven_database::{FileLocationKey, Writer};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
@@ -28,12 +29,12 @@ const REQUEST_BYTES: u64 = 1024 * 1024;
 /// what it reads. Its shared store lock prevents deletion until the stream
 /// and its I/O finish, including reads still running after the store closes
 /// or the caller cancels.
-pub struct FileStream<M: Mode = Writer> {
+pub struct FileStream<M: FilesMode = Writer> {
     id: String,
     source: OpenFile<M>,
     state: tokio::sync::Mutex<FileStreamState>,
 }
-enum OpenFile<M: Mode> {
+enum OpenFile<M: FilesMode> {
     Local {
         stream: LocalFileStream,
         owner: Arc<FilesInner<M>>,
@@ -57,7 +58,7 @@ impl Drop for FileStreamState {
         }
     }
 }
-pub(crate) struct UploadedFile<M: Mode = Writer> {
+pub(crate) struct UploadedFile<M: FilesMode = Writer> {
     owner: Arc<FilesInner<M>>,
     file: FileRef,
     /// Where its bytes are stored.
@@ -110,7 +111,7 @@ enum ChunkDestination<'a> {
     /// A pin's whole file, whose download `meter` hears as its bytes arrive.
     WholeFile(&'a TransferMeter),
 }
-impl<M: Mode> Files<M> {
+impl<M: FilesMode> Files<M> {
     /// Open the file as its record now stands: its bytes here while it is on
     /// this device only, uploading or not, or else its cached or stored
     /// bytes. A file only on another device can't be read here (§17.7).
@@ -161,7 +162,7 @@ impl<M: Mode> Files<M> {
         self.open_file_stream(file).await?.read_at(0, file.size()).await
     }
 }
-impl<M: Mode> FileStream<M> {
+impl<M: FilesMode> FileStream<M> {
     fn new(file: &FileRef, source: OpenFile<M>) -> Self {
         Self {
             id: file.id().to_string(),
@@ -298,13 +299,13 @@ impl<M: Mode> FileStream<M> {
     }
 }
 /// A borrowed stream of bounded authenticated plaintext buffers.
-pub struct FileRangeStream<'a, M: Mode = Writer> {
+pub struct FileRangeStream<'a, M: FilesMode = Writer> {
     file: &'a FileStream<M>,
     offset: u64,
     remaining: u64,
     empty: bool,
 }
-impl<M: Mode> FileRangeStream<'_, M> {
+impl<M: FilesMode> FileRangeStream<'_, M> {
     /// Yield the next buffer, or `None` after the exact requested range.
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, FileReadError> {
         if self.empty {
@@ -338,7 +339,7 @@ impl FilesInner {
         UploadedFile::open(self.clone(), file).await?.keep_whole().await
     }
 }
-impl<M: Mode> UploadedFile<M> {
+impl<M: FilesMode> UploadedFile<M> {
     /// Open an uploaded file without a request when its header is cached.
     /// Otherwise the first fetch checks the header: one starting at chunk
     /// zero carries it in the same request, and any other first fetch reads
@@ -838,7 +839,7 @@ enum ChunkStep {
     Held,
 }
 
-async fn cache<M: Mode>(
+async fn cache<M: FilesMode>(
     owner: &FilesInner<M>,
     file: &FileRef,
     first: i64,
@@ -853,7 +854,7 @@ async fn cache<M: Mode>(
 /// through the object the bytes received reach: storage tells it as the
 /// stream is read, and CloudKit also as each part's fetch goes, ahead of the
 /// read.
-async fn fetch<M: Mode>(
+async fn fetch<M: FilesMode>(
     owner: &FilesInner<M>,
     file: &FileRef,
     path: &ObjectPath,

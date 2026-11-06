@@ -7,11 +7,12 @@
 use super::file_error::TransferError;
 use super::file_failure::{download_subject, stored, upload_subject, FileCopy, FileFailure};
 use super::file_status::Uploading;
+use super::FilesMode;
 use crate::{files::FilesInner, FileReadError, PendingReason, PendingRecord, PendingSubject};
-use coven_database::{DbError, FileRef, Mode};
+use coven_database::{DbError, FileRef};
 use coven_foundation::id_source::FileId;
 
-impl<M: Mode> FilesInner<M> {
+impl<M: FilesMode> FilesInner<M> {
     /// Record a pin's failure as the stored bytes' pending record, or, with
     /// no failure, clear the conditions the completed download checked. The
     /// record belongs to the stored bytes, whichever call downloaded them. A
