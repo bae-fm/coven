@@ -276,6 +276,10 @@ import SequenceApply
 #print axioms CovenSequence.Keys.first_attempt_confidential
 #print axioms CovenSequence.Keys.revocation
 #print axioms CovenSequence.Keys.rotation_revokes
+#print axioms CovenSequence.Keys.copy_order_agrees
+#print axioms CovenSequence.Keys.needed_complete
+#print axioms CovenSequence.Keys.needed_after_none
+#print axioms CovenSequence.Keys.needed_exposes_nothing
 #print axioms CovenSequence.Keys.revoked_write_no_effect
 
 #print axioms CovenSequence.KeysExamples.tentative_not_accepted

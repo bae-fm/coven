@@ -469,6 +469,170 @@ theorem rotation_preserves_old (h : History Aud Mem) (through : Nat) (current : 
   rw [rotation_effect]
   simp [accepted, different]
 
+/-! ## Opening a copy (§12.1)
+
+A device opens a copy routed to its member. If the key's introduction has been
+applied, the material must match its commitment, or the device stops. If not,
+the key is held as tentative: `accepted` refuses it every use until its
+introduction confirms it. -/
+
+/-- The commitment an applied introduction names for `key`, if any. -/
+def commitment (h : History Aud Mem) (key : Key Aud) : Option Nat :=
+  (h.introductions.find? fun i => decide (i.key = key)).map (·.hash)
+
+/-- Custody once `material` is held under `key`. -/
+def hold (held : Custody Aud) (key : Key Aud) (material : Nat) : Custody Aud :=
+  fun k => if k = key then some material else held k
+
+/-- Open a copy of `key` whose box holds `material`; `none` stops the device.
+An accepted key needs nothing, and a key already held waits for its
+introduction. -/
+def openCopy (h : History Aud Mem) (held : Custody Aud) (key : Key Aud) (material : Nat) :
+    Option (Custody Aud) :=
+  if accepted h held key then some held else
+    match commitment h key with
+    | none => some (if (held key).isSome then held else hold held key material)
+    | some hash => if material = hash then some (hold held key material) else none
+
+/-- **A copy opened before its introduction ends as one opened after it.** On a
+device holding nothing under a key not yet introduced, opening the copy, then
+applying the introduction and opening it again, gives what applying the
+introduction first gives: the key held and accepted when its material matches
+the commitment, and a stop when it doesn't. Before the introduction the key is
+held but not accepted. -/
+theorem copy_order_agrees (h : History Aud Mem) (held : Custody Aud) (key : Key Aud)
+    (material hash slot : Nat) (fresh : ∀ i ∈ h.introductions, i.key ≠ key)
+    (unheld : held key = none) :
+    let h' := step h slot (.introduce key hash)
+    (∃ tentative, openCopy h held key material = some tentative ∧
+      tentative key = some material ∧ accepted h tentative key = false) ∧
+    (openCopy h held key material).bind (fun c => openCopy h' c key material) =
+      openCopy h' held key material ∧
+    openCopy h' held key material =
+      (if material = hash then some (hold held key material) else none) ∧
+    ∀ c, openCopy h' held key material = some c → accepted h' c key = true := by
+  intro h'
+  have none_before : commitment h key = none := by
+    simp only [commitment, Option.map_eq_none_iff, List.find?_eq_none, decide_eq_true_eq]
+    exact fun i hi => fresh i hi
+  have not_before : ∀ c : Custody Aud, accepted h c key = false := by
+    intro c
+    apply Bool.eq_false_iff.mpr
+    intro yes
+    obtain ⟨⟨i, hi, hk⟩, _⟩ := (accepted_iff h c key).mp yes
+    exact fresh i hi hk
+  have after : commitment h' key = some hash := by
+    simp [h', commitment, step]
+  have held_hold : hold held key material key = some material := by simp [hold]
+  have accepted_after : ∀ c : Custody Aud,
+      accepted h' c key = true ↔ c key = some hash := by
+    intro c
+    rw [accepted_iff]
+    constructor
+    · rintro ⟨_, all⟩
+      exact all ⟨key, hash, slot⟩ (by simp [h', step]) rfl
+    · intro holds
+      refine ⟨⟨⟨key, hash, slot⟩, by simp [h', step], rfl⟩, fun i hi hk => ?_⟩
+      simp only [h', step, List.mem_cons] at hi
+      rcases hi with rfl | old
+      · exact holds
+      · exact absurd hk (fresh i old)
+  have first : openCopy h held key material = some (hold held key material) := by
+    simp [openCopy, not_before, none_before, unheld]
+  have direct : openCopy h' held key material =
+      (if material = hash then some (hold held key material) else none) := by
+    have no : accepted h' held key = false := by
+      apply Bool.eq_false_iff.mpr
+      intro yes
+      rw [(accepted_after held).mp yes] at unheld
+      cases unheld
+    simp [openCopy, no, after]
+  refine ⟨⟨_, first, held_hold, not_before _⟩, ?_, direct, ?_⟩
+  · rw [first, direct]
+    simp only [Option.bind_some]
+    by_cases same : material = hash
+    · subst same
+      have yes : accepted h' (hold held key material) key = true :=
+        (accepted_after _).mpr held_hold
+      simp [openCopy, yes]
+    · have no : accepted h' (hold held key material) key = false := by
+        apply Bool.eq_false_iff.mpr
+        intro yes
+        rw [(accepted_after _).mp yes] at held_hold
+        exact same (Option.some.inj held_hold).symm
+      simp [openCopy, no, after, same]
+  · intro c opened
+    rw [direct] at opened
+    split at opened
+    · rename_i same
+      cases opened
+      exact (accepted_after _).mpr (by simp [hold, same])
+    · cases opened
+
+/-! ## Old keys reach new members (§12.1) -/
+
+/-- The copies an audience still needs: of every key introduced for it, one to
+each current member's current sealing key, unless that copy is already in the
+sequence. -/
+def needed [DecidableEq Mem] (h : History Aud Mem) (current : Current Aud Mem) (members : List Mem)
+    (audience : Aud) : List (Route Aud Mem) :=
+  ((h.introductions.filter fun i => decide (i.key.audience = audience)).flatMap
+    fun i => routes current members i.key).filter fun r => decide (r ∉ h.copies)
+
+/-- **Every current member gets a copy of every older key.** Once the needed
+copies are published, every key introduced for the audience has a copy to each
+current member's current sealing key. -/
+theorem needed_complete [DecidableEq Mem] (h : History Aud Mem) (through : Nat)
+    (current : Current Aud Mem) (members : List Mem) (audience : Aud)
+    (i : Introduction Aud) (introduced : i ∈ h.introductions) (hi : i.key.audience = audience)
+    (m : Mem) (c : Nat) (member : m ∈ members) (bound : current audience m = some c) :
+    (⟨i.key, m, c⟩ : Route Aud Mem) ∈
+      (publish h through ((needed h current members audience).map Event.copy)).copies := by
+  rw [publish_copies]
+  by_cases sent : (⟨i.key, m, c⟩ : Route Aud Mem) ∈ h.copies
+  · exact List.mem_append_right _ sent
+  · apply List.mem_append_left
+    apply List.mem_reverse.mpr
+    apply List.mem_filter.mpr
+    refine ⟨List.mem_flatMap.mpr ⟨i, List.mem_filter.mpr ⟨introduced, by simp [hi]⟩, ?_⟩,
+      by simp [sent]⟩
+    exact routes_complete current members i.key m c member (hi ▸ bound)
+
+/-- **A retry sends no copy already in the sequence:** once the needed copies are
+published, none is needed. -/
+theorem needed_after_none [DecidableEq Mem] (h : History Aud Mem) (through : Nat)
+    (current : Current Aud Mem) (members : List Mem) (audience : Aud) :
+    needed (publish h through ((needed h current members audience).map Event.copy)) current
+      members audience = [] := by
+  rw [publish_copies]
+  apply List.filter_eq_nil_iff.mpr
+  intro r hr
+  simp only [decide_eq_true_eq, Decidable.not_not, List.mem_append, List.mem_reverse]
+  by_cases sent : r ∈ h.copies
+  · exact Or.inr sent
+  · exact Or.inl (List.mem_filter.mpr ⟨hr, by simp [sent]⟩)
+
+/-- Sending an older key to current members exposes nothing: each copy goes to
+its recipient's current sealing key. -/
+theorem needed_exposes_nothing [DecidableEq Mem] (h : History Aud Mem) (through : Nat)
+    (current : Current Aud Mem) (members : List Mem) (audience : Aud) (key : Key Aud) :
+    exposed (publish h through ((needed h current members audience).map Event.copy)) current key =
+      exposed h current key := by
+  rw [publish_copies]
+  apply Bool.eq_iff_iff.mpr
+  rw [exposed_iff, exposed_iff]
+  constructor
+  · rintro ⟨r, hr, hk, bad⟩
+    rcases List.mem_append.mp hr with new | old
+    · obtain ⟨found, _⟩ := List.mem_filter.mp (List.mem_reverse.mp new)
+      obtain ⟨i, _, route⟩ := List.mem_flatMap.mp found
+      have := (routes_current current members i.key r route)
+      rw [← this.1, hk] at this
+      exact absurd this.2 bad
+    · exact ⟨r, old, hk, bad⟩
+  · rintro ⟨r, hr, hk, bad⟩
+    exact ⟨r, List.mem_append_right _ hr, hk, bad⟩
+
 /-- An observer's secret set is independent of what a reader chooses to open.
 This is the ideal encryption boundary: only equality of the exact audience key
 reveals a protected value. Public ciphertext lengths are outside this value. -/

@@ -225,6 +225,19 @@ separate from both authorization and introduction.
   agree. `accepted_from_introduction` excludes acceptance before introduction.
   `introduction_accepts` accepts matching tentative material at that slot;
   missing custody or conflicting commitments do not establish acceptance.
+- `copy_order_agrees`: `openCopy` opens a copy as §12.1 does. With the key's
+  introduction applied, material that doesn't match its commitment stops the
+  device; without it, the key is held as tentative and not accepted. On a
+  device holding nothing under a key not yet introduced, opening the copy and
+  then, once the introduction applies, opening it again ends as applying the
+  introduction first does: the key held and accepted when its material
+  matches, a stop when it doesn't.
+- `needed_complete`, `needed_after_none`, `needed_exposes_nothing`: `needed`
+  lists the copies an audience still needs, of every key introduced for it to
+  each current member's current sealing key, leaving out copies already in the
+  sequence. Once they are published every current member has every older key,
+  none is needed, so a retry sends none, and they expose no key, since each
+  goes to a current sealing key.
 - `routed_exposure`, `removed_exposure`, `retired_credential_exposure`: every
   key routed to any credential retained by an excluded member/device is
   exposed. Opening or deleting a local copy is irrelevant to that conclusion.
