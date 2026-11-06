@@ -5390,7 +5390,8 @@ writes no rows and advances no generation.
 From that slot on, Gifts' rows are taken out (§8.4), including late edits made
 before the deletion that arrive afterwards. Their lost values name
 `DeletedCircle` and the entry. A new local write into Gifts fails with
-`DeletedCircle`.
+`DeletedCircle`, and so does a migration that writes into Gifts, failing the
+open that runs it (§18.4).
 
 Ana queued note 9 in Gifts before Ben's deletion claimed slot 50. If her member
 and device are still active, her later batch is consumed and note 9 is taken out
@@ -7845,6 +7846,11 @@ inserted or deleted, and each cell whose value changed.
 Ana's migration renames `title` to `name` and fills a new column `slug` from it.
 Each note's `name` keeps the write that last set its title, and each `slug` is set
 by the migration write.
+
+**A migration that writes into a deleted circle fails.** A migration is the app
+writing, so a row it puts in a deleted circle is refused as a local write there
+is: the open that runs it fails with `DeletedCircle` (§15.9) and the database
+stays at its version. Taking the row out quietly would hide the app's mistake.
 
 **The migration write carries no row changes in its slot.** Its record in a writes
 slot names the migration and holds nothing else; its changes reach other devices
@@ -11934,7 +11940,7 @@ maps them are with each provider in Appendix E.
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
 | `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |
-| `DeletedCircle` | a new local write into a deleted circle; also the cause named by its rows' lost values | §15.9 |
+| `DeletedCircle` | a new local write or a migration writing into a deleted circle; also the cause named by its rows' lost values | §15.9, §18.4 |
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
 | `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
 | `DbError::StatePersistence` | coven can't save pending state or the sync status; sync and database calls stop | §19.1 |

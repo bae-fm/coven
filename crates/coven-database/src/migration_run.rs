@@ -273,9 +273,18 @@ fn finish(
             &visible,
             &store,
             &changed,
-            &deleted,
             &crate::file_write::Copied::new(),
         )?;
+        // A migration is the app writing: a row it writes into a deleted
+        // circle fails the open, as a local write there fails (§15.9, §18.4).
+        // Its rows never reach `write_commit::check_membership`, since its
+        // parts are cleared before it is queued, so this is their check.
+        if let Some(circle) = changes.keys().find_map(|row| match row.audience {
+            coven_merge::Audience::Circle(circle) if deleted.contains_key(&circle) => Some(circle),
+            _ => None,
+        }) {
+            return Err(DbError::DeletedCircle(circle));
+        }
         // Rows removal rules hide independently become ordinary deletes at
         // their generations (§18.7).
         let selected = hidden.select();

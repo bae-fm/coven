@@ -9,7 +9,7 @@ use coven_format::{
     value::Value,
     write::{RowChange, RowExecution, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
@@ -100,7 +100,6 @@ pub(crate) fn changes(
     after: &AppView<'_>,
     stored: &MergeStore<'_>,
     changed: &BTreeMap<AppKey, BTreeSet<String>>,
-    deleted: &BTreeMap<CircleId, crate::Slot>,
     copies: &crate::file_write::Copied,
 ) -> Result<BTreeMap<RowId, RowChange>, DbError> {
     let (moved, inherited) =
@@ -323,15 +322,6 @@ pub(crate) fn changes(
         .map(|(row, c)| (row.clone(), c.change.after().expect("generation exhausted")))
         .collect();
     for (row, change) in &mut changes {
-        // A migration write's rows never reach `write_commit::check_membership`:
-        // its parts are cleared before it is queued, so this is the only check
-        // that refuses one in a deleted circle. A local write's rows meet the
-        // same refusal again there, which also covers its file records.
-        if let Audience::Circle(circle) = row.audience {
-            if deleted.contains_key(&circle) {
-                return Err(DbError::DeletedCircle(circle));
-            }
-        }
         let columns = match &mut change.change.operation {
             Operation::Insert(c) | Operation::Update(c) => c,
             Operation::Delete => continue,

@@ -56,7 +56,6 @@ impl DatabaseConnection {
                         &after,
                         &store,
                         &changed,
-                        &deleted_circles,
                         &files.taken_out_copies(),
                     )?;
                     // The write's dismissals follow the app's changes (§8.4).
