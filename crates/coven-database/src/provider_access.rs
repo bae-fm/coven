@@ -71,6 +71,22 @@ pub(crate) fn finish(
     Ok(())
 }
 
+/// Queue the account's request `id` again with no target fixed, ending the
+/// wait its last attempt left.
+pub(crate) fn requeue(
+    db: &DatabaseConnection,
+    account: &str,
+    id: OperationId,
+) -> Result<(), DbError> {
+    crate::operation::set_step(db, id, REQUEST_QUEUED_STEP)?;
+    crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
+    db.internal_execute(
+        "UPDATE _coven_provider_access SET target=NULL WHERE account=?1 AND target IS NOT NULL",
+        [account],
+    )?;
+    Ok(())
+}
+
 /// Fix a request's target to the account's intention before storage is
 /// called. A revoke may remove the direct share supplying acceptance
 /// tokens even when other permissions remain, so neither confirmation is
@@ -141,9 +157,7 @@ pub(crate) fn adopt<P: PendingValue>(
         }
         let id = match before.request {
             Some(request) => {
-                crate::operation::set_step(db, request.operation, REQUEST_QUEUED_STEP)?;
-                crate::retry::clear(db, crate::RetrySubject::Operation(request.operation))?;
-                db.internal_execute("UPDATE _coven_provider_access SET target=NULL WHERE account=?1 AND target IS NOT NULL", [&change.account])?;
+                requeue(db, &change.account, request.operation)?;
                 request.operation
             }
             None => {

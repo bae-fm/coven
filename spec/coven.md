@@ -9500,14 +9500,16 @@ The work starts as soon as the owner's device applies the entry.
 The owner's device keeps actual access close to intent this way:
 
 - It sends grant and revoke requests one at a time.
-- Before each request it reads the current intended access. If a later entry
-  changes what's intended while a request runs, it lets that request finish. If
-  a completed request has since become obsolete, it records and sends the
-  opposite request before reporting that account's work complete. So an
-  account's work ends only with the provider holding the intended access
-  ([`settled_matches`](proofs/storage/CovenStorage/ProviderAccess.lean)); ending
+- Before each request it reads the current intended access, and forgets the
+  grant it last confirmed: a request that ends without a reply leaves the
+  provider's state unknown. If a later entry changes what's intended while a
+  request runs, it lets that request finish. If a completed request has since
+  become obsolete, it records and sends the opposite request before reporting
+  that account's work complete. So an account's work ends only with the
+  provider holding the intended access
+  ([`quiet_exact`](proofs/storage/CovenStorage/ProviderAccess.lean)); ending
   it on every success reply would leave a removed member's grant in place
-  ([`no_recheck_reports_stale`](proofs/storage/CovenStorage/ProviderAccess.lean)).
+  ([`obsolete_finish_strands`](proofs/storage/CovenStorage/ProviderAccess.lean)).
 - Pending and failed requests stay in the operation journal (§11.4) and the
   pending list (§19.1).
 
@@ -9529,7 +9531,14 @@ names it, whichever of the owner's devices recorded the share (§13.2).
   a parent folder, public links, groups, unidentified grantees and the owner's
   own grant, and any share that also grants others, are left in place and
   reported to the owner as `AccessRemains`; the owner changes them at the
-  provider.
+  provider. The revocation stays listed until the app retries it and finds
+  them gone, or a later entry intends the account shared again.
+- Ana's laptop takes back Dan's account, and an invite to him applies while
+  the revocation runs; its reply then lists a parent folder's grant. The
+  reply is obsolete, as a completed one can be: the laptop grants the account
+  again and reports nothing. Reporting `AccessRemains` would tell Ana to
+  remove grants from an account Household shares
+  ([`obsolete_revocation_reported`](proofs/storage/CovenStorage/ProviderAccess.lean)).
 
 #### 20.10 S3 member keys
 
@@ -11904,8 +11913,13 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A copy that checks a free name and then writes it lets two racers both win | `check_then_write_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* A conditional PUT racing a copy can be accepted beside it | `put_racing_copy_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* At most one store's setup passes per location, however far listings lag | `at_most_one_store` | `proofs/storage/CovenStorage/LocationClaim.lean` | §20.3 |
-| *Body.* The owner's device ends an account's sharing work only with the provider holding the intended access, however the intention changed while requests ran; a confirmed request the intention has left queues the opposite one; once the intention holds still the work settles. Assumes a success reply means the provider applied the request | `steps_good`, `settled_matches`, `obsolete_reversed`, `settles` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
-| *Body.* Ending an account's work on every success reply, without comparing the target with the intention, reports a removed member's access settled while the provider still grants it | `no_recheck_reports_stale` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
+| On the owner's device, each account has one request at a time: none runs beside another, and the one running is the target its row fixed, which applying entries leaves alone until its reply is recorded | `one_request` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §14.2, §20.9 |
+| *Body.* With nothing listed or running for an account, coven's grant at the provider is the one the sequence intends, however the intention changed while requests ran; a reply for a target the intention has left queues the opposite request | `quiet_exact`, `obsolete_reversed` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §14.2, §20.9 |
+| `AccessRemains` is listed only for an account the sequence doesn't intend shared, and leaves the list only when the app retries it or an entry intends the account shared again | `remains_unshared`, `remains_listed` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §14.2, §20.9 |
+| From every reachable state, with the intention no longer changing, coven's own steps, the app retrying what it is shown and the owner removing the grants coven reported end an account's work with nothing listed or running | `settles` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §14.2, §20.9 |
+| Each rule those results need is needed: a request sent beside one still running, or a confirmed grant kept when a target is fixed, leaves the account's access other than the sequence intends, with nothing listed | `overlapping_requests_strand`, `kept_confirmation_strands` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
+| *Body.* Ending an account's work on every confirmation, without comparing the target with the intention, reports a removed member's access settled while the provider still grants it | `obsolete_finish_strands` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
+| *Body.* An obsolete revocation whose reply lists grants left in place, reported as `AccessRemains`, tells the owner to remove grants from an account the store intends shared | `obsolete_revocation_reported` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | With an atomic copy, copy publication is create-once: same effect as a create, temporaries hidden, one winner per race, lost replies settled by the marker, a marker means the session's bytes | `copy_is_create`, `stage_hidden`, `race_one_winner`, `lost_reply_settles`, `marker_settles_bytes` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | When every publication of a name is a conditional copy, at most one is accepted in any order, and none if the name was taken | `every_copy_at_most_one`, `copied_at_most` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |

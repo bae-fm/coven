@@ -171,3 +171,88 @@ async fn obsolete_completion_and_its_correction_are_one_commit() {
         assert!(db.operation(id).await.unwrap().is_none());
     }
 }
+
+/// Ana's device sends the revocation of Dan's account, and the provider
+/// reports a parent folder's grant left in place. When history still means
+/// to take the account back, the reply is listed as the operation's failure.
+/// When an invite to Dan applied while the revocation ran, the account is
+/// intended shared again: the reply queues the grant on the same pending
+/// subject, and nothing tells Ana to remove grants from an account her store
+/// shares (§20.9).
+#[tokio::test]
+async fn grants_left_in_place_fail_the_revocation_only_while_it_is_intended() {
+    for reshared in [false, true] {
+        let store = TestStore::new();
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        let invite = db
+            .start_operation_with_access::<Record>(
+                NewOperation {
+                    kind: "invite".into(),
+                    data: vec![0],
+                    started_by: "test".into(),
+                    pauses_writes: false,
+                },
+                vec![change(false)],
+            )
+            .await
+            .unwrap();
+        let id = db
+            .provider_access("account@example.com".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .request
+            .unwrap()
+            .operation;
+        assert!(!db
+            .start_provider_request::<Record>("account@example.com".into(), id)
+            .await
+            .unwrap());
+        if reshared {
+            db.advance_operation_with_access::<Record>(
+                OperationUpdate { id: invite, previous: 0, last_step: 1, data: vec![1] },
+                vec![change(true)],
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let failure = crate::pending::tests::failed_operation_record(id);
+        let recorded = db
+            .fail_provider_request::<Record>(
+                "account@example.com".into(),
+                id,
+                b"account@example.com".to_vec(),
+                failure.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded, !reshared);
+        let state = db.provider_access("account@example.com".into()).await.unwrap().unwrap();
+        assert_eq!(state.intended, reshared);
+        assert_eq!(state.granted, None);
+        let pending = db.pending::<Record>().await.unwrap();
+        if reshared {
+            assert_eq!(
+                state.request.unwrap(),
+                ProviderAccessRequest { operation: id, target: None }
+            );
+            assert_eq!(pending, vec![crate::pending::tests::operation_record(id)]);
+            assert!(db
+                .start_provider_request::<Record>("account@example.com".into(), id)
+                .await
+                .unwrap());
+        } else {
+            assert_eq!(
+                state.request.unwrap(),
+                ProviderAccessRequest { operation: id, target: Some(false) }
+            );
+            assert_eq!(pending, vec![failure]);
+            assert_eq!(
+                db.operation(id).await.unwrap().unwrap().last_step,
+                crate::provider_access::REQUEST_FAILED_STEP
+            );
+        }
+        db.close().await.unwrap();
+    }
+}

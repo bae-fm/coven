@@ -235,8 +235,19 @@ import CovenStorage
 #print axioms CovenStorage.LocalBytes.early_commit_strands
 #print axioms CovenStorage.LocalBytes.unrecorded_file_lost
 
-#print axioms CovenStorage.ProviderAccess.steps_good
-#print axioms CovenStorage.ProviderAccess.settled_matches
+#print axioms CovenStorage.ProviderAccess.inv_start
+#print axioms CovenStorage.ProviderAccess.idle_call
+#print axioms CovenStorage.ProviderAccess.inv_step
+#print axioms CovenStorage.ProviderAccess.reachable_inv
+#print axioms CovenStorage.ProviderAccess.one_request
+#print axioms CovenStorage.ProviderAccess.quiet_exact
+#print axioms CovenStorage.ProviderAccess.remains_unshared
+#print axioms CovenStorage.ProviderAccess.remains_listed
 #print axioms CovenStorage.ProviderAccess.obsolete_reversed
+#print axioms CovenStorage.ProviderAccess.Steps.trans
+#print axioms CovenStorage.ProviderAccess.progress
 #print axioms CovenStorage.ProviderAccess.settles
-#print axioms CovenStorage.ProviderAccess.no_recheck_reports_stale
+#print axioms CovenStorage.ProviderAccess.overlapping_requests_strand
+#print axioms CovenStorage.ProviderAccess.kept_confirmation_strands
+#print axioms CovenStorage.ProviderAccess.obsolete_finish_strands
+#print axioms CovenStorage.ProviderAccess.obsolete_revocation_reported

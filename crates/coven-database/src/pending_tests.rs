@@ -142,6 +142,11 @@ pub(crate) fn operation_record(id: OperationId) -> Record {
         cause: None,
     }
 }
+/// A failure an operation reported, as a provider request's grants left in
+/// place are.
+pub(crate) fn failed_operation_record(id: OperationId) -> Record {
+    Record { reason: Reason::Refused, ..operation_record(id) }
+}
 fn record(subject: u64) -> Record {
     Record { subject: subject.into(), reason: Reason::Refused, operation: None, cause: None }
 }

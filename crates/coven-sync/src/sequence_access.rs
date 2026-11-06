@@ -186,10 +186,15 @@ impl SequenceSync {
                         account: account.clone(),
                         shares,
                     });
-                    self.database
+                    if self
+                        .database
                         .fail_provider_request(account, id, record.data, pending.clone())
-                        .await?;
-                    return Err(SyncError::Pending(Box::new(pending)));
+                        .await?
+                    {
+                        return Err(SyncError::Pending(Box::new(pending)));
+                    }
+                    // An entry intends the account shared again: grant it.
+                    continue;
                 }
                 None
             };

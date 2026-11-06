@@ -86,16 +86,19 @@ impl crate::Database {
         .await
     }
 
-    /// Keep an inconclusive request with its notice and unknown confirmation:
-    /// the operation `id` moves from its fixed request to a reported failure,
-    /// recording `data`.
+    /// Record a revocation's reply that listed grants left in place: the
+    /// operation `id` moves from its fixed request to a reported failure,
+    /// recording `data`, with `pending` as its record. An entry that made
+    /// the account intended again while the request ran makes the reply
+    /// obsolete: the opposite request is queued on the same pending subject
+    /// instead, as a confirmation's is, and this returns false (§20.9).
     pub async fn fail_provider_request<P: PendingValue>(
         &self,
         account: String,
         id: OperationId,
         data: Vec<u8>,
         pending: P,
-    ) -> Result<(), DbError> {
+    ) -> Result<bool, DbError> {
         let update = crate::OperationUpdate {
             id,
             previous: crate::provider_access::REQUEST_FIXED_STEP,
@@ -106,15 +109,24 @@ impl crate::Database {
             inner.access.with_writer(|db| {
                 db.transaction(|db| {
                     let state = read(db, &account)?.ok_or(DbError::OperationChanged(update.id))?;
-                    if state.request.as_ref().map(|r| r.operation) != Some(update.id)
-                        || pending.operation() != Some(update.id)
-                    {
+                    let request = state.request.ok_or(DbError::OperationChanged(update.id))?;
+                    if request.operation != update.id || pending.operation() != Some(update.id) {
                         return Err(DbError::Invariant {
                             what: "a provider request's condition names its own operation",
                         });
                     }
+                    let target = request.target.ok_or(DbError::OperationChanged(update.id))?;
+                    if state.intended != target {
+                        crate::provider_access::requeue(db, &account, update.id)?;
+                        crate::pending::save(
+                            db,
+                            &P::provider_access(update.id, account, state.intended),
+                        )?;
+                        return Ok(false);
+                    }
                     crate::operation::advance(db, &update)?;
-                    crate::pending::save(db, &pending)
+                    crate::pending::save(db, &pending)?;
+                    Ok(true)
                 })
             })
         })
@@ -144,12 +156,7 @@ impl crate::Database {
                         finish(db, &account, id)?;
                         Ok(true)
                     } else {
-                        crate::operation::set_step(
-                            db,
-                            id,
-                            crate::provider_access::REQUEST_QUEUED_STEP,
-                        )?;
-                        crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
+                        crate::provider_access::requeue(db, &account, id)?;
                         crate::pending::save(db, &P::provider_access(id, account, state.intended))?;
                         Ok(false)
                     }

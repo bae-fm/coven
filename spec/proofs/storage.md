@@ -351,34 +351,58 @@ the pending failure.
 ## Sharing with accounts
 
 [ProviderAccess.lean](storage/CovenStorage/ProviderAccess.lean) models one
-account's provider access on the owner's device (§20.9): the access the applied
-sequence intends, the access the device has confirmed, at most one request,
-and the provider's own state. A request fixes its target from the intention
-before it is sent and clears what was confirmed; an entry that changes the
-intention while it runs lets it finish; a request without a conclusive reply
-is reported failed and fixed again on retry; a success reply confirms its
-target and ends the account's work only if the target is still intended,
-otherwise queuing the opposite request in the same commit.
+account on one of the owner's devices as it shares the store and takes
+sharing back (§14.2, §20.9): the account's row, with whether the applied
+sequence intends it shared, the grant the provider last confirmed and at most
+one request; the device's call to the provider; coven's own grant there, and
+the grants it leaves in place. A pass fixes a request's target from the
+intention before sending it, and forgets the confirmed grant. An entry may
+apply at any moment, while a request runs too, and leaves a fixed request
+alone. A call may end without a reply, and the device sends the same target
+again. A reply confirms its target, or, for a revocation, lists grants left in
+place (`AccessRemains`); the owner may remove those, and the app retry the
+revocation. Under `Rules.correct`:
 
-`steps_good` keeps three facts: nothing is confirmed while a request runs,
-confirmed access is what the provider holds, and an account with no work left
-is confirmed at its intention. `settled_matches` follows: whenever the owner's
-device has no request left for an account, the provider holds exactly the
-intended access, however the intention changed while requests ran.
-`obsolete_reversed`: confirming a target the intention has left queues the
-opposite request, and the next request sent targets the intention.
-`settles`: from any work left, a run in which the provider answers reaches no
-work left at the same intention. `no_recheck_reports_stale` is the
-counterexample: ending the work on every success reply reports Dan's access
-settled while the provider still grants it, his removal having applied while
-the grant ran.
+- `one_request`: no earlier request runs beside the current one, and the one
+  running is the target the row fixed, which applying entries leaves alone
+  until its reply is recorded.
+- `quiet_exact`: when nothing is listed and nothing runs for the account,
+  coven's grant at the provider is the one the sequence intends, however the
+  intention changed while requests ran.
+- `obsolete_reversed`: a reply for a target the intention has left, a
+  confirmation or grants left in place, queues the opposite request instead of
+  ending the work or reporting `AccessRemains`.
+- `remains_unshared`, `remains_listed`: `AccessRemains` is listed only for an
+  account the sequence doesn't intend shared, and leaves the list only when
+  the app retries it or an entry intends the account shared again.
+- `settles`: from every reachable state, with the intention no longer
+  changing, coven's own steps, the app's retry and the owner removing the
+  grants coven reported end with nothing listed and nothing running. The
+  proof is a measure such a step lowers from every other state (`progress`).
 
-The model takes as given that a success reply means the provider applied the
-request, which the live sharing tests check (storage-certification.md). It
-leaves out the invitation a grant returns, grants the provider keeps that
-coven didn't make (`AccessRemains`), changes the person makes at the provider,
-and the order of different accounts' requests, which the owner's device sends
-one at a time.
+Each rule is needed; leaving one out is a checked counterexample:
+
+- `overlapping_requests_strand`: a revocation queued and sent while a grant
+  still runs lands first and is confirmed; the grant lands after, and the
+  account stays shared against the sequence with nothing listed.
+- `kept_confirmation_strands`: keeping the confirmed grant when a revocation
+  fixes its target, a revocation that found a parent folder's grant ends as
+  soon as an invite intends the account shared again, though coven's own
+  grant is gone. Once the owner removes the parent folder's grant, as she
+  was told, the account has no access and nothing is listed.
+- `obsolete_finish_strands`: ending the work on every confirmation reports
+  Dan's access settled while the provider still grants it, his removal having
+  applied while the grant ran.
+- `obsolete_revocation_reported`: reporting every revocation's grants left in
+  place tells the owner to remove grants from an account the store intends
+  shared, while coven's own grant stays taken back.
+
+The model takes as given that a reply means the provider applied the request,
+which the live sharing tests check (storage-certification.md), and that a
+request whose call ended without a reply took effect, if at all, before it
+ended. It leaves out the invitation a grant returns, the order of different
+accounts' requests, which the owner's device sends one at a time, and the
+owner's other devices, each of which runs the same work.
 
 ## Hybrid timestamps and retry time
 
