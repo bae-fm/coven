@@ -439,10 +439,11 @@ pub(crate) fn settle_record(
     if !kept {
         // The record's file is gone from this device: its original is
         // forgotten, never touched, coven's copy goes once nothing names it,
-        // and an upload no other file shares is left for the upload worker
-        // to retire (§17.9).
+        // an upload no other file shares is left for the upload worker to
+        // retire (§17.9), and no move lists it (§17.3).
         crate::user_file::forget(db, id)?;
         crate::file_queue::forget(db, id)?;
+        crate::file_moves::forget(db, id)?;
         crate::file_pins::end(db, id)?;
     }
     Ok(())

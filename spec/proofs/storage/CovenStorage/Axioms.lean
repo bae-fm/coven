@@ -60,6 +60,8 @@ import CovenStorage
 #print axioms CovenStorage.Files.stage_local_writes_no_cloud
 #print axioms CovenStorage.Moves.move_whole
 #print axioms CovenStorage.Moves.switch_needs_every_upload
+#print axioms CovenStorage.Moves.list_while_live
+#print axioms CovenStorage.Moves.fail_keeps_list
 #print axioms CovenStorage.Holds.held_unpublished
 #print axioms CovenStorage.Holds.held_with_completion
 #print axioms CovenStorage.Holds.raise_waits_for_held

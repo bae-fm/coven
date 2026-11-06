@@ -785,6 +785,7 @@ homes = [
     "crates/coven-database/src/file_moves_schema.rs",
 ]
 tables = [
+    "_coven_move_files",
     "_coven_moves",
 ]
 

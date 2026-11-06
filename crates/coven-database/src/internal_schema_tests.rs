@@ -67,12 +67,14 @@ async fn only_the_spec_tables_are_created() {
             }
         }
         // What the app's SQL reads (Appendix C.1): the views, the files
-        // table, and the pins, queue, sync status and retry effect coven
-        // keeps as tables, which the app's triggers may follow.
+        // table, and the pins, pin requests, moves, queue, sync status and
+        // retry effect coven keeps as tables, which the app's triggers may
+        // follow.
         assert_eq!(
             views,
             [
                 ("table".into(), "coven_files".into()),
+                ("table".into(), "coven_moves".into()),
                 ("table".into(), "coven_pin_requests".into()),
                 ("table".into(), "coven_pins".into()),
                 ("table".into(), "coven_retry_effect".into()),
@@ -96,8 +98,8 @@ async fn only_the_spec_tables_are_created() {
         let tables = sql
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table'
-                 AND name NOT IN('coven_files','coven_pins','coven_pin_requests','coven_upload_queue',
-                     'coven_sync_status','coven_retry_effect')
+                 AND name NOT IN('coven_files','coven_pins','coven_pin_requests','coven_moves',
+                     'coven_upload_queue','coven_sync_status','coven_retry_effect')
                  ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),
@@ -154,6 +156,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_migration_counted_losses",
                 "_coven_migration_losses",
                 "_coven_migration_prefix",
+                "_coven_move_files",
                 "_coven_moves",
                 "_coven_object_removals",
                 "_coven_operations",

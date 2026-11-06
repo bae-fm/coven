@@ -466,15 +466,17 @@ another mode, opening fails with `WalUnavailable`.
 
 Some of that bookkeeping decides what the app shows: the files its rows
 reference and where each is, which files are still waiting to upload and why,
-which files this device keeps pinned, what can't proceed, how sync is going,
+which files each move to the cloud holds, which files this device keeps
+pinned, what can't proceed, how sync is going,
 how the app's admin operations ended, who the members are, and which circles
 this member is in.
 So the app's SQL can read it through thirteen views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
 `coven_pending`, `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
-`coven_devices`, `coven_circles` and `coven_circle_members`, and six tables,
-`coven_files`, `coven_pins`, `coven_pin_requests`, `coven_upload_queue`,
-`coven_sync_status` and `coven_retry_effect` ([api.md E4](api.md#e4-reading) lists their columns).
+`coven_devices`, `coven_circles` and `coven_circle_members`, and seven tables,
+`coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`,
+`coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`
+([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
 ```sql
@@ -520,6 +522,16 @@ each album are still downloading to be kept. A local trigger on
 triggers on its own pin requests add the file's row in the statement that
 records the request, and delete it in the one that ends it: the pin made, the
 app's unpin or the file gone.
+
+`coven_moves` is a table for the same reason: it lists each file of each move
+to the cloud still moving or failed (§17.3), with the move's state. Ben moves
+an album's 12 tracks to the cloud, and one track's original changes before its
+upload, failing the move. His music app shows the album as failed, with its 12
+tracks and a Cancel, without decoding the move's pending record. A local
+trigger on `coven_moves` keeps each album's move state in a device-local
+table: coven's triggers add a move's files in the write that records it,
+change their state in the statement that fails it, and delete them in the one
+that cancels or switches it.
 
 `coven_upload_queue` is a table for the same reason: it lists each file
 waiting in the upload queue, by its id and place, as `coven_uploads` does,
@@ -2795,8 +2807,8 @@ to "Shopping". Every change coven makes is ordinary SQL, including a late write
 taking a row back out (§8.4), so a count a local trigger keeps stays right.
 
 A local trigger can also follow `coven_files`, `coven_pins`,
-`coven_pin_requests`, `coven_upload_queue`, `coven_sync_status` and
-`coven_retry_effect`, the six of coven's tables it may (§4). Ben's music app
+`coven_pin_requests`, `coven_moves`, `coven_upload_queue`, `coven_sync_status`
+and `coven_retry_effect`, the seven of coven's tables it may (§4). Ben's music app
 counts each album's pinned tracks:
 
 ```sql
@@ -2811,7 +2823,9 @@ A trigger like it on DELETE takes one away. It runs wherever the pin changes:
 in Ben's own write, as his phone applies another device's, and in coven's own
 transactions as a file is pinned, downloads, uploads or is unpinned. One on
 `coven_upload_queue` runs as Ben's write stages a file and as coven's
-transaction completes or retires its upload.
+transaction completes or retires its upload. One on `coven_moves` runs as
+Ben's write records a move, as coven's transaction fails it, and as the write
+that cancels or switches it ends it.
 
 A trigger on `coven_files` follows the records themselves. Ben imports an album
 on his laptop, and his phone lists the albums whose tracks are all stored. When
@@ -2897,30 +2911,32 @@ doesn't, when the database opens and after migrating.
 - **Owner tables.** For owner permissions (§9.6), a shared trigger's targets are
   direct changes, even when a foreign-key action fired it, unless a step equals a
   foreign-key action's exact effect.
-- **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests` or
-  `coven_upload_queue` runs after the change.** Run before it, a trigger could
-  skip coven's change with `RAISE(IGNORE)` and leave the table wrong, so
+- **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_moves`, `coven_upload_queue`, `coven_sync_status` or
+  `coven_retry_effect` runs after the change.** Run before it, a trigger
+  could skip coven's change with `RAISE(IGNORE)` and leave the table wrong, so
   opening or migrating fails with `TriggerTiming` for one that doesn't say
   `AFTER`. A trigger that names no time runs before.
 - **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
-  `coven_upload_queue`, `coven_sync_status` or `coven_retry_effect` writes
-  only local tables,** and
-  so do the triggers it fires in turn: a pin, a pin request, a queued file,
-  the sync facts,
+  `coven_moves`, `coven_upload_queue`, `coven_sync_status` or
+  `coven_retry_effect` writes only local tables,** and
+  so do the triggers it fires in turn: a pin, a pin request, a move, a queued
+  file, the sync facts,
   the retry effect and what a trigger keeps of a record are this device's
   alone. As a migration ends and as the store opens, coven prepares each
-  change to the six tables, which compiles every
+  change to the seven tables, which compiles every
   trigger it would fire. One that writes a synced table fails with
   `TriggerTarget`, and one that writes coven's tables with `InternalTable`.
 - **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
-  `coven_upload_queue`, `coven_sync_status` or `coven_retry_effect` reads only
-  what app SQL reads.** It runs inside coven's own statements, and as coven applies another
-  device's write, and coven judges it there as it judges the app's
-  statements. Otherwise a trigger on `coven_pins` could copy
-  `_coven_cache`'s paths into an app table, and the app would read coven's
-  tables after all. The same preparing at open refuses a trigger that reads
-  coven's tables with `InternalTable`, and one that calls what only coven's
-  views may, such as `_coven_sending_files`, with `StatementForbidden`.
+  `coven_moves`, `coven_upload_queue`, `coven_sync_status` or
+  `coven_retry_effect` reads only what app SQL reads.** It runs inside
+  coven's own statements, and as coven applies another device's write, and
+  coven judges it there as it judges the app's statements. Otherwise a
+  trigger on `coven_pins` could copy `_coven_cache`'s paths into an app table,
+  and the app would read coven's tables after all. The same preparing at open
+  refuses a trigger that reads coven's tables with `InternalTable`, and one
+  that calls what only coven's views may, such as `_coven_sending_files`, with
+  `StatementForbidden`.
 - **Following `coven_files` changes only this device.** The trigger writes no
   synced table and changes no record, so a migration that makes or drops one
   changes nothing that syncs, like one changing a local table, and is declared
@@ -6253,6 +6269,14 @@ upload: the same copy, or the same original as one staging recorded it.
 
 - **The move survives restarts,** recorded in the database with its uploads, and
   resumes when the store opens.
+- **The app sees what each move holds.** `coven_moves` lists each file of a
+  move with the move's state ([api.md E4](api.md#e4-reading)), from the write
+  that records the move, so the app can show a move's files, a failed one's
+  included, without decoding its record. A file joins the list as it comes to
+  wait for the move's uploads, as a new file over a moving file's bytes does
+  (§17.2), and leaves it as its record goes. A switch or a cancel ends the list
+  with the move; a failure changes only the state. A bound file's move is
+  listed too, though the app can't cancel it (§17.4).
 - **Nobody sees anything until the end.** The files stay on this device only
   while they upload, and switch together once every one is stored.
 - **A missing original waits.** If a move's original is missing when its upload
@@ -6267,22 +6291,27 @@ upload: the same copy, or the same original as one staging recorded it.
   each stays on this device only, keeping its bytes here, its uploads retire,
   and bytes they stored become deletion candidates (§17.10). The move stays
   recorded as failed, its record naming the original and saying it changed,
-  until the app cancels it. A write's own move fails the same way. Moving the
-  file again fails again; the app stages the original afresh, as a new file.
+  and still lists its files, until the app cancels it. A write's own move
+  fails the same way. Each file stays in the failed move, so a file is in one
+  move at a time and `coven_moves` lists it once: moving one again fails with
+  `FileInMove`, naming the move, until the app cancels the move. A changed original moved
+  after that fails again; the app stages the original afresh, as a new file.
 - **A file drops out with its last reference.** If a row stops referencing a file
   before its move switches, and nothing else references it, the write deletes its
   record as usual (§17.2); the move's other files still switch together.
 - **Cancelling** a move, failed or still moving, switches none of its files and
-  ends its record; an upload in flight finishes and writes nothing. The app
-  finds a write's own move, which the write doesn't return, in
-  `coven_uploads.move` (§4). Cancelling a cancelled move does nothing. A move
-  that finished can't be cancelled (`MoveFinished`), nor can a bound file's
-  (`MoveBound`, §17.4), and an id this device never gave a move is
-  `MoveUnknown`.
+  ends its record and its list; an upload in flight finishes and writes
+  nothing. The app finds a write's own move, which the write doesn't return,
+  in `coven_uploads.move` or `coven_moves.move` (§4). Cancelling a cancelled
+  move does nothing. A move that finished can't be cancelled (`MoveFinished`),
+  nor can a bound file's (`MoveBound`, §17.4), and an id this device never
+  gave a move is `MoveUnknown`.
 - **Only this device's files.** Moving a file on another device only fails with
-  `NotThisDevice`, since only that device has its bytes. A file in the cloud, or
-  already in a move, fails with `NotDeviceOnlyHere`, and a file this device has
-  no record of with `FileAbsent`.
+  `NotThisDevice`, since only that device has its bytes, and a file in the
+  cloud with `NotDeviceOnlyHere`. A file already in a move, moving or failed,
+  fails with `FileInMove`, which names the move so the app can point at it,
+  and cancel it if it failed. A file this device has no record of fails with
+  `FileAbsent`.
 
 Ana's laptop holds an album she imported locally. She moves it to the cloud as
 one move. Her laptop uploads its twelve tracks over an hour; Ben's phone keeps
@@ -7444,7 +7473,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 | changes a file reference's binding or size limit | neither: it changes only how this device sends its own writes, which receivers can't tell (§17.4) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
-| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect` (§9.4) | neither: they don't sync |
+| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`, `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect` (§9.4) | neither: they don't sync |
 
 A migration that changes rows is breaking because each device would otherwise
 compute those changes from its own rows, and the devices would disagree.
@@ -9674,10 +9703,11 @@ device consistent with the database.
   `coven_devices`, `coven_circles` and `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
   only, since SQLite names the view to the authorizer only for what a join
-  reads. `coven_pins`, `coven_pin_requests` and `coven_upload_queue` have the
-  same prefix: tables coven's triggers keep, from the internal view
-  `_coven_pin_source`, from `_coven_pin_requests` and from the files each
-  upload stores (§4). So do `coven_sync_status`, the one row
+  reads. `coven_pins`, `coven_pin_requests`, `coven_moves` and
+  `coven_upload_queue` have the same prefix: tables coven's triggers keep, from
+  the internal view `_coven_pin_source`, from `_coven_pin_requests`, from
+  `_coven_move_files` with each move's state, and from the files each upload
+  stores (§4). So do `coven_sync_status`, the one row
   coven writes as what the sync state is computed from changes (§19.1), and
   `coven_retry_effect`,
   the one row coven writes as what the person's retry would do changes
@@ -9730,6 +9760,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.9) |
 | `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, the app unpins the file, or the file's record goes or leaves the cloud (§17.8) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
+| `_coven_move_files` | the files each moving or failed move lists, by file, since a file is in at most one move: written in the write that records the move, and as a new file over a moving file's bytes joins it; a file leaves as its record goes, and a switch or a cancel ends the move's list, while a failure keeps it (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
@@ -11413,6 +11444,7 @@ Write-ups explain each model and state its assumptions:
 | Once a device has seen the slot where stored bytes lost their last name, every write it can still send that counts read through that slot, so every write of another device not gone for good that missed the change is published; a device's next write sends a copy that missed a delete, and a device gone for good holds nothing back | `seen_unpublished`, `missed_published`, `next_write_publishes_copy`, `gone_holds_nothing` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
 | *Body.* A copy that missed a delete names the stored bytes in a write its device hasn't sent, while nothing published names them | `unseen_copy_unpublished` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
+| A file is in at most one move; only a moving or failed move lists files, and every file waiting for a moving move is listed under it; failing a move keeps every listing and leaves no file waiting for it | `list_while_live`, `fail_keeps_list` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
 | With a raise's marker between a held write and its completion, the raise waits while the upload is queued, a pass publishing the held write publishes through the marker, and the completion waits for the raise | `raise_waits_for_held`, `held_with_marker`, `completion_after_raise` | `proofs/storage/CovenStorage/Holds.lean` | §17.4, §18.5 |
 | A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the app unpins the file, the file's record goes or the file leaves the cloud; the app's unpin ends it with the pin | `requested_by_switch`, `unkept_unrequested`, `unpin_ends_request`, `request_ends_made_unpinned_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
@@ -11531,7 +11563,8 @@ maps them are with each provider in Appendix E.
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
 | `DbError::DeviceOnly` | a bound reference names a file on one device only that no bound upload stores | §17.4 |
 | `DbError::NotThisDevice` | a move to the cloud names a file on another device only, or a write makes a new file over one, by `existing_file` or by moving its row | §17.2, §17.3 |
-| `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
+| `DbError::NotDeviceOnlyHere` | a move names a file in the cloud | §17.3 |
+| `DbError::FileInMove` | a move names a file already in a move, moving or failed, which the error names | §17.3 |
 | `DbError::FileAbsent` | a move, a call making files device-only, or a new file over an existing file's bytes names a file this device has no record of | §17.2, §17.3 |
 | `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |
 | `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |

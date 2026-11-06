@@ -492,7 +492,8 @@ pub(crate) struct Queued<'a> {
 }
 
 /// Queue the upload to `location` of files for the cloud, with their source
-/// and one hash per plaintext chunk, in their move (§17.3, §17.9).
+/// and one hash per plaintext chunk, in their move, which lists each file
+/// from this write on (§17.3, §17.9).
 pub(crate) fn enqueue(
     db: &DatabaseConnection,
     queued: Queued<'_>,
@@ -548,6 +549,7 @@ pub(crate) fn enqueue(
             "INSERT INTO _coven_upload_files(file,upload,keep) VALUES(?1,?2,?3)",
             rusqlite::params![file, upload, keep],
         )?;
+        crate::file_moves::list(db, of, *file)?;
     }
     Ok(())
 }

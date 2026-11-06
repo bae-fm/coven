@@ -113,6 +113,19 @@ move that fails or is cancelled switches none, and a file whose last
 reference goes drops out. `move_whole` shows that from a state with no moves,
 in every reachable state, a move's files are all in the cloud or none is.
 
+Each move also lists its files, which `coven_moves` shows the app. The state
+gives each file at most the one move listing it, so a file is in one move at a
+time: recording a move or joining one takes only a file no move lists, a
+failed one included. The step recording a move lists its files, and a file
+that comes to wait for a moving move, as a new file over a waiting file's
+bytes does, joins it. A failure keeps the listing, a cancel or a switch ends
+it, and a file whose last reference goes leaves it. `list_while_live` shows
+that from a state with no moves, in every reachable state, only a moving or
+failed move lists files, and every file waiting for a moving move is listed
+under it. `fail_keeps_list` shows the step failing a move keeps every listing
+and leaves no file waiting for it, so a failed move lists the files the app
+can cancel it for.
+
 [Shared.lean](storage/CovenStorage/Shared.lean) adds to those steps a
 write making a new file over an existing file's bytes, as `existing_file`
 stages one for a row in another audience and as a moved row gets one: a

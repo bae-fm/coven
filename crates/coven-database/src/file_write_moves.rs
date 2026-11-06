@@ -47,10 +47,12 @@ struct MoveUpload {
 
 impl FileWrite<'_> {
     /// Record a move of these files to the cloud (§17.3). Each must be on
-    /// this device only, with no upload queued. A user's original uploads
-    /// with the facts and hashes its staging recorded, so its upload fails
-    /// the move if the original changed since. The files switch to the
-    /// cloud together, in one write once every one is stored.
+    /// this device only (`NotThisDevice`, `NotDeviceOnlyHere`) and in no
+    /// move, whether one this write recorded or a moving or failed one
+    /// (`FileInMove`). A user's original uploads with the facts and hashes
+    /// its staging recorded, so its upload fails the move if the original
+    /// changed since. The files switch to the cloud together, in one write
+    /// once every one is stored.
     pub(crate) fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError> {
         let db = self.database;
         let mut uploads: Vec<MoveUpload> = Vec::new();
@@ -69,15 +71,23 @@ impl FileWrite<'_> {
                 Place::DeviceOnly(_) => return Err(DbError::NotThisDevice { file: id }),
                 Place::Cloud(_) => return Err(DbError::NotDeviceOnlyHere { file: id }),
             }
-            let moving = self
+            // A file is in at most one move: one this write recorded, or a
+            // moving or failed one, which the app cancels to free it.
+            let recorded = self
                 .files
                 .moving
                 .borrow()
                 .iter()
-                .flat_map(|moving| &moving.uploads)
-                .any(|upload| upload.files.iter().any(|(file, _)| *file == id));
-            if moving || crate::file_queue::upload_of(db, id)?.is_some() {
-                return Err(DbError::NotDeviceOnlyHere { file: id });
+                .find(|moving| {
+                    moving.uploads.iter().any(|upload| upload.files.iter().any(|(f, _)| *f == id))
+                })
+                .map(|moving| moving.id);
+            let holding = match recorded {
+                Some(of) => Some(of),
+                None => file_moves::of_file(db, id)?,
+            };
+            if let Some(of) = holding {
+                return Err(DbError::FileInMove { file: id, id: of });
             }
             let upload = match file {
                 MoveFile::User(_) | MoveFile::UserKeptHere(_) => {

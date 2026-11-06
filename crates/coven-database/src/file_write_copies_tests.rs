@@ -513,3 +513,52 @@ async fn a_new_file_over_a_new_file_over_a_staged_file_shares_its_upload() {
     assert_eq!(record(&db, again).place, stored);
     db.close().await.unwrap();
 }
+
+/// Ana stages a photo for the cloud in a store row, and before it is stored
+/// puts it in a Gifts row, as a new file over its bytes. The new file waits
+/// for the photo's upload, so it joins the photo's move: `coven_moves` lists
+/// both under it, and the switch ends the list.
+#[tokio::test]
+async fn a_new_file_over_a_moving_file_joins_its_move() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let photo = db
+        .staged_write::<_, _, _, _, DbError>(
+            |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::Cloud)),
+            |sql, file| {
+                insert(&sql, "photos", 1, "store", file)?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    let copy = share_into(&db, 2, CIRCLE, photo).await;
+    let listed = |db: &crate::Database| {
+        let db = db.clone();
+        async move {
+            db.read(|sql| {
+                Ok::<_, DbError>(sql.query(
+                    "SELECT move,state,file FROM coven_moves ORDER BY file",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get::<_, crate::MoveId>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, FileId>(2)?,
+                        ))
+                    },
+                )?)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let rows = listed(&db).await;
+    let of = rows[0].0;
+    let mut files = [photo, copy];
+    files.sort_by_key(ToString::to_string);
+    assert_eq!(rows, files.iter().map(|file| (of, "moving".to_owned(), *file)).collect::<Vec<_>>());
+    complete_uploads(&db).await;
+    assert!(listed(&db).await.is_empty());
+    db.close().await.unwrap();
+}

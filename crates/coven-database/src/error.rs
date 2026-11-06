@@ -527,11 +527,21 @@ pub enum DbError {
         /// The file.
         file: coven_foundation::id_source::FileId,
     },
-    /// The file to move is in the cloud already, or already moving (§17.3).
-    #[error("file {file} is not on this device only, waiting for no upload")]
+    /// The file to move is in the cloud already (§17.3).
+    #[error("file {file} is not on this device only")]
     NotDeviceOnlyHere {
         /// The file.
         file: coven_foundation::id_source::FileId,
+    },
+    /// The file to move is in a move already, moving or failed: a file is in
+    /// one move at a time, and the app cancels a failed one to move its files
+    /// again (§17.3).
+    #[error("file {file} is in move {id:?}")]
+    FileInMove {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+        /// The move that holds it.
+        id: crate::MoveId,
     },
     /// A bound reference names a file larger than its limit (§17.4).
     #[error("{table}.{column} names a file of {size} bytes, over its limit of {limit}")]

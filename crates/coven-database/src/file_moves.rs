@@ -2,9 +2,11 @@
 //! stages for the cloud, or the files the app moves. Each upload belongs to
 //! one move. No file of a move switches to the cloud until every one of its
 //! uploads is stored; then one write switches them all. A move that fails
-//! or is cancelled switches none.
+//! or is cancelled switches none. Each moving or failed move lists its
+//! files, for the app to see in `coven_moves`.
 
 use crate::{sqlite::DatabaseConnection, DbError};
+use coven_foundation::id_source::FileId;
 
 /// One move's identity on this device, never reused (§17.3, E3).
 #[derive(
@@ -32,11 +34,12 @@ pub(crate) enum MoveState {
     /// Its uploads are queued; none of its files has switched.
     Moving,
     /// A user's original changed before its upload: none of its files
-    /// switched, and its record says which, until the app cancels it.
+    /// switched or waits for an upload, and its record says which original
+    /// and its list which files, until the app cancels it.
     Failed,
-    /// The app cancelled it: none of its files switched.
+    /// The app cancelled it: none of its files switched, and it lists none.
     Cancelled,
-    /// Its files switched to the cloud together.
+    /// Its files switched to the cloud together, and it lists none.
     Finished,
 }
 
@@ -91,7 +94,49 @@ pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, 
         })
 }
 
+/// The move that lists `file`, moving or failed, if any: a file is in at
+/// most one move (§17.3).
+pub(crate) fn of_file(db: &DatabaseConnection, file: FileId) -> Result<Option<MoveId>, DbError> {
+    Ok(db.query("SELECT move FROM _coven_move_files WHERE file=?1", [file], |r| r.get(0))?.pop())
+}
+
+/// List `file` as one of move `id`'s files, as an upload of the move comes
+/// to store it (§17.3).
+pub(crate) fn list(db: &DatabaseConnection, id: MoveId, file: FileId) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_move_files(move,file) VALUES(?1,?2)",
+        rusqlite::params![id, file],
+    )?;
+    Ok(())
+}
+
+/// The new file `to` over `from`'s bytes, now waiting for the upload `from`
+/// waits for, joins that upload's move (§17.2, §17.3).
+pub(crate) fn join(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_move_files(move,file)
+         SELECT u.move,?2 FROM _coven_upload_files AS l
+         JOIN _coven_file_uploads AS u ON u.id=l.upload WHERE l.file=?1",
+        rusqlite::params![from, to],
+    )?;
+    Ok(())
+}
+
+/// `file`'s record is gone from this device: no move lists it.
+pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_move_files WHERE file=?1", [file])?;
+    Ok(())
+}
+
+/// Move `id` now stands at `state`. A switch or a cancel ends its list with
+/// it; a failure keeps the list, for the app to cancel (§17.3).
 fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbError> {
+    match state {
+        MoveState::Cancelled | MoveState::Finished => {
+            db.internal_execute("DELETE FROM _coven_move_files WHERE move=?1", [id])?;
+        }
+        MoveState::Moving | MoveState::Failed => {}
+    }
     db.internal_execute(
         "UPDATE _coven_moves SET state=?2 WHERE id=?1",
         rusqlite::params![id, state.text()],
@@ -102,8 +147,9 @@ fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbEr
 /// End a move switching none of its files: every file stays on this device
 /// only, keeping its bytes here, and no upload of the move stores a file any
 /// more, so the upload worker retires them, an attempt in flight once it
-/// ends, and their stored bytes become deletion candidates (§17.10). The
-/// move's pending record is replaced or cleared by the caller.
+/// ends, and their stored bytes become deletion candidates (§17.10). A
+/// failed move keeps its list; a cancelled one ends it. The move's pending
+/// record is replaced or cleared by the caller.
 pub(crate) fn end_unswitched(
     db: &DatabaseConnection,
     id: MoveId,

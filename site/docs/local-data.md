@@ -434,6 +434,8 @@ tables like these, so the list stays one query over the database:
 | `coven_network` | store, always exactly one row | `usable`, `metered`, `unmetered_only` |
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |
 | `coven_pins` (a table) | file this device keeps pinned | `file` |
+| `coven_pin_requests` (a table) | file a switch to the cloud asked this device to keep whole, not yet pinned | `file` |
+| `coven_moves` (a table) | file of a move to the cloud still moving or failed | `move`, `state`, `file` |
 | `coven_pending` | pending record | `record`, `file`, `position`, `cause` |
 | `coven_invites` | invite this device made that hasn't ended | `invite`, `operation` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
@@ -473,6 +475,13 @@ it reads only what the app's SQL may.
 each album's queued count, first place and bytes in the app's own table, which
 an outbox reads by index however long the queue is; grouping `coven_uploads`
 by album reads every queued file, with what each waits for.
+
+`coven_pin_requests` and `coven_moves` are tables for the same reason. A
+trigger on `coven_pin_requests` follows each file still to be kept whole after
+its switch to the cloud. One on `coven_moves` follows each file of a move as
+the move starts, as it fails, which is when the app can offer to cancel it,
+and as a cancel or a switch ends it. `move` reads as a
+`MoveId`, the id `cancel_move` takes.
 
 Local triggers can follow `coven_files` too, the records themselves. When
 another device finishes uploading a track, its write switches the track's

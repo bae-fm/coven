@@ -1438,7 +1438,8 @@ pub enum DbError {
     InvalidForeignKeyEffect { table: String, key: RowKey },
     /// A local trigger wrote a synced table or a shared trigger a local one,
     /// including a trigger on `coven_files`, `coven_pins`,
-    /// `coven_pin_requests` or `coven_upload_queue` and those it fires (§9.4).
+    /// `coven_pin_requests`, `coven_moves` or `coven_upload_queue` and those
+    /// it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
     /// A bulk write's statement, or a trigger or foreign-key action it would
     /// run, writes a synced table (§4, E3). Nothing committed.
@@ -1518,8 +1519,12 @@ pub enum DbError {
     /// bytes: one to move to the cloud (§17.3), or one a write makes a new
     /// file over (§17.2).
     NotThisDevice { file: FileId },
-    /// The file to move is in the cloud already, or already in a move (§17.3).
+    /// The file to move is in the cloud already (§17.3).
     NotDeviceOnlyHere { file: FileId },
+    /// The file to move is in a move already, moving or failed, which `id`
+    /// names: a file is in one move at a time, and the app cancels a failed
+    /// move to move its files again (§17.3).
+    FileInMove { file: FileId, id: MoveId },
     /// A bound reference names a file larger than its limit (§17.4).
     BoundFileTooLarge { table: String, column: String, size: u64, limit: u64 },
     /// A bound reference names a file on one device only that no bound
@@ -1764,9 +1769,9 @@ pub enum SchemaError {
     AudienceConstraint { table: String, constraint: String },
     /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
-    /// A trigger on `coven_files`, `coven_pins`, `coven_pin_requests` or
-    /// `coven_upload_queue` runs
-    /// before its change (§9.4).
+    /// A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
+    /// `coven_moves`, `coven_upload_queue`, `coven_sync_status` or
+    /// `coven_retry_effect` runs before its change (§9.4).
     TriggerTiming { trigger: String, table: String },
 }
 
@@ -3170,18 +3175,20 @@ impl CovenWrite<'_> {
     pub fn existing_file(&self, from: FileId) -> FileId;
 
     /// Records a move of these files to the cloud (§17.3). Each must be on
-    /// this device only with no upload queued (`NotThisDevice`,
-    /// `NotDeviceOnlyHere`, `FileAbsent`). The write reads no file: a user's
+    /// this device only (`NotThisDevice`, `NotDeviceOnlyHere`, `FileAbsent`)
+    /// and in no move, a failed one included (`FileInMove`, naming the move). The write reads no file: a user's
     /// original uploads with what its staging recorded. The move survives
     /// restarts; once every file is stored, one write switches them all to
     /// the cloud, changing no app row. A missing original waits; one changed
     /// since its staging, even keeping its size and modification time, fails
     /// the move before a changed byte is sent, and the move's record says
-    /// which until the app cancels it.
+    /// which until the app cancels it. `coven_moves` lists the move's files
+    /// with its state from this write on, a failed move's too, until a
+    /// switch or a cancel ends it (E4).
     pub fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError>;
 
     /// Cancels a move, failed or still moving: every file stays on this
-    /// device only, and its record ends. A write staging files for the
+    /// device only, and its record and its list in `coven_moves` end. A write staging files for the
     /// cloud returns no move id; `coven_uploads.move` names the move of
     /// each file still uploading (E4). A cancelled move cancels again
     /// without effect; a finished one fails with `MoveFinished`, a bound
@@ -3363,8 +3370,9 @@ let moved = handle
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 - *Coven's state in SQL.* App SQL reads eleven views of coven's own tables and
-  six tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
-  `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`, in reads,
+  seven tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_moves`, `coven_upload_queue`, `coven_sync_status` and
+  `coven_retry_effect`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -3372,7 +3380,7 @@ let moved = handle
   when coven changes them. The app can't write them, or name an object of its
   own after one.
 - The app's migrations may declare local triggers on `coven_files`,
-  `coven_pins`, `coven_pin_requests`, `coven_upload_queue`,
+  `coven_pins`, `coven_pin_requests`, `coven_moves`, `coven_upload_queue`,
   `coven_sync_status` and `coven_retry_effect`, AFTER their
   changes, writing only
   local tables and reading only what app SQL reads
@@ -3463,6 +3471,9 @@ let moved = handle
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
 | `coven_pin_requests`: each file a switch to the cloud asked this device to keep whole, whose pin coven has not yet made (E8); a table, which local triggers can follow: a row appears as the switching write records the request and goes as the request ends, whether by the pin made, the app's unpin or the file gone | `file` | the file's id; the copy the request keeps and its wait are coven's, and `pin_requests` reads them |
+| `coven_moves`: each file of each move to the cloud that is still moving or has failed ([§17.3](coven.md#173-staging-a-file)), one row per file, since a file is in at most one move; a table, which local triggers can follow: a move's rows appear in the write that records it, a file's as it joins a moving move as a new file over a moving file's bytes, their state changes in the transaction that fails the move, a file's row goes with its record, and the rest go in the write that cancels or switches the move | `move` | the move, read as `MoveId`: the id `move_to_cloud` returned, or the move of the write that staged the file; a bound file's move is listed too, though `cancel_move` refuses it with `MoveBound` ([§17.4](coven.md#174-bound-and-trailing-references)) |
+| | `state` | `moving` while its uploads are queued, `failed` once a changed original failed it: its files stay on this device only, none waits for an upload, and the move's pending record says which original until the app cancels it |
+| | `file` | the file's id; a file a failed move lists stays in it, and `move_to_cloud` refuses it with `FileInMove`, naming the move, until the app cancels the move |
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
@@ -3511,8 +3522,8 @@ impl types::FromSql for OperationKind;
 impl types::FromSql for OperationOutcome;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
-/// Reads `coven_uploads.move` and `coven_pending.move`, the move
-/// `cancel_move` takes.
+/// Reads `coven_uploads.move`, `coven_pending.move` and
+/// `coven_moves.move`, the move `cancel_move` takes.
 impl types::FromSql for MoveId;
 ```
 

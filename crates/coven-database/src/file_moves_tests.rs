@@ -256,9 +256,9 @@ async fn coven_pending_names_the_move_a_record_is_about() {
     db.close().await.unwrap();
 }
 
-/// A move takes only files on this device only with no upload queued:
-/// another device's file, a file in the cloud or already moving, and one
-/// this device has no record of are refused.
+/// A move takes only files on this device only and in no move: another
+/// device's file, a file in the cloud, one already in a move, named with
+/// that move, and one this device has no record of are refused.
 #[tokio::test]
 async fn a_move_takes_only_this_devices_files_waiting_for_no_upload() {
     let ids = SequentialIds::new();
@@ -282,9 +282,10 @@ async fn a_move_takes_only_this_devices_files_waiting_for_no_upload() {
         }
     };
     assert!(matches!(refused(&b, local).await, DbError::NotThisDevice { file } if file == local));
+    let staged = FileDatabase::new(a.clone()).uploads().await.unwrap()[0].of;
     assert!(matches!(
         refused(&a, uploading).await,
-        DbError::NotDeviceOnlyHere { file } if file == uploading
+        DbError::FileInMove { file, id } if file == uploading && id == staged
     ));
     complete(&a, uploading).await;
     assert!(matches!(
@@ -298,19 +299,19 @@ async fn a_move_takes_only_this_devices_files_waiting_for_no_upload() {
     // of it moves.
     let twice = a
         .write(move |sql| {
-            sql.move_to_cloud(vec![MoveFile::App(local)])?;
+            let first = sql.move_to_cloud(vec![MoveFile::App(local)])?;
             assert!(matches!(
                 sql.move_to_cloud(vec![MoveFile::App(local)]),
-                Err(DbError::NotDeviceOnlyHere { .. })
+                Err(DbError::FileInMove { file, id }) if file == local && id == first
             ));
             Ok(())
         })
         .await;
     assert!(matches!(twice, Err(DbError::StepFailed)), "{twice:?}");
-    move_files(&a, vec![MoveFile::App(local)]).await.unwrap();
+    let moving = move_files(&a, vec![MoveFile::App(local)]).await.unwrap();
     assert!(matches!(
         refused(&a, local).await,
-        DbError::NotDeviceOnlyHere { file } if file == local
+        DbError::FileInMove { file, id } if file == local && id == moving
     ));
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -484,12 +485,184 @@ async fn a_local_trigger_follows_each_pin_request_coven_adds_and_ends() {
     db.close().await.unwrap();
 }
 
+/// What app SQL reads of `coven_moves`: each file a move lists, with the
+/// move's state, by move and file.
+async fn listed(db: &Database) -> Vec<(MoveId, String, FileId)> {
+    db.read(|sql| {
+        Ok::<_, DbError>(sql.query(
+            "SELECT move,state,file FROM coven_moves ORDER BY move,file",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    })
+    .await
+    .unwrap()
+}
+
+/// `files`, each listed under move `of` in `state`, as `listed` orders them.
+fn listing(of: MoveId, state: &str, files: &[FileId]) -> Vec<(MoveId, String, FileId)> {
+    let mut listing: Vec<_> = files.iter().map(|file| (of, state.to_owned(), *file)).collect();
+    listing.sort_by_key(|(_, _, file)| file.to_string());
+    listing
+}
+
+/// A move lists its files in `coven_moves`, moving, from the write that
+/// records it, and so does a write's own move of the files it stages for the
+/// cloud. Storing one upload changes nothing; the switch ends the list.
+#[tokio::test]
+async fn a_move_lists_its_files_from_its_write_until_its_switch() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let files = stage(&db, &["a", "b"], Place::DeviceOnly).await;
+    assert!(listed(&db).await.is_empty());
+    let id = move_files(&db, files.iter().copied().map(MoveFile::App).collect()).await.unwrap();
+    assert_eq!(listed(&db).await, listing(id, "moving", &files));
+    let staged = stage(&db, &["c"], Place::Cloud).await;
+    let written = FileDatabase::new(db.clone())
+        .uploads()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|upload| upload.files == staged)
+        .unwrap()
+        .of;
+    let both = [listing(id, "moving", &files), listing(written, "moving", &staged)].concat();
+    assert_eq!(listed(&db).await, both);
+    complete(&db, files[0]).await;
+    assert_eq!(listed(&db).await, both);
+    complete(&db, files[1]).await;
+    assert_eq!(listed(&db).await, listing(written, "moving", &staged));
+    complete(&db, staged[0]).await;
+    assert!(listed(&db).await.is_empty());
+    db.close().await.unwrap();
+}
+
+/// A failed move keeps listing its files, failed, and ends only their
+/// uploads. Each stays in it: moving one again is refused until the app
+/// cancels the move. A file whose last reference goes leaves the list in
+/// that write; cancelling the move ends the rest. Moved again, a file is
+/// listed under the new move, and cancelling that ends its list too.
+#[tokio::test]
+async fn a_failed_move_lists_its_files_until_the_app_cancels_it() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let files = stage(&db, &["a", "b", "c"], Place::DeviceOnly).await;
+    let id = move_files(&db, files.iter().copied().map(MoveFile::App).collect()).await.unwrap();
+    complete(&db, files[0]).await;
+    let uploads = FileDatabase::new(db.clone());
+    let failing = uploads.uploads().await.unwrap()[0].id;
+    uploads.fail_move(failing, crate::pending::tests::moving(1, id)).await.unwrap();
+    assert_eq!(listed(&db).await, listing(id, "failed", &files));
+    assert!(uploads.uploads().await.unwrap().is_empty());
+    assert_eq!(local_count(&db, "_coven_upload_files"), 0);
+    assert!(matches!(
+        move_files(&db, vec![MoveFile::App(files[1])]).await,
+        Err(DbError::FileInMove { file, id: of }) if file == files[1] && of == id
+    ));
+    assert_eq!(listed(&db).await, listing(id, "failed", &files));
+    db.write(|sql| {
+        sql.execute("DELETE FROM files WHERE id='c'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(listed(&db).await, listing(id, "failed", &files[..2]));
+    db.write(move |sql| sql.cancel_move(id)).await.unwrap();
+    assert!(listed(&db).await.is_empty());
+    let again = move_files(&db, vec![MoveFile::App(files[0])]).await.unwrap();
+    assert_eq!(listed(&db).await, listing(again, "moving", &files[..1]));
+    db.write(move |sql| sql.cancel_move(again)).await.unwrap();
+    assert!(listed(&db).await.is_empty());
+    db.close().await.unwrap();
+}
+
+/// The app's local log of what coven does to `coven_moves`, kept by its
+/// triggers on the table.
+const FOLLOWING: &str = "CREATE TABLE followed(n INTEGER PRIMARY KEY, change TEXT NOT NULL,
+         move INTEGER NOT NULL, state TEXT NOT NULL, file TEXT NOT NULL);
+     CREATE TRIGGER move_listed AFTER INSERT ON coven_moves BEGIN
+         INSERT INTO followed(change,move,state,file) VALUES('listed',NEW.move,NEW.state,NEW.file);
+     END;
+     CREATE TRIGGER move_changed AFTER UPDATE ON coven_moves BEGIN
+         INSERT INTO followed(change,move,state,file) VALUES('changed',NEW.move,NEW.state,NEW.file);
+     END;
+     CREATE TRIGGER move_ended AFTER DELETE ON coven_moves BEGIN
+         INSERT INTO followed(change,move,state,file) VALUES('ended',OLD.move,OLD.state,OLD.file);
+     END;";
+
+/// A local trigger on `coven_moves` follows each file coven lists under a
+/// move as the move starts, each state change as it fails, and each file
+/// it stops listing, as a cancel or a switch ends the move.
+#[tokio::test]
+async fn a_local_trigger_follows_each_move_coven_lists_fails_and_ends() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            crate::file_write::tests::tables(),
+            vec![
+                crate::Migration::addition(1, "files", crate::file_write::tests::SCHEMA),
+                crate::Migration::addition(2, "following", FOLLOWING),
+            ],
+        )
+        .namespaces(crate::file_write::tests::namespaces(Provenance::AppProvided))
+        .open()
+        .await
+        .unwrap();
+    let files = stage(&db, &["a", "b"], Place::DeviceOnly).await;
+    let id = move_files(&db, files.iter().copied().map(MoveFile::App).collect()).await.unwrap();
+    let uploads = FileDatabase::new(db.clone());
+    let failing = uploads.uploads().await.unwrap()[0].id;
+    uploads.fail_move(failing, crate::pending::tests::moving(1, id)).await.unwrap();
+    db.write(move |sql| sql.cancel_move(id)).await.unwrap();
+    let again = move_files(&db, vec![MoveFile::App(files[0])]).await.unwrap();
+    complete(&db, files[0]).await;
+    let followed = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT change,move,state,file FROM followed ORDER BY n",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, MoveId>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, FileId>(3)?,
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    let mut each = files.clone();
+    each.sort_by_key(ToString::to_string);
+    let step = |change: &str, of: MoveId, state: &str, file: FileId| {
+        (change.to_owned(), of, state.to_owned(), file)
+    };
+    let mut expected = Vec::new();
+    for (change, state) in [("listed", "moving"), ("changed", "failed"), ("ended", "failed")] {
+        let mut changes: Vec<_> = each.iter().map(|file| step(change, id, state, *file)).collect();
+        expected.append(&mut changes);
+    }
+    expected.push(step("listed", again, "moving", files[0]));
+    expected.push(step("ended", again, "moving", files[0]));
+    let mut seen = followed;
+    // Within one statement SQLite visits a move's files in no promised order.
+    for chunk in seen.chunks_mut(2).take(3) {
+        chunk.sort_by_key(|(_, _, _, file)| file.to_string());
+    }
+    assert_eq!(seen, expected);
+    db.close().await.unwrap();
+}
+
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_moves(id,state)
-           SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;",
+           SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;
+         INSERT INTO _coven_move_files(move,file)
+           SELECT m.id,'file_' || (2*m.id+c.k) FROM _coven_moves AS m,(SELECT 0 AS k UNION ALL SELECT 1) AS c
+           WHERE m.state IN ('moving','failed');",
     )
     .unwrap();
 }

@@ -48,10 +48,11 @@ pub(super) fn keep_source(
 
 /// A new file over `from`'s bytes, on this device only as `from` is, shares
 /// its bytes here, the user's original or coven's copy, and its upload if
-/// one is queued: the upload's completion switches both to the cloud
-/// (§17.2).
+/// one is queued, joining its move: the upload's completion switches both to
+/// the cloud (§17.2, §17.3).
 pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
     crate::file_queue::share(db, from, to)?;
+    crate::file_moves::join(db, from, to)?;
     crate::user_file::share(db, from, to)
 }
 
