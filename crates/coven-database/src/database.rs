@@ -209,25 +209,37 @@ pub struct DatabaseAccess<L> {
 }
 
 impl<L> DatabaseAccess<L> {
-    /// Refuse calls once a connection failed the handle. A failing call keeps
-    /// its own error; one that succeeds while the handle fails reports it.
-    /// So does one that fails as a bug fails the handle: its own error, such
-    /// as a statement the broken authorizer refused, says less (E15).
-    fn call<R, E: From<DbError>>(&self, run: impl FnOnce() -> Result<R, E>) -> Result<R, E> {
+    /// Refuse calls once a connection failed the handle. A call whose own
+    /// work failed the handle with a bug returns that bug as `DbError::Bug`:
+    /// its own error, such as a statement the broken authorizer refused,
+    /// says less, and the app's closure may have dropped it. A bug its error
+    /// carries beside that one goes to the sink, so neither is lost. Any
+    /// other failing call keeps its own error, and one that succeeds while
+    /// the handle fails reports the failure (E15).
+    fn call<R, E: From<DbError> + CarriesBug>(
+        &self,
+        run: impl FnOnce() -> Result<R, E>,
+    ) -> Result<R, E> {
         if let Some(error) = self.observer.error() {
             return Err(error.into());
         }
-        let result = run();
+        let (result, own) = self.observer.calling(run);
+        if let Some(bug) = own {
+            let carried = result.as_ref().err().and_then(CarriesBug::bug);
+            if let Some(other) = carried.filter(|other| **other != bug) {
+                self.observer.report(other);
+            }
+            return Err(DbError::Bug(bug).into());
+        }
         match (result, self.observer.error()) {
-            (Ok(result), None) => Ok(result),
-            (Ok(_), Some(error)) | (Err(_), Some(error @ DbError::Bug(_))) => Err(error.into()),
-            (Err(error), _) => Err(error),
+            (Ok(_), Some(error)) => Err(error.into()),
+            (result, _) => result,
         }
     }
 
     /// Read one committed state on a reader: read-only decisions never take
     /// the writer (§21.2).
-    fn with_committed<R, E: From<DbError>>(
+    fn with_committed<R, E: From<DbError> + CarriesBug>(
         &self,
         run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
     ) -> Result<R, E> {
@@ -371,7 +383,10 @@ pub(crate) fn with_locked<T, R>(connection: &Mutex<T>, run: impl FnOnce(&mut T) 
 }
 
 impl DatabaseInner {
-    fn call<R, E: From<DbError>>(&self, run: impl FnOnce(&Self) -> Result<R, E>) -> Result<R, E> {
+    fn call<R, E: From<DbError> + CarriesBug>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<R, E>,
+    ) -> Result<R, E> {
         self.access.call(|| run(self))
     }
 

@@ -15,8 +15,8 @@ pub struct SyncLoop {
     /// Where the person's retry requests wait for this loop's passes.
     waits: Arc<RetryWaits>,
     /// The bug the loop ended on, if it panicked: what a command to it
-    /// fails with from then on, where a loop that ended with its store
-    /// fails with `StoreClosed`.
+    /// fails with from then on, as `SyncError::WorkerFailed`, where a loop
+    /// that ended with its store fails with `StoreClosed`.
     panicked: Arc<std::sync::OnceLock<coven_foundation::task::Bug>>,
     /// Each time the loop has taken everything that can wake it and waits.
     #[cfg(any(test, feature = "test-utils"))]
@@ -44,7 +44,7 @@ impl SyncLoop {
     /// A panic in the loop goes to the store's bug sink, and ends the loop
     /// as a failure: the last pass is recorded failed with the bug, sync
     /// stops, and the retries waiting, those the panicking pass took among
-    /// them, are answered with the bug (E15).
+    /// them, are answered with it as `SyncError::WorkerFailed` (E15).
     pub fn new(sync: Arc<SequenceSync>, codes: crate::RestoreCodes) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let waits = sync.waits.clone();
@@ -62,7 +62,7 @@ impl SyncLoop {
                     clippy::let_underscore_must_use,
                     reason = "the loop has ended either way; a failed write has failed the handle, which reports it"
                 )]
-                let _ = show(&owner, LastPass::failed(SyncError::Bug(bug.clone()))).await;
+                let _ = show(&owner, LastPass::failed(SyncError::WorkerFailed(bug.clone()))).await;
                 if let Err(error) = owner.waits.sync_panicked(bug).await {
                     tracing::debug!("stopping sync on a failed handle: {error}");
                 }
@@ -100,11 +100,11 @@ impl SyncLoop {
         }
     }
 
-    /// Why a command found the loop gone: the bug it ended on, or the store
-    /// closing.
+    /// Why a command found the loop gone: the bug it ended on, which the
+    /// sink heard already, or the store closing.
     fn gone(&self) -> SyncError {
         match self.panicked.get() {
-            Some(bug) => SyncError::Bug(bug.clone()),
+            Some(bug) => SyncError::WorkerFailed(bug.clone()),
             None => DbError::StoreClosed.into(),
         }
     }

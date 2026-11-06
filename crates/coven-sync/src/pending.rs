@@ -164,9 +164,9 @@ pub enum LocalFailure {
     /// The work's runtime is shutting down and dropped it: the process is
     /// ending, and the next one runs the work again (E15).
     Shutdown,
-    /// Coven's own code broke its rule or panicked: a bug, which the call
-    /// reports. The work retries under backoff, as a database failure does,
-    /// and fails again until the bug is fixed (E15).
+    /// Coven's own code broke its rule or panicked: a bug. The work retries
+    /// under backoff, as a database failure does, and fails again until the
+    /// bug is fixed (E15).
     Bug,
 }
 

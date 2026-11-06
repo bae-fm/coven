@@ -169,6 +169,10 @@ task_types = [
     # one it replaced, put back when the scope ends.
     "Active",
     "PreviousActive",
+    # One of a store's calls running on a thread, which claims the bug its
+    # work fails the handle with, and puts back the call it ran inside as
+    # it ends (api.md E15).
+    "CallScope",
     # What one storage setup call has spent waiting to resend refused
     # requests, which its steps draw on and then the connection it makes for
     # its own requests (§20.8).

@@ -317,13 +317,12 @@ impl Drop for Transferring {
             Some(false) => {}
             // An attempt in flight keeps its object's entry; without it the
             // progress watches read is wrong. This drop may run during an
-            // unwind, so it fails the store's handle instead of panicking.
-            None => self.owner.shared.observer.fail(crate::observation::HandleFailure::Bug(
-                coven_foundation::task::Bug {
-                    operation: "end a transfer in flight",
-                    message: "an attempt in flight lost its object's entry".into(),
-                },
-            )),
+            // unwind, so it fails the store's handle instead of panicking,
+            // and the bug goes to the call it runs in or the bug sink (E15).
+            None => self.owner.shared.observer.fail_with_bug(coven_foundation::task::Bug {
+                operation: "end a transfer in flight",
+                message: "an attempt in flight lost its object's entry".into(),
+            }),
         }
     }
 }

@@ -239,20 +239,21 @@ impl SqlAuthorization {
         move |context| {
             let mut state = lock_unpoisoned(&state);
             if let Some(bug) = &state.broken {
-                state.denied = Some(DbError::Bug(bug.clone()));
+                state.denied = Some(DbError::StoreFailed(bug.clone()));
                 return Authorization::Deny;
             }
             // SQLite's authorizer can't fail, and rusqlite turns its panic
             // into an error that names no bug, so the authorizer keeps it:
             // what it was changing may be half-changed, so the handle fails
-            // and this connection refuses every later statement (E15).
+            // and this connection refuses every later statement, repeating
+            // the bug its first refusal returned (E15).
             match coven_foundation::task::caught_sync("authorize a statement", || {
                 state.judge(context)
             }) {
                 Ok(authorization) => authorization,
                 Err(bug) => {
                     if let Some(handle) = handle.get() {
-                        handle.fail(crate::observation::HandleFailure::Bug(bug.clone()));
+                        handle.fail_with_bug(bug.clone());
                     }
                     state.denied = Some(DbError::Bug(bug.clone()));
                     state.broken = Some(bug);

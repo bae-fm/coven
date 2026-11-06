@@ -287,9 +287,10 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     }
 }
 
-/// A pass that panics ends the loop as a failure the person sees: the last
-/// pass is recorded failed with the bug, the retry the pass took is
-/// answered with it, and a later start fails with it (E15).
+/// A pass that panics ends the loop as a failure the person sees: the bug
+/// sink hears the bug, the last pass is recorded failed with it, and the
+/// retry the pass took and a later start repeat it as `WorkerFailed`, which
+/// the app doesn't report again (E15).
 #[tokio::test]
 async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
     let group = Group::new();
@@ -319,8 +320,8 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
         panic!("the retry heard no failure: {answer:?}");
     };
     let bug = match error.downcast_ref::<SyncError>() {
-        Some(SyncError::Bug(bug)) => bug.clone(),
-        _ => panic!("the retry heard no bug: {error:?}"),
+        Some(SyncError::WorkerFailed(bug)) => bug.clone(),
+        _ => panic!("the retry heard no worker's bug: {error:?}"),
     };
     assert_eq!(bug.operation, "the sync loop");
     assert!(bug.message.starts_with("a read of"), "{bug:?}");
@@ -330,10 +331,10 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
     };
     assert!(shown.contains(&bug.message), "{shown}");
     assert!(
-        matches!(ben_loop.start().await, Err(SyncError::Bug(heard)) if heard == bug),
-        "a later start hears the bug"
+        matches!(ben_loop.start().await, Err(SyncError::WorkerFailed(heard)) if heard == bug),
+        "a later start hears the worker's bug"
     );
-    assert_eq!(group.bugs.take(), [bug], "the app's bug sink heard it too");
+    assert_eq!(group.bugs.take(), [bug], "the app's bug sink heard it, once");
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }

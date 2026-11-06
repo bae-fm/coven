@@ -25,7 +25,7 @@
 //! answers every waiting request `NotSyncing`. A pass that ends without
 //! answering the requests it took, because it panicked or was dropped,
 //! leaves them waiting again; an owner that panicked stops sync and answers
-//! every waiting request with its bug (E15).
+//! every waiting request with its bug, as `SyncError::WorkerFailed` (E15).
 //!
 //! A failed write has failed the store's handle, which every call and live
 //! query then reports, and no later step can commit; the requests waiting
@@ -270,6 +270,7 @@ fn failed(error: &DbError) -> RetryOutcome {
         DbError::RollbackFailed => DbError::RollbackFailed,
         DbError::CheckpointFailed(cause) => DbError::CheckpointFailed(cause.clone()),
         DbError::WallTimer(cause) => DbError::WallTimer(cause.clone()),
+        DbError::StoreFailed(bug) => DbError::StoreFailed(bug.clone()),
         DbError::Shutdown(shutdown) => DbError::Shutdown(*shutdown),
         DbError::Bug(bug) => DbError::Bug(bug.clone()),
         _ => DbError::Invariant { what: "a retry step fails only as its handle or runtime does" },
@@ -400,9 +401,10 @@ impl RetryWaits {
         Ok(())
     }
 
-    /// The connection's owner panicked with `bug`, so no pass follows a
-    /// waiting request: sync stops, and each request, those the panicking
-    /// pass took among them, is answered `Failed` with the bug (E15).
+    /// The connection's owner panicked with `bug`, which the sink heard, so
+    /// no pass follows a waiting request: sync stops, and each request,
+    /// those the panicking pass took among them, is answered `Failed` with
+    /// `SyncError::WorkerFailed` carrying the bug (E15).
     pub async fn sync_panicked(
         self: &Arc<Self>,
         bug: coven_foundation::task::Bug,
@@ -413,7 +415,7 @@ impl RetryWaits {
                 |_, requests, _| std::mem::take(&mut requests.waiting),
             )
             .await?;
-        let error = crate::SyncError::Bug(bug).into();
+        let error = crate::SyncError::WorkerFailed(bug).into();
         answer(waiting, &PassFailure::Failed { error }.into());
         Ok(())
     }

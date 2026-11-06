@@ -142,7 +142,8 @@ impl<'a> WriteTransaction<'a> {
             database.batch("COMMIT")?;
             // The write took effect, whatever follows, so it returns as
             // committed. A panic telling the handle's live queries may have
-            // left one untold of it, so it fails the handle (E15).
+            // left one untold of it, so it fails the handle, and the call
+            // running the write returns the bug (E15).
             let told = caught_sync("tell the live queries of a commit", || {
                 if let Some(checkpoints) = &database.checkpoints {
                     checkpoints.committed();
@@ -158,7 +159,7 @@ impl<'a> WriteTransaction<'a> {
                 database.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
             });
             if let (Err(bug), Some(handle)) = (told, &database.handle) {
-                handle.fail_after_panic(bug);
+                handle.fail_with_bug(bug);
             }
             Ok(result)
         });

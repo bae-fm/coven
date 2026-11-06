@@ -247,7 +247,8 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
 
 /// The first pass's connection panics while the person's retry waits for
 /// it: the app's bug sink hears the bug, the last pass shows it, and the
-/// retry is answered with it (E15).
+/// retry is answered with it as `WorkerFailed`, which the app doesn't report
+/// again (E15).
 #[tokio::test]
 async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
     let f = Fixture::new().await;
@@ -272,7 +273,7 @@ async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
         panic!("the retry heard no failure: {answer:?}");
     };
     assert!(
-        matches!(error.downcast_ref::<SyncError>(), Some(SyncError::Bug(heard)) if *heard == bug),
+        matches!(error.downcast_ref::<SyncError>(), Some(SyncError::WorkerFailed(heard)) if *heard == bug),
         "{error:?}"
     );
     assert_eq!(f.bugs.take(), std::slice::from_ref(&bug));

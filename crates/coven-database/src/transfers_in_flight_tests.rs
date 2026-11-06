@@ -348,10 +348,13 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
 
 /// An attempt that ends after its file's entry went fails the store's
 /// handle with the bug instead of panicking: it ends as it drops, perhaps
-/// during an unwind (api.md E15).
+/// during an unwind. Dropped outside any of the store's calls, as on the
+/// upload worker's task, the bug goes to the bug sink, and later calls
+/// repeat it as `StoreFailed` (api.md E15).
 #[test]
 fn an_attempt_whose_entry_is_gone_fails_the_handle() {
-    let handle = crate::observation::CommitObserver::new();
+    let bugs = coven_foundation::task::HeardBugs::shared();
+    let handle = crate::observation::CommitObserver::new(bugs.clone());
     let transfers = super::TransfersInFlight::new(handle.clone());
     let uploads = transfers.uploads();
     let object = ObjectId(uuid::Uuid::from_u128(1));
@@ -360,9 +363,10 @@ fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     let attempt = uploads.start(DeviceId(1), object, vec![file], progress);
     uploads.state().objects.remove(&object);
     drop(attempt);
+    let heard = bugs.take();
     assert!(
-        matches!(handle.error(), Some(crate::DbError::Bug(bug)) if bug.operation == "end a transfer in flight"),
-        "{:?}",
+        matches!(handle.error(), Some(crate::DbError::StoreFailed(bug)) if heard == [bug.clone()] && bug.operation == "end a transfer in flight"),
+        "{:?}, heard {heard:?}",
         handle.error()
     );
 }

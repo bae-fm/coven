@@ -49,13 +49,15 @@ mod fixture {
         })
         .unwrap();
         crate::transfers_in_flight::TransfersInFlight::new(
-            crate::observation::CommitObserver::new(),
+            crate::observation::CommitObserver::new(coven_foundation::task::HeardBugs::shared()),
         )
         .register(&db)
         .unwrap();
-        crate::network_facts::NetworkFacts::new(crate::observation::CommitObserver::new())
-            .register(&db)
-            .unwrap();
+        crate::network_facts::NetworkFacts::new(crate::observation::CommitObserver::new(
+            coven_foundation::task::HeardBugs::shared(),
+        ))
+        .register(&db)
+        .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;").unwrap();
         let schema = crate::internal_schema::initial_schema();
         let mut migration = Batch::new(&db, &schema);

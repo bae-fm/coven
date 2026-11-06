@@ -1,7 +1,7 @@
 //! The file names one open store reserves while their bytes wait for a
 //! write (Appendix C.3).
 
-use crate::observation::{CommitObserver, HandleFailure};
+use crate::observation::CommitObserver;
 use crate::DbError;
 use coven_foundation::files::FileName;
 use coven_foundation::locks::lock_unpoisoned;
@@ -32,18 +32,19 @@ impl ReservedNames {
     /// whole whatever the check finds, and the lock is taken as it is. A name
     /// that isn't reserved was released by another holder, so the set no
     /// longer says which bytes removals must skip: the store's handle fails
-    /// with the bug. Holders release as they drop, perhaps during an unwind,
-    /// so this never panics.
+    /// with the bug, which goes to the call releasing them or the bug sink
+    /// (E15). Holders release as they drop, perhaps during an unwind, so
+    /// this never panics.
     pub(crate) fn release<'a>(&self, names: impl IntoIterator<Item = &'a FileName>) {
         let unreserved = {
             let mut reserved = lock_unpoisoned(&self.names);
             names.into_iter().filter(|name| !reserved.remove(*name)).count()
         };
         if unreserved > 0 {
-            self.handle.fail(HandleFailure::Bug(Bug {
+            self.handle.fail_with_bug(Bug {
                 operation: "release reserved file names",
                 message: format!("{unreserved} released names were not reserved"),
-            }));
+            });
         }
     }
 

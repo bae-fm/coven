@@ -82,8 +82,9 @@ impl UploadRetryAnswer {
 /// Why the upload worker ended, which each app retry from then on hears.
 #[derive(Debug)]
 pub(super) enum WorkerEnd {
-    /// It panicked: a bug.
-    Bug(coven_foundation::task::Bug),
+    /// It panicked with this bug, which the store's bug sink heard: each
+    /// retry hears it as `SyncError::WorkerFailed` (E15).
+    Panicked(coven_foundation::task::Bug),
     /// The store closed under it.
     Closed,
     /// What it watches failed, as when the handle fails, with one shared
@@ -92,9 +93,10 @@ pub(super) enum WorkerEnd {
 }
 
 impl WorkerEnd {
-    fn of(error: SyncError) -> Self {
+    /// The end of a worker that stopped on `error`, the failure of what it
+    /// watches.
+    pub(super) fn of(error: SyncError) -> Self {
         match error {
-            SyncError::Bug(bug) => Self::Bug(bug),
             SyncError::Database(DbError::StoreClosed) => Self::Closed,
             error => {
                 let (failure, source) = error.into_shared();
@@ -105,7 +107,7 @@ impl WorkerEnd {
 
     fn error(&self) -> SyncError {
         match self {
-            Self::Bug(bug) => SyncError::Bug(bug.clone()),
+            Self::Panicked(bug) => SyncError::WorkerFailed(bug.clone()),
             Self::Closed => DbError::StoreClosed.into(),
             Self::Failed(failure, source) => {
                 SyncError::Failed { failure: *failure, source: source.clone() }
@@ -228,7 +230,8 @@ impl Run<'_> {
 
 impl FilesInner {
     /// Queue an app retry for the upload worker, and wake it. A worker that
-    /// panicked serves none: the retry fails with its bug.
+    /// panicked serves none: the retry fails with its bug, as
+    /// `SyncError::WorkerFailed`.
     pub(super) fn ask_retry(&self) -> Result<UploadRetryAnswer, SyncError> {
         let (reply, answer) = oneshot::channel();
         {
@@ -247,12 +250,12 @@ impl FilesInner {
         Ok(UploadRetryAnswer(answer))
     }
 
-    /// The upload worker ended with `error`, its panic's bug or the failure
-    /// of what it watches: no run will serve an app retry, so each waiting
-    /// one is answered with it, as each asked from now on is (E15).
-    pub(super) fn worker_ended(&self, error: SyncError) {
+    /// The upload worker ended, on a panic or on the failure of what it
+    /// watches: no run will serve an app retry, so each waiting one is
+    /// answered with why, as each asked from now on is (E15).
+    pub(super) fn worker_ended(&self, end: WorkerEnd) {
         let mut retries = lock_unpoisoned(&self.app_retries);
-        let ended = self.worker_ended.get_or_init(|| WorkerEnd::of(error));
+        let ended = self.worker_ended.get_or_init(|| end);
         for retry in retries.drain(..) {
             #[expect(
                 clippy::let_underscore_must_use,

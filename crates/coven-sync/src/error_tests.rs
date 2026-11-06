@@ -228,6 +228,26 @@ fn storage_and_custody_bugs_are_syncs_bug() {
     assert!(matches!(custody, SyncError::Bug(found) if found == bug));
 }
 
+/// An earlier bug that an error repeats, a worker's or a failed handle's,
+/// carries none for the caller to report: the sink, or the call it
+/// happened in, heard it already. A failed handle stays a database
+/// failure, as its other failures do (api.md E15).
+#[test]
+fn a_repeated_bug_carries_none_to_report() {
+    use coven_foundation::task::{Bug, CarriesBug};
+    let bug = Bug { operation: "the sync loop", message: "it panicked".into() };
+    let worker = SyncError::WorkerFailed(bug.clone());
+    assert_eq!(worker.bug(), None);
+    assert_eq!(worker.local_failure(), crate::LocalFailure::Bug);
+    let handle = SyncError::from(DbError::StoreFailed(bug.clone()));
+    assert!(
+        matches!(&handle, SyncError::Database(DbError::StoreFailed(found)) if *found == bug),
+        "{handle:?}"
+    );
+    assert_eq!(handle.bug(), None);
+    assert_eq!(SyncError::from(DbError::Bug(bug.clone())).bug(), Some(&bug));
+}
+
 /// A sync step's write keeps the step's own error when its rollback or the
 /// removal of its released bytes fails too: each later failure follows it,
 /// and a database failure stays one database failure (§4, Appendix C.3).

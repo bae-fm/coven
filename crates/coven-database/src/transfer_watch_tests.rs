@@ -29,7 +29,8 @@ async fn next(watch: &mut TransferWatch) -> Vec<TransferChange> {
 /// read are heard as the later one.
 #[tokio::test]
 async fn a_reader_hears_each_file_whose_progress_moved() {
-    let transfers = TransfersInFlight::new(CommitObserver::new());
+    let transfers =
+        TransfersInFlight::new(CommitObserver::new(coven_foundation::task::HeardBugs::shared()));
     let uploads = transfers.uploads();
     let first = uploads.start(DeviceId(1), object(1), vec![file(1)], progress(0, 100));
     let mut watch = uploads.subscribe();
@@ -58,7 +59,8 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
 /// the same file is in flight; of two attempts at once, the newer shows.
 #[tokio::test]
 async fn an_ended_attempt_moves_no_later_one() {
-    let transfers = TransfersInFlight::new(CommitObserver::new());
+    let transfers =
+        TransfersInFlight::new(CommitObserver::new(coven_foundation::task::HeardBugs::shared()));
     let downloads = transfers.downloads();
     let ended = downloads.start(DeviceId(1), object(1), vec![file(1)], progress(0, 100));
     let stale = ended.meter();
@@ -82,7 +84,7 @@ async fn an_ended_attempt_moves_no_later_one() {
 /// Closing the store ends the watch, at its first read too.
 #[tokio::test]
 async fn closing_the_store_ends_the_watch() {
-    let observer = CommitObserver::new();
+    let observer = CommitObserver::new(coven_foundation::task::HeardBugs::shared());
     let transfers = TransfersInFlight::new(observer.clone());
     let mut open = transfers.uploads().subscribe();
     assert_eq!(next(&mut open).await, [TransferChange::Reset(BTreeMap::new())]);

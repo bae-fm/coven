@@ -74,13 +74,13 @@ impl StorageConnections {
     /// The connection attempt panicked with `bug`, which has gone to the
     /// store's bug sink: the last pass is recorded failed with it, sync
     /// stops, and the retries waiting, those the attempt took among them,
-    /// are answered with it (E15).
+    /// are answered with it as `SyncError::WorkerFailed` (E15).
     async fn attempt_panicked(&self, bug: crate::task::Bug) {
         #[expect(
             clippy::let_underscore_must_use,
             reason = "the attempt has ended either way; a failed write has failed the handle, which reports it"
         )]
-        let _ = self.show(LastPass::failed(SyncError::Bug(bug.clone()))).await;
+        let _ = self.show(LastPass::failed(SyncError::WorkerFailed(bug.clone()))).await;
         if let Err(error) = self.waits.sync_panicked(bug).await {
             tracing::debug!("stopping sync on a failed handle: {error}");
         }

@@ -165,7 +165,7 @@ impl DatabaseBuilder {
         let path = self.directory.database_path();
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
-        let observer = CommitObserver::new();
+        let observer = CommitObserver::new(self.directory.bugs().clone());
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let mut writer = DatabaseConnection::open(
@@ -343,7 +343,7 @@ impl DatabaseBuilder {
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
         // Only the cache connection commits, and nothing subscribes to it.
-        let observer = CommitObserver::new();
+        let observer = CommitObserver::new(self.directory.bugs().clone());
         // A read-only handle transfers nothing: every file reads as waiting.
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         // Nor does it watch the network: none is known (api.md E4).

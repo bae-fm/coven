@@ -121,12 +121,20 @@ pub enum SyncError {
     /// (E15). Its category is `LocalFailure::Bug`.
     #[error(transparent)]
     Bug(#[from] coven_foundation::task::Bug),
+    /// The worker this call needs ended on a panic: the sync loop, a
+    /// connection attempt or the upload worker. The store's bug sink heard
+    /// the bug as it happened, so the app shows this and doesn't report it
+    /// again (E15). Its category is `LocalFailure::Bug`.
+    #[error("{0}; it has stopped")]
+    WorkerFailed(coven_foundation::task::Bug),
 }
 
 impl coven_foundation::task::CarriesBug for SyncError {
     fn bug(&self) -> Option<&coven_foundation::task::Bug> {
         match self {
             Self::Bug(bug) => Some(bug),
+            // An earlier bug, which the sink heard as it happened.
+            Self::WorkerFailed(_) => None,
             Self::Database(error) => error.bug(),
             Self::SecureStorage(error) => error.bug(),
             Self::Storage(error) => error.bug(),
@@ -248,7 +256,8 @@ impl SyncError {
             | SyncError::DeviceIdInUse(_)
             | SyncError::Code(_)
             | SyncError::Shutdown(_)
-            | SyncError::Bug(_) => PendingReason::Failed(error.local_failure()),
+            | SyncError::Bug(_)
+            | SyncError::WorkerFailed(_) => PendingReason::Failed(error.local_failure()),
         }
     }
 
@@ -286,7 +295,7 @@ impl SyncError {
             | Self::UpdateRequired(_)
             | Self::Code(_) => crate::LocalFailure::Operation,
             Self::Shutdown(_) => crate::LocalFailure::Shutdown,
-            Self::Bug(_) => crate::LocalFailure::Bug,
+            Self::Bug(_) | Self::WorkerFailed(_) => crate::LocalFailure::Bug,
         }
     }
 
@@ -302,6 +311,7 @@ impl SyncError {
                 | Self::Failed { .. }
                 | Self::Shutdown(_)
                 | Self::Bug(_)
+                | Self::WorkerFailed(_)
         ) && crate::PendingReason::Failed(self.local_failure()).clears()
             == Some(crate::pending::Clears::ByItself)
     }

@@ -301,7 +301,7 @@ impl Files {
             upload_worker(Arc::downgrade(&inner), stop.subscribe(), uploads_changes),
             |bug| async move {
                 if let Some(owner) = owner.upgrade() {
-                    owner.worker_ended(SyncError::Bug(bug));
+                    owner.worker_ended(file_upload_pool::WorkerEnd::Panicked(bug));
                 }
             },
         );
@@ -437,7 +437,7 @@ async fn upload_worker(
     // No run serves an app retry once the worker has ended, so each waiting
     // one, and each asked after, hears why.
     if let (Some(ended), Some(owner)) = (ended, owner.upgrade()) {
-        owner.worker_ended(ended);
+        owner.worker_ended(file_upload_pool::WorkerEnd::of(ended));
     }
 }
 

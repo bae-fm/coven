@@ -800,11 +800,13 @@ fn bundled_sqlite_is_built_without_global_memory_statistics() {
 }
 
 /// The authorizer panics judging a write's statement: its state may be
-/// half-changed, so the handle fails with the bug, and every later call
-/// reports it (E15).
+/// half-changed, so the handle fails with the bug. The write returns it as
+/// its own, and every later call repeats it as `StoreFailed`; the bug sink
+/// hears nothing, since the write's caller reports it (E15).
 #[tokio::test]
 async fn a_panicking_authorizer_fails_the_handle_with_its_bug() {
-    let store = TestStore::new();
+    let bugs = coven_foundation::task::HeardBugs::shared();
+    let store = TestStore::reporting_to(bugs.clone());
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.inspect_writer(|writer| writer.panic_next_authorization());
     let failed = db
@@ -821,19 +823,24 @@ async fn a_panicking_authorizer_fails_the_handle_with_its_bug() {
     assert_eq!(bug.operation, "authorize a statement");
     assert_eq!(bug.message, "the authorizer's state is past repair");
     assert!(
-        matches!(db.read(|_| Ok(())).await, Err(DbError::Bug(later)) if later == *bug),
-        "a later call reports the bug"
+        matches!(db.read(|_| Ok(())).await, Err(DbError::StoreFailed(later)) if later == *bug),
+        "a later call repeats the bug"
     );
-    assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::Bug(_))));
+    assert!(
+        matches!(db.write(|_| Ok(())).await, Err(DbError::StoreFailed(later)) if later == *bug)
+    );
+    assert!(bugs.take().is_empty(), "the write's caller reports the bug, not the sink");
 }
 
 /// A panic after SQLite committed a write, before the handle's live queries
 /// heard of it: a live query may be untold of the commit, so the handle
-/// fails with the bug, and the write and every later call return it. The
-/// write's changes stay committed (E15).
+/// fails with the bug. The write returns it as its own, and every later
+/// call repeats it as `StoreFailed`. The write's changes stay committed
+/// (E15).
 #[tokio::test]
 async fn a_panic_after_commit_fails_the_handle_and_keeps_the_write() {
-    let store = TestStore::new();
+    let bugs = coven_foundation::task::HeardBugs::shared();
+    let store = TestStore::reporting_to(bugs.clone());
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.test_on_write_checkpoint(|point| {
         if point == crate::test_utils::WriteCheckpoint::Committed {
@@ -856,9 +863,10 @@ async fn a_panic_after_commit_fails_the_handle_and_keeps_the_write() {
     assert_eq!(bug.operation, "tell the live queries of a commit");
     assert_eq!(bug.message, "the live queries' list is torn");
     assert!(
-        matches!(db.read(|_| Ok(())).await, Err(DbError::Bug(later)) if later == *bug),
-        "a later call reports the bug"
+        matches!(db.read(|_| Ok(())).await, Err(DbError::StoreFailed(later)) if later == *bug),
+        "a later call repeats the bug"
     );
+    assert!(bugs.take().is_empty(), "the write's caller reports the bug, not the sink");
     drop(db);
     let notes: i64 = rusqlite::Connection::open(store.database_path())
         .unwrap()
@@ -910,8 +918,10 @@ async fn a_panicking_write_hook_rolls_the_write_back_with_its_bug() {
 }
 
 /// A panic while the handle's live-query state was held may have left a
-/// query untold of a commit: the handle fails with the bug, and a live
-/// query hears it as its last result (E15).
+/// query untold of a commit: the handle fails with a bug naming that state,
+/// which the call that found it and a live query repeat as `StoreFailed`,
+/// the query as its last result. The panic itself reached whatever ran it,
+/// so the sink hears nothing (E15).
 #[tokio::test]
 async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     let store = TestStore::new();
@@ -923,9 +933,9 @@ async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     db.observer.test_poison();
     assert!(matches!(
         db.read(|_| Ok(())).await,
-        Err(DbError::Bug(bug)) if bug.operation == "the store's live queries"
+        Err(DbError::StoreFailed(bug)) if bug.operation == "the store's live queries"
     ));
-    assert!(matches!(query.next().await, Some(Err(DbError::Bug(_)))));
+    assert!(matches!(query.next().await, Some(Err(DbError::StoreFailed(_)))));
     assert!(query.next().await.is_none());
 }
 

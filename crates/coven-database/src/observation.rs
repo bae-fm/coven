@@ -6,8 +6,9 @@ use crate::scope_lookup::Lookups;
 use crate::sql_value::SqlValue;
 use crate::{CommitScope, DbError};
 use coven_foundation::locks::lock_unpoisoned;
-use coven_foundation::task::Bug;
+use coven_foundation::task::{Bug, BugSinkRef};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, Weak},
 };
@@ -108,8 +109,9 @@ pub(crate) enum HandleFailure {
     Checkpoint(Arc<DbError>),
     /// The handle's clock could not wait for an invite's expiry (§13.2).
     WallTimer(coven_foundation::clock::WallTimerError),
-    /// A panic while a lock on this store's state was held may have left
-    /// that state half-changed (E15).
+    /// A bug, a panic or a fault a drop found, may have left this store's
+    /// state wrong (E15). It reached its one reporter as it happened, so
+    /// the calls after it repeat it as `DbError::StoreFailed`.
     Bug(Bug),
 }
 
@@ -120,7 +122,7 @@ impl HandleFailure {
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
             Self::WallTimer(cause) => DbError::WallTimer(cause.clone()),
-            Self::Bug(bug) => DbError::Bug(bug.clone()),
+            Self::Bug(bug) => DbError::StoreFailed(bug.clone()),
         }
     }
 }
@@ -373,6 +375,25 @@ struct ObserverState {
     failure: Option<HandleFailure>,
 }
 
+thread_local! {
+    /// The store call this thread runs, if any, and the bug its own work
+    /// failed that store's handle with (E15).
+    // Clippy asks for a `const` initializer this already has where the
+    // target has no native thread locals, as Android: std builds those
+    // from a function, which the lint reads as the initializer.
+    #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
+    static CALL: RefCell<Option<Call>> = const { RefCell::new(None) };
+}
+
+/// One of a handle's calls running on this thread.
+struct Call {
+    /// The handle the call is on, by its state's address.
+    handle: usize,
+    /// The first bug the call's work failed the handle with, which the call
+    /// returns as its own.
+    bug: Option<Bug>,
+}
+
 /// The bug of `what`, a lock's state, which a panic while it was held may
 /// have left half-changed.
 fn half_changed(what: &'static str) -> Bug {
@@ -416,16 +437,19 @@ impl Drop for ObserverState {
 #[derive(Clone)]
 pub(crate) struct CommitObserver {
     state: Arc<Mutex<ObserverState>>,
+    /// Where a bug that fails the handle outside its calls goes (E15).
+    bugs: BugSinkRef,
 }
 
 impl CommitObserver {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(bugs: BugSinkRef) -> Self {
         Self {
             state: Arc::new(Mutex::new(ObserverState {
                 subscriptions: Vec::new(),
                 closed: false,
                 failure: None,
             })),
+            bugs,
         }
     }
 
@@ -589,14 +613,78 @@ impl CommitObserver {
     }
 
     /// Fail the handle with `bug`, a panic in work that may have held its
-    /// state. The handle fails with the panic's own bug, not the one a
-    /// poisoned lock would name.
-    pub(crate) fn fail_after_panic(&self, bug: Bug) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
-            self.state.clear_poison();
-            poisoned.into_inner()
-        });
-        state.fail(HandleFailure::Bug(bug));
+    /// state or a fault a drop found in it. The handle fails with this bug,
+    /// not the one a poisoned lock would name. The bug goes to one
+    /// reporter: the handle's call this thread runs, which returns it as
+    /// its own (`calling`), or the store's bug sink, outside such a call or
+    /// once the call has a bug of its own already (E15).
+    pub(crate) fn fail_with_bug(&self, bug: Bug) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+                self.state.clear_poison();
+                poisoned.into_inner()
+            });
+            state.fail(HandleFailure::Bug(bug.clone()));
+        }
+        let handle = self.id();
+        // A drop as this thread ends finds its locals gone: no call runs.
+        let unclaimed = CALL
+            .try_with(|call| match call.borrow_mut().as_mut() {
+                Some(call) if call.handle == handle && call.bug.is_none() => {
+                    call.bug = Some(bug.clone());
+                    None
+                }
+                _ => Some(bug.clone()),
+            })
+            .unwrap_or(Some(bug));
+        if let Some(bug) = unclaimed {
+            self.report(&bug);
+        }
+    }
+
+    /// Run `call`, one of this handle's calls, on this thread. Beside its
+    /// result comes the bug its own work failed the handle with, if any,
+    /// which the call returns as its own (E15). A call that unwinds leaves
+    /// that bug to the sink: its panic is the call's bug then. A call made
+    /// inside another on the same handle is part of it, and leaves its bug
+    /// to the outer one, which the app hears from.
+    pub(crate) fn calling<R>(&self, call: impl FnOnce() -> R) -> (R, Option<Bug>) {
+        let handle = self.id();
+        if CALL
+            .with(|running| running.borrow().as_ref().is_some_and(|outer| outer.handle == handle))
+        {
+            return (call(), None);
+        }
+        /// Restores the call this one runs inside, if any, as it ends.
+        struct CallScope<'a> {
+            outer: Option<Call>,
+            observer: &'a CommitObserver,
+        }
+        impl Drop for CallScope<'_> {
+            fn drop(&mut self) {
+                let ended = CALL.with(|call| call.replace(self.outer.take()));
+                if let Some(bug) = ended.and_then(|ended| ended.bug) {
+                    self.observer.report(&bug);
+                }
+            }
+        }
+        let outer = CALL.with(|running| running.replace(Some(Call { handle, bug: None })));
+        let scope = CallScope { outer, observer: self };
+        let result = call();
+        let bug =
+            CALL.with(|running| running.borrow_mut().as_mut().and_then(|call| call.bug.take()));
+        drop(scope);
+        (result, bug)
+    }
+
+    /// Hand `bug`, which no call returns, to the store's bug sink (E15).
+    pub(crate) fn report(&self, bug: &Bug) {
+        coven_foundation::task::report(self.bugs.as_ref(), bug);
+    }
+
+    /// This handle, as `CALL` names it.
+    fn id(&self) -> usize {
+        Arc::as_ptr(&self.state) as usize
     }
 
     pub(crate) fn close(&self) {
@@ -630,3 +718,7 @@ impl CommitObserver {
         change(&mut state)
     }
 }
+
+#[cfg(test)]
+#[path = "observation_tests.rs"]
+mod tests;

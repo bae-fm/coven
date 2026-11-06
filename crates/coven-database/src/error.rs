@@ -21,6 +21,8 @@ impl CarriesBug for DbError {
                 operation.bug().or_else(|| cleanup.bug())
             }
             Self::Closing { failures } => failures.iter().find_map(DbError::bug),
+            // An earlier bug, which reached its one reporter as it happened.
+            Self::StoreFailed(_) => None,
             _ => None,
         }
     }
@@ -110,6 +112,13 @@ pub enum DbError {
     /// write.
     #[error(transparent)]
     Bug(#[from] coven_foundation::task::Bug),
+    /// An earlier bug may have left this handle's state wrong, so the
+    /// handle failed with it, and every call and live query fails with it
+    /// until the store is reopened (E15). The call whose work hit the bug
+    /// returned it as `Bug`, or the store's bug sink heard it, so the app
+    /// shows this and doesn't report it again.
+    #[error("the store's handle failed on an earlier bug; reopen the store: {0}")]
+    StoreFailed(coven_foundation::task::Bug),
     /// SQLite refused or failed a statement, preserving its error.
     #[error(transparent)]
     Sqlite(rusqlite::Error),

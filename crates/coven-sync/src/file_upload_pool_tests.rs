@@ -247,9 +247,10 @@ async fn a_metered_network_holds_trailing_uploads_until_it_is_unmetered() {
     f.close().await;
 }
 
-/// The upload worker panics as Ben's photo starts uploading: his app's
-/// early retry hears the bug instead of waiting for a run that never
-/// comes, and so does a retry asked after it (E15).
+/// The upload worker panics as Ben's photo starts uploading: the bug sink
+/// hears the bug, and his app's early retry hears it as `WorkerFailed`
+/// instead of waiting for a run that never comes, as does a retry asked
+/// after it (E15).
 #[tokio::test]
 async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -263,16 +264,16 @@ async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
     let answered = tokio::time::timeout(HANG_GUARD, f.files.retry_uploads_now())
         .await
         .expect("the retry is answered");
-    let Err(SyncError::Bug(bug)) = answered else {
-        panic!("the retry heard no bug: {answered:?}");
+    let Err(SyncError::WorkerFailed(bug)) = answered else {
+        panic!("the retry heard no worker's bug: {answered:?}");
     };
     assert_eq!(bug.operation, "the upload worker");
     assert!(bug.message.starts_with("the upload of"), "{bug:?}");
     assert!(
-        matches!(f.files.retry_uploads_now().await, Err(SyncError::Bug(later)) if later == bug),
-        "a later retry hears the bug"
+        matches!(f.files.retry_uploads_now().await, Err(SyncError::WorkerFailed(later)) if later == bug),
+        "a later retry hears the worker's bug"
     );
-    assert_eq!(f.bugs.take(), [bug], "the app's bug sink heard it too");
+    assert_eq!(f.bugs.take(), [bug], "the app's bug sink heard it, once");
     f.close().await;
 }
 
