@@ -623,6 +623,7 @@ mod source {
                     | "snapshot_preparation.rs"
                     | "snapshot_staging.rs"
                     | "sql_versions.rs"
+                    | "staged_damage.rs"
                     | "write_rows.rs"
                     | "write_schema.rs"
             ),
