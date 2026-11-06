@@ -7191,13 +7191,23 @@ condition in the session, because a retry must not overwrite a competing floor.
   attempt aborts each one before starting another, and the abort of an upload
   no file waits for does the same (Appendix E.10). Without the plan, those
   parts would stay in her bucket for as long as the phone lives.
+  - The row marks the plan before the request that may start the upload, and
+    only once the connection has admitted that request: no provider cooldown
+    is live and the destination may be published (§5.4). A plan never marked
+    has nothing at its name, whatever stopped the attempt first: a crash, a
+    pause, a failed read or a refusal that sent nothing. The next attempt goes
+    on from it, and an abort forgets it, with no request, wherever the name is.
   - On OneDrive the plan names the temporary, and on CloudKit the upload
     record, which the next attempt finds again; a OneDrive session whose start
     reply was lost holds no item and expires (Appendix E.2).
   - Where an S3 name is shared, a slot or the floor on a profile that completes
-    in place, nothing tells this device's upload from another's: coven reports
-    `SessionIdentityUnknown`, and the upload is ended once it can never publish
-    (§17.10).
+    in place, nothing tells this device's upload from another's. A marked plan
+    there reports `SessionIdentityUnknown`, and the upload is ended once it can
+    never publish (§17.10). An unmarked one goes on. Ben's laptop records the
+    plan of its claim on slot 41, in a store on R2, and a provider cooldown
+    refuses the first part before anything is sent: the plan stays unmarked,
+    and the next pass sends the claim. Without the mark, a claim stopped
+    before its first part could never be sent.
   - A Dropbox session's start is itself the request that begins it, and no
     route lists one, so a plan would name nothing there; Dropbox discards the
     session 7 days after it began.
@@ -10608,20 +10618,24 @@ object, or the floor. That reserved place is distinct from every coven path.
 
 **Session records.** Every S3 session is recorded with its name before its native
 multipart upload exists. The first part starts the native upload, and the record
-then gains the native id, saved with that part.
+then gains the native id, saved with that part. Before that part's request, once
+the connection has admitted it (§17.9), the record is marked: from then on an
+upload may exist at the name. A record never marked names none.
 
-- A record without the native id may name an upload that exists: one whose
-  start's reply was lost, or one started before the device stopped. Resuming or
-  aborting such a record at a name the device alone uses (next) first aborts
-  every unfinished upload at that name, then starts over from the name.
+- A marked record without the native id may name an upload that exists: one
+  whose start's reply was lost, or one started before the device stopped.
+  Resuming or aborting such a record at a name the device alone uses (next)
+  first aborts every unfinished upload at that name, then starts over from the
+  name, unmarked. An unmarked record resumes, and its abort ends nothing, with
+  no request, at any name.
 - Recovery may abort only uploads proven to belong to that session. A name the
   device alone uses proves it: a copy profile's private staging name, or a
   destination under the device's own file or snapshot folders, which only one
   upload of that device ever targets. A shared slot or floor path doesn't
   establish ownership. Ending dead sessions (below) rests on something else:
   not whose a session is, but that it can never publish.
-- At a shared path the native id can't be recovered: coven reports
-  `SessionIdentityUnknown` and keeps the journal until provider evidence
+- At a shared path the native id of a marked record can't be recovered: coven
+  reports `SessionIdentityUnknown` and keeps the journal until provider evidence
   settles cleanup.
 - Aborting never deletes a destination. It ends another claimant's session only
   once that session can never publish (below).
@@ -11476,7 +11490,8 @@ Write-ups explain each model and state its assumptions:
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.9 |
 | An upload going up in parts records only parts the provider holds, so the progress the app is shown is never ahead of them; the part an attempt sends next is the first the provider lacks, and the provider gets no part twice and publishes every part once, in order, after any crashes, failed attempts and expired sessions | `steps_good`, `progress_never_ahead`, `next_part_new`, `held_nodup`, `published_whole` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | A crash forgets only memory, and every session the provider holds stays; after it, a session the provider still has continues from the parts it holds, and one it expired starts over with a new plan; no step changes the location, key or chunk hashes | `crash_keeps`, `resume_continues`, `expired_starts_over`, `steps_keep_fixed` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
-| A session is begun only once its plan is recorded; a session begun but never named, after a lost begin reply or a stop before the record, sits at the place of the plan the row records, and the attempt's first request, an abort, and the next run that fails nothing each end every such session | `begin_needs_plan`, `steps_stray_le`, `stray_named`, `open_sweeps`, `abort_sweeps`, `next_run_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
+| A session is begun only once its plan is recorded and marked, and only the step before that request marks a plan; a session begun but never named, after a lost begin reply or a stop before the record, sits at the place of the marked plan the row records, and where that place is the device's own, the attempt's first request, an abort, and the next run that fails nothing each end every such session | `begin_needs_plan`, `only_mark_marks`, `steps_stray_le`, `stray_named`, `open_sweeps`, `abort_sweeps`, `next_run_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
+| A plan never marked has nothing at its place, so at any place its attempt goes on from it and its abort forgets it; a marked plan at a shared place fails, never to retry, attempt and abort alike | `unmarked_resumes`, `unmarked_aborts`, `marked_shared_never`, `abort_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
 | What a row records is forgotten only by aborting it, which ends the provider's session and every session begun at its plan's place; an upload retires only once it records nothing, so it retires with no session left; a failed abort keeps the upload queued with what it records, as its failure | `forgotten_by_abort`, `retire_needs_no_session`, `retired_no_session`, `failed_abort_queued` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | Uploads retry by class: a failure waits as its class says, an attempt starts only when due or covered by the app's retry, and an abort only once its wait is over; a delay ends only when it passes and a connection wait only on a new connection; a `Never` failure is never retried, by automatic work or the app | `failure_waits_by_class`, `start_needs_due`, `abort_needs_ready`, `wait_ends`, `never_retried` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
@@ -11656,7 +11671,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Failed(LocalFailure::Bug)` | coven's own code broke its rule or panicked; the work retries under backoff and fails again until the bug is fixed | api.md E15 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
-| `SessionIdentityUnknown` | an S3 upload session at a shared path lost its native id | E.10 |
+| `SessionIdentityUnknown` | an S3 upload session at a shared path may have started an upload whose native id it lost | E.10 |
 
 Which sync state each fact names (§19.1). With several, the state is the first
 of removed, device needs reset, update needed, signed out, no access, folder

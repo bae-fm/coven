@@ -256,15 +256,16 @@ upload going up in parts (coven.md §17.9): the provider's live session, with th
 parts it holds in the order they arrived, the sessions it began that the row
 never named, and the published object; the queue row, with whether a file
 still waits for it, what it records of its session (nothing, a plan naming
-where the next session will be, or the session with its confirmed parts), its
-pending failure and what that failure waits for; and the attempt this process
-is running, in memory only. A part is its index. The steps are the upload
+where the next session will be, marked or not, or the session with its
+confirmed parts), its pending failure and what that failure waits for; the
+attempt this process is running, in memory only; and whether the upload's
+place is the device's own. A part is its index. The steps are the upload
 worker's: start an attempt when the upload is due, resume the recorded session
-or record a plan, begin the planned session, record a session, send a part,
-publish, complete, fail with a class, crash, abort and forget what an upload no
-file waits for records, and retire one that records nothing. The provider may
-lose the reply to a begin or a part, drop a part, expire its sessions or lose
-the completion reply.
+or record a plan, mark the plan, begin the planned session, record a session,
+send a part, publish, complete, fail with a class, stop for a pause, crash,
+abort and forget what an upload no file waits for records, and retire one that
+records nothing. The provider may lose the reply to a begin or a part, drop a
+part, expire its sessions or lose the completion reply.
 
 `steps_good` carries one invariant through every step. The provider's session
 holds parts `0 … n-1` in order (`held_nodup`), and the published object is
@@ -280,15 +281,23 @@ one it expired starts over with a new plan (`expired_starts_over`). No step
 changes the location, key and chunk hashes the staging write fixed
 (`steps_keep_fixed`).
 
-The row records a plan before the provider begins a session
-(`begin_needs_plan`). A session begun whose name the row never recorded,
-because the begin's reply was lost or the process stopped before the record,
-is a stray, and only those steps leave one (`steps_stray_le`). Every stray sits
-at the place of the plan the row still records (`stray_named`), so the
-attempt's first request ends them all before anything else (`open_sweeps`), as
-does the abort of an upload no file waits for (`abort_sweeps`), and the
-upload's next run on a provider that fails nothing leaves none
-(`next_run_sweeps`). What a row records is forgotten only by aborting it,
+The row records a plan before the provider begins a session, and marks it
+before the request that may begin it (`begin_needs_plan`). Only that step marks
+a plan, so a failure, a refused request, a pause or a crash before it leaves
+the plan unmarked (`only_mark_marks`). A session begun whose name the row never
+recorded, because the begin's reply was lost or the process stopped before the
+record, is a stray, and only those steps leave one (`steps_stray_le`). Every
+stray sits at the place of the marked plan the row still records
+(`stray_named`). Where that place is the device's own, the attempt's first
+request ends them all before anything else (`open_sweeps`), as does the abort
+of an upload no file waits for (`abort_sweeps`), and the upload's next run on a
+provider that fails nothing leaves none (`next_run_sweeps`). An unmarked plan
+has nothing at its place, so wherever it is, the attempt goes on from it
+(`unmarked_resumes`) and the abort forgets it (`unmarked_aborts`). A marked
+plan at a shared place may have begun a session nothing tells from another
+device's: the attempt fails, never to retry (`marked_shared_never`), and so
+does the abort (`abort_sweeps`). What a row records is forgotten only by
+aborting it,
 which ends the provider's session and every stray first
 (`forgotten_by_abort`), and an upload retires only once it records nothing
 (`retire_needs_no_session`), so it retires with no session left at the
@@ -307,13 +316,14 @@ recorded session.
 The first part goes before the record names the session, as an S3 upload's
 first part starts its native upload (coven.md Appendix E.10); a failure then
 records the session the attempt holds. Ending the sessions at a plan's place
-assumes the provider can list them there and that they are this upload's
-alone; coven.md §17.9 names the places where that holds. Outside the model are
-the provider's own behaviour, which the model takes as truthful, and the length
-of each delay, which [Clocks](#hybrid-timestamps-and-retry-time) bounds.
-`uploadSessionRunner` runs the worker's runs, `run` in the model, against the
-upload worker over coven-storage's in-memory provider through
-`COVEN_UPLOAD_SESSION_LEAN`:
+assumes the provider can list them there, and that at the device's own place
+they are this upload's alone; coven.md §17.9 and Appendix E.10 name the places
+that are a device's own. Outside the model are the provider's own behaviour,
+which the model takes as truthful, and the length of each delay, which
+[Clocks](#hybrid-timestamps-and-retry-time) bounds. `uploadSessionRunner` runs
+the worker's runs, `run` in the model, against the upload worker over
+coven-storage's in-memory provider through `COVEN_UPLOAD_SESSION_LEAN`, once at
+the device's own place and once at a shared one:
 `files::tests::abandoned_tests::sessions::upload_sessions_match_the_storage_model` in
 coven-sync compares, after each run, the queue row, the parts its session
 records, the provider's live session and its parts, the sessions it began that
