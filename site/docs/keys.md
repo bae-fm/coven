@@ -23,9 +23,7 @@ naming the service fails with `KeyError::ServiceNotRegistered`.
 coven brings the native credential store for each platform it supports: Apple's
 data-protection keychain on macOS and iOS, the Android Keystore, Windows
 Credential Manager, and the Secret Service over D-Bus on Linux. The app doesn't
-install a store itself. On any other platform, keychain custody fails with
-`KeyError::UnsupportedKeyringPlatform`; the other custody choices below still
-work.
+install a store itself. A target without one is refused at compile time.
 
 ## Custody
 

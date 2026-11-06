@@ -54,9 +54,6 @@ pub enum KeyError {
     /// The service name is empty or contains a NUL.
     #[error("keyring service requires a nonempty name without NUL")]
     InvalidServiceName,
-    /// This target has no native credential store implementation.
-    #[error("unsupported keyring platform")]
-    UnsupportedKeyringPlatform,
     /// The person's entries need iCloud Keychain or Block Store: Apple
     /// platforms, or an Android phone with Google Play services.
     #[error("saved restore codes need iCloud Keychain or Block Store")]

@@ -303,9 +303,7 @@ fn store() -> Result<Arc<keyring_core::CredentialStore>, KeyError> {
     target_os = "windows",
     target_os = "linux"
 )))]
-fn store() -> Result<Arc<keyring_core::CredentialStore>, KeyError> {
-    Err(KeyError::UnsupportedKeyringPlatform)
-}
+compile_error!("coven's keychain custody supports macOS, iOS, Android, Windows and Linux only");
 
 #[cfg(test)]
 #[path = "platform_tests.rs"]

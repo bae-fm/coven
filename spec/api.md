@@ -1595,12 +1595,6 @@ pub enum DbError {
         maximum: u64,
     },
 
-    /// Upload attempts must follow this device's queue order (§6.3).
-    UploadNotOldest {
-        /// The write whose upload was requested.
-        write: coven_merge::WriteId,
-    },
-
     /// An upload cannot succeed before its sealing keys have been fixed (§6.3).
     UploadNotAttempted {
         /// The write whose success was reported.
@@ -2067,8 +2061,6 @@ pub enum KeyError {
     MissingKeychainEntitlement(KeychainError),
     /// The service name is empty or contains NUL.
     InvalidServiceName,
-    /// This platform has no native credential store.
-    UnsupportedKeyringPlatform,
 
     /// The person's entries need iCloud Keychain or Block Store: Apple
     /// platforms, or an Android phone with Google Play services.

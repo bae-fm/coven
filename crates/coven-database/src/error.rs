@@ -291,12 +291,6 @@ pub enum DbError {
         /// Its maximum length.
         maximum: u64,
     },
-    /// Upload attempts must follow this device's queue order (§6.3).
-    #[error("write {write:?} is not the oldest waiting upload")]
-    UploadNotOldest {
-        /// The write whose upload was requested.
-        write: coven_merge::WriteId,
-    },
     /// An upload cannot succeed before its sealing keys have been fixed (§6.3).
     #[error("write {write:?} has no recorded upload attempt")]
     UploadNotAttempted {
