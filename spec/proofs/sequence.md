@@ -809,6 +809,22 @@ and moves its coverage forward over them.
   model's body, so the model's theorems don't cover coven's body for such a
   part.
 
+[`SecondRaise`](sequence/CovenSequence/SecondRaise.lean) takes a device that
+joined a circle after its first breaking migration, wrote into it, and runs a
+second one before anyone raised the circle. Its migration captures its writes
+through the new marker, the held write into the circle among them.
+
+- `second_capture_not_body`: capturing the circle, as coven does today,
+  publishes a raise body the device never held: it read the circle's parts
+  converted and never ran the first migration on its rows, so its rows
+  migrated again aren't the circle's rows migrated.
+- `skipped_capture_drops_held`: leaving the circle out sends the held write
+  ahead of the circle's version. Its part is refused, and the raise a holder
+  makes later covers its slot without it.
+
+Neither is right under the rule that only a device that held a circle raises
+it; which device may raise a circle it didn't hold is open.
+
 ## Operations
 
 [`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim,
