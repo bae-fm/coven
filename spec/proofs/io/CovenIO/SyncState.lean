@@ -806,8 +806,9 @@ inductive Event
   as the last finished sync. -/
   | storage (s : Storage) (finished : Option Nat)
   /-- The sync loop, or the attempt to connect that starts it, ends on a
-  failure of its own work or a panic, in a pass or outside one: the last
-  pass shows the failure, nothing moves, and sync stops (api.md E15). -/
+  failure of its own work or a panic, in a pass or outside one, or the
+  upload worker panics: the last pass shows the failure, nothing moves, and
+  sync stops (api.md E15). -/
   | halt (failure : PassFailure)
   /-- Sync starts or stops, a cooldown begins or ends, the app pauses or
   resumes uploads, or turns the setting to transfer only on unmetered
@@ -1076,6 +1077,14 @@ theorem only_setup_changes_storage (f g : Facts) (e : Event) (h : step f e = som
   | finish last now => simp only [step] at h; split at h <;> simp at h; subst h; rfl
   | _ => simp only [step, Option.some.injEq] at h; subst h; rfl
 
+/-- Once sync halts, every queued upload waits with sync not running, never
+for its backoff or its turn: no upload goes out until a start, which a
+panic's halt refuses until the store reopens. -/
+theorem halted_uploads_wait (f g : Facts) (p : PassFailure) (h : step f (.halt p) = some g) :
+    ∀ u, g.uploadWait u = .notSyncing := by
+  simp only [step, Option.some.injEq] at h; subst h
+  intro u; simp [Facts.uploadWait, Facts.heldAll]
+
 /-- The loop's candidate is never above the state shown. -/
 theorem loop_le_state (f : Facts) : f.loop.rank ≤ (state f).rank := by
   by_cases n : f.storage = .none
@@ -1196,6 +1205,11 @@ example : (run connected [.storage .signedOut none, .pending [.removed]]).map st
 and sync stops. -/
 example : (run connected [.begin, .move, .halt .other]).map (fun f => (state f, f.running)) =
     some (.failed, false) := by decide
+
+/-- Carol's upload worker panics while her photo uploads: failed, and the
+photo waits with sync not running. -/
+example : (run connected [.uploads [photo .moving], .halt .other, .uploads [photo .queued]]).map
+    (fun f => (state f, f.uploads.map f.uploadWait)) = some (.failed, [.notSyncing]) := by decide
 
 /-- Ana's pending invite waits for Dan's request: no state of its own. -/
 example : (run connected [.pending [.missing, .paused]]).map state = some .synced := by decide

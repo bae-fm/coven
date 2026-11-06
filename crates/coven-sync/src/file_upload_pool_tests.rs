@@ -280,6 +280,46 @@ async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
     f.close().await;
 }
 
+/// The upload worker's panic halts sync, as the sync loop's does: the last
+/// pass shows the bug, sync stops, and a start fails with the bug until the
+/// store reopens, so Ben's queued photo waits with sync not running beside a
+/// failed state, never as though its turn would come (E15, §19.1, IO
+/// `halted_uploads_wait`).
+#[tokio::test]
+async fn a_panicking_upload_worker_halts_sync() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    crate::record_opened(
+        &f.database,
+        coven_database::RecordedLocation::Connected(coven_storage::CloudProvider::S3),
+        None,
+    )
+    .await
+    .unwrap();
+    let faults = coven_storage::test_utils::Faults {
+        panic_file_uploads: 1,
+        ..coven_storage::test_utils::Faults::none()
+    };
+    f.storage.set_faults(faults).await;
+    f.attach("files", "a", photo(1)).await;
+    f.set_uploads_paused(false).await;
+    let answered = tokio::time::timeout(HANG_GUARD, f.files.retry_uploads_now())
+        .await
+        .expect("the retry is answered");
+    let Err(SyncError::WorkerFailed(bug)) = answered else {
+        panic!("the retry heard no worker's bug: {answered:?}");
+    };
+    let shown = crate::sync_status(&f.database).await.unwrap().state;
+    assert!(matches!(shown, crate::SyncState::Failed(_)), "{shown:?}");
+    assert!(!f.files.inner.waits.started(), "sync stopped");
+    let started = f.files.inner.waits.sync_started().await;
+    assert!(
+        matches!(&started, Err(SyncError::WorkerFailed(heard)) if heard == &bug),
+        "{started:?}"
+    );
+    assert_eq!(f.bugs.take(), [bug], "the app's bug sink heard it, once");
+    f.close().await;
+}
+
 /// Ben's photo's upload is held as it starts, then fails, and the write
 /// recording that failure panics, which fails the run serving Ben's app's
 /// early retry. The worker goes on and sends the bug to the sink, once;

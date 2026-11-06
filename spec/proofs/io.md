@@ -209,8 +209,9 @@ A store's long-lived workers end in one of the model's events. A pass ends
 with `finish`; the sync loop, or the attempt to connect that starts it,
 ending on a failure of its own work or a panic, in a pass or outside one,
 is `halt`: the last pass shows the failure, nothing moves, and sync stops
-(api.md E15). The upload worker's end drops its attempts, an `uploads`
-change. The invite expiry, the network follower and a read-ahead change no
+(api.md E15). The upload worker's panic is `halt` too, with its dropped
+attempts an `uploads` change, and `halted_uploads_wait` proves that after a
+halt every queued upload waits with sync not running. The invite expiry, the network follower and a read-ahead change no
 fact the state reads. `only_setup_changes_storage` proves no event but
 opening, setup or forgetting changes whether storage is set up, so a
 worker's failure never undoes a setup; `failed_worker_shows` proves that

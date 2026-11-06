@@ -120,6 +120,11 @@ impl StorageConnections {
             if superseded() {
                 break;
             }
+            // The upload worker's panic halted sync: the attempt ends as on
+            // its own panic (E15).
+            if let Some(bug) = self.waits.halted() {
+                return self.attempt_panicked(bug).await;
+            }
             // The app's network report ends a wait for the network, and the
             // person's retry any wait (§6.7).
             if let Err(error) =
@@ -155,6 +160,7 @@ impl StorageConnections {
                     () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
                     () = async { if let Some(cooldown) = cooldown { cooldown.await } else { std::future::pending().await } } => {}
                     () = stopped => {}
+                    _ = self.waits.halt() => {}
                     changed = rearmed.changed() => if changed.is_err() { return self.stopped().await },
                     never = parks.parked() => match never {},
                 }

@@ -380,14 +380,20 @@ impl RetryWaits {
     }
 
     /// A started connection will plan: requests wait for its passes, and
-    /// the failure its owner last found still holds them.
-    pub async fn sync_started(self: &Arc<Self>) -> Result<(), DbError> {
-        self.step_as(
-            Step::Start,
-            |state| RetryState { sync: RetrySync::Started { cooling_until: None }, ..state },
-            |_, _, _| (),
-        )
-        .await
+    /// the failure its owner last found still holds them. Once a worker's
+    /// panic has halted sync (`sync_halted`), it fails with that bug as
+    /// `SyncError::WorkerFailed` until the store reopens (E15).
+    pub async fn sync_started(self: &Arc<Self>) -> Result<(), crate::SyncError> {
+        if let Some(bug) = self.halted() {
+            return Err(crate::SyncError::WorkerFailed(bug));
+        }
+        Ok(self
+            .step_as(
+                Step::Start,
+                |state| RetryState { sync: RetrySync::Started { cooling_until: None }, ..state },
+                |_, _, _| (),
+            )
+            .await?)
     }
 
     /// Sync stopped, or no connection will plan: no pass follows a waiting
@@ -402,6 +408,25 @@ impl RetryWaits {
             .await?;
         answer(stopped, &RetryOutcome::NotSyncing);
         Ok(())
+    }
+
+    /// The upload worker, which serves the whole store, panicked with
+    /// `bug`, which the sink heard: sync halts for the rest of this store's
+    /// session, as the connection owner's own panic halts it (E15). The last
+    /// pass shows the bug with nothing moving, sync stops, each waiting
+    /// request hears it as `SyncError::WorkerFailed`, the connection's owner
+    /// ends on it, and every start fails with it until the store reopens.
+    pub async fn sync_halted(
+        self: &Arc<Self>,
+        bug: coven_foundation::task::Bug,
+    ) -> Result<(), DbError> {
+        self.halted.send_replace(Some(bug.clone()));
+        if let Some(database) = &self.database {
+            crate::LastPass::failed(crate::SyncError::WorkerFailed(bug.clone()))
+                .record(database)
+                .await?;
+        }
+        self.sync_panicked(bug).await
     }
 
     /// The connection's owner panicked with `bug`, which the sink heard, so

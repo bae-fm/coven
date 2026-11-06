@@ -9055,9 +9055,14 @@ forever.
 - Each worker's owner ends the work it served, so nothing waits on a worker
   that is gone. The sync loop and a connection attempt do as above, and
   answer every waiting retry with `WorkerFailed`, those the panicking pass
-  took among them. The upload worker answers each waiting
-  `retry_uploads_now` with `WorkerFailed`, and each later one too, as it
-  does with the failure when a failed handle ends it. The invite expiry, the
+  took among them. The upload worker's panic halts sync the same way: the
+  last pass is recorded failed with the bug, sync stops, the connection's
+  owner ends on it, and every retry, `retry_uploads_now` and start fails
+  with `WorkerFailed` until the store reopens. Sync never runs on with
+  writes going out while files stay queued with no worker to send them; the
+  queued files wait with sync not running beside the failed state. When a
+  failed handle ends the upload worker instead, each `retry_uploads_now`
+  hears that failure. The invite expiry, the
   network follower and a read-ahead only report: the next open writes the
   expiries that passed, the network shows as last heard until the store
   closes, and the next read fetches what the read-ahead would have.

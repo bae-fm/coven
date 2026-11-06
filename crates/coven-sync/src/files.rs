@@ -300,8 +300,9 @@ impl Files {
             network,
             UploadSettings::new(),
         ));
-        // A panic in the worker goes to the store's bug sink, and fails the
-        // app retries it would have served.
+        // A panic in the worker goes to the store's bug sink, halts sync
+        // until the store reopens, as the sync loop's own panic does, and
+        // fails the app retries it would have served (E15).
         let owner = Arc::downgrade(&inner);
         let task = coven_foundation::task::spawn_owned(
             "the upload worker",
@@ -309,6 +310,19 @@ impl Files {
             upload_worker(Arc::downgrade(&inner), stop.subscribe(), uploads_changes),
             |bug| async move {
                 if let Some(owner) = owner.upgrade() {
+                    // A failed write has failed the handle, which reports
+                    // it, or its bug goes to the sink.
+                    if let Err(error) = owner.waits.sync_halted(bug.clone()).await {
+                        let error = crate::SyncError::from(error);
+                        if !coven_foundation::task::report_carried(
+                            owner.database.bugs().as_ref(),
+                            &error,
+                        ) {
+                            tracing::debug!(
+                                "halting sync after the upload worker's panic failed: {error}"
+                            );
+                        }
+                    }
                     owner.worker_ended(file_upload_pool::WorkerEnd::Panicked(bug));
                 }
             },

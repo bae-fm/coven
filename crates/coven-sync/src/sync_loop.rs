@@ -346,6 +346,15 @@ async fn panicked(sync: &SequenceSync, bug: coven_foundation::task::Bug) {
     }
 }
 
+/// The upload worker's panic halted sync with `bug`, which the sink heard:
+/// the loop ends as on its own panic, so the last pass shows the bug, even
+/// over a pass that ended since, and later commands hear it as
+/// `SyncError::WorkerFailed` (E15).
+async fn halted(sync: &SequenceSync, bug: coven_foundation::task::Bug) -> LoopEnd {
+    panicked(sync, bug.clone()).await;
+    LoopEnd::Bug(bug)
+}
+
 /// Run the loop, catching a panic in its work while it still holds its
 /// commands and a closer's reply: it records why it ended before it lets
 /// either go, so each hears that, a panic's bug as `WorkerFailed` (E15).
@@ -478,6 +487,7 @@ async fn serve(
             tokio::select! {
                 biased;
                 never = parks.polling() => match never {},
+                bug = sync.waits.halt() => break halted(&sync, bug).await,
                 command = commands.recv() => match command {
                     Some(Command::Start) => {
                         if !started {

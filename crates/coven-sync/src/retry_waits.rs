@@ -58,6 +58,9 @@ pub struct RetryWaits {
     syncing: tokio::sync::watch::Sender<bool>,
     /// The reason last logged for each subject's failure.
     failures: crate::failure_log::FailureLog,
+    /// The bug of a store-wide worker's panic that halted sync for the rest
+    /// of this store's session (`sync_halted`), once one has.
+    halted: tokio::sync::watch::Sender<Option<coven_foundation::task::Bug>>,
 }
 
 /// Hears each wait a failed attempt arms, so an owner waiting on the
@@ -127,6 +130,7 @@ impl RetryWaits {
             requests: Mutex::new(retry_answer::RetryRequests::new()),
             failures: crate::failure_log::FailureLog::new(),
             syncing: tokio::sync::watch::channel(false).0,
+            halted: tokio::sync::watch::channel(None).0,
         };
         for (subject, wait) in waits {
             owner.arm_for(subject, wait.not_before, restart_wait(wait.not_before, now, wait.wait));
@@ -147,6 +151,7 @@ impl RetryWaits {
             requests: Mutex::new(retry_answer::RetryRequests::new()),
             failures: crate::failure_log::FailureLog::new(),
             syncing: tokio::sync::watch::channel(false).0,
+            halted: tokio::sync::watch::channel(None).0,
         }
     }
 
@@ -232,6 +237,28 @@ impl RetryWaits {
     /// a read-only handle never starts.
     pub(crate) fn started(&self) -> bool {
         *self.syncing.borrow()
+    }
+
+    /// The bug that halted sync for the rest of this store's session, if
+    /// one has (`sync_halted`).
+    pub fn halted(&self) -> Option<coven_foundation::task::Bug> {
+        self.halted.borrow().clone()
+    }
+
+    /// Resolves with the bug that halts sync, once one has: the connection's
+    /// owner then ends as on its own panic.
+    pub fn halt(
+        &self,
+    ) -> impl std::future::Future<Output = coven_foundation::task::Bug> + Send + 'static {
+        let mut halted = self.halted.subscribe();
+        async move {
+            let bug = halted.wait_for(Option::is_some).await.ok().and_then(|bug| bug.clone());
+            match bug {
+                Some(bug) => bug,
+                // The sender goes only with the store, and the owner with it.
+                None => std::future::pending().await,
+            }
+        }
     }
 
     /// Changes whenever a failed attempt arms a new wait.
