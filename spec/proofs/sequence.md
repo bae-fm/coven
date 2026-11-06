@@ -54,10 +54,11 @@ Checked counterexamples explain the rules:
 [`Model`](sequence/CovenSequence/Model.lean) abstracts devices,
 members, unique keys, paths, batches, rows, audiences, and admin operations
 other than membership, roles and the store name. Circle renames, access and
-circle membership use `aux`. Authority for membership, store renames and
-store resets is concrete in `Authority`. Other rules remain abstract: who may write to an audience,
-the effect of other operations, the merge, the converter of old-version parts,
-and the database part of a migration.
+circle membership use `aux`. Authority for membership, store renames, store
+resets, circle actions and provider access is concrete in `Authority`. Other
+rules remain abstract: who may write to an audience, the effect of other
+operations, the merge, the converter of old-version parts, and the database
+part of a migration.
 
 For each audience `A`, a device's state has three parts:
 
@@ -365,6 +366,15 @@ without changing entry effects or the ordered ledger.
   equal names, including prefixes with refused renames.
 - `store_reset_authorized`: a store reset requires an admin in that state;
   circle resets and schema raises retain their own audience authority policy.
+- `applied_circle_action_by_member`, `outside_circle_refused`: under
+  `withPolicy`, an applied circle action was made by a device whose member
+  belonged to the circle in the preceding state, and an admin outside it is
+  refused.
+- `applied_access_authorized`, `other_kind_refused`: an applied access change
+  was made by its own member, or by an admin for an S3 key, and sets the kind
+  of access slot 1 recorded; one of the other kind is refused. The circle an
+  action names, circle membership in `aux` and the access an entry sets are
+  supplied by `Policy`.
 
 [`Registration`](sequence/CovenSequence/Registration.lean) proves the device
 rules independently of the supplied authority policy:

@@ -149,4 +149,107 @@ theorem store_reset_authorized (R : Rules S) (store : S.Aud) (seq : Nat → Slot
   simp only [audValid, withResetRole, Bool.and_eq_true, ite_true] at valid
   exact valid.1.1.1.1.1.2.2
 
+/-! ## Circle actions and provider access (§10.1, §10.3)
+
+The admin state `aux` holds circles and each member's provider access. These
+rules decide who may make the admin actions that change them, against the state
+before the entry's slot, as every other admin entry is judged. -/
+
+/-- What an action other than membership, roles and renames names.
+* `circle o`: the circle a circle action names (renaming it, changing its
+  members, deleting or rotating it);
+* `reads aux c m`: member `m` belongs to circle `c` in admin state `aux`;
+* `access o`: the member whose provider access an access change sets, and
+  whether the new access is an S3 key;
+* `s3`: whether slot 1 recorded an S3 key, which fixes every member's kind of
+  access. -/
+structure Policy (S : Sig) where
+  circle : S.Op → Option S.Aud
+  reads : S.Aux → S.Aud → S.Mem → Bool
+  access : S.Op → Option (S.Mem × Bool)
+  s3 : Bool
+
+/-- A circle action needs its author in the circle; an admin outside it can't.
+Provider access is set by its member, or by an admin when it is an S3 key, and
+only to the kind of access slot 1 recorded. -/
+def policyAllows (P : Policy S) (L : Ledger S) (d : S.Dev) (o : S.Op) : Bool :=
+  match L.deviceOf d with
+  | none => false
+  | some m =>
+    (match P.circle o with
+      | some c => P.reads L.aux c m
+      | none => true) &&
+    (match P.access o with
+      | some (target, s3) =>
+          (decide (m = target) || (isAdmin L d && s3)) && decide (s3 = P.s3)
+      | none => true)
+
+def withPolicy (R : Rules S) (P : Policy S) : Rules S :=
+  { R with authorized := fun L d e => match e with
+      | .other o => policyAllows P L d o && R.authorized L d e
+      | _ => R.authorized L d e }
+
+theorem policy_of_valid (R : Rules S) (P : Policy S) (L : Ledger S) (d : S.Dev) (o : S.Op)
+    (valid : ledgerValid (withRoles (withPolicy R P)) L (.admin d (.other o)) = true) :
+    policyAllows P L d o = true := by
+  simp only [ledgerValid, withRoles, allowed, requiresAdmin, withPolicy, Bool.false_eq_true,
+    ↓reduceIte, Bool.and_eq_true] at valid
+  exact valid.1.2.1.1
+
+theorem policy_of_applied (R : Rules S) (P : Policy S) (seq : Nat → Slot S) (j : Nat)
+    (d : S.Dev) (o : S.Op) (slot : seq j = .admin d (.other o))
+    (applied : Applied (withRoles (withPolicy R P)) seq j) :
+    policyAllows P (ledgerAt (withRoles (withPolicy R P)) seq (j - 1)) d o = true := by
+  unfold Applied at applied
+  rw [slot] at applied
+  exact policy_of_valid R P _ d o applied
+
+/-- **Only a circle's members act on it.** An applied circle action was made by
+a device whose member belonged to the circle in the state before its slot. -/
+theorem applied_circle_action_by_member (R : Rules S) (P : Policy S) (seq : Nat → Slot S)
+    (j : Nat) (d : S.Dev) (o : S.Op) (c : S.Aud) (slot : seq j = .admin d (.other o))
+    (names : P.circle o = some c) (applied : Applied (withRoles (withPolicy R P)) seq j) :
+    ∃ m, (ledgerAt (withRoles (withPolicy R P)) seq (j - 1)).deviceOf d = some m ∧
+      P.reads (ledgerAt (withRoles (withPolicy R P)) seq (j - 1)).aux c m = true := by
+  have yes := policy_of_applied R P seq j d o slot applied
+  unfold policyAllows at yes
+  split at yes
+  · cases yes
+  · rename_i m author
+    simp only [names, Bool.and_eq_true] at yes
+    exact ⟨m, author, yes.1⟩
+
+/-- An admin outside the circle is refused like anyone else outside it. -/
+theorem outside_circle_refused (R : Rules S) (P : Policy S) (L : Ledger S) (d : S.Dev)
+    (o : S.Op) (c : S.Aud) (m : S.Mem) (names : P.circle o = some c) (author : L.deviceOf d = some m)
+    (outside : P.reads L.aux c m = false) :
+    ledgerValid (withRoles (withPolicy R P)) L (.admin d (.other o)) = false := by
+  simp [ledgerValid, withRoles, allowed, requiresAdmin, withPolicy, policyAllows, author, names,
+    outside]
+
+/-- **Provider access is set by its own member, or by an admin for an S3
+key,** and only to the kind of access slot 1 recorded. -/
+theorem applied_access_authorized (R : Rules S) (P : Policy S) (seq : Nat → Slot S) (j : Nat)
+    (d : S.Dev) (o : S.Op) (target : S.Mem) (s3 : Bool) (slot : seq j = .admin d (.other o))
+    (sets : P.access o = some (target, s3)) (applied : Applied (withRoles (withPolicy R P)) seq j) :
+    ((ledgerAt (withRoles (withPolicy R P)) seq (j - 1)).deviceOf d = some target ∨
+      (isAdmin (ledgerAt (withRoles (withPolicy R P)) seq (j - 1)) d = true ∧ s3 = true)) ∧
+      s3 = P.s3 := by
+  have yes := policy_of_applied R P seq j d o slot applied
+  unfold policyAllows at yes
+  split at yes
+  · cases yes
+  · rename_i m author
+    simp only [sets, Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq] at yes
+    obtain ⟨-, own | admin, kind⟩ := yes
+    · exact ⟨Or.inl (own ▸ author), kind⟩
+    · exact ⟨Or.inr admin, kind⟩
+
+/-- An access change of the other kind than slot 1's is refused, whoever makes it. -/
+theorem other_kind_refused (R : Rules S) (P : Policy S) (L : Ledger S) (d : S.Dev)
+    (o : S.Op) (target : S.Mem) (sets : P.access o = some (target, !P.s3)) :
+    ledgerValid (withRoles (withPolicy R P)) L (.admin d (.other o)) = false := by
+  cases author : L.deviceOf d <;> cases h : P.s3 <;>
+    simp [ledgerValid, withRoles, allowed, requiresAdmin, withPolicy, policyAllows, author, sets, h]
+
 end CovenSequence.Authority

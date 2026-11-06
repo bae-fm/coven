@@ -3388,9 +3388,12 @@ renames, so loading one recovers the name at its covered prefix.
   writes are checked against them, and they stop an id or key being reused.
 - **What the proofs cover.** The model proves membership changes, role changes
   and store renames authorised, and an admin always present. It also proves
-  that the name follows the applied renames and agrees at equal prefixes. Other
-  admin actions are checked against the authority rules this section states,
-  which the model takes as given.
+  that the name follows the applied renames and agrees at equal prefixes, that
+  only a circle's members act on it, and that provider access is set by its
+  member, or by an admin for an S3 key, and only to the kind slot 1 recorded.
+  It takes as given that the store's owner can't be removed or move their
+  access (§10.1), and that slot 1 carries the key that verifies it and the
+  store id its path names (§10.3): checks of signatures and bytes (§22).
 
 ### 11. Admin operations
 
@@ -11620,6 +11623,8 @@ Write-ups explain each model and state its assumptions:
 | Membership and role changes apply only from an active admin in the preceding state; leaving no admin is refused; every prefix after creation keeps an admin | `applied_membership_authorized`, `last_admin_refused`, `every_prefix_has_admin` | `proofs/sequence/CovenSequence/Authority.lean` | §10.2, §10.4 |
 | A store rename requires an admin in the preceding state; a non-admin rename is refused without changing the name | `applied_rename_authorized`, `non_admin_rename_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
 | The current name is the creation name followed by applied renames; equal prefixes give equal names | `name_is_latest_applied`, `name_prefix` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
+| A circle action applies only from a device whose member belongs to the circle in the preceding state; an admin outside it is refused | `applied_circle_action_by_member`, `outside_circle_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1 |
+| Provider access is set by its own member, or by an admin for an S3 key, and only to the kind of access slot 1 recorded; an entry of the other kind is refused | `applied_access_authorized`, `other_kind_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1, §10.3 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
 | An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
