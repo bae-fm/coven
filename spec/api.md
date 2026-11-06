@@ -5125,10 +5125,11 @@ pub enum SyncError {
     /// The call's work panicked: a bug in coven, which the caller reports
     /// (E15). Its category is `LocalFailure::Bug`.
     Bug(Bug),
-    /// The worker this call needs ended on a panic: the sync loop, a
-    /// connection attempt or the upload worker. The bug sink heard the bug
-    /// as it happened, so the app shows this and doesn't report it again
-    /// (E15). Its category is `LocalFailure::Bug`.
+    /// The worker this call waits on hit a bug: the sync loop, a
+    /// connection attempt or the upload worker panicked and ended, or the
+    /// upload worker's run serving this call failed on it. The bug sink
+    /// heard the bug as it happened, so the app shows this and doesn't
+    /// report it again (E15). Its category is `LocalFailure::Bug`.
     WorkerFailed(Bug),
 }
 
@@ -6064,7 +6065,9 @@ impl CovenHandle {
     /// it tries none and returns `NotSyncing`. Provider cooldowns still hold; failures stay in
     /// pending() (§6.7). Once the upload worker has ended other than with
     /// the store, by a panic or a failure of the handle, no run follows, so
-    /// it fails with why, `SyncError::WorkerFailed` for a panic (E15).
+    /// it fails with why, `SyncError::WorkerFailed` for a panic. The run
+    /// serving it that fails answers it with that failure, and with
+    /// `WorkerFailed` when the failure is a bug, which the sink hears (E15).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// `CovenWrite::set_uploads_paused`, in a write of its own.
@@ -8980,19 +8983,30 @@ forever.
   network follower and a read-ahead only report: the next open writes the
   expiries that passed, the network shows as last heard until the store
   closes, and the next read fetches what the read-ahead would have.
+- A worker that doesn't end can still fail on a bug. Ben's app asks
+  `retry_uploads_now`, and a database call in the upload run serving it
+  panics. The worker sends the bug to the sink and goes on; the retry, and
+  every other one that run serves, is answered `WorkerFailed` with the
+  bug. The retries waited on the worker's work, so the bug is the
+  worker's to report, once.
 - A call's `Bug` is always a bug its own work hit, and its caller is the
   one that reports it. A bug coven has already reported comes back to later
-  calls under a variant naming what it ended: `SyncError::WorkerFailed` for
-  a worker's, and `DbError::StoreFailed` for a handle's, below. Were both
-  `Bug`, an app would report one bug once for each call that repeats it, or
-  guess from their text which ones are the same.
-- A failure such a worker records, or answers a retry with, may carry a bug:
-  a database call in the loop's pass that panicked returns `DbError::Bug`,
-  and the loop records it as the pass's failure. No caller hears of it, so
-  that bug goes to the sink too. So a pass's failure, in the sync status or
-  a retry's answer, is never the app's to report. `CarriesBug::bug` finds
-  the bug an error carries, itself or through the failure it keeps, and
-  none in `WorkerFailed` or `StoreFailed`.
+  calls under a variant naming the work it failed: `SyncError::WorkerFailed`
+  for a worker's, and `DbError::StoreFailed` for a handle's, below. Were
+  both `Bug`, an app would report one bug once for each call that repeats
+  it, or guess from their text which ones are the same.
+- A failure such a worker records, answers a retry with, or ends on may
+  carry a bug: a database call in the loop's pass that panicked returns
+  `DbError::Bug`, and the loop records it as the pass's failure. No caller
+  hears of it, so that bug goes to the sink too, once. So does a bug in any
+  other database call the sync loop or a connection attempt makes on its
+  own: writing what a retry would do, beginning a pass, writing the last
+  pass, or saving the connection's wait. Such a write answers the retries
+  waiting then with its failure, and the worker stops as on any failure
+  of its own write. So a pass's failure, in the sync status or a retry's
+  answer, is never the app's to report. `CarriesBug::bug` finds the bug an
+  error carries, itself or through the failure it keeps, and none in
+  `WorkerFailed` or `StoreFailed`.
 - A live query whose run panics returns its `DbError::Bug` once, then
   `None`, as for a closed store. What the run read is unknown, so no commit
   could tell whether to run it again.
