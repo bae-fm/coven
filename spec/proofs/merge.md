@@ -413,7 +413,16 @@ at.
   every parent its references point at and every row whose claim rivals its
   own. Lean: `removal_local`.
 - [§15.3](../coven.md#153-references-stay-readable) gives the parents: a row points only at rows every reader of it can
-  read.
+  read. The check allows a reference into the row's own audience or the
+  store, and nothing else; its parent is then readable by every member who
+  reads the row, under any membership, and the check refuses exactly the
+  references some membership would leave unreadable. A write, a move
+  included, is refused exactly when one of its references, with audiences
+  as the write leaves them, isn't allowed. Lean: `allowed_readable`,
+  `readable_allowed`, `moved_refused_iff`.
+- Audiences are compared by value. That one circle has one spelling, and
+  that each table's declared audience source holds at open, are Rust checks
+  the models take as given ([§15.1](../coven.md#151-declaring-audiences)).
 - [§15.2](../coven.md#152-unique-values-dont-cross-audiences) gives the unique rivals: a unique constraint on a root table
   includes the audience column, and one on a descendant table includes the
   foreign key it takes its audience from, so rivals share an audience;

@@ -340,3 +340,6 @@ open CovenMerge
 #print axioms CovenMerge.Ownership.ForeignKey.delete_old_mismatch_refused
 #print axioms CovenMerge.Ownership.ForeignKeyExamples.cascade_delete_keeps_written_values
 #print axioms CovenMerge.Ownership.ForeignKeyExamples.changed_delete_old_refused
+#print axioms CovenMerge.References.allowed_readable
+#print axioms CovenMerge.References.readable_allowed
+#print axioms CovenMerge.References.moved_refused_iff
