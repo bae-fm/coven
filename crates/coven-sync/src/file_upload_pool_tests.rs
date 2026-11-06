@@ -153,8 +153,10 @@ async fn pausing_a_cooldown_and_a_metered_network_start_no_new_upload() {
         }
         gate.add_permits(2);
         until_queued(&f, 2).await;
-        // The run ends once its attempts did, and started nothing more.
+        // The run ends once its attempts did, and started nothing more, nor
+        // did a run the worker woke for after it.
         drop(f.files.inner.drain.lock().await);
+        f.files.uploads_parked_from_now().await;
         assert_eq!(creates(&f).len(), 2, "{stop:?}");
         let queue = f.queue().await;
         assert!(queue.files.iter().all(|upload| upload.phase == UploadPhase::Waiting));
@@ -188,8 +190,9 @@ async fn a_paused_run_ends_when_no_bound_upload_could_have_been_queued() {
     // queueing anything.
     f.network.set_metered(true);
     gate.add_permits(2);
-    // The run ends once both attempts did.
+    // The run ends once both attempts did, and no run after it starts one.
     drop(f.files.inner.drain.lock().await);
+    f.files.uploads_parked_from_now().await;
     assert_eq!(creates(&f).len(), 2);
     let queue = f.queue().await;
     assert_eq!(queue.files.len(), 2);
