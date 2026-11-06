@@ -50,6 +50,19 @@ and `conversions_preserve_frozen` preserve losses through later schema changes.
 Callbacks here are successful validated functions; executing application SQL
 and handling a failed transaction are outside this conversion model.
 
+[ConversionChecks.lean](queue/CovenQueue/ConversionChecks.lean) gives
+conversion the merge package's admission guard as its per-change losses: the
+owner check under the current declaration and kept creators, the foreign-key
+check against the write's original schema, then the sources the change
+depends on. `guard_none_iff` states when the guard keeps a change.
+`failed_check_frozen` proves a change failing its owner or foreign-key check
+stays frozen with that cause, and `converted_passed_checks` that a change the
+converter reaches passed every check. The owner policy, the reconstructed
+execution and the dependency edges are inputs, as in the merge package. The
+merge package's `judge_view::tests::receipt_matches_the_model` compares Rust's
+verdicts with the guard; Rust's received interpretation converts only the
+changes those verdicts keep.
+
 [ConversionChain.lean](queue/CovenQueue/ConversionChain.lean) selects a chain
 from migration statements. `statement_plans_agree` proves that devices select
 the same chain. `row_classification_diverges` shows why classifying a migration

@@ -8015,8 +8015,12 @@ couldn't count anyway. For each row change, in order:
 
 Only a change that passes all four reaches the converter. A change whose sources
 were dropped stays frozen in its original shape, with the dropped sources as its
-cause. Unrelated changes in the same write, even in the same part, can convert
-and apply. A write cut off by removal or key replacement (§14.1) stays refused;
+cause, and one that fails its owner or foreign-key check stays frozen with that
+failure as its cause
+([`failed_check_frozen`](proofs/queue/CovenQueue/ConversionChecks.lean),
+[`converted_passed_checks`](proofs/queue/CovenQueue/ConversionChecks.lean)).
+Unrelated changes in the same write, even in the same part, can convert and
+apply. A write cut off by removal or key replacement (§14.1) stays refused;
 conversion can't rescue it, and changes that build on it follow §9.5.
 
 **When a migration declares `Drop`.** If any breaking migration in the write's
@@ -11859,6 +11863,7 @@ Write-ups explain each model and state its assumptions:
 | Receiving a write has one result: its verdict is the evaluation of the received history, and two receipts of it under the same conversion, schema view and history, each made after the write's recorded reads were received and not refused, agree. Receipt takes the write's record, never whether its upload was tried | `receive_matches_evaluation`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
 | The model defines the converters a write takes as those of the breaking migrations after its version through the raise's, composed in the order of the app's migration list, which it takes to be version order. For a single breaking migration that is the raise itself, this is exactly the conversion the receipt theorems use | `one_step_is_conversion` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
 | Dependent changes stay frozen; independent ones convert and match receivers | `dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
+| *Body.* Under the receiver's admission guard, a change that fails its owner or foreign-key check stays frozen with that cause, and a change the converter reaches passed both checks, had no earlier verdict and depends on no dropped source | `guard_none_iff`, `failed_check_frozen`, `converted_passed_checks` | `proofs/queue/CovenQueue/ConversionChecks.lean` | §9.1, §9.6, §18.6 |
 | With `Drop`, values are kept; frozen stays frozen; a lost value is never converted again | `explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
 | *Body.* With no breaking migration in a write's range, no converter is needed; older writes still need the conversions they cross | `newest_breaking_write_admitted`, `retained_step_required` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
 | Recorded reads don't exclude a write | `recorded_reads_do_not_exclude` | `proofs/queue/CovenQueue/Model.lean` | §18.6 |

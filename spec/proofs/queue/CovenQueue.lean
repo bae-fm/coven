@@ -4,6 +4,7 @@ import CovenQueue.Pending
 import CovenQueue.Verdicts
 import CovenQueue.Conversion
 import CovenQueue.ConversionChain
+import CovenQueue.ConversionChecks
 import CovenQueue.RowMerge
 import CovenQueue.Checked
 import CovenQueue.Migration

@@ -1,6 +1,9 @@
 import CovenQueue
 
 #print axioms CovenQueue.Chain.local_only_requires_addition
+#print axioms CovenQueue.ConversionChecks.guard_none_iff
+#print axioms CovenQueue.ConversionChecks.failed_check_frozen
+#print axioms CovenQueue.ConversionChecks.converted_passed_checks
 
 #print axioms CovenQueue.own_earlier_read
 #print axioms CovenQueue.first_key_usable
