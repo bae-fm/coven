@@ -10,7 +10,8 @@ use crate::{
 use coven_crypto::{MemberIdentity, Signature, StoreKeyring, SIGNATURE_LEN};
 use coven_database::Database;
 use coven_format::{
-    admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_snapshot::SnapshotObjectPrefix,
+    admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_key::CopyBox,
+    sealed_slot::SlotObjectPrefix, sealed_snapshot::SnapshotObjectPrefix,
 };
 use coven_storage::{ByteRange, Storage};
 use std::{
@@ -192,6 +193,36 @@ pub(crate) enum RoutedKey {
 }
 
 impl RoutedKey {
+    /// Open the key held for `member` by `copy`, the kind of the slot whose
+    /// clear prefix is `prefix`, at `path`. A box sealed to a pair this
+    /// member holds that doesn't open at its slot's path is that slot's
+    /// damage, not a local failure.
+    pub(crate) fn open(
+        prefix: &SlotObjectPrefix,
+        copy: &CopyBox,
+        path: &ObjectPath,
+        member: &MemberIdentity,
+    ) -> Result<Self, SyncError> {
+        let context = SlotObjectPrefix::copy_context(prefix.format, prefix.key, &copy.routing)?;
+        match copy.routing.audience {
+            coven_merge::Audience::Store => {
+                copy.open_store_key(member, path.as_str(), &context).map(Self::Store)
+            }
+            coven_merge::Audience::Circle(_) => {
+                copy.open_circle_key(member, path.as_str(), &context).map(Self::Circle)
+            }
+        }
+        .map_err(|error| damaged(path, Refusal::Decryption { cause: Some(Arc::new(error)) }))
+    }
+
+    /// Check the key against the hash its introduction committed to.
+    pub(crate) fn check_hash(&self, hash: &[u8; 32]) -> Result<(), coven_crypto::MaterialError> {
+        match self {
+            Self::Store(key) => key.check_hash(hash),
+            Self::Circle(key) => key.check_hash(hash),
+        }
+    }
+
     pub(crate) fn insert(self, ring: &mut StoreKeyring) -> Result<(), SyncError> {
         match self {
             Self::Store(key) => ring.insert_store_key(key)?,
@@ -208,7 +239,7 @@ pub(crate) fn routed_key(
     store: coven_foundation::id_source::StoreId,
     member: &MemberIdentity,
 ) -> Result<Option<RoutedKey>, SyncError> {
-    use coven_format::sealed_slot::{BoundedSlot, SlotKind, SlotObjectPrefix};
+    use coven_format::sealed_slot::{BoundedSlot, SlotKind};
     let path = original.path(store);
     let object = checked(&path, BoundedSlot::decode(&original.object))?;
     let SlotKind::KeyCopy(copy) = &object.prefix.kind else {
@@ -217,22 +248,7 @@ pub(crate) fn routed_key(
     if !copy.routing.held_by(member) {
         return Ok(None);
     }
-    let context =
-        SlotObjectPrefix::copy_context(object.prefix.format, object.prefix.key, &copy.routing)?;
-    let opened = match copy.routing.audience {
-        coven_merge::Audience::Store => {
-            copy.open_store_key(member, path.as_str(), &context).map(RoutedKey::Store)
-        }
-        coven_merge::Audience::Circle(_) => {
-            copy.open_circle_key(member, path.as_str(), &context).map(RoutedKey::Circle)
-        }
-    };
-    // A box sealed to a pair this member holds that doesn't open at its
-    // slot's path is that slot's damage, as `History::acquire` judges it,
-    // not a local failure.
-    opened
-        .map(Some)
-        .map_err(|error| damaged(&path, Refusal::Decryption { cause: Some(Arc::new(error)) }))
+    RoutedKey::open(&object.prefix, copy, &path, member).map(Some)
 }
 
 /// Whether `original` is a copy for this member sealed to a pair it doesn't

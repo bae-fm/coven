@@ -3736,7 +3736,10 @@ Opening a copy:
 
 1. Open it with the private key its routing names.
 2. If the key's introduction has already been applied, check the key against its
-   hash. A mismatch stops the device at that slot (§5.4).
+   hash. A mismatch stops the device at that slot (§5.4). A key that matches,
+   while the device holds other bytes under its id, conflicts in the device's
+   own custody, not in the copy: the device stops at that slot with
+   `SyncError::Key` (E5), and custody keeps what it holds.
 3. If the introduction hasn't arrived yet, keep the key as *tentative* and apply
    the copy. A tentative key may only be used to check its own introduction. It
    can't encrypt app data until the introduction confirms it.

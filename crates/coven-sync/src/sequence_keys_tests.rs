@@ -753,3 +753,66 @@ async fn a_held_key_whose_material_conflicts_fails_with_its_material_error() {
     );
     ana.database().close().await.unwrap();
 }
+
+/// Ben's custody holds Ana's rotated store key under its id with other
+/// material before he has read the rotation. Opening the sequence finds
+/// nothing wrong in the history he applied; unlocking reads the rotation,
+/// whose copy for Ben is sound, and fails with the held key's material
+/// error, not as damage to the copy, and custody keeps what it held (E5).
+#[tokio::test]
+async fn unlocking_against_a_held_key_whose_material_conflicts_fails_with_its_material_error() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.rotate_key(Audience::Store).await.unwrap();
+    let rotated = ana
+        .sync
+        .session
+        .lock()
+        .await
+        .history
+        .introductions
+        .iter()
+        .rev()
+        .find(|introduction| introduction.audience == Audience::Store)
+        .map(|introduction| introduction.key)
+        .unwrap();
+    let mut conflicting = ben.sync.keys.read().unwrap().unwrap();
+    assert!(conflicting.store_key_ids().all(|key| key != rotated));
+    conflicting.insert_store_key(coven_crypto::StoreKey::from_bytes(rotated, [9; 32])).unwrap();
+    ben.sync.keys.persist(&conflicting).unwrap();
+    let held = &ben.sync;
+    let opened = SequenceSync::open(
+        held.database.clone(),
+        held.storage.clone(),
+        held.directory.clone(),
+        held.device,
+        held.keys.clone(),
+        held.member.clone(),
+        held.person.clone(),
+        Arc::new(crate::SequenceState::new()),
+        held.clock.clone(),
+        held.ids.clone(),
+        held.waits.clone(),
+        held.files.clone(),
+    )
+    .await
+    .unwrap();
+    let result = opened.unlock().await;
+    assert!(
+        matches!(
+            &result,
+            Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if *id == rotated
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        ben.sync.keys.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
+        conflicting.to_secret_bytes().as_bytes()
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

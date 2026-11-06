@@ -1,6 +1,6 @@
 //! Authenticated administrative history, indexed by its counted slots.
 
-use crate::{effects, OperationRejection, Refusal, SyncError};
+use crate::{effects, snapshot_object::RoutedKey, OperationRejection, Refusal, SyncError};
 use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
 use coven_database::{AdminEffect, DeviceStop, StoreCircle, StoreDevice, StoreMember, StoreState};
 use coven_format::{
@@ -489,39 +489,18 @@ impl History {
             {
                 continue;
             }
-            let context =
-                SlotObjectPrefix::copy_context(saved.prefix.format, saved.prefix.key, route)?;
-            let result = match route.audience {
-                Audience::Store => {
-                    copy.open_store_key(member, saved.path.as_str(), &context).map(|key| {
-                        if let Some(hash) = hash {
-                            key.check_hash(&hash)?;
-                        }
-                        ring.insert_store_key(key)
-                    })
-                }
-                Audience::Circle(_) => {
-                    copy.open_circle_key(member, saved.path.as_str(), &context).map(|key| {
-                        if let Some(hash) = hash {
-                            key.check_hash(&hash)?;
-                        }
-                        ring.insert_circle_key(key)
-                    })
-                }
-            };
-            result
-                .map_err(|error| {
-                    crate::write_object::damaged(
-                        &saved.path,
-                        Refusal::Decryption { cause: Some(std::sync::Arc::new(error)) },
-                    )
-                })?
-                .map_err(|error| {
+            let key = RoutedKey::open(&saved.prefix, copy, &saved.path, member)?;
+            if let Some(hash) = hash {
+                key.check_hash(&hash).map_err(|error| {
                     crate::write_object::damaged(
                         &saved.path,
                         Refusal::WrongIdentity { cause: Some(std::sync::Arc::new(error)) },
                     )
                 })?;
+            }
+            // The copy holds the key history committed to, so other bytes
+            // held under its id conflict in this device's custody (E5).
+            key.insert(ring)?;
             changed = true;
         }
         Ok(changed)
