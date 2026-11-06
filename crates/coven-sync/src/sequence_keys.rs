@@ -4,7 +4,7 @@ use crate::{
     sequence_sync::sequence_operations::{
         OperationProgress, OperationStep, Request, SequenceOperation,
     },
-    sequence_sync::{SequenceSync, Session},
+    sequence_sync::{next_slot, SequenceSync, Session},
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
@@ -138,7 +138,7 @@ impl SequenceSync {
                 author: member.member(),
                 after: session.through,
             },
-            coven_merge::Slot(session.through + 1),
+            coven_merge::Slot(next_slot(session.through)?),
             &change,
         ) {
             Ok(_) => {

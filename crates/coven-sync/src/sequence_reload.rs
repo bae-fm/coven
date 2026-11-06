@@ -4,7 +4,7 @@ use crate::{
     chunk_reader::PartPlaintext,
     floor_object::FloorObject,
     history::History,
-    sequence_sync::{SequenceSync, Session},
+    sequence_sync::{next_slot, SequenceSync, Session},
     slot_object::{self, ReceivedSlot, SlotBody},
     snapshot_authorship::SnapshotAuthorship,
     snapshot_object::{self, BodyFailure, SnapshotBody, SnapshotObject},
@@ -349,8 +349,9 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let started = self.clock.elapsed();
         let mut bytes = 0;
-        let mut reads = crate::sequence_sync::SlotReads::new(self, after + 1, through);
-        for number in (after + 1)..=through {
+        let from = next_slot(after)?;
+        let mut reads = crate::sequence_sync::SlotReads::new(self, from, through);
+        for number in from..=through {
             let path = self.path(number)?;
             let input = reads.next().await?.ok_or_else(|| {
                 crate::write_object::damaged(&path, Refusal::Parse { cause: None })
@@ -491,7 +492,11 @@ impl SequenceSync {
                 // The floor supplies the start when the audience's own start
                 // needs slots below its first kept slot, or has none.
                 let from_floor = match (&own, &floor) {
-                    (Some(own), Some(floor)) if own.covers + 1 >= floor.header.first.0 => None,
+                    (Some(own), Some(floor))
+                        if own.covers.saturating_add(1) >= floor.header.first.0 =>
+                    {
+                        None
+                    }
                     (_, floor) => floor.as_ref(),
                 };
                 let start = match (own, from_floor) {
@@ -529,7 +534,7 @@ impl SequenceSync {
                             }
                             (_, Some(own)) => {
                                 return Err(crate::write_object::damaged(
-                                    &self.path(own.covers + 1)?,
+                                    &self.path(next_slot(own.covers)?)?,
                                     Refusal::Parse { cause: None },
                                 ))
                             }
@@ -660,8 +665,9 @@ impl SequenceSync {
         let mut bytes = 0;
         let mut slots = Vec::new();
         let mut missing = None;
-        let mut reads = crate::sequence_sync::SlotReads::new(self, first + 1, target);
-        for number in (first + 1)..=target {
+        let from = next_slot(first)?;
+        let mut reads = crate::sequence_sync::SlotReads::new(self, from, target);
+        for number in from..=target {
             let path = self.path(number)?;
             let Some(input) = reads.next().await? else {
                 missing = Some(number);
@@ -685,7 +691,7 @@ impl SequenceSync {
             slots.push(incoming);
         }
         let floor = self.read_floor(previous_floor, ring, member).await?;
-        if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first + 1) {
+        if floor.as_ref().is_some_and(|floor| floor.header.first.0 > from) {
             return Ok(floor);
         }
         if let Some(number) = missing {

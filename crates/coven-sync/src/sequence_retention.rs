@@ -1,7 +1,7 @@
 //! A confirmed conditional floor write authorizes each journaled deletion.
 use crate::sequence_sync::OperationState;
 use crate::{
-    sequence_sync::{SequenceSync, Session},
+    sequence_sync::{next_slot, SequenceSync, Session},
     OperationKind, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
@@ -279,13 +279,9 @@ impl SequenceSync {
         // Every audience needs a mature snapshot before `first` moves; until
         // then it stays where it is. It never moves back.
         let first = match mature.into_iter().collect::<Option<Vec<_>>>() {
-            Some(covers) => covers
-                .into_iter()
-                .min()
-                .expect("store audience")
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?
-                .max(previous_first),
+            Some(covers) => {
+                next_slot(covers.into_iter().min().expect("store audience"))?.max(previous_first)
+            }
             None => previous_first,
         };
         let names_advance = session.floor.as_ref().is_none_or(|floor| {

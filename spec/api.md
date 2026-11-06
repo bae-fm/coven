@@ -5151,7 +5151,8 @@ pub enum SyncError {
     /// The latest applied prefix no longer permits the operation; its journal
     /// undoes owned artifacts before completion (§11).
     Rejected(OperationRejection),
-    /// The sequence has no next slot.
+    /// The sequence has no next slot: slot numbers are `u64`s, and the
+    /// slot it would follow is the last one.
     SequenceExhausted,
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),

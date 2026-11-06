@@ -59,7 +59,8 @@ pub enum SyncError {
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),
-    /// No greater positive store slot remains.
+    /// The sequence has no next slot: slot numbers are `u64`s, and the
+    /// slot it would follow is the last one.
     #[error("the store sequence is exhausted")]
     SequenceExhausted,
     /// Storage refused or failed a request.

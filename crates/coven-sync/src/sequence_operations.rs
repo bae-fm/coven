@@ -4,7 +4,7 @@ use crate::sequence_sync::OperationState;
 use crate::{
     history::History,
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
-    sequence_sync::{SequenceSync, Session},
+    sequence_sync::{next_slot, SequenceSync, Session},
     slot_object, OperationOutcome, OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
@@ -258,7 +258,7 @@ impl SequenceSync {
         request: Request,
         started_by: &str,
     ) -> Result<OperationOutcome, SyncError> {
-        if !self.validate_request(session, member, &request)? {
+        if !self.validate_request(session, member, &request)?? {
             return Ok(OperationOutcome::Satisfied);
         }
         let id = self.start_request_row(request, started_by).await?;
@@ -274,62 +274,70 @@ impl SequenceSync {
         SlotHeader { device: self.device, claim, author: member.member(), after: session.through }
     }
 
+    /// Whether `request` still has work to claim, or the applied history's
+    /// rejection of it. Validating a change needs the slot it would take,
+    /// and none follows the last one.
     pub(crate) fn validate_request(
         &self,
         session: &Session,
         member: &MemberIdentity,
         request: &Request,
-    ) -> Result<bool, OperationRejection> {
-        match request {
+    ) -> Result<Result<bool, OperationRejection>, SyncError> {
+        Ok(match request {
             Request::Key(_) => unreachable!("key preparation supplies its public commitment first"),
             Request::Change(change) => session
                 .history
                 .validate(
                     &self.operation_header(session, member, 1),
-                    Slot(session.through + 1),
+                    Slot(next_slot(session.through)?),
                     change,
                 )
                 .map(|effect| effect.is_some()),
-            Request::Snapshot(request) => {
-                // Nobody raises a deleted circle: a raise started before the
-                // deletion applied finds nothing to claim, and adopts that
-                // state as it would an established version (§15.9, §18.3).
-                if matches!(request.purpose, Purpose::Raise(_))
-                    && session.history.state.deleted(&request.audience)
-                {
-                    return Ok(false);
-                }
-                let state = &session.history.state;
-                let author = member.member();
-                if state.active_member(&author).is_none()
-                    || !state.device_acts_for(&self.device, &author)
-                {
-                    return Err(OperationRejection::NotAllowed);
-                }
-                // A snapshot of a gone circle meets a gone target, as every
-                // change aimed at it does (§10.4).
-                if let Audience::Circle(circle) = &request.audience {
-                    if state.gone_circle(circle) {
-                        return Err(OperationRejection::TargetGone(crate::EntryTarget::Circle(
-                            *circle,
-                        )));
-                    }
-                }
-                if !crate::effects::belongs(state, &request.audience, &author)
-                    || (request.purpose == Purpose::Reset
-                        && request.audience == Audience::Store
-                        && !state.active_admin(&author))
-                {
-                    return Err(OperationRejection::NotAllowed);
-                }
-                // A raise that finds its version established adopts that
-                // state and claims nothing (§18.3).
-                if let Purpose::Raise(version) = request.purpose {
-                    return Ok(session.history.state.reached(&request.audience) < version);
-                }
-                Ok(true)
+            Request::Snapshot(request) => self.validate_snapshot(session, member, request),
+        })
+    }
+
+    /// Whether a snapshot `request` still has work to claim, or the applied
+    /// history's rejection of it.
+    fn validate_snapshot(
+        &self,
+        session: &Session,
+        member: &MemberIdentity,
+        request: &SnapshotRequest,
+    ) -> Result<bool, OperationRejection> {
+        // Nobody raises a deleted circle: a raise started before the
+        // deletion applied finds nothing to claim, and adopts that
+        // state as it would an established version (§15.9, §18.3).
+        if matches!(request.purpose, Purpose::Raise(_))
+            && session.history.state.deleted(&request.audience)
+        {
+            return Ok(false);
+        }
+        let state = &session.history.state;
+        let author = member.member();
+        if state.active_member(&author).is_none() || !state.device_acts_for(&self.device, &author) {
+            return Err(OperationRejection::NotAllowed);
+        }
+        // A snapshot of a gone circle meets a gone target, as every
+        // change aimed at it does (§10.4).
+        if let Audience::Circle(circle) = &request.audience {
+            if state.gone_circle(circle) {
+                return Err(OperationRejection::TargetGone(crate::EntryTarget::Circle(*circle)));
             }
         }
+        if !crate::effects::belongs(state, &request.audience, &author)
+            || (request.purpose == Purpose::Reset
+                && request.audience == Audience::Store
+                && !state.active_admin(&author))
+        {
+            return Err(OperationRejection::NotAllowed);
+        }
+        // A raise that finds its version established adopts that
+        // state and claims nothing (§18.3).
+        if let Purpose::Raise(version) = request.purpose {
+            return Ok(session.history.state.reached(&request.audience) < version);
+        }
+        Ok(true)
     }
 
     /// Whether a journaled operation already carries `request`'s kind of work.
@@ -549,7 +557,7 @@ impl SequenceSync {
                 self.check_binding(session, member)?;
                 Ok(true)
             } else {
-                self.validate_request(session, member, &request)
+                self.validate_request(session, member, &request)?
             };
             match validation {
                 Ok(false) => {
@@ -693,8 +701,7 @@ impl SequenceSync {
         request: &Request,
         step: &OperationStep,
     ) -> Result<(), SyncError> {
-        let path =
-            self.path(session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?)?;
+        let path = self.path(next_slot(session.through)?)?;
         let store_key = match request {
             Request::Change(StoreChange::CreateStore { key, .. }) => *key,
             _ => session.history.metadata_key(ring)?,
@@ -755,7 +762,7 @@ impl SequenceSync {
                 };
                 session.history.validate(
                     &self.operation_header(session, member, 1),
-                    Slot(session.through + 1),
+                    Slot(next_slot(session.through)?),
                     &change,
                 )?;
                 (SlotFrame::Admin(change), SlotKind::Admin)

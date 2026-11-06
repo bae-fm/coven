@@ -61,7 +61,7 @@ impl SequenceSync {
             + 'static,
     ) -> Result<Child, SyncError> {
         let request = Request::Change(change);
-        match self.validate_request(session, member, &request) {
+        match self.validate_request(session, member, &request)? {
             Err(reason) => return Ok(Child::Decided(OperationOutcome::Rejected(reason))),
             Ok(false) => return Ok(Child::Decided(OperationOutcome::Satisfied)),
             Ok(true) => (),

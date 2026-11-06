@@ -8,6 +8,12 @@ use coven_database::{LoadStep, SlotContent};
 use coven_foundation::progress::ProgressReport;
 use coven_merge::Slot;
 
+/// The slot after `slot`. Slot numbers are `u64`s, so none follows the last
+/// one: there the sequence is exhausted (E5).
+pub(crate) fn next_slot(slot: u64) -> Result<u64, SyncError> {
+    slot.checked_add(1).ok_or(SyncError::SequenceExhausted)
+}
+
 impl SequenceSync {
     /// Exponential existence checks bracket the end; binary checks narrow it.
     /// These observations never supply data or advance the applied prefix.
@@ -77,7 +83,7 @@ impl SequenceSync {
             }
         }
         loop {
-            let first = session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
+            let first = next_slot(session.through)?;
             let mut next = first;
             let mut known_end = session.through;
             // Slots read so far, out of the end known so far, for the
@@ -165,7 +171,7 @@ impl SequenceSync {
                     if let Some(progress) = progress.as_deref_mut() {
                         reading.count(progress, next, known_end);
                     }
-                    next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
+                    next = next_slot(next)?;
                 }
                 // The final floor observation follows every input read. A
                 // floor written after the ending miss may name new slots: read

@@ -811,3 +811,12 @@ async fn a_live_query_reruns_as_a_pass_applies_another_devices_slot() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// The slot before the last `u64` slot number has a next slot; the last one
+/// has none, and the sequence is exhausted there (E5).
+#[test]
+fn no_slot_follows_the_last_slot_number() {
+    assert_eq!(super::next_slot(u64::MAX - 1).unwrap(), u64::MAX);
+    let exhausted = super::next_slot(u64::MAX);
+    assert!(matches!(exhausted, Err(SyncError::SequenceExhausted)), "{exhausted:?}");
+}

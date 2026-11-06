@@ -4,7 +4,7 @@ use crate::{
     floor_object::FloorObject,
     recorded_upload::{self, UploadSource, Uploaded},
     sealed_stream::SealedStream,
-    sequence_sync::{SequenceSync, Session},
+    sequence_sync::{next_slot, SequenceSync, Session},
     slot_object,
     stream_input::StreamInput,
     SyncError,
@@ -368,7 +368,7 @@ impl SequenceSync {
                 return Ok(());
             }
             let count = prepared.len() as u64;
-            let at = session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
+            let at = next_slot(session.through)?;
             let path = self.path(at)?;
             let prefix = SlotObjectPrefix {
                 format: coven_format::FormatVersion::CURRENT,

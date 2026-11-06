@@ -1,7 +1,7 @@
 //! The first store keys of an installation whose custody holds none, and
 //! the registration that follows its admission (§13).
 
-use super::{sequence_read::SlotStep, SequenceSync, Session};
+use super::{next_slot, sequence_read::SlotStep, SequenceSync, Session};
 use crate::{floor_object, slot_object, snapshot_object::RoutedKey, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::LoadStep;
@@ -231,7 +231,7 @@ impl SequenceSync {
                     };
                     scan.count(next, end);
                 }
-                next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
+                next = next_slot(next)?;
             }
             if keys.iter().any(|key| matches!(key, RoutedKey::Store(_))) {
                 break;

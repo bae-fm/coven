@@ -4,7 +4,7 @@ use crate::{
     object_input::ObjectInput,
     sequence_sync::sequence_operations::{Request, SequenceOperation},
     sequence_sync::snapshot_capture::SnapshotRequest,
-    sequence_sync::{SequenceSync, Session},
+    sequence_sync::{next_slot, SequenceSync, Session},
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
@@ -80,9 +80,7 @@ impl SequenceSync {
                 None => (0, FIRST_SNAPSHOT_BYTES),
             };
             let growth = self.database.snapshot_slot_bytes(audience.clone(), covers).await?;
-            let next = covers
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?
+            let next = next_slot(covers)?
                 .max(session.floor.as_ref().map_or(1, |floor| floor.header.first.0));
             // History older than grace also asks for coverage, so retention can
             // delete it even where the slots never reach the threshold: a

@@ -731,6 +731,7 @@ pub use sequence_own_membership::{registration_journaled, removal_journaled};
 mod sequence_raises;
 #[path = "sequence_read.rs"]
 mod sequence_read;
+pub(crate) use sequence_read::next_slot;
 #[path = "sequence_reload.rs"]
 pub(crate) mod sequence_reload;
 #[path = "sequence_retention.rs"]

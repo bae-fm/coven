@@ -163,7 +163,9 @@ impl SequenceSync {
             // Retention deletes what a selection needs only once a newer
             // snapshot has passed grace. The reload then ends with the error,
             // and the next call selects afresh (§16.5).
-            if let Some(floor) = floor.as_ref().filter(|floor| floor.header.first.0 > first + 1) {
+            if let Some(floor) =
+                floor.as_ref().filter(|floor| floor.header.first.0 > first.saturating_add(1))
+            {
                 self.database.finish_operation(record.id).await?;
                 return Err(coven_storage::StorageFailure::NotFound
                     .with_source(format!(

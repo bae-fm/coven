@@ -4,8 +4,8 @@
 //! it again against everything it read, and claims its slot; one the
 //! caught-up state refuses is undone and rejected (§11.2).
 
-use crate::sequence_sync::registered;
 use crate::sequence_sync::sequence_operations::SequenceOperation;
+use crate::sequence_sync::{next_slot, registered};
 use crate::{effects, OperationRejection, OperationSteps, SequenceState, SyncError};
 use coven_crypto::MemberIdentity;
 use coven_database::{Journal, OperationId, SqlContext, StoreState};
@@ -121,7 +121,7 @@ pub(crate) fn changes(
 ) -> Result<bool, SyncError> {
     let through = journal.applied_slot()?;
     let header = SlotHeader { device, claim: 1, author, after: through };
-    let next = Slot(through.checked_add(1).ok_or(SyncError::SequenceExhausted)?);
+    let next = Slot(next_slot(through)?);
     match effects::checked_change(applied, &header, next, change, &Default::default(), &[]) {
         Err(OperationRejection::TargetGone(target)) if unseen(applied, &target) => Ok(true),
         checked => Ok(checked?.is_some()),
