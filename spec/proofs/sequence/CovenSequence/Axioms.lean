@@ -37,6 +37,8 @@ import SequenceApply
 #print axioms CovenSequence.device_stops
 #print axioms CovenSequence.stopped_stays
 #print axioms CovenSequence.deletion_keeps_reachable
+#print axioms CovenSequence.unopened_stops
+#print axioms CovenSequence.clear_of_opens
 
 #print axioms CovenSequence.Operation.step_req
 #print axioms CovenSequence.Operation.step_inv

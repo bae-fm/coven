@@ -561,7 +561,8 @@ needed.
 audiences it follows, a key per audience, and one reader per audience. A
 reader may move only while no other reader of the device is behind it. When a
 reader's next slot, checked against the floor, is its audience's and the device
-has no key for it, the device stops entirely.
+has no key for it, or is a slot the device can't open at all, the device stops
+entirely.
 
 - `keyless_passes_only_others` (in `Reader`): a reader of `A` without `A`'s key
   passes only slots that have no part or announcement for `A`.
@@ -571,11 +572,17 @@ has no key for it, the device stops entirely.
   next slot is `B`'s, never moves that reader. Even before it notices, every
   other reader applies at most up to that slot. `missing_key_blocks_reload`
   forbids every floor reload until all followed audience keys are held.
+- `unopened_stops`: a kept slot the device can't open at all, its bytes damaged
+  or in a newer format than its app reads, stops it too. No reader applies that
+  slot, for any audience, or moves past it, and no audience reloads while a
+  reader waits there. Which slots a device can open (`opens`) is an input: the
+  model reads no bytes or formats.
 - `stopped_stays`: once the device has stopped, nothing moves: no reader
   applies a slot and none reloads.
 - `dev_ok`: device steps keep every followed reader sound.
 - `device_reaches_head`: on good storage, a running device holding the keys of
-  the audiences it follows, and no others, can run every reader to the head. A
+  the audiences it follows, and no others, and able to open every slot, can run
+  every reader to the head. A
   device outside a circle has no reader for it, applies the circle's slots
   without reading their circle parts, and reaches the right state for every
   audience it reads.
@@ -583,9 +590,9 @@ has no key for it, the device stops entirely.
   stale creates, floor writes, deletions, uploads and reader steps:
   - storage stays good;
   - every reader stays at a prefix state of its audience;
-  - a device holding its audiences' keys never stops, and can still run every
-    reader to the head of the current storage, where each holds the full state
-    of its audience.
+  - a device holding its audiences' keys and able to open every slot never
+    stops, and can still run every reader to the head of the current storage,
+    where each holds the full state of its audience.
 
   Deleting covered slots never changes any device's reachable state.
 
@@ -1676,7 +1683,7 @@ they do not replace the separate byte-format, merge or queue tests.
   Captured publication and migration effects are separate in `RaiseQueue`;
   each abstract part contains originals with one authored prefix. Decoding a
   batch with mixed authored prefixes into individual originals is not modelled.
-  A device whose app cannot apply a slot stops before it; that stop is not modelled.
+  A device whose app cannot open a slot stops before it (`unopened_stops`).
 - Reload models changed readable audiences and their local write gates.
   Delivery failures, circle invitation and the policy choosing the followed
   set remain abstract; a newly readable audience must load its own prefix.

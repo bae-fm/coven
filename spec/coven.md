@@ -1517,6 +1517,11 @@ while still sending writes Ben's removal should have cut off.
 Ben's laptop reads slot 41, a copy of a Gifts key it can't open. A key that
 arrives in a later slot can't let it get past 41.
 
+A slot the device can't open at all, its bytes damaged or written in a newer
+format than its app reads, stops it the same way: it applies that slot for no
+audience and loads no floor snapshot while it waits there
+([`unopened_stops`](proofs/sequence/CovenSequence/Device.lean)).
+
 **Edge cases.**
 
 - **Parts a device can't read.** A slot's parts for circles this member isn't in
@@ -11551,6 +11556,7 @@ Write-ups explain each model and state its assumptions:
 | A settled claim, kept or claimed again after it didn't land (the model's `notLanded`), ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device missing a followed audience key cannot reload any audience past its blocked slot, even before noticing the block; a stopped device applies and reloads nothing | `device_stops`, `missing_key_blocks_reload`, `stopped_stays`, `Device.stopped_checks_nothing` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
+| *Body.* A device whose next kept slot is one it can't open, its bytes damaged or in a newer format than its app reads, applies that slot for no audience, moves no reader past it, and reloads nothing while it waits there | `unopened_stops` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
 | A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2, §16.6 |
 | In storage in good order every slot from the first kept slot through the head is present, so one missing there, through the floor's `at` or a slot the device has applied, is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §16.6 |
 | *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
