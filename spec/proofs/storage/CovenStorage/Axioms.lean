@@ -251,3 +251,4 @@ import CovenStorage
 #print axioms CovenStorage.ProviderAccess.kept_confirmation_strands
 #print axioms CovenStorage.ProviderAccess.obsolete_finish_strands
 #print axioms CovenStorage.ProviderAccess.obsolete_revocation_reported
+#print axioms CovenStorage.ProviderAccess.gone_device_strands_share

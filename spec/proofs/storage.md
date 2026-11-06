@@ -404,6 +404,17 @@ ended. It leaves out the invitation a grant returns, the order of different
 accounts' requests, which the owner's device sends one at a time, and the
 owner's other devices, each of which runs the same work.
 
+The same file puts two owner devices on one provider (`Pair`): each keeps its
+own row and call, reads the sequence's entries at its own pace, and may stop
+for good, after which it sends nothing and records no reply.
+`gone_device_strands_share` is what coven does today, a checked
+counterexample to the promise of §20.9. Ana's phone sends the grant of an
+invite to Dan; before it lands, Ben removes the phone, and her laptop,
+applying that, revokes Dan's account and has it confirmed. The phone's grant
+then lands, and the phone stops for good reading its own removal. Dan's
+account stays shared, nothing is listed on either device, and neither has a
+step left that takes it back.
+
 ## Hybrid timestamps and retry time
 
 [Clocks.lean](storage/CovenStorage/Clocks.lean) orders a local timestamp after

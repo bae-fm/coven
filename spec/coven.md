@@ -9539,6 +9539,15 @@ names it, whichever of the owner's devices recorded the share (§13.2).
   again and reports nothing. Reporting `AccessRemains` would tell Ana to
   remove grants from an account Household shares
   ([`obsolete_revocation_reported`](proofs/storage/CovenStorage/ProviderAccess.lean)).
+- Each of the owner's devices sends its own requests, and a request can land
+  after another device's. Ana's phone sends the grant of an invite to Dan,
+  and Ben removes the phone before it lands. Her laptop applies the removal,
+  which ends the invite's share, and takes Dan's account back. The phone's
+  grant then lands, and the phone stops for good as it reads its removal,
+  without recording the reply. Dan's account stays shared with nothing listed
+  on either device
+  ([`gone_device_strands_share`](proofs/storage/CovenStorage/ProviderAccess.lean)):
+  no device of Ana's takes that grant back.
 
 #### 20.10 S3 member keys
 
@@ -11920,6 +11929,7 @@ Write-ups explain each model and state its assumptions:
 | Each rule those results need is needed: a request sent beside one still running, or a confirmed grant kept when a target is fixed, leaves the account's access other than the sequence intends, with nothing listed | `overlapping_requests_strand`, `kept_confirmation_strands` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | *Body.* Ending an account's work on every confirmation, without comparing the target with the intention, reports a removed member's access settled while the provider still grants it | `obsolete_finish_strands` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | *Body.* An obsolete revocation whose reply lists grants left in place, reported as `AccessRemains`, tells the owner to remove grants from an account the store intends shared | `obsolete_revocation_reported` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
+| *Body.* With two owner devices, a grant one sends lands after the other's revocation, and the sender stops for good before recording the reply: the account stays shared against the sequence, with nothing listed and no step left that takes it back | `gone_device_strands_share` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | With an atomic copy, copy publication is create-once: same effect as a create, temporaries hidden, one winner per race, lost replies settled by the marker, a marker means the session's bytes | `copy_is_create`, `stage_hidden`, `race_one_winner`, `lost_reply_settles`, `marker_settles_bytes` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | When every publication of a name is a conditional copy, at most one is accepted in any order, and none if the name was taken | `every_copy_at_most_one`, `copied_at_most` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |

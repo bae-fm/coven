@@ -448,4 +448,122 @@ theorem obsolete_revocation_reported :
       w.request = .remains ∧ w.intended = true ∧ w.direct = false := by
   exact ⟨_, rfl, rfl, rfl, rfl⟩
 
+
+/-! ## Two owner devices
+
+Each of the owner's devices keeps its own row and sends its own requests, at
+its own place in history; both reach the one provider. A device reads the
+sequence's entries in order (`read`), and may stop for good at any point: its
+removal, a reset in its place, or its member's keys replaced (§14.1). A
+stopped device sends nothing more and records no reply. -/
+
+/-- One owner device: its row and call, how many entries it has read, and
+whether it stopped for good. -/
+structure Device where
+  intended : Bool
+  granted : Option Bool
+  request : Req
+  call : Call
+  read : Nat
+  stopped : Bool
+  deriving DecidableEq, Repr
+
+/-- The owner's two devices, the account's intentions in the order the
+sequence's entries set them, and the provider. -/
+structure Pair where
+  history : List Bool
+  first : Device
+  second : Device
+  direct : Bool
+  other : Bool
+  deriving DecidableEq, Repr
+
+inductive Who where
+  | first
+  | second
+  deriving DecidableEq, Repr
+
+def Pair.device (p : Pair) : Who → Device
+  | .first => p.first
+  | .second => p.second
+
+def Pair.set (p : Pair) : Who → Device → Pair
+  | .first, d => { p with first := d }
+  | .second, d => { p with second := d }
+
+/-- A device's view: its own row and call, and the provider. -/
+def view (p : Pair) (d : Device) : World :=
+  ⟨d.intended, d.granted, d.request, d.call, none, p.direct, p.other⟩
+
+inductive PairAct where
+  /-- The device applies the next entry it hasn't read. -/
+  | read (who : Who)
+  /-- One of the single device's steps, other than applying an entry. -/
+  | on (who : Who) (a : Act)
+  | stop (who : Who)
+  deriving DecidableEq, Repr
+
+def entrySteps : Act → Bool
+  | .apply _ => false
+  | _ => true
+
+def pairEnabled (p : Pair) : PairAct → Bool
+  | .read who => !(p.device who).stopped && (p.device who).read < p.history.length
+  | .on who a => !(p.device who).stopped && entrySteps a &&
+      enabled Rules.correct (view p (p.device who)) a
+  | .stop who => !(p.device who).stopped
+
+/-- Carry a device's step back: its row and call to the device, the
+provider's grants to the pair. -/
+def after (p : Pair) (who : Who) (w : World) : Pair :=
+  let d := p.device who
+  { p.set who { d with intended := w.intended, granted := w.granted, request := w.request,
+                        call := w.call } with
+    direct := w.direct, other := w.other }
+
+def pairAct (p : Pair) : PairAct → Pair
+  | .read who =>
+    let d := p.device who
+    match p.history[d.read]? with
+    | some shared =>
+      let p' := after p who (act Rules.correct (view p d) (.apply shared))
+      p'.set who { p'.device who with read := d.read + 1 }
+    | none => p
+  | .on who a => after p who (act Rules.correct (view p (p.device who)) a)
+  | .stop who => p.set who { p.device who with stopped := true, call := .none }
+
+def pairTrace : Pair → List PairAct → Option Pair
+  | p, [] => some p
+  | p, a :: rest => if pairEnabled p a then pairTrace (pairAct p a) rest else none
+
+/-- Every step a pair could take. -/
+def pairActs : List PairAct :=
+  [Who.first, Who.second].flatMap fun who =>
+    [.read who, .stop who] ++
+      [Act.fix, .retry, .send, .land, .landStray, .confirm, .remain, .drop, .unshare].map (.on who)
+
+/-- Ana's phone and laptop both hold Household's account. The phone records
+the share of an invite to Dan, so both devices read the account as intended
+shared; the laptop takes the grant as made, and the phone, which needs the
+invite's invitation, fixes and sends it. Before the grant lands, Ben removes
+the phone, which ends the invite's share: the laptop reads that entry,
+revokes Dan's account, and the provider confirms; nothing is left on the
+laptop. Then the phone's grant lands, and the phone, reading its own
+removal, stops for good without recording the reply. Dan's account is
+shared against the sequence, nothing is listed on any device, and the only
+step either device has left is the laptop stopping too. -/
+theorem gone_device_strands_share :
+    ∃ p, pairTrace
+        ⟨[true, false],
+          ⟨true, some false, .queued, .none, 1, false⟩,
+          ⟨true, some true, .none, .none, 1, false⟩, false, false⟩
+        [.on .first .fix, .on .first .send, .read .second, .on .second .fix,
+          .on .second .send, .on .second .land, .on .second .confirm, .on .first .land,
+          .stop .first] = some p ∧
+      p.direct = true ∧ p.second.intended = false ∧ p.second.request = .none ∧
+      p.first.stopped = true ∧
+      ∀ a ∈ pairActs, pairEnabled p a = true → a = .stop .second := by
+  refine ⟨_, rfl, rfl, rfl, rfl, rfl, ?_⟩
+  decide
+
 end CovenStorage.ProviderAccess
