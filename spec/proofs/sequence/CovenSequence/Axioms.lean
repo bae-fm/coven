@@ -108,6 +108,10 @@ import SequenceApply
 #print axioms CovenSequence.ClaimJournal.kind_counters_report_copy
 #print axioms CovenSequence.ClaimJournal.two_open_claims_report_copy
 #print axioms CovenSequence.ClaimJournal.unrecorded_create_looks_like_copy
+#print axioms CovenSequence.SavedName.absent_stays
+#print axioms CovenSequence.SavedName.never_back
+#print axioms CovenSequence.SavedName.saved_latest
+#print axioms CovenSequence.SavedName.slotless_puts_back
 
 #print axioms CovenSequence.Deadline.bounded_retention
 #print axioms CovenSequence.Deadline.uncovered_has_no_deadline

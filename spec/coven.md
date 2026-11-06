@@ -3987,7 +3987,10 @@ writes its name only when its slot is later than the entry's, and otherwise
 keeps the entry's name. When Ana's phone next opens Household, before it has
 applied slot 41, its Household from slot 1 is older than the laptop's Family
 from slot 41, and the entry keeps Family. Without the slot, every device that
-opened while behind would put back a name the others had already moved past.
+opened while behind would put back a name the others had already moved past
+([`slotless_puts_back`](proofs/sequence/CovenSequence/SavedName.lean)). With
+it, devices writing in any order leave the entry at the latest slot any of
+them saw ([`saved_latest`](proofs/sequence/CovenSequence/SavedName.lean)).
 
 A name rewrite changes only the name. It keeps the code the entry holds: a
 device saves a code of its own only at the points above. Otherwise Ana's
@@ -11666,6 +11669,7 @@ Write-ups explain each model and state its assumptions:
 | An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots, the member's removal and the replacement of its keys included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
+| *Body.* A saved restore code's name, rewritten by each device only for a later slot than the entry's, ends at the latest slot any device saw and that slot's name, whatever order the devices write in, and a forgotten entry stays absent; overwriting without the slot puts back a name a behind device still holds | `saved_latest`, `never_back`, `absent_stays`, `slotless_puts_back` | `proofs/sequence/CovenSequence/SavedName.lean` | §13.1 |
 | *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
 | *Body.* A restore whose facts count only a removal stays listed for good once its member's keys are replaced after it registers: every resume fails | `replaced_restore_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1, §14.1 |
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |

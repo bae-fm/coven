@@ -828,6 +828,21 @@ The same file models the race and the procedure:
   replacement's copies and the undo after a refusal (`resolve`) are outside
   this part.
 
+## The saved restore code's name
+
+[`SavedName`](sequence/CovenSequence/SavedName.lean) models the name a
+person's saved restore code carries with the slot that set it (coven.md §13.1).
+A device rewrites it only for a later slot than the entry's, and never
+creates an absent entry.
+
+- `saved_latest`, `never_back`: rewrites from any number of devices, in any
+  order, leave the latest slot among them and that slot's name; no rewrite
+  moves the entry back.
+- `absent_stays`: a forgotten entry stays forgotten.
+- `slotless_puts_back` is a checked counterexample: overwriting without the
+  slot, a phone still behind at slot 1 puts Household back over Family from
+  slot 41.
+
 ## Invites and the app's operations
 
 [`InviteLifecycle`](sequence/CovenSequence/InviteLifecycle.lean) models one
