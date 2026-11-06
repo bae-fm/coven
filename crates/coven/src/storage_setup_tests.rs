@@ -1,5 +1,8 @@
 use super::*;
-use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
+use coven_storage::{
+    test_utils::{Faults, MemoryStorage},
+    ObjectPath, ObjectPrefix, Storage,
+};
 use std::num::NonZeroU64;
 
 fn builder(app: &Coven, storage: &Arc<MemoryStorage>) -> CovenBuilder {
@@ -311,6 +314,128 @@ async fn a_reconnect_cut_past_its_point_of_no_return_finishes_once_sync_starts()
     // connection attempt that finished it parks.
     phone.handle.test_parked().await;
     assert!(!phone.candidate_kept());
+    phone.handle.close().await.unwrap();
+}
+
+/// Run the phone's setup until it is held at `at`, then `act`, then let it
+/// go on, returning its result.
+async fn setup_acting_at(
+    phone: &Phone,
+    at: SetupStop,
+    act: impl std::future::Future<Output = ()>,
+) -> Result<StorageSetup, StorageSetupError> {
+    let (reached, resume) = phone.pause_at(at);
+    let setup = phone.setup();
+    tokio::pin!(setup);
+    tokio::select! {
+        result = &mut setup => panic!("setup ended before {at:?}: {result:?}"),
+        reached = reached => reached.unwrap(),
+    }
+    act.await;
+    resume.send(()).unwrap();
+    setup.await
+}
+
+/// The slot numbers storage holds for the phone's store.
+async fn stored_slots(phone: &Phone) -> Vec<u64> {
+    let objects = phone.storage.list(&ObjectPrefix::all(phone.directory.id())).await.unwrap();
+    objects.iter().filter_map(|object| object.path.slot_number()).map(|slot| slot.0).collect()
+}
+
+/// Ana's first setup stores slot 1 but loses the reply. Setup keeps that
+/// claim's path and bytes and settles it: Household is created once, with
+/// Ana its one member, and no other store is said to hold slot 1 (E5).
+#[tokio::test]
+async fn a_setup_whose_slot_1_reply_is_lost_settles_that_claim() {
+    let phone = Phone::new().await;
+    let store = phone.directory.id();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (go, held) = tokio::sync::oneshot::channel();
+    let losing = async {
+        // The first creation in the store's folder past the point of no
+        // return is slot 1: its reply is lost once it is stored.
+        phone.storage.hold_next_creation(ObjectPrefix::all(store), entered, held).await;
+    };
+    let result = {
+        let setup = setup_acting_at(&phone, SetupStop::Claiming, losing);
+        tokio::pin!(setup);
+        tokio::select! {
+            result = &mut setup => panic!("slot 1 was never created: {result:?}"),
+            entered = entering => entered.unwrap(),
+        }
+        phone.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+        go.send(()).unwrap();
+        setup.await
+    };
+    assert!(
+        !matches!(&result, Err(StorageSetupError::Storage(error))
+            if error.failure() == StorageFailure::StoreExists),
+        "{result:?}"
+    );
+    if result.is_err() {
+        phone.handle.start_sync().await.unwrap();
+    }
+    assert_eq!(phone.ended().await, OperationOutcome::Landed(coven_merge::Slot(1)));
+    assert!(phone.created().await);
+    let members = phone.handle.members().await.unwrap();
+    assert_eq!(members.len(), 1, "{members:?}");
+    assert!(members[0].is_self);
+    phone.handle.close().await.unwrap();
+}
+
+/// Ana's first setup, past its point of no return, finds the bucket claimed
+/// for another store as it claims it: the claim is refused with
+/// `OwnLocationRequired`, and setup undoes what it made, keeping no store
+/// key, location or credentials, claiming no slot and listing itself undone
+/// (E5, §11.6, §20.3).
+#[tokio::test]
+async fn a_setup_whose_claim_is_refused_undoes_what_it_made() {
+    let phone = Phone::new().await;
+    let taking = async {
+        phone.storage.plant_location_marker(Some(b"another store's id".to_vec())).await;
+    };
+    let result = setup_acting_at(&phone, SetupStop::Claiming, taking).await;
+    assert!(own_location_required(result.as_ref().unwrap_err()), "{result:?}");
+    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert!(phone.handle.storage_config().await.unwrap().is_none());
+    let custody = phone.app.store_keychain(phone.directory.id());
+    assert!(custody.storage_credentials().unwrap().is_none());
+    assert!(!phone.candidate_kept());
+    assert!(matches!(phone.ended().await, OperationOutcome::Undone(_)));
+    assert!(stored_slots(&phone).await.is_empty());
+    phone.handle.close().await.unwrap();
+}
+
+/// The first setup registers the device under the name it was given; a
+/// reconnect after this device lost its credentials keeps that name and
+/// claims nothing (E5).
+#[tokio::test]
+async fn setup_names_the_first_device_and_a_reconnect_keeps_its_name() {
+    let mut phone = Phone::new().await;
+    phone.setup().await.unwrap();
+    let names = |members: Vec<MemberInfo>| -> Vec<String> {
+        members.into_iter().flat_map(|member| member.devices).map(|device| device.name).collect()
+    };
+    assert_eq!(names(phone.handle.members().await.unwrap()), ["Ana's phone"]);
+    let slots = stored_slots(&phone).await;
+
+    phone.handle.close().await.unwrap();
+    phone.app.lose_storage_credentials(phone.directory.id()).unwrap();
+    phone.handle =
+        builder(&phone.app, &phone.storage).open(phone.directory.id(), |_| ()).await.unwrap();
+    phone
+        .handle
+        .setup_s3_storage(
+            phone.storage.config(),
+            "Another name",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(names(phone.handle.members().await.unwrap()), ["Ana's phone"]);
+    assert_eq!(stored_slots(&phone).await, slots);
     phone.handle.close().await.unwrap();
 }
 
