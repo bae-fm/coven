@@ -23,7 +23,7 @@ theorem step_deviceOf (L : Ledger S) (k : Nat) (x : Slot S) {d : S.Dev} {m : S.M
     cases x with
     | admin a e =>
       cases e with
-      | addDevice d' m' =>
+      | addDevice d' m' r =>
         simp only [ledgerEffect, applyEntry]
         by_cases hd : d = d'
         · subst hd
@@ -44,6 +44,7 @@ theorem step_removed (L : Ledger S) (k : Nat) (x : Slot S) {d : S.Dev}
       | removeDevice d' =>
         simp only [ledgerEffect, applyEntry]
         by_cases hd : d = d' <;> simp [hd, h]
+      | addDevice d' m' r => simp [ledgerEffect, applyEntry, h]
       | _ => simp [ledgerEffect, applyEntry, h]
     | _ => simp [ledgerEffect, h]
   · simp [refuse, h]
@@ -109,11 +110,13 @@ theorem applied_ledger (seq : Nat → Slot S) {j : Nat} (hj : 1 ≤ j) (h : Appl
   simp [ledgerStep, h]
 
 /-- What cuts off batches by device `d` made under key generation `g`: slot `j`
-removes `d`, removes the member `d` was registered to, or replaces that
-member's key when `g` was not newer than the replaced key. -/
+removes `d`, registers another installation in `d`'s place, removes the member
+`d` was registered to, or replaces that member's key when `g` was not newer
+than the replaced key. -/
 def Cut (seq : Nat → Slot S) (j : Nat) (d : S.Dev) (g : Nat) : Prop :=
   1 ≤ j ∧ Applied R seq j ∧
     ((∃ a, seq j = .admin a (.removeDevice d)) ∨
+     (∃ a e m, seq j = .admin a (.addDevice e m (some d))) ∨
      (∃ a m, seq j = .admin a (.removeMember m) ∧ (ledgerAt R seq (j - 1)).deviceOf d = some m) ∨
      (∃ a m, seq j = .admin a (.replaceKey m) ∧ (ledgerAt R seq (j - 1)).deviceOf d = some m ∧
         g ≤ (ledgerAt R seq (j - 1)).keyGen m))
@@ -132,7 +135,14 @@ theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g
   obtain ⟨hj1, happ, hcases⟩ := hcut
   have hcount : counts (ledgerAt R seq k) d g = false := by
     simp only [counts]
-    rcases hcases with ⟨a, hs⟩ | ⟨a, m, hs, hdm⟩ | ⟨a, m, hs, hdm, hg⟩
+    rcases hcases with ⟨a, hs⟩ | ⟨a, e, m, hs⟩ | ⟨a, m, hs, hdm⟩ | ⟨a, m, hs, hdm, hg⟩
+    · have hrj : (ledgerAt R seq j).removed d = true := by
+        rw [applied_ledger R seq hj1 happ, hs]
+        simp [ledgerEffect, applyEntry]
+      have hr := removed_stays R seq j hrj k hjk
+      cases hdk : (ledgerAt R seq k).deviceOf d with
+      | none => rfl
+      | some m => simp [hr]
     · have hrj : (ledgerAt R seq j).removed d = true := by
         rw [applied_ledger R seq hj1 happ, hs]
         simp [ledgerEffect, applyEntry]

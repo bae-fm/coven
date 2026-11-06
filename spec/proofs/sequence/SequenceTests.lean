@@ -213,7 +213,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 #eval do
   let result ← run (applyCase [admin 0 1 (json% {"kind":"removeMember","member":1}),
     admin 0 2 (json% {"kind":"addMember","member":1,"role":"member"}),
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     writes 1 1 0 [part 0 1 [7] [] [] []],
     writes 2 2 0 [part 0 1 [7] [] [] []]])
   checkField result ["ledger","removed"] (json% [1])
@@ -227,7 +227,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   let result ← run (applyCase [
     admin 0 1 (json% {"kind":"removeMember","member":1}),
     admin 0 2 (json% {"kind":"addMember","member":2,"role":"member"}),
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2,"replaces":null}),
     writes 2 2 0 [part 0 1 [7] [] [] []]])
   checkField result ["ledger","members"] (json% [[0,"admin"],[2,"member"]])
   checkField result ["ledger","retired"] (json% [1])
@@ -239,7 +239,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 #eval do
   let result ← run (applyCase [
     admin 1 1 (json% {"kind":"removeDevice","device":1}),
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     writes 2 2 0 [part 0 1 [7] [] [] []]])
   checkField result ["slots","0","ledger","removed"] (json% [1])
   checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1]])
@@ -254,10 +254,10 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     admin 0 1 (json% {"kind":"removeDevice","device":0}),
     admin 1 1 (json% {"kind":"removeDevice","device":1}),
     admin 0 2 (json% {"kind":"addMember","member":2,"role":"member"}),
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
-    admin 3 1 (json% {"kind":"addDevice","device":3,"member":0}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
+    admin 3 1 (json% {"kind":"addDevice","device":3,"member":0,"replaces":null}),
     admin 3 2 (json% {"kind":"addMember","member":2,"role":"member"}),
-    admin 4 1 (json% {"kind":"addDevice","device":4,"member":2})])
+    admin 4 1 (json% {"kind":"addDevice","device":4,"member":2,"replaces":null})])
   checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1],[3,0],[4,2]])
   checkField result ["ledger","removed"] (json% [0,1])
   checkField result ["ledger","refused"] (json% [3])
@@ -267,8 +267,8 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 #eval do
   for (device, member) in ([(0,0), (0,1), (1,1)] : List (Nat × Nat)) do
     let result ← run (applyCase [
-      admin device 1 (json% {"kind":"addDevice","device":2,"member":$(member)}),
-      admin 2 1 (json% {"kind":"addDevice","device":2,"member":$(member)})])
+      admin device 1 (json% {"kind":"addDevice","device":2,"member":$(member),"replaces":null}),
+      admin 2 1 (json% {"kind":"addDevice","device":2,"member":$(member),"replaces":null})])
     checkField result ["slots","0","ledger","devices"] (json% [[0,0],[1,1]])
     checkField result ["ledger","refused"] (json% [1])
     checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,$(member)]])
@@ -278,11 +278,11 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 #eval do
   for member in [0,1] do
     let result ← run (applyCase [
-      admin 1 1 (json% {"kind":"addDevice","device":1,"member":$(member)}),
-      admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
-      admin 2 2 (json% {"kind":"addDevice","device":2,"member":$(member)}),
+      admin 1 1 (json% {"kind":"addDevice","device":1,"member":$(member),"replaces":null}),
+      admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
+      admin 2 2 (json% {"kind":"addDevice","device":2,"member":$(member),"replaces":null}),
       admin 0 1 (json% {"kind":"removeDevice","device":2}),
-      admin 2 3 (json% {"kind":"addDevice","device":2,"member":$(member)})])
+      admin 2 3 (json% {"kind":"addDevice","device":2,"member":$(member),"replaces":null})])
     checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1]])
     checkField result ["ledger","removed"] (json% [2])
     checkField result ["ledger","refused"] (json% [1,3,5])
@@ -291,9 +291,9 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 -- registering a new device, and other unregistered admin authors are refused.
 #eval do
   let result ← run (applyCase [
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2,"replaces":null}),
     admin 0 1 (json% {"kind":"removeMember","member":1}),
-    admin 2 2 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 2 2 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     admin 2 3 (json% {"kind":"replaceKey","member":0}),
     admin 2 4 (json% {"kind":"removeDevice","device":0}),
     admin 2 5 (json% {"kind":"addMember","member":2,"role":"admin"})])
@@ -317,7 +317,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     checkField result ["audiences","0","refused"] (json% [2])
     checkField result ["audiences","0","unique_claims"] (json% [[8,3]])
   let result ← run (applyCase [
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     admin 1 1 (json% {"kind":"removeDevice","device":2})])
   checkField result ["ledger","removed"] (json% [2])
   checkField result ["ledger","refused"] (json% [])

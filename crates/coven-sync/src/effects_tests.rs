@@ -402,7 +402,9 @@ mod sequence_differential {
                 Self::Add(m, r) => json!({"kind":"addMember","member":m,"role":role(*r)}),
                 Self::Remove(m) => json!({"kind":"removeMember","member":m}),
                 Self::Role(m, r) => json!({"kind":"changeRole","member":m,"role":role(*r)}),
-                Self::Register(d, m) => json!({"kind":"addDevice","device":d,"member":m}),
+                Self::Register(d, m) => {
+                    json!({"kind":"addDevice","device":d,"member":m,"replaces":null})
+                }
                 Self::RemoveDevice(d) => json!({"kind":"removeDevice","device":d}),
                 Self::Replace(m) => json!({"kind":"replaceKey","member":m}),
             }

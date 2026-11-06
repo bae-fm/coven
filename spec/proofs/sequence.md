@@ -93,7 +93,9 @@ These are the validity rules:
 - **An admin entry** requires an active author, except that a fresh device may
   author its own `addDevice` entry. Registration requires a current member and
   an id with no historical binding. Only the installation itself may register
-  that id, even when its member is an admin. The member's current-key signature
+  that id, even when its member is an admin. A registration may name an earlier
+  device of the same member that it replaces, as a reset or a restore in place
+  does; that device is removed by it. The member's current-key signature
   authenticating the fresh device is checked outside the model. Other entries
   still require an active device and the supplied authority policy. Adding a
   member requires an id that is neither active nor retired.
@@ -198,6 +200,7 @@ old original to `Keys.sendingKey`'s departed-circle choice.
   for when its device was cut off at an earlier applied slot `j`. The cut-off
   is one of:
   - the device's removal;
+  - a registration of another installation in its place;
   - the removal of the member it was registered to;
   - the replacement of that member's key at or above the generation the batch
     was made under.
@@ -209,6 +212,13 @@ old original to `Keys.sendingKey`'s departed-circle choice.
 
 A batch is cut off when it was "made under a replaced key". A batch that the
 member's other devices make under the new key counts.
+
+The model's ledger has one `removed` flag for a device removed and one
+replaced. Rust keeps them apart, as the stop each device reports differs
+(coven.md §14.1), and records a later removal of a replaced device as a
+change; the model refuses that removal, which changes nothing either device
+counts. The report a refused batch makes, naming the entry that decided it,
+is Rust's (`WritesRefused`).
 
 ## Audience keys and revocation
 

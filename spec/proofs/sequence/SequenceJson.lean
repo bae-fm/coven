@@ -52,7 +52,8 @@ def readEntry (n : Nat) (j : Json) : Except String (Entry (sig n)) := do
   | "addMember" => return .addMember (← member n j) (← readRole j)
   | "removeMember" => return .removeMember (← member n j)
   | "changeRole" => return .changeRole (← member n j) (← readRole j)
-  | "addDevice" => return .addDevice (← nat j "device") (← member n j)
+  | "addDevice" =>
+    return .addDevice (← nat j "device") (← member n j) (← j.getObjValAs? (Option Nat) "replaces")
   | "removeDevice" => return .removeDevice (← nat j "device")
   | "circleMember" => return .other ⟨← nat j "audience", ← member n j, ← j.getObjValAs? Bool "allowed"⟩
   | "renameStore" => return .renameStore (← j.getObjValAs? String "name")

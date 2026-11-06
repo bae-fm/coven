@@ -92,7 +92,7 @@ def mayWrite (c : Config n) (L : Ledger (sig n)) (d a : Nat) : Bool :=
 
 def baseRules (c : Config n) (records : Nat → ClaimRecord String) : Rules (sig n) where
   authorized := fun L d e => match e with
-    | .addDevice _ m => L.member m
+    | .addDevice _ m _ => L.member m
     | .removeDevice target => Authority.isAdmin L d ||
         match L.deviceOf d with
         | some m => L.deviceOf target == some m
@@ -134,8 +134,8 @@ theorem member_without_active_device_can_register (c : Config n) (records : Nat 
     (fresh : (ledgerAt (rules c records) seq k).deviceOf d = none) :
     let R := rules c records
     let L := ledgerAt R seq k
-    let next := ledgerStep R L (k + 1) (.admin d (.addDevice d m))
-    ledgerValid R L (.admin d (.addDevice d m)) = true ∧
+    let next := ledgerStep R L (k + 1) (.admin d (.addDevice d m none))
+    ledgerValid R L (.admin d (.addDevice d m none)) = true ∧
       next.deviceOf d = some m ∧ active next d = true ∧
       ∀ old, L.deviceOf old = some m → active next old = false := by
   let R := rules c records
@@ -144,15 +144,15 @@ theorem member_without_active_device_can_register (c : Config n) (records : Nat 
   have admin : Authority.HasAdmin L := by
     have h := Authority.every_prefix_has_admin (baseRules c records) seq initial k
     simpa [L, R, rules, Authority.withRoles_decision_eq] using h
-  have authorized : R.authorized L d (.addDevice d m) = true := by
+  have authorized : R.authorized L d (.addDevice d m none) = true := by
     simp [R, rules, Authority.withRoles, Authority.allowed, Authority.requiresAdmin,
       baseRules, applyEntry, Authority.HasAdmin] at admin ⊢
     exact ⟨member, admin⟩
   have valid := self_registration_valid R L d m fresh member authorized
   have unremoved : L.removed d = false :=
     unregistered_unremoved R seq (fun _ _ => rfl) k d fresh
-  have effect : ledgerStep R L (k + 1) (.admin d (.addDevice d m)) =
-      noteSlot R L (applyEntry R L (.addDevice d m)) (k + 1) (.admin d (.addDevice d m)) := by
+  have effect : ledgerStep R L (k + 1) (.admin d (.addDevice d m none)) =
+      noteSlot R L (applyEntry R L (.addDevice d m none)) (k + 1) (.admin d (.addDevice d m none)) := by
     simp [ledgerStep, valid, ledgerEffect]
   change ledgerValid R L _ = true ∧ _
   refine ⟨valid, self_registration_applied R L _ d m fresh member authorized, ?_, ?_⟩
@@ -241,7 +241,7 @@ read; it reuses an actual slot instead of inventing a sentinel operation. -/
 def run (c : Config n) (entries : List (ClaimRecord String × Slot (sig n))) : Json := Id.run do
   let devices := sorted (c.devices.map (·.1) ++ entries.flatMap fun (_, s) =>
     author s :: match s with
-      | .admin _ (.addDevice d _) | .admin _ (.removeDevice d) => [d]
+      | .admin _ (.addDevice d _ _) | .admin _ (.removeDevice d) => [d]
       | _ => [])
   let audiences := c.audiences.mergeSort (fun a b => a.id ≤ b.id)
   let state : Nat → Ledger (sig n) × (Nat → AudLedger (sig n)) × (Nat → List Row) :=

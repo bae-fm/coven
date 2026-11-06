@@ -83,7 +83,10 @@ inductive Entry (S : Sig) where
   | addMember (m : S.Mem) (role : Role)
   | removeMember (m : S.Mem)
   | changeRole (m : S.Mem) (role : Role)
-  | addDevice (d : S.Dev) (m : S.Mem)
+  /-- Installation `d` registers for member `m`. `replaces` names an earlier
+  device of `m` it takes the place of, as a reset or a restore in place does
+  (coven.md §19.3): that device counts no longer from this slot. -/
+  | addDevice (d : S.Dev) (m : S.Mem) (replaces : Option S.Dev)
   | removeDevice (d : S.Dev)
   | replaceKey (m : S.Mem)
   | renameStore (name : String)
@@ -202,7 +205,7 @@ The member's current-key signature authenticating that installation is checked
 outside the model. -/
 def adminAuthor (L : Ledger S) (d : S.Dev) (e : Entry S) : Bool :=
   active L d || match e with
-    | .addDevice target _ => decide (d = target) && (L.deviceOf d).isNone
+    | .addDevice target _ _ => decide (d = target) && (L.deviceOf d).isNone
     | _ => false
 
 /-- The checks of an entry that do not depend on roles. Only an installation
@@ -211,7 +214,10 @@ def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
   | .addMember m _ => !L.member m && !L.retired m
   | .removeMember m => L.member m
   | .changeRole m _ => L.member m
-  | .addDevice d m => decide (author = d) && (L.deviceOf d).isNone && L.member m
+  | .addDevice d m replaces => decide (author = d) && (L.deviceOf d).isNone && L.member m &&
+    match replaces with
+    | some old => L.deviceOf old == some m
+    | none => true
   | .removeDevice d => (L.deviceOf d).isSome && !L.removed d
   | .replaceKey m => L.member m
   | .renameStore _ | .other _ => true
@@ -227,7 +233,9 @@ def applyEntry (L : Ledger S) : Entry S → Ledger S
       retired := fun x => x == m || L.retired x
       removed := fun d => L.removed d || L.deviceOf d == some m }
   | .changeRole m role => { L with role := fun x => if x = m then role else L.role x }
-  | .addDevice d m => { L with deviceOf := fun x => if x = d then some m else L.deviceOf x }
+  | .addDevice d m replaces =>
+    { L with deviceOf := fun x => if x = d then some m else L.deviceOf x
+             removed := fun x => L.removed x || decide (replaces = some x) }
   | .removeDevice d => { L with removed := fun x => if x = d then true else L.removed x }
   | .replaceKey m => { L with keyGen := fun x => if x = m then L.keyGen m + 1 else L.keyGen x }
   | .renameStore name => { L with name }
