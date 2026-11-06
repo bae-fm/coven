@@ -94,6 +94,14 @@ impl LastPass {
         database.record_last_pass(self.encoded()?).await
     }
 
+    /// Write this, a store-wide worker's panic, as how the last pass ended,
+    /// halting sync until the store reopens: nothing moves, and no pass
+    /// writes over it (IO `halt`). A failure fails the store's handle, as
+    /// `record`'s does.
+    pub async fn record_halt(&self, database: &coven_database::Database) -> Result<(), DbError> {
+        database.record_halt(self.encoded()?).await
+    }
+
     /// Write this as how the running pass ended, `now` by the store's clock,
     /// and that it moves no more. A synced pass's end becomes the last
     /// synced time, unless that is later. A failure fails the store's

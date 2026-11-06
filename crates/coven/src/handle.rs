@@ -660,6 +660,12 @@ impl CovenHandle {
     pub(crate) async fn test_record_pending(&self, record: coven_sync::PendingRecord) {
         self.database.record_pending(record).await.unwrap();
     }
+    /// Halt sync with `bug`, as the upload worker's panic does (E15).
+    #[cfg(test)]
+    pub(crate) async fn test_halt(&self, bug: crate::task::Bug) {
+        self.waits.sync_halted(bug).await.unwrap();
+    }
+
     /// Panic in the next write the store's writer judges, as a bug in it
     /// would.
     #[cfg(test)]

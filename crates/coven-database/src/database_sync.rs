@@ -332,6 +332,17 @@ impl Database {
         .await
     }
 
+    /// Record that a store-wide worker's panic halted sync until the store
+    /// reopens, with its failure, as sync encodes it, as how the last pass
+    /// ended, and that nothing moves: from here no pass writes the row. A
+    /// failure fails this handle, as `record_opened`'s does.
+    pub async fn record_halt(&self, last_pass: Vec<u8>) -> Result<(), DbError> {
+        self.save_sync_status(move |db| {
+            crate::internal_schema::sync_status::save_halt(db, &last_pass)
+        })
+        .await
+    }
+
     /// Record how the running pass ended, as sync encodes it, and that it
     /// moves no more; `finished`, for a pass that reached the end of the
     /// sequence, is when, which becomes the last synced time unless that is

@@ -423,7 +423,7 @@ impl RetryWaits {
         self.halted.send_replace(Some(bug.clone()));
         if let Some(database) = &self.database {
             crate::LastPass::failed(crate::SyncError::WorkerFailed(bug.clone()))
-                .record(database)
+                .record_halt(database)
                 .await?;
         }
         self.sync_panicked(bug).await

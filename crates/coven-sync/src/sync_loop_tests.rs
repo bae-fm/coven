@@ -513,6 +513,64 @@ async fn a_loop_ending_mid_pass_shows_its_failure() {
     ana.database().close().await.unwrap();
 }
 
+/// The upload worker panics while Ben's loop is in a pass: the loop ends on
+/// the halt, the state is failed, and the pass that ends after the halt
+/// writes nothing over it, neither its end nor its synced time (E15, IO
+/// `halt`).
+#[tokio::test]
+async fn a_halt_during_a_pass_ends_the_loop_and_the_pass_writes_nothing_after_it() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    at(&group, 100);
+    let mut last = LastPass::follow(&ben.sync.database);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
+    ben_loop.start().await.unwrap();
+    last.wait_for(|last| matches!(last, Some(LastPass::Synced))).await;
+    let synced = crate::sync_status(ben.database()).await.unwrap().last_synced;
+    let before = ben.database().applied_slot().await.unwrap();
+    insert(ana.database(), "a", "read by the pass the halt meets").await;
+    ana.sync.pass().await.unwrap();
+    let (observed, observing) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    ben.storage.hold_next_read(ana.sync.path(before + 1).unwrap(), observed, resumed).await;
+    ben_loop.sync_now().unwrap();
+    tokio::time::timeout(HANG_GUARD, observing).await.unwrap().unwrap();
+    let bug = coven_foundation::task::Bug {
+        operation: "the upload worker",
+        message: "the upload of a photo broke".into(),
+    };
+    ben.sync.waits.sync_halted(bug.clone()).await.unwrap();
+    at(&group, 200);
+    resume.send(()).unwrap();
+    let ended = tokio::time::timeout(HANG_GUARD, async {
+        loop {
+            match ben_loop.sync_now() {
+                Err(error) => break error,
+                Ok(()) => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("the loop ends on the halt");
+    assert!(matches!(&ended, SyncError::WorkerFailed(heard) if heard == &bug), "{ended:?}");
+    let status = crate::sync_status(ben.database()).await.unwrap();
+    assert!(matches!(status.state, SyncState::Failed(_)), "{:?}", status.state);
+    assert_eq!(status.last_synced, synced, "the pass the halt met wrote its end");
+    let shown = last.wait_for(|last| matches!(last, Some(LastPass::Failed { .. }))).await;
+    let Some(LastPass::Failed { error, .. }) = shown else {
+        panic!("the last pass shows no failure");
+    };
+    assert!(error.contains(&bug.message), "{error}");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// Set the group's clock `seconds` after the epoch.
 fn at(group: &Group, seconds: u64) {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));

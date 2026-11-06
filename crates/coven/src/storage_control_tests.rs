@@ -502,6 +502,41 @@ async fn stopping_answers_waiting_retries_not_syncing() {
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
 }
 
+/// The upload worker panics while a connection attempt waits out its
+/// backoff: the attempt ends on the halt, the state is failed with the
+/// halt's bug, and no attempt runs after it to write over it; a start fails
+/// with the bug (E15, IO `halt`).
+#[tokio::test]
+async fn a_halt_ends_a_waiting_connection_attempt() {
+    let f = stopped_fixture().await;
+    *f.connector.failure.lock().unwrap() = Some(attempt_failure(1));
+    f.handle.start_sync().await.unwrap();
+    attempt_failed(&f.handle, 1).await;
+    f.handle.test_parked().await;
+    let attempts = *f.connector.attempts.borrow();
+    *f.connector.failure.lock().unwrap() = Some(attempt_failure(2));
+    let bug = crate::task::Bug {
+        operation: "the upload worker",
+        message: "the upload of a photo broke".into(),
+    };
+    f.handle.test_halt(bug.clone()).await;
+    // Past the attempt's backoff: an attempt still running would try again.
+    f.advance(Duration::from_secs(600));
+    f.handle.test_parked().await;
+    assert_eq!(*f.connector.attempts.borrow(), attempts, "an attempt ran after the halt");
+    let state = f.handle.sync_status().await.unwrap().state;
+    assert!(matches!(state, SyncState::Failed(_)), "{state:?}");
+    let shown = last_pass(&f.handle, |last| matches!(last, Some(LastPass::Failed { .. }))).await;
+    let Some(LastPass::Failed { error, .. }) = shown else { panic!("no failure shown") };
+    assert!(error.contains(&bug.message), "{error}");
+    let started = f.handle.start_sync().await;
+    assert!(
+        matches!(&started, Err(SyncError::WorkerFailed(heard)) if heard == &bug),
+        "{started:?}"
+    );
+    f.handle.close().await.unwrap();
+}
+
 /// What `coven_retry_effect` says a retry would do, as an app reads it now.
 async fn effect(f: &Fixture) -> RetryEffect {
     f.handle.read(RetryEffect::read).await.unwrap()

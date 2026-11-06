@@ -9,8 +9,9 @@
 //! with the location's `provider`) and that no pass moves; setup, joining
 //! and restoring write storage set up and their finish as the last synced
 //! time; each start of sync adds one to `starts`, so even a start that ends
-//! the way the last one did writes the row; the loop writes that its pass
-//! moved a slot (`moving`) and how the
+//! the way the last one did writes the row; a store-wide worker's panic
+//! halts sync until the store reopens (`halted`), after which no pass writes
+//! the row; the loop writes that its pass moved a slot (`moving`) and how the
 //! pass ended (`last_pass`, which sync encodes as JSON and the app reads as
 //! `LastPass`), with a synced pass's finish as `last_synced`, in milliseconds
 //! since the Unix epoch by the store's clock. That time never goes backward:
@@ -35,10 +36,11 @@ pub(super) const SCHEMA: &str = "CREATE TABLE coven_sync_status (
         moving INTEGER NOT NULL CHECK(moving IN (0,1)),
         last_synced INTEGER CHECK(last_synced>=0),
         starts INTEGER NOT NULL CHECK(starts>=0),
+        halted INTEGER NOT NULL CHECK(halted IN (0,1)),
         CHECK((storage='none')=(provider IS NULL))
     ) STRICT;
-    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moving,last_synced,starts)
-        VALUES(1,'none',NULL,NULL,0,NULL,0);";
+    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moving,last_synced,starts,halted)
+        VALUES(1,'none',NULL,NULL,0,NULL,0,0);";
 
 /// Whether a storage location is recorded on this device, and whether this
 /// device holds credentials for it (§19.1), with the location's provider.
@@ -135,7 +137,8 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusR
 
 /// Write whether a location is recorded and its credentials held, and, when
 /// `finished` names one, that sync finished then. Opening also writes that
-/// no pass moves. A row that already says this is left alone.
+/// no pass moves and that no halt holds. A row that already says this is
+/// left alone.
 pub(crate) fn save_location(
     db: &crate::sqlite::DatabaseConnection,
     location: &RecordedLocation<String>,
@@ -147,9 +150,11 @@ pub(crate) fn save_location(
     db.internal_execute(
         "UPDATE coven_sync_status SET storage=?1,provider=?2,
              moving=CASE WHEN ?4 THEN 0 ELSE moving END,
+             halted=CASE WHEN ?4 THEN 0 ELSE halted END,
              last_synced=CASE WHEN ?3 IS NULL THEN last_synced
                  ELSE max(coalesce(last_synced,?3),?3) END
-         WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2 OR (?4 AND moving=1)
+         WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2
+             OR (?4 AND (moving=1 OR halted=1))
              OR (?3 IS NOT NULL AND (last_synced IS NULL OR last_synced<?3)))",
         rusqlite::params![storage, provider, finished, opening],
     )?;
@@ -159,7 +164,7 @@ pub(crate) fn save_location(
 /// Write that the running pass moved a slot.
 pub(crate) fn save_moving(db: &crate::sqlite::DatabaseConnection) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE coven_sync_status SET moving=1 WHERE singleton=1 AND moving=0",
+        "UPDATE coven_sync_status SET moving=1 WHERE singleton=1 AND moving=0 AND halted=0",
         [],
     )?;
     Ok(())
@@ -173,21 +178,37 @@ pub(crate) fn save_start(db: &crate::sqlite::DatabaseConnection) -> Result<(), D
 
 /// Write how the last pass ended, as sync encodes it, when sync failed
 /// outside a pass's end, and that nothing moves: a loop that ends in a pass
-/// that moved a slot shows its failure, never syncing.
+/// that moved a slot shows its failure, never syncing. Once a halt holds,
+/// it writes nothing: the halt's failure stands.
 pub(crate) fn save_last_pass(
     db: &crate::sqlite::DatabaseConnection,
     last_pass: &[u8],
 ) -> Result<(), DbError> {
     db.internal_execute(
         "UPDATE coven_sync_status SET last_pass=?1,moving=0
-         WHERE singleton=1 AND (last_pass IS NOT ?1 OR moving=1)",
+         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moving=1)",
+        [last_pass],
+    )?;
+    Ok(())
+}
+
+/// Write that a store-wide worker's panic halted sync until the store
+/// reopens, with its failure as how the last pass ended, and that nothing
+/// moves: from here no pass writes the row.
+pub(crate) fn save_halt(
+    db: &crate::sqlite::DatabaseConnection,
+    last_pass: &[u8],
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE coven_sync_status SET last_pass=?1,moving=0,halted=1 WHERE singleton=1",
         [last_pass],
     )?;
     Ok(())
 }
 
 /// Write how the running pass ended and that it moves no more, and, when
-/// `finished` names one, that it reached the end of the sequence then.
+/// `finished` names one, that it reached the end of the sequence then. A
+/// pass that ends after a halt writes nothing: the halt's failure stands.
 pub(crate) fn save_pass_end(
     db: &crate::sqlite::DatabaseConnection,
     last_pass: &[u8],
@@ -198,7 +219,7 @@ pub(crate) fn save_pass_end(
         "UPDATE coven_sync_status SET last_pass=?1,moving=0,
              last_synced=CASE WHEN ?2 IS NULL THEN last_synced
                  ELSE max(coalesce(last_synced,?2),?2) END
-         WHERE singleton=1 AND (last_pass IS NOT ?1 OR moving=1
+         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moving=1
              OR (?2 IS NOT NULL AND (last_synced IS NULL OR last_synced<?2)))",
         rusqlite::params![last_pass, finished],
     )?;
