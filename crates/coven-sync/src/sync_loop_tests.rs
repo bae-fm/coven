@@ -333,6 +333,7 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
         matches!(ben_loop.start().await, Err(SyncError::Bug(heard)) if heard == bug),
         "a later start hears the bug"
     );
+    assert_eq!(group.bugs.take(), [bug], "the app's bug sink heard it too");
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }

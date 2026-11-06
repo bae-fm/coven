@@ -48,6 +48,9 @@ pub(crate) struct Group {
     /// Whether a breaking migration journals the raises passes publish.
     pub(crate) raises: std::sync::atomic::AtomicBool,
     pub(crate) custody: Custody,
+    /// The app's bug sink, shared by every device of the group, which a
+    /// test that expects a bug takes it from.
+    pub(crate) bugs: Arc<coven_foundation::task::HeardBugs>,
 }
 /// Where an installation keeps its store and member keys.
 pub(crate) enum Custody {
@@ -72,11 +75,12 @@ impl Group {
             version: 1.into(),
             raises: false.into(),
             custody: Custody::Memory,
+            bugs: coven_foundation::task::HeardBugs::shared(),
         }
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
         let temp = tempfile::tempdir().unwrap();
-        StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
+        StoreDirectories::new(temp.path().into(), self.bugs.clone())
             .create_store_dir(self.store, self.ids.as_ref())
             .unwrap();
         let identity = MemberIdentity::new(
@@ -144,10 +148,9 @@ impl Group {
     /// A new installation's unpublished directory.
     pub(crate) fn directory(&self) -> (tempfile::TempDir, coven_foundation::files::StoreDir) {
         let temp = tempfile::tempdir().unwrap();
-        let directory =
-            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
-                .create_store_dir(self.store, self.ids.as_ref())
-                .unwrap();
+        let directory = StoreDirectories::new(temp.path().into(), self.bugs.clone())
+            .create_store_dir(self.store, self.ids.as_ref())
+            .unwrap();
         (temp, directory)
     }
     /// A group on a provider that shares the store with accounts.
@@ -178,8 +181,7 @@ impl Group {
         clock: coven_foundation::clock::ClockRef,
     ) -> Device {
         let directory =
-            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
-                .store_dir(&self.store);
+            StoreDirectories::new(temp.path().into(), self.bugs.clone()).store_dir(&self.store);
         let mut database = DatabaseBuilder::new(directory.clone());
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
@@ -235,8 +237,7 @@ impl Group {
         clock: coven_foundation::clock::ClockRef,
     ) -> Device {
         let directory =
-            StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
-                .store_dir(&self.store);
+            StoreDirectories::new(temp.path().into(), self.bugs.clone()).store_dir(&self.store);
         // As coven's opening does with storage set up, before any loop runs.
         crate::record_opened(
             &database,
