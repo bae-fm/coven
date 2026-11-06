@@ -11696,7 +11696,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
-| `SyncError::WorkerFailed` | the sync loop, a connection attempt or the upload worker ended on a panic, or the upload run serving a retry failed on a bug, which the bug sink heard; the retries and calls that waited on that work fail with it | api.md E15 |
+| `SyncError::WorkerFailed` | the sync loop, a connection attempt or the upload worker ended on a panic, the sync loop ended on a bug in its own work, or the upload run serving a retry failed on a bug, which the bug sink heard; the retries and calls that waited on that work fail with it | api.md E15 |
 | `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
 | `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |

@@ -5126,8 +5126,9 @@ pub enum SyncError {
     /// (E15). Its category is `LocalFailure::Bug`.
     Bug(Bug),
     /// The worker this call waits on hit a bug: the sync loop, a
-    /// connection attempt or the upload worker panicked and ended, or the
-    /// upload worker's run serving this call failed on it. The bug sink
+    /// connection attempt or the upload worker panicked and ended, the sync
+    /// loop ended on a bug in its own work, or the upload worker's run
+    /// serving this call failed on it. The bug sink
     /// heard the bug as it happened, so the app shows this and doesn't
     /// report it again (E15). Its category is `LocalFailure::Bug`.
     WorkerFailed(Bug),
@@ -5446,8 +5447,9 @@ impl CovenHandle {
 
     /// Starts syncing with the keys unlocked for this session; the first pass
     /// connects. Does nothing if already running or no storage is set up.
-    /// Once the sync loop has ended on a panic, it fails with
-    /// `SyncError::WorkerFailed` (E15).
+    /// Once the sync loop has ended on its own, it fails with why:
+    /// `SyncError::WorkerFailed` for a panic or a bug in the loop's own
+    /// work, and otherwise the failure that ended it (E15).
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
     /// Stops syncing, retaining keys, credentials and location: once
@@ -9003,7 +9005,11 @@ forever.
   own: writing what a retry would do, beginning a pass, writing the last
   pass, or saving the connection's wait. Such a write answers the retries
   waiting then with its failure, and the worker stops as on any failure
-  of its own write. So a pass's failure, in the sync status or a retry's
+  of its own write. A sync loop that stops so answers every later command
+  with why: `WorkerFailed` for a bug, and otherwise its write's failure,
+  which has failed the handle. A loop answers `DbError::StoreClosed` only
+  once its store's closing ended it, and `SyncError::NoStorage` once its
+  connection was released. So a pass's failure, in the sync status or a retry's
   answer, is never the app's to report. `CarriesBug::bug` finds the bug an
   error carries, itself or through the failure it keeps, and none in
   `WorkerFailed` or `StoreFailed`.
