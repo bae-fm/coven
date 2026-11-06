@@ -168,6 +168,9 @@ async fn a_setup_cut_past_its_point_of_no_return_finishes_once_sync_starts() {
         assert_eq!(phone.ended().await, OperationOutcome::Landed(Slot(1)), "{at:?}");
         assert!(phone.created().await, "{at:?}");
         assert_eq!(phone.handle.storage_config().await.unwrap(), Some(phone.storage.config()));
+        // Setup deletes its own credentials after its row ends, before the
+        // connection attempt that finished it parks.
+        phone.handle.test_parked().await;
         assert!(!phone.candidate_kept(), "{at:?}");
         phone.handle.restore_code().await.unwrap();
         phone.handle.close().await.unwrap();
@@ -304,6 +307,9 @@ async fn a_reconnect_cut_past_its_point_of_no_return_finishes_once_sync_starts()
         .storage_credentials()
         .unwrap()
         .is_some());
+    // Setup deletes its own credentials after its row ends, before the
+    // connection attempt that finished it parks.
+    phone.handle.test_parked().await;
     assert!(!phone.candidate_kept());
     phone.handle.close().await.unwrap();
 }
