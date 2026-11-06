@@ -11,24 +11,24 @@ impl super::WalCheckpointer {
         &self,
         visit: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<(), crate::DbError>,
     ) -> Result<(), crate::DbError> {
-        visit(&self.shared.connection.lock().expect("checkpointer lock poisoned"))
+        visit(&self.upkeep().connection.lock().expect("checkpointer lock poisoned"))
     }
 
     /// Run one wake's checkpoint now, on the calling thread.
     pub(crate) fn run_now(&self) -> Result<(), crate::DbError> {
-        self.shared.run()
+        self.upkeep().checkpoint()
     }
 
     /// Run `fault` as each checkpoint takes the writer.
     pub(crate) fn fault(&self, fault: impl FnMut() -> Result<(), crate::DbError> + Send + 'static) {
-        *self.shared.fault.lock().unwrap() = Some(Box::new(fault));
+        *self.upkeep().fault.lock().unwrap() = Some(Box::new(fault));
     }
 
     /// What each checkpoint's last step does from now on, told while the
     /// checkpoint still holds the writer.
     pub(crate) fn report_restarts(&self) -> UnboundedReceiver<WalCheckpoint> {
         let (restarts, reported) = unbounded_channel();
-        *self.shared.restarts.lock().unwrap() = Some(restarts);
+        *self.upkeep().restarts.lock().unwrap() = Some(restarts);
         reported
     }
 }

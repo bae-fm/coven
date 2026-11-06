@@ -107,6 +107,10 @@ pub(crate) enum HandleFailure {
     /// A WAL checkpoint failed with this cause, other than on a busy or
     /// locked database, and the store's checkpointing stopped.
     Checkpoint(Arc<DbError>),
+    /// Checking or gathering the planner's statistics failed with this
+    /// cause, other than on a busy or locked database, and keeping them
+    /// stopped.
+    Statistics(Arc<DbError>),
     /// The handle's clock could not wait for an invite's expiry (§13.2).
     WallTimer(coven_foundation::clock::WallTimerError),
     /// A bug, a panic or a fault a drop found, may have left this store's
@@ -121,6 +125,7 @@ impl HandleFailure {
             Self::State(cause) => DbError::StatePersistence(cause.clone()),
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
+            Self::Statistics(cause) => DbError::StatisticsFailed(cause.clone()),
             Self::WallTimer(cause) => DbError::WallTimer(cause.clone()),
             Self::Bug(bug) => DbError::StoreFailed(bug.clone()),
         }

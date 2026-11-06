@@ -111,8 +111,8 @@ impl Database {
     }
 
     /// Every connection the store holds open, one at a time, each under its
-    /// own lock: the readers, the input database's, the checkpointers' and
-    /// the writer.
+    /// own lock: the readers, the input database's, the checkpointers', the
+    /// planner statistics' and the writer.
     pub(crate) fn inspect_connections(&self, mut inspect: impl FnMut(&DatabaseConnection)) {
         let slot = self.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
@@ -125,6 +125,7 @@ impl Database {
         for checkpoints in &inner.checkpoints {
             checkpoints.with_connection(&mut visit).unwrap();
         }
+        inner.statistics.with_connection(&mut visit).unwrap();
         with_locked(&inner.access.writer, |writer| visit(writer)).unwrap();
     }
 
@@ -149,6 +150,13 @@ impl Database {
         let checkpointers = &slot.as_ref().unwrap().checkpoints;
         assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
         checkpointers[1].report_restarts()
+    }
+
+    /// Each run of the planner's statistics from now on, told once it
+    /// committed (§4).
+    pub(crate) fn report_statistics_runs(&self) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let slot = self.inner.read().unwrap();
+        slot.as_ref().unwrap().statistics.report_runs()
     }
 
     /// Whether coven checkpoints the store's database, not only its input

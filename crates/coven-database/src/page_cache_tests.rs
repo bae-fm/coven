@@ -22,7 +22,7 @@ async fn blobs(store: &TestStore) -> Database {
 }
 
 /// Each connection's cached bytes: the readers', the input database's, the
-/// checkpointers' and the writer's.
+/// checkpointers', the planner statistics' and the writer's.
 fn cache_used(db: &Database) -> Vec<i32> {
     let mut used = Vec::new();
     db.inspect_connections(|connection| used.push(connection.cache_used().unwrap()));
@@ -48,8 +48,8 @@ async fn one_release_empties_every_connections_page_cache() {
         before.push(connection.cache_used().unwrap());
     });
     // Four readers, the input database's reader and writer, its checkpointer
-    // and the store's, and the writer.
-    assert_eq!(before.len(), 9);
+    // and the store's, the planner statistics' and the writer.
+    assert_eq!(before.len(), 10);
     db.release_memory().await.unwrap();
     let after = cache_used(&db);
     for (connection, (before, after)) in before.iter().zip(&after).enumerate() {

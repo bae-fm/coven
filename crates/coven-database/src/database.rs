@@ -149,6 +149,9 @@ pub struct DatabaseInner {
     /// Coven's checkpointers of the input database and, unless the app
     /// checkpoints it, the store's (§4); stopped before their writers close.
     checkpoints: Vec<crate::wal_checkpoints::WalCheckpointer>,
+    /// The thread keeping the planner's statistics of the store's database
+    /// while it stays open (§4); stopped before the writer closes.
+    statistics: crate::upkeep::UpkeepThread<crate::planner_statistics::PlannerStatistics>,
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
@@ -906,6 +909,7 @@ impl Database {
                             .into_iter()
                             .filter_map(|checkpoints| checkpoints.stop().err())
                             .collect();
+                        failures.extend(inner.statistics.stop().err());
                         failures.extend(inner.inputs.close());
                         // The statistics follow this session's writes, outside
                         // any captured transaction. A failed handle's writer may

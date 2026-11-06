@@ -1313,9 +1313,13 @@ tables = [
 # Removes an abandoned snapshot staging's records on a blocking task as it
 # drops; closing the store waits for it (§16.2).
 "crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
-# Starts a database's checkpointer thread, which the store stops and joins as
+# Starts a thread of the store's upkeep, which the store stops and joins as
 # it closes (§4).
-"crates/coven-database/src/wal_checkpoints.rs" = ["WalCheckpointer::start"]
+"crates/coven-database/src/upkeep.rs" = ["UpkeepThread::spawn"]
+# Starts a database's checkpointer on the store's upkeep thread (§4).
+"crates/coven-database/src/wal_checkpoints.rs" = ["UpkeepThread::start"]
+# Starts the planner statistics' keeper on the store's upkeep thread (§4).
+"crates/coven-database/src/planner_statistics.rs" = ["UpkeepThread::start"]
 # One per open store, which every connection tells of its commits (§4).
 "crates/coven-database/src/observation.rs" = [
     "CommitObserver::new",

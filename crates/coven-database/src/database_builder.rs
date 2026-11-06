@@ -270,6 +270,18 @@ impl DatabaseBuilder {
                 observer.clone(),
             )?);
         }
+        let statistics =
+            crate::upkeep::UpkeepThread::<crate::planner_statistics::PlannerStatistics>::start(
+                DatabaseConnection::open(
+                    &path,
+                    false,
+                    SqlAuthorization::new(&tables),
+                    &self.sqlite,
+                    &self.functions,
+                )?,
+                &writer,
+                observer.clone(),
+            )?;
         tracing::info!(
             migrations = migrations.len(),
             migrating = ?(migrated - migrating),
@@ -318,6 +330,7 @@ impl DatabaseBuilder {
                     local_open_gate: Mutex::new(None),
                 },
                 checkpoints,
+                statistics,
                 migrations: outcomes,
                 raise_operation: self.migration_operation,
                 clock,

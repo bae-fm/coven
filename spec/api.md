@@ -405,7 +405,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated, though the bundled SQLite still runs them: `count_changes` makes a write return a row count, the column-name pragmas rename result columns, `empty_result_callbacks` changes `sqlite3_exec`'s callbacks, and `default_cache_size` writes a cache size into the file's header |
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
 | `wal_checkpoint`, `incremental_vacuum`, `shrink_memory` | app, as calls | `checkpoint`, `incremental_vacuum` and `release_memory` on the handle |
-| `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close, and keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
+| `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, at close, and while the store stays open once a table reaches 100 rows or ten times its counted size, checked each 1,000 rows the writer changes; it keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
 | `foreign_key_check` | nobody | a call coven doesn't offer |
 | `integrity_check`, `quick_check` | nobody | they read every row and index; a statement that meets damage fails with `DbError::DamagedDatabase` instead (§19.3) |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
@@ -439,8 +439,9 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   SQLite's own, `BINARY`, `NOCASE` or `RTRIM`, fails the open with
   `DbError::ReservedCollation`, and a name given twice with
   `DbError::DuplicateCollation`. SQLite refuses any statement that needs a
-  collation the app didn't register, including the statistics a writable open
-  gathers for a table with an index in it. A panic in `compare` ends the
+  collation the app didn't register, including the statistics a writable open,
+  or a run while the store stays open, gathers for a table with an index in
+  it. A panic in `compare` ends the
   process: SQLite has no way for a comparison to fail.
 - *Functions* are the app's own scalar functions, which its SQL calls by name
   ([§4](coven.md#4-writing-locally)). `CovenBuilder::function(name, arguments,
@@ -1595,15 +1596,22 @@ pub enum DbError {
     /// Rather than stay open while its WAL grows without bound, this handle
     /// and every live query fail with this same cause until reopened (§4).
     CheckpointFailed(Arc<DbError>),
+    /// Checking or gathering the query planner's statistics while the store
+    /// stays open failed with this cause, other than on a busy or locked
+    /// database, so keeping them stopped. Rather than stay open while the
+    /// planner plans with statistics that no longer hold, this handle and
+    /// every live query fail with this same cause until reopened (§4).
+    StatisticsFailed(Arc<DbError>),
     /// The handle's clock could not wait for an open invite's expiry, so
     /// the invite would outlive its lifetime. Rather than stay open
     /// without writing expiries, this handle and every live query fail with
     /// this same cause until reopened, and opening writes each expiry
     /// already past (§13.2).
     WallTimer(WallTimerError),
-    /// The system refused the thread that checkpoints the store's WAL, so
+    /// The system refused a thread of coven's upkeep, the one that
+    /// checkpoints a WAL or the one that keeps the planner's statistics, so
     /// the store did not open (§4).
-    CheckpointerThread(std::io::Error),
+    UpkeepThread(std::io::Error),
     /// Reading a claim's sealed bytes to retain them failed, and the claim's
     /// transaction did not commit (§11).
     ClaimRead(std::io::Error),
@@ -3800,10 +3808,10 @@ where
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed, the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`, `WallTimer`, or `StoreFailed` for state a bug
-    /// may have left wrong), or one that carries a bug, as a run that panicked
-    /// does (`DbError::Bug`, E15): after it, `None`, so a loop over the
-    /// query ends.
+    /// `CheckpointFailed`, `StatisticsFailed`, `WallTimer`, or `StoreFailed`
+    /// for state a bug may have left wrong), or one that carries a bug, as a
+    /// run that panicked does (`DbError::Bug`, E15): after it, `None`, so a
+    /// loop over the query ends.
     pub async fn next(&mut self) -> Option<Result<T, E>>
     where
         T: Clone + PartialEq;

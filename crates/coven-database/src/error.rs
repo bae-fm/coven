@@ -10,7 +10,9 @@ impl CarriesBug for DbError {
             Self::Bug(bug) => Some(bug),
             Self::Disk(error) => error.bug(),
             Self::Lock(error) => error.bug(),
-            Self::StatePersistence(cause) | Self::CheckpointFailed(cause) => cause.bug(),
+            Self::StatePersistence(cause)
+            | Self::CheckpointFailed(cause)
+            | Self::StatisticsFailed(cause) => cause.bug(),
             Self::Rollback { operation, .. } => operation.bug(),
             Self::FileCleanup { write, failures } => write
                 .as_ref()
@@ -82,6 +84,13 @@ pub enum DbError {
     /// and every live query fail with this same cause until reopened (§4).
     #[error("a WAL checkpoint failed: {0}")]
     CheckpointFailed(#[source] std::sync::Arc<DbError>),
+    /// Checking or gathering the query planner's statistics while the store
+    /// stays open failed with this cause, other than on a busy or locked
+    /// database, so keeping them stopped. Rather than stay open while the
+    /// planner plans with statistics that no longer hold, this handle and
+    /// every live query fail with this same cause until reopened (§4).
+    #[error("gathering the planner's statistics failed: {0}")]
+    StatisticsFailed(#[source] std::sync::Arc<DbError>),
     /// The handle's clock could not wait for an open invite's expiry, so
     /// the invite would outlive its lifetime. Rather than stay open
     /// without writing expiries, this handle and every live query fail with
@@ -89,10 +98,11 @@ pub enum DbError {
     /// already past (§13.2).
     #[error(transparent)]
     WallTimer(coven_foundation::clock::WallTimerError),
-    /// The system refused the thread that checkpoints the store's WAL, so
+    /// The system refused a thread of coven's upkeep, the one that
+    /// checkpoints a WAL or the one that keeps the planner's statistics, so
     /// the store did not open (§4).
-    #[error("the WAL checkpoint thread could not start: {0}")]
-    CheckpointerThread(#[source] std::io::Error),
+    #[error("an upkeep thread could not start: {0}")]
+    UpkeepThread(#[source] std::io::Error),
     /// Reading a claim's sealed bytes to retain them failed, and the claim's
     /// transaction did not commit (§11).
     #[error("reading a claim's bytes failed: {0}")]

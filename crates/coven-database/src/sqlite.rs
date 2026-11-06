@@ -16,6 +16,8 @@ mod local_write;
 mod page_cache;
 #[path = "pre_update_changes.rs"]
 mod pre_update_changes;
+#[path = "rolled_back.rs"]
+mod rolled_back;
 pub(crate) use pre_update_changes::ROWS_PER_TABLE;
 pub(crate) use rowid_policy::rowid_guard;
 #[path = "rowid_policy.rs"]
@@ -46,7 +48,6 @@ use crate::internal_schema;
 use crate::migration::validate_versions;
 use crate::observation::CommitObserver;
 use crate::schema::Schema;
-use crate::SqlReadContext;
 use crate::{
     CovenMigrationError, DbError, Migration, MigrationError, MigrationOutcome, OpenError,
     SyncedTable,
@@ -72,7 +73,10 @@ pub(crate) struct DatabaseConnection {
     handle: Option<CommitObserver>,
     observation: Option<WriterObservation>,
     /// The writer's checkpointer, woken after each commit (§4).
-    checkpoints: Option<crate::wal_checkpoints::CommitSignal>,
+    checkpoints: Option<crate::upkeep::Wake>,
+    /// The writer's keeper of the planner's statistics, woken as its
+    /// commits change rows (§4).
+    statistics: Option<crate::planner_statistics::ChangeWake>,
     streaming: std::cell::Cell<bool>,
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
@@ -175,6 +179,7 @@ impl DatabaseConnection {
             handle: None,
             observation: None,
             checkpoints: None,
+            statistics: None,
             streaming: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             write_checkpoint: std::cell::RefCell::new(None),
@@ -712,8 +717,20 @@ impl DatabaseConnection {
     }
 
     /// Wake `checkpoints` after each commit this writer makes (§4).
-    pub(crate) fn signal_commits(&mut self, checkpoints: crate::wal_checkpoints::CommitSignal) {
+    pub(crate) fn signal_commits(&mut self, checkpoints: crate::upkeep::Wake) {
         self.checkpoints = Some(checkpoints);
+    }
+
+    /// Tell `statistics` of the rows each commit this writer makes changed
+    /// (§4).
+    pub(crate) fn signal_changes(&mut self, statistics: crate::planner_statistics::ChangeWake) {
+        self.statistics = Some(statistics);
+    }
+
+    /// The rows this connection's statements have changed since it opened,
+    /// their triggers' included, as SQLite counts them.
+    pub(crate) fn changed_rows(&self) -> u64 {
+        self.connection.total_changes()
     }
 
     /// Serve an open handle once opening succeeds (§4).
@@ -740,93 +757,6 @@ impl DatabaseConnection {
         self.observation =
             Some(WriterObservation { device, supplemental: Arc::new(supplemental), tables });
         Ok(())
-    }
-
-    /// A one-shot read of one snapshot. Nothing runs it again, so it records
-    /// nothing of what it reads, and narrows nothing (§4).
-    pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
-        E: From<DbError>,
-    {
-        self.read_transaction(|| {
-            let _reading = self.authorization.reading();
-            read(SqlReadContext::new(self))
-        })
-    }
-
-    pub(crate) fn read_transaction<R, E: From<DbError>>(
-        &self,
-        read: impl FnOnce() -> Result<R, E>,
-    ) -> Result<R, E> {
-        self.batch("BEGIN DEFERRED")?;
-        let mut guard = SqlTransaction { database: self, active: true };
-        // A read runs no migration and no DDL.
-        let constants = self.keep_constants();
-        // BEGIN alone does not fix a WAL snapshot. Pin it before invoking a
-        // consumer that can wait while a writer commits. Reading the schema
-        // table also brings this connection's copy of the schema, and the
-        // planner's statistics SQLite loads with it, up to the snapshot's,
-        // before the read prepares a statement.
-        let result = (|| {
-            self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get::<_, i64>(0))?;
-            read()
-        })();
-        drop(constants);
-        guard.active = false;
-        match self.roll_back() {
-            Ok(()) => result,
-            // A failed read keeps its own cause; the handle now refuses calls.
-            Err(rollback) => Err(match result {
-                Ok(_) => DbError::from(rollback).into(),
-                Err(error) => {
-                    tracing::error!(%rollback, "ending a failed read's snapshot failed");
-                    error
-                }
-            }),
-        }
-    }
-
-    /// Run checks that write scratch state, such as temporary tables, in a
-    /// transaction that always rolls back, so nothing they write is kept or
-    /// observed. It takes no write lock until something writes the main schema.
-    pub(crate) fn discarded_transaction<T>(
-        &self,
-        run: impl FnOnce(&Self) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
-        use crate::WriteFailure;
-        self.batch("BEGIN DEFERRED")?;
-        let mut guard = SqlTransaction { database: self, active: true };
-        let result = run(self);
-        guard.active = false;
-        match self.roll_back() {
-            Ok(()) => result,
-            Err(rollback) => Err(match result {
-                Ok(_) => DbError::from(rollback),
-                Err(error) => error.with_rollback(rollback),
-            }),
-        }
-    }
-
-    /// Roll back the open transaction unless SQLite already ended it. When
-    /// ROLLBACK fails, this connection may still be inside the transaction: a
-    /// writer would treat its uncommitted changes as committed and a reader
-    /// would keep reading its old snapshot, so the handle refuses every later
-    /// call until the store is reopened (§4).
-    fn roll_back(&self) -> rusqlite::Result<()> {
-        if self.connection.is_autocommit() {
-            return Ok(());
-        }
-        let result = {
-            let _scope = self.authorization.internal();
-            self.connection.execute_batch("ROLLBACK")
-        };
-        if result.is_err() {
-            if let Some(handle) = &self.handle {
-                handle.fail(crate::observation::HandleFailure::Rollback);
-            }
-        }
-        result
     }
 
     pub(crate) fn lost_values(&self) -> Result<Vec<crate::LostValue>, DbError> {
@@ -943,25 +873,6 @@ impl DatabaseConnection {
     pub(crate) fn checkpoint(&self, point: crate::test_utils::WriteCheckpoint) {
         if let Some(callback) = self.write_checkpoint.borrow().as_ref() {
             callback(point);
-        }
-    }
-}
-
-/// A read or a discarded transaction, rolled back if its callback panics.
-struct SqlTransaction<'a> {
-    database: &'a DatabaseConnection,
-    active: bool,
-}
-
-// Still active only while a callback's panic unwinds, when a second panic
-// would abort the process. The panic propagates; a failed rollback is logged
-// and fails the handle, so every later call reports it.
-impl Drop for SqlTransaction<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            if let Err(rollback) = self.database.roll_back() {
-                tracing::error!(%rollback, "rolling back a panicking transaction failed");
-            }
         }
     }
 }

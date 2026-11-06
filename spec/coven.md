@@ -156,7 +156,7 @@ A commit can be refused for these local reasons:
 | `FileUnknown`, `FileUnreferenced`, `FileWriteOnce` | a reference names no file of the row's audience, a staged file has no reference, or a write-once reference would change | §17.2, §17.3 |
 | `UndeclaredNamespace`, `NamespaceKind` and other file checks | a file is staged into an undeclared namespace or one of the other kind, or the staged file can't be used | §17.1, [api.md E3](api.md#e3-writing) |
 | `BoundFileTooLarge`, `DeviceOnly`, `NamespaceKind` | a bound reference names a file over its column's limit, a file on one device only that no bound upload stores, or a user's file | §17.4 |
-| `RollbackFailed`, `CheckpointFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
+| `RollbackFailed`, `CheckpointFailed`, `StatisticsFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
 | `StoreFailed` | an earlier bug may have left the handle's state wrong; it carries that bug | [api.md E15](api.md#e15-background-work-panics-and-shutdown) |
 | Closed or unusable installation | nothing can be written | [api.md E1](api.md#e1-opening) |
 
@@ -853,8 +853,7 @@ open; a checkpointer that was that runtime's task would have ended with it,
 and the WAL would have grown with every later write. A checkpoint that
 panics is a bug in coven, and it ends the process, whose crash report carries
 the panic: the store must not stay open with no one checkpointing it. A
-system that refuses the thread fails the open with
-`DbError::CheckpointerThread`.
+system that refuses the thread fails the open with `DbError::UpkeepThread`.
 
 On Windows a store's path is verbatim (`\\?\D:\…`), and SQLite takes a
 path that starts `\\` for a network share. There it locks the WAL's
@@ -878,8 +877,9 @@ holds a lot. So the app can give it back. Ben's music app on Android calls
 SQLite, as coven builds it (`SQLITE_ENABLE_MEMORY_MANAGEMENT`), keeps the
 pages no statement is using in one pool for the whole process, and a release on
 any connection empties the whole pool. So coven releases once, on an idle
-reader, and that frees the writer's cached pages, `inputs.db`'s and the
-checkpointers' too, and those of any other store the process has open. It never
+reader, and that frees the writer's cached pages, `inputs.db`'s, the
+checkpointers' and the planner statistics' too, and those of any other store
+the process has open. It never
 waits for a write: a write in progress keeps only the pages it is using. A
 reader that had read every page of a store with 200 rows of 4 KB, and the write
 of them waiting to upload, held 1.6 MB, and 10 KB after. The next reads load
@@ -917,6 +917,30 @@ opens. A connection that analyzes a table loads the count it found, and
 forgetting the statistics afterwards doesn't unload it, so the writer would
 keep planning with the small count. The writer and the readers then read what
 that run kept.
+
+A table can also fill while the handle stays open. Ben's first scan of his
+music folder fills the scan's candidates from empty, and every candidate holds
+the same folder root. Without statistics, SQLite takes a root to hold a few
+rows, so it looks up the candidates under one file root by reading every
+candidate of the root in order: at 10,000 candidates, 50,020 SQLite steps and
+442 µs a lookup, against 56 steps and 18 µs through the file root's index. So
+each time the writer's commits have changed 1,000 rows since the last check, a
+thread of coven's own asks SQLite which tables a run would analyze, without
+running it, and reads at most 100 rows of each. On the store of four
+20,000-row tables, a check took about 80 µs. When one of those tables holds
+100 rows or more, the thread runs on its own connection as an open's run does,
+holding coven's writer so no write of coven's finds the database locked. So a
+table has statistics within 1,000 changed rows of reaching 100 rows, or of
+SQLite estimating it at ten times its counted size. SQLite reads statistics
+again only as it reads the schema, so the run also creates and drops a table
+of coven's in its transaction. Every connection, the read-only readers among
+them and the run's own, then reads the schema and plans with the new
+statistics from its next statement. The thread lives as long as the store,
+and a panic in it ends the process, as with the checkpointing thread. A check
+or run that fails other than on a busy or locked database stops it, and the
+handle fails with `DbError::StatisticsFailed` and SQLite's cause until the
+store is reopened: the planner would otherwise plan with statistics that no
+longer hold for as long as the store stayed open.
 
 The settings coven's guarantees rest on stay fixed, and the app has no way to
 name them. WAL mode lets readers keep their snapshots. `synchronous = FULL`
@@ -1164,8 +1188,8 @@ how the app receives them.
   coven none for one under 100 rows, so every run analyzes each again, which
   reads fewer than 100 rows of each.
 - **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
-  `StatePersistence`, `CheckpointFailed`, `StoreFailed`) skips the run,
-  since its writer may still hold a transaction.
+  `StatePersistence`, `CheckpointFailed`, `StatisticsFailed`, `StoreFailed`)
+  skips the run, since its writer may still hold a transaction.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
   ends, before the transaction that asked could commit.
@@ -1179,7 +1203,8 @@ how the app receives them.
   to another order: a migration that declares a column or index in it, a read
   or write of such an index, and a write that a CHECK in it judges. Opening
   doesn't look for one, but a writable open fails when it gathers the
-  planner's statistics for a table with such an index.
+  planner's statistics for a table with such an index, and a handle fails
+  with `StatisticsFailed` when a run while it stays open does.
 - **A function panics.** The process ends before the transaction that called it
   could commit. A panic is a bug in the function, not a refusal, and the
   function's later results can't be trusted to match the index entries and CHECK
@@ -11655,7 +11680,8 @@ maps them are with each provider in Appendix E.
 | `DbError::OperationRunning`, `DbError::OperationUnknown` | a write acknowledges an operation that is still running, or one `coven_operations` doesn't list | §11.4 |
 | `DbError::CheckpointFailed` | one of coven's WAL checkpoints failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::StoreFailed` | an earlier bug may have left the handle's state wrong; the call whose work hit it returned it as `DbError::Bug`, or the bug sink heard it; every later call on that handle fails with it until the store is reopened | api.md E15 |
-| `DbError::CheckpointerThread` | the system refused the thread that checkpoints the store's WAL, so the store did not open | §4 |
+| `DbError::StatisticsFailed` | checking or gathering the planner's statistics while the store stayed open failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
+| `DbError::UpkeepThread` | the system refused a thread of coven's upkeep, the one that checkpoints a WAL or the one that keeps the planner's statistics, so the store did not open | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
 | `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |

@@ -560,7 +560,7 @@ impl DatabaseConnection {
     }
 
     /// Gather the query planner's statistics where they are missing or stale,
-    /// outside any transaction, so no captured transaction records them (§4).
+    /// outside any captured transaction, so none records them (§4).
     /// `0x10000` checks every table, not only those this connection read;
     /// `0x10` reads at most SQLite's 2,000 rows of each index, or the app's
     /// own lower `analysis_limit`, and fewer in a schema of over 100 tables
@@ -589,6 +589,46 @@ impl DatabaseConnection {
             [SMALL_TABLE],
         )?;
         Ok(())
+    }
+
+    /// Whether a run of [`Self::optimize`] would change statistics a table
+    /// keeps: `PRAGMA optimize`, told to name its work without doing it,
+    /// names each table whose size changed tenfold since its statistics,
+    /// and each one with rows and an index that has none: one never
+    /// analyzed, and every one under [`SMALL_TABLE`] rows. Reading at most
+    /// that many rows of each tells which a run would keep statistics for.
+    pub(crate) fn statistics_wanted(&self) -> Result<bool, DbError> {
+        let named = self.query("PRAGMA optimize=0x10013", [], |r| r.get::<_, String>(0))?;
+        for analyze in named {
+            let table = analyze.strip_prefix("ANALYZE ").ok_or(DbError::Invariant {
+                what: "PRAGMA optimize names its work as ANALYZE statements",
+            })?;
+            let rows: i64 = self.query_row(
+                &format!("SELECT count(*) FROM (SELECT 1 FROM {table} LIMIT ?1)"),
+                [SMALL_TABLE],
+                |r| r.get(0),
+            )?;
+            if rows >= SMALL_TABLE {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Gather the statistics as [`Self::optimize`] does, on a connection of
+    /// their own while the store stays open, and change the schema in the
+    /// same transaction: SQLite reads the statistics again only as it reads
+    /// the schema, so every connection, the read-only readers among them,
+    /// plans with the new ones from its next statement, this one included,
+    /// which so loads no count of a table whose statistics it forgot.
+    pub(crate) fn gather_statistics_for_every_connection(&mut self) -> Result<(), DbError> {
+        self.transaction(|connection| {
+            connection.optimize()?;
+            connection.batch(
+                "CREATE TABLE _coven_statistics_gathered(gathered);
+                 DROP TABLE _coven_statistics_gathered",
+            )
+        })
     }
 
     /// Gather the statistics on this connection of their own, then close it.

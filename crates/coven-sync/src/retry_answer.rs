@@ -271,6 +271,7 @@ fn failed(error: &DbError) -> RetryOutcome {
         DbError::StatePersistence(cause) => DbError::StatePersistence(cause.clone()),
         DbError::RollbackFailed => DbError::RollbackFailed,
         DbError::CheckpointFailed(cause) => DbError::CheckpointFailed(cause.clone()),
+        DbError::StatisticsFailed(cause) => DbError::StatisticsFailed(cause.clone()),
         DbError::WallTimer(cause) => DbError::WallTimer(cause.clone()),
         DbError::StoreFailed(bug) => DbError::StoreFailed(bug.clone()),
         DbError::Shutdown(shutdown) => DbError::Shutdown(*shutdown),

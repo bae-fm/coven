@@ -817,10 +817,10 @@ async fn write_searched(db: &crate::Database, from: usize, notes: usize) {
 /// Statistics gathered as it opens would say the FTS5 index's data table
 /// holds its two rows, and SQLite would read the whole table to clean up
 /// each merged segment instead of looking up the segment's range. Coven
-/// keeps no statistics for a table that small, so the cleanup stays a range
-/// lookup as the index grows (§4).
+/// keeps no statistics for a table that small, as it opens or while the
+/// index grows, so the cleanup stays a range lookup (§4).
 #[tokio::test]
-async fn a_new_store_gathers_no_statistics_while_it_fills() {
+async fn a_new_stores_index_cleanup_stays_a_range_lookup_as_it_fills() {
     let store = TestStore::new();
     let db = searched_notes(&store).open().await.unwrap();
     assert_eq!(counted_index_pages(&db), None);

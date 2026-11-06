@@ -146,7 +146,10 @@ impl<'a> WriteTransaction<'a> {
             // running the write returns the bug (E15).
             let told = caught_sync("tell the live queries of a commit", || {
                 if let Some(checkpoints) = &database.checkpoints {
-                    checkpoints.committed();
+                    checkpoints.wake();
+                }
+                if let Some(statistics) = &database.statistics {
+                    statistics.committed(database.changed_rows());
                 }
                 #[cfg(any(test, feature = "test-utils"))]
                 database.record_work(|work| work.commits += 1);
