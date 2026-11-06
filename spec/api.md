@@ -1672,8 +1672,6 @@ pub struct StagedDigest(/* private */);
 
 /// What a downloaded write waits for before it can apply (§5.4, §19.1).
 pub enum WriteWait {
-    /// The original's authored sequence prefix has not been applied.
-    Slot(u64),
     /// These original row changes are unavailable even if their slots were consumed.
     Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.

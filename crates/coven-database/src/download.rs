@@ -51,8 +51,6 @@ pub enum ApplyOutcome {
 /// A prerequisite for applying a downloaded write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteWait {
-    /// The original names a sequence prefix this installation has not applied.
-    Slot(u64),
     /// These original row changes are unavailable even if their slots were consumed.
     Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.
@@ -74,14 +72,14 @@ pub(crate) fn source_wait(result: Result<ApplyOutcome, DbError>) -> Result<Apply
     }
 }
 
+/// What the write `header`, whose `opened` parts this device reads, waits
+/// for before it applies. Its prefix needs no check: its slot holds its
+/// `read_through` to the slot's `after`, which the caller has applied.
 pub(crate) fn prerequisite(
     database: &DatabaseConnection,
     header: &WriteHeader,
     opened: &[Audience],
 ) -> Result<Option<WriteWait>, DbError> {
-    if header.read_through > crate::sequence::applied(database)? {
-        return Ok(Some(WriteWait::Slot(header.read_through)));
-    }
     if header.schema_version > database.schema_version()? {
         return Ok(Some(WriteWait::SchemaVersion(header.schema_version)));
     }

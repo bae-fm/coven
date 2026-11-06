@@ -44,8 +44,7 @@ fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
         checksum: None,
     };
     assert_eq!(object.replace_token, "condition");
-    let _waits =
-        [WriteWait::Slot(1), WriteWait::Sources(Vec::new()), WriteWait::SchemaPublication(2)];
+    let _waits = [WriteWait::Sources(Vec::new()), WriteWait::SchemaPublication(2)];
     let _exhausted: DbError = DbError::WriteNumberExhausted;
     let _identity: CryptoError = CryptoError::KeyIdentity;
     let _snapshot: SnapshotError = SnapshotError::KeyUnavailable {
