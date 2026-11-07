@@ -9951,7 +9951,9 @@ What they don't cover:
   honest snapshot contents, a prepared snapshot's body in storage before its
   announcement counts, and providers that behave as §20 requires. They take the
   platform's keychain and Block Store to keep, list and delete a person's saved
-  restore-code entries as §13.1 says, and device clocks that lag an inviting
+  restore-code entries as §13.1 says, a backup not to carry a device id's
+  custody to another device, which §19.3 leaves unchecked outside Apple
+  platforms, and device clocks that lag an inviting
   device's by less than the week a decline marker is kept (§13.2).
 - **What the app is told.** Which entry a `WritesRefused` record names (§14.1),
   and what each pending record and status says (§19.1, Appendix H), are tested
