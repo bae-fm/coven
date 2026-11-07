@@ -142,7 +142,7 @@ mod transfers_in_flight;
 mod upkeep;
 mod upload;
 mod wal_checkpoints;
-pub use transfer_watch::{TransferChange, TransferWatch};
+pub use transfer_watch::{TransferChange, TransferEnd, TransferWatch};
 pub use transfers_in_flight::{InFlight, TransferMeter, TransferProgress, Transferring};
 mod user_file;
 mod write;

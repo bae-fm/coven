@@ -49,10 +49,53 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
         next(&mut watch).await,
         [TransferChange::Updated { file: file(1), progress: progress(30, 100) }]
     );
-    drop(second);
-    assert_eq!(next(&mut watch).await, [TransferChange::Removed { file: file(2) }]);
-    drop(first);
-    assert_eq!(next(&mut watch).await, [TransferChange::Removed { file: file(1) }]);
+    second.end(TransferEnd::Finished);
+    assert_eq!(
+        next(&mut watch).await,
+        [TransferChange::Removed { file: file(2), end: TransferEnd::Finished }]
+    );
+    first.end(TransferEnd::Finished);
+    assert_eq!(
+        next(&mut watch).await,
+        [TransferChange::Removed { file: file(1), end: TransferEnd::Finished }]
+    );
+}
+
+/// A reader hears how each file's transfer ended: finished, failed, held,
+/// or dropped by whatever moved its bytes. A file that ended and started
+/// again between two reads is heard ending, then moving.
+#[tokio::test]
+async fn a_reader_hears_how_each_transfer_ended() {
+    let transfers =
+        TransfersInFlight::new(CommitObserver::new(coven_foundation::task::HeardBugs::shared()));
+    let downloads = transfers.downloads();
+    let start = |n| downloads.start(DeviceId(1), object(n), vec![file(n)], progress(0, 100));
+    let (finished, failed, held, dropped, restarted) =
+        (start(1), start(2), start(3), start(4), start(5));
+    let mut watch = downloads.subscribe();
+    next(&mut watch).await;
+    finished.end(TransferEnd::Finished);
+    failed.end(TransferEnd::Failed);
+    held.end(TransferEnd::Held);
+    drop(dropped);
+    restarted.end(TransferEnd::Failed);
+    let again = start(5);
+    assert_eq!(
+        next(&mut watch).await,
+        [
+            TransferChange::Removed { file: file(1), end: TransferEnd::Finished },
+            TransferChange::Removed { file: file(2), end: TransferEnd::Failed },
+            TransferChange::Removed { file: file(3), end: TransferEnd::Held },
+            TransferChange::Removed { file: file(4), end: TransferEnd::Dropped },
+            TransferChange::Removed { file: file(5), end: TransferEnd::Failed },
+            TransferChange::Updated { file: file(5), progress: progress(0, 100) },
+        ]
+    );
+    drop(again);
+    assert_eq!(
+        next(&mut watch).await,
+        [TransferChange::Removed { file: file(5), end: TransferEnd::Dropped }]
+    );
 }
 
 /// A meter whose attempt ended moves nothing, even when a later attempt of

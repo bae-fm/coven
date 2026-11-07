@@ -9,7 +9,8 @@ use crate::{
 };
 use coven_crypto::{ContentHash, ContentHasher, FileKey};
 use coven_database::{
-    CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferMeter,
+    CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferEnd,
+    TransferMeter,
 };
 use coven_database::{FileLocationKey, Writer};
 use coven_format::{
@@ -772,7 +773,8 @@ impl UploadedFile {
     /// then. `None` when a metered network the app keeps files off stops it
     /// before its next request to storage; what it had goes.
     pub(crate) async fn keep_whole(&self) -> Result<Option<CacheReservation>, TransferError> {
-        // In flight until it ends, by finishing, failing or being dropped.
+        // In flight until it ends: finished, failed or held, as what the
+        // download came to says, or dropped with this call.
         let downloading = self.owner.database.downloads_in_flight().start(
             self.location.uploader(),
             self.location.object(),
@@ -782,10 +784,22 @@ impl UploadedFile {
                 bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
             },
         );
-        // How far through the encrypted object the whole file has got, in
-        // order: cached chunks count as they are copied in, fetched ones as
-        // their bytes arrive.
-        let meter = downloading.meter();
+        let kept = self.assemble_whole(&downloading.meter()).await;
+        downloading.end(match &kept {
+            Ok(Some(_)) => TransferEnd::Finished,
+            Ok(None) => TransferEnd::Held,
+            Err(_) => TransferEnd::Failed,
+        });
+        kept
+    }
+
+    /// Write the whole copy `keep_whole` keeps, telling `meter` how far
+    /// through the encrypted object it has got, in order: cached chunks
+    /// count as they are copied in, fetched ones as their bytes arrive.
+    async fn assemble_whole(
+        &self,
+        meter: &TransferMeter,
+    ) -> Result<Option<CacheReservation>, TransferError> {
         let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
         let header = self.header.encode();
         writer.append(&header).await?;
@@ -797,7 +811,7 @@ impl UploadedFile {
             // A metered network the app keeps files off stops the download
             // before its next request to storage (§17.8).
             let ChunkStep::Read(last, chunks) = self
-                .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(&meter))
+                .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(meter))
                 .await?
             else {
                 return Ok(None);

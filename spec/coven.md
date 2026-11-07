@@ -7095,8 +7095,12 @@ before the first byte arrives. Chunks already cached count as they are copied
 in, fetched ones as their bytes arrive (§6.7). On CloudKit a file past 8 MiB
 moves as each part's fetch reports its fraction; a smaller one is held in its
 record whole, which says only once fetched whether it holds the bytes, so it
-moves as the fetched record is read. Like `coven_downloading`, the watch is
-memory only.
+moves as the fetched record is read. Ben's pin of an album fails on track 9,
+and his app's bar must not count track 9's bytes, which never came. So when a
+file's download ends, the watch says how: finished, its whole copy checked and
+waiting for the pin's write; failed; held by a metered network; or dropped, its
+prepare's caller having stopped waiting. Track 9's ends failed. Like
+`coven_downloading`, the watch is memory only.
 
 Ana's app restarts after the provider confirmed two upload parts and her cache
 committed three download ranges. Her first reads and subscriptions show those same
@@ -7307,9 +7311,10 @@ condition in the session, because a retry must not overwrite a competing floor.
   object's whole size, known before the attempt sends anything. A file in
   parts counts each part from where it starts in the object, and a resumed or
   restarted session from where the provider says it stands. On CloudKit the
-  bytes are the fraction of each asset its client reports sent (§6.7). The
-  watch is memory only, like `coven_sending`, whose files are the ones it
-  names.
+  bytes are the fraction of each asset its client reports sent (§6.7). As an
+  attempt ends, the watch says how: stored, failed, held by the pause or a
+  metered network, or dropped. The watch is memory only, like
+  `coven_sending`, whose files are the ones it names.
 - Pausing an upload is persisted too.
 - After a crash, a session the provider still has continues from its confirmed
   parts; reopening the app forgets none of them.

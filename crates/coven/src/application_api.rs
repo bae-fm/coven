@@ -44,7 +44,7 @@ pub use coven_database::{
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
     RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead, SqlReadContext,
     SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError, ToSql,
-    TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch,
+    TransferChange, TransferEnd, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch,
     WriteFailure, WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
 

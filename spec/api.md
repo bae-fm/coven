@@ -6214,9 +6214,12 @@ pub struct TransferProgress {
     pub bytes_total: u64,
 }
 
-/// Hears how far each file in flight has got. Changes that arrive faster
-/// than the reader reads are heard together: the next read names each file
-/// that differs from what the reader last heard.
+/// Hears how far each file in flight has got, and how each one's transfer
+/// ended. Changes that arrive faster than the reader reads are heard
+/// together: the next read names each file that differs from what the
+/// reader last heard, and how each file it heard in flight ended. A file
+/// that started and ended between two reads isn't heard at all; one that
+/// ended and started again is heard ending, then moving.
 pub struct TransferWatch { /* private */ }
 
 impl TransferWatch {
@@ -6233,8 +6236,29 @@ pub enum TransferChange {
     Reset(BTreeMap<FileId, TransferProgress>),
     /// The file started, or its progress moved.
     Updated { file: FileId, progress: TransferProgress },
-    /// The file's transfer ended, whether it finished or not.
-    Removed { file: FileId },
+    /// The file's transfer ended, as `end` says.
+    Removed { file: FileId, end: TransferEnd },
+}
+
+/// How a file's transfer ended, decided in the step that takes the file out
+/// of the files in flight, so a reader never hears it gone without how.
+/// When two attempts move one file at once, the last to end says it.
+pub enum TransferEnd {
+    /// Its bytes all moved: an upload stored them, or a download assembled
+    /// and checked the file's whole copy, which the write committing its
+    /// pin keeps.
+    Finished,
+    /// It failed, and its failure went where the transfer's failures go:
+    /// an upload's pending record, a pin's call.
+    Failed,
+    /// A hold stopped it before it finished, and nothing failed: a metered
+    /// network, and for an upload also the pause, or a self-replacement
+    /// pausing writes. It starts again once the hold ends (§12.3, §17.8,
+    /// §17.9).
+    Held,
+    /// Whatever moved its bytes dropped it before it ended, as a pin's
+    /// caller does that drops the call.
+    Dropped,
 }
 
 pub struct UploadQueue {
@@ -6325,7 +6349,7 @@ while let Some(changes) = watch.next().await {
         match change {
             TransferChange::Reset(files) => bars = files,
             TransferChange::Updated { file, progress } => { bars.insert(file, progress); }
-            TransferChange::Removed { file } => { bars.remove(&file); }
+            TransferChange::Removed { file, .. } => { bars.remove(&file); }
         }
     }
     draw_bars(&bars);
@@ -6362,7 +6386,11 @@ Ana pins an album and one song cannot be downloaded. The song's reason is in
 competing failure state in that progress. While the album's other songs
 download, `coven_downloading` names the ones in flight, and the download watch
 how far each has got: a song's bytes count only once it is kept whole, so pin
-progress alone would sit still until then.
+progress alone would sit still until then. As each download ends, the watch
+says how. The song that can't be downloaded ends `Failed`, so an app that
+counts a song whole once its download ends `Finished` never counts it.
+Without this, the app would see only that the song left `coven_downloading`,
+as a song whose whole copy waits for the pin's write does too.
 
 ```rust
 /// Plaintext bytes in a full file, write-part or snapshot chunk: 64 KiB.

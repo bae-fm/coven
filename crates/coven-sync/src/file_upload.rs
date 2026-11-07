@@ -21,8 +21,24 @@ pub(super) enum Attempted {
     /// Storage holds the bytes, but no file waited for them any more: the
     /// upload retired, storing no file (§17.3).
     Retired,
-    /// The upload stays queued: the attempt failed, or a hold stopped it.
-    Queued,
+    /// The attempt failed: the upload stays queued, its failure the file's
+    /// pending record.
+    Failed,
+    /// A hold stopped the attempt, and nothing failed: the upload stays
+    /// queued.
+    Held,
+}
+
+impl Attempted {
+    /// How the attempt's transfer ended, for the upload watch (E7).
+    pub(super) fn transfer_end(self) -> coven_database::TransferEnd {
+        use coven_database::TransferEnd;
+        match self {
+            Attempted::Stored | Attempted::Retired => TransferEnd::Finished,
+            Attempted::Failed => TransferEnd::Failed,
+            Attempted::Held => TransferEnd::Held,
+        }
+    }
 }
 
 impl FilesInner {
@@ -35,12 +51,12 @@ impl FilesInner {
         meter: TransferMeter,
     ) -> Result<Attempted, SyncError> {
         if item.holds.is_none() && self.trailing_held() {
-            return Ok(Attempted::Queued);
+            return Ok(Attempted::Held);
         }
         self.forget_connection_wait(RetrySubject::Upload(item.id));
         match self.upload(&item, meter).await {
             Ok(attempted) => {
-                if attempted != Attempted::Queued {
+                if attempted != Attempted::Held {
                     self.waits.forget(RetrySubject::Upload(item.id));
                     self.waits.failure_cleared(&upload_subject(&item.location), |_| true);
                 }
@@ -52,7 +68,7 @@ impl FilesInner {
             Err(error) => {
                 coven_foundation::task::report_carried(self.database.bugs().as_ref(), &error);
                 self.record_failure(&item, error).await?;
-                Ok(Attempted::Queued)
+                Ok(Attempted::Failed)
             }
         }
     }
@@ -92,7 +108,7 @@ impl FilesInner {
             .await?
         {
             crate::recorded_upload::Uploaded::Stored(_) => {}
-            crate::recorded_upload::Uploaded::Paused => return Ok(Attempted::Queued),
+            crate::recorded_upload::Uploaded::Paused => return Ok(Attempted::Held),
             crate::recorded_upload::Uploaded::Occupied(expected) => {
                 self.settle_occupied(storage.as_ref(), &path, expected).await?;
             }
@@ -109,7 +125,7 @@ impl FilesInner {
             // completes it (§12.3, §17.4).
             Err(DbError::MemberKeysChanging) => {
                 self.writes_were_paused();
-                Ok(Attempted::Queued)
+                Ok(Attempted::Held)
             }
             Err(error) => Err(FileReadError::from(error).into()),
         }

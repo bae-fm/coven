@@ -653,9 +653,13 @@ impl FilesInner {
                 progress,
             );
             run.attempts.push(Box::pin(async move {
-                let meter = sending.meter();
-                let _sending = sending;
-                (id, self.attempt_upload(item, meter).await)
+                let attempted = self.attempt_upload(item, sending.meter()).await;
+                sending.end(match &attempted {
+                    Ok(attempted) => attempted.transfer_end(),
+                    // The attempt failed, and so did recording its failure.
+                    Err(_) => coven_database::TransferEnd::Failed,
+                });
+                (id, attempted)
             }));
         }
         run.ready = waiting;
@@ -672,7 +676,7 @@ impl FilesInner {
         match attempted {
             Attempted::Stored => run.uploaded += 1,
             Attempted::Retired => {}
-            Attempted::Queued => {
+            Attempted::Failed | Attempted::Held => {
                 if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
                     run.crossed.insert(RetrySubject::Upload(id), ending);
                 }

@@ -830,7 +830,7 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
         let changes = downloads.next().await.unwrap();
         if changes
             .iter()
-            .any(|change| matches!(change, TransferChange::Removed { file } if *file == track))
+            .any(|change| matches!(change, TransferChange::Removed { file, .. } if *file == track))
         {
             break;
         }

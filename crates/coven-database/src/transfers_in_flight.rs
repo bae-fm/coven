@@ -6,9 +6,10 @@
 //! and `coven_downloading` views, which name each file over an object, and a
 //! live query that reads one runs again as a transfer it shows starts or
 //! ends. How far each has got is progress no table holds: a `TransferWatch`
-//! hears it, by file (E7, E8).
+//! hears it, by file, and how each ended (E7, E8).
 
 use crate::observation::{CommitObserver, RowChange};
+use crate::transfer_watch::{changes_since, Heard, TransferChange, TransferEnd};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::functions::FunctionFlags;
@@ -94,7 +95,7 @@ impl TransfersInFlight {
 
 /// The stored objects this process is transferring one way. The worker
 /// transferring them adds each attempt as it starts and removes it as it
-/// ends, cancelled included. Clones share it.
+/// ends, saying how, cancelled included. Clones share it.
 #[derive(Clone)]
 pub struct InFlight {
     shared: Arc<InFlightShared>,
@@ -106,10 +107,9 @@ struct InFlightShared {
     /// Told of each start and end, as of a commit that changed what the
     /// live queries reading the direction's views read.
     observer: CommitObserver,
-    /// Each file in flight with its progress, as watches read it: every file
-    /// over an object in flight. Sent under the state's lock, so it changes in
-    /// the order the state does.
-    progress: watch::Sender<BTreeMap<FileId, TransferProgress>>,
+    /// Tells each watch that a file started, moved or ended, after the state
+    /// changed; a watch reads the change from the state.
+    changed: watch::Sender<()>,
 }
 
 #[derive(Default)]
@@ -119,6 +119,14 @@ struct InFlightState {
     /// The next attempt's number, so an ended attempt is never taken for a
     /// later one of the same object.
     next: u64,
+    /// Each open watch, by number, with what its reader last heard of each
+    /// file: how far it had got, or how it ended since. `None` before the
+    /// watch's first read. An attempt that ends marks its files ended here
+    /// in the same step that takes them out of flight, so no reader can
+    /// hear a file gone before it hears how it ended.
+    watches: BTreeMap<u64, Option<BTreeMap<FileId, Heard>>>,
+    /// The next watch's number.
+    next_watch: u64,
 }
 
 struct Entry {
@@ -131,6 +139,19 @@ struct Entry {
 }
 
 impl InFlightState {
+    /// An attempt for `files` ended as `end` says: each of them no attempt
+    /// still moves is ended for every watch that heard it.
+    fn ended(&mut self, files: &[FileId], end: TransferEnd) {
+        let now = self.progress();
+        for file in files.iter().filter(|file| !now.contains_key(*file)) {
+            for heard in self.watches.values_mut().flatten() {
+                if let Some(heard) = heard.get_mut(file) {
+                    *heard = Heard::Ended(end);
+                }
+            }
+        }
+    }
+
     /// Each file in flight with the progress its object's newest attempt
     /// shows.
     fn progress(&self) -> BTreeMap<FileId, TransferProgress> {
@@ -153,7 +174,7 @@ impl InFlight {
                 direction,
                 state: Mutex::new(InFlightState::default()),
                 observer,
-                progress: watch::channel(BTreeMap::new()).0,
+                changed: watch::channel(()).0,
             }),
         }
     }
@@ -185,23 +206,53 @@ impl InFlight {
                 .entry(object)
                 .or_insert_with(|| Entry { device, attempts: Vec::new() });
             entry.attempts.push((attempt, files, progress));
-            let started = entry.attempts.len() == 1;
-            self.shared.progress.send_replace(state.progress());
-            (attempt, started)
+            (attempt, entry.attempts.len() == 1)
         };
+        self.shared.changed.send_replace(());
         if started {
             self.changed();
         }
-        Transferring { owner: self.clone(), object, attempt }
+        Transferring { owner: self.clone(), object, attempt, end: TransferEnd::Dropped }
     }
 
     /// Hear how far each file in flight has got: all of them first, then
-    /// each change, until the store closes.
+    /// each change, and how each file ended, until the store closes.
     pub fn subscribe(&self) -> crate::TransferWatch {
+        let number = {
+            let mut state = self.state();
+            let number = state.next_watch;
+            state.next_watch += 1;
+            state.watches.insert(number, None);
+            number
+        };
         crate::TransferWatch::new(
-            self.shared.progress.subscribe(),
+            self.clone(),
+            number,
+            self.shared.changed.subscribe(),
             self.shared.observer.subscribe(),
         )
+    }
+
+    /// What watch `number` has yet to hear: every file in flight on its
+    /// first read, and after that each change since its last.
+    pub(crate) fn read(&self, number: u64) -> Vec<TransferChange> {
+        let mut state = self.state();
+        let now = state.progress();
+        let heard = state.watches.get_mut(&number).expect("a watch is registered until it drops");
+        match heard {
+            Some(heard) => changes_since(heard, now),
+            None => {
+                *heard = Some(
+                    now.iter().map(|(file, progress)| (*file, Heard::Moved(*progress))).collect(),
+                );
+                vec![TransferChange::Reset(now)]
+            }
+        }
+    }
+
+    /// Watch `number` dropped: nothing hears for it any more.
+    pub(crate) fn forget(&self, number: u64) {
+        self.state().watches.remove(&number);
     }
 
     /// The attempt has got `bytes` of the way; an attempt that ended moves
@@ -218,7 +269,8 @@ impl InFlight {
             return;
         };
         progress.bytes_transferred = bytes;
-        self.shared.progress.send_replace(state.progress());
+        drop(state);
+        self.shared.changed.send_replace(());
     }
 
     /// Tell live queries after the files changed, so a query that ran
@@ -264,18 +316,26 @@ impl InFlight {
     }
 }
 
-/// One attempt to transfer a stored object; dropping it, also when its
-/// attempt is cancelled, ends the attempt.
+/// One attempt to transfer a stored object. Its worker ends it as its
+/// transfer ended; dropping it otherwise, as a cancelled attempt does, ends
+/// it as dropped.
 pub struct Transferring {
     owner: InFlight,
     object: ObjectId,
     attempt: u64,
+    /// How the attempt ends when this drops.
+    end: TransferEnd,
 }
 
 impl Transferring {
     /// What tells this attempt's progress, for whatever moves its bytes.
     pub fn meter(&self) -> TransferMeter {
         TransferMeter { owner: self.owner.clone(), object: self.object, attempt: self.attempt }
+    }
+
+    /// End the attempt as `end` says.
+    pub fn end(mut self, end: TransferEnd) {
+        self.end = end;
     }
 }
 
@@ -299,29 +359,35 @@ impl Drop for Transferring {
     fn drop(&mut self) {
         let ended = {
             let mut state = self.owner.state();
-            match state.objects.get_mut(&self.object) {
-                Some(entry) => {
-                    entry.attempts.retain(|(attempt, _, _)| *attempt != self.attempt);
-                    let ended = entry.attempts.is_empty();
-                    if ended {
-                        state.objects.remove(&self.object);
-                    }
-                    self.owner.shared.progress.send_replace(state.progress());
-                    Some(ended)
+            let attempt = state.objects.get_mut(&self.object).and_then(|entry| {
+                let at =
+                    entry.attempts.iter().position(|(attempt, _, _)| *attempt == self.attempt)?;
+                let (_, files, _) = entry.attempts.remove(at);
+                Some((files, entry.attempts.is_empty()))
+            });
+            attempt.map(|(files, ended)| {
+                if ended {
+                    state.objects.remove(&self.object);
                 }
-                None => None,
-            }
+                state.ended(&files, self.end);
+                ended
+            })
         };
         match ended {
-            Some(true) => self.owner.changed(),
-            Some(false) => {}
-            // An attempt in flight keeps its object's entry; without it the
-            // progress watches read is wrong. This drop may run during an
-            // unwind, so it fails the store's handle instead of panicking,
-            // and the bug goes to the call it runs in or the bug sink (E15).
+            Some(ended) => {
+                self.owner.shared.changed.send_replace(());
+                if ended {
+                    self.owner.changed();
+                }
+            }
+            // An attempt in flight keeps its place in its object's entry;
+            // without it the progress watches read is wrong. This drop may
+            // run during an unwind, so it fails the store's handle instead of
+            // panicking, and the bug goes to the call it runs in or the bug
+            // sink (E15).
             None => self.owner.shared.observer.fail_with_bug(coven_foundation::task::Bug {
                 operation: "end a transfer in flight",
-                message: "an attempt in flight lost its object's entry".into(),
+                message: "an attempt in flight lost its place in its object's entry".into(),
             }),
         }
     }
