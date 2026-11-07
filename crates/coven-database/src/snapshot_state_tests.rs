@@ -160,3 +160,67 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
         database.close().await.unwrap();
     }
 }
+
+/// A snapshot's cell loss is kept only against a replacing write that had not
+/// read the lost value's setter; one whose replacing write had read it is
+/// refused, and nothing is loaded (§8.2).
+#[tokio::test]
+async fn a_cell_loss_whose_replacing_write_read_its_setter_is_refused() {
+    const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)";
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut databases = Vec::new();
+    for (millis, store) in [1000, 2000, 3000, 4000].into_iter().zip(&stores) {
+        databases.push(
+            store
+                .builder(notes(), vec![crate::Migration::addition(1, "notes", SCHEMA)])
+                .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_millis(millis))))
+                .open()
+                .await
+                .unwrap(),
+        );
+    }
+    let [a, b, c, target] = databases.as_slice() else { unreachable!() };
+    sql(a, "INSERT INTO notes VALUES('n','first')").await.unwrap();
+    let initial = records(a)[0].clone();
+    for database in [a, b, c] {
+        database.receive(initial.clone().into()).await.unwrap();
+    }
+    sql(b, "UPDATE notes SET title='second'").await.unwrap();
+    sql(c, "UPDATE notes SET title='third'").await.unwrap();
+    for change in [records(b)[0].clone(), records(c)[0].clone()] {
+        a.receive(change.into()).await.unwrap();
+    }
+    assert_eq!(a.lost_values().await.unwrap().len(), 1);
+
+    let snapshot = frames(a, Audience::Store).await;
+    let (header, snapshot_records) = decode(&snapshot);
+    let load = |records: Vec<SnapshotRecord>| {
+        let (mut encoder, mut plaintext) = SnapshotEncoder::start(header.clone()).unwrap();
+        for record in records {
+            plaintext.extend(encoder.record(record).unwrap());
+        }
+        plaintext.extend(encoder.finish().unwrap());
+        load_one(target, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(plaintext))
+    };
+    let original = contents(target);
+
+    // The same loss, but claiming the initial insert as the lost setter: the
+    // replacing write read it.
+    let mut forged = snapshot_records.clone();
+    for record in &mut forged {
+        if let SnapshotRecord::Loss(loss) = record {
+            if let LossValues::Cell { cell, .. } = &mut loss.values {
+                cell.write = initial.header.position;
+            }
+        }
+    }
+    assert!(load(forged).await.is_err());
+    assert_eq!(contents(target), original);
+
+    load(snapshot_records).await.unwrap();
+    assert_eq!(target.lost_values().await.unwrap().len(), 1);
+    for database in databases {
+        database.close().await.unwrap();
+    }
+}
