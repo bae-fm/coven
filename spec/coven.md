@@ -1816,8 +1816,8 @@ state from synced.
 - **Snapshot prefixes.** Reading only the start of a snapshot takes at most two
   bounded range requests; reading the rest takes at most one more stream, read
   once and kept nowhere whole (§16.2).
-- **Writes come inside their slot,** with no request of their own. If a provider
-  splits a stream into several requests of its own, each counts (§21.1).
+- **Writes come inside their slot,** with no request of their own. A stream a
+  provider splits into several requests of its own still counts once (§21.1).
 - **A broken connection is a failed read.** It can never be taken as proof that
   bytes which haven't all arrived are bad, and so never leads to a permanent
   refusal (§19.1).
@@ -9795,10 +9795,10 @@ sequence's reads instead: an installation reads the sequence in one place at
 a time, its passes, restores and reloads one after another, so at most 16
 slot reads are in flight beside the files.
 
-**Extra requests are counted too,** and reported separately from the pass's own:
-provider metadata requests, redirects, listing pages, native asset parts, upload
-parts and retries, including failed requests. OneDrive's metadata fetches and
-rechecks (§20.5) and any container-existence check count here.
+**Each call to a provider counts once,** by its kind, whether it succeeds or
+fails, and calling again after a failure is another call. What a provider does
+inside one call isn't counted apart: a redirect, a listing's further pages,
+OneDrive's metadata fetches and rechecks (§20.5), a container-existence check.
 
 #### 21.2 What else stays bounded
 
