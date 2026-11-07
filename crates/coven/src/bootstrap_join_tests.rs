@@ -38,6 +38,10 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     let file = directory.owned_file(StoreFile::Bootstrap);
     identity.record_attempt().unwrap();
+    // As the join saves it before it sends: the code lists the installation.
+    StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+        .set_invite_code(&SecretText::new(invite.shown_code().to_string()))
+        .unwrap();
     let saved = file.read_optional().unwrap().unwrap();
     // A live directory clone keeps the bootstrap lease, and the join below
     // would wait for it. The file handle names only the path.
@@ -994,6 +998,3 @@ async fn a_join_request_whose_create_reply_was_lost_ends_as_settled() {
     assert_eq!(creates(), before, "the retry sent no second request");
     owner.close().await;
 }
-
-#[path = "bootstrap_end_tests.rs"]
-mod end;

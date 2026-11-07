@@ -68,3 +68,55 @@ async fn a_declined_join_finishes_after_a_failure_at_any_step_of_its_ending() {
     }
     panic!("the ending never completed without a failure");
 }
+
+/// Carol's first join ended and stopped after its code was deleted, before
+/// the installation went. A later invite of the store sends its own request:
+/// the leftover saved request opens only with the first invite's code.
+#[tokio::test]
+async fn an_ended_join_left_without_its_code_does_not_fail_the_next_invite() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let first = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &first).await;
+    let code = coven_sync::read_invite_code(first.shown_code()).unwrap();
+    coven_sync::record_ending(&install.app.store_dir(&store), &code).unwrap();
+    StoreKeychain::new(install.keychain.clone(), store).delete_invite_code().unwrap();
+    assert!(install.root.path().join("stores").join(store.to_string()).exists());
+    // Ana declined the first invite's request, so the next request is the second's.
+    let request = owner.next_join_request().await;
+    owner.handle.decline_join_request(&request).await.unwrap();
+    joins_and_is_approved(&owner, &install, &owner.invite().await).await;
+    owner.close().await;
+}
+
+/// A join that stopped after it saved its request and before it saved its
+/// code leaves the same.
+#[tokio::test]
+async fn an_unsent_join_left_without_its_code_does_not_fail_the_next_invite() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let first = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let builder = install.builder(&owner, owner.recipient());
+    let pending = builder.directories.begin_bootstrap(store, builder.ids.as_ref()).await.unwrap();
+    let code = coven_sync::read_invite_code(first.shown_code()).unwrap();
+    coven_sync::JoiningIdentity::prepare(&pending.directory(), &code, "Carol's phone").unwrap();
+    drop(pending);
+    assert!(saved_code(&install, store).is_none());
+    joins_and_is_approved(&owner, &install, &owner.invite().await).await;
+    owner.close().await;
+}
+
+async fn joins_and_is_approved(owner: &Owner, install: &Installation, invite: &Invite) {
+    let control = JoinControl::new();
+    let joining = join_with_invite(
+        install.builder(owner, owner.recipient()),
+        invite.shown_code(),
+        "Carol's phone",
+        |_| {},
+        &control,
+    );
+    let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+}

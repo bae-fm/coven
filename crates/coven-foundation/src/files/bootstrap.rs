@@ -96,6 +96,9 @@ pub struct BootstrapStore {
     lease: BootstrapLease,
     protection: Protection,
     bugs: crate::task::BugSinkRef,
+    /// Whether the directory was there before this call: an earlier call's
+    /// installation, not a new one.
+    resumed: bool,
 }
 
 /// The bootstrap lock, which the bootstrap or replacement that took it holds
@@ -132,6 +135,12 @@ impl BootstrapStore {
             self.protection,
             self.bugs.clone(),
         )
+    }
+
+    /// Whether the installation was left by an earlier call, rather than made
+    /// by this one.
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     /// Publish the loaded, open store by removing its durable marker.
@@ -224,7 +233,8 @@ pub(super) async fn reserve_bootstrap_directory(
     let lock = lock::acquire_bootstrap(&path, id, &bugs).await?;
     let closing = lock.closing_guard();
     let lease = BootstrapLease::new(lock);
-    if !exists("inspect bootstrap path", &path)? {
+    let resumed = exists("inspect bootstrap path", &path)?;
+    if !resumed {
         creation::create(&root, id, ids, true, protection, bugs.clone())?;
     }
     let metadata = fs::symlink_metadata(&path)
@@ -253,7 +263,7 @@ pub(super) async fn reserve_bootstrap_directory(
     super::atomic_file::remove_temporaries(&path)?;
     // A resumed installation may have been made with another class (E1).
     protection.apply(&path)?;
-    let store = BootstrapStore { _closing: closing, path, id, lease, protection, bugs };
+    let store = BootstrapStore { _closing: closing, path, id, lease, protection, bugs, resumed };
     store.directory().settings().map_err(DirectoryCreationError::Settings)?;
     Ok(store)
 }

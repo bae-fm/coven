@@ -4716,6 +4716,11 @@ sent its request:
   sign-in it would connect with may be gone already. Stopping after the code
   leaves an installation without a code, which lists as no join. A sign-in is
   never left without its code, where no listing would find it.
+- Beginning, a call that finds an installation an earlier call left, with
+  neither a saved code nor a record, removes it and begins afresh. Its saved
+  request opens only with the code it was made for, so keeping it would fail
+  every later invite of the store: a join that stopped before it saved its code
+  leaves one, and so does one that stopped after deleting it.
 - Finishing, it publishes the store, with the kept sign-in as its credentials,
   then deletes the code. A failure deleting it is reported to the call with the
   open handle; the leftover entry goes with the store's other device-only

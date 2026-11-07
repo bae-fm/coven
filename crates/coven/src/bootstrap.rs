@@ -50,7 +50,7 @@ use credentials::restore_connection;
 
 #[path = "bootstrap_unfinished.rs"]
 mod unfinished;
-use unfinished::{kept, Kept};
+use unfinished::{begin_installation, kept, Kept};
 
 #[path = "bootstrap_end.rs"]
 mod end;
@@ -244,7 +244,7 @@ async fn bootstrap_device(
         let keys = StoreKeychain::new(keychain.clone(), id);
         crate::coven::finish_deletion::<BootstrapError>(&directory, keys).await?;
     }
-    let pending = builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?;
+    let pending = begin_installation(&builder, id, &device_entries).await?;
     // The store's one unfinished installation lists one call. A restore on
     // a waiting join's installation, or a join on a recorded restore's,
     // would remove the other's listing when it ends without the store, with

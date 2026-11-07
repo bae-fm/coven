@@ -11,6 +11,27 @@ pub(super) enum Kept {
     Nothing,
 }
 
+/// Begin a call's first installation of `id`. One an earlier call left,
+/// which no saved code or record lists, is removed first: a join that
+/// stopped before it saved its code, or after it deleted it, holds a saved
+/// request that only the code it was made for opens, and keeping it would
+/// fail every later invite of the store (§13.4).
+pub(super) async fn begin_installation(
+    builder: &CovenBuilder,
+    id: StoreId,
+    entries: &StoreKeychain,
+) -> Result<BootstrapStore, BootstrapError> {
+    let pending = builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?;
+    if !pending.resumed() || entries.invite_code()?.is_some() || entries.restore_record()?.is_some()
+    {
+        return Ok(pending);
+    }
+    tracing::info!(store = %id, "removing an unfinished installation nothing refers to");
+    pending.cancel()?;
+    drop(pending);
+    Ok(builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?)
+}
+
 /// Read what lists the store's unfinished first installation. One that keeps
 /// neither a join's saved code nor a restore's record is what a crash or a
 /// dropped call left before either could write to storage: nothing refers

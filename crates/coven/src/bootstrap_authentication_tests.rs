@@ -519,3 +519,6 @@ async fn publishing_a_join_leaves_no_sealed_copy_of_its_identity() {
     joined.close().await.unwrap();
     owner.close().await;
 }
+
+#[path = "bootstrap_end_tests.rs"]
+mod end;
