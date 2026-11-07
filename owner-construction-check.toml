@@ -11,6 +11,7 @@ rules = [
     "retained-capability-parameters",
     "component-bundles",
     "capability-construction",
+    "typed-errors",
     "conventions",
 ]
 

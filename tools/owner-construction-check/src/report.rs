@@ -17,6 +17,7 @@ use crate::sources::Workspace;
 #[cfg(test)]
 use crate::syntax::RustFile;
 use crate::task_state::find_task_state_leaks;
+use crate::typed_errors::find_string_error_violations;
 use crate::unique_type_names::find_unique_type_name_violations;
 
 pub(crate) struct Report(pub(crate) Vec<Finding>);
@@ -87,6 +88,9 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
     }
     if policy.selects(Rule::CapabilityConstruction) {
         findings.extend(find_capability_construction_violations(files, policy, &graph));
+    }
+    if policy.selects(Rule::TypedErrors) {
+        findings.extend(find_string_error_violations(files));
     }
     if policy.selects(Rule::Conventions) {
         findings.extend(find_convention_violations(&workspace.files, policy.api_crate.as_deref()));

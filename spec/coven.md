@@ -11502,6 +11502,13 @@ shared state.
   program runs names its table nowhere in the source, so the checker can't
   see it.
 
+**Errors are typed.** Production code never makes an error a string: no
+function returns `Result<_, String>`, and no `map_err` closure turns its
+error into text with `to_string()` or `format!`. A string can't be matched
+on and loses the cause, so each caller would read prose to decide what to
+do. A failure gets an error type that keeps its cause as the source. Test
+code answers to none of this.
+
 ### F.3 Owners and tasks
 
 An *owner* is an object that holds a capability, or holds another owner, and
@@ -11728,9 +11735,9 @@ the same on any platform.
 2. The dependency rules of F.1, with `cargo deny check advisories bans
    licenses`: known security advisories, the crates `deny.toml` refuses, and
    the licenses it allows.
-3. The rules of F.2 and F.3, by a checker that reads the syntax tree of every
-   crate, including inside macro calls, and the crates' `.sql` files, against
-   the policy file,
+3. The rules of F.2 and F.3, including typed errors, by a checker that reads the
+   syntax tree of every crate, including inside macro calls, and the crates'
+   `.sql` files, against the policy file,
    `owner-construction-check.toml` at the workspace root. The policy holds
    everything the rules know about coven: the rules it runs, the crate order,
    the capabilities and their homes, the tables each part of the database

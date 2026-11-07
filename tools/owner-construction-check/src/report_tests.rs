@@ -7,7 +7,7 @@ fn policy(rows: &str) -> Policy {
     Policy::fixture(&format!(
         r#"rules = ["crate-dependencies", "capability-boundaries", "database-boundary",
             "owner-dependencies", "retained-capability-parameters", "component-bundles",
-            "capability-construction", "conventions"]
+            "capability-construction", "typed-errors", "conventions"]
         {rows}"#
     ))
 }
@@ -416,4 +416,25 @@ fn only_the_selected_rules_run() {
         messages(&selected),
         ["type Clock is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"]
     );
+}
+
+#[test]
+fn string_errors_are_refused_in_production_code_and_not_in_tests() {
+    let report = check(
+        &workspace(vec![
+            RustFile::fixture(
+                "crates/first/src/lib.rs",
+                "fn g() -> Result<(), u8> { Ok(()) } fn run() -> Result<(), String> { g().map_err(|e| e.to_string()) }",
+            ),
+            RustFile::fixture(
+                "crates/first/src/lib_tests.rs",
+                "fn g() -> Result<(), u8> { Ok(()) } fn run() -> Result<(), String> { g().map_err(|e| e.to_string()) }",
+            ),
+        ]),
+        &policy(""),
+    );
+    let lines = report.lines();
+    assert!(lines[0].starts_with("crates/first/src/lib.rs:1: map_err"), "{lines:?}");
+    assert!(lines[1].starts_with("crates/first/src/lib.rs:1: run returns"), "{lines:?}");
+    assert_eq!(lines.len(), 3, "{lines:?}");
 }

@@ -50,6 +50,8 @@ pub(crate) enum Rule {
     /// Appendix F.3: owners and capabilities are constructed only at
     /// composition roots (`capability_construction.rs`).
     CapabilityConstruction,
+    /// Appendix F.2: errors are typed, never strings (`typed_errors.rs`).
+    TypedErrors,
     /// Appendix F.5: visibility, file length and test layout (`conventions.rs`).
     Conventions,
 }
