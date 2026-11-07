@@ -4130,8 +4130,10 @@ iCloud Keychain, and so from all of Ana's Apple devices (api.md
 - It needs no open store and no provider connection.
 - Forgetting an entry that is already absent succeeds.
 - The S3 key goes first, then the code. The code is what the list shows, so a
-  failure part way leaves Test listed, never an unlisted key, and calling
-  again finishes.
+  failure part way leaves Test listed, never an unlisted key
+  ([`forget_cut_listed`](proofs/sequence/CovenSequence/SavedEntries.lean)),
+  and calling again finishes
+  ([`forget_finishes`](proofs/sequence/CovenSequence/SavedEntries.lean)).
 - A later join, restore, reset or member-key replacement on one of Ana's
   devices saves the entry again, with a current code.
 
@@ -4165,7 +4167,12 @@ one of Ana's devices fail to open Household, or to apply Ben's rename.
 
 - The new entry is one copy, in one keychain group. The device writes the
   first group's copy, then deletes the others, so a failure part way leaves
-  the entry unreadable, never absent, and the next opening finishes.
+  the entry unreadable
+  ([`replace_cut_ambiguous`](proofs/sequence/CovenSequence/SavedEntries.lean)),
+  never absent
+  ([`replace_cut_present`](proofs/sequence/CovenSequence/SavedEntries.lean)),
+  and the next opening finishes
+  ([`replace_finishes`](proofs/sequence/CovenSequence/SavedEntries.lean)).
 - The device saves nothing when it holds no current code: when another device
   replaced the member keys it holds, the store has no storage location, or the
   member was removed. Its old code would no longer restore the store; the
@@ -12025,6 +12032,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots, the member's removal and the replacement of its keys included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
 | *Body.* A saved restore code's name, rewritten by each device only for a later slot than the entry's, ends at the latest slot any device saw and that slot's name, whatever order the devices write in, and a forgotten entry stays absent; the rewrite keeps the code the entry holds, in any order of rewrites; overwriting without the slot puts back a name a behind device still holds, and a rewrite that saves the device's own code puts back a code the person's other device has replaced | `saved_latest`, `never_back`, `absent_stays`, `rewrite_keeps_code`, `rewrites_keep_code`, `slotless_puts_back`, `overwrite_puts_back_code` | `proofs/sequence/CovenSequence/SavedName.lean` | §13.1 |
+| *Body.* A failure part way through forgetting a store's saved entries leaves the store listed, never an unlisted key, and calling again finishes; deleting the code first would strand the key. Replacing a saved entry, writing the first group's copy and then deleting the others, leaves it present and, with copies in several groups, unreadable at every cut, and repeating the change leaves one copy of the new bytes; deleting before the write would leave it absent | `forget_cut_listed`, `forget_finishes`, `code_first_strands`, `replace_cut_present`, `replace_cut_ambiguous`, `replace_finishes`, `delete_then_write_loses` | `proofs/sequence/CovenSequence/SavedEntries.lean` | §13.1 |
 | *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
 | *Body.* A restore whose facts count only a removal stays listed for good once its member's keys are replaced after it registers: every resume fails | `replaced_restore_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1, §14.1 |
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |

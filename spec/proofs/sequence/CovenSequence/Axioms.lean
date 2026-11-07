@@ -126,6 +126,13 @@ import SequenceApply
 #print axioms CovenSequence.SavedName.rewrites_keep_code
 #print axioms CovenSequence.SavedName.overwrite_puts_back_code
 #print axioms CovenSequence.SavedName.slotless_puts_back
+#print axioms CovenSequence.SavedEntries.forget_cut_listed
+#print axioms CovenSequence.SavedEntries.forget_finishes
+#print axioms CovenSequence.SavedEntries.code_first_strands
+#print axioms CovenSequence.SavedEntries.replace_cut_present
+#print axioms CovenSequence.SavedEntries.replace_cut_ambiguous
+#print axioms CovenSequence.SavedEntries.replace_finishes
+#print axioms CovenSequence.SavedEntries.delete_then_write_loses
 
 #print axioms CovenSequence.Deadline.bounded_retention
 #print axioms CovenSequence.Deadline.uncovered_has_no_deadline

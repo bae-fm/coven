@@ -1015,6 +1015,24 @@ resetting and member-key replacement save a code over a readable entry.
   slot, a phone still behind at slot 1 puts Household back over Family from
   slot 41.
 
+[`SavedEntries`](sequence/CovenSequence/SavedEntries.lean) models the two saved
+entries of a store, the S3 key and the restore code with one copy per keychain
+group, through the two operations that take several keychain steps (§13.1).
+
+- `forget_cut_listed`, `forget_finishes`: forgetting deletes the key and then
+  the code. Cut after any step, no key is saved for a store the listing does
+  not show, and running it again from there leaves both entries absent.
+  `code_first_strands` is the counterexample for the other order.
+- `replace_cut_present`, `replace_cut_ambiguous`, `replace_finishes`: replacing
+  an entry writes the first group's copy and then deletes the others. Cut at
+  any step, an entry that existed is still present; with copies in several
+  groups it reads as ambiguous until the last deletion; and the change run
+  again leaves exactly the new bytes. `delete_then_write_loses` is the
+  counterexample for deleting first.
+
+The model has the keychain's steps and not the platform: that each step is
+atomic, and that the keychain lists the copies of every group, are assumed.
+
 ## Invites and the app's operations
 
 [`InviteLifecycle`](sequence/CovenSequence/InviteLifecycle.lean) models one
