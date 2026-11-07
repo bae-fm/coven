@@ -21,7 +21,8 @@ accepting a slower number takes a commit:
   slower        above the baseline by more than the tolerance (exit status 1)
   no baseline   the scenario's number has none yet (exit status 0)
   not compared  the machine's one-minute load was over half its cores when the
-                scenario started; the numbers are shown and recorded, and
+                scenario started, after waiting up to ten minutes for it to
+                fall; the numbers are shown and recorded, and
                 `accept` refuses them
 
 The tolerance is 25%, widened by the baseline's own spread. The last run
@@ -44,6 +45,7 @@ import re
 import statistics
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +56,7 @@ LAST_RUN = ROOT / "target" / "perf" / "last-run.json"
 TOLERANCE = 0.25
 LOAD_SHARE = 0.5
 DEFAULT_REPEAT = 3
+QUIET_WAIT = 600
 
 BETTER, WITHIN, SLOWER, NO_BASELINE, NOT_COMPARED = (
     "better",
@@ -74,9 +77,11 @@ class Scenario:
     summary: str
 
 
-def test_command(target: tuple[str, ...], filter_: str) -> tuple[str, ...]:
+def test_command(
+    target: tuple[str, ...], filter_: str, package: str = "coven-database"
+) -> tuple[str, ...]:
     return (
-        "test", "--release", "-p", "coven-database", "--features", "test-utils", *target,
+        "test", "--release", "-p", package, "--features", "test-utils", *target,
         "--", *([filter_] if filter_ else []), "--ignored", "--nocapture", "--test-threads", "1",
     )  # fmt: skip
 
@@ -138,6 +143,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         "insert-cost",
         test_command(("--test", "insert_cost"), ""),
         "a synced insert, a release import and joined live queries",
+    ),
+    Scenario(
+        "restore-plain",
+        test_command(("--test", "restore_cost"), "a_restore_without_triggers_with_a_floor_costs", "coven"),
+        "restoring a 39,000-track store from a floor, tables without triggers",
+    ),
+    Scenario(
+        "restore-projections",
+        test_command(("--test", "restore_cost"), "a_restore_with_triggers_and_a_floor_costs", "coven"),
+        "restoring the same store into tables with listing and search triggers",
     ),
     Scenario(
         "bulk-write-cost",
@@ -230,6 +245,16 @@ def command_list(_: argparse.Namespace) -> int:
     return 0
 
 
+def wait_for_quiet(cores: int) -> None:
+    """Wait, up to ten minutes, for the one-minute load to fall to its share."""
+    waited = 0
+    while os.getloadavg()[0] > cores * LOAD_SHARE and waited < QUIET_WAIT:
+        if waited == 0:
+            print(f"  waiting for load {os.getloadavg()[0]:.2f} to fall under {cores * LOAD_SHARE:.0f}")
+        time.sleep(10)
+        waited += 10
+
+
 def command_run(args: argparse.Namespace) -> int:
     machine = machine_name()
     baselines = load_json(BASELINES / f"{machine}.json").get("scenarios", {})
@@ -238,6 +263,7 @@ def command_run(args: argparse.Namespace) -> int:
     slower = 0
     print(f"machine {machine}")
     for scenario in chosen(args.scenarios):
+        wait_for_quiet(cores)
         load = os.getloadavg()[0]
         print(f"\n{scenario.name} (load {load:.2f} of {cores} cores)")
         runs, logs = [], []

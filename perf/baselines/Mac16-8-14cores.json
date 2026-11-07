@@ -1,0 +1,663 @@
+{
+  "machine": "Mac16-8-14cores",
+  "scenarios": {
+    "app-statements": {
+      "triggered_insert/coven": {
+        "median": 0.048491,
+        "spread": 0.5618980841805696,
+        "unit": "ms"
+      },
+      "triggered_insert/plain_cached": {
+        "median": 0.002448,
+        "spread": 0.056372549019607886,
+        "unit": "ms"
+      },
+      "triggered_insert/plain_preparing_each": {
+        "median": 0.016194,
+        "spread": 0.0702111893293812,
+        "unit": "ms"
+      },
+      "triggered_miss/coven": {
+        "median": 0.0014479999999999999,
+        "spread": 5.372928176795582,
+        "unit": "ms"
+      },
+      "triggered_miss/plain_cached": {
+        "median": 0.001461,
+        "spread": 0.010951403148528374,
+        "unit": "ms"
+      },
+      "triggered_miss/plain_preparing_each": {
+        "median": 0.014746,
+        "spread": 0.0585243455852434,
+        "unit": "ms"
+      }
+    },
+    "bulk-write-cost": {
+      "local_table/clear_through_a_bulk_write": {
+        "median": 3.9956669999999996,
+        "spread": 0.22800748911258126,
+        "unit": "ms"
+      },
+      "local_table/clear_through_a_write": {
+        "median": 34.760375,
+        "spread": 0.01518490522613755,
+        "unit": "ms"
+      },
+      "local_table/empty_bulk_write": {
+        "median": 1.27125,
+        "spread": 0.9902977384464111,
+        "unit": "ms"
+      },
+      "local_table/fill_through_a_bulk_write": {
+        "median": 43.118708,
+        "spread": 0.1321613115123952,
+        "unit": "ms"
+      },
+      "local_table/fill_through_a_write": {
+        "median": 39.056459000000004,
+        "spread": 0.025174017951806578,
+        "unit": "ms"
+      }
+    },
+    "commits-under-live-query": {
+      "commits/coven_s_checkpoints/LiveQuery/elapsed": {
+        "median": 398.40104199999996,
+        "spread": 0.04894377259183981,
+        "unit": "ms"
+      },
+      "commits/coven_s_checkpoints/LiveQuery/wal_end_kb": {
+        "median": 4096.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "commits/coven_s_checkpoints/LiveQuery/wal_largest_kb": {
+        "median": 4856.0,
+        "spread": 0.009884678747940691,
+        "unit": "count"
+      },
+      "commits/coven_s_checkpoints/None/elapsed": {
+        "median": 347.80487500000004,
+        "spread": 0.05048388410311957,
+        "unit": "ms"
+      },
+      "commits/coven_s_checkpoints/None/wal_end_kb": {
+        "median": 4096.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "commits/coven_s_checkpoints/None/wal_largest_kb": {
+        "median": 4904.0,
+        "spread": 0.013866231647634585,
+        "unit": "count"
+      },
+      "commits/coven_s_checkpoints/Unpaused/elapsed": {
+        "median": 448.515417,
+        "spread": 0.06657472824395694,
+        "unit": "ms"
+      },
+      "commits/coven_s_checkpoints/Unpaused/wal_end_kb": {
+        "median": 4096.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "commits/coven_s_checkpoints/Unpaused/wal_largest_kb": {
+        "median": 4880.0,
+        "spread": 0.004918032786885246,
+        "unit": "count"
+      },
+      "commits/none/LiveQuery/elapsed": {
+        "median": 260.179459,
+        "spread": 0.05636782417938679,
+        "unit": "ms"
+      },
+      "commits/none/LiveQuery/wal_end_kb": {
+        "median": 50602.0,
+        "spread": 0.00031619303584838544,
+        "unit": "count"
+      },
+      "commits/none/LiveQuery/wal_largest_kb": {
+        "median": 50602.0,
+        "spread": 0.00031619303584838544,
+        "unit": "count"
+      },
+      "commits/none/None/elapsed": {
+        "median": 235.625792,
+        "spread": 0.02450213090424331,
+        "unit": "ms"
+      },
+      "commits/none/None/wal_end_kb": {
+        "median": 50602.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "commits/none/None/wal_largest_kb": {
+        "median": 50602.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "commits/none/Unpaused/elapsed": {
+        "median": 261.880167,
+        "spread": 0.018624930844801234,
+        "unit": "ms"
+      },
+      "commits/none/Unpaused/wal_end_kb": {
+        "median": 50602.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "commits/none/Unpaused/wal_largest_kb": {
+        "median": 50602.0,
+        "spread": 0.0,
+        "unit": "count"
+      }
+    },
+    "insert-cost": {
+      "joined_query_0/live_run": {
+        "median": 0.016292,
+        "spread": 0.06395777068499864,
+        "unit": "ms"
+      },
+      "joined_query_0/one_shot_read": {
+        "median": 0.013292,
+        "spread": 0.05958471260908825,
+        "unit": "ms"
+      },
+      "joined_query_1/live_run": {
+        "median": 0.014209000000000001,
+        "spread": 0.038144837778872474,
+        "unit": "ms"
+      },
+      "joined_query_1/one_shot_read": {
+        "median": 0.011417,
+        "spread": 0.06937023736533234,
+        "unit": "ms"
+      },
+      "joined_query_2/live_run": {
+        "median": 0.017374999999999998,
+        "spread": 0.1414100719424459,
+        "unit": "ms"
+      },
+      "joined_query_2/one_shot_read": {
+        "median": 0.013333,
+        "spread": 0.1281032025800646,
+        "unit": "ms"
+      },
+      "joined_query_3/live_run": {
+        "median": 0.0185,
+        "spread": 0.1305945945945945,
+        "unit": "ms"
+      },
+      "joined_query_3/one_shot_read": {
+        "median": 0.012625,
+        "spread": 0.06605940594059403,
+        "unit": "ms"
+      },
+      "release_import/per_row": {
+        "median": 0.10691,
+        "spread": 0.004087550275933091,
+        "unit": "ms"
+      },
+      "release_import_with_files/per_row": {
+        "median": 0.340625,
+        "spread": 0.00750678899082578,
+        "unit": "ms"
+      },
+      "release_import_with_live_queries/per_row": {
+        "median": 0.107599,
+        "spread": 0.013754774672627024,
+        "unit": "ms"
+      },
+      "synced_insert/committed": {
+        "median": 0.045460999999999994,
+        "spread": 0.017927454301489263,
+        "unit": "ms"
+      }
+    },
+    "joined-live-query": {
+      "credit_write/no_live_query": {
+        "median": 1.007625,
+        "spread": 1.5696563701773971,
+        "unit": "ms"
+      },
+      "credit_write/query_open": {
+        "median": 1.37775,
+        "spread": 0.014939575394665228,
+        "unit": "ms"
+      },
+      "joined_query/live_run": {
+        "median": 0.019489,
+        "spread": 0.04381959053825238,
+        "unit": "ms"
+      },
+      "joined_query/one_shot_read": {
+        "median": 0.012211,
+        "spread": 0.11219392351158804,
+        "unit": "ms"
+      }
+    },
+    "local-table-writes": {
+      "local_table_1000000_rows/coven_delete": {
+        "median": 324.204167,
+        "spread": 0.05334562834289539,
+        "unit": "ms"
+      },
+      "local_table_1000000_rows/coven_insert": {
+        "median": 335.068083,
+        "spread": 0.11220356670020411,
+        "unit": "ms"
+      },
+      "local_table_1000000_rows/narrowed_delete": {
+        "median": 309.0515,
+        "spread": 0.12269327927546057,
+        "unit": "ms"
+      },
+      "local_table_1000000_rows/narrowed_insert": {
+        "median": 364.88741600000003,
+        "spread": 0.06958779033366277,
+        "unit": "ms"
+      },
+      "local_table_1000000_rows/plain_delete": {
+        "median": 9.656583,
+        "spread": 0.15821248572088076,
+        "unit": "ms"
+      },
+      "local_table_1000000_rows/plain_insert": {
+        "median": 320.522375,
+        "spread": 0.21402458096724122,
+        "unit": "ms"
+      },
+      "local_table_50000_rows/coven_delete": {
+        "median": 15.273125,
+        "spread": 0.15630389982403736,
+        "unit": "ms"
+      },
+      "local_table_50000_rows/coven_insert": {
+        "median": 16.960834000000002,
+        "spread": 0.17236280951750368,
+        "unit": "ms"
+      },
+      "local_table_50000_rows/narrowed_delete": {
+        "median": 24.998334,
+        "spread": 0.16096240653477162,
+        "unit": "ms"
+      },
+      "local_table_50000_rows/narrowed_insert": {
+        "median": 17.665042,
+        "spread": 0.1056795675889138,
+        "unit": "ms"
+      },
+      "local_table_50000_rows/plain_delete": {
+        "median": 0.32691699999999996,
+        "spread": 0.1588048342545662,
+        "unit": "ms"
+      },
+      "local_table_50000_rows/plain_insert": {
+        "median": 13.451625,
+        "spread": 0.15070365104587743,
+        "unit": "ms"
+      },
+      "local_table_5000_rows/coven_delete": {
+        "median": 2.8332919999999997,
+        "spread": 0.5647582388260723,
+        "unit": "ms"
+      },
+      "local_table_5000_rows/coven_insert": {
+        "median": 2.828083,
+        "spread": 0.8036659461550457,
+        "unit": "ms"
+      },
+      "local_table_5000_rows/narrowed_delete": {
+        "median": 2.53275,
+        "spread": 0.23084275984601718,
+        "unit": "ms"
+      },
+      "local_table_5000_rows/narrowed_insert": {
+        "median": 4.118,
+        "spread": 0.37549587178241856,
+        "unit": "ms"
+      },
+      "local_table_5000_rows/plain_delete": {
+        "median": 0.1655,
+        "spread": 0.19235045317220545,
+        "unit": "ms"
+      },
+      "local_table_5000_rows/plain_insert": {
+        "median": 1.5647499999999999,
+        "spread": 0.14139638919955277,
+        "unit": "ms"
+      }
+    },
+    "queue-by-release": {
+      "queue_by_release/10000/by_release__app_s_count": {
+        "median": 0.049833,
+        "spread": 0.009190696927738648,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/by_release__table": {
+        "median": 1.7085,
+        "spread": 0.028070237050043866,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/by_release__view": {
+        "median": 2.54325,
+        "spread": 0.024198171630787284,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/one_release__app_s_count": {
+        "median": 0.011708,
+        "spread": 0.14238127775879755,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/pause": {
+        "median": 0.011167,
+        "spread": 0.3022297841855468,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/queuing": {
+        "median": 34.674707999999995,
+        "spread": 0.03015647601127605,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/queuing_without_the_table": {
+        "median": 21.248958,
+        "spread": 0.021265748654592905,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/whole_queue__table": {
+        "median": 0.053125,
+        "spread": 0.0525364705882352,
+        "unit": "ms"
+      },
+      "queue_by_release/10000/whole_queue__view": {
+        "median": 0.850166,
+        "spread": 0.05694887821907724,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/by_release__app_s_count": {
+        "median": 0.08079199999999999,
+        "spread": 0.006188731557579965,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/by_release__table": {
+        "median": 3.677458,
+        "spread": 0.022660761863221888,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/by_release__view": {
+        "median": 5.363125,
+        "spread": 0.028163057918657395,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/one_release__app_s_count": {
+        "median": 0.013417,
+        "spread": 0.09935156890512044,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/pause": {
+        "median": 0.013208,
+        "spread": 0.16081162931556628,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/queuing": {
+        "median": 73.984833,
+        "spread": 0.029094936255381138,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/queuing_without_the_table": {
+        "median": 45.1815,
+        "spread": 0.02443017606763827,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/whole_queue__table": {
+        "median": 0.099875,
+        "spread": 0.014608260325406778,
+        "unit": "ms"
+      },
+      "queue_by_release/20000/whole_queue__view": {
+        "median": 1.663875,
+        "spread": 0.027195552550522133,
+        "unit": "ms"
+      }
+    },
+    "restore-plain": {
+      "restore/Plain_floor_true": {
+        "median": 3068.260875,
+        "spread": 0.029663695724699592,
+        "unit": "ms"
+      }
+    },
+    "restore-projections": {
+      "restore/Projections_floor_true": {
+        "median": 3211.481417,
+        "spread": 0.004084434034263626,
+        "unit": "ms"
+      }
+    },
+    "sending-state": {
+      "sending_state/10000/one_release_s_sending_files": {
+        "median": 0.016834,
+        "spread": 1.5197813947962455,
+        "unit": "ms"
+      },
+      "sending_state/10000/releases_being_sent": {
+        "median": 0.016,
+        "spread": 6.3645625,
+        "unit": "ms"
+      },
+      "sending_state/10000/sending_column": {
+        "median": 0.279292,
+        "spread": 0.882442031995188,
+        "unit": "ms"
+      },
+      "sending_state/10000/whole_queue": {
+        "median": 0.934125,
+        "spread": 0.04210785494446673,
+        "unit": "ms"
+      },
+      "sending_state/20000/one_release_s_sending_files": {
+        "median": 0.015333999999999999,
+        "spread": 0.07877918351376033,
+        "unit": "ms"
+      },
+      "sending_state/20000/releases_being_sent": {
+        "median": 0.015667,
+        "spread": 0.23144188421522952,
+        "unit": "ms"
+      },
+      "sending_state/20000/sending_column": {
+        "median": 0.543084,
+        "spread": 0.03889821832350051,
+        "unit": "ms"
+      },
+      "sending_state/20000/whole_queue": {
+        "median": 1.819541,
+        "spread": 0.5709544330136005,
+        "unit": "ms"
+      }
+    },
+    "statistics": {
+      "statistics/analyze_every_row": {
+        "median": 11.010208,
+        "spread": 0.017063710331358117,
+        "unit": "ms"
+      },
+      "statistics/first_optimize": {
+        "median": 1.539375,
+        "spread": 0.038299959399106825,
+        "unit": "ms"
+      },
+      "statistics/optimize_nothing_changed": {
+        "median": 0.193083,
+        "spread": 0.073372591061875,
+        "unit": "ms"
+      }
+    },
+    "store-size": {
+      "ten_thousand_row_store_bytes": {
+        "median": 19976192.0,
+        "spread": 0.0,
+        "unit": "count"
+      }
+    },
+    "unpinned-releases": {
+      "unpinned_releases/probe_the_table": {
+        "median": 27.522667000000002,
+        "spread": 0.03681965123510741,
+        "unit": "ms"
+      },
+      "unpinned_releases/probe_the_view": {
+        "median": 75.30912500000001,
+        "spread": 0.0335611122822101,
+        "unit": "ms"
+      },
+      "unpinned_releases/read_the_apps_count": {
+        "median": 0.22575,
+        "spread": 0.16943078626799546,
+        "unit": "ms"
+      },
+      "unpinned_releases/write_110000_pins": {
+        "median": 801.288958,
+        "spread": 0.02313896855171668,
+        "unit": "ms"
+      },
+      "unpinned_releases/write_110000_pins_without_the_table": {
+        "median": 151.64012499999998,
+        "spread": 0.010425176054161074,
+        "unit": "ms"
+      },
+      "unpinned_releases/write_120000_files": {
+        "median": 777.526167,
+        "spread": 0.011913049866526342,
+        "unit": "ms"
+      },
+      "unpinned_releases/write_120000_files_without_the_table": {
+        "median": 421.880209,
+        "spread": 0.01353474725333686,
+        "unit": "ms"
+      }
+    },
+    "write-cost-per-row": {
+      "write_cost/insert_tracks_0..": {
+        "median": 848.221042,
+        "spread": 0.01214423893058741,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_0../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_10000..": {
+        "median": 862.8085,
+        "spread": 0.016112641449406166,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_10000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_20000..": {
+        "median": 900.129417,
+        "spread": 0.011229171949170952,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_20000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_30000..": {
+        "median": 901.152167,
+        "spread": 0.013151496976869724,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_30000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_40000..": {
+        "median": 884.4644579999999,
+        "spread": 0.015261448753433092,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_40000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_50000..": {
+        "median": 1031.634917,
+        "spread": 0.05066076684568055,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_50000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_60000..": {
+        "median": 902.594625,
+        "spread": 0.010878083835254362,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_60000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_70000..": {
+        "median": 883.398375,
+        "spread": 0.004320624882290606,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_70000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_80000..": {
+        "median": 878.408875,
+        "spread": 0.009029347523384147,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_80000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/insert_tracks_90000..": {
+        "median": 889.552667,
+        "spread": 0.005272173502460002,
+        "unit": "ms"
+      },
+      "write_cost/insert_tracks_90000../full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/move_every_album__carrying_every_track": {
+        "median": 21400.273041999997,
+        "spread": 0.029246710159802243,
+        "unit": "ms"
+      },
+      "write_cost/move_every_album__carrying_every_track/full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      },
+      "write_cost/update_1000_titles": {
+        "median": 97.419583,
+        "spread": 0.018306134609506634,
+        "unit": "ms"
+      },
+      "write_cost/update_1000_titles/full_scan_steps": {
+        "median": 0.0,
+        "spread": 0.0,
+        "unit": "count"
+      }
+    }
+  }
+}

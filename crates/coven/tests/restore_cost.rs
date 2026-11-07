@@ -406,6 +406,10 @@ async fn restore_cost(library: Library, floor: bool) {
     let tracks = track_count(&restored).await;
     assert_eq!(tracks, (RELEASES * TRACKS_PER_RELEASE) as i64);
     eprintln!("restored {tracks} tracks in {restored_in:?} ({library:?}, floor {floor})");
+    coven_database::test_utils::report_time(
+        &format!("restore/{library:?}_floor_{floor}"),
+        restored_in,
+    );
     restored.close().await.unwrap();
 }
 
