@@ -25,6 +25,7 @@ import CovenSequence.RaiseBody
 import CovenSequence.SecondRaise
 import CovenSequence.QueueReload
 import CovenSequence.QueueReloadExamples
+import CovenSequence.QueueFold
 import CovenSequence.RaiseQueue
 import CovenSequence.Claims
 import CovenSequence.Membership

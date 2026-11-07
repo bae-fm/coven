@@ -724,6 +724,25 @@ installation, including local commits made while loading.
   into the affected audience. `during_preserves_queue` proves admitted commits
   only extend the queue and preserve the previously visible applied slot.
 
+[`QueueFold`](sequence/CovenSequence/QueueFold.lean) folds the queue again
+after a slot of writes only where the slot reaches. A queued write changes only
+its own rows, and what it leaves in them depends only on what they held. A slot
+of writes changes only the rows it stages. The rows it reaches are those, closed
+over the queue: a queued write that changes one of them adds all of its rows.
+
+- `untouched_rows_keep_their_fold`: outside the closure, the queue's fold over
+  the state after the slot is the fold the state already holds.
+- `reached_rows_refold_alone`, `refold_reached`: inside it, folding only the
+  queued writes that reach it, over the slots' state put back there, gives the
+  whole queue's fold over the state after the slot.
+- `staged_rows_alone_too_small`: the staged rows without the closure are too
+  few. A queued write that changes a staged row and another can carry the
+  staged row's new value into the other.
+
+A slot that changes membership, cut-offs or boundaries changes how every queued
+write applies; the model leaves it out, and the device folds the whole queue
+again after one.
+
 [`RaiseQueue`](sequence/CovenSequence/RaiseQueue.lean) represents capture,
 confirmation, taking the body, its upload, preparation announcement and raise
 activation as separate persisted states. Confirmation means the captured writes slot has

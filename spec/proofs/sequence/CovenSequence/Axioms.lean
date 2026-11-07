@@ -219,6 +219,10 @@ import SequenceApply
 #print axioms CovenSequence.QueueReload.unread_reset_excludes
 #print axioms CovenSequence.QueueReload.permission_same_view
 #print axioms CovenSequence.QueueReload.changed_binding_cannot_send
+#print axioms CovenSequence.QueueFold.untouched_rows_keep_their_fold
+#print axioms CovenSequence.QueueFold.reached_rows_refold_alone
+#print axioms CovenSequence.QueueFold.refold_reached
+#print axioms CovenSequence.QueueFold.staged_rows_alone_too_small
 #print axioms CovenSequence.Reload.newest_mem
 #print axioms CovenSequence.Reload.newest_latest
 #print axioms CovenSequence.QueueReloadExamples.reset_counterexample
