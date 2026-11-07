@@ -52,6 +52,10 @@ use credentials::restore_connection;
 mod unfinished;
 use unfinished::{kept, Kept};
 
+#[path = "bootstrap_end.rs"]
+mod end;
+use end::{record_ending, remove_unfinished};
+
 #[path = "bootstrap_error.rs"]
 mod error;
 pub use error::BootstrapError;
@@ -252,6 +256,14 @@ async fn bootstrap_device(
     if other {
         return Err(BootstrapDirectoryError::from(StoreLockError::BootstrapPending(id)).into());
     }
+    // A join that decided to end and stopped part way through deleting
+    // what it kept finishes that, without connecting: the sign-in it would
+    // connect with may be gone already (§13.4).
+    if let BootstrapRequest::Join { code, .. } = &request {
+        if coven_sync::ended_for(&pending.directory(), code)? {
+            return remove_unfinished(&device_entries, &pending, Ok(None));
+        }
+    }
     let result =
         prepare_and_load(&mut builder, Installing::New(&pending), &request, None, &status, cancel)
             .await;
@@ -361,40 +373,22 @@ async fn bootstrap_device(
             }
         }
         // Only a join ends without a store: declined or expired.
-        Ok(None) => remove_unfinished(&device_entries, &pending, Ok(None)),
+        Ok(None) => match record_ending(&request, &pending) {
+            Ok(()) => remove_unfinished(&device_entries, &pending, Ok(None)),
+            Err(error) => Err(error),
+        },
         Err(error) => match &request {
             BootstrapRequest::Restore { .. } => {
                 restore::ended(&builder, &pending, &device_entries, error).await
             }
             BootstrapRequest::Join { .. } if matches!(error, BootstrapError::Cancelled) => {
-                remove_unfinished(&device_entries, &pending, Err(error))
+                match record_ending(&request, &pending) {
+                    Ok(()) => remove_unfinished(&device_entries, &pending, Err(error)),
+                    Err(recording) => combine(Err(error), Err(recording)),
+                }
             }
             BootstrapRequest::Join { .. } => Err(error),
         },
-    }
-}
-
-/// Remove an unfinished first installation that ends without a store: a join
-/// declined, expired or cancelled before its request was sent, or a restore
-/// cancelled, or ended by the facts once recorded (§13.1), which may have
-/// loaded into a join's installation. A first installation is the only one
-/// of its store on the device, so every device-only entry of the store is
-/// its own, and all of them go: the custody a cut commit wrote, then the
-/// provider credentials, which only a join's or a recorded restore's kept
-/// sign-in can be before publication, then the saved code or record; then
-/// the installation (§13.4). A failure part way leaves the code or record
-/// and installation, which list as the join or restore it was and a retry
-/// ends again (signing in first once the kept sign-in is gone), or the
-/// installation alone, which lists as neither. Credentials are never left
-/// without their code or record (§13.2).
-fn remove_unfinished<T>(
-    device_entries: &StoreKeychain,
-    pending: &BootstrapStore,
-    result: Result<T, BootstrapError>,
-) -> Result<T, BootstrapError> {
-    match device_entries.delete_device_entries() {
-        Ok(()) => cleanup(pending, result),
-        Err(error) => combine(result, Err(error.into())),
     }
 }
 
@@ -818,13 +812,6 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
             std::future::pending::<()>().await;
         }
     }
-}
-
-fn cleanup<T>(
-    pending: &BootstrapStore,
-    result: Result<T, BootstrapError>,
-) -> Result<T, BootstrapError> {
-    combine(result, pending.cancel().map_err(BootstrapError::from))
 }
 
 /// Close the installation's database; its failure is the bootstrap's.

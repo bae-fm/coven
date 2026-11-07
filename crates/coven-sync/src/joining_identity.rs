@@ -110,6 +110,10 @@ enum JoinStage {
     Sent,
     /// Its copies opened this member's keys: approval has begun (§13.2).
     Opened,
+    /// The join decided to end without a store, and is deleting what it
+    /// kept: whatever call finds it finishes the deletion, without
+    /// connecting (§13.4).
+    Ended,
 }
 
 impl JoinStage {
@@ -119,6 +123,7 @@ impl JoinStage {
             Self::Accepted => 1,
             Self::Sent => 2,
             Self::Opened => 3,
+            Self::Ended => 4,
         }
     }
 
@@ -128,6 +133,7 @@ impl JoinStage {
             1 => Some(Self::Accepted),
             2 => Some(Self::Sent),
             3 => Some(Self::Opened),
+            4 => Some(Self::Ended),
             _ => None,
         }
     }
@@ -309,6 +315,12 @@ impl JoiningIdentity {
         self.state == JoinStage::Accepted
     }
 
+    /// Whether the join already decided to end, and only its deletion is
+    /// left (§13.4).
+    pub fn ended(&self) -> bool {
+        self.state == JoinStage::Ended
+    }
+
     /// Whether this member's keys have opened, in this call or an earlier
     /// one: approval has begun, and the join never reports waiting for it
     /// again (§13.2, E10).
@@ -323,7 +335,7 @@ impl JoiningIdentity {
     pub fn record_acceptance(&mut self) -> Result<(), SyncError> {
         match self.state {
             JoinStage::Unsent => self.record(JoinStage::Accepted),
-            JoinStage::Accepted | JoinStage::Sent | JoinStage::Opened => Ok(()),
+            JoinStage::Accepted | JoinStage::Sent | JoinStage::Opened | JoinStage::Ended => Ok(()),
         }
     }
 
@@ -434,6 +446,23 @@ impl JoiningIdentity {
         now.duration_since(std::time::UNIX_EPOCH)
             .map_or(true, |since| since.as_secs() < self.expires_at)
     }
+}
+
+/// Record that the join with `code` ends without a store, before anything it
+/// kept is deleted: a call that stops part way through the deletion finds the
+/// record and finishes it without connecting. Nothing saved is nothing to
+/// record.
+pub fn record_ending(directory: &StoreDir, code: &InviteCode) -> Result<(), SyncError> {
+    match JoiningIdentity::saved(directory, code)? {
+        Some(mut saved) => saved.record(JoinStage::Ended),
+        None => Ok(()),
+    }
+}
+
+/// Whether the request kept for `code` was recorded as ended
+/// (`record_ending`).
+pub fn ended_for(directory: &StoreDir, code: &InviteCode) -> Result<bool, SyncError> {
+    Ok(JoiningIdentity::saved(directory, code)?.is_some_and(|saved| saved.ended()))
 }
 
 fn local_path(code: &InviteCode) -> String {

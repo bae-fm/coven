@@ -4707,13 +4707,15 @@ sent its request:
   request. A listed join always has the request it resumes from, and a kept
   sign-in always belongs to a listed join.
 - Ending without loading, declined, expired, or cancelled before sending, it
-  deletes the store's entries on the device, the kept sign-in before the code,
-  then the installation; cancelled, it unmounts a Dropbox folder first, while
-  the sign-in it unmounts with is still kept (above). Stopping
-  after the sign-in leaves a join that still lists, and the next call ends it
-  once Dan signs in. Stopping after the code leaves an installation without a
-  code, which lists as no join. A sign-in is never left without its code, where
-  no listing would find it.
+  first records in the saved request that it ends, then deletes the store's
+  entries on the device, the kept sign-in before the code, then the
+  installation; cancelled, it unmounts a Dropbox folder first, while the
+  sign-in it unmounts with is still kept (above). Stopping after the record
+  and before the code leaves a join that still lists, and the next call
+  finishes the deletion without connecting, so Dan signs in to nothing: the
+  sign-in it would connect with may be gone already. Stopping after the code
+  leaves an installation without a code, which lists as no join. A sign-in is
+  never left without its code, where no listing would find it.
 - Finishing, it publishes the store, with the kept sign-in as its credentials,
   then deletes the code. A failure deleting it is reported to the call with the
   open handle; the leftover entry goes with the store's other device-only

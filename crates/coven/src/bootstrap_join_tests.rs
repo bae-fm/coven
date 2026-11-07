@@ -994,3 +994,6 @@ async fn a_join_request_whose_create_reply_was_lost_ends_as_settled() {
     assert_eq!(creates(), before, "the retry sent no second request");
     owner.close().await;
 }
+
+#[path = "bootstrap_end_tests.rs"]
+mod end;
