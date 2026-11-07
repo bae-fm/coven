@@ -586,3 +586,149 @@ async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_nam
     assert_eq!(db.lost_values().await.unwrap().len(), 1, "the app keeps Ana's title frozen");
     db.close().await.unwrap();
 }
+
+/// The notes the app shows, by id, with their titles.
+fn note_titles(database: &crate::Database) -> Vec<(String, String)> {
+    database.inspect_writer(|db| {
+        db.query("SELECT id,title FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+    })
+}
+
+/// Ana's queued rename of note `n`, folded over Ben's concurrent one, leaves
+/// a lost value, and she dismisses it in a second unsent write that changes
+/// no row of its own. Ben's next slot edits the note's body: it reaches the
+/// note, so both her writes fold again, the dismissal with them, and the
+/// lost value stays gone (§6.2).
+#[tokio::test]
+async fn a_slot_reaching_a_dismissed_row_keeps_the_queued_dismissal() {
+    let store = TestStore::new();
+    let migrations = vec![Migration::addition(
+        1,
+        "notes",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT)",
+    )];
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','Note','')").await.unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE notes SET title='Ana' WHERE id='n'").await.unwrap();
+    let ben = [("title", Value::Text("Ben".into()))];
+    crate::tests::remote_update_concurrent_with_queue(&db, "notes", "n", &ben).await;
+    let lost = db.lost_values().await.unwrap();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    db.dismiss_lost_values(&lost).await.unwrap();
+    assert!(db.lost_values().await.unwrap().is_empty());
+    let shown = note_titles(&db);
+    let body = [("body", Value::Text("Ben's body".into()))];
+    crate::tests::remote_update_beside_queue(&db, "notes", "n", &body).await;
+    assert!(db.lost_values().await.unwrap().is_empty(), "{:?}", db.lost_values().await);
+    assert_eq!(note_titles(&db), shown);
+    db.close().await.unwrap();
+}
+
+/// Ana's device writes note `x` under her member key, and an admin slot
+/// replaces that key before the write gets a slot: the write still shows,
+/// folded over the slots, until its own slot comes back and is refused as
+/// signed with the old key (§14.1). Her later rename of another note still
+/// waits, so the queue stays; the refused slot reaches note `x` and takes
+/// her write off it.
+#[tokio::test]
+async fn a_refused_queued_write_comes_off_its_rows() {
+    let store = TestStore::new();
+    let migrations = vec![Migration::addition(
+        1,
+        "notes",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+    )];
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    TestStore::register(&db, store.device(), 1);
+    sql(&db, "INSERT INTO notes VALUES('counted','Counted')").await.unwrap();
+    count_own(&db).await;
+    sql(&db, "INSERT INTO notes VALUES('x','Ana')").await.unwrap();
+    let ana = crate::tests::member(1);
+    let mut state = db.store_state().await.unwrap();
+    state.members.get_mut(&ana).unwrap().keys = crate::tests::keys(8);
+    db.admin_fixture(
+        coven_format::admin::StoreChange::ReplaceMemberKeys {
+            member: ana,
+            expected: coven_crypto::MemberPublicKeys {
+                signing: crate::test_utils::signer(),
+                sealing: crate::tests::keys(1).sealing,
+            },
+            keys: crate::tests::keys(8),
+        },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
+    let queued = records(&db).pop().unwrap();
+    sql(&db, "UPDATE notes SET title='Later' WHERE id='counted'").await.unwrap();
+    assert_eq!(
+        note_titles(&db),
+        [("counted".to_owned(), "Later".to_owned()), ("x".to_owned(), "Ana".to_owned())]
+    );
+    db.receive(queued.into()).await.unwrap();
+    let refused: bool = db.inspect_writer(|db| {
+        db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_refusals)", [], |r| r.get(0))
+            .unwrap()
+    });
+    assert!(refused, "the write's slot is refused");
+    assert_eq!(note_titles(&db), [("counted".to_owned(), "Later".to_owned())]);
+    db.close().await.unwrap();
+}
+
+/// Another device's insert of `artists` row `id` at generation 1.
+fn artist_insert(id: &str) -> coven_format::write::RowChange {
+    use coven_merge::{Change, ColumnValue, Operation};
+    let value = ColumnValue { value: Value::Text(id.into()), parents: Default::default() };
+    coven_format::write::RowChange {
+        row: crate::tests::store_row("artists", id),
+        change: Change {
+            generation: 0,
+            operation: Operation::Insert([("id".to_owned(), value)].into()),
+        },
+        old: Default::default(),
+        sources: Default::default(),
+        creator: None,
+        execution: Default::default(),
+    }
+}
+
+/// Ana's unsent writes create the artist `prince` with an album, then delete
+/// the artist, the delete carrying to the album through ON DELETE CASCADE.
+/// Ben's slot created `prince` first, which makes him its owner: her insert
+/// and delete of the artist are refused, and the album's delete with them,
+/// though his slot never touched the album. Both her writes change the
+/// artist, so the slot reaches them and their album (§6.2).
+#[tokio::test]
+async fn a_slot_reaches_every_row_of_the_queued_writes_it_reaches() {
+    const SCHEMA: &str = "CREATE TABLE artists(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY,
+           artist TEXT REFERENCES artists(id) ON DELETE CASCADE)";
+    let store = TestStore::new();
+    let tables = vec![
+        SyncedTable::new("artists", RowIdentity::SharedKey).owner_only(),
+        SyncedTable::new("albums", RowIdentity::SharedKey),
+    ];
+    let migrations = vec![Migration::addition(1, "schema", SCHEMA)];
+    let db = store.builder(tables, migrations).open().await.unwrap();
+    TestStore::register(&db, store.device(), 1);
+    sql(&db, "INSERT INTO artists VALUES('ana')").await.unwrap();
+    count_own(&db).await;
+    sql(&db, "INSERT INTO artists VALUES('prince'); INSERT INTO albums VALUES('purple','prince')")
+        .await
+        .unwrap();
+    sql(&db, "DELETE FROM artists WHERE id='prince'").await.unwrap();
+    let albums = |db: &crate::Database| -> Vec<String> {
+        db.inspect_writer(|db| {
+            db.query("SELECT id FROM albums ORDER BY id", [], |r| r.get(0)).unwrap()
+        })
+    };
+    assert!(albums(&db).is_empty());
+    let ben = coven_foundation::id_source::DeviceId(10_000 + db.applied_slot().await.unwrap());
+    TestStore::register(&db, ben, 2);
+    crate::tests::remote_write_beside_queue(&db, artist_insert("prince")).await;
+    assert_eq!(albums(&db), ["purple"], "Ana's delete of Ben's artist is refused");
+    db.close().await.unwrap();
+}
