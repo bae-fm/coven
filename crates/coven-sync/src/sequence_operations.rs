@@ -2,7 +2,6 @@
 
 use crate::sequence_sync::OperationState;
 use crate::{
-    history::History,
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
     sequence_sync::{next_slot, SequenceSync, Session},
     slot_object, OperationOutcome, OperationRejection, SyncError,
@@ -22,11 +21,15 @@ use coven_merge::{Audience, Slot};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
+use super::sequence_copies::{required_copies, route};
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Request {
     Change(#[serde(with = "change")] StoreChange),
     Snapshot(SnapshotRequest),
     Key(super::sequence_keys::KeyPreparation),
+    /// One key copy this device's member owes a current member (§12.1).
+    Copy(#[serde(with = "route")] KeyCopyPrefix),
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) enum OperationStep {
@@ -86,6 +89,7 @@ impl SequenceOperation {
     pub(crate) fn kind(&self) -> crate::OperationKind {
         match &self.request {
             Request::Key(target) => target.kind(),
+            Request::Copy(_) => crate::OperationKind::SendKeyCopy,
             Request::Change(change) => operation_kind(change),
             Request::Snapshot(request) => match request.purpose {
                 Purpose::Ordinary => crate::OperationKind::WriteSnapshot,
@@ -293,6 +297,7 @@ impl SequenceSync {
                     change,
                 )
                 .map(|effect| effect.is_some()),
+            Request::Copy(route) => Ok(session.history.copy_wanted(route, member.member())),
             Request::Snapshot(request) => self.validate_snapshot(session, member, request),
         })
     }
@@ -591,15 +596,33 @@ impl SequenceSync {
             if matches!(step, OperationStep::Preparing) {
                 step = match &request {
                     Request::Key(_) => unreachable!("key preparation has advanced"),
-                    Request::Change(change) => match required_copies(&session.history, ring, change, member.member()).into_iter().find(|route|
-                        !session.history.copies.iter().any(|copy| matches!(&copy.prefix.kind, SlotKind::KeyCopy(copy) if &copy.routing == route))) {
-                        Some(route) => OperationStep::Copy(route), None => OperationStep::Claiming,
-                    },
+                    Request::Copy(route) => OperationStep::Copy(route.clone()),
+                    Request::Change(change) => {
+                        match required_copies(&session.history, ring, change, member.member())
+                            .into_iter()
+                            .find(|route| !session.history.has_copy(route))
+                        {
+                            Some(route) => OperationStep::Copy(route),
+                            None => OperationStep::Claiming,
+                        }
+                    }
                     Request::Snapshot(request) => {
                         let number = self.database.reserve_snapshot_number().await?.get();
-                        OperationStep::Capturing(Capture {id: coven_format::admin::SnapshotId {audience: request.audience.clone(),device: self.device,number},
-                            purpose: request.purpose, key: session.history.sending_key(ring, member.member(), &request.audience)?, name: format!("snapshot-{number}.sealed")})
-                    },
+                        OperationStep::Capturing(Capture {
+                            id: coven_format::admin::SnapshotId {
+                                audience: request.audience.clone(),
+                                device: self.device,
+                                number,
+                            },
+                            purpose: request.purpose,
+                            key: session.history.sending_key(
+                                ring,
+                                member.member(),
+                                &request.audience,
+                            )?,
+                            name: format!("snapshot-{number}.sealed"),
+                        })
+                    }
                 };
                 self.database
                     .advance_operation(
@@ -897,77 +920,8 @@ mod change {
         StoreChange::decode(&Vec::<u8>::deserialize(input)?).map_err(serde::de::Error::custom)
     }
 }
-mod route {
-    use super::*;
-    pub(super) fn serialize<S: serde::Serializer>(
-        value: &KeyCopyPrefix,
-        output: S,
-    ) -> Result<S::Ok, S::Error> {
-        (&value.audience.to_string(), value.key, value.member, value.sealing.as_bytes())
-            .serialize(output)
-    }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        input: D,
-    ) -> Result<KeyCopyPrefix, D::Error> {
-        let (audience, key, member, sealing): (String, _, _, [u8; 32]) =
-            Deserialize::deserialize(input)?;
-        let audience: Audience = audience.parse().map_err(serde::de::Error::custom)?;
-        Ok(KeyCopyPrefix {
-            audience,
-            key,
-            member,
-            sealing: coven_crypto::SealingKey::from_bytes(sealing),
-        })
-    }
-}
-
 fn parent_owned(record: &OperationRecord) -> bool {
     record.started_by == operation_kind::INVITE
-}
-
-fn required_copies(
-    history: &History,
-    ring: &StoreKeyring,
-    change: &StoreChange,
-    author: coven_foundation::id_source::MemberId,
-) -> Vec<KeyCopyPrefix> {
-    match change {
-        StoreChange::RotateKey { audience, key, .. } => history.routes(audience, *key),
-        StoreChange::CreateCircle { circle, key, .. } => vec![KeyCopyPrefix {
-            audience: Audience::Circle(*circle),
-            key: *key,
-            member: author,
-            sealing: history.state.members[&author].keys.sealing,
-        }],
-        StoreChange::AddCircleMember { circle, member } => history
-            .introductions
-            .iter()
-            .filter(|intro| intro.audience == Audience::Circle(*circle))
-            .map(|intro| KeyCopyPrefix {
-                audience: intro.audience.clone(),
-                key: intro.key,
-                member: *member,
-                sealing: history.state.members[member].keys.sealing,
-            })
-            .collect(),
-        StoreChange::AddMember { member, keys, .. }
-        | StoreChange::ReplaceMemberKeys { member, keys, .. } => history
-            .introductions
-            .iter()
-            .filter(|intro| {
-                intro.audience == Audience::Store
-                    || (crate::effects::belongs(&history.state, &intro.audience, member)
-                        && history.accepted(ring, &intro.audience, intro.key))
-            })
-            .map(|intro| KeyCopyPrefix {
-                audience: intro.audience.clone(),
-                key: intro.key,
-                member: *member,
-                sealing: keys.sealing,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 fn operation_kind(change: &StoreChange) -> crate::OperationKind {

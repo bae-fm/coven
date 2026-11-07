@@ -250,6 +250,7 @@ impl SequenceSync {
             let member =
                 self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             self.rotate_exposed(&mut session, &mut ring, &member).await?;
+            self.send_owed_copies(&mut session, &mut ring, &member).await?;
             self.publish_raises(&mut session, &mut ring, &member).await?;
             // A snapshot announced here is named by this pass's floor write.
             self.request_snapshots(&mut session, &mut ring, &member).await?;
@@ -705,6 +706,8 @@ mod sequence_access_keys;
 pub(crate) mod sequence_bootstrap;
 #[path = "sequence_claim.rs"]
 mod sequence_claim;
+#[path = "sequence_copies.rs"]
+pub(crate) mod sequence_copies;
 #[path = "sequence_credentials.rs"]
 mod sequence_credentials;
 #[path = "sequence_files.rs"]

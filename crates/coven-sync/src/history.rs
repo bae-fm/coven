@@ -468,6 +468,42 @@ impl History {
             .collect()
     }
 
+    /// Whether a copy with `route`'s routing is in the sequence.
+    pub(crate) fn has_copy(&self, route: &KeyCopyPrefix) -> bool {
+        self.copies.iter().any(|copy| {
+            matches!(&copy.prefix.kind, coven_format::sealed_slot::SlotKind::KeyCopy(copy) if &copy.routing == route)
+        })
+    }
+
+    /// Whether `author` should send the copy `route` describes: they and the
+    /// recipient are still in its audience, the recipient's sealing key is
+    /// still the one it names, and the sequence has no such copy (§12.1).
+    pub(crate) fn copy_wanted(&self, route: &KeyCopyPrefix, author: MemberId) -> bool {
+        effects::belongs(&self.state, &route.audience, &author)
+            && effects::belongs(&self.state, &route.audience, &route.member)
+            && self
+                .state
+                .members
+                .get(&route.member)
+                .is_some_and(|member| member.keys.sealing == route.sealing)
+            && !self.has_copy(route)
+    }
+
+    /// The copies `me` owes (§12.1): for each audience `me` belongs to, each
+    /// introduced key `ring` holds and accepts, to each current member whose
+    /// current sealing key has no copy of it. Removed members get none.
+    pub(crate) fn owed_copies(&self, ring: &StoreKeyring, me: MemberId) -> Vec<KeyCopyPrefix> {
+        self.introductions
+            .iter()
+            .filter(|intro| {
+                effects::belongs(&self.state, &intro.audience, &me)
+                    && self.accepted(ring, &intro.audience, intro.key)
+            })
+            .flat_map(|intro| self.routes(&intro.audience, intro.key))
+            .filter(|route| !self.has_copy(route))
+            .collect()
+    }
+
     /// Open addressed boxes tentatively; an introduction must supply a matching
     /// commitment before use. Other recipients' routing still records exposure.
     pub(crate) fn acquire(

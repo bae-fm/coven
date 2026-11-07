@@ -5989,6 +5989,9 @@ pub enum OperationKind {
     RequiredReload,
     /// Replace an audience key exposed to an excluded member or credential (§12.2).
     RotateKey,
+    /// Send an older audience key to a current member whose current sealing key
+    /// has no copy of it (§12.1).
+    SendKeyCopy,
     /// Publish a member's replacement pair and finish required custody (§12.3, E9).
     ReplaceMemberKeys,
     /// Upload a snapshot, then claim its announcement (§16.2).
@@ -6891,6 +6894,11 @@ match stream.read_at(resume_at, 256 * 1024).await {
   access. The expected old binding must still be current at the claim; an
   earlier replacement or removal fails the call and undoes its artifacts.
   Replacing again needs a new call. Both keys must be fresh.
+
+- An admin sends a member's new sealing key only the keys it holds. Each other
+  member's device sends the older keys it holds, to every current member
+  whose sealing key lacks a copy, in a pass of its own, as the operation
+  `SendKeyCopy` (§12.1).
 
 - Replacement preserves the id, role, circle memberships and device ids.
   Historical public bindings remain available for signature checks. Old

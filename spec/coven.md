@@ -3597,6 +3597,7 @@ snapshot body is deleted (§16.3).
 | Key rotation, circle creation | keep the new key; claim its copies; claim its introduction (§12.1) |
 | Adding a circle member | supply the circle's earlier keys to them first (§15.7) |
 | Invite | record the fixed target member and the new provider access, then show the code (§13.2) |
+| Older keys for a member | at a pass, for each key held and each current member lacking a copy of it: claim the copy (§12.1) |
 | Replacing one's own keys | pause app writes; confirm the writes queued before the replacement; keep the new pair; claim copies, then the replacement; install custody and refresh the restore code before lifting the pause (§12.3) |
 | Schema raise | confirm captured writes and the raise marker; upload and announce the snapshot; claim the raise (§18.5) |
 | Snapshots | §16 covers taking, announcing and keeping them |
@@ -3814,6 +3815,18 @@ to Carol in different slots; both stay readable and record the same recipient.
 has no copy of an older key is sent one, so they can read history made under it.
 An operation that retries doesn't need to send a copy that is already in the
 sequence.
+
+Adding or recovering a member sends only the keys the acting device holds, so
+the others reach them through the pass. After it applies what arrived, each
+device of a member in an audience works out the copies it owes: for each key of
+that audience it holds, one to each current member whose current sealing key has
+no copy of it in the sequence. It claims each as an operation of its own (kind
+`SendKeyCopy`), the way any key copy is claimed, with no turn-taking: if two
+members' devices send the same copy, both stay readable (above). A member who
+has left the audience is owed none. Ana, an admin outside Gifts, recovers Ben
+and can send him only the store key. Carol is in Gifts: her next pass sends
+Ben's new sealing key a copy of each Gifts key she holds, and his new phone
+opens them with its first keys.
 
 **A new device** first opens the copies for its sealing key, from the floor or the
 sequence, and checks their introductions and its membership before loading any
@@ -4505,7 +4518,8 @@ Approval records exactly the pair it checked: as *add member* for a fresh id, or
 needs a new approval. Before the entry, approval claims copies for Dan's exact
 sealing key: every store key in history, and, when recovering an existing
 member, the keys Ana holds for that member's circles. If Ana's phone lacks a key
-it must send, approval is blocked until it has it.
+it must send, approval is blocked until it has it. The keys of a circle Ana is
+outside reach him from that circle's members at their next passes (§12.1).
 
 The entry adding a new member records how they reach storage: their provider
 account, or the id of the S3 key made for them and who holds it. Any admin can

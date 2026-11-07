@@ -51,6 +51,9 @@ pub enum OperationKind {
     RequiredReload,
     /// Publish a fresh audience key and its sealed copies.
     RotateKey,
+    /// Send an older audience key to a current member whose sealing key has
+    /// no copy of it.
+    SendKeyCopy,
     /// Create a circle and its first key.
     CreateCircle,
     /// Seal a circle's history to a member.
@@ -81,6 +84,7 @@ impl OperationKind {
                 | Self::RetainFiles
                 | Self::RequiredReload
                 | Self::RotateKey
+                | Self::SendKeyCopy
                 | Self::RevokeAccess
         )
     }
