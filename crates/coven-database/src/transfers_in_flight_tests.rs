@@ -209,6 +209,7 @@ async fn reading_what_is_being_sent_costs() {
                     .unwrap();
                 best = best.min(started.elapsed());
             }
+            crate::test_utils::report_time(&format!("sending_state/{files}/{name}"), best);
             timings.push(format!("{name} {answer} in {best:?}"));
         }
         eprintln!("{files} queued: {}", timings.join("; "));

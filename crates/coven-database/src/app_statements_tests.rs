@@ -248,6 +248,16 @@ async fn a_triggered_statements_cost() {
     .unwrap();
     let coven_miss = started.elapsed() / STATEMENTS as u32;
     db.close().await.unwrap();
+    for (metric, time) in [
+        ("triggered_insert/coven", coven),
+        ("triggered_insert/plain_preparing_each", fresh),
+        ("triggered_insert/plain_cached", cached),
+        ("triggered_miss/coven", coven_miss),
+        ("triggered_miss/plain_preparing_each", fresh_miss),
+        ("triggered_miss/plain_cached", cached_miss),
+    ] {
+        crate::test_utils::report_time(metric, time);
+    }
     eprintln!(
         "insert per statement: coven {coven:?}; plain SQLite preparing each {fresh:?}, from its cache {cached:?}"
     );

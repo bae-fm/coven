@@ -442,6 +442,17 @@ async fn counting_unpinned_releases_costs() {
     }
     assert_eq!((probed, kept, computed), (1000, 1000, 1000));
     assert!(agrees(&db));
+    for (metric, time) in [
+        ("write_120000_files", rows),
+        ("write_120000_files_without_the_table", bare_rows),
+        ("write_110000_pins", pins),
+        ("write_110000_pins_without_the_table", bare_pins),
+        ("probe_the_view", computing),
+        ("probe_the_table", probing),
+        ("read_the_apps_count", keeping),
+    ] {
+        crate::test_utils::report_time(&format!("unpinned_releases/{metric}"), time);
+    }
     eprintln!(
         "120,000 files {rows:?}, against {bare_rows:?} without the table and the app's count; \
          110,000 pins {pins:?}, against {bare_pins:?}; probing the view {computing:?}, \

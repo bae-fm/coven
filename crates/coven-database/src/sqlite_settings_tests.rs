@@ -639,6 +639,13 @@ async fn gathering_statistics_on_a_library_sized_store() {
     let unchanged = timed("PRAGMA optimize=0x10012");
     forget();
     let whole = timed("PRAGMA analysis_limit=0; ANALYZE");
+    for (metric, time) in [
+        ("first_optimize", first),
+        ("optimize_nothing_changed", unchanged),
+        ("analyze_every_row", whole),
+    ] {
+        crate::test_utils::report_time(&format!("statistics/{metric}"), time);
+    }
     eprintln!(
         "first optimize {first:?}; again, nothing changed {unchanged:?}; ANALYZE of every row {whole:?}"
     );
@@ -736,6 +743,18 @@ async fn commits_under_a_rerunning_live_query_cost() {
     for (name, settings) in [("coven's checkpoints", SqliteSettings::default()), ("none", off)] {
         for reading in [Reading::None, Reading::LiveQuery, Reading::Unpaused] {
             let (elapsed, largest, ended) = timed_writes(2000, reading, settings.clone()).await;
+            let metric = format!("commits/{name}/{reading:?}");
+            crate::test_utils::report_time(&format!("{metric}/elapsed"), elapsed);
+            crate::test_utils::report_cost(
+                &format!("{metric}/wal_largest_kb"),
+                (largest / 1024) as f64,
+                "count",
+            );
+            crate::test_utils::report_cost(
+                &format!("{metric}/wal_end_kb"),
+                (ended / 1024) as f64,
+                "count",
+            );
             eprintln!(
                 "{name}, reading {reading:?}: 2,000 commits in {elapsed:?}, WAL at most {} KB, {} KB at the end",
                 largest / 1024,

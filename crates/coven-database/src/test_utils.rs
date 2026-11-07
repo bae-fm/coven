@@ -6,6 +6,23 @@ use crate::{Migration, RowIdentity, SyncedTable};
 mod work_counts;
 pub use work_counts::{WorkCounter, WorkCounts};
 
+/// One measured number, as a line `scripts/perf.sh` reads:
+/// `COST metric=<name> value=<n> unit=<ms|ratio|count>`. Lower is better in
+/// every unit. A character in `metric` outside letters, digits and `_./-`
+/// becomes `_`, so a label can be passed as it reads.
+pub fn report_cost(metric: &str, value: f64, unit: &str) {
+    let metric: String = metric
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || "_./-".contains(c) { c } else { '_' })
+        .collect();
+    eprintln!("COST metric={metric} value={value} unit={unit}");
+}
+
+/// [`report_cost`] for a time, in milliseconds.
+pub fn report_time(metric: &str, time: std::time::Duration) {
+    report_cost(metric, time.as_secs_f64() * 1000.0, "ms");
+}
+
 pub(crate) type WriteCheckpointObserver = Box<dyn Fn(WriteCheckpoint) + Send>;
 
 /// Boundaries after a local write's durable commit, for process-crash tests.

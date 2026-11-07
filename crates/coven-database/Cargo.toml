@@ -53,3 +53,4 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "bulk_write_cost"
+required-features = ["test-utils"]

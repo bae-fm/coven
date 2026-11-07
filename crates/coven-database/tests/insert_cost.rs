@@ -253,21 +253,23 @@ async fn import(files: bool, live: bool) -> Duration {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_release_imports_cost() {
+    let per_row = import(false, false).await;
+    coven_database::test_utils::report_time("release_import/per_row", per_row);
     eprintln!(
-        "per row of a release, {} rows a write, no files: {:?}",
+        "per row of a release, {} rows a write, no files: {per_row:?}",
         RELEASES * RELEASE_ROWS,
-        import(false, false).await
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_release_imports_cost_with_joined_live_queries_open() {
+    let per_row = import(false, true).await;
+    coven_database::test_utils::report_time("release_import_with_live_queries/per_row", per_row);
     eprintln!(
-        "per row of a release, {} rows a write, no files, {} joined live queries open: {:?}",
+        "per row of a release, {} rows a write, no files, {} joined live queries open: {per_row:?}",
         RELEASES * RELEASE_ROWS,
         JOINED.len(),
-        import(false, true).await
     );
 }
 
@@ -286,7 +288,7 @@ async fn a_joined_live_querys_run_cost() {
     for write in 0..WRITES {
         write_releases(&db, false, write * RELEASES..(write + 1) * RELEASES).await;
     }
-    for sql in JOINED {
+    for (index, sql) in JOINED.into_iter().enumerate() {
         let mut query = db.subscribe_reconfigurable(uuid(1, 0), move |album: &String, read| {
             Ok::<_, DbError>(
                 read.query(sql, [album], |r| r.get::<_, coven_database::types::Value>(0))?,
@@ -315,6 +317,14 @@ async fn a_joined_live_querys_run_cost() {
         }
         live.sort();
         once.sort();
+        coven_database::test_utils::report_time(
+            &format!("joined_query_{index}/live_run"),
+            live[RUNS / 2],
+        );
+        coven_database::test_utils::report_time(
+            &format!("joined_query_{index}/one_shot_read"),
+            once[RUNS / 2],
+        );
         eprintln!("{sql}\n  a live run {:?}, a one-shot read {:?}", live[RUNS / 2], once[RUNS / 2]);
     }
     db.close().await.unwrap();
@@ -323,10 +333,11 @@ async fn a_joined_live_querys_run_cost() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_release_with_files_imports_cost() {
+    let per_row = import(true, false).await;
+    coven_database::test_utils::report_time("release_import_with_files/per_row", per_row);
     eprintln!(
-        "per row of a release, {} rows a write, a file staged per track: {:?}",
+        "per row of a release, {} rows a write, a file staged per track: {per_row:?}",
         RELEASES * RELEASE_ROWS,
-        import(true, false).await
     );
 }
 
@@ -356,5 +367,7 @@ async fn a_synced_inserts_cost() {
         .unwrap();
     assert_eq!(listed, (ROWS * WRITES) as i64);
     db.close().await.unwrap();
-    eprintln!("per synced insert, committed in writes of {ROWS}: {:?}", median(coven_times));
+    let per_insert = median(coven_times);
+    coven_database::test_utils::report_time("synced_insert/committed", per_insert);
+    eprintln!("per synced insert, committed in writes of {ROWS}: {per_insert:?}");
 }

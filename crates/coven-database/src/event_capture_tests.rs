@@ -153,6 +153,16 @@ async fn local_table_writes_against_plain_sqlite() {
             rows as usize > crate::sqlite::pre_update_changes::ROWS_PER_TABLE
         );
         db.close().await.unwrap();
+        for (metric, time) in [
+            ("coven_insert", coven_insert),
+            ("narrowed_insert", narrowed_insert),
+            ("plain_insert", plain_insert),
+            ("coven_delete", coven_delete),
+            ("narrowed_delete", narrowed_delete),
+            ("plain_delete", plain_delete),
+        ] {
+            crate::test_utils::report_time(&format!("local_table_{rows}_rows/{metric}"), time);
+        }
         eprintln!(
             "{rows} rows: insert {coven_insert:?} through coven, {narrowed_insert:?} narrowed, {plain_insert:?} plain; delete {coven_delete:?} through coven, {narrowed_delete:?} narrowed, {plain_delete:?} plain"
         );

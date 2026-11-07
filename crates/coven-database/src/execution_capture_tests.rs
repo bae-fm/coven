@@ -663,6 +663,12 @@ mod write_cost {
         let cpu = (cpu() - cpu_started) / rows as f64;
         let statements = db.inspect_writer(|writer| writer.profiled_statements());
         let fullscan: i64 = statements.iter().map(|s| i64::from(s.fullscan_steps)).sum();
+        crate::test_utils::report_time(&format!("write_cost/{label}"), elapsed);
+        crate::test_utils::report_cost(
+            &format!("write_cost/{label}/full_scan_steps"),
+            fullscan as f64,
+            "count",
+        );
         println!(
             "{label}: {rows} rows, {:.1} µs/row, {cpu:.1} CPU µs/row, {:.2} statements/row, \
              {fullscan} full-scan steps, load {}",

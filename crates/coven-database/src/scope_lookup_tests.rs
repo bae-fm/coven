@@ -299,6 +299,14 @@ async fn joined_runs_against_one_shot_reads() {
     let beside = credit(&db, RUNS / 4, Some(&live)).await;
     let spent = spent.lock().unwrap();
     let live_run = spent.iter().skip(1).sum::<Duration>() / RUNS;
+    for (metric, time) in [
+        ("joined_query/one_shot_read", one_shot),
+        ("joined_query/live_run", live_run),
+        ("credit_write/no_live_query", alone),
+        ("credit_write/query_open", beside),
+    ] {
+        crate::test_utils::report_time(metric, time);
+    }
     eprintln!("joined query: {one_shot:?} a one-shot read, {live_run:?} a live run");
     eprintln!(
         "a write crediting {CREDITED} tracks of other releases: {alone:?} with no live query, \

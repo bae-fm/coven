@@ -183,10 +183,9 @@ mod fixture {
         .await
         .unwrap();
         db.close().await.unwrap();
-        eprintln!(
-            "10,000-row store: {} bytes",
-            std::fs::metadata(store.database_path()).unwrap().len()
-        );
+        let bytes = std::fs::metadata(store.database_path()).unwrap().len();
+        crate::test_utils::report_cost("ten_thousand_row_store_bytes", bytes as f64, "count");
+        eprintln!("10,000-row store: {bytes} bytes");
     }
 }
 

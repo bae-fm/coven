@@ -232,6 +232,11 @@ async fn reading_the_queue_by_release_costs() {
         let mut timings = vec![format!(
             "queuing {queuing:?}, against {bare_queuing:?} without the table and the app's count"
         )];
+        crate::test_utils::report_time(&format!("queue_by_release/{files}/queuing"), queuing);
+        crate::test_utils::report_time(
+            &format!("queue_by_release/{files}/queuing_without_the_table"),
+            bare_queuing,
+        );
         let by_release = "SELECT count(*),sum(queued),sum(first) FROM (
              SELECT t.release_id,count(*) AS queued,min(u.position) AS first
              FROM {queue} AS u JOIN tracks AS t ON u.file=t.file
@@ -267,6 +272,7 @@ async fn reading_the_queue_by_release_costs() {
                     .unwrap();
                 best = best.min(started.elapsed());
             }
+            crate::test_utils::report_time(&format!("queue_by_release/{files}/{name}"), best);
             timings.push(format!("{name} {answer:?} in {best:?}"));
         }
         eprintln!("{files} queued: {}", timings.join("; "));

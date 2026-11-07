@@ -74,6 +74,15 @@ async fn clearing_a_local_table_through_a_write_and_a_bulk_write() {
 
     drop(live);
     db.close().await.unwrap();
+    for (metric, time) in [
+        ("fill_through_a_write", write_fill),
+        ("fill_through_a_bulk_write", bulk_fill),
+        ("clear_through_a_write", write_clear),
+        ("clear_through_a_bulk_write", bulk_clear),
+        ("empty_bulk_write", commit),
+    ] {
+        coven_database::test_utils::report_time(&format!("local_table/{metric}"), time);
+    }
     eprintln!(
         "{ROWS} rows: fill {write_fill:?} through a write, {bulk_fill:?} through a bulk write; \
          clear {write_clear:?} through a write, {bulk_clear:?} through a bulk write; \
