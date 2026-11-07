@@ -191,9 +191,10 @@ fn aggregates(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
 impl Planner {
     /// Order the items so each comes after the sources it takes values
     /// from: core by core, each after the core it sits in; within a core,
-    /// those with conditions of their own first, then views and table
-    /// functions, which nothing narrows but whose values others can take,
-    /// then those an ordered one reaches, in FROM order.
+    /// those an ordered one reaches first, so each takes the values of the
+    /// sources the core's narrowing started from, then those with
+    /// conditions of their own, then views and table functions, which
+    /// nothing narrows but whose values others can take, in FROM order.
     fn ordered(mut self) -> Sources {
         let mut order: Vec<usize> = Vec::new();
         for core in 0..self.cores.len() {
@@ -203,16 +204,16 @@ impl Planner {
                 let next = remaining
                     .iter()
                     .copied()
-                    .find(|item| items[*item].source.term.is_some())
-                    .or_else(|| {
-                        remaining.iter().copied().find(|item| items[*item].source.table.is_none())
+                    .find(|item| {
+                        self.edges
+                            .iter()
+                            .any(|edge| edge.member == *item && order.contains(&edge.partner))
                     })
                     .or_else(|| {
-                        remaining.iter().copied().find(|item| {
-                            self.edges
-                                .iter()
-                                .any(|edge| edge.member == *item && order.contains(&edge.partner))
-                        })
+                        remaining.iter().copied().find(|item| items[*item].source.term.is_some())
+                    })
+                    .or_else(|| {
+                        remaining.iter().copied().find(|item| items[*item].source.table.is_none())
                     })
                     .unwrap_or(remaining[0]);
                 let taken: Vec<Edge> = self
@@ -370,6 +371,56 @@ impl Planner {
         }
         None
     }
+
+    /// Narrow the sources by `found`, which conditions on the joined rows
+    /// give. A LEFT JOIN's right side it narrows is an inner join's then: a
+    /// left row with NULLs in its place fails the condition, so no row the
+    /// LEFT JOIN alone adds reaches the result.
+    pub(crate) fn narrow(&mut self, found: Narrowing) {
+        for item in self.add(found) {
+            self.join_inner(item);
+        }
+    }
+
+    /// `found`, which the ON of the LEFT JOIN adding `item` gives: what it
+    /// says of `item` narrows it, and the rest narrows the other sources
+    /// only once the join is an inner join's. Until then a left row appears
+    /// whatever its ON says of the left side.
+    fn narrow_on(&mut self, item: usize, found: Narrowing) {
+        let (own, others) = found.split(item);
+        self.add(own);
+        match &mut self.items[item].left_on {
+            Some(held) => held.extend(others),
+            None => self.narrow(others),
+        }
+    }
+
+    /// Make `item` an inner join's right side, if it was a LEFT JOIN's: its
+    /// ON narrows the other sources as an inner join's does.
+    pub(crate) fn join_inner(&mut self, item: usize) {
+        if let Some(held) = self.items[item].left_on.take() {
+            self.narrow(held);
+        }
+    }
+
+    /// Add `found` to the sources' terms and the edges, and say which
+    /// sources it narrows.
+    fn add(&mut self, found: Narrowing) -> Vec<usize> {
+        let mut narrowed = Vec::new();
+        for (item, term) in found.terms {
+            let source = &mut self.items[item].source;
+            source.term = Some(match source.term.take() {
+                Some(existing) => existing.and(term),
+                None => term,
+            });
+            narrowed.push(item);
+        }
+        for edge in found.edges {
+            narrowed.push(edge.member);
+            self.edges.push(edge);
+        }
+        narrowed
+    }
 }
 
 /// Read `select`, which sits in the core `parent`, if any, where its FROM
@@ -505,7 +556,8 @@ fn read_core<'a>(
                     parts(arg, &mut found);
                 }
             }
-            let Some(item) = read_item(connection, planner, table, core, parent, ctes)? else {
+            let Some(item) = read_item(connection, planner, table, left, core, parent, ctes)?
+            else {
                 return Ok(None);
             };
             let place = if left { Place::LeftOn(planner.items.len()) } else { Place::Inner };
@@ -578,22 +630,9 @@ fn read_condition(
             referenced.push(item);
         }
     }
-    let items = &planner.items;
-    // A LEFT JOIN's ON decides only which right rows join each left row,
-    // so it narrows its own right side alone. Any other condition filters
-    // the joined rows, and each one coven narrows by is false where its
-    // column is NULL: a left row that no right row joins, with NULLs in
-    // their place, fails it, so it narrows a LEFT JOIN's right side as it
-    // does any source.
-    let narrows = |item: usize| {
-        items[item].core == core
-            && match place {
-                Place::Inner => true,
-                Place::LeftOn(position) => position == item,
-            }
-    };
+    let mut found = Narrowing::default();
     if let [item] = referenced[..] {
-        if !narrows(item) {
+        if planner.items[item].core != core {
             return Ok(());
         }
         let column = |expr: &Expr<'_>| {
@@ -602,26 +641,40 @@ fn read_condition(
                 (found == item).then(|| planner.items[item].columns.affinity(&column)).flatten()?;
             Some((column, affinity))
         };
-        if let Some(term) = term(connection, &column, condition)? {
-            let source = &mut planner.items[item].source;
-            source.term = Some(match source.term.take() {
-                Some(existing) => existing.and(term),
-                None => term,
-            });
+        found.terms.extend(term(connection, &column, condition)?.map(|term| (item, term)));
+    } else if let Expr::Binary(left, Operator::Equals, right) = condition {
+        for (member, other, first) in [(left, right, false), (right, left, true)] {
+            found.edges.extend(planner.edge(core, member, other, first));
         }
-        return Ok(());
     }
-    let Expr::Binary(left, Operator::Equals, right) = condition else {
-        return Ok(());
-    };
-    for (member, other, first) in [(left, right, false), (right, left, true)] {
-        if let Some(edge) = planner.edge(core, member, other, first) {
-            if narrows(edge.member) {
-                planner.edges.push(edge);
-            }
-        }
+    match place {
+        Place::Inner => planner.narrow(found),
+        Place::LeftOn(item) => planner.narrow_on(item, found),
     }
     Ok(())
+}
+
+/// What conditions narrow: terms on one source's rows each, and edges.
+/// Each is false where the column it tests is NULL, so it rejects a row
+/// with NULLs in its source's place.
+#[derive(Default)]
+pub(crate) struct Narrowing {
+    terms: Vec<(usize, ScopeTerm)>,
+    edges: Vec<Edge>,
+}
+
+impl Narrowing {
+    /// What of this narrows `item`, and the rest.
+    fn split(self, item: usize) -> (Self, Self) {
+        let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);
+        let (own_edges, edges) = self.edges.into_iter().partition(|edge| edge.member == item);
+        (Self { terms: own, edges: own_edges }, Self { terms, edges })
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.terms.extend(other.terms);
+        self.edges.extend(other.edges);
+    }
 }
 
 /// `member`'s column equals a value of `partner`'s rows.

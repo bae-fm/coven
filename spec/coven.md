@@ -710,14 +710,16 @@ columns and a column, or an expression over the columns, of one other table in
 the join. The ON of a LEFT JOIN narrows only its right side: it decides which
 right rows join each left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
-inner join's ON, narrows it as it does an inner join's. Each condition coven
-narrows by is false where its column is NULL, so a left row with NULLs in the
-right side's place fails it, and can't appear whatever the LEFT JOIN's ON
-matched. Ben's album page can list only the release's producers, with `LEFT
-JOIN track_artists AS c ON c.track_id = t.id` and `WHERE t.release_id = ?1 AND
-c.role = 'producer'`. That narrows `track_artists` to the producer credits on
-this release's tracks, so crediting a singer on one of them doesn't rerun the
-page.
+inner join's ON, makes the LEFT JOIN an inner join. Each condition coven narrows
+by is false where its column is NULL, so a left row with NULLs in the right
+side's place fails it, and can't appear whatever the LEFT JOIN's ON matched:
+only the rows an inner join gives are left. So coven narrows such a join as an
+inner join, by its ON both ways. Ben's album page can list only the album's
+producers, with `JOIN tracks AS t ON t.release_id = r.id LEFT JOIN
+track_artists AS c ON c.track_id = t.id` and `WHERE r.album_id = ?1 AND c.role
+= 'producer'`. That narrows `track_artists` to the producer credits on this
+album's tracks, so crediting a producer on another album, or a singer on this
+one, doesn't rerun the page.
 
 A lookup compares as the statement does. A join on an expression, which has no
 affinity, gives the looked-up value the joined column's, so a text `'5'` the
@@ -764,9 +766,10 @@ album_tracks AS SELECT r.album_id, t.title FROM releases AS r JOIN tracks AS t
 ON t.release_id = r.id`, and its album page reads `SELECT title FROM
 album_tracks WHERE album_id = ?1`: that narrows `releases` to the album's
 releases and `tracks` to theirs, as the join written out would. A LEFT JOIN's
-right side in the view takes the condition too, as it takes a WHERE condition. A
-condition passes into each arm of a compound, but not into a query that groups its rows,
-calls an aggregate or window function, or has a LIMIT: a row of such a query
+right side in the view takes the condition too, which makes that join an inner
+join, as a WHERE condition does. A condition passes into each arm of a compound,
+but not into a query that groups its rows, calls an aggregate or window
+function, or has a LIMIT: a row of such a query
 comes of many rows of its tables, or depends on which other rows there are, so a
 condition on it says nothing of each. Coven's own views are read whole, since
 what they show changes with what coven holds in memory too. A view coven can't

@@ -315,8 +315,9 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
 /// Narrow the cores of the subquery, CTE or view `item` by `term` and
 /// `edges`, which its own core's conditions put on its rows: each arm's
 /// source an output column passes on takes them as its own. A LEFT JOIN's
-/// right side in the arm does too: a row with NULLs in its place fails each
-/// of them, as a WHERE condition in the arm would.
+/// right side in the arm does too, and is an inner join's then: a row with
+/// NULLs in its place fails each of them, as a WHERE condition in the arm
+/// would.
 pub(crate) fn push_down(
     planner: &mut Planner,
     item: usize,
@@ -379,6 +380,9 @@ pub(crate) fn push_down(
                 });
             }
             planner.edges.extend(passed.iter().cloned());
+            if renamed.is_some() || !passed.is_empty() {
+                planner.join_inner(target);
+            }
             push_down(planner, target, renamed, passed);
         }
     }

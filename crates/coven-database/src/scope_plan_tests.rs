@@ -636,6 +636,61 @@ INSERT INTO tracks VALUES (1,'r1'),(2,'r2');").await.unwrap();
     db.close().await.unwrap();
 }
 
+/// A LEFT JOIN whose right side a WHERE condition narrows is an inner join:
+/// a left row with NULLs in its place fails the condition. So it narrows as
+/// one, its ON both ways, and its right side by the rows its left side
+/// reaches from the album: an 'x' credit on another album's track doesn't
+/// rerun the query. In a view, the condition put on its rows does the same.
+#[tokio::test]
+async fn a_left_join_a_where_condition_narrows_is_an_inner_join() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, album TEXT);
+CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT);
+CREATE TABLE credits(id INTEGER PRIMARY KEY, track INTEGER, role TEXT, name TEXT);
+CREATE VIEW album_credits AS SELECT r.album, t.id, c.id AS credit, c.role, c.name FROM releases r JOIN tracks t ON t.release = r.id LEFT JOIN credits c ON c.track = t.id;
+INSERT INTO releases VALUES ('r1','a1'),('r2','a2');
+INSERT INTO tracks VALUES (1,'r1'),(2,'r2');").await.unwrap();
+    for sql in [
+        "SELECT t.id, c.name FROM releases r JOIN tracks t ON t.release = r.id LEFT JOIN credits c ON c.track = t.id WHERE r.album = ?1 AND c.role = 'x' ORDER BY c.id",
+        "SELECT id, name FROM album_credits WHERE album = ?1 AND role = 'x' ORDER BY credit",
+    ] {
+        write(&db, "DELETE FROM credits; INSERT INTO credits VALUES (1,1,'x','Ana'),(2,1,'y','Ben'),(3,2,'x','Carol')");
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
+            Ok(db.query(sql, ["a1"], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?)
+        });
+        assert_eq!(next(&mut query).await, [(1, "Ana".into())]);
+        write(&db, "UPDATE credits SET name = 'Caroline' WHERE id = 3");
+        assert!(!query.is_marked_for_rerun(), "another album: {sql}");
+        write(&db, "INSERT INTO credits VALUES (4,2,'x','Dan')");
+        assert!(!query.is_marked_for_rerun(), "a new credit on another album: {sql}");
+        write(&db, "UPDATE credits SET name = 'Benny' WHERE id = 2");
+        assert!(!query.is_marked_for_rerun(), "another role: {sql}");
+        write(&db, "UPDATE credits SET role = 'x' WHERE id = 2");
+        assert_eq!(next(&mut query).await, [(1, "Ana".into()), (1, "Benny".into())], "{sql}");
+        write(&db, "INSERT INTO credits VALUES (5,1,'x','Eve')");
+        assert_eq!(
+            next(&mut query).await,
+            [(1, "Ana".into()), (1, "Benny".into()), (1, "Eve".into())],
+            "{sql}"
+        );
+    }
+    // Its ON narrows the left side by the right's rows, as an inner join's
+    // does: a track with no 'x' credit doesn't rerun the query.
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|db| {
+        Ok(db.query(
+            "SELECT t.release, c.name FROM tracks t LEFT JOIN credits c ON c.track = t.id WHERE c.role = 'x' ORDER BY c.id",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?)
+    });
+    next(&mut query).await;
+    write(&db, "INSERT INTO tracks VALUES (3,'r1')");
+    assert!(!query.is_marked_for_rerun(), "a track with no 'x' credit");
+    write(&db, "UPDATE tracks SET release = 'r2' WHERE id = 1");
+    assert_eq!(next(&mut query).await[0], ("r2".into(), "Ana".into()));
+    db.close().await.unwrap();
+}
+
 /// A comparison SQLite would make after converting a value, or under a
 /// collation other than BINARY, or on a generated column, keeps the table
 /// whole: coven compares values as they are.

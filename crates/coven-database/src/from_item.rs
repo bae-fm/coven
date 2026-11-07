@@ -63,6 +63,10 @@ impl Columns {
 pub(crate) struct FromItem {
     pub(crate) source: Source,
     pub(crate) columns: Columns,
+    /// For the right side of a LEFT JOIN that no condition outside its ON
+    /// narrows yet, what its ON says of the other sources, which narrows
+    /// them once one does and so makes it an inner join's.
+    pub(crate) left_on: Option<crate::scope_plan::Narrowing>,
     /// The SELECT core whose FROM holds it.
     pub(crate) core: usize,
     /// A subquery's, CTE's or view's cores, which conditions on its rows
@@ -76,6 +80,7 @@ pub(crate) fn read_item<'a>(
     connection: &Connection,
     planner: &mut Planner,
     table: &'a SelectTable<'a>,
+    left: bool,
     core: usize,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
@@ -84,7 +89,13 @@ pub(crate) fn read_item<'a>(
         Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
         None => name.0.to_owned(),
     };
-    let item = |source, columns, derived| FromItem { source, columns, core, derived };
+    let item = |source, columns, derived| FromItem {
+        source,
+        columns,
+        left_on: left.then(crate::scope_plan::Narrowing::default),
+        core,
+        derived,
+    };
     match table {
         SelectTable::Table(name, alias, _) => {
             let qualifier = qualifier(alias, &name.name);
