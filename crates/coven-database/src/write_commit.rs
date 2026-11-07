@@ -393,7 +393,12 @@ pub(crate) fn retain_queue(
     }
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
-    crate::upload::queue(database, record.header.position, &bytes)?;
+    crate::upload::queue(
+        database,
+        record.header.position,
+        &bytes,
+        record.parts.iter().flat_map(|part| part.dismissals.iter().map(|d| &d.row)),
+    )?;
     crate::file_protection::queued(database, record)
 }
 

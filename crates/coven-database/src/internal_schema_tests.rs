@@ -172,6 +172,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_published_file_refs",
                 "_coven_published_losses",
                 "_coven_published_rows",
+                "_coven_queued_dismissals",
                 "_coven_queued_file_refs",
                 "_coven_raise_captures",
                 "_coven_references",

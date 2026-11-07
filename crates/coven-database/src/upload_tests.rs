@@ -451,7 +451,8 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_uploads SELECT device,n,zeroblob(256) FROM fixture;
-         INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;",
+         INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;
+         INSERT INTO _coven_queued_dismissals SELECT device,n,tab,key,audience FROM fixture;",
     )
     .unwrap();
 }

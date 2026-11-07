@@ -24,5 +24,19 @@ macro_rules! coven_uploads_tables {
                 FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
+        // The rows a queued write's dismissals name, kept beside its record
+        // from the moment it is queued: an applied slot finds the rows each
+        // queued write changes without reading the queue's plaintext (§6.2).
+        $visit!(_coven_queued_dismissals, "
+            CREATE TABLE _coven_queued_dismissals (
+                device BLOB NOT NULL,
+                number BLOB NOT NULL,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                PRIMARY KEY(device,number,table_name,key,audience),
+                FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+        ");
     };
 }

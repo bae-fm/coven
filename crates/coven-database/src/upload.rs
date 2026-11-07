@@ -347,17 +347,38 @@ pub(crate) fn read_batch<E: From<DbError>>(
 }
 
 /// Queue this device's write `write`, its plaintext `record` fixed at
-/// commit, to wait for its upload.
-pub(crate) fn queue(
+/// commit, to wait for its upload, with the rows its dismissals name,
+/// `dismissed`.
+pub(crate) fn queue<'a>(
     database: &DatabaseConnection,
     write: WriteId,
     record: &[u8],
+    dismissed: impl IntoIterator<Item = &'a coven_merge::RowId>,
 ) -> Result<(), DbError> {
+    let number = write.number.to_be_bytes();
     database.internal_execute(
         "INSERT INTO _coven_uploads(device,number,record) VALUES(?1,?2,?3)",
-        params![write.device, write.number.to_be_bytes().as_slice(), record],
+        params![write.device, number.as_slice(), record],
     )?;
+    for row in dismissed {
+        database.internal_execute(
+            "INSERT INTO _coven_queued_dismissals(device,number,table_name,key,audience) VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+            params![write.device, number.as_slice(), row.table, row.key, &row.audience],
+        )?;
+    }
     Ok(())
+}
+
+/// The rows the dismissals of this device's queued write `write` name.
+pub(crate) fn dismissed(
+    database: &DatabaseConnection,
+    write: WriteId,
+) -> Result<Vec<coven_merge::RowId>, DbError> {
+    database.query(
+        "SELECT table_name,key,audience FROM _coven_queued_dismissals WHERE device=?1 AND number=?2",
+        params![write.device, write.number.to_be_bytes().as_slice()],
+        crate::row_queries::read_identity,
+    )
 }
 
 /// The writes `device`'s landed claim `claim` carried leave the queue.

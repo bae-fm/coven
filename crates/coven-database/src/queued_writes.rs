@@ -1,11 +1,9 @@
 //! Reapply eligible original queue records once over counted state.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::upload::UploadParts;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
-use coven_format::dismissal::WriteFrame;
 use coven_format::write::WriteHeader;
-use coven_merge::{Audience, RowId, WriteId};
+use coven_merge::{RowId, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Which queued writes fold again after a slot (§6.2).
@@ -31,18 +29,26 @@ pub(crate) fn stage(
         if !folded(db, &header.header)? {
             return Ok(());
         }
-        let mut dismissed = Vec::new();
-        let opened = visit_frames(
-            db,
-            parts,
-            |audience| crate::download_stage::ignored(db, &header.header, audience),
-            |ignored, frame| {
-                if let WriteFrame::Dismissal(dismissal) = &frame {
-                    dismissed.push(dismissal.row.clone());
-                }
-                crate::download_stage::frame(db, &header.header, *ignored, frame)
-            },
-        )?;
+        let mut opened = Vec::new();
+        for (part, mut bytes) in parts {
+            if crate::reload_gate::reloading(db, &part.audience)? {
+                continue;
+            }
+            let audience = part.audience.clone();
+            let ignored = crate::download_stage::ignored(db, &header.header, &audience)?;
+            crate::download_stream::visit_part::<DbError>(
+                part,
+                |chunk| {
+                    let bytes =
+                        bytes.next().expect("queued plaintext contains the counted part")?;
+                    chunk.copy_from_slice(&bytes);
+                    Ok(())
+                },
+                |frame| crate::download_stage::frame(db, &header.header, ignored, frame),
+            )?;
+            opened.push(audience);
+        }
+        let dismissed = crate::upload::dismissed(db, header.header.position)?;
         let rows = rows(db, schema, &header.header, dismissed)?;
         crate::published::capture_rows(
             db,
@@ -65,37 +71,6 @@ fn folded(db: &DatabaseConnection, header: &WriteHeader) -> Result<bool, DbError
     let removed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_devices d JOIN _coven_members m ON m.member=d.member WHERE d.device=?1 AND (d.state<>'active' OR m.removed=1))",
         [header.position.device],|r|r.get(0))?;
     Ok(!removed)
-}
-
-/// Visit each frame of a queued write's parts outside a reloading audience,
-/// whose writes the reload folds once it installs: `part` reads what a
-/// part's audience decides for its frames, and `frame` takes each frame
-/// with it. Returns those parts' audiences.
-fn visit_frames<T>(
-    db: &DatabaseConnection,
-    parts: UploadParts<'_>,
-    mut part: impl FnMut(&Audience) -> Result<T, DbError>,
-    mut frame: impl FnMut(&T, WriteFrame) -> Result<(), DbError>,
-) -> Result<Vec<Audience>, DbError> {
-    let mut opened = Vec::new();
-    for (header, mut bytes) in parts {
-        if crate::reload_gate::reloading(db, &header.audience)? {
-            continue;
-        }
-        let audience = header.audience.clone();
-        let decided = part(&audience)?;
-        crate::download_stream::visit_part::<DbError>(
-            header,
-            |chunk| {
-                let bytes = bytes.next().expect("queued plaintext contains the counted part")?;
-                chunk.copy_from_slice(&bytes);
-                Ok(())
-            },
-            |each| frame(&decided, each),
-        )?;
-        opened.push(audience);
-    }
-    Ok(opened)
 }
 
 /// The rows one write changes, by whether the current schema has their table.
@@ -168,22 +143,11 @@ struct Queue {
 impl Queue {
     fn read(db: &DatabaseConnection, schema: &WriteSchema) -> Result<Self, DbError> {
         let mut writes: Vec<(WriteId, Vec<RowId>)> = Vec::new();
-        crate::upload::each_plaintext(db, |header, parts| {
+        crate::upload::each_plaintext(db, |header, _| {
             if !folded(db, &header.header)? {
                 return Ok(());
             }
-            let mut dismissed = Vec::new();
-            visit_frames(
-                db,
-                parts,
-                |_| Ok(()),
-                |(), frame| {
-                    if let WriteFrame::Dismissal(dismissal) = frame {
-                        dismissed.push(dismissal.row);
-                    }
-                    Ok(())
-                },
-            )?;
+            let dismissed = crate::upload::dismissed(db, header.header.position)?;
             let rows = rows(db, schema, &header.header, dismissed)?;
             writes.push((
                 header.header.position,
