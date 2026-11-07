@@ -162,3 +162,23 @@ async fn a_join_that_stopped_before_its_create_sends_nothing_once_the_invite_end
     assert!(crate::tests::no_request(&owner.storage, &path).await, "no request was sent");
     owner.close().await;
 }
+
+/// A join published its store and stopped before it deleted its joining
+/// keys and saved code. The next open of the store deletes them.
+#[tokio::test]
+async fn opening_a_published_store_deletes_the_joining_keys_and_code_a_stopped_join_left() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    joins_and_is_approved(&owner, &install, &invite).await;
+    let directory = install.app.store_dir(&store);
+    directory.owned_file(StoreFile::Bootstrap).replace(b"joining keys").unwrap();
+    let kept = StoreKeychain::new(install.keychain.clone(), store);
+    kept.set_invite_code(&SecretText::new(invite.shown_code().to_string())).unwrap();
+    let opened = install.builder(&owner, owner.recipient()).open(store, |_| ()).await.unwrap();
+    opened.close().await.unwrap();
+    assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
+    assert!(kept.invite_code().unwrap().is_none());
+    owner.close().await;
+}

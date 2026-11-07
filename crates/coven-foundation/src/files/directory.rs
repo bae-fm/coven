@@ -173,6 +173,12 @@ impl StoreDir {
         Self { path, id, bootstrap: Some(bootstrap), protection, bugs }
     }
 
+    /// Whether the store is still an unpublished installation: its marker is
+    /// there (§13.4).
+    pub fn is_unpublished(&self) -> Result<bool, FileError> {
+        super::bootstrap::is_pending(&self.path)
+    }
+
     fn is_bootstrapping(&self) -> bool {
         self.bootstrap
             .is_some_and(|instance| lock::bootstrap_running(&self.path, self.id, instance))
@@ -340,12 +346,23 @@ pub fn verify_lock(directory: &StoreDir, lock: &StoreLock) -> Result<(), StoreLo
 }
 
 /// Remove what unfinished writes left at the top of the store `lock` holds
-/// for writing (Appendix C.3), then give every folder and file the class its
+/// for writing (Appendix C.3), and the joining keys a published store still
+/// holds when the join that published it stopped before deleting them
+/// (§13.4), then give every folder and file the class its
 /// layout gives the store's files, as `directory` names it, unless the
 /// store's record shows they were last given it (E1). Blocks while it walks
 /// the store.
 pub fn settle_files(directory: &StoreDir, lock: &StoreLock) -> Result<(), FileError> {
     super::atomic_file::remove_temporaries(lock.directory())?;
+    // A store still unpublished keeps them: its join resumes from them.
+    if !super::bootstrap::is_pending(lock.directory())?
+        && super::atomic_file::exists(
+            "inspect the joining keys",
+            &lock.directory().join(StoreFile::Bootstrap.name()),
+        )?
+    {
+        directory.owned_file(StoreFile::Bootstrap).remove_with_temporaries()?;
+    }
     directory.protection.apply(lock.directory())
 }
 

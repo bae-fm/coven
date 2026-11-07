@@ -605,6 +605,10 @@ impl CovenBuilder {
                         error => DbError::from(error).into(),
                     }
                 })?;
+                // A join that published and stopped before deleting its code (§13.4).
+                if !directory.is_unpublished().map_err(DbError::from)? {
+                    keychain.delete_invite_code()?;
+                }
                 Ok(OpeningStore { database, lock, builder, directory, keychain })
             })
             .await

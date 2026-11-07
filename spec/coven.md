@@ -4726,8 +4726,9 @@ sent its request:
   leaves one, and so does one that stopped after deleting it.
 - Finishing, it publishes the store, with the kept sign-in as its credentials,
   then deletes the code. A failure deleting it is reported to the call with the
-  open handle; the leftover entry goes with the store's other device-only
-  entries when the store is deleted.
+  open handle. A crash after publishing and before either deletion leaves the
+  saved request, which holds Dan's private keys, and the code. Opening a
+  published store deletes both, so neither outlives the first open.
 
 A saved code coven can't read fails the listing: the join it belongs to may have
 sent its request, so leaving it out would hide a join the app has to finish.
