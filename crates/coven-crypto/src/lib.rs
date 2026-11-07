@@ -15,6 +15,8 @@ mod member;
 mod object_digest;
 mod randomness;
 pub use randomness::random_secret;
+#[cfg(any(test, feature = "test-utils"))]
+pub use randomness::refuse_randomness;
 mod s3_signing;
 mod secret;
 mod wire;

@@ -106,6 +106,55 @@ fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
     });
 }
 
+/// The system refuses the salt of a new custody file: opening fails with
+/// nothing saved and the passphrase erased, and the app opens again with it.
+#[test]
+fn refused_randomness_fails_opening_new_custody_and_saves_nothing() {
+    let (_temp, file, id) = file();
+    let custody = || {
+        Arc::new(PassphraseCustody::<StoreKeyring>::new(
+            Passphrase::new("phrase".into()),
+            file.clone(),
+            id,
+        ))
+    };
+    let refused = custody();
+    crate::refuse_randomness(1);
+    let error = KeySession::open(refused.clone()).unwrap_err();
+    assert!(matches!(error, KeyError::Crypto(crate::CryptoError::Unavailable(_))), "{error:?}");
+    assert!(refused.protection.lock().unwrap().is_none());
+    assert!(file.read_optional().unwrap().is_none());
+    let session = KeySession::open(custody()).unwrap();
+    assert!(session.read().unwrap().is_none());
+}
+
+/// The system refuses a save's nonce: the save fails, the session and the
+/// file keep the keys they had, and saving again keeps the new ones.
+#[test]
+fn refused_randomness_fails_a_save_and_leaves_the_kept_keys() {
+    let (_temp, file, id) = file();
+    let custody =
+        PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
+    let session = KeySession::open(Arc::new(custody)).unwrap();
+    let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
+    session.persist(&first).unwrap();
+    let saved = file.read_optional().unwrap();
+    let second = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(2))).unwrap());
+    crate::refuse_randomness(1);
+    let error = session.persist(&second).unwrap_err();
+    assert!(matches!(error, KeyError::Crypto(crate::CryptoError::Unavailable(_))), "{error:?}");
+    assert_eq!(
+        session.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
+        first.to_secret_bytes().as_bytes()
+    );
+    assert_eq!(file.read_optional().unwrap(), saved);
+    session.persist(&second).unwrap();
+    assert_eq!(
+        session.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
+        second.to_secret_bytes().as_bytes()
+    );
+}
+
 #[test]
 fn parameters_are_recorded_authenticated_and_bounded_before_derivation() {
     let key_ids = coven_foundation::id_source::SequentialIds::new();

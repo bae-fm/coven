@@ -2,7 +2,29 @@
 
 use crate::CryptoError;
 
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    // Clippy asks for a `const` initializer this already has where the
+    // target has no native thread locals, as Android: std builds those
+    // from a function, which the lint reads as the initializer.
+    #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
+    static REFUSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Refuse the next `count` requests for randomness on this thread, as a
+/// system whose random source fails would. Randomness comes from the system
+/// with no handle to arm, and a thread's count leaves other tests alone.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn refuse_randomness(count: usize) {
+    REFUSALS.set(count);
+}
+
 pub(crate) fn fill(bytes: &mut [u8]) -> Result<(), CryptoError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    if let Some(left) = REFUSALS.get().checked_sub(1) {
+        REFUSALS.set(left);
+        return fill_with(bytes, |_| Err(getrandom::Error::UNSUPPORTED));
+    }
     fill_with(bytes, getrandom::fill)
 }
 
