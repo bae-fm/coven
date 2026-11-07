@@ -501,3 +501,8 @@ import SequenceApply
 #print axioms CovenSequence.JoinScan.damaged_not_passed
 #print axioms CovenSequence.JoinScan.stop_strands_scan
 #print axioms CovenSequence.JoinScan.deleted_damage_recovers
+#print axioms CovenSequence.WriteQueue.nothing_lost
+#print axioms CovenSequence.WriteQueue.applied_once
+#print axioms CovenSequence.WriteQueue.leaves_only_landed
+#print axioms CovenSequence.WriteQueue.visible_exactly_once
+#print axioms CovenSequence.WriteQueue.unguarded_finish_loses

@@ -1772,6 +1772,9 @@ Writes go out in a writes slot:
 - **Leaving the queue.** Queued writes are removed only once their claim is
   settled and the state that consumed them is committed. The rest of the local
   queue is then applied over that state, and no write is ever applied twice.
+  Forgetting a landed claim's writes before its slot applied would leave them
+  in neither the queue nor the state
+  ([`unguarded_finish_loses`](proofs/sequence/CovenSequence/WriteQueue.lean)).
 
 Snapshots go out as announcements. The device first uploads the snapshot's
 journaled bytes, then claims the announcement. A snapshot captured too early is
@@ -11913,6 +11916,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* An operation that forgets its claim on restart lands twice | `forgetful_lands_twice` | `proofs/sequence/CovenSequence/Operation.lean` | §5.1, §11.1 |
 | *Body.* A device that numbers its claims of every kind with one counter, keeps one claim open at a time, and records each attempt before sending it has the single-copy facts settling needs, under any interleaving with other devices' slots and its own late creates: its open claim settles as landed exactly when its attempt's bytes fill the slot, and never as another copy | `journal_own`, `journal_settles` | `proofs/sequence/CovenSequence/ClaimJournal.lean` | §5.1, §5.3 |
 | *Body.* A counter per kind of slot, two claims open at once, or a create sent before it is recorded each make one copy of a device read as another copy using its id | `kind_counters_report_copy`, `two_open_claims_report_copy`, `unrecorded_create_looks_like_copy` | `proofs/sequence/CovenSequence/ClaimJournal.lean` | §5.1 |
+| Queued writes leave the queue only once their claim has settled as landed and the applied state holds them: every committed write is in the queue or the state, the state counts each once, and the rows the app sees, the state then the rest of the queue over it, hold every committed write exactly once | `nothing_lost`, `applied_once`, `leaves_only_landed`, `visible_exactly_once` | `proofs/sequence/CovenSequence/WriteQueue.lean` | §6.3 |
+| *Body.* Forgetting the writes of a landed claim before its slot has applied leaves them in neither the queue nor the state | `unguarded_finish_loses` | `proofs/sequence/CovenSequence/WriteQueue.lean` | §6.3 |
 | A read followed by a floor check admits only genuine first bytes | `floor_check_sound` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | *Body.* Without the floor check, a stale create can win a deleted slot and be taken as genuine, so recreated bytes can't confirm a claim | `stale_create_wins_deleted_slot` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | A slot at or above the floor read after the create holds the genuine bytes | `claim_floor_check` | `proofs/sequence/CovenSequence/Retention.lean` | §5.2 |

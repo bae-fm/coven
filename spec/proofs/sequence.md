@@ -993,6 +993,28 @@ The same file models the race and the procedure:
   replacement's copies and the undo after a refusal (`resolve`) are outside
   this part.
 
+## Leaving the queue
+
+[`WriteQueue`](sequence/CovenSequence/WriteQueue.lean) models a device's queue
+of writes, the writes its applied slots consumed, and the one open claim, which
+carries a prefix of the queue (§6.3). The claim's create lands at some time, its
+slot applies once it has, settling as landed needs the bytes there, and
+finishing, as `claim::finish` does, needs the settlement and the application.
+
+- `nothing_lost`: every write ever committed is in the queue or in the state.
+- `applied_once`: the state counts each write once.
+- `leaves_only_landed`: a write that is not in the queue is in the state and was
+  carried by a claim that landed.
+- `visible_exactly_once`: the app's rows, the state and then the queue's writes
+  the state does not hold, hold every committed write exactly once.
+- `unguarded_finish_loses`: forgetting a settled claim's writes before their slot
+  has applied leaves them in neither place.
+
+A claim that is lost to another device's slot is the same claim retried, which
+does not change the queue, so the model has no step for it. Which writes a claim
+carries is any prefix of the queue; sendable-prefix rules (§17.4, §18.5) are in
+`Holds` and `RaiseQueue`.
+
 ## The saved restore code's name
 
 [`SavedName`](sequence/CovenSequence/SavedName.lean) models the name a
