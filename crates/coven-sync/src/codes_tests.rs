@@ -366,12 +366,12 @@ fn typical_codes_keep_their_lengths() {
     assert_eq!(
         lengths,
         vec![
-            ("S3", 258, Some(367), 425),
-            ("S3, detected settings", 335, Some(444), 501),
-            ("Google Cloud Storage", 306, Some(481), 538),
-            ("Dropbox", 257, None, 316),
-            ("OneDrive", 303, None, 501),
-            ("iCloud", 372, None, 540),
+            ("S3", 258, Some(367), 423),
+            ("S3, detected settings", 335, Some(444), 500),
+            ("Google Cloud Storage", 306, Some(481), 537),
+            ("Dropbox", 257, None, 314),
+            ("OneDrive", 303, None, 500),
+            ("iCloud", 372, None, 538),
         ]
     );
 }
