@@ -136,28 +136,27 @@ impl NameResolver {
         let syntax = syn::parse_file(crate::rust_prelude::IMPORTS).expect("Rust prelude imports");
         Collector { resolver: &mut resolver, file: "<prelude>", scope: prelude }
             .visit_file(&syntax);
-        for module in modules.values() {
+        for module in modules.values().flatten() {
             for end in 1..=module.len() {
                 resolver.module(&module[..end]);
             }
         }
         for file in files {
-            let Some(module) = modules.get(&file.relative_path) else {
-                continue;
-            };
-            resolver
-                .extern_crates
-                .entry(module[0].clone())
-                .or_default()
-                .extend(file.extern_crates.clone());
-            let scope = resolver.module(module);
-            resolver.regions.entry(file.relative_path.clone()).or_default().push(Region {
-                start: (0, 0),
-                end: (usize::MAX, usize::MAX),
-                scope,
-            });
-            Collector { resolver: &mut resolver, file: &file.relative_path, scope }
-                .visit_file(&file.syntax);
+            for module in modules.get(&file.relative_path).into_iter().flatten() {
+                resolver
+                    .extern_crates
+                    .entry(module[0].clone())
+                    .or_default()
+                    .extend(file.extern_crates.clone());
+                let scope = resolver.module(module);
+                resolver.regions.entry(file.relative_path.clone()).or_default().push(Region {
+                    start: (0, 0),
+                    end: (usize::MAX, usize::MAX),
+                    scope,
+                });
+                Collector { resolver: &mut resolver, file: &file.relative_path, scope }
+                    .visit_file(&file.syntax);
+            }
         }
         resolver
     }

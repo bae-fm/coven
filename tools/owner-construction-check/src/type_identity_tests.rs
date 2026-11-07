@@ -97,3 +97,29 @@ fn a_projection_names_every_type_impls_give_it() {
         BTreeSet::from(["Connection".into(), "Projected".into(), "Qualified".into()])
     );
 }
+
+/// Two example roots that each declare `mod shared;` for one file both reach
+/// its types through the module.
+#[test]
+fn a_module_file_two_roots_declare_resolves_from_each() {
+    let files = checked(&[
+        file("crates/app-core/src/lib.rs", ""),
+        file(
+            "crates/app-core/examples/first.rs",
+            "mod shared; struct First { c: shared::Connection }",
+        ),
+        file(
+            "crates/app-core/examples/second.rs",
+            "mod shared; struct Second { c: shared::Connection }",
+        ),
+        file(
+            "crates/app-core/examples/shared/mod.rs",
+            "pub(crate) struct Connection { socket: Socket }",
+        ),
+    ]);
+    let policy = Policy::fixture(r#"capability_types = ["Socket"]"#);
+    assert_eq!(
+        OwnerGraph::collect(&files, &policy).owners,
+        BTreeSet::from(["Connection".into(), "First".into(), "Second".into()])
+    );
+}

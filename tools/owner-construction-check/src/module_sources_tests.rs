@@ -63,8 +63,8 @@ fn included_files_belong_to_the_including_module() {
     ]
     .map(|(path, source)| RustFile::fixture(path, source));
     let modules = module_sources(&files);
-    assert_eq!(modules["crates/app/src/work/parts.rs"], ["app", "work"]);
-    assert_eq!(modules["crates/app/src/work/nested.rs"], ["app", "work", "nested"]);
+    assert_eq!(modules["crates/app/src/work/parts.rs"], [vec!["app", "work"]]);
+    assert_eq!(modules["crates/app/src/work/nested.rs"], [vec!["app", "work", "nested"]]);
     assert_eq!(
         test_module_files(&files),
         ["crates/app/src/tests.rs", "crates/app/src/tests/case.rs", "crates/app/src/tests/list.rs"]
@@ -89,8 +89,8 @@ fn modules_an_included_file_declares_resolve_from_its_directory() {
     ]
     .map(|(path, source)| RustFile::fixture(path, source));
     let modules = module_sources(&files);
-    assert_eq!(modules["crates/app/src/work/parts/pathed.rs"], ["app", "work", "pathed"]);
-    assert_eq!(modules["crates/app/src/work/parts/plain.rs"], ["app", "work", "plain"]);
+    assert_eq!(modules["crates/app/src/work/parts/pathed.rs"], [vec!["app", "work", "pathed"]]);
+    assert_eq!(modules["crates/app/src/work/parts/plain.rs"], [vec!["app", "work", "plain"]]);
     assert!(test_module_files(&files).contains("crates/app/src/cases/round_trips.rs"));
 }
 
@@ -114,9 +114,26 @@ fn example_bench_and_bin_files_are_crate_roots() {
     let modules = module_sources(&files);
     assert_eq!(
         modules["crates/app/examples/bench_library.rs"],
-        ["app", "restore_bench", "bench_library"]
+        [vec!["app", "restore_bench", "bench_library"]]
     );
-    assert_eq!(modules["crates/app/benches/fixtures.rs"], ["app", "speed", "fixtures"]);
-    assert_eq!(modules["crates/app/src/bin/helper.rs"], ["app", "bin", "tool", "helper"]);
-    assert_eq!(modules["crates/app/examples/multi/part.rs"], ["app", "multi", "part"]);
+    assert_eq!(modules["crates/app/benches/fixtures.rs"], [vec!["app", "speed", "fixtures"]]);
+    assert_eq!(modules["crates/app/src/bin/helper.rs"], [vec!["app", "bin", "tool", "helper"]]);
+    assert_eq!(modules["crates/app/examples/multi/part.rs"], [vec!["app", "multi", "part"]]);
+}
+
+/// Two roots that declare the same file each compile it as their own module,
+/// so the file has a path under each.
+#[test]
+fn a_file_two_roots_declare_is_a_module_of_each() {
+    let files = [
+        ("crates/app/src/lib.rs", ""),
+        ("crates/app/examples/first.rs", "mod shared;"),
+        ("crates/app/examples/second.rs", "mod shared;"),
+        ("crates/app/examples/shared/mod.rs", ""),
+    ]
+    .map(|(path, source)| RustFile::fixture(path, source));
+    assert_eq!(
+        module_sources(&files)["crates/app/examples/shared/mod.rs"],
+        [vec!["app", "first", "shared"], vec!["app", "second", "shared"]]
+    );
 }

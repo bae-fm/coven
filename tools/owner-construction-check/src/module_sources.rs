@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use crate::syntax::{is_test_only, RustFile};
 
-pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>> {
+/// Each production file's module paths. A file two crate roots declare, such
+/// as an example's `mod shared;` in two examples, is one module in each root's
+/// crate, so it has one path per root, as that root reaches it.
+pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<Vec<String>>> {
     let sources =
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
     // A file beside a root, such as `examples/bench_library.rs` for
@@ -25,11 +28,14 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>
         .iter()
         .flat_map(|(root, reached)| reached.keys().filter(|path| **path != root.relative_path))
         .collect::<BTreeSet<_>>();
-    let mut modules = BTreeMap::new();
+    let mut modules: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
     for (root, reached) in &roots {
         if !declared.contains(&root.relative_path) {
             for (path, module) in reached {
-                modules.entry(path.clone()).or_insert_with(|| module.clone());
+                let known = modules.entry(path.clone()).or_default();
+                if !known.contains(module) {
+                    known.push(module.clone());
+                }
             }
         }
     }
@@ -37,7 +43,11 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>
     // root in the input. Their conventional module path remains well-defined.
     for file in files.iter().filter(|file| production(file)) {
         if !modules.contains_key(&file.relative_path) {
-            collect(file, inferred_module(file), &sources, &mut modules);
+            let mut reached = BTreeMap::new();
+            collect(file, inferred_module(file), &sources, &mut reached);
+            for (path, module) in reached {
+                modules.entry(path).or_insert_with(|| vec![module]);
+            }
         }
     }
     modules

@@ -752,13 +752,17 @@ pub(crate) struct SchemaMacro {
 /// `schema_root` and every module beneath it, wherever `#[path]` puts its file.
 pub(crate) fn schema_table_macros(files: &[RustFile], schema_root: &str) -> Vec<SchemaMacro> {
     let modules = module_sources(files);
-    let Some(schema_module) = modules.get(schema_root) else {
+    let Some(schema_modules) = modules.get(schema_root) else {
         return Vec::new();
     };
     files
         .iter()
         .filter(|file| {
-            modules.get(&file.relative_path).is_some_and(|module| module.starts_with(schema_module))
+            modules.get(&file.relative_path).is_some_and(|paths| {
+                paths.iter().any(|path| {
+                    schema_modules.iter().any(|schema_module| path.starts_with(schema_module))
+                })
+            })
         })
         .flat_map(|file| {
             file.syntax.items.iter().filter_map(|item| {
