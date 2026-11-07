@@ -314,8 +314,9 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
 
 /// Narrow the cores of the subquery, CTE or view `item` by `term` and
 /// `edges`, which its own core's conditions put on its rows: each arm's
-/// source an output column passes on takes them as its own, unless a LEFT
-/// JOIN adds it there.
+/// source an output column passes on takes them as its own. A LEFT JOIN's
+/// right side in the arm does too: a row with NULLs in its place fails each
+/// of them, as a WHERE condition in the arm would.
 pub(crate) fn push_down(
     planner: &mut Planner,
     item: usize,
@@ -353,7 +354,7 @@ pub(crate) fn push_down(
         }
         for target in targets {
             let found = &planner.items[target];
-            if found.nullable || (found.source.table.is_none() && found.derived.is_none()) {
+            if found.source.table.is_none() && found.derived.is_none() {
                 continue;
             }
             let renamed = term.as_ref().and_then(|term| {

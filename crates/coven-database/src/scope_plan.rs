@@ -491,7 +491,7 @@ fn read_core<'a>(
             .map(|table| (*table, None))
             .chain(from.joins.iter().flatten().map(|join| (&join.table, Some(join))));
         for (table, join) in tables {
-            let nullable = match join.map(|join| join.operator) {
+            let left = match join.map(|join| join.operator) {
                 None | Some(JoinOperator::Comma | JoinOperator::TypedJoin(None)) => false,
                 Some(JoinOperator::TypedJoin(Some(kind))) => {
                     if kind.intersects(JoinType::NATURAL | JoinType::RIGHT) {
@@ -505,11 +505,10 @@ fn read_core<'a>(
                     parts(arg, &mut found);
                 }
             }
-            let Some(item) = read_item(connection, planner, table, nullable, core, parent, ctes)?
-            else {
+            let Some(item) = read_item(connection, planner, table, core, parent, ctes)? else {
                 return Ok(None);
             };
-            let place = if nullable { Place::LeftOn(planner.items.len()) } else { Place::Inner };
+            let place = if left { Place::LeftOn(planner.items.len()) } else { Place::Inner };
             planner.cores[core].items.push(planner.items.len());
             planner.items.push(item);
             match join.and_then(|join| join.constraint.as_ref()) {
@@ -580,10 +579,16 @@ fn read_condition(
         }
     }
     let items = &planner.items;
+    // A LEFT JOIN's ON decides only which right rows join each left row,
+    // so it narrows its own right side alone. Any other condition filters
+    // the joined rows, and each one coven narrows by is false where its
+    // column is NULL: a left row that no right row joins, with NULLs in
+    // their place, fails it, so it narrows a LEFT JOIN's right side as it
+    // does any source.
     let narrows = |item: usize| {
         items[item].core == core
             && match place {
-                Place::Inner => !items[item].nullable,
+                Place::Inner => true,
                 Place::LeftOn(position) => position == item,
             }
     };

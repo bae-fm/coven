@@ -116,7 +116,7 @@ async fn a_join_narrows_toward_either_side() {
     db.close().await.unwrap();
 }
 
-/// A LEFT JOIN's right side is narrowed by its ON alone, by the values its
+/// A LEFT JOIN's right side is narrowed by its ON, by the values its
 /// left side matched: a release with no tracks gaining one reruns the query.
 #[tokio::test]
 async fn a_left_join_narrows_its_right_side_by_its_on() {

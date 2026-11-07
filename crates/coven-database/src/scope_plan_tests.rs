@@ -602,6 +602,40 @@ async fn conditions_on_any_column_narrow() {
     db.close().await.unwrap();
 }
 
+/// A WHERE condition on a LEFT JOIN's right side narrows that side, as it
+/// would an inner join's: the NULLs a missing right row gives fail it, so
+/// such a row can't reach the result either way. A view's LEFT JOIN takes
+/// the condition put on its rows the same way.
+#[tokio::test]
+async fn a_where_condition_narrows_a_left_joins_right_side() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release_id TEXT);
+CREATE TABLE credits(id INTEGER PRIMARY KEY, track_id INTEGER, role TEXT, name TEXT);
+CREATE VIEW credited AS SELECT t.id, t.release_id, c.id AS credit, c.role, c.name FROM tracks t LEFT JOIN credits c ON c.track_id = t.id;
+INSERT INTO tracks VALUES (1,'r1'),(2,'r2');").await.unwrap();
+    for sql in [
+        "SELECT t.id, c.name FROM tracks t LEFT JOIN credits c ON c.track_id = t.id WHERE t.release_id = ?1 AND c.role = 'x' ORDER BY c.id",
+        "SELECT id, name FROM credited WHERE release_id = ?1 AND role = 'x' ORDER BY credit",
+    ] {
+        write(&db, "DELETE FROM credits; INSERT INTO credits VALUES (1,1,'x','Ana'),(2,1,'y','Ben'),(3,2,'x','Carol')");
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
+            Ok(db.query(sql, ["r1"], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?)
+        });
+        assert_eq!(next(&mut query).await, [(1, "Ana".into())]);
+        write(&db, "UPDATE credits SET name = 'Benny' WHERE id = 2");
+        assert!(!query.is_marked_for_rerun(), "another role: {sql}");
+        write(&db, "UPDATE credits SET name = 'Caroline' WHERE id = 3");
+        assert!(!query.is_marked_for_rerun(), "another release: {sql}");
+        write(&db, "UPDATE credits SET role = 'x' WHERE id = 2");
+        assert_eq!(next(&mut query).await, [(1, "Ana".into()), (1, "Benny".into())], "{sql}");
+        write(&db, "DELETE FROM credits WHERE id = 1");
+        assert_eq!(next(&mut query).await, [(1, "Benny".into())], "{sql}");
+        write(&db, "INSERT INTO credits VALUES (4,1,'y','Dan')");
+        assert!(!query.is_marked_for_rerun(), "a new credit of another role: {sql}");
+    }
+    db.close().await.unwrap();
+}
+
 /// A comparison SQLite would make after converting a value, or under a
 /// collation other than BINARY, or on a generated column, keeps the table
 /// whole: coven compares values as they are.

@@ -63,8 +63,6 @@ impl Columns {
 pub(crate) struct FromItem {
     pub(crate) source: Source,
     pub(crate) columns: Columns,
-    /// The right side of a LEFT JOIN: only its own ON conditions narrow it.
-    pub(crate) nullable: bool,
     /// The SELECT core whose FROM holds it.
     pub(crate) core: usize,
     /// A subquery's, CTE's or view's cores, which conditions on its rows
@@ -78,7 +76,6 @@ pub(crate) fn read_item<'a>(
     connection: &Connection,
     planner: &mut Planner,
     table: &'a SelectTable<'a>,
-    nullable: bool,
     core: usize,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
@@ -87,7 +84,7 @@ pub(crate) fn read_item<'a>(
         Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
         None => name.0.to_owned(),
     };
-    let item = |source, columns, derived| FromItem { source, columns, nullable, core, derived };
+    let item = |source, columns, derived| FromItem { source, columns, core, derived };
     match table {
         SelectTable::Table(name, alias, _) => {
             let qualifier = qualifier(alias, &name.name);
