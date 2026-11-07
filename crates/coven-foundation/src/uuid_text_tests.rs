@@ -66,23 +66,28 @@ fn uuid_and_circle_ids_bind_as_canonical_text() {
     assert_eq!(CircleId::column_result(ValueRef::Text(bound.as_bytes())).unwrap(), CircleId(id));
 }
 
-/// A stored object's id binds as its sixteen bytes and reads back; text, or a
-/// blob of another length, is not an object id.
+/// A store, key or stored object's id binds as its sixteen bytes and reads
+/// back; text, or a blob of another length, is not such an id.
 #[test]
-fn object_ids_bind_as_their_sixteen_bytes() {
-    let object = ObjectId(Uuid::parse_str("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap());
-    let ToSqlOutput::Borrowed(ValueRef::Blob(bytes)) = object.to_sql().unwrap() else {
-        panic!("an object id binds as a blob")
-    };
-    assert_eq!(bytes, object.0.as_bytes());
-    assert_eq!(ObjectId::column_result(ValueRef::Blob(bytes)).unwrap(), object);
-    assert!(matches!(
-        ObjectId::column_result(ValueRef::Blob(&[1; 15])),
-        Err(FromSqlError::InvalidBlobSize { expected_size: 16, blob_size: 15 })
-    ));
-    let text = object.0.to_string();
-    assert!(matches!(
-        ObjectId::column_result(ValueRef::Text(text.as_bytes())),
-        Err(FromSqlError::InvalidType)
-    ));
+fn store_key_and_object_ids_bind_as_their_sixteen_bytes() {
+    fn check<T: ToSql + FromSql + PartialEq + std::fmt::Debug>(id: T, uuid: Uuid) {
+        let ToSqlOutput::Borrowed(ValueRef::Blob(bytes)) = id.to_sql().unwrap() else {
+            panic!("{id:?} binds as a blob")
+        };
+        assert_eq!(bytes, uuid.as_bytes());
+        assert_eq!(T::column_result(ValueRef::Blob(bytes)).unwrap(), id);
+        assert!(matches!(
+            T::column_result(ValueRef::Blob(&[1; 15])),
+            Err(FromSqlError::InvalidBlobSize { expected_size: 16, blob_size: 15 })
+        ));
+        let text = uuid.to_string();
+        assert!(matches!(
+            T::column_result(ValueRef::Text(text.as_bytes())),
+            Err(FromSqlError::InvalidType)
+        ));
+    }
+    let uuid = Uuid::parse_str("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+    check(ObjectId(uuid), uuid);
+    check(StoreId(uuid), uuid);
+    check(KeyId(uuid), uuid);
 }

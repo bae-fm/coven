@@ -533,6 +533,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 
 ```rust
 /// A store's UUID, independent of its name and location (E1).
+/// ToSql/FromSql bind/read its 16 bytes.
 pub struct StoreId(pub Uuid);
 
 /// Circle UUID; ToSql/FromSql bind/read canonical text, as `coven_circles`
@@ -2241,7 +2242,7 @@ pub enum MaterialError {
 }
 
 /// A store or circle key's random id, named by the admin slot that
-/// brings the key in (§12.1).
+/// brings the key in (§12.1). ToSql/FromSql bind/read its 16 bytes.
 pub struct KeyId(pub Uuid);
 
 /// The two places coven keeps file bytes inside a store (E1).

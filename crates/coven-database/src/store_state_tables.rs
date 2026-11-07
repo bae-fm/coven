@@ -132,7 +132,7 @@ pub(crate) fn name_local_creation(
 ) -> Result<(), DbError> {
     database.internal_execute(
         "INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,0) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name WHERE created=0",
-        params![store.0.as_bytes().as_slice(), name, 1u64.to_be_bytes().as_slice()],
+        params![store, name, 1u64.to_be_bytes().as_slice()],
     )?;
     Ok(())
 }
@@ -152,13 +152,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
         .query(
             "SELECT store,name,named_at FROM _coven_store WHERE singleton=1 AND created=1",
             [],
-            |r| {
-                Ok(StoreIdentity {
-                    id: StoreId(uuid::Uuid::from_bytes(r.get(0)?)),
-                    name: r.get(1)?,
-                    named_at: slot(r, 2)?,
-                })
-            },
+            |r| Ok(StoreIdentity { id: r.get(0)?, name: r.get(1)?, named_at: slot(r, 2)? }),
         )?
         .pop();
     state.members = database
@@ -210,7 +204,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
 }
 pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id.0.as_bytes().as_slice(),store.name,store.named_at.0.to_be_bytes().as_slice()])?;
+        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.0.to_be_bytes().as_slice()])?;
     }
     for table in [
         "_coven_circle_deletions",

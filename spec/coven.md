@@ -10050,15 +10050,14 @@ device consistent with the database.
   access limited to its own objects and the views. SQL functions such as
   `coven_applying()` and `coven_key()` keep their names.
 - Coven's tables are local only; they never sync.
-- A member, circle, file, stored object or device id has one form in every
-  column of coven's tables and views that holds it: the form its type binds
-  and reads in SQL
-  ([api.md E4](api.md#e4-reading)). Member, circle and file ids are canonical
-  UUID text, a stored object's id is its 16 bytes, and a device id is its eight
-  big-endian bytes. A second form would make a lookup bound in one form miss
-  rows held in the other, and every view would have to convert. So
-  `_coven_members.member` holds the same text `coven_members` shows and
-  `MemberId` binds.
+- A store, key, member, circle, file, stored object or device id has one form
+  in every column of coven's tables and views that holds it: the form its type
+  binds and reads in SQL ([api.md E4](api.md#e4-reading)). Member, circle and
+  file ids are canonical UUID text; store, key and stored object ids are their
+  16 bytes; and a device id is its eight big-endian bytes. A second form would
+  make a lookup bound in one form miss rows held in the other, and every view
+  would have to convert. So `_coven_members.member` holds the same text
+  `coven_members` shows and `MemberId` binds.
 - What changes about a row after coven writes it lives in rows of its own
   beside it, never in the row: SQLite writes a row's whole record again on
   any update, so a verdict or key choice kept beside a write's plaintext

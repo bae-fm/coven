@@ -1,8 +1,8 @@
 //! Coven's ids at the SQL value boundary, without database access: UUIDs as
-//! canonical text, stored objects' ids as their sixteen bytes, and device ids
-//! as the eight big-endian bytes coven stores.
+//! canonical text; store, key and stored objects' ids as their sixteen bytes;
+//! and device ids as the eight big-endian bytes coven stores.
 
-use crate::id_source::{CircleId, DeviceId, FileId, MemberId, ObjectId};
+use crate::id_source::{CircleId, DeviceId, FileId, KeyId, MemberId, ObjectId, StoreId};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef};
 use rusqlite::ToSql;
 use uuid::Uuid;
@@ -75,21 +75,58 @@ impl FromSql for FileId {
     }
 }
 
+/// A UUID's sixteen bytes, as a BLOB.
+fn uuid_blob(id: &Uuid) -> ToSqlOutput<'_> {
+    ToSqlOutput::Borrowed(ValueRef::Blob(id.as_bytes()))
+}
+
+/// A UUID from a BLOB of exactly sixteen bytes.
+fn uuid_from_blob(value: ValueRef<'_>) -> FromSqlResult<Uuid> {
+    let bytes = value.as_blob()?;
+    let bytes = <[u8; 16]>::try_from(bytes).map_err(|_wrong_size| {
+        FromSqlError::InvalidBlobSize { expected_size: 16, blob_size: bytes.len() }
+    })?;
+    Ok(Uuid::from_bytes(bytes))
+}
+
 /// A stored object's id as its sixteen bytes, as coven's object columns hold
 /// it.
 impl ToSql for ObjectId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Borrowed(ValueRef::Blob(self.0.as_bytes())))
+        Ok(uuid_blob(&self.0))
     }
 }
 
 impl FromSql for ObjectId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        let bytes = value.as_blob()?;
-        let bytes = <[u8; 16]>::try_from(bytes).map_err(|_wrong_size| {
-            FromSqlError::InvalidBlobSize { expected_size: 16, blob_size: bytes.len() }
-        })?;
-        Ok(Self(Uuid::from_bytes(bytes)))
+        uuid_from_blob(value).map(Self)
+    }
+}
+
+/// A store id as its sixteen bytes, as `_coven_store` holds it.
+impl ToSql for StoreId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(uuid_blob(&self.0))
+    }
+}
+
+impl FromSql for StoreId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        uuid_from_blob(value).map(Self)
+    }
+}
+
+/// A store or circle key's id as its sixteen bytes, as coven's key columns
+/// hold it.
+impl ToSql for KeyId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(uuid_blob(&self.0))
+    }
+}
+
+impl FromSql for KeyId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        uuid_from_blob(value).map(Self)
     }
 }
 

@@ -628,14 +628,14 @@ impl RetainedInput {
                         .query(
                             "SELECT audience,key FROM _coven_input_unread WHERE object=?1",
                             [id],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, [u8; 16]>(1)?)),
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, KeyId>(1)?)),
                         )?
                         .into_iter()
                         .map(|(audience, key)| {
                             Ok((
                                 crate::write_encoding::audience(&audience)
                                     .map_err(|_| DbError::DamagedDatabase)?,
-                                KeyId(uuid::Uuid::from_bytes(key)),
+                                key,
                             ))
                         })
                         .collect::<Result<BTreeSet<_>, DbError>>()?;
@@ -698,7 +698,7 @@ impl RetainedInput {
                             (
                                 id,
                                 crate::write_encoding::audience_text(&audience),
-                                key.0.as_bytes().as_slice(),
+                                key,
                             ),
                         )?;
                     }
