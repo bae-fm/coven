@@ -428,6 +428,7 @@ pub(crate) fn settle_record(
             |r| r.get::<_, bool>(0),
         )? {
             crate::database::file_database::remove_cached(db, &namespace, &object)?;
+            crate::database::file_database::remove_partial_pin(db, &namespace, &object)?;
         }
         // A file off its stored bytes can't be kept whole here: a request
         // to keep it ends (§17.8).

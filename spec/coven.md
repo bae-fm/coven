@@ -7023,9 +7023,9 @@ No failed range is marked cached or pinned. A read of a file on this device
 only with no upload records nothing: there is no work to retry, and its error,
 `UserFileChanged` or `UserFileMissing` for an original, goes to the caller.
 
-Ben's laptop is pinning a song and has two verified ranges when Wi-Fi drops.
-The list reports the network failure, and progress stays at those two committed
-ranges. Pinning again fetches the rest. A bad final content hash would
+Ben's laptop is pinning a song and has two verified requests' bytes in its
+partial copy when Wi-Fi drops. The list reports the network failure. Pinning
+again fetches the rest (§17.8). A bad final content hash would
 instead leave a permanent refusal and publish no completed file or pin.
 
 [IO and observable work](proofs/io.md) specifies where downloads are checked,
@@ -7055,10 +7055,32 @@ download can take minutes, and no write can hold the writer that long, so it
 can't be a step itself.
 
 - **Nothing counts until the write.** A prepared pin committed by no write,
-  because the app dropped it or the process ended, keeps nothing: the whole
-  copies wait under recorded names, which the next write or open removes. An
-  app that wants each track's download to survive a crash prepares and commits
-  each track in turn; one prepared pin over the album keeps all of it or none.
+  because the app dropped it or the process ended, pins nothing, and the
+  cache's budget never counts its copies. What it downloaded is not lost; see
+  *A stopped prepare keeps its bytes*. An app that wants each track pinned
+  when its download ends prepares and commits each track in turn; one prepared
+  pin over the album pins all of it or none.
+- **A stopped prepare keeps its bytes.** A prepare dropped partway, or ended by
+  a crash, leaves each file's partial copy on disk, held apart from the cache:
+  the budget neither counts nor evicts it. Ben pauses his album's download
+  with track 4 half fetched; tracks 1 to 3 are whole copies and track 4 holds
+  the bytes it had. Preparing the album again copies nothing it has, and
+  fetches only track 4's rest and the tracks after it. A partial holds the
+  file's header and whole chunks, synced to disk, and coven keeps what it has
+  written after each request to storage, so a stop loses at most the request
+  under way. The next prepare of the file reads its partial back first,
+  authenticating each chunk as it would a fetched one and feeding the content
+  hash, then asks storage for the chunks after them with a range request, as
+  every provider answers (§20.5). A partial that does not check, because its
+  header differs or a chunk fails authentication, is deleted and the file
+  downloads again from its first byte. So is one whose complete bytes fail the
+  content hash, which also leaves its refusal (§19.1). Without the check, bytes
+  that changed on this device would be pinned as the file. A partial goes when
+  the app unpins the file, when a write pins the copy it became, and when no
+  record here names the file's stored bytes any more. An unpin while a prepare
+  of the file runs ends its partial, and the prepare fails with `PinChanged`
+  and records nothing. Without the unpin rule, bytes for a pin the app no
+  longer wants would stay on disk for good.
 - **A copy already kept is pinned in place.** If a checked whole copy of a file
   is already in the cache, preparing notes it instead of downloading. If the
   budget evicts that copy before the write, the write fails with `PinChanged`,
@@ -7135,7 +7157,8 @@ after the app released it, and track 7 would go on downloading.
 - Preparing assembles a complete encrypted cache file from cached and fetched
   chunks, checks its content hash, and syncs it to disk. The write publishes it
   pinned, replacing the separate cached chunks in one step. A cancellation or a
-  crash leaves no partly downloaded file exempt from eviction.
+  crash leaves the partly downloaded file as a partial copy, which is no cache
+  entry: no read finds it, and nothing exempts a cached chunk because of it.
 - Only stored bytes are kept. Pinning a file on one device only, this one
   included while it uploads, fails with `DeviceOnly`, on every device; the app
   pins it once it is stored. Without this rule a device would hold a pin it
@@ -10287,6 +10310,12 @@ pins) consistent with its database across crashes.
   the name for deletion instead (§17.8). The transaction taking the last such
   record off them already removed their entries, and a later one exposing
   bytes would name what nothing reads or unpins.
+- A pin's partial download is a cache file named by a row of its own, kept
+  across crashes and restarts. Its name's removal record goes before the row
+  names it, as for a cache entry, and its bytes are synced before the row
+  records how many of them are kept; bytes past that count are cut off when the
+  download continues. Deleting it records its name for removal and removes the
+  row first (§17.8).
 - Cancelling staging or a cache write releases its active names. Durable records
   keep any abandoned bytes findable for deletion.
 - A transaction that releases owned bytes records their deletion before
@@ -12153,7 +12182,7 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
 | `DbError::PreparedElsewhere` | a write is given staged files or a prepared pin from another open store, or from this one before it closed | §17.3, §17.8 |
-| `DbError::PinChanged` | a write commits a prepared pin whose already-kept copy was evicted since | §17.8 |
+| `DbError::PinChanged` | a write commits a prepared pin whose already-kept copy was evicted since, or a prepare finds its partial download ended by the app's unpin | §17.8 |
 | `DbError::DismissedRowChanged` | a write dismisses a taken-out row and also changes it, or a row its delete cascades to | §8.4 |
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |

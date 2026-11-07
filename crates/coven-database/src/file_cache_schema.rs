@@ -43,6 +43,24 @@ macro_rules! coven_cache_tables {
                 UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
             END;
         ");
+        // A pin's download that stopped, kept apart from the cache: the first
+        // `size` bytes of a file's encrypted copy, synced, so the next prepare
+        // of the file continues from them. The cache never counts or evicts
+        // them; the app's unpin, the pin they became, or the stored bytes
+        // leaving ends them (§17.8, Appendix C.3).
+        $visit!(_coven_cache_partials, "
+            CREATE TABLE _coven_cache_partials (
+                namespace TEXT NOT NULL,
+                object_path TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                size INTEGER NOT NULL CHECK(size>=0),
+                PRIMARY KEY(namespace,object_path)
+            ) STRICT, WITHOUT ROWID;
+            CREATE TRIGGER _coven_cache_partials_unremoved BEFORE INSERT ON _coven_cache_partials BEGIN
+                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
+                WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
+            END;
+        ");
         // Cache ranges whose bytes are being written with no writer held;
         // opening makes the abandoned ones removals (Appendix C.3).
         $visit!(_coven_cache_writes, "

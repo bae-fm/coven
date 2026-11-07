@@ -628,6 +628,7 @@ impl FileDatabase {
                     file,
                     name,
                     writing: Some(writing),
+                    partial: false,
                 })
             })
             .await
@@ -674,6 +675,14 @@ pub struct CacheReservation {
     name: FileName,
     /// Held until a prepared pin takes the copy or it drops.
     writing: Option<BytesWriting>,
+    /// Whether the file is kept as a partial download, its row naming it.
+    partial: bool,
+}
+impl CacheReservation {
+    /// The cache file's name.
+    pub fn name(&self) -> &FileName {
+        &self.name
+    }
 }
 /// What a reservation holds while its bytes are still written, a pin's
 /// whole cache file or a device-only call's copies: the lease closing the
@@ -800,6 +809,10 @@ pub struct LocalEvidence<P> {
 
 #[path = "file_database_pins.rs"]
 mod pins;
+
+#[path = "file_database_partial_pins.rs"]
+mod partial_pins;
+pub(crate) use partial_pins::remove as remove_partial_pin;
 
 #[path = "file_database_prepared_pin.rs"]
 mod prepared_pin;

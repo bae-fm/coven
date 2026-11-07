@@ -607,6 +607,8 @@ mod cache;
 mod device_only;
 #[path = "file_keep_tests.rs"]
 mod keep;
+#[path = "file_read_partial_tests.rs"]
+mod partial_pin;
 #[path = "file_read_tests.rs"]
 mod read;
 #[path = "file_status_tests.rs"]

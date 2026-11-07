@@ -16,7 +16,11 @@ impl CovenHandle {
     /// one included while it uploads, is refused with
     /// `FileReadError::DeviceOnly`, and one whose record goes, or leaves its
     /// stored bytes, while they download keeps nothing and fails with
-    /// `DbError::NoLongerStored`. Which files are downloading is in
+    /// `DbError::NoLongerStored`. A prepare that stops, dropped or ended by
+    /// a crash, keeps the bytes it downloaded of each file, apart from the
+    /// cache, and the next prepare of the file continues from them; the
+    /// app's unpin of the file ends them, and a prepare it ends fails with
+    /// `DbError::PinChanged`. Which files are downloading is in
     /// `coven_downloading`, how far each has got on the download watch.
     pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError> {
         self.files.prepare_pin(files).await

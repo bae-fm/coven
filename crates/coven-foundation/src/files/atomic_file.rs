@@ -305,6 +305,40 @@ impl FileWriter {
         })
     }
 
+    /// Reopen `file`, an unfinished file of a writer that stopped, for
+    /// appending after its first `length` bytes, which the caller recorded
+    /// as synced: whatever lies past them is cut off. A file shorter than
+    /// `length` is refused, since the bytes it lost are not appended again.
+    pub(super) fn resume(
+        file: &AtomicFile,
+        lock: StoreReadLock,
+        bugs: crate::task::BugSinkRef,
+        length: u64,
+    ) -> Result<Self, FileError> {
+        use std::io::Seek;
+        let path = file.resolved()?;
+        let mut file = owned_options()
+            .open(&path)
+            .map_err(|source| FileError::at("reopen owned file", &path, source))?;
+        let metadata =
+            file.metadata().map_err(|source| FileError::at("inspect owned file", &path, source))?;
+        if !metadata.is_file() || metadata.len() < length {
+            return Err(FileError::at(
+                "reopen owned file",
+                &path,
+                io::Error::new(io::ErrorKind::InvalidInput, "a regular file holding its bytes"),
+            ));
+        }
+        file.set_len(length)
+            .and_then(|()| file.seek(io::SeekFrom::Start(length)).map(|_| ()))
+            .map_err(|source| FileError::at("reopen owned file", &path, source))?;
+        Ok(Self {
+            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
+            path,
+            bugs,
+        })
+    }
+
     /// Read once in 64 KiB chunks, reporting each chunk after its disk write,
     /// then finish the file into `batch`.
     pub async fn write_from<R: tokio::io::AsyncRead + Unpin>(
@@ -338,6 +372,21 @@ impl FileWriter {
     /// Sync all appended bytes, then flush their directory and the drive's
     /// cache, as a batch of this one file, before publishing metadata.
     pub async fn finish(self) -> Result<(), FileError> {
+        self.run("sync owned file", |writer, path| {
+            sync_file(&writer.file)?;
+            #[cfg(unix)]
+            sync_directory(parent(path))?;
+            #[cfg(not(unix))]
+            let _ = path;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Sync all appended bytes and flush their directory and the drive's
+    /// cache, keeping the writer open: what was appended before is durable
+    /// when this returns.
+    pub async fn sync(&mut self) -> Result<(), FileError> {
         self.run("sync owned file", |writer, path| {
             sync_file(&writer.file)?;
             #[cfg(unix)]

@@ -439,7 +439,8 @@ async fn a_pins_download_is_listed_while_it_runs() {
 
 /// Preparing a pin downloads the file whole and pins nothing (§17.8): the
 /// write committing it pins it, beside the app's own row. A prepared pin
-/// dropped uncommitted keeps nothing once the next write has run.
+/// dropped uncommitted pins nothing, and its copy stays as the partial
+/// download the next prepare completes without a request.
 #[tokio::test]
 async fn a_prepared_pin_pins_nothing_until_its_write_commits_it() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -453,8 +454,11 @@ async fn a_prepared_pin_pins_nothing_until_its_write_commits_it() {
     let with_copy = cache_files(&f);
     drop(prepared);
     f.database.write(|_| Ok(())).await.unwrap();
-    assert_eq!(cache_files(&f), with_copy - 1, "a pin never committed keeps nothing");
+    assert_eq!(pinned().await.unwrap(), vec![Some(false)]);
+    assert_eq!(cache_files(&f), with_copy, "the dropped pin's copy is kept to continue from");
+    let requests = f.storage.request_count();
     let prepared = f.files.prepare_pin(std::slice::from_ref(&file)).await.unwrap();
+    assert_eq!(f.storage.request_count(), requests, "the kept copy is not downloaded again");
     f.database
         .write(move |sql| {
             sql.execute("INSERT INTO other(id) VALUES('offline')", [])?;
@@ -521,6 +525,7 @@ async fn bytes_no_record_names_are_read_but_never_kept() {
         f.files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::Database(DbError::NoLongerStored { file: id })) if id == file.id()
     ));
+    f.database.write(|_| Ok(())).await.unwrap();
     assert_eq!(cache_files(&f), 0, "the pin keeps nothing");
     assert!(file_pending(&f).await.is_empty());
     f.close().await;

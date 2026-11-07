@@ -174,7 +174,8 @@ pub enum DbError {
     },
     /// A pin prepared over a whole copy already kept found that copy gone
     /// when its write committed it, evicted since: nothing was pinned, and
-    /// preparing again downloads it (§17.8).
+    /// preparing again downloads it. A prepare whose partial download the
+    /// app's unpin ended meanwhile fails with it too (§17.8).
     #[error("the kept copy of file {file} changed since its pin was prepared")]
     PinChanged {
         /// The file.

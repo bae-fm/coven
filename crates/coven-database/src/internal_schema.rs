@@ -39,8 +39,10 @@ pub(crate) const FILE_NAMED_SQL: &str = "(EXISTS(SELECT 1 FROM _coven_device_fil
     OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
     OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1))";
 /// Whether the cache-area path `?1` is in use: by an entry, a range being
-/// written, or bytes recorded for removal (Appendix C.3).
+/// written, a pin's partial download, or bytes recorded for removal
+/// (Appendix C.3).
 pub(crate) const CACHE_NAME_USED_SQL: &str = "(EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)
+    OR EXISTS(SELECT 1 FROM _coven_cache_partials WHERE path=?1)
     OR EXISTS(SELECT 1 FROM _coven_cache_writes WHERE path=?1)
     OR EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=?1 AND area='cache'))";
 

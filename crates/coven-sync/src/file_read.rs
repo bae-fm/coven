@@ -25,6 +25,9 @@ use std::sync::Arc;
 
 use super::file_error::TransferError;
 
+#[path = "file_read_partial.rs"]
+mod partial;
+
 const REQUEST_BYTES: u64 = 1024 * 1024;
 /// An open file. A file never changes its bytes, so nothing later changes
 /// what it reads. Its shared store lock prevents deletion until the stream
@@ -795,18 +798,19 @@ impl UploadedFile {
 
     /// Write the whole copy `keep_whole` keeps, telling `meter` how far
     /// through the encrypted object it has got, in order: cached chunks
-    /// count as they are copied in, fetched ones as their bytes arrive.
+    /// count as they are copied in, fetched ones as their bytes arrive. It
+    /// continues the partial copy an earlier prepare left, once the bytes
+    /// kept check, and keeps what it has written, synced, after each
+    /// request, so a prepare that stops loses at most the request under
+    /// way (§17.8).
     async fn assemble_whole(
         &self,
         meter: &TransferMeter,
     ) -> Result<Option<CacheReservation>, TransferError> {
-        let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
-        let header = self.header.encode();
-        writer.append(&header).await?;
-        let mut written = header.len() as u64;
+        let (mut reservation, mut writer, mut hash, next, mut written) = self.begin_whole().await?;
+        let database = &self.owner.database;
         meter.reached(written);
-        let mut hash = ContentHasher::new();
-        let mut index = 0;
+        let mut index = next;
         while index < self.header.chunk_count() {
             // A metered network the app keeps files off stops the download
             // before its next request to storage (§17.8).
@@ -822,12 +826,20 @@ impl UploadedFile {
                 written += chunk.ciphertext.len() as u64;
                 meter.reached(written);
             }
+            writer.sync().await?;
+            database.keep_pin_download(&mut reservation, written).await?;
             index = last + 1;
         }
         if hash.finish() != self.hash {
+            // Chunks that each authenticate but whole to another file: no
+            // part of the copy is to be trusted again.
+            drop(writer);
+            drop(reservation);
+            database.discard_pin_download(&self.file).await?;
             return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
         writer.finish().await?;
+        database.keep_pin_download(&mut reservation, written).await?;
         Ok(Some(reservation))
     }
 }

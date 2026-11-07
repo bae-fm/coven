@@ -1068,11 +1068,13 @@ owner = "Database"
 homes = [
     "crates/coven-database/src/file_cache.rs",
     "crates/coven-database/src/file_cache_schema.rs",
+    "crates/coven-database/src/file_database_partial_pins.rs",
     "crates/coven-database/src/internal_schema_pins.rs",
 ]
 tables = [
     "_coven_cache",
     "_coven_cache_budgets",
+    "_coven_cache_partials",
     "_coven_cache_writes",
 ]
 
@@ -1435,6 +1437,8 @@ tables = [
 "crates/coven-storage/src/providers/s3_empty.rs" = ["empty_bucket"]
 
 "crates/coven-sync/src/file_read.rs" = ["FileStream::read", "UploadedFile::open"]
+# A pin's partial cache file, reopened to go on or checked before it does.
+"crates/coven-sync/src/file_read_partial.rs" = ["UploadedFile::open_writer", "UploadedFile::check_partial"]
 # Creates a reserved cache file for a pin or an upload's own copy.
 "crates/coven-sync/src/file_cache.rs" = ["FilesInner::create_cache_file"]
 "crates/coven-sync/src/files.rs" = ["Files::new", "Files::read_only", "FilesInner::new"]

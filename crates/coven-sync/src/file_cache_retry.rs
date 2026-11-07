@@ -258,15 +258,18 @@ fn returned(file: &FileRef, error: TransferError) -> FileReadError {
     }
 }
 
-/// Invalid arguments, a closed store and a file only on another device do
-/// not introduce file work.
+/// Invalid arguments, a closed store, a file only on another device and a
+/// pin the app changed under its download do not introduce file work.
 fn unrecorded(error: &FileReadError) -> bool {
     matches!(
         error,
         FileReadError::RangeOutOfBounds { .. }
             | FileReadError::DeviceOnly { .. }
             | FileReadError::Database(
-                DbError::StoreClosed | DbError::FileAbsent { .. } | DbError::NoLongerStored { .. }
+                DbError::StoreClosed
+                    | DbError::FileAbsent { .. }
+                    | DbError::NoLongerStored { .. }
+                    | DbError::PinChanged { .. }
             )
     )
 }

@@ -442,12 +442,16 @@ pub(crate) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bo
         (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
     )? == 1)
 }
-/// Release a stored file's budget exemption: every entry of its bytes.
+/// Release a stored file's budget exemption: every entry of its bytes. The
+/// partial download its pin waited on goes too, the app no longer keeping
+/// the file (§17.8).
 pub(crate) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
+    let object = object_path_of(file)?;
     db.internal_execute(
         "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND object_path=?2",
-        (file.namespace(), object_path_of(file)?),
+        (file.namespace(), &object),
     )?;
+    super::partial_pins::remove(db, file.namespace(), &object)?;
     Ok(())
 }
 /// Whether a pinned, checked whole copy of this file is on the device.
@@ -487,6 +491,11 @@ pub(crate) fn publish(
     }
     let object = object_path_of(file)?;
     remove_entries(db, file.namespace(), &object)?;
+    // The partial download this copy completed is the copy now.
+    db.internal_execute(
+        "DELETE FROM _coven_cache_partials WHERE namespace=?1 AND object_path=?2 AND path=?3",
+        (file.namespace(), &object, name.as_str()),
+    )?;
     // The reservation's cleanup record goes before the row names its bytes.
     crate::file_removals::keep(db, "cache", name.as_str())?;
     db.internal_execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
@@ -496,7 +505,7 @@ pub(crate) fn publish(
 /// cache keeps bytes only while one does (§17.8): the transaction taking
 /// the last such record off them removes their entries, and one publishing
 /// an entry after it would name bytes nothing could read or unpin.
-fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+pub(crate) fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND object_path=?2)",
         (file.namespace(), object_path_of(file)?),

@@ -1443,7 +1443,8 @@ pub enum DbError {
     DeviceOnlyUnreferenced { file: FileId },
     /// A pin prepared over a whole copy already kept found that copy gone
     /// when its write committed it, evicted since: nothing was pinned, and
-    /// preparing again downloads it (§17.8).
+    /// preparing again downloads it. A prepare whose partial download the
+    /// app's unpin ended meanwhile fails with it too (§17.8).
     PinChanged { file: FileId },
     /// One of coven's steps in this write failed, and the write's closure
     /// went on to return success: the write rolls back, since a failed step
@@ -6431,8 +6432,9 @@ impl CovenWrite<'_> {
     /// pinned. A pin prepared in another open store, or in this one before
     /// it closed, fails with `PreparedElsewhere`; a file whose record left
     /// its stored bytes since with `NoLongerStored`, keeping nothing; and a
-    /// copy already kept that the budget evicted since with `PinChanged`,
-    /// which preparing again downloads.
+    /// copy already kept that the budget evicted since, or a download
+    /// the app's unpin ended, with `PinChanged`, which preparing again
+    /// downloads.
     pub fn pin(&self, prepared: PreparedPin) -> Result<(), DbError>;
 
     /// Stops keeping files, as a step of this write (§4, §17.8): each file's
@@ -6555,7 +6557,11 @@ impl CovenHandle {
     /// here needs no call: the write switching it to the cloud pins it, and
     /// coven makes that pin itself. While the network is metered and the
     /// app moves files only on unmetered networks (E7), it waits before each
-    /// request to storage until that ends; dropping it cancels.
+    /// request to storage until that ends; dropping it cancels. A prepare
+    /// that stops, dropped or ended by a crash, keeps the bytes it
+    /// downloaded of each file, apart from the cache, and the next prepare
+    /// of the file continues from them; the app's unpin of the file ends
+    /// them, and a prepare it ends fails with `PinChanged`.
     pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError>;
 
     /// `prepare_pin`, then `CovenWrite::pin` in a write of its own.

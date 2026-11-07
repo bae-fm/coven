@@ -14,7 +14,8 @@ macro_rules! coven_file_removals_tables {
                 WHERE EXISTS(SELECT 1 FROM _coven_device_files WHERE path=NEW.path)
                     OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=NEW.path)
                     OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=NEW.path)
-                    OR EXISTS(SELECT 1 FROM _coven_cache WHERE path=NEW.path);
+                    OR EXISTS(SELECT 1 FROM _coven_cache WHERE path=NEW.path)
+                    OR EXISTS(SELECT 1 FROM _coven_cache_partials WHERE path=NEW.path);
             END;
         ");
     };

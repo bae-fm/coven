@@ -321,6 +321,17 @@ pub trait StoreDirAccess: Sized {
     /// under it. The caller records the name first and removes partial bytes
     /// after a failure.
     fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError>;
+    /// Reopen a named file of `area` that an earlier writer left unfinished,
+    /// for appending after its first `length` bytes, which the caller
+    /// recorded as synced; anything past them is cut off. A file with fewer
+    /// bytes is refused. The writer holds the store's read lock as
+    /// `create_writer`'s does.
+    fn resume_writer(
+        &self,
+        area: FileArea,
+        name: &FileName,
+        length: u64,
+    ) -> Result<FileWriter, WriterError>;
 }
 
 /// Check that `lock` protects exactly the store at `directory`.
@@ -414,6 +425,15 @@ impl StoreDirAccess for StoreDir {
     fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError> {
         let lock = self.lock_read_only()?;
         Ok(FileWriter::create(&self.file(area, name), lock, self.bugs.clone())?)
+    }
+    fn resume_writer(
+        &self,
+        area: FileArea,
+        name: &FileName,
+        length: u64,
+    ) -> Result<FileWriter, WriterError> {
+        let lock = self.lock_read_only()?;
+        Ok(FileWriter::resume(&self.file(area, name), lock, self.bugs.clone(), length)?)
     }
 }
 
