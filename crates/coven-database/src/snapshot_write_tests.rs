@@ -32,6 +32,50 @@ impl coven_format::snapshot::WriteSlots for Oracle {
     }
 }
 
+/// Change a merge row's cells with `edit`, as a damaged or dishonest body
+/// would hold them.
+pub(crate) fn edit_cells(
+    records: &mut [SnapshotRecord],
+    row: impl Fn(&coven_merge::RowId) -> bool,
+    edit: impl FnOnce(&mut BTreeMap<String, coven_merge::Cell<Value>>),
+) {
+    let oracle = Oracle(
+        records
+            .iter()
+            .filter_map(|record| match record {
+                SnapshotRecord::Write(write) => Some((write.id, write.clone())),
+                _ => None,
+            })
+            .collect(),
+    );
+    let merged = records
+        .iter_mut()
+        .find_map(|record| match record {
+            SnapshotRecord::Merge(merged) if row(merged.state.row()) => Some(merged),
+            _ => None,
+        })
+        .expect("the snapshot holds the row");
+    let mut cells = merged.state.cells().clone();
+    edit(&mut cells);
+    merged.state = coven_merge::RowState::from_parts(
+        merged.state.row().clone(),
+        merged.state.generations().clone(),
+        cells,
+        BTreeMap::new(),
+        &oracle,
+    )
+    .unwrap();
+}
+
+/// A value of the wrong type for a TEXT column: SQLite would store it as text.
+pub(crate) fn unstored_title(records: &mut [SnapshotRecord]) {
+    edit_cells(
+        records,
+        |_| true,
+        |cells| cells.get_mut("title").unwrap().value.value = Value::Integer(1),
+    );
+}
+
 pub(crate) fn id(audience: Audience) -> SnapshotId {
     SnapshotId { device: DeviceId(99), number: 1, audience }
 }
@@ -241,7 +285,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     assert_eq!(header.schema_version, 2);
     assert_eq!(header.covers, 7);
     // The migration marker has no changes; five original changes retain verdicts.
-    assert_eq!(&header.counts[..6], &[1, 6, 3, 1, 1, 5]);
+    assert_eq!(&header.counts[..5], &[6, 3, 1, 1, 5]);
     let verdicts: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
@@ -260,15 +304,6 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
             ChangeVerdict::Excluded(2),
         ]
     );
-    let synced = snapshot
-        .iter()
-        .find_map(|record| match record {
-            SnapshotRecord::Synced(row) => Some(row),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(synced.row.table, "notes");
-    assert_eq!(synced.columns["title"].value, Value::Text("third".into()));
     let merged = snapshot
         .iter()
         .find_map(|record| match record {
@@ -276,6 +311,8 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
             _ => None,
         })
         .unwrap();
+    assert_eq!(merged.state.row().table, "notes");
+    assert_eq!(merged.state.cells()["title"].value.value, Value::Text("third".into()));
     assert_eq!(merged.state.generations().len(), 3);
     assert_eq!(merged.state.cells()["title"].write, writes[3].header.position);
     let lost = snapshot
@@ -301,6 +338,25 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     receiver.close().await.unwrap();
 }
 
+/// How many times `needle` is in `bytes`.
+fn occurrences(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes.windows(needle.len()).filter(|window| *window == needle).count()
+}
+
+/// A row's values are its merge row's, and its original change's: nothing
+/// else in the snapshot holds them again (D7.1).
+#[tokio::test]
+async fn a_snapshot_holds_a_rows_value_in_its_merge_row_and_its_original_change() {
+    let store = TestStore::new();
+    let database = store.schema(notes(), NOTES).await.unwrap();
+    sql(&database, "INSERT INTO notes VALUES('note','a title no other record holds','')")
+        .await
+        .unwrap();
+    let snapshot = frames(&database, Audience::Store).await.concat();
+    assert_eq!(occurrences(&snapshot, b"a title no other record holds"), 2);
+    database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_snapshot_leaves_out_this_devices_unsent_writes() {
     let ids = SequentialIds::new();
@@ -319,14 +375,11 @@ async fn a_snapshot_leaves_out_this_devices_unsent_writes() {
     let rows: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
-            SnapshotRecord::Synced(row) => Some(row.columns["title"].value.clone()),
+            SnapshotRecord::Merge(row) => Some(row.state.cells()["title"].value.value.clone()),
             _ => None,
         })
         .collect();
     assert_eq!(rows, [Value::Text("from the sender".into())]);
-    let merged: Vec<_> =
-        snapshot.iter().filter(|record| matches!(record, SnapshotRecord::Merge(_))).collect();
-    assert_eq!(merged.len(), 1, "one merge record");
     let writes: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
@@ -390,7 +443,7 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
     assert_eq!(during, before);
     let after = decode(&frames(&database, Audience::Store).await);
     assert_ne!(after, before);
-    assert_eq!(after.0.counts[section::SYNCED], 2);
+    assert_eq!(after.0.counts[section::MERGE], 2);
     database.close().await.unwrap();
 }
 
@@ -409,19 +462,17 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
         uuid::Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap(),
     ));
     let (header, snapshot) = decode(&frames(&database, circle.clone()).await);
-    assert_eq!(header.counts[section::SYNCED], 1);
     assert_eq!(header.counts[section::MERGE], 1);
     for record in snapshot {
         match record {
-            SnapshotRecord::Synced(row) => {
-                assert_eq!(row.row.audience, circle);
-                assert_eq!(row.row.table, "notes");
+            SnapshotRecord::Merge(row) => {
+                assert_eq!(row.state.row().audience, circle);
+                assert_eq!(row.state.row().table, "notes");
                 assert_eq!(
-                    row.columns["root"].parents.values().next().unwrap().row.audience,
+                    row.state.cells()["root"].value.parents.values().next().unwrap().row.audience,
                     Audience::Store
                 );
             }
-            SnapshotRecord::Merge(row) => assert_eq!(row.state.row().audience, circle),
             SnapshotRecord::Column(column) => assert_eq!(column.table, "notes"),
             SnapshotRecord::Write(_) | SnapshotRecord::Claim(_) => {}
             SnapshotRecord::Authored(authored) => {
@@ -472,7 +523,7 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
         "{panicked:?}"
     );
     sql(&database, "INSERT INTO notes VALUES('n','still open','')").await.unwrap();
-    assert_eq!(decode(&frames(&database, Audience::Store).await).0.counts[section::SYNCED], 1);
+    assert_eq!(decode(&frames(&database, Audience::Store).await).0.counts[section::MERGE], 1);
     database.close().await.unwrap();
 }
 
@@ -636,16 +687,13 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     let mut references = Vec::new();
     for record in snapshot {
         match record {
-            SnapshotRecord::Synced(row) if row.row.table == "children" => {
-                references.push(row.columns["parent"].clone())
-            }
             SnapshotRecord::Merge(row) if row.state.row().table == "children" => {
                 references.push(row.state.cells()["parent"].value.clone())
             }
             _ => {}
         }
     }
-    assert_eq!(references.len(), 2);
+    assert_eq!(references.len(), 1);
     for written in references {
         assert_eq!(written.value, Value::Text("parent".into()));
         assert_eq!(written.parents.values().next().unwrap().generation, 1);

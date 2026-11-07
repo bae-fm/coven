@@ -21,7 +21,7 @@ pub(crate) struct PreparedSnapshot<'a> {
     evidence: VecDeque<PreparedEvidence>,
     /// The first record staging found failing the loader's checks, and its
     /// section.
-    refusal: Option<(u8, DbError)>,
+    refusal: Option<(usize, DbError)>,
 }
 
 /// Authenticate each staged write evidence of the staging `staging`, whose
@@ -32,7 +32,7 @@ pub(crate) fn prepare<'a>(
     db: &'a DatabaseConnection,
     staging: i64,
     header: SnapshotHeader,
-    refusal: Option<(u8, DbError)>,
+    refusal: Option<(usize, DbError)>,
     authorship: &dyn Authorship,
 ) -> Result<PreparedSnapshot<'a>, DbError> {
     let oracle = SnapshotMetadata::staged(db, staging);
@@ -72,7 +72,7 @@ impl PreparedSnapshot<'_> {
     /// Refuse the body for the first record staging found failing the
     /// loader's checks, once installing reaches that record's section, in
     /// the order the checks that need the writer would have met it.
-    pub(crate) fn refuse(&mut self, section: u8) -> Result<(), DbError> {
+    pub(crate) fn refuse(&mut self, section: usize) -> Result<(), DbError> {
         match self.refusal.take() {
             Some((at, refusal)) if at == section => Err(refusal),
             other => {
@@ -102,7 +102,7 @@ impl PreparedSnapshot<'_> {
     /// `oracle`. Evidence comes authenticated.
     pub(crate) fn frames(
         &mut self,
-        sections: std::ops::RangeInclusive<u8>,
+        sections: std::ops::RangeInclusive<usize>,
         oracle: &SnapshotMetadata<'_>,
         mut consume: impl FnMut(SnapshotRecord<PreparedEvidence>) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
@@ -112,7 +112,7 @@ impl PreparedSnapshot<'_> {
                 "SELECT evidence,record FROM {} WHERE section BETWEEN ?1 AND ?2 ORDER BY rowid",
                 crate::database::input_database::staging::table(self.staging, "records")
             ),
-            [*sections.start(), *sections.end()],
+            [*sections.start() as i64, *sections.end() as i64],
             |row| {
                 if row.get::<_, bool>(0)? {
                     let prepared = evidence

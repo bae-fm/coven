@@ -10,64 +10,21 @@ use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::snapshot::SnapshotRecord;
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::Audience;
-use std::collections::BTreeMap;
 use std::io::Cursor;
 
-/// `snapshot` with its author's removals undone: no rules loss, and each row
-/// its author's rules took out shown as synced, as a body that only lists its
-/// author's rows would show it. The loading device's own rules must find them.
-/// Also returns how many rows its author's rules took out.
+/// `snapshot` with its author's removals undone: no rules loss, so each row
+/// its author's rules took out shows, as a body that only lists its author's
+/// rows would show it. The loading device's own rules must find them. Also
+/// returns how many rows its author's rules took out.
 fn without_rule_losses(
     snapshot: &crate::snapshot_write::tests::SnapshotFrames,
 ) -> (Vec<u8>, usize) {
     let mut taken_out = 0;
     let bytes = edited(snapshot, |header, records| {
-        let merged: BTreeMap<_, _> = records
-            .iter()
-            .filter_map(|record| match record {
-                SnapshotRecord::Merge(row) => Some((row.state.row().clone(), row.state.clone())),
-                _ => None,
-            })
-            .collect();
-        let removed: Vec<_> = records
-            .iter()
-            .filter_map(|record| match record {
-                SnapshotRecord::Loss(loss)
-                    if matches!(loss.cause, coven_format::loss::LossCause::Rules(_)) =>
-                {
-                    Some(loss.row.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        taken_out = removed.len();
-        records.retain(|record| {
-                !matches!(record, SnapshotRecord::Loss(loss) if matches!(loss.cause, coven_format::loss::LossCause::Rules(_)))
-            });
-        header.counts[coven_format::snapshot::section::LOSS] -= removed.len() as u64;
-        for row in removed {
-            let state = &merged[&row];
-            records.push(SnapshotRecord::Synced(coven_format::snapshot_rows::SyncedRow {
-                row: row.clone(),
-                columns: state
-                    .cells()
-                    .iter()
-                    .map(|(name, cell)| (name.clone(), cell.value.clone()))
-                    .collect(),
-            }));
-            header.counts[coven_format::snapshot::section::SYNCED] += 1;
-        }
-        let order = |record: &SnapshotRecord| match record {
-            SnapshotRecord::Synced(row) => (record.section(), Some(row.row.clone())),
-            _ => (record.section(), None),
-        };
-        // Synced rows in row order, every other section as it was.
-        let mut indexed: Vec<_> = records.drain(..).enumerate().collect();
-        indexed.sort_by(|(i, x), (j, y)| match (order(x), order(y)) {
-            ((0, Some(a)), (0, Some(b))) => a.cmp(&b),
-            ((s, _), (t, _)) => s.cmp(&t).then(i.cmp(j)),
-        });
-        records.extend(indexed.into_iter().map(|(_, record)| record));
+        let removed = |record: &SnapshotRecord| matches!(record, SnapshotRecord::Loss(loss) if matches!(loss.cause, coven_format::loss::LossCause::Rules(_)));
+        taken_out = records.iter().filter(|record| removed(record)).count();
+        records.retain(|record| !removed(record));
+        header.counts[coven_format::snapshot::section::LOSS] -= taken_out as u64;
     });
     (bytes, taken_out)
 }

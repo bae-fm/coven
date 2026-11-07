@@ -51,9 +51,8 @@ pub(crate) fn write<E>(
     let removed = crate::published::removals(db, &schema.schema, &schema.rules)?;
     let mut counts = [0; SECTIONS];
     let mut columns = BTreeSet::new();
-    crate::snapshot_view::rows(db, schema, &removed, &audience, |row, synced| {
+    crate::snapshot_view::rows(db, schema, &audience, |row| {
         counts[section::MERGE] += 1;
-        counts[section::SYNCED] += u64::from(synced.is_some());
         columns.extend(
             row.state.cells().keys().map(|column| (row.state.row().table.clone(), column.clone())),
         );
@@ -83,7 +82,6 @@ pub(crate) fn write<E>(
     let evidence = crate::authorship::evidence(
         db,
         schema,
-        &removed,
         &audience,
         crate::authorship::Author {
             device: id.device,
@@ -116,19 +114,11 @@ pub(crate) fn write<E>(
     begin(encoder.header()).map_err(SnapshotWriteError::Output)?;
     emit(header).map_err(SnapshotWriteError::Output)?;
     let mut record = |record| emit(encoder.record(record)?).map_err(SnapshotWriteError::Output);
-    crate::snapshot_view::rows(db, schema, &removed, &audience, |_, synced| {
-        if let Some(row) = synced {
-            record(SnapshotRecord::Synced(row))?;
-        }
-        Ok::<_, SnapshotWriteError<E>>(())
-    })?;
     db.for_each(&format!("SELECT timestamp,number,read_through,slot FROM _coven_writes WHERE slot<=?1 ORDER BY {WRITE_DEVICE_SQL},number"),[covers.to_be_bytes()],|r|record(SnapshotRecord::Write(read_write(r).map_err(DbError::from)?)))?;
     for (table, column) in columns {
         record(SnapshotRecord::Column(SyncedColumn { table, column }))?;
     }
-    crate::snapshot_view::rows(db, schema, &removed, &audience, |row, _| {
-        record(SnapshotRecord::Merge(row))
-    })?;
+    crate::snapshot_view::rows(db, schema, &audience, |row| record(SnapshotRecord::Merge(row)))?;
     crate::snapshot_view::losses(db, &removed, &audience, |loss| {
         record(SnapshotRecord::Loss(loss))
     })?;

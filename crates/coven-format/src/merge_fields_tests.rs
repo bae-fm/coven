@@ -53,11 +53,11 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     )
     .unwrap();
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    header.counts = [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, _) = SnapshotEncoder::start(header).unwrap();
     let frame = encoder.record(SnapshotRecord::Merge(merged.clone())).unwrap();
     let mut input = Decoder::new(&frame[crate::FRAME_PREFIX_LEN..]).unwrap();
-    assert_eq!(u8::get(&mut input).unwrap(), 3);
+    assert_eq!(u8::get(&mut input).unwrap(), 2);
     assert_eq!(RowId::get(&mut input).unwrap(), *merged.state.row());
     assert_eq!(
         <BTreeMap<u64, WriteId> as Wire>::get(&mut input).unwrap(),
@@ -99,11 +99,6 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
                     input.take(bytes.len() - crate::FRAME_PREFIX_LEN - 1).unwrap(),
                     encode_loss(&loss).unwrap()
                 );
-                input.finish().unwrap();
-            }
-            SnapshotRecord::Synced(row) => {
-                assert_eq!(RowId::get(&mut input).unwrap(), row.row);
-                take_field(&mut input, &row.columns, encode_columns, decode_columns);
                 input.finish().unwrap();
             }
             SnapshotRecord::Authored(authored) => {
@@ -410,7 +405,7 @@ fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
     let bytes = encode_loss(&loss).unwrap();
     assert_eq!(decode_loss(&bytes).unwrap(), loss);
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+    header.counts = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, start) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         crate::snapshot::SnapshotDecoder::start(&start, &fixture::snapshot_prefix(&header))

@@ -1002,7 +1002,7 @@ proves admitted copies mean a permitted move.
 **Authorship a snapshot carries.** `OwnerSnapshotAuthors.lean` models what a
 loader knows about a snapshot's author: its device, the key its signature
 verified with and, once registered, the device's member. A device belongs to
-one member for good and its authenticated key history is retained (§10, §10.4). D7 section 7
+one member for good and its authenticated key history is retained (§10, §10.4). D7 section 6
 needs evidence for a write unless it is from the snapshot's own device or,
 with the signer's member known, from that member's device.
 `own_writes_signers` proves such a write's author is the snapshot's signer and

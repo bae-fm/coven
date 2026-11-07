@@ -19,8 +19,7 @@ use std::sync::Arc;
 const REPLACED: usize = 1 << 20;
 const WINNING: usize = 4 << 20;
 
-const SECTIONS: [(&str, usize); 12] = [
-    ("synced rows", section::SYNCED),
+const SECTIONS: [(&str, usize); 11] = [
     ("applied writes", section::WRITE),
     ("synced columns", section::COLUMN),
     ("merge rows", section::MERGE),

@@ -660,17 +660,9 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
             input
         } else {
             // Framing is checked before acquiring the writer. This failure
-            // belongs to installation: synced values disagree with merge state.
+            // belongs to installation: a cell isn't what SQLite stores.
             let (header, mut records) = crate::snapshot_write::tests::decode(&snapshot);
-            let row = records
-                .iter_mut()
-                .find_map(|record| match record {
-                    coven_format::snapshot::SnapshotRecord::Synced(row) => Some(row),
-                    _ => None,
-                })
-                .expect("snapshot carries the inserted row");
-            row.columns.get_mut("title").unwrap().value =
-                coven_format::value::Value::Text("changed".into());
+            crate::snapshot_write::tests::unstored_title(&mut records);
             let (mut encoder, mut bytes) =
                 coven_format::snapshot::SnapshotEncoder::start(header).unwrap();
             for record in records {

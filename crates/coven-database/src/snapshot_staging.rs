@@ -7,7 +7,7 @@
 use super::InputDatabase;
 use crate::database::{start_call, Database, DatabaseInner};
 use crate::snapshot_error::{invalid, SnapshotError};
-use crate::snapshot_layout::{SnapshotLayout, Staged, TableLayout};
+use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{encoded, sql_value};
@@ -18,8 +18,8 @@ use coven_format::{
     admin::SnapshotId,
     merge_fields,
     sealed_snapshot::SnapshotObjectPrefix,
-    snapshot::{SnapshotHeader, SnapshotRecord},
-    snapshot_rows::{AuthoredChange, MergeRow, SyncedRow},
+    snapshot::{section, SnapshotHeader, SnapshotRecord},
+    snapshot_rows::{AuthoredChange, MergeRow},
     snapshot_stream::SnapshotChunkDecoder,
     value::Value,
     write::WriteHeader,
@@ -64,10 +64,8 @@ fn create_staged(
 ) -> Result<Vec<String>, DbError> {
     let mut tables = Vec::new();
     for table in &layout.tables {
-        for rows in [Staged::Synced, Staged::Merged] {
-            db.batch(&table.create_staged(staging, rows))?;
-            tables.push(table.staged(staging, rows));
-        }
+        db.batch(&table.create_staged(staging))?;
+        tables.push(table.staged(staging));
     }
     let name = |name: &str| table(staging, name).trim_start_matches("temp.").to_owned();
     db.batch(&format!(
@@ -111,9 +109,8 @@ fn remove_all(db: &DatabaseConnection, stagings: &[SnapshotStaging]) -> Result<(
 /// for its tables.
 struct Inserts {
     layout: SnapshotLayout,
-    /// Each synced table's synced and merge row inserts, in the layout's
-    /// order.
-    rows: Vec<[String; 2]>,
+    /// Each synced table's row insert, in the layout's order.
+    rows: Vec<String>,
     generations: String,
     columns: String,
     parts: String,
@@ -129,14 +126,12 @@ impl Inserts {
             .tables
             .iter()
             .map(|table| {
-                [Staged::Synced, Staged::Merged].map(|rows| {
-                    format!(
-                        "INSERT INTO {}({}) VALUES({})",
-                        table.staged(staging, rows),
-                        table.names().join(","),
-                        vec!["?"; table.width()].join(",")
-                    )
-                })
+                format!(
+                    "INSERT INTO {}({}) VALUES({})",
+                    table.staged(staging),
+                    table.names().join(","),
+                    vec!["?"; table.width()].join(",")
+                )
             })
             .collect();
         let insert = |name: &str, columns: &str| {
@@ -277,7 +272,7 @@ enum Phase {
         /// The first record that failed the loader's checks as it staged,
         /// and its section: the load or file check refuses the body with it
         /// where it reaches that section.
-        refusal: Option<(u8, DbError)>,
+        refusal: Option<(usize, DbError)>,
     },
     /// A batch or the end of the stream failed; only discarding is left.
     Failed,
@@ -293,7 +288,7 @@ struct StagingState {
     records: i64,
     columns: BTreeSet<(String, String)>,
     parts: BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
-    refusal: Option<(u8, DbError)>,
+    refusal: Option<(usize, DbError)>,
 }
 
 impl Drop for SnapshotStaging {
@@ -607,31 +602,11 @@ fn stage(
         if refusal.is_some() {
             continue;
         }
-        let header = decoder.header().expect("records follow the header");
-        let additions = header.schema_version < *schema.versions.end();
         let staged = RecordStaging { db, schema, inserts };
-        let section = section(&record);
-        if let Err(refused) = staged.record(record, decoder.frame(), additions, columns, parts)? {
+        let section = record.section();
+        if let Err(refused) = staged.record(record, decoder.frame(), columns, parts)? {
             *refusal = Some((section, refused));
         }
-    }
-}
-
-/// A record's section of the snapshot (D7).
-fn section(record: &SnapshotRecord) -> u8 {
-    match record {
-        SnapshotRecord::Synced(_) => 0,
-        SnapshotRecord::Write(_) => 1,
-        SnapshotRecord::Column(_) => 2,
-        SnapshotRecord::Merge(_) => 3,
-        SnapshotRecord::Loss(_) => 4,
-        SnapshotRecord::Authored(_) => 5,
-        SnapshotRecord::Creation(_) => 6,
-        SnapshotRecord::Evidence(_) => 7,
-        SnapshotRecord::Admin(_) => 8,
-        SnapshotRecord::KeyCopy(_) => 9,
-        SnapshotRecord::Announcement(_) => 10,
-        SnapshotRecord::Claim(_) => 11,
     }
 }
 
@@ -652,12 +627,10 @@ impl RecordStaging<'_> {
         &self,
         record: SnapshotRecord,
         frame: &[u8],
-        additions: bool,
         columns: &mut BTreeSet<(String, String)>,
         parts: &mut BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
     ) -> Result<Checked, DbError> {
         match &record {
-            SnapshotRecord::Synced(row) => return self.synced(row, additions),
             SnapshotRecord::Write(_) => return Ok(Ok(())),
             SnapshotRecord::Column(column) => {
                 self.db.internal_execute(
@@ -692,44 +665,14 @@ impl RecordStaging<'_> {
             | SnapshotRecord::Announcement(_)
             | SnapshotRecord::Claim(_) => {}
         }
-        let section = section(&record);
-        self.db.internal_execute(&self.inserts.records, params![section, section == 7, frame])?;
-        Ok(Ok(()))
-    }
-
-    /// A synced row's schema checks, then its values and parents.
-    fn synced(&self, row: &SyncedRow, additions: bool) -> Result<Checked, DbError> {
-        let keyed = match check_synced(self.schema, row, additions) {
-            Ok(keyed) => keyed,
-            Err(refused) => return Ok(Err(refused)),
-        };
-        let at = self.inserts.layout.position(&row.row.table);
-        let layout = &self.inserts.layout.tables[at];
-        let mut values = vec![rusqlite::types::Value::Null; layout.width()];
-        values[TableLayout::KEY] = row.row.key.clone().into();
-        values[TableLayout::AUDIENCE] = (&row.row.audience).into();
-        values[TableLayout::SYNCED] = layout
-            .columns
-            .iter()
-            .map(|name| if row.columns.contains_key(name) { '1' } else { '0' })
-            .collect::<String>()
-            .into();
-        values[TableLayout::MERGED] = 0.into();
-        values[TableLayout::EARLIER] = 0.into();
-        values[TableLayout::KEYED] = keyed.into();
-        values[TableLayout::PRESENT] = 0.into();
-        for (j, name) in layout.columns.iter().enumerate() {
-            if let Some(column) = row.columns.get(name) {
-                values[layout.value_at(j)] = sql_value(&column.value);
-            }
-        }
-        put_parents(layout, &mut values, |j| row.columns.get(&layout.columns[j]));
-        self.db.internal_execute(&self.inserts.rows[at][0], params_from_iter(values))?;
+        let section = record.section();
+        let evidence = section == section::EVIDENCE;
+        self.db
+            .internal_execute(&self.inserts.records, params![section as i64, evidence, frame])?;
         Ok(Ok(()))
     }
 
     /// A merge row's checks, then its generations, cells and parents.
-    /// Installing compares it with its synced row.
     fn merged(
         &self,
         merged: &MergeRow,
@@ -747,13 +690,10 @@ impl RecordStaging<'_> {
         let mut values = vec![rusqlite::types::Value::Null; layout.width()];
         values[TableLayout::KEY] = row.key.clone().into();
         values[TableLayout::AUDIENCE] = (&row.audience).into();
-        values[TableLayout::MERGED] = 1.into();
         values[TableLayout::PRESENT] = state.present().into();
         values[TableLayout::GENERATION] = generation.to_be_bytes().to_vec().into();
         values[TableLayout::DEVICE] = writer.device.0.to_be_bytes().to_vec().into();
         values[TableLayout::NUMBER] = writer.number.to_be_bytes().to_vec().into();
-        values[TableLayout::EARLIER] = (state.generations().len() as i64 - 1).into();
-        values[TableLayout::KEYED] = 1.into();
         for (j, name) in layout.columns.iter().enumerate() {
             if let Some(cell) = state.cells().get(name) {
                 values[layout.value_at(j)] = sql_value(&cell.value.value);
@@ -764,7 +704,7 @@ impl RecordStaging<'_> {
         put_parents(layout, &mut values, |j| {
             state.cells().get(&layout.columns[j]).map(|cell| &cell.value)
         });
-        self.db.internal_execute(&self.inserts.rows[at][1], params_from_iter(values))?;
+        self.db.internal_execute(&self.inserts.rows[at], params_from_iter(values))?;
         for (earlier, write) in state.generations() {
             if *earlier == generation {
                 continue;
@@ -829,39 +769,6 @@ impl RecordStaging<'_> {
         )?;
         Ok(Ok(()))
     }
-}
-
-/// The loader's checks of a synced row against the schema, and whether it
-/// has every key column, from which its key is checked here.
-fn check_synced(schema: &WriteSchema, row: &SyncedRow, additions: bool) -> Result<bool, DbError> {
-    let table = schema.row_table(&row.row)?;
-    for (name, value) in &row.columns {
-        schema.row_column(table, &row.row.audience, name, value)?;
-    }
-    if crate::file_table::is_files(&table.name) {
-        crate::file_table::check_cells(
-            &row.columns.iter().map(|(n, v)| (n.as_str(), v)).collect(),
-            true,
-        )?;
-    }
-    let disagree = || invalid("synced values disagree with their key or schema");
-    if !additions && row.columns.len() != table.synced_columns().count() {
-        return Err(disagree());
-    }
-    let key: Option<crate::write_rows::AppValues> = crate::write_rows::key_columns(table)
-        .iter()
-        .map(|column| {
-            row.columns.get(&column.name).map(|value| (column.name.clone(), value.value.clone()))
-        })
-        .collect();
-    let Some(key) = key else {
-        // A key column left to its default is checked once SQLite gives it.
-        return Ok(false);
-    };
-    if crate::write_rows::row_key(table, &key)? != row.row.key {
-        return Err(disagree());
-    }
-    Ok(true)
 }
 
 /// The loader's checks of a merge row on its own.

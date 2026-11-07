@@ -97,7 +97,7 @@ def snapshot_id(audience, device, number):
 
 def last_claim(device, number, digest):
     assert (number == 0) == (digest is None)
-    return frame(6, b"\x0b" + u64(device) + u64(number)
+    return frame(6, b"\x0a" + u64(device) + u64(number)
                  + (b"\x00" if digest is None else b"\x01" + digest))
 
 
@@ -638,7 +638,7 @@ def main():
     # A second audience has its own coverage and the same active app schema.
     path = STORE_TEXT + b"snapshots/02020202-0202-0202-0202-020202020202/1/1"
     prefix = bytes([34, 0, 1]) + circle_audience(CIRCLE) + bytes([3]) * 16 + u64(8) + b"\x00"
-    plaintext = frame(5, snapshot_id(circle_audience(CIRCLE), 1, 1) + u32(2) + u64(0) * 11 + u64(2))
+    plaintext = frame(5, snapshot_id(circle_audience(CIRCLE), 1, 1) + u32(2) + u64(0) * 10 + u64(2))
     plaintext += last_claim(1, 7, bytes([0x71]) * 32) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
     body = prefix + signature(sodium, context(b"coven/prefix-signature/v1", path, prefix), 0x33)
     body += sealed_chunk(sodium, encryption_key(18), path, prefix, 0, 0, plaintext, bytes([0x69]) * 24)
@@ -667,12 +667,12 @@ def main():
                              plaintext[start:start + 65536], bytes([0x70 + index]) * 24)
     floor = signed(sodium, path, body)
     # Refused and reset-ignored parts still carry the device's included claim.
-    authored = next(piece for piece in frames[:write_at] if piece[0] == 6 and piece[7] == 5)
+    authored = next(piece for piece in frames[:write_at] if piece[0] == 6 and piece[7] == 4)
     assert authored[-1] == 1  # Applied verdict in the source record.
     claim_snapshots = []
     for number, verdict, stored in [(8, b"\x03", refused_slot), (9, b"\x05" + u64(2), reset_ignored_slot)]:
-        counts = [0] * 12
-        counts[5], counts[11] = 1, 2
+        counts = [0] * 11
+        counts[4], counts[10] = 1, 2
         body = frame(5, snapshot_id(store_audience(), 1, number) + u32(2) + b"".join(u64(n) for n in counts))
         body += frame(6, authored[7:-1] + verdict)
         body += last_claim(1, number, hashlib.sha256(stored).digest()) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
@@ -684,7 +684,7 @@ def main():
     for slot, claim, stored in [(1, 1, entry_object), (2, 2, store_key),
                                 (6, 5, writes_slot), (9, 8, circle_announcement)]:
         prefix = bytes([34, 0, 1]) + store_audience() + bytes([1]) * 16 + u64(slot) + b"\x00"
-        header = frame(5, snapshot_id(store_audience(), 1, slot) + u32(2) + u64(0) * 11 + u64(1))
+        header = frame(5, snapshot_id(store_audience(), 1, slot) + u32(2) + u64(0) * 10 + u64(1))
         body = header + last_claim(1, claim, hashlib.sha256(stored).digest()) + frame(7, b"")
         settlements.append(prefix + body)
     (out / "snapshot-settlement-claims.hex").write_text("".join(body.hex() + "\n" for body in settlements))

@@ -8,7 +8,7 @@ use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LoadStep};
-use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
+use coven_format::snapshot::{section, SnapshotHeader, SnapshotRecord};
 use coven_foundation::progress::ProgressReport;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
@@ -167,7 +167,6 @@ pub(crate) fn read(
     let header = prepared.header().clone();
     let expected = &header.id;
     let audience = &expected.audience;
-    prepared.refuse(0)?;
     let layout = SnapshotLayout::new(schema);
     crate::snapshot_state::begin(database, audience)?;
     crate::ownership::clear_audience(database, audience)?;
@@ -200,24 +199,21 @@ pub(crate) fn read(
         },
     )?;
     crate::snapshot_install::copy_rows(database, &prepared, &layout, progress)?;
-    crate::snapshot_install::check_synced(database, schema, &layout, audience, progress)?;
-    prepared.refuse(3)?;
-    crate::snapshot_install::compare_rows(&prepared, &layout, progress)?;
-    crate::snapshot_install::check_merged(database, schema, &layout, audience, progress)?;
+    prepared.refuse(section::MERGE)?;
     crate::snapshot_install::persist_rows(database, &layout, audience, progress)?;
     let mut loss_state = None;
-    prepared.frames(4..=4, &metadata, |record| match record {
+    prepared.frames(section::LOSS..=section::LOSS, &metadata, |record| match record {
         SnapshotRecord::Loss(loss) => {
             crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)
         }
         _ => Err(invalid("staged loss section holds another record")),
     })?;
-    prepared.refuse(5)?;
+    prepared.refuse(section::AUTHORED)?;
     crate::snapshot_install::sources(database, &prepared, audience)?;
-    prepared.refuse(6)?;
+    prepared.refuse(section::CREATION)?;
     crate::snapshot_install::creations(database, &prepared)?;
     let mut authenticated = BTreeMap::new();
-    prepared.frames(7..=11, &metadata, |record| {
+    prepared.frames(section::EVIDENCE..=section::CLAIM, &metadata, |record| {
         match record {
             SnapshotRecord::Evidence(evidence) => {
                 crate::authorship::load(

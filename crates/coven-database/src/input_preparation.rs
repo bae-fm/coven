@@ -28,7 +28,7 @@ impl<'a> PreparedInputs<'a> {
         &self,
         staging: i64,
         header: coven_format::snapshot::SnapshotHeader,
-        refusal: Option<(u8, DbError)>,
+        refusal: Option<(usize, DbError)>,
         authorship: &dyn crate::authorship::Authorship,
     ) -> Result<crate::snapshot_preparation::PreparedSnapshot<'a>, DbError> {
         crate::snapshot_preparation::prepare(self.db, staging, header, refusal, authorship)

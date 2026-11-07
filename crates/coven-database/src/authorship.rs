@@ -255,7 +255,6 @@ fn proves(
 pub(crate) fn evidence(
     db: &DatabaseConnection,
     schema: &WriteSchema,
-    removed: &BTreeMap<RowId, BTreeSet<coven_merge::Rule>>,
     audience: &Audience,
     author: Author,
 ) -> Result<Vec<WriteEvidence>, DbError> {
@@ -272,7 +271,7 @@ pub(crate) fn evidence(
         }
         Ok(())
     })?;
-    crate::snapshot_view::rows(db, schema, removed, audience, |merged, _| {
+    crate::snapshot_view::rows(db, schema, audience, |merged| {
         let state = merged.state;
         let row = state.row();
         if crate::ownership::owner_table(schema, &row.table) && state.present() {

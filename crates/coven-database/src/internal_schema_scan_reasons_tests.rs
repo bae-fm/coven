@@ -82,7 +82,7 @@ mod fixture {
             CAST(printf('%032d',i) AS BLOB) AS key,
             printf('%036d',i) AS member FROM numbers;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
-     INSERT INTO _coven_install_fixture SELECT key,audience,'1',1,counter(1),device,n,0,1,1,x'00',device,n,key,audience,counter(1) FROM fixture;
+     INSERT INTO _coven_install_fixture SELECT key,audience,counter(1),device,n,1,x'00',device,n,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
      INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;
      INSERT INTO _coven_install_authored SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
@@ -481,8 +481,8 @@ mod source {
         // One synced table's install table, laid out as `TableLayout` lays
         // out every one: a column of values, setters and parents each.
         sql.push_str(
-            "CREATE TEMP TABLE _coven_install_fixture(coven_key,coven_audience,coven_synced,coven_merged,
-               coven_generation,coven_device,coven_number,coven_earlier,coven_keyed,coven_present,
+            "CREATE TEMP TABLE _coven_install_fixture(coven_key,coven_audience,
+               coven_generation,coven_device,coven_number,coven_present,
                coven_v0,coven_d0,coven_n0,coven_k0,coven_a0,coven_g0,UNIQUE(coven_key,coven_audience));",
         );
         for name in ["published_migration.rs", "migration_run.rs"] {
@@ -532,9 +532,8 @@ mod source {
                 ("{generation}", "coven_generation"),
                 ("{device}", "coven_device"),
                 ("{number}", "coven_number"),
-                ("{merged}", "coven_merged"),
                 ("{present}", "coven_present"),
-                ("{synced}", "coven_synced"),
+                ("{stored}", "i.coven_d0 IS NOT NULL"),
                 ("{setter_device}", "coven_d0"),
                 ("{setter_number}", "coven_n0"),
                 ("{parent_key}", "coven_k0"),

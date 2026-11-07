@@ -653,7 +653,7 @@ impl SequenceSync {
         }) {
             Some(store_snapshot) => {
                 let body = store_snapshot.body();
-                rows = body.header.synced_rows();
+                rows = body.header.merge_rows();
                 (
                     History::restore(&body.originals, self.store(), ring, member)?,
                     store_snapshot.announcement().covers,

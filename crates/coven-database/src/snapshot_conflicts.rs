@@ -114,16 +114,6 @@ pub(crate) fn rows(
             ),
             params![table.table],
         )?;
-        // A merge row the snapshot's author took out, with no synced row.
-        db.internal_execute(
-            &format!(
-                "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
-                 SELECT ?1,i.{key},i.{audience_column} FROM {installed} AS i WHERE i.{present}=1 AND i.{synced} IS NULL
-                 ON CONFLICT DO NOTHING",
-                synced = table.column("synced"),
-            ),
-            params![table.table],
-        )?;
         // A row of another audience whose reference to a replaced row, as
         // the row is now or was before, names a generation that isn't
         // current.
@@ -171,12 +161,11 @@ pub(crate) fn rows(
             }
         }
     }
-    // A row of another audience the rules take out now, which a replaced
-    // row can bring back.
+    // A row the rules take out now: one the snapshot's author took out, or
+    // one of another audience, which a replaced row can bring back.
     db.internal_execute(
         "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
          SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'
-         AND audience NOT IN (SELECT audience FROM temp._coven_download_replaced)
          ON CONFLICT DO NOTHING",
         [],
     )?;

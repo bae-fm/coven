@@ -1,4 +1,4 @@
-//! Snapshots stream a header, twelve ordered sections and an end marker (§16.1).
+//! Snapshots stream a header, eleven ordered sections and an end marker (§16.1).
 //! The caller stages records and supplies the applied write metadata to merge.
 
 use crate::admin::SnapshotId;
@@ -20,42 +20,40 @@ pub struct SnapshotHeader {
     pub schema_version: u32,
     /// Last included slot from the signed sealed prefix.
     pub covers: u64,
-    /// Counts: synced rows, applied writes, columns, merged rows, losses,
-    /// authored changes, creations, write evidence, three original-slot sections
-    /// and per-device last included claims.
+    /// Counts: applied writes, columns, merged rows, losses, authored
+    /// changes, creations, write evidence, three original-slot sections and
+    /// per-device last included claims.
     pub counts: [u64; SECTIONS],
 }
 /// The number of record sections (D7).
-pub const SECTIONS: usize = 12;
+pub const SECTIONS: usize = 11;
 
 /// Each record section's place in the stream, and its count's in the
 /// header (D7).
 pub mod section {
-    /// Synced rows.
-    pub const SYNCED: usize = 0;
     /// Applied writes.
-    pub const WRITE: usize = 1;
+    pub const WRITE: usize = 0;
     /// Columns.
-    pub const COLUMN: usize = 2;
+    pub const COLUMN: usize = 1;
     /// Merged rows.
-    pub const MERGE: usize = 3;
+    pub const MERGE: usize = 2;
     /// Losses.
-    pub const LOSS: usize = 4;
+    pub const LOSS: usize = 3;
     /// Authored changes.
-    pub const AUTHORED: usize = 5;
+    pub const AUTHORED: usize = 4;
     /// Creations.
-    pub const CREATION: usize = 6;
+    pub const CREATION: usize = 5;
     /// Write evidence.
-    pub const EVIDENCE: usize = 7;
+    pub const EVIDENCE: usize = 6;
     /// Original admin slots, the first of the three sections a history
     /// read decodes.
-    pub const ADMIN: usize = 8;
+    pub const ADMIN: usize = 7;
     /// Original key-copy slots.
-    pub const KEY_COPY: usize = 9;
+    pub const KEY_COPY: usize = 8;
     /// Original announcement slots.
-    pub const ANNOUNCEMENT: usize = 10;
+    pub const ANNOUNCEMENT: usize = 9;
     /// Each device's last included claim.
-    pub const CLAIM: usize = 11;
+    pub const CLAIM: usize = 10;
 }
 impl Wire for [u64; SECTIONS] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -73,9 +71,9 @@ impl Wire for [u64; SECTIONS] {
     }
 }
 impl SnapshotHeader {
-    /// The synced rows the snapshot holds, its first count.
-    pub fn synced_rows(&self) -> u64 {
-        self.counts[0]
+    /// The merge rows the snapshot holds.
+    pub fn merge_rows(&self) -> u64 {
+        self.counts[section::MERGE]
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -94,13 +92,12 @@ pub fn frame_section(frame: &[u8]) -> Option<usize> {
 /// One bounded record in a snapshot, using the owners' logical identities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotRecord<E = crate::authorship::WriteEvidence> {
-    /// An app-visible synced row.
-    Synced(SyncedRow),
     /// Applied write metadata, before any row needing it is decoded.
     Write(AppliedWrite),
     /// A synced column.
     Column(SyncedColumn),
-    /// One row's generations and winning cells; losses travel separately.
+    /// One row's generations and winning cells, which are its values; losses
+    /// travel separately.
     Merge(MergeRow),
     /// A displaced cell, removed row or excluded write's row.
     Loss(Loss),
@@ -144,7 +141,6 @@ impl SnapshotRecord {
         prepare: impl FnOnce(crate::authorship::WriteEvidence) -> Result<E, X>,
     ) -> Result<SnapshotRecord<E>, X> {
         Ok(match self {
-            Self::Synced(value) => SnapshotRecord::Synced(value),
             Self::Write(value) => SnapshotRecord::Write(value),
             Self::Column(value) => SnapshotRecord::Column(value),
             Self::Merge(value) => SnapshotRecord::Merge(value),
@@ -160,9 +156,8 @@ impl SnapshotRecord {
     }
 
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        u8::try_from(self.section()).expect("twelve sections").put(out)?;
+        u8::try_from(self.section()).expect("eleven sections").put(out)?;
         match self {
-            Self::Synced(v) => v.put(out),
             Self::Write(v) => v.put(out),
             Self::Column(v) => v.put(out),
             Self::Merge(v) => v.put(out),
@@ -203,7 +198,6 @@ impl SnapshotRecord {
     {
         let tag = u8::get(input)?;
         match usize::from(tag) {
-            section::SYNCED => Ok(Self::Synced(Wire::get(input)?)),
             section::WRITE => Ok(Self::Write(Wire::get(input)?)),
             section::COLUMN => Ok(Self::Column(Wire::get(input)?)),
             section::MERGE => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
@@ -220,7 +214,6 @@ impl SnapshotRecord {
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::Synced(v) => v.validate(),
             Self::Write(v) => v.validate(),
             Self::Column(v) => {
                 name(&v.table)?;
@@ -242,7 +235,6 @@ impl SnapshotRecord {
     /// The section the record belongs to.
     pub fn section(&self) -> usize {
         match self {
-            Self::Synced(_) => section::SYNCED,
             Self::Write(_) => section::WRITE,
             Self::Column(_) => section::COLUMN,
             Self::Merge(_) => section::MERGE,
@@ -258,7 +250,6 @@ impl SnapshotRecord {
     }
     fn key(&self) -> RecordKey {
         match self {
-            Self::Synced(v) => RecordKey::Row(v.row.clone()),
             Self::Write(v) => RecordKey::Write(v.id),
             Self::Column(v) => RecordKey::Column(v.clone()),
             Self::Merge(v) => RecordKey::Row(v.state.row().clone()),
@@ -274,7 +265,6 @@ impl SnapshotRecord {
         let audience =
             |r: &RowId| require(r.audience == h.id.audience, "snapshot audience", Rule::Audience);
         match self {
-            Self::Synced(v) => audience(&v.row),
             Self::Write(v) => require(v.slot.0 <= h.covers, "snapshot write slot", Rule::Coverage),
             Self::Column(_) | Self::Evidence(_) | Self::Claim(_) => Ok(()),
             Self::Loss(v) => {
@@ -334,8 +324,7 @@ impl SnapshotRecord {
     /// The writes this record names, each of which the snapshot must cover.
     fn named_writes(&self) -> Vec<WriteId> {
         match self {
-            Self::Synced(_)
-            | Self::Column(_)
+            Self::Column(_)
             | Self::Write(_)
             | Self::Admin(_)
             | Self::KeyCopy(_)

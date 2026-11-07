@@ -122,7 +122,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("a reload visits each row it changed once, and each file reference and stored file those rows hold; each lookup of the device's own records is indexed"),
 ("snapshot_conflicts.rs", sql, "_coven_lost")
     if sql.contains("FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'") =>
-    Some("a reload visits every row the rules take out in the audiences it keeps, through the index of rules losses, since a replaced row can bring any back"),
+    Some("a reload visits every row the rules take out, through the index of rules losses: its snapshots' authors took some out, and a replaced row can bring back any other"),
 ("sqlite.rs", "{} ORDER BY l.id", "l") =>
     Some("the public losses reader returns all losses"),
 ("upload.rs", "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1", "u") =>

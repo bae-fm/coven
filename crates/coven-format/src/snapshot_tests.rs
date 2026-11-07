@@ -11,7 +11,7 @@ fn raw(record: &SnapshotRecord) -> Vec<u8> {
 }
 fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHeader {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 12];
+    header.counts = [0; SECTIONS];
     header.counts[section] = count;
     header.id.audience = audience;
     header
@@ -59,14 +59,12 @@ fn rejected_frames_do_not_advance_counts_or_order() {
     assert!(writer.finish().is_err());
     assert!(reader.frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle).is_err());
     let records = test_utils::snapshot_records();
-    assert!(writer.record(records[1].clone()).is_err());
-    assert!(reader.frame(&raw(&records[1]), &oracle).is_err());
+    let out_of_order = records.last().unwrap();
+    assert!(writer.record(out_of_order.clone()).is_err());
+    assert!(reader.frame(&raw(out_of_order), &oracle).is_err());
     let mut row = test_utils::row();
     row.audience = Audience::Circle(CircleId(Uuid::from_bytes([1; 16])));
-    let wrong = SnapshotRecord::Synced(SyncedRow {
-        row,
-        columns: BTreeMap::from([("x".into(), test_utils::column(Value::Null))]),
-    });
+    let wrong = SnapshotRecord::Merge(test_utils::merge_row_of(row, Value::Null));
     assert!(writer.record(wrong.clone()).is_err());
     assert!(reader.frame(&raw(&wrong), &oracle).is_err());
     for record in records {
@@ -80,7 +78,8 @@ fn rejected_frames_do_not_advance_counts_or_order() {
 }
 #[test]
 fn duplicate_identity_and_uncovered_writes_are_rejected() {
-    let (mut writer, first) = SnapshotEncoder::start(single_header(1, Audience::Store, 2)).unwrap();
+    let (mut writer, first) =
+        SnapshotEncoder::start(single_header(section::WRITE, Audience::Store, 2)).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
@@ -104,7 +103,7 @@ fn duplicate_identity_and_uncovered_writes_are_rejected() {
 #[test]
 fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
     let (mut writer, first) =
-        SnapshotEncoder::start(single_header(0, Audience::Store, 10_000)).unwrap();
+        SnapshotEncoder::start(single_header(section::MERGE, Audience::Store, 10_000)).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
@@ -112,10 +111,8 @@ fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
     for i in -5000..5000 {
         let mut row = test_utils::row();
         row.key = crate::key::encode_key(&[Value::Integer(i)]).unwrap();
-        let record = SnapshotRecord::Synced(SyncedRow {
-            row,
-            columns: BTreeMap::from([("x".into(), test_utils::column(Value::Blob(vec![1; 2048])))]),
-        });
+        let record =
+            SnapshotRecord::Merge(test_utils::merge_row_of(row, Value::Blob(vec![1; 2048])));
         let frame = writer.record(record.clone()).unwrap();
         total += frame.len();
         assert_eq!(reader.frame(&frame, &oracle).unwrap(), Some(record));
@@ -127,7 +124,7 @@ fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
 #[test]
 fn empty_snapshot_requires_an_exact_end_frame() {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 12];
+    header.counts = [0; SECTIONS];
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -160,7 +157,7 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
     assert_eq!(reader.finish(), Ok(()));
 
     let mut empty = header;
-    empty.counts = [0; 12];
+    empty.counts = [0; SECTIONS];
     let (mut writer, first) = SnapshotEncoder::start(empty).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -169,55 +166,21 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
     assert_eq!(reader.finish(), Ok(()));
 }
 #[test]
-fn synced_rows_use_merges_written_reference_validation() {
-    let circle = Audience::Circle(CircleId(Uuid::from_bytes([1; 16])));
-    for (audience, generation, expected) in [
-        (Audience::Store, 2, MergeError::ParentGeneration(2)),
-        (circle, 1, MergeError::ReferenceAudience(test_utils::row())),
-    ] {
-        let mut parent = test_utils::row();
-        parent.audience = audience;
-        let record = SnapshotRecord::Synced(SyncedRow {
-            row: test_utils::row(),
-            columns: BTreeMap::from([(
-                "x".into(),
-                ColumnValue {
-                    value: Value::Integer(1),
-                    parents: BTreeMap::from([(
-                        coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
-                        Parent { row: parent, generation },
-                    )]),
-                },
-            )]),
-        });
-        let (mut writer, first) =
-            SnapshotEncoder::start(single_header(0, Audience::Store, 1)).unwrap();
-        let mut reader =
-            SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
-        assert_eq!(writer.record(record.clone()), Err(Error::Merge(expected.clone())));
-        assert_eq!(reader.frame(&raw(&record), &test_utils::oracle()), Err(Error::Merge(expected)));
-    }
-    let row = test_utils::write().parts.remove(0).rows.remove(0);
-    let coven_merge::Operation::Update(columns) = row.change.operation else {
-        panic!("update");
-    };
-    round_trip(SnapshotRecord::Synced(SyncedRow { row: row.row, columns }), Audience::Store);
-}
-#[test]
 fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
     let original = test_utils::merge_row();
     let state = &original.state;
     let encode_parts = |generations: &BTreeMap<u64, WriteId>,
                         cells: &BTreeMap<String, Cell<Value>>| {
         encode_frame_with(6, |out| {
-            3u8.put(out)?;
+            u8::try_from(section::MERGE).unwrap().put(out)?;
             state.row().put(out)?;
             generations.put(out)?;
             cells.put(out)
         })
         .unwrap()
     };
-    let (writer, header) = SnapshotEncoder::start(single_header(3, Audience::Store, 1)).unwrap();
+    let (writer, header) =
+        SnapshotEncoder::start(single_header(section::MERGE, Audience::Store, 1)).unwrap();
     let mut reader =
         SnapshotDecoder::start(&header, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
@@ -256,7 +219,8 @@ fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
 #[test]
 fn decoded_snapshot_state_is_directly_usable_by_the_merge() {
     let original = test_utils::merge_row();
-    let (writer, first) = SnapshotEncoder::start(single_header(3, Audience::Store, 1)).unwrap();
+    let (writer, first) =
+        SnapshotEncoder::start(single_header(section::MERGE, Audience::Store, 1)).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
@@ -329,7 +293,7 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
     cases.push((invalid, Rule::Coverage));
     for (write, rule) in cases {
         let (mut writer, first) =
-            SnapshotEncoder::start(single_header(1, Audience::Store, 1)).unwrap();
+            SnapshotEncoder::start(single_header(section::WRITE, Audience::Store, 1)).unwrap();
         let mut reader =
             SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
         let record = SnapshotRecord::Write(write);
@@ -346,7 +310,8 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
 fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
     round_trip(SnapshotRecord::Creation(test_utils::creation()), Audience::Store);
     let refused = |creation: crate::authorship::Creation| {
-        let (mut writer, _) = SnapshotEncoder::start(single_header(6, Audience::Store, 1)).unwrap();
+        let (mut writer, _) =
+            SnapshotEncoder::start(single_header(section::CREATION, Audience::Store, 1)).unwrap();
         let record = SnapshotRecord::Creation(creation);
         assert!(writer
             .record(record.clone())
@@ -377,7 +342,8 @@ fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
 fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
     round_trip(SnapshotRecord::Evidence(test_utils::write_evidence()), Audience::Store);
     let refused = |evidence: crate::authorship::WriteEvidence| {
-        let (mut writer, _) = SnapshotEncoder::start(single_header(7, Audience::Store, 1)).unwrap();
+        let (mut writer, _) =
+            SnapshotEncoder::start(single_header(section::EVIDENCE, Audience::Store, 1)).unwrap();
         let record = SnapshotRecord::Evidence(evidence);
         assert!(writer
             .record(record.clone())
@@ -404,14 +370,15 @@ fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
 #[test]
 fn claim_record_round_trips_the_complete_slot_digest() {
     for (number, digest) in [(0u64, None), (1, Some([0x31; 32])), (u64::MAX, Some([0x42; 32]))] {
-        let (_, first) = SnapshotEncoder::start(single_header(11, Audience::Store, 1)).unwrap();
+        let (_, first) =
+            SnapshotEncoder::start(single_header(section::CLAIM, Audience::Store, 1)).unwrap();
         let mut reader = SnapshotDecoder::start(
             &first,
-            &test_utils::snapshot_prefix(&single_header(11, Audience::Store, 1)),
+            &test_utils::snapshot_prefix(&single_header(section::CLAIM, Audience::Store, 1)),
         )
         .unwrap();
         let frame = encode_frame_with(6, |out| {
-            11u8.put(out)?;
+            10u8.put(out)?;
             DeviceId(1).put(out)?;
             number.put(out)?;
             digest.put(out)
@@ -427,7 +394,7 @@ fn last_claim_requires_a_digest_exactly_when_its_number_is_positive() {
     for (number, digest) in [(0, Some([0x31; 32])), (1, None)] {
         let record = SnapshotRecord::Claim(LastClaim { device: DeviceId(1), number, digest });
         let (mut writer, first) =
-            SnapshotEncoder::start(single_header(11, Audience::Store, 1)).unwrap();
+            SnapshotEncoder::start(single_header(section::CLAIM, Audience::Store, 1)).unwrap();
         let mut reader =
             SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
         assert!(writer.record(record.clone()).is_err());
@@ -448,7 +415,7 @@ fn last_claims_preserve_zero_and_exhausted_counters_and_refuse_duplicate_devices
         );
     }
     let (mut writer, first) =
-        SnapshotEncoder::start(single_header(11, Audience::Store, 2)).unwrap();
+        SnapshotEncoder::start(single_header(section::CLAIM, Audience::Store, 2)).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let record = SnapshotRecord::Claim(LastClaim {
@@ -582,7 +549,7 @@ fn history_extraction_requires_counts_order_and_the_end_marker() {
     let mut reader = open();
     assert!(reader.history_frame(frames.last().unwrap()).is_err());
     let mut reader = open();
-    assert!(reader.history_frame(&frames[2]).is_err());
+    assert!(reader.history_frame(&frames[6]).is_err());
     for removed in 1..frames.len() {
         let mut reader = open();
         let result: Result<Vec<_>, _> = frames

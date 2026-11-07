@@ -52,7 +52,7 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
     let snapshot = frames(a, Audience::Store).await;
     let (header, snapshot_records) = decode(&snapshot);
     let original = contents(target);
-    for damage in 0..7 {
+    for damage in 0..6 {
         let mut header = header.clone();
         let mut records = snapshot_records.clone();
         match damage {
@@ -100,10 +100,6 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
                     let LossValues::Row(cells) = &mut loss.values else { unreachable!() };
                     cells.remove("title");
                 }
-            }
-            6 => {
-                records.retain(|r| !matches!(r,SnapshotRecord::Loss(loss) if matches!(loss.values,LossValues::Row(_))));
-                header.counts[coven_format::snapshot::section::LOSS] -= 1;
             }
             _ => unreachable!(),
         }

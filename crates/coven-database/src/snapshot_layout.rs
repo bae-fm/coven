@@ -78,29 +78,15 @@ impl TableLayout {
     }
 
     /// Coven's columns in the order both connections read and write them:
-    /// the row's identity; `synced`, which columns its synced record has,
-    /// as a `1` or `0` each, or NULL without one; `merged`, whether a merge
-    /// record names it; its current generation and that generation's write;
-    /// how many earlier generations it has; `keyed`, whether its synced
-    /// record has every key column; `present`, whether its merge record is
-    /// at an odd generation; then its values, its cells' setters and its
-    /// cells' parents.
+    /// the row's identity; its current generation and that generation's
+    /// write; `present`, whether it is at an odd generation; then its values,
+    /// its cells' setters and its cells' parents.
     pub(crate) fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = [
-            "key",
-            "audience",
-            "synced",
-            "merged",
-            "generation",
-            "device",
-            "number",
-            "earlier",
-            "keyed",
-            "present",
-        ]
-        .iter()
-        .map(|name| self.column(name))
-        .collect();
+        let mut names: Vec<String> =
+            ["key", "audience", "generation", "device", "number", "present"]
+                .iter()
+                .map(|name| self.column(name))
+                .collect();
         names.extend((0..self.columns.len()).map(|j| self.value(j)));
         for j in 0..self.columns.len() {
             names.push(self.setter_device(j));
@@ -117,15 +103,11 @@ impl TableLayout {
     /// Positions in [`Self::names`].
     pub(crate) const KEY: usize = 0;
     pub(crate) const AUDIENCE: usize = 1;
-    pub(crate) const SYNCED: usize = 2;
-    pub(crate) const MERGED: usize = 3;
-    pub(crate) const GENERATION: usize = 4;
-    pub(crate) const DEVICE: usize = 5;
-    pub(crate) const NUMBER: usize = 6;
-    pub(crate) const EARLIER: usize = 7;
-    pub(crate) const KEYED: usize = 8;
-    pub(crate) const PRESENT: usize = 9;
-    const FIELDS: usize = 10;
+    pub(crate) const GENERATION: usize = 2;
+    pub(crate) const DEVICE: usize = 3;
+    pub(crate) const NUMBER: usize = 4;
+    pub(crate) const PRESENT: usize = 5;
+    const FIELDS: usize = 6;
     pub(crate) fn value_at(&self, column: usize) -> usize {
         Self::FIELDS + column
     }
@@ -140,14 +122,9 @@ impl TableLayout {
         self.parent_at(self.pairs.len())
     }
 
-    /// A staging table of `staging` on the input connection: its synced
-    /// rows, or its merge rows.
-    pub(crate) fn staged(&self, staging: i64, rows: Staged) -> String {
-        let rows = match rows {
-            Staged::Synced => "synced",
-            Staged::Merged => "merged",
-        };
-        format!("temp.{}", identifier(&format!("_coven_staged_{staging}_{rows}_{}", self.table)))
+    /// A staging table of `staging` on the input connection.
+    pub(crate) fn staged(&self, staging: i64) -> String {
+        format!("temp.{}", identifier(&format!("_coven_staged_{staging}_rows_{}", self.table)))
     }
     /// The writer's table of the snapshots being installed.
     pub(crate) fn installed(&self) -> String {
@@ -156,10 +133,10 @@ impl TableLayout {
 
     /// The input connection's tables: coven's columns only, untyped, so each
     /// value keeps the storage class the snapshot gave it.
-    pub(crate) fn create_staged(&self, staging: i64, rows: Staged) -> String {
+    pub(crate) fn create_staged(&self, staging: i64) -> String {
         format!(
             "CREATE TEMP TABLE {}({},UNIQUE({},{}));",
-            self.staged(staging, rows).trim_start_matches("temp."),
+            self.staged(staging).trim_start_matches("temp."),
             self.names().join(","),
             self.column("key"),
             self.column("audience")
@@ -179,16 +156,6 @@ impl TableLayout {
             self.column("audience")
         )
     }
-}
-
-/// The two kinds of row a snapshot stages, each in a table of its own.
-#[derive(Clone, Copy)]
-pub(crate) enum Staged {
-    /// Synced records: identity, which columns, values and parents.
-    Synced,
-    /// Merge records: identity, generations, cell values, setters and
-    /// parents.
-    Merged,
 }
 
 /// The layout of every synced table, in declaration order.

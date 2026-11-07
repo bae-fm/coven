@@ -171,21 +171,36 @@ async fn slots_beside_unsent_rows_put_back_only_the_rows_they_reach() {
     db.close().await.unwrap();
 }
 
-/// Whether the counted projection a snapshot reads shows `albums` row `id`.
-fn counted_visible(database: &crate::Database, id: &str) -> bool {
+/// The merge state of `albums` row `id` the counted projection a snapshot
+/// reads shows, or `None` while it shows no such row.
+fn counted_state(database: &crate::Database, id: &str) -> Option<coven_merge::RowState<Value>> {
     let key = crate::tests::text_key(id);
+    let album = |row: &coven_merge::RowId| row.table == "albums" && row.key == key;
     database.inspect_writer_schema(|db, schema| {
-        let mut visible = None;
-        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
-        crate::snapshot_view::rows(db, schema, &removed, &Audience::Store, |row, synced| {
-            if row.state.row().table == "albums" && row.state.row().key == key {
-                visible = Some(synced.is_some());
+        let mut state = None;
+        crate::snapshot_view::rows(db, schema, &Audience::Store, |row| {
+            if album(row.state.row()) {
+                state = Some(row.state);
             }
             Ok::<_, DbError>(())
         })
         .unwrap();
-        visible.expect("the album has merge state")
+        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
+        let mut taken_out = false;
+        crate::snapshot_view::losses(db, &removed, &Audience::Store, |loss| {
+            taken_out |=
+                album(&loss.row) && matches!(loss.cause, coven_format::loss::LossCause::Rules(_));
+            Ok::<_, DbError>(())
+        })
+        .unwrap();
+        let state = state.expect("the album has merge state");
+        (state.present() && !taken_out).then_some(state)
     })
+}
+
+/// Whether the counted projection a snapshot reads shows `albums` row `id`.
+fn counted_visible(database: &crate::Database, id: &str) -> bool {
+    counted_state(database, id).is_some()
 }
 
 /// A migration's new rules recompute removals over every row of the tables
@@ -235,19 +250,7 @@ async fn a_migrations_recomputed_rows_keep_their_counted_state() {
 /// The counted projection a snapshot reads of `albums` row `id`: its
 /// `artist`, or `None` while it shows no such row.
 fn counted_artist(database: &crate::Database, id: &str) -> Option<Value> {
-    let key = crate::tests::text_key(id);
-    database.inspect_writer_schema(|db, schema| {
-        let mut shown = None;
-        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
-        crate::snapshot_view::rows(db, schema, &removed, &Audience::Store, |row, synced| {
-            if row.state.row().table == "albums" && row.state.row().key == key {
-                shown = Some(synced.map(|synced| synced.columns["artist"].value.clone()));
-            }
-            Ok::<_, DbError>(())
-        })
-        .unwrap();
-        shown.expect("the album has merge state")
-    })
+    counted_state(database, id).map(|state| state.cells()["artist"].value.value.clone())
 }
 
 /// Open a store whose counted album `first` is by counted artist Ana, then

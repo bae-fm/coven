@@ -1,49 +1,26 @@
 //! Snapshot projection of counted rows, independent of queued local originals.
 use crate::write_encoding::decoded;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
-use coven_format::{
-    authorship::Creation,
-    loss::Loss,
-    merge_fields,
-    snapshot_rows::{MergeRow, SyncedRow},
-};
+use coven_format::{authorship::Creation, loss::Loss, merge_fields, snapshot_rows::MergeRow};
 use coven_merge::{Audience, RowId, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Each counted row of `audience`, and its synced values while it shows.
-/// `removed` holds the rules that take kept rows out under `schema`
-/// (`published::removals`); every other row's stored state records its own.
+/// Each counted row of `audience`.
 pub(crate) fn rows<E: From<DbError>>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
-    removed: &BTreeMap<RowId, BTreeSet<Rule>>,
     audience: &Audience,
-    mut visit: impl FnMut(MergeRow, Option<SyncedRow>) -> Result<(), E>,
+    mut visit: impl FnMut(MergeRow) -> Result<(), E>,
 ) -> Result<(), E> {
     let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema).without_row_cache();
     db.for_each("SELECT table_name,key FROM _coven_rows WHERE audience=?1 UNION SELECT table_name,key FROM _coven_published_rows WHERE audience=?1 ORDER BY table_name,key",[audience],|r| {
         let id=RowId {table:r.get(0).map_err(DbError::from)?,key:r.get(1).map_err(DbError::from)?,audience:audience.clone()};
-        let (row,visible)=if let Some(state)=crate::published::kept_state(db,&id)? {
-            let visible=state.present() && !removed.contains_key(&id);
-            (MergeRow {state},visible)
-        } else {
-            let stored=store.row_without_losses(&id)?;
-            let visible=stored.state.present() && stored.loss.is_none();
-            (MergeRow {state:stored.state},visible)
+        let state=match crate::published::kept_state(db,&id)? {
+            Some(state)=>state,
+            None=>store.row_without_losses(&id)?.state,
         };
-        if row.state.generations().is_empty() {return Ok(());}
-        let synced=if visible {
-            let raw=row.state.cells().iter().map(|(name,cell)|(name.clone(),cell.value.value.clone())).collect();
-            let table=schema.table(&id.table);
-            let values=crate::removal_sql::evaluate_values(db,table,&raw)?;
-            // Every column but a generated one, which SQLite computes (D7.1).
-            let columns=values.into_iter().filter(|(name,_)| !table.generated(name)).map(|(name,value)| {
-                let column=row.state.cells().get(&name).map(|cell|cell.value.clone()).unwrap_or(coven_merge::ColumnValue {value,parents:Default::default()});
-                (name,column)
-            }).collect();
-            Some(SyncedRow {row:id,columns})
-        } else {None};
-        visit(row,synced)
+        if state.generations().is_empty() {return Ok(());}
+        visit(MergeRow {state})
     })
 }
 

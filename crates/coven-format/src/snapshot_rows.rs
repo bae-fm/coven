@@ -1,33 +1,10 @@
-//! Snapshot rows carry app values and merge generations; losses travel separately.
+//! Snapshot merge rows carry app values and generations; losses travel separately.
 
 use crate::error::{require, Error, Rule as FormatRule};
-use crate::value::{positive, row, Slot, Value};
+use crate::value::{positive, Slot, Value};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
-use coven_merge::{ColumnValue, RowId, RowState, Timestamp, WriteId, WriteOracle};
+use coven_merge::{RowId, RowState, Timestamp, WriteId, WriteOracle};
 use std::collections::BTreeMap;
-
-/// One app-visible row, with its original reference metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SyncedRow {
-    /// Table, encoded primary key and audience.
-    pub row: RowId,
-    /// Columns in name order, carrying merge's value and parent metadata.
-    pub columns: BTreeMap<String, ColumnValue<Value>>,
-}
-wire_struct!(SyncedRow, row, columns => crate::wire::get_name_map);
-impl SyncedRow {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        row(&self.row)?;
-        require(!self.columns.is_empty(), "synced columns", FormatRule::Required)?;
-        crate::merge_wire::columns(&self.columns)?;
-        for value in self.columns.values() {
-            for parent in value.parents.values() {
-                parent.validate_written(&self.row).map_err(Error::Merge)?;
-            }
-        }
-        Ok(())
-    }
-}
 
 /// Applied write metadata needed to reconstruct merge's state without write bodies.
 #[derive(Clone, Debug, PartialEq, Eq)]

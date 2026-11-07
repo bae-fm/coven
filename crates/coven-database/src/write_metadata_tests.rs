@@ -41,10 +41,8 @@ fn is_sqlite_failure(error: &DbError) -> bool {
 async fn reading_the_snapshot_view_fails_with_the_metadata_read_error() {
     unreadable_metadata(|db, schema| {
         let error =
-            crate::snapshot_view::rows(db, schema, &BTreeMap::new(), &Audience::Store, |_, _| {
-                Ok::<_, DbError>(())
-            })
-            .unwrap_err();
+            crate::snapshot_view::rows(db, schema, &Audience::Store, |_| Ok::<_, DbError>(()))
+                .unwrap_err();
         assert!(is_sqlite_failure(&error), "{error:?}");
     })
     .await;

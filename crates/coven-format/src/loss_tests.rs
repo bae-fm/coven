@@ -6,13 +6,13 @@ use coven_merge::{Audience, Parent};
 
 fn encoder(count: u64) -> (SnapshotEncoder, SnapshotDecoder) {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0, 0, 0, 0, count, 0, 0, 0, 0, 0, 0, 0];
+    header.counts = [0, 0, 0, count, 0, 0, 0, 0, 0, 0, 0];
     let (encoder, frame) = SnapshotEncoder::start(header.clone()).unwrap();
     (encoder, SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(&header)).unwrap())
 }
 fn raw(loss: &Loss) -> Vec<u8> {
     crate::encode_frame_with(6, |out| {
-        4u8.put(out)?;
+        3u8.put(out)?;
         loss.put(out)
     })
     .unwrap()
@@ -75,7 +75,7 @@ fn every_loss_uses_one_section_without_write_headers_or_merge_metadata() {
         for loss in losses {
             let record = SnapshotRecord::Loss(loss);
             let frame = encoder.record(record.clone()).unwrap();
-            assert_eq!(frame[crate::FRAME_PREFIX_LEN], 4);
+            assert_eq!(frame[crate::FRAME_PREFIX_LEN], 3);
             assert_eq!(decoder.frame(&frame, &empty).unwrap(), Some(record));
         }
         decoder.frame(&encoder.finish().unwrap(), &empty).unwrap();
@@ -202,7 +202,7 @@ fn circle_losses_keep_every_original_removal_reason() {
     ]);
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
-    header.counts = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+    header.counts = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(encoder.header())).unwrap();
@@ -223,7 +223,7 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
     loss.cause = LossCause::Rules([Rule::DeletedCircle(entry)].into());
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
-    header.counts = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+    header.counts = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(&header)).unwrap();

@@ -4879,16 +4879,16 @@ everything is encrypted.
      first and then each circle's, counted in the snapshot's bytes. Its rows
      are staged as they arrive, so streaming and staging are one step;
   3. installing their rows, counted in tables. Installing passes over each
-     snapshot's tables six times: it copies their rows, checks them three
-     ways, writes their merge records and checks that every row has one. Each
-     pass counts each table once;
+     snapshot's tables three times: it copies their rows, writes their merge
+     records and checks that the rows that show fit their tables. Each pass
+     counts each table once;
   4. applying, in that same transaction, the slots from the snapshots'
      coverage to the common target (§16.5), counted in slots;
   5. reading the slots after the target, counted in slots;
   6. applying those, one transaction each, counted in slots.
 
   Dan's phone can show "Streaming the store, 0 of 2.4 MB" through "2.4 of 2.4 MB",
-  then Gifts', "Installing, 0 of 36" through "36 of 36", and on to "Applying,
+  then Gifts', "Installing, 0 of 18" through "18 of 18", and on to "Applying,
   120 of 120". Before reading, the phone finds where the sequence ends with the
   existence checks of §6.1, so reading has a total; a slot Ana adds meanwhile
   raises it. Finding keys finds the end the same way once it has read its
@@ -5504,7 +5504,8 @@ A snapshot records one audience after applying through a slot. Its coverage is
 that slot number, and it counts every slot up to it, including writes that were
 consumed without effect, such as refused writes. A snapshot holds:
 
-- the audience's rows, merge records and lost values;
+- the audience's merge records and lost values: a row's values are its cells,
+  and which rows show follows from them, so nothing holds them a second time;
 - the evidence old writes still need: each deleted row's generations (§8.3), and
   each row change's *source verdict*, the record of whether the data it built on
   was kept or dropped (§9.5). Without them, an old edit arriving late could bring
@@ -5594,10 +5595,13 @@ with its own schema, on storage held in memory, measured:
 | a snapshot's size | about 3.3 times the slots it covers (40 MB for those 1,000 albums) |
 | 100 ms per request | 0.1 s more for each slot read |
 
-That puts k near 0.28. On coven's own plain schema, with no app triggers, a
-1,000-release library measured a = 0.35 s per MB of snapshot (29.2 MB) and
-b = 0.84 s per MB of slots (104 slots, 7.7 MB), so k near 0.42, each with an
-empty store's restore taken out. k stays 1 while bae's restore work changes
+That puts k near 0.28. Those snapshots held each row's values a second time, in
+a record of the rows the app sees, which D7 no longer has; that record was about
+a quarter of coven's plain library below. On coven's own plain schema, with no
+app triggers, a 1,000-release library measured a = 0.049 s per MB of snapshot
+(22.4 MB, about 2.9 times the slots it covers) and b = 0.38 s per MB of slots
+(104 slots, 7.7 MB), so k near 0.13, each with an empty store's restore taken
+out. k stays 1 while bae's restore work changes
 what replaying costs; it is set again from a fresh measurement of a and b. The 8 MiB cap traded
 the other way: for the 1,000-album library, a new device made 84 requests
 instead of 230 and restored in 20 s instead of 36 s at 100 ms per request, at the
@@ -5653,9 +5657,9 @@ every decoded record, at once, and a body larger than the 64 MiB a device sets
 aside for bytes read from storage could never load.
 
 Each record is staged as the fields loading needs, so loading never decodes it
-again. A row's synced record and its merge record each become one row of a
-table for the row's table, with a column for each of its values, its cells'
-setters and their references' parents; its source records and its creation
+again. A row's merge record becomes one row of a table for the row's table,
+with a column for each of its values, its cells' setters and their references'
+parents; its source records and its creation
 have tables of their own. Only the few records loading handles one at a time
 keep their frames: lost values, write evidence, history and claims. Checks that
 need nothing but the schema run as each record stages; the first record that

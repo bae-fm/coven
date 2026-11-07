@@ -145,7 +145,7 @@ async fn the_capture_stops_at_the_marker_and_later_app_writes_stay_outside() {
     let titles: Vec<_> = records
         .iter()
         .filter_map(|record| match record {
-            SnapshotRecord::Synced(row) => Some(row.columns["title"].value.clone()),
+            SnapshotRecord::Merge(row) => Some(row.state.cells()["title"].value.value.clone()),
             _ => None,
         })
         .collect();
@@ -289,7 +289,8 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
     assert_eq!(header.covers, again.covers);
     assert!(records.iter().any(|record| matches!(
         record,
-        SnapshotRecord::Synced(row) if row.columns["title"].value == Value::Text("remote".into())
+        SnapshotRecord::Merge(row)
+            if row.state.cells()["title"].value.value == Value::Text("remote".into())
     )));
     // Without a capture of its audience the write still waits for the raise.
     db.discard_raise_capture(Audience::Store, 2).await.unwrap();
@@ -322,7 +323,7 @@ async fn refreshing_coverage_preserves_the_original_captured_prefix() {
     assert_eq!(db.unconfirmed_own_prefix(again.through).await.unwrap(), None);
     assert_eq!(db.prepare_raise_capture(Audience::Store, 3).await.unwrap(), None);
     let (_, records) = decode(&raise_frames(&db, 3, 2).await);
-    assert!(records.iter().any(|r|matches!(r,SnapshotRecord::Synced(row) if row.columns["title"].value==Value::Text("title".into()))));
+    assert!(records.iter().any(|r|matches!(r,SnapshotRecord::Merge(row) if row.state.cells()["title"].value.value==Value::Text("title".into()))));
     assert_eq!(title(&db).await, "after the marker");
     db.close().await.unwrap();
 }

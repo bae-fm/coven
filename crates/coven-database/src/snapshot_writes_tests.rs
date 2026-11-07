@@ -362,18 +362,10 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     .is_err());
     assert_eq!(contents(&c), original);
     // Both bodies stage, and installing the store's fails after the circle's
-    // installed: its synced value disagrees with its merge record. The whole
+    // installed: a cell isn't what SQLite stores for its column. The whole
     // load rolls back, so neither audience changes.
     let (header, mut records) = crate::snapshot_write::tests::decode(&store_frames);
-    let row = records
-        .iter_mut()
-        .find_map(|record| match record {
-            coven_format::snapshot::SnapshotRecord::Synced(row) => Some(row),
-            _ => None,
-        })
-        .expect("the store snapshot carries its row");
-    row.columns.get_mut("title").unwrap().value =
-        coven_format::value::Value::Text("changed".into());
+    crate::snapshot_write::tests::unstored_title(&mut records);
     let (mut encoder, mut disagreeing) =
         coven_format::snapshot::SnapshotEncoder::start(header).unwrap();
     for record in records {
@@ -412,7 +404,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
             Err(crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error, .. }))
                 if *snapshot == id(Audience::Store)
                     && matches!(**error, crate::DbError::Snapshot(
-                        crate::SnapshotError::Inconsistent("synced and merge values disagree")
+                        crate::SnapshotError::Inconsistent("cell values disagree with their schema")
                     ))
         ),
         "{failed:?}"

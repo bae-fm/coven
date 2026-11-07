@@ -955,13 +955,13 @@ audience's state and the evidence old writes still need.
 A snapshot's plaintext is a header frame, its record frames in order, then an
 end frame (kind 7).
 
-The header (kind 5) is `id:SnapshotId | schema_version:u32 | counts:12×u64`:
+The header (kind 5) is `id:SnapshotId | schema_version:u32 | counts:11×u64`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | `SnapshotId` | which snapshot (D2) |
 | `schema_version` | `u32` | the writing device's app schema version, the shape of the rows it holds: the audience's raised version (§18.3) or a later one reached only by additions |
-| `counts` | `12×u64` | the number of records in each section below |
+| `counts` | `11×u64` | the number of records in each section below |
 
 The covered slot is in the sealed prefix, not the header (D9).
 
@@ -970,41 +970,47 @@ as shown. Empty sections emit nothing.
 
 | Section | Record | Order |
 | --- | --- | --- |
-| 0 | Synced row: `row:RowId \| columns:map<name, ColumnValue>` | `RowId` |
-| 1 | Applied write: `id:WriteId \| slot:Slot \| timestamp:Timestamp \| read_through:u64` | `WriteId` |
-| 2 | Synced column: `table:name \| column:name` | table, column |
-| 3 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
-| 4 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity, below |
-| 5 | Authored change: `header:WriteHeader \| complete:bool \| change:record \| verdict` | `ChangeId` |
-| 6 | Creation: `row:RowId \| write:WriteId \| creator:ChangeId` | `RowId` |
-| 7 | Write evidence: `write:WriteId \| prefix:bytes \| header:bytes \| roots:[32 bytes] \| header_signature:64 bytes \| proof:Multiproof` | `WriteId` |
-| 8 | Original admin slot: `slot:Slot \| object:bytes` | slot |
-| 9 | Original key-copy slot: `slot:Slot \| object:bytes` | slot |
-| 10 | Original announcement slot: `slot:Slot \| object:bytes` | slot |
-| 11 | Last included claim: `device:DeviceId \| number:u64 \| digest:Option<32 bytes>` | device |
+| 0 | Applied write: `id:WriteId \| slot:Slot \| timestamp:Timestamp \| read_through:u64` | `WriteId` |
+| 1 | Synced column: `table:name \| column:name` | table, column |
+| 2 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
+| 3 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity, below |
+| 4 | Authored change: `header:WriteHeader \| complete:bool \| change:record \| verdict` | `ChangeId` |
+| 5 | Creation: `row:RowId \| write:WriteId \| creator:ChangeId` | `RowId` |
+| 6 | Write evidence: `write:WriteId \| prefix:bytes \| header:bytes \| roots:[32 bytes] \| header_signature:64 bytes \| proof:Multiproof` | `WriteId` |
+| 7 | Original admin slot: `slot:Slot \| object:bytes` | slot |
+| 8 | Original key-copy slot: `slot:Slot \| object:bytes` | slot |
+| 9 | Original announcement slot: `slot:Slot \| object:bytes` | slot |
+| 10 | Last included claim: `device:DeviceId \| number:u64 \| digest:Option<32 bytes>` | device |
 
 `Cell` is `write:WriteId | value:ColumnValue`: the write that set a cell, and the
 value it set.
 
-### D7.1 Rows, writes and merge records (sections 0 to 3)
+### D7.1 Writes and merge records (sections 0 to 2)
 
 These sections are the audience's state, in the shape of coven's merge records
-(Appendix B.1).
+(Appendix B.1). A row's values are its merge row's cells, and nothing else
+holds them again: a 4 MiB note's value is in its merge row, not also in a record
+of the rows the app sees. Those rows follow from the merge rows and the lost
+values, so a device works them out on loading:
 
-- **Synced rows** (section 0) are the audience's present rows that removal rules
-  haven't taken out, each with the values its merge records hold as written.
-  Their `columns` maps are nonempty, and hold every column but the generated
-  ones. These values can differ from what the app's tables show: when a
-  nullable reference's parent is deleted, the app reads NULL, but section 0
-  keeps the written parent key.
+- **A row shows** when its merge row is present and has no active removed-row
+  lost value.
+- **Its values** are its cells, as written, and each column no cell sets holds
+  the column's default. A column added after the row was written has no cell.
+- These values can differ from what the app's tables show: when a nullable
+  reference's parent is deleted, the app reads NULL, but the cell keeps the
+  written parent key.
+
+The sections:
+
 - **No generated columns.** No section names a generated column, as no write
   does (D5.5). A device loading the snapshot computes them, and refuses a
   snapshot that names one.
-- **Applied writes** (section 1) name every write applied. Their timestamps name
+- **Applied writes** (section 0) name every write applied. Their timestamps name
   their devices. `read_through` is below the containing slot, with own earlier
   writes implicit.
-- **Synced columns** (section 2) name each synced column.
-- **Merge rows** (section 3) hold each row's generations, with the write that
+- **Synced columns** (section 1) name each synced column.
+- **Merge rows** (section 2) hold each row's generations, with the write that
   moved it to each, and each cell's setting write and value.
 
 **Checks.**
@@ -1012,17 +1018,20 @@ These sections are the audience's state, in the shape of coven's merge records
 - Each applied write is in a slot from 1 to the snapshot's coverage, and is
   stamped after every write it had read: each in a slot up to its
   `read_through`, and its own device's earlier writes (§7.2).
-- Synced-row references obey merge's written-parent checks.
 - A merge row must have contiguous generations, valid transition and cell
   timestamps, no cells when deleted, and valid parent generations and audiences.
-- A present merge row has a synced row exactly when it has no active removed-row
-  lost value.
+  Its references obey merge's written-parent checks.
+- A present merge row has a cell for every key and reference column, and its
+  key cells give its key.
+- Each cell of a row that shows holds what SQLite stores for its column. A row
+  removal rules took out keeps its cells as written, whatever the columns became
+  since.
 - A row deleted by a migration still carries its advanced even generation in
-  section 3 (§18.7).
+  section 2 (§18.7).
 
-### D7.2 Lost values (section 4)
+### D7.2 Lost values (section 3)
 
-Every lost value uses section 4, whatever caused it: a cell lost concurrently,
+Every lost value uses section 3, whatever caused it: a cell lost concurrently,
 removal rules that took a row out, a schema change that excluded a write, or a
 breaking migration that froze a removed row's lost values (§18.7). Appendix B.3
 describes the same record as coven keeps it locally.
@@ -1072,7 +1081,7 @@ record.
   keep their new scalar values; deletes keep their old scalar values. Like every
   frozen value (D5.6), they have empty parent maps. The original parent evidence
   is retained separately: the parents the change named survive in its original
-  row change, which section 5 keeps (D7.3).
+  row change, which section 4 keeps (D7.3).
 - Dependent and unauthorized values name their own write as setter and have
   empty parent maps. The identity remains for a delete with no old values.
 
@@ -1095,7 +1104,7 @@ rows, and for lost values frozen by a breaking migration.
   and cells.
 - Frozen lost values need no live cells or current schema columns.
 
-**Identity and order.** Section 4 is sorted by each record's identity: its row,
+**Identity and order.** Section 3 is sorted by each record's identity: its row,
 generation, values identity, frozen flag, cause tag, then the write id of a
 schema, dependency or unauthorized lost value when present.
 
@@ -1129,13 +1138,13 @@ schema, dependency or unauthorized lost value when present.
   snapshot's covered slot. A delete-circle entry has no companion write or row
   list (D6).
 
-### D7.3 Authored changes (section 5)
+### D7.3 Authored changes (section 4)
 
 A late write can depend on a change the snapshot already judged (§9.5). So the
 snapshot keeps every original change and its verdict, separately from the lost
 values the app may dismiss.
 
-Section 5 holds every original row change of the audience whose write the
+Section 4 holds every original row change of the audience whose write the
 snapshot's covered slot includes and which this device holds.
 
 | Field | Meaning |
@@ -1195,13 +1204,13 @@ disposition     u8            1 byte
 - Successor snapshots preserve originals while they support source verdicts or
   current authorship. Physical deletion follows §16.6.
 
-Section 5 and lost-value cause 3 supply the evidence for the merge model's data
+Section 4 and lost-value cause 3 supply the evidence for the merge model's data
 rule (see What's proved).
 
-### D7.4 Creations (section 6)
+### D7.4 Creations (section 5)
 
 An owned row's owner is the member whose write created it first (§9.6), and that
-must survive deletion and reloads. Section 6 holds each row's selected creation.
+must survive deletion and reloads. Section 5 holds each row's selected creation.
 
 - `write` is the generation-zero insert with the lowest slot, then the lowest
   write number.
@@ -1209,20 +1218,20 @@ must survive deletion and reloads. Section 6 holds each row's selected creation.
   insert copied the row from another audience (D5.7).
 - `creator` has the row's key, and names its table as its own write did, before
   any later rename. It is in another audience exactly when `write` copied it.
-- Section 6 holds a row whenever any write has created it, through deletion,
+- Section 5 holds a row whenever any write has created it, through deletion,
   removal and dismissal.
 - A loader replaces the audience's creations with these.
 
-### D7.5 Write evidence (section 7)
+### D7.5 Write evidence (section 6)
 
 A snapshot carries only one audience's rows, but owner checks need proof of who
 wrote them. Carol's snapshot can't simply claim that Ana created an owned row:
-it must carry Ana's signed evidence. Section 7 lets the snapshot carry another
+it must carry Ana's signed evidence. Section 6 lets the snapshot carry another
 member's authorship without that write's parts.
 
 **What it holds.** For every creation of an `owner_only()` row, and every cell of
 a present owned row, set by a write whose device's member is not the snapshot's
-signer, section 7 holds that write's evidence. Writes of the snapshot's own
+signer, section 6 holds that write's evidence. Writes of the snapshot's own
 device are its signer's.
 
 | Field | Meaning |
@@ -1269,20 +1278,20 @@ without their evidence.
 A loader keeps the openings. Its own later snapshot reuses them for the same
 writes, so it can carry evidence for parts it never held.
 
-### D7.6 Original slots (sections 8 to 10)
+### D7.6 Original slots (sections 7 to 9)
 
 A device that loads the store snapshot must still check old signatures and know
 which keys reached whom. So the store snapshot keeps the signed slots
 themselves, not a summary.
 
-- Sections 8 to 10 occur only in the store snapshot.
+- Sections 7 to 9 occur only in the store snapshot.
 - They keep the original signed admin, key-copy and announcement slots through
   coverage, including creation. Verify each object using its original slot path.
 - These records preserve historical bindings, key introductions, exposure and
   announcements. Admin state is derived from them in order; retained later slots
   supply newer bindings.
 
-### D7.7 Last included claims (section 11)
+### D7.7 Last included claims (section 10)
 
 A device settles a claim whose slot was deleted from this section (§5.3); which
 claims count is [§16.1's](coven.md#161-what-a-snapshot-holds).
@@ -2365,4 +2374,4 @@ supports. coven.md Appendix G lists every other proof.
 | Ben's example: an untried upload stays untried with its original record through conversions, and two receptions of a write under the same conversion, schema view and history, each meeting the receipt's prerequisites, agree | `conversions_preserve_untried`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | D5.2 |
 | A step counts as a foreign-key action exactly when it equals the schema's consequence of an earlier step, through a reference its row holds at that moment; the classification reads only the steps, the replayed references and the schema, never a sender's label. In the model's construction of steps and their parents, a classified step names, in every reference it writes, the row and incarnation whose step caused it. A reference over columns another reference shares names the parent every author view consistent with the steps holds where they leave its key, a move's halves included, and a row change's reference the parent where the whole write's steps leave its key, in the write's net incarnations | `action_iff`, `follows_cause`, `Place.place_sound`, `Place.recorded_sound`, `Place.net_sound` | `proofs/merge/CovenMerge/ForeignKeyClassification.lean`, `proofs/merge/CovenMerge/ForeignKeyPlace.lean` | D5.8 |
 | The merge model's row is one table, key and audience, so equal keys must be one row; binary collation and D3 make equal keys equal bytes. The model abstracts keys, so B2 doesn't prove the byte order: Rust compares `RowId` keys as bytes, and `coven-format`'s key tests show D3's bytes sort as SQLite does | write-up B2 | [`proofs/merge.md`](proofs/merge.md#b2-terms) | D3 |
-| The data rule: receive order, progress, and dropping a change by its data, whose evidence section 5 and lost-value cause 3 supply | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | D7.3 |
+| The data rule: receive order, progress, and dropping a change by its data, whose evidence section 4 and lost-value cause 3 supply | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | D7.3 |

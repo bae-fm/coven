@@ -4,7 +4,7 @@
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
-use crate::snapshot_layout::{SnapshotLayout, Staged, TableLayout};
+use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
@@ -18,10 +18,9 @@ use rusqlite::types::ToSqlOutput;
 use rusqlite::{params, params_from_iter};
 
 /// The passes installing makes over each snapshot's tables, one table at a
-/// time: `copy_rows`, `check_synced`, `compare_rows`, `check_merged`,
-/// `persist_rows` and `finish`. Each table counts once in each pass toward
-/// the `Installing` step (§13.4).
-pub(crate) const TABLE_PASSES: u64 = 6;
+/// time: `copy_rows`, `persist_rows` and `finish`. Each table counts once in
+/// each pass toward the `Installing` step (§13.4).
+pub(crate) const TABLE_PASSES: u64 = 3;
 
 /// The writer's tables for the snapshots one reload installs: each synced
 /// table's rows, their earlier generations, and their source records; and
@@ -80,23 +79,9 @@ fn copy(
     })
 }
 
-/// Whether the row's synced record, in the table `alias` names, has
-/// column `j`.
-fn synced_has(layout: &TableLayout, alias: &str, j: usize, has: bool) -> String {
-    synced_mask_has(&format!("{alias}{}", layout.column("synced")), j, has)
-}
-
-/// Whether the synced record whose column mask `mask` gives has column `j`:
-/// the mask holds a `1` at each column the record has.
-fn synced_mask_has(mask: &str, j: usize, has: bool) -> String {
-    format!("substr({mask},{},1)='{}'", j + 1, if has { 1 } else { 0 })
-}
-
-/// Copy the snapshot's rows and earlier generations: each row's synced
-/// record and merge record, staged apart, become one row. Its app columns
-/// are given as SQLite stores them: a column its synced record has, or with
-/// no synced record a column its merge record sets, takes the staged value;
-/// any other takes the column's default.
+/// Copy the snapshot's rows and earlier generations. A row's app columns are
+/// given as SQLite stores them: a column a cell sets takes the cell's value,
+/// any other its default.
 pub(crate) fn copy_rows(
     db: &DatabaseConnection,
     prepared: &PreparedSnapshot<'_>,
@@ -105,32 +90,12 @@ pub(crate) fn copy_rows(
 ) -> Result<(), DbError> {
     for table in &layout.tables {
         let names = table.names();
-        let mut joined: Vec<String> = names
-            .iter()
-            .enumerate()
-            .map(|(at, name)| match at {
-                TableLayout::KEY | TableLayout::AUDIENCE => format!("coalesce(m.{name},s.{name})"),
-                TableLayout::SYNCED => format!("s.{name}"),
-                TableLayout::MERGED | TableLayout::PRESENT => format!("coalesce(m.{name},0)"),
-                TableLayout::KEYED => format!("coalesce(s.{name},1)"),
-                _ => format!("m.{name}"),
-            })
-            .collect();
-        for j in 0..table.columns.len() {
-            joined[table.value_at(j)] = format!(
-                "CASE WHEN {} THEN s.{value} ELSE m.{value} END",
-                synced_has(table, "s.", j, true),
-                value = table.value(j)
-            );
-        }
-        let synced = TableLayout::SYNCED + 1;
         let mut columns = names.clone();
         let mut values: Vec<String> = (1..=names.len()).map(|i| format!("?{i}")).collect();
         for (j, name) in table.columns.iter().enumerate() {
             columns.push(identifier(name));
             values.push(format!(
-                "CASE WHEN {} OR (?{synced} IS NULL AND ?{} IS NOT NULL) THEN ?{} ELSE {} END",
-                synced_mask_has(&format!("?{synced}"), j, true),
+                "CASE WHEN ?{} IS NOT NULL THEN ?{} ELSE {} END",
                 table.setter_at(j) + 1,
                 table.value_at(j) + 1,
                 table.defaults[j].as_deref().unwrap_or("NULL")
@@ -140,12 +105,9 @@ pub(crate) fn copy_rows(
             db,
             prepared,
             &format!(
-                "SELECT {} FROM {} AS m FULL JOIN {} AS s ON s.{key}=m.{key} AND s.{audience}=m.{audience} ORDER BY 1,2",
-                joined.join(","),
-                table.staged(prepared.staging(), Staged::Merged),
-                table.staged(prepared.staging(), Staged::Synced),
-                key = table.column("key"),
-                audience = table.column("audience"),
+                "SELECT {} FROM {} ORDER BY 1,2",
+                names.join(","),
+                table.staged(prepared.staging())
             ),
             &format!(
                 "INSERT INTO {}({}) VALUES({})",
@@ -165,212 +127,6 @@ pub(crate) fn copy_rows(
         ),
         "INSERT INTO temp._coven_install_generations(table_name,key,audience,generation,device,number) VALUES(?1,?2,?3,?4,?5,?6)",
     )
-}
-
-/// A merge row against the synced row staged for it, on the input
-/// connection: a deleted row has none, and each cell the synced row has is
-/// its value and parents. A cell the synced row lacks has no parents; its
-/// value is checked against the column's default once SQLite gives it.
-pub(crate) fn compare_rows(
-    prepared: &PreparedSnapshot<'_>,
-    layout: &SnapshotLayout,
-    progress: &mut ProgressReport<LoadStep>,
-) -> Result<(), DbError> {
-    let exists = |sql: String| {
-        let mut found = false;
-        prepared.each(&sql, [], |r| {
-            found = r.get(0)?;
-            Ok(())
-        })?;
-        Ok::<_, DbError>(found)
-    };
-    for table in &layout.tables {
-        let joined = format!(
-            "{} AS m JOIN {} AS s ON s.{key}=m.{key} AND s.{audience}=m.{audience}",
-            table.staged(prepared.staging(), Staged::Merged),
-            table.staged(prepared.staging(), Staged::Synced),
-            key = table.column("key"),
-            audience = table.column("audience"),
-        );
-        if exists(format!(
-            "SELECT EXISTS(SELECT 1 FROM {joined} WHERE m.{}=0)",
-            table.column("present")
-        ))? {
-            return Err(invalid("deleted merge row also has a synced row"));
-        }
-        let mut disagree = Vec::new();
-        for j in 0..table.columns.len() {
-            let pairs: Vec<_> = table
-                .pairs
-                .iter()
-                .enumerate()
-                .filter(|(_, (column, _))| *column == j)
-                .map(|(q, _)| q)
-                .collect();
-            let mut differs = vec![format!(
-                "NOT {}",
-                crate::sql::same_value(
-                    &format!("s.{}", table.value(j)),
-                    &format!("m.{}", table.value(j))
-                )
-            )];
-            differs.extend(pairs.iter().map(|q| {
-                let parent = |column: String| format!("s.{column} IS m.{column}");
-                format!(
-                    "NOT ({} AND {} AND {})",
-                    parent(table.parent_key(*q)),
-                    parent(table.parent_audience(*q)),
-                    parent(table.parent_generation(*q))
-                )
-            }));
-            let mut parented: Vec<_> =
-                pairs.iter().map(|q| format!("m.{} IS NOT NULL", table.parent_key(*q))).collect();
-            parented.push("0".into());
-            disagree.push(format!(
-                "(m.{} IS NOT NULL AND (({} AND ({})) OR ({} AND ({}))))",
-                table.setter_device(j),
-                synced_has(table, "s.", j, true),
-                differs.join(" OR "),
-                synced_has(table, "s.", j, false),
-                parented.join(" OR ")
-            ));
-        }
-        if exists(format!("SELECT EXISTS(SELECT 1 FROM {joined} WHERE {})", disagree.join(" OR ")))?
-        {
-            return Err(invalid("synced and merge values disagree"));
-        }
-        progress.advance();
-    }
-    Ok(())
-}
-
-/// The synced rows' checks that need SQLite's own reading of the values:
-/// each value is already what SQLite stores, and gives the row's key.
-pub(crate) fn check_synced(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    layout: &SnapshotLayout,
-    audience: &Audience,
-    progress: &mut ProgressReport<LoadStep>,
-) -> Result<(), DbError> {
-    for table in &layout.tables {
-        let installed = table.installed();
-        let schema_table = schema.table(&table.table);
-        let stored: Vec<_> = (0..table.columns.len())
-            .map(|j| {
-                format!(
-                    "({} AND NOT {})",
-                    synced_has(table, "", j, true),
-                    crate::sql::same_value(&table.value(j), &identifier(&table.columns[j]))
-                )
-            })
-            .collect();
-        if exists(
-            db,
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM {installed} WHERE {}=?1 AND {} IS NOT NULL AND ({}))",
-                table.column("audience"),
-                table.column("synced"),
-                stored.join(" OR ")
-            ),
-            params![audience],
-        )? {
-            return Err(invalid("synced values disagree with their key or schema"));
-        }
-        let keys = crate::write_rows::key_columns(schema_table);
-        for (key, values) in db.query(
-            &format!(
-                "SELECT {},{} FROM {installed} WHERE {}=?1 AND {} IS NOT NULL AND {}=0",
-                table.column("key"),
-                keys.iter().map(|c| identifier(&c.name)).collect::<Vec<_>>().join(","),
-                table.column("audience"),
-                table.column("synced"),
-                table.column("keyed")
-            ),
-            params![audience],
-            |r| {
-                let values: AppValues = keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| Ok((c.name.clone(), value(r.get_ref(i + 1)?)?)))
-                    .collect::<rusqlite::Result<_>>()?;
-                Ok((r.get::<_, Vec<u8>>(0)?, values))
-            },
-        )? {
-            if crate::write_rows::row_key(schema_table, &values)? != key {
-                return Err(invalid("synced values disagree with their key or schema"));
-            }
-        }
-        progress.advance();
-    }
-    Ok(())
-}
-
-/// The merge rows' checks against their synced rows that need SQLite's
-/// own reading of the values: a cell on a column its synced row lacks holds
-/// that column's default, and so does a column the synced row has but no
-/// cell sets.
-pub(crate) fn check_merged(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    layout: &SnapshotLayout,
-    audience: &Audience,
-    progress: &mut ProgressReport<LoadStep>,
-) -> Result<(), DbError> {
-    for table in &layout.tables {
-        let installed = table.installed();
-        let schema_table = schema.table(&table.table);
-        let defaulted: Vec<_> = (0..table.columns.len())
-            .map(|j| {
-                format!(
-                    "({} AND {} IS NOT NULL AND NOT {})",
-                    synced_has(table, "", j, false),
-                    table.setter_device(j),
-                    crate::sql::same_value(&table.value(j), &identifier(&table.columns[j]))
-                )
-            })
-            .collect();
-        if exists(
-            db,
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM {installed} WHERE {}=?1 AND {} IS NOT NULL AND {}=1 AND ({}))",
-                table.column("audience"),
-                table.column("synced"),
-                table.column("merged"),
-                defaulted.join(" OR ")
-            ),
-            params![audience],
-        )? {
-            return Err(invalid("synced and merge values disagree"));
-        }
-        let defaults = crate::removal_sql::evaluate_values(db, schema_table, &AppValues::new())?;
-        let mut parameters = vec![rusqlite::types::Value::from(audience)];
-        let mut unset = Vec::new();
-        for (j, name) in table.columns.iter().enumerate() {
-            parameters.push(sql_value(&defaults[name]));
-            unset.push(format!(
-                "({} AND {} IS NULL AND NOT {})",
-                synced_has(table, "", j, true),
-                table.setter_device(j),
-                crate::sql::same_value(&identifier(name), &format!("?{}", parameters.len()))
-            ));
-        }
-        if exists(
-            db,
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM {installed} WHERE {}=?1 AND {} IS NOT NULL AND {}=1 AND ({}))",
-                table.column("audience"),
-                table.column("synced"),
-                table.column("merged"),
-                unset.join(" OR ")
-            ),
-            params_from_iter(parameters),
-        )? {
-            return Err(invalid("synced values disagree with merge defaults"));
-        }
-        progress.advance();
-    }
-    Ok(())
 }
 
 fn exists<P: rusqlite::Params>(
@@ -410,10 +166,9 @@ pub(crate) fn persist_rows(
                 "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id)
                  SELECT ?2,i.{key},i.{audience_column},i.{generation},
                    (SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=i.{device} AND number=i.{number})
-                 FROM {installed} AS i WHERE i.{audience_column}=?1 AND i.{merged}=1 ORDER BY i.{key}",
+                 FROM {installed} AS i WHERE i.{audience_column}=?1 ORDER BY i.{key}",
                 device = table.column("device"),
                 number = table.column("number"),
-                merged = table.column("merged"),
             ),
             params![audience, table.table],
         )?;
@@ -455,9 +210,9 @@ pub(crate) fn persist_rows(
     Ok(())
 }
 
-/// Every synced row has a merge record, and a merge row present without a
-/// synced row is one the snapshot's author took out, with a live rules loss
-/// that a synced row doesn't have.
+/// Each cell of a row the snapshot's author shows holds what SQLite stores for
+/// its column. A row its author took out, with a live rules loss, keeps its
+/// cells as written, whatever the columns became since.
 pub(crate) fn finish(
     db: &DatabaseConnection,
     layout: &SnapshotLayout,
@@ -465,24 +220,36 @@ pub(crate) fn finish(
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     for table in &layout.tables {
-        let unmatched = exists(
+        let stored: Vec<_> = table
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(j, name)| {
+                format!(
+                    "(i.{} IS NOT NULL AND NOT {})",
+                    table.setter_device(j),
+                    crate::sql::same_value(
+                        &format!("i.{}", table.value(j)),
+                        &format!("i.{}", identifier(name))
+                    )
+                )
+            })
+            .collect();
+        let refused = exists(
             db,
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM {installed} AS i WHERE i.{audience_column}=?1 AND (
-                   (i.{synced} IS NOT NULL AND i.{merged}=0)
-                   OR ((i.{synced} IS NOT NULL OR i.{present}=1)
-                       AND (i.{synced} IS NULL) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=?2 AND l.key=i.{key} AND l.audience=i.{audience_column} AND l.frozen=0 AND l.replacement_kind='rules'))))",
+                "SELECT EXISTS(SELECT 1 FROM {installed} AS i WHERE i.{audience_column}=?1 AND i.{present}=1 AND ({stored})
+                   AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=?2 AND l.key=i.{key} AND l.audience=i.{audience_column} AND l.frozen=0 AND l.replacement_kind='rules'))",
                 installed = table.installed(),
                 audience_column = table.column("audience"),
-                synced = table.column("synced"),
-                merged = table.column("merged"),
                 present = table.column("present"),
                 key = table.column("key"),
+                stored = stored.join(" OR "),
             ),
             params![audience, table.table],
         )?;
-        if unmatched {
-            return Err(invalid("synced row has no merge record"));
+        if refused {
+            return Err(invalid("cell values disagree with their schema"));
         }
         progress.advance();
     }
@@ -575,8 +342,7 @@ pub(crate) fn creations(
     )
 }
 
-/// The merged values of an installed row: each value its synced record or
-/// its merge cells give.
+/// The merged values of an installed row: each value its cells give.
 pub(crate) fn values(
     db: &DatabaseConnection,
     schema: &crate::schema::Schema,
@@ -584,7 +350,7 @@ pub(crate) fn values(
 ) -> Result<AppValues, DbError> {
     let table = &schema.tables[&row.table.to_ascii_lowercase()];
     let layout = TableLayout::new(schema, table);
-    let mut select = vec![layout.column("synced")];
+    let mut select = Vec::new();
     for j in 0..layout.columns.len() {
         select.push(layout.value(j));
         select.push(layout.setter_device(j));
@@ -599,15 +365,10 @@ pub(crate) fn values(
         ),
         params![row.key, &row.audience],
         |r| {
-            let synced: Option<String> = r.get(0)?;
             let mut values = AppValues::new();
             for (j, name) in layout.columns.iter().enumerate() {
-                let has = match &synced {
-                    Some(synced) => synced.as_bytes()[j] == b'1',
-                    None => false,
-                } || r.get_ref(2 + 2 * j)? != rusqlite::types::ValueRef::Null;
-                if has {
-                    values.insert(name.clone(), value(r.get_ref(1 + 2 * j)?)?);
+                if r.get_ref(1 + 2 * j)? != rusqlite::types::ValueRef::Null {
+                    values.insert(name.clone(), value(r.get_ref(2 * j)?)?);
                 }
             }
             Ok(values)
@@ -674,14 +435,11 @@ pub(crate) fn file_locations(
     };
     db.for_each(
         &format!(
-            "SELECT CASE WHEN {synced} IS NOT NULL AND {} THEN {} ELSE {} END FROM {} WHERE {}=?1 AND ({synced} IS NOT NULL OR {}=1)",
-            synced_has(&table, "", j, false),
-            identifier(&table.columns[j]),
+            "SELECT {} FROM {} WHERE {}=?1 AND {}=1",
             table.value(j),
             table.installed(),
             table.column("audience"),
             table.column("present"),
-            synced = table.column("synced"),
         ),
         params![audience],
         |r| visit(&value(r.get_ref(0)?)?),

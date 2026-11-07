@@ -307,15 +307,16 @@ pub fn oracle() -> TestOracle {
 }
 /// The fixture's merged row, with an actual concurrent loss validated by merge.
 pub fn merge_row() -> MergeRow {
+    merge_row_of(row(), Value::Integer(2))
+}
+/// A merge row of `row` whose cell `x` holds `value`.
+pub fn merge_row_of(row: RowId, value: Value) -> MergeRow {
     let state = RowState::from_parts(
-        row(),
+        row,
         BTreeMap::from([(1, WriteId { device: DeviceId(1), number: 1 })]),
         BTreeMap::from([(
             "x".into(),
-            Cell {
-                write: WriteId { device: DeviceId(1), number: 2 },
-                value: column(Value::Integer(2)),
-            },
+            Cell { write: WriteId { device: DeviceId(1), number: 2 }, value: column(value) },
         )]),
         BTreeMap::new(),
         &oracle(),
@@ -323,13 +324,13 @@ pub fn merge_row() -> MergeRow {
     .unwrap();
     MergeRow { state }
 }
-/// The header for the fixture's twelve snapshot sections.
+/// The header for the fixture's eleven snapshot sections.
 pub fn snapshot_header() -> SnapshotHeader {
     SnapshotHeader {
         id: SnapshotId { device: DeviceId(1), number: 1, audience: Audience::Store },
         schema_version: 2,
         covers: 9,
-        counts: [1, 4, 1, 1, 4, 1, 1, 1, 1, 1, 1, 2],
+        counts: [4, 1, 1, 4, 1, 1, 1, 1, 1, 1, 2],
     }
 }
 /// The sealed prefix carrying a snapshot's coverage, with a fixed test key.
@@ -343,10 +344,6 @@ pub fn snapshot_prefix(header: &SnapshotHeader) -> crate::sealed_snapshot::Snaps
 }
 /// Records in their canonical section and identity order.
 pub fn snapshot_records() -> Vec<SnapshotRecord> {
-    let mut records = vec![SnapshotRecord::Synced(SyncedRow {
-        row: row(),
-        columns: BTreeMap::from([("x".into(), column(Value::Integer(2)))]),
-    })];
     let mut writes = oracle().writes;
     let header = write().header;
     writes.insert(
@@ -358,7 +355,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
             read_through: header.read_through,
         },
     );
-    records.extend(writes.into_values().map(SnapshotRecord::Write));
+    let mut records: Vec<_> = writes.into_values().map(SnapshotRecord::Write).collect();
     records.push(SnapshotRecord::Column(SyncedColumn { table: "t".into(), column: "x".into() }));
     records.push(SnapshotRecord::Merge(merge_row()));
     records.extend(
@@ -637,12 +634,15 @@ pub fn chunked_write() -> WriteRecord {
     record.parts[0].rows[0].execution.steps[0].change.operation = blob;
     record
 }
-/// A snapshot with a synced row spanning chunk boundaries.
+/// A snapshot with a merge row spanning chunk boundaries.
 pub fn chunked_snapshot_frames() -> Vec<Vec<u8>> {
     let (mut encoder, header) = SnapshotEncoder::start(snapshot_header()).unwrap();
     let mut records = snapshot_records();
-    let SnapshotRecord::Synced(row) = &mut records[0] else { unreachable!() };
-    row.columns.insert("x".into(), column(Value::Blob(vec![0x42; crate::chunks::CHUNK_SIZE + 31])));
+    let large = records.iter_mut().find(|record| matches!(record, SnapshotRecord::Merge(_)));
+    *large.expect("the fixture's merge row") = SnapshotRecord::Merge(merge_row_of(
+        row(),
+        Value::Blob(vec![0x42; crate::chunks::CHUNK_SIZE + 31]),
+    ));
     let mut frames = vec![header];
     for record in records {
         frames.push(encoder.record(record).unwrap());

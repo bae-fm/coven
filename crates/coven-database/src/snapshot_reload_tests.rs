@@ -613,30 +613,24 @@ fn without(
     records.remove(at);
 }
 
-fn synced_track<'a>(
-    records: &'a mut [SnapshotRecord],
-    key: &str,
-) -> &'a mut coven_format::snapshot_rows::SyncedRow {
-    records
-        .iter_mut()
-        .find_map(|record| match record {
-            SnapshotRecord::Synced(row)
-                if row.row.table == "tracks" && row.row.key == crate::tests::text_key(key) =>
-            {
-                Some(row)
-            }
-            _ => None,
-        })
-        .unwrap()
+type TrackCells = BTreeMap<String, coven_merge::Cell<coven_format::value::Value>>;
+
+/// Change the cells of the track of the encoded key `key` with `edit`.
+fn edit_track_key(
+    records: &mut [SnapshotRecord],
+    key: Vec<u8>,
+    edit: impl FnOnce(&mut TrackCells),
+) {
+    crate::snapshot_write::tests::edit_cells(
+        records,
+        |row| row.table == "tracks" && row.key == key,
+        edit,
+    );
 }
 
-fn is_track(record: &SnapshotRecord, kind: usize, key: &str) -> bool {
-    let row = match record {
-        SnapshotRecord::Synced(row) => &row.row,
-        SnapshotRecord::Merge(row) => row.state.row(),
-        _ => return false,
-    };
-    record.section() == kind && row.table == "tracks" && row.key == crate::tests::text_key(key)
+/// Change track `key`'s cells with `edit`.
+fn edit_track(records: &mut [SnapshotRecord], key: &str, edit: impl FnOnce(&mut TrackCells)) {
+    edit_track_key(records, crate::tests::text_key(key), edit);
 }
 
 #[tokio::test]
@@ -653,42 +647,30 @@ async fn inconsistent_library_snapshots_are_refused_with_their_reason_and_change
     type Edit = Box<dyn FnOnce(&mut SnapshotHeader, &mut Vec<SnapshotRecord>)>;
     let cases: Vec<(&str, Edit)> = vec![
         (
-            "synced and merge values disagree",
+            "cell values disagree with their schema",
             Box::new(|_, records| {
-                synced_track(records, "t1").columns.get_mut("title").unwrap().value =
-                    Value::Text("not merged".into());
-            }),
-        ),
-        (
-            "synced values disagree with their key or schema",
-            Box::new(|_, records| {
-                synced_track(records, "t1").columns.get_mut("position").unwrap().value =
-                    Value::Text("1".into());
+                edit_track(records, "t1", |cells| {
+                    cells.get_mut("position").unwrap().value.value = Value::Text("1".into());
+                });
             }),
         ),
         (
             "row names an unknown column",
             Box::new(|_, records| {
-                let row = synced_track(records, "t1");
-                let value = row.columns["title"].clone();
-                row.columns.insert("nothing".into(), value);
+                edit_track(records, "t1", |cells| {
+                    let cell = cells["title"].clone();
+                    cells.insert("nothing".into(), cell);
+                });
             }),
         ),
         (
             "row names a generated column",
             Box::new(|_, records| {
-                let row = synced_track(records, "t1");
-                let value = row.columns["title"].clone();
-                row.columns.insert("label".into(), value);
+                edit_track(records, "t1", |cells| {
+                    let cell = cells["title"].clone();
+                    cells.insert("label".into(), cell);
+                });
             }),
-        ),
-        (
-            "synced row has no merge record",
-            Box::new(|header, records| without(header, records, |r| is_track(r, 3, "t3"))),
-        ),
-        (
-            "synced row has no merge record",
-            Box::new(|header, records| without(header, records, |r| is_track(r, 0, "t3"))),
         ),
         (
             "merge cell has no column record",
@@ -717,9 +699,47 @@ async fn inconsistent_library_snapshots_are_refused_with_their_reason_and_change
     }
 }
 
+/// A row its author took out keeps its cells as written, so nothing compares
+/// them with what its table stores: only a row that shows has to fit it.
 #[tokio::test]
-async fn a_synced_value_without_a_merge_cell_must_be_the_columns_default() {
-    use coven_format::value::Value;
+async fn a_row_its_author_took_out_need_not_fit_its_table() {
+    use coven_format::{loss::LossCause, loss::LossValues, value::Value};
+    let ids = SequentialIds::new();
+    let [a_store, b_store, c_store] = [(); 3].map(|()| TestStore::with_ids(&ids));
+    let a = open(&a_store).await;
+    let b = open(&b_store).await;
+    let c = open(&c_store).await;
+    concurrent_library(&a, &b).await;
+    let snapshot = frames(&a, Audience::Store).await;
+    let unfitting = Value::Text("1".into());
+    let bytes = edited(&snapshot, |_, records| {
+        let (key, loss) = records
+            .iter_mut()
+            .find_map(|record| match record {
+                SnapshotRecord::Loss(loss)
+                    if loss.row.table == "tracks" && matches!(loss.cause, LossCause::Rules(_)) =>
+                {
+                    Some((loss.row.key.clone(), loss))
+                }
+                _ => None,
+            })
+            .expect("the library has a track its author took out");
+        let LossValues::Row(cells) = &mut loss.values else { panic!("a removed row") };
+        cells.get_mut("position").unwrap().value.value = unfitting.clone();
+        edit_track_key(records, key, |cells| {
+            cells.get_mut("position").unwrap().value.value = unfitting.clone();
+        });
+    });
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes)).await.unwrap();
+    for db in [a, b, c] {
+        db.close().await.unwrap();
+    }
+}
+
+/// A column no cell sets, added after the row was written, takes the
+/// column's default where the snapshot installs.
+#[tokio::test]
+async fn a_column_no_cell_sets_takes_its_default() {
     let ids = SequentialIds::new();
     let [a_store, c_store] = [(); 2].map(|()| TestStore::with_ids(&ids));
     let first = || vec![Migration::addition(1, "notes", crate::write::tests::NOTES)];
@@ -739,21 +759,6 @@ async fn a_synced_value_without_a_merge_cell_must_be_the_columns_default() {
     let a = a_store.builder(crate::write::tests::notes(), both()).open().await.unwrap();
     let c = c_store.builder(crate::write::tests::notes(), both()).open().await.unwrap();
     let snapshot = frames(&a, Audience::Store).await;
-    let original = crate::tests::contents(&c);
-    let bytes = edited(&snapshot, |_, records| {
-        let SnapshotRecord::Synced(row) = &mut records[0] else {
-            panic!("synced row first");
-        };
-        row.columns.get_mut("color").unwrap().value = Value::Text("red".into());
-    });
-    let error = load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&error, crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(r)) if *r == "synced values disagree with merge defaults"),
-        "{error:?}"
-    );
-    assert_eq!(crate::tests::contents(&c), original);
     load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
         .await
         .unwrap();

@@ -195,12 +195,7 @@ async fn malformed_or_inconsistent_snapshots_roll_back_every_table() {
     trailing.push(0);
     damaged.push(trailing);
     let (header, mut records) = crate::snapshot_write::tests::decode(&frames);
-    if let coven_format::snapshot::SnapshotRecord::Synced(row) = &mut records[0] {
-        row.columns.get_mut("title").unwrap().value =
-            coven_format::value::Value::Text("different from merge".into());
-    } else {
-        panic!("synced row first");
-    }
+    crate::snapshot_write::tests::unstored_title(&mut records);
     let (mut encoder, header) = coven_format::snapshot::SnapshotEncoder::start(header).unwrap();
     let mut inconsistent = header;
     for record in records {
