@@ -469,6 +469,9 @@ import SequenceApply
 #print axioms CovenSequence.ReadPass.checkFirst_blames_honest_floor
 #print axioms CovenSequence.ReadPass.end_search_sees_an_end
 #print axioms CovenSequence.ReadPass.checked_gap_reads_as_end
+#print axioms CovenSequence.ReadPass.climb_exact
+#print axioms CovenSequence.ReadPass.narrow_exact
+#print axioms CovenSequence.ReadPass.locateEnd_finds_end
 #print axioms CovenSequence.ReloadFloor.install_eq_atTarget
 #print axioms CovenSequence.ReloadFloor.honest_floor_installs
 #print axioms CovenSequence.ReloadFloor.atTarget_refuses_honest_floor

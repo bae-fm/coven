@@ -366,4 +366,74 @@ theorem checked_gap_reads_as_end :
       .stops 13 := by
   decide
 
+
+/-! ## The search finds the end
+
+On storage whose slots after `start` are present exactly up to `e`, the
+doubling and halving return `e`, when `e` is less than `2 ^ 64` past `start`
+(the search's reach, one doubling per bit of a `u64` slot number). -/
+
+section Exact
+variable (present : Nat → Bool) (start e : Nat)
+
+/-- Doubling stops with a bracket that holds the end, at most `2 ^ 64` wide. -/
+theorem climb_exact (hp : ∀ i, start < i → (present i = true ↔ i ≤ e)) :
+    ∀ fuel low step, 0 < step → start ≤ low → low ≤ e → e < start + step * 2 ^ fuel →
+      step * 2 ^ fuel ≤ 2 ^ 64 →
+      (climb present start low step fuel).1 ≤ e ∧ e < (climb present start low step fuel).2 ∧
+        start ≤ (climb present start low step fuel).1 ∧
+        (climb present start low step fuel).2 - (climb present start low step fuel).1 ≤ 2 ^ 64
+  | 0, low, step, pos, hs, hl, he, hb => by
+    simp only [climb, Nat.pow_zero, Nat.mul_one] at *
+    omega
+  | fuel + 1, low, step, pos, hs, hl, he, hb => by
+    have pw : step * 2 ^ (fuel + 1) = 2 * step * 2 ^ fuel := by
+      simp [Nat.pow_succ, Nat.mul_comm, Nat.mul_assoc]
+    have stepLe : step ≤ step * 2 ^ (fuel + 1) :=
+      Nat.le_mul_of_pos_right _ (Nat.two_pow_pos _)
+    simp only [climb]
+    by_cases h : present (start + step) = true
+    · have le := (hp (start + step) (by omega)).1 h
+      simp only [h, ite_true]
+      exact climb_exact hp fuel (start + step) (2 * step) (by omega) (by omega) le
+        (by rw [pw] at he; exact he) (by rw [pw] at hb; exact hb)
+    · have lt : ¬ start + step ≤ e := fun hle => h ((hp (start + step) (by omega)).2 hle)
+      have h' : present (start + step) = false := by simpa using h
+      simp only [h', Bool.false_eq_true, ite_false]
+      refine ⟨hl, by omega, hs, by omega⟩
+
+/-- Halving a bracket that holds the end, at most `2 ^ fuel` wide, returns it. -/
+theorem narrow_exact (hp : ∀ i, start < i → (present i = true ↔ i ≤ e)) :
+    ∀ fuel low high, start ≤ low → low ≤ e → e < high → high - low ≤ 2 ^ fuel →
+      narrow present low high fuel = e
+  | 0, low, high, hs, hl, he, hw => by
+    simp only [narrow, Nat.pow_zero] at *
+    omega
+  | fuel + 1, low, high, hs, hl, he, hw => by
+    have pw : 2 ^ (fuel + 1) = 2 * 2 ^ fuel := by rw [Nat.pow_succ]; omega
+    by_cases adj : high ≤ low + 1
+    · simp only [narrow, adj, ite_true]; omega
+    · simp only [narrow, adj, ite_false]
+      by_cases h : present (low + (high - low) / 2) = true
+      · have le := (hp (low + (high - low) / 2) (by omega)).1 h
+        simp only [h, ite_true]
+        exact narrow_exact hp fuel _ high (by omega) le he (by omega)
+      · have lt : ¬ low + (high - low) / 2 ≤ e :=
+          fun hle => h ((hp _ (by omega)).2 hle)
+        have h' : present (low + (high - low) / 2) = false := by simpa using h
+        simp only [h', Bool.false_eq_true, ite_false]
+        exact narrow_exact hp fuel low _ hs hl (by omega) (by omega)
+
+/-- **The end search finds the end.** With the slots after `start` present
+exactly up to `e`, and `e` within the search's reach, it returns `e`. -/
+theorem locateEnd_finds_end (hp : ∀ i, start < i → (present i = true ↔ i ≤ e))
+    (hs : start ≤ e) (hr : e < start + 2 ^ 64) : locateEnd present start = e := by
+  have c := climb_exact present start e hp 64 start 1 (by omega) (Nat.le_refl _) hs
+    (by omega) (by omega)
+  obtain ⟨c1, c2, c3, c4⟩ := c
+  unfold locateEnd
+  exact narrow_exact present start e hp 64 _ _ c3 c1 c2 c4
+
+end Exact
+
 end CovenSequence.ReadPass

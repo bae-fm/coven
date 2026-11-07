@@ -1489,6 +1489,10 @@ it, or it is at or below the floor's `at`.
   answers every check the search makes the same way, so the search answers the
   same there. A missing slot a check lands on is therefore not known to be a gap;
   a later check or a floor's `at` makes it known.
+- `locateEnd_finds_end` (with `climb_exact` and `narrow_exact`): when the slots
+  after `start` are present exactly up to `e`, and `e` is less than `2 ^ 64`
+  past `start`, the search returns `e`. The doubling brackets `e` in at most 64
+  checks and the halving then narrows the bracket to it in at most 64 more.
 - `checked_gap_reads_as_end`: from slot 10 with slots to 20, a gap at 12, which
   a check lands on, reads as the end at 11; a gap at 13 is passed over by the
   check of 14 and reported.
