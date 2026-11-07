@@ -501,7 +501,12 @@ fn open_reader(path: &Path) -> io::Result<fs::File> {
 /// reports that new bytes are visible but directory syncing failed.
 /// Windows requires the POSIX replacement support described by [`AtomicFile::replace`].
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
-    let temp = prepare(path, bytes)?;
+    install(prepare(path, bytes)?, path)
+}
+
+/// Replace `path` with the prepared temporary sibling `temp`, whose failure
+/// to install also removes it.
+fn install(temp: tempfile::NamedTempFile, path: &Path) -> Result<(), FileError> {
     #[cfg(unix)]
     {
         match temp.persist(path) {

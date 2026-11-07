@@ -75,14 +75,74 @@ fn failed_rename_preserves_the_target_and_removes_the_stage() {
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
+/// Set `directory`'s permission bits.
+#[cfg(unix)]
+fn set_mode(directory: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(directory, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A folder that can be written but not opened: renames and removals in it
+/// work, and syncing it fails, since syncing opens it first.
+#[cfg(unix)]
+const UNOPENABLE: u32 = 0o300;
+
+#[cfg(unix)]
 #[test]
-fn a_directory_sync_error_reports_that_the_bytes_are_installed() {
-    let error = FileError::AfterReplace {
-        path: PathBuf::from("settings"),
-        source: Box::new(io::Error::other("directory sync failed")),
-    };
+fn a_failed_directory_sync_after_replacing_leaves_the_new_bytes_visible() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    let file = AtomicFile::new(path.clone());
+    file.replace(b"old").unwrap();
+    set_mode(directory.path(), UNOPENABLE);
+    let error = file.replace(b"new").unwrap_err();
+    set_mode(directory.path(), 0o700);
     assert!(error.installed_new_bytes());
     assert!(std::error::Error::source(&error).is_some());
+    assert!(matches!(&error, FileError::AfterReplace { path: named, .. } if *named == path));
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"new");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1, "no temporary sibling is left");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_directory_sync_after_removing_leaves_the_file_gone_and_can_be_retried() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    let file = AtomicFile::new(path.clone());
+    file.replace(b"old").unwrap();
+    set_mode(directory.path(), UNOPENABLE);
+    let error = file.remove().unwrap_err();
+    set_mode(directory.path(), 0o700);
+    assert!(!error.installed_new_bytes());
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(matches!(&error, FileError::AfterRemove { path: named, .. } if *named == path));
+    assert_eq!(file.read_optional().unwrap(), None);
+    file.remove().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_removal_of_the_temporary_file_keeps_both_causes_and_the_old_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    let file = AtomicFile::new(path.clone());
+    file.replace(b"old").unwrap();
+    let temp = prepare(&path, b"new").unwrap();
+    // Neither the rename nor removing the temporary file can change the folder.
+    set_mode(directory.path(), 0o500);
+    let error = install(temp, &path).unwrap_err();
+    set_mode(directory.path(), 0o700);
+    assert!(!error.installed_new_bytes());
+    let FileError::Cleanup { operation, cleanup } = error else {
+        panic!("both failures, not {error:?}");
+    };
+    assert!(matches!(*operation, FileError::Io { operation: "rename temporary file", .. }));
+    let cleanup = cleanup.downcast_ref::<io::Error>().expect("the operating system's cause");
+    assert_eq!(cleanup.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"old");
+    file.replace(b"new").unwrap();
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"new");
 }
 
 #[test]
