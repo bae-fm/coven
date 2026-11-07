@@ -1969,6 +1969,16 @@ they do not replace the separate byte-format, merge or queue tests.
   `settle_from_floor`. Only the single-copy theorems assume `Own` or its
   equivalent journal facts; `ClaimJournal` derives `Own` from one device's
   journal rules.
+- An operation's action is fixed by construction. The verdict function `check`
+  that `Operation`'s steps take is one function of the slots for the operation's
+  whole life, and its entry bytes name
+  the operation and the slot only (`ours n`), so a retry after a lost race
+  claims the same action at another slot (§11.2). That the Rust journal keeps
+  the target and the approved keys fixed is tested.
+- The refusal to remove the member whose account holds the store, or to move
+  that member's access (`StoreOwner`, §10.1), is made before a claim and is not
+  an entry rule. Slot 1 carrying the key that verifies it, and the store id it
+  names matching its path (§10.3), are checks of bytes outside the model.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, store renames,
     the runner's device/key actions, circle membership changes and store resets,
