@@ -42,6 +42,15 @@ import SequenceApply
 #print axioms CovenSequence.unopened_stops
 #print axioms CovenSequence.clear_of_opens
 
+#print axioms CovenSequence.CopyOrder.audience_complete
+#print axioms CovenSequence.CopyOrder.store_copy_precedes_need
+#print axioms CovenSequence.CopyOrder.copy_precedes_need_inside
+#print axioms CovenSequence.CopyOrderExamples.copy_precedes_need_fails
+#print axioms CovenSequence.CopyOrderExamples.early_scan_stops_below_replacement
+#print axioms CovenSequence.CopyOrderExamples.races_follow
+#print axioms CovenSequence.CopyOrderExamples.races_keep_order
+#print axioms CovenSequence.CopyOrderExamples.stale_rotation_illegal
+
 #print axioms CovenSequence.Operation.step_req
 #print axioms CovenSequence.Operation.step_inv
 #print axioms CovenSequence.Operation.steps_inv

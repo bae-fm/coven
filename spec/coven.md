@@ -3828,6 +3828,23 @@ and can send him only the store key. Carol is in Gifts: her next pass sends
 Ben's new sealing key a copy of each Gifts key she holds, and his new phone
 opens them with its first keys.
 
+Ben's phone can get there first. It scans for its copies once, while it holds
+no keys, then reads the slots in order. If the scan ended before Carol's copy
+landed, the phone stops with `KeyUnavailable` at the first Gifts part it reaches
+(§5.4), even one written before the recovery. The copy is in a later slot, which
+can't get it past that one, and neither can a later floor. A phone restored
+after Carol's pass finds the copy and reads on.
+
+So a copy doesn't always come before the slot that needs it. A Gifts write can
+even land between the recovery and the copy: Carol's write lost its slot to the
+recovery and keeps the key of its first attempt, and a pass sends writes before
+copies
+([`copy_precedes_need_fails`](proofs/sequence/CovenSequence/CopyOrderExamples.lean)).
+This is the only way. A store key's copy is always below every slot that needs
+it, and so is a circle key's, as long as each replacement of a member's keys
+comes from another member of that circle
+([`store_copy_precedes_need`, `copy_precedes_need_inside`](proofs/sequence/CovenSequence/CopyOrder.lean)).
+
 **A new device** first opens the copies for its sealing key, from the floor or the
 sequence, and checks their introductions and its membership before loading any
 data (§13, §16.4).
@@ -11943,6 +11960,9 @@ Write-ups explain each model and state its assumptions:
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | A copy opened before its key's introduction is held as tentative and not accepted; once the introduction applies, the device ends as if it had applied the introduction first: the key accepted when its material matches the commitment, a stop when it doesn't | `copy_order_agrees` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
 | The copies an audience still needs, of every key introduced for it to each current member's current sealing key, give every current member every older key once published; then none is needed, so a retry sends none, and they expose no key | `needed_complete`, `needed_after_none`, `needed_exposes_nothing` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
+| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, and so has a circle's key while each replacement of one of its members comes from another of them. Store creation's slot 2 is the exception §12.1 names | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
+| A rotation among another admin's addition and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the added member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
+| *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
 | A replacement applies only while the pair it expects is current; once one applies, its member never has the replaced pair again, so a competing replacement, and every retry of it, is refused at every later slot | `replaced_never_current`, `competing_replacement_refused` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §10.4, §11.2, §12.3 |
 | Replacing one's own keys, every write under the old pair lands before the replacement's slot and every write under the new pair after it; once the replacement lands, writes resume only with the new pair kept, installed and its restore code refreshed, and a write meanwhile is refused | `writes_straddle_replacement`, `pause_lifts_after_install` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |

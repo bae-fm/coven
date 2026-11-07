@@ -324,6 +324,48 @@ preserves other keys. `journal_depends_only_on_commitment` makes the journal's
 observation independent of secrets with the same commitment. Rust tests also
 scan the physical SQLite files, whose encoding is outside the model.
 
+[`CopyOrder`](sequence/CovenSequence/CopyOrder.lean) asks whether a copy sits
+below every slot that needs it, since a reader that reaches a slot it can't open
+stops there (`keyless_stops`). It sets `Keys`' projection beside a roster of who
+reads each audience with which sealing key, as `effects.rs` and
+`circle_effects.rs` keep it. `required` is Rust's `required_copies`, and `legal`
+says a slot followed the rules at its position: an entry's required copies are
+in the prefix before it, which `operation_outcome` gives when validation asks
+for them, and every key sealing the slot is introduced. `Follows` is a history
+of legal slots after creation's two. `CopyPrecedesNeed` is the claim: for every
+slot after creation, every key it needs and every member reading that key's
+audience just before it, a copy to the member's current sealing key sits below.
+
+- `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside`:
+  every key introduced for an audience has a copy to each reader's current
+  sealing key, at every prefix from slot 2 on, when each replacement of a reader
+  comes from another reader. That holds of the store, so a store key's copy is
+  always first; for a circle it is the premise of `copy_precedes_need_inside`.
+- `races_follow`, `races_keep_order`, `stale_rotation_illegal`
+  ([`CopyOrderExamples`](sequence/CovenSequence/CopyOrderExamples.lean)): Ben
+  rotates the store key while Ana adds Dan, and Dan replaces his keys among the
+  next rotation's copies. Each race is one history of `Follows`, not a case of
+  the proof. A rotation that kept the routes it first read is not legal.
+- `copy_precedes_need_fails` is a checked counterexample: §12.1's recovery of
+  Ben by Ana, an admin outside Gifts.
+  1. Ana replaces Ben's keys at slot 13 and sends what she holds, the store key.
+  2. Carol's write chose the Gifts key and lost slot 13. Her device comes back
+     after Ana's rotation of the exposed store key, and a pass sends writes
+     first, so it lands at slot 18 with the Gifts key of its first attempt.
+  3. Carol's pass then sends Ben's copy, at slot 22. Ben reads Gifts at slot 18,
+     and no copy of the Gifts key below it is sealed to his new key.
+- `early_scan_stops_below_replacement`: the claim names the sealing key current
+  at each slot, but a recovered device reads old slots with its new pair. A key
+  scan that ended before the copy can't open Carol's write at slot 11 either,
+  and a scan after it can.
+
+`Follows` allows more than Rust does, as it asks nothing of fresh sealing keys
+or a write's authority, so `store_copy_precedes_need` and
+`copy_precedes_need_inside` cover those histories too. The counterexample's slots
+are what Rust claims in that order. No Rust differential runs this model. The
+floor is left out: `copies` keeps every copy claimed, as a store snapshot does
+for the slots a floor has passed.
+
 ## Unique values and owner rows
 
 [`Unique`](sequence/CovenSequence/Unique.lean), per audience:

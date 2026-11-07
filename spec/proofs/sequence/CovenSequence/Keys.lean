@@ -14,8 +14,9 @@ tokens. Hash equality checks the material committed under a named key.
 Distinct key identities stand for independently generated, non-aliasing
 secrets (§3's random-generation assumption). Encryption is idealized below by
 observation with the matching secret, not implemented or proved
-cryptographically. No theorem promises delivery, custody availability,
-fairness, or secrecy against an unobserved in-flight copy.
+cryptographically. No theorem here promises delivery, custody availability,
+fairness, or secrecy against an unobserved in-flight copy. `CopyOrder` says when
+a copy sits below the slot that needs it, and when it doesn't.
 -/
 namespace CovenSequence.Keys
 
