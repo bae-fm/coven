@@ -59,6 +59,11 @@ pub(super) struct Remote {
     /// Whether the last page of members says `"cursor": null` rather than
     /// leaving the cursor out.
     null_member_cursor: bool,
+    /// The shared links `list_shared_links` returns for the store's folder:
+    /// links to it and to its parents.
+    links: Vec<Value>,
+    /// Whether that reply says more links exist than it lists.
+    more_links: bool,
 }
 pub(super) fn file_metadata(path: &str, bytes: &[u8], state: &Remote) -> Value {
     json!({".tag":"file", "path_lower":path, "size":bytes.len(), "id":format!("id:{path}"),
@@ -423,6 +428,10 @@ pub(super) async fn endpoint(
                     .retain(|m| m["invitee"]["email"] != member && m["user"]["email"] != member);
             }
             reply(status)
+        }
+        "/2/sharing/list_shared_links" => {
+            assert_eq!(arg, json!({"path":"ns:namespace"}));
+            reply(json!({"links":state.links,"has_more":state.more_links}))
         }
         other => panic!("unexpected Dropbox request {other}"),
     }

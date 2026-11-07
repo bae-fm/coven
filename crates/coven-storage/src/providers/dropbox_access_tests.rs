@@ -469,3 +469,71 @@ async fn a_null_members_cursor_ends_the_listing() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     provider(&server.url).revoke_access("member").await.unwrap();
 }
+
+/// A shared link as `list_shared_links` lists it, to the store's folder or
+/// one of its parents, with the audience fields `link_permissions` carries.
+fn link(id: &str, permissions: Value) -> Value {
+    json!({".tag":"folder","url":format!("https://www.dropbox.com/scl/fo/{id}"),"id":id,
+        "name":"Household","link_permissions":permissions})
+}
+
+/// Removing Dan leaves the store folder's shared links in place: a link
+/// whose audience reaches accounts beyond the folder's members still reaches
+/// his, so revocation reports it as a grant that also reaches other
+/// accounts, and one whose audience it can't tell as unidentified. A link
+/// only the folder's members, the caller or no one can use is not reported,
+/// and no link is changed (§20.9).
+#[tokio::test]
+async fn revocation_reports_the_links_left_in_place() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    {
+        let mut remote = state.lock().unwrap();
+        remote.members.insert("member".into(), "editor".into());
+        remote.links = vec![
+            link("id:public", json!({"effective_audience":{".tag":"public"}})),
+            link("id:parent", json!({"resolved_visibility":{".tag":"team_only"}})),
+            link("id:password", json!({"resolved_visibility":{".tag":"password"}})),
+            link("id:signed-in", json!({"effective_audience":{".tag":"public_logged_in_only"}})),
+            link("id:pointer", json!({"effective_audience":{".tag":"no_one"}})),
+            link("id:members", json!({"effective_audience":{".tag":"members"}})),
+            link("id:folder-only", json!({"resolved_visibility":{".tag":"shared_folder_only"}})),
+            link("id:mine", json!({"resolved_visibility":{".tag":"only_you"}})),
+            link("id:unstated", json!({"can_revoke":false})),
+            link("id:newer", json!({"effective_audience":{".tag":"a_later_audience"}})),
+        ];
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let shares = provider(&server.url).revoke_access("member").await.unwrap();
+    let retained = |id: &str, reason| RetainedAccess { provider_id: id.into(), reason };
+    assert_eq!(
+        shares,
+        [
+            retained("id:public", RetainedAccessReason::OtherAccounts),
+            retained("id:parent", RetainedAccessReason::OtherAccounts),
+            retained("id:password", RetainedAccessReason::OtherAccounts),
+            retained("id:signed-in", RetainedAccessReason::OtherAccounts),
+            retained("id:unstated", RetainedAccessReason::UnidentifiedAccount),
+            retained("id:newer", RetainedAccessReason::UnidentifiedAccount),
+        ]
+    );
+    let remote = state.lock().unwrap();
+    assert!(!remote.members.contains_key("member"));
+    assert_eq!(remote.sharing_mutations, ["remove"]);
+}
+
+/// A path's links come in one reply, with no cursor for the rest: when
+/// Dropbox says more exist, revocation can't tell who they reach, and
+/// reports the store's folder as reached by grants it can't identify.
+#[tokio::test]
+async fn revocation_reports_links_it_could_not_list() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state.lock().unwrap().more_links = true;
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    assert_eq!(
+        provider(&server.url).revoke_access("member").await.unwrap(),
+        [RetainedAccess {
+            provider_id: "ns:namespace".into(),
+            reason: RetainedAccessReason::UnidentifiedAccount
+        }]
+    );
+}

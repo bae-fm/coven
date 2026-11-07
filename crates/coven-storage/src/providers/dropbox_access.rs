@@ -157,3 +157,54 @@ pub(super) fn remaining_parent_access(
     }
     Ok(retained)
 }
+
+/// The grants the shared links to the store's folder and its parents leave
+/// in place, from `sharing/list_shared_links` (§20.9). A link reaches an
+/// account taken off the folder unless only the folder's members, the
+/// caller or no one can use it. A link whose audience Dropbox doesn't state,
+/// or states with a value coven doesn't know, can't be judged, so it is
+/// reported as unidentified. Each link is named by the item it links to,
+/// never by its URL, which reaches the folder itself; one naming no item is
+/// named by the store's folder, `folder`. A path's links come in one reply
+/// with no cursor for the rest: when Dropbox says more exist, the folder is
+/// reported as reached by grants coven can't identify.
+pub(super) fn retained_links(
+    value: &Value,
+    folder: &str,
+) -> Result<Vec<RetainedAccess>, StorageError> {
+    let mut retained = Vec::new();
+    for link in http::array(value, "links")? {
+        let permissions = link
+            .get("link_permissions")
+            .filter(|permissions| permissions.is_object())
+            .ok_or(StorageFailure::Protocol.with_source("Dropbox link without permissions"))?;
+        let audience = ["effective_audience", "resolved_visibility"]
+            .into_iter()
+            .find_map(|field| permissions.get(field).filter(|value| !value.is_null()))
+            .map(|audience| http::string(audience, ".tag"))
+            .transpose()?;
+        let reason = match audience {
+            Some("no_one" | "members" | "shared_folder_only" | "only_you") => continue,
+            Some(
+                "public"
+                | "team"
+                | "team_only"
+                | "password"
+                | "team_and_password"
+                | "public_logged_in_only",
+            ) => RetainedAccessReason::OtherAccounts,
+            _ => RetainedAccessReason::UnidentifiedAccount,
+        };
+        let item = http::optional_string(link, "id")?.unwrap_or(folder);
+        retained.push(RetainedAccess { provider_id: item.into(), reason });
+    }
+    match value.get("has_more") {
+        Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => retained.push(RetainedAccess {
+            provider_id: folder.into(),
+            reason: RetainedAccessReason::UnidentifiedAccount,
+        }),
+        _ => return Err(StorageFailure::Protocol.with_source("invalid Dropbox link listing")),
+    }
+    Ok(retained)
+}

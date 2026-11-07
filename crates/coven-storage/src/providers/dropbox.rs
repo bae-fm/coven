@@ -1,4 +1,4 @@
-use super::dropbox_access::{remaining_parent_access, FolderMembers, MemberId};
+use super::dropbox_access::{remaining_parent_access, retained_links, FolderMembers, MemberId};
 use super::http::{self, Body, OAuthSession};
 use super::pagination::Pagination;
 use crate::session::SessionState;
@@ -173,6 +173,13 @@ impl DropboxStorage {
             method = "sharing/list_folder_members/continue";
             request = json!({"cursor":cursor});
         }
+    }
+    /// The grants the shared links to the store's folder and its parents
+    /// leave in place.
+    async fn links(&self) -> Result<Vec<RetainedAccess>, StorageError> {
+        let folder = format!("ns:{}", self.namespace()?);
+        let value = self.rpc("sharing/list_shared_links", json!({"path":folder})).await?;
+        retained_links(&value, &folder)
     }
     async fn remove_member(&self, member: &MemberId) -> Result<Vec<RetainedAccess>, StorageError> {
         let value = self.rpc("sharing/remove_folder_member",json!({"shared_folder_id":self.namespace()?,"member":member.selector(),"leave_a_copy":false})).await?;
@@ -461,6 +468,7 @@ impl ProviderOps for DropboxStorage {
         }
         remaining.retained.extend(self.members(email, true).await?.retained);
         remaining.retained.extend(completed);
+        remaining.retained.extend(self.links().await?);
         let mut shares = Vec::new();
         for share in remaining.retained {
             if !shares.contains(&share) {

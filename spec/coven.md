@@ -10465,7 +10465,7 @@ acceptance where the provider documents an undo that keeps the invite usable
   `already_mounted` counts as done. A cancel unmounts it with
   `sharing/unmount_folder`, which keeps the account a member, so the folder
   can be mounted again
-  ([sharing_folders.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/sharing_folders.stone)).
+  ([sharing.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/sharing.stone)).
   An unmount answered `access_error` with `unmounted`, `not_a_member` or
   `invalid_id` finds nothing mounted, and counts as done, so a cancel that
   failed after its unmount landed can be retried.
@@ -10480,6 +10480,22 @@ acceptance where the provider documents an undo that keeps the invite usable
   and Apple doesn't say whether it can accept the same URL again. Leaving
   could make the invite unusable while it is still open, so a cancel leaves
   the acceptance; it ends when the invite does.
+
+**Dropbox links left in place.** Taking an account back on Dropbox removes
+it from the shared folder's members, then reads the links that still reach
+the folder: `sharing/list_shared_links` with the folder's path lists the
+links to it and to its parents
+([sharing.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/sharing.stone)).
+Coven changes none of them. A link only the folder's members, the caller or
+no one can use doesn't reach the removed account; any other is reported in
+`AccessRemains` as reaching other accounts, named by the item it links to,
+never by its URL, which reaches the folder. A link whose audience Dropbox
+doesn't state, or states with a value coven doesn't know, is reported as
+unidentified, and so is the folder when the reply says more links exist,
+since a path's links come in one reply. A link to an item inside the folder
+isn't listed, and isn't reported: it reaches that item, not the folder.
+`get_folder_metadata`'s `link_metadata` isn't used: Dropbox documents
+it as possibly not returned, so its absence says nothing.
 
 **OneDrive floor replacement.** OneDrive's direct `PUT …/content` with
 `If-Match` let two writers holding one eTag both succeed, so the floor is
