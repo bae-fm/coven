@@ -8,12 +8,29 @@ use crate::syntax::{is_test_only, RustFile};
 pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>> {
     let sources =
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    // A file beside a root, such as `examples/bench_library.rs` for
+    // `examples/restore_bench.rs`'s `mod bench_library;`, matches the root
+    // layout too. A root another root declares is that root's module, not a
+    // root.
+    let roots = files
+        .iter()
+        .filter(|file| production(file) && is_crate_root(file))
+        .map(|file| {
+            let mut reached = BTreeMap::new();
+            collect(file, inferred_module(file), &sources, &mut reached);
+            (file, reached)
+        })
+        .collect::<Vec<_>>();
+    let declared = roots
+        .iter()
+        .flat_map(|(root, reached)| reached.keys().filter(|path| **path != root.relative_path))
+        .collect::<BTreeSet<_>>();
     let mut modules = BTreeMap::new();
-    for file in files.iter().filter(|file| production(file)) {
-        let path = Path::new(&file.relative_path);
-        if matches!(path.file_name().and_then(|name| name.to_str()), Some("lib.rs" | "main.rs")) {
-            let module = inferred_module(file);
-            collect(file, module, &sources, &mut modules);
+    for (root, reached) in &roots {
+        if !declared.contains(&root.relative_path) {
+            for (path, module) in reached {
+                modules.entry(path.clone()).or_insert_with(|| module.clone());
+            }
         }
     }
     // Isolated syntax fixtures and feature-specific source files can have no
@@ -24,6 +41,18 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>
         }
     }
     modules
+}
+
+/// A file cargo compiles as the root of a crate: `lib.rs` or `main.rs`
+/// anywhere, and each file directly under the package's `examples/`,
+/// `benches/` or `src/bin/`. Its `mod x;` is `x.rs` or `x/mod.rs` beside it.
+fn is_crate_root(file: &RustFile) -> bool {
+    let relative = file.relative_path.strip_prefix(file.package_root.as_str());
+    let components = relative.map(|path| path.split('/').collect::<Vec<_>>());
+    matches!(
+        components.as_deref(),
+        Some([.., "lib.rs" | "main.rs"] | ["examples" | "benches", _] | ["src", "bin", _])
+    )
 }
 
 fn production(file: &RustFile) -> bool {
@@ -106,10 +135,9 @@ fn included_items(file: &RustFile) -> Items<'_> {
 fn directories(file: &RustFile) -> (PathBuf, PathBuf) {
     let path = Path::new(&file.relative_path);
     let directory = path.parent().expect("source directory");
-    let child_directory = if matches!(
-        path.file_stem().and_then(|stem| stem.to_str()),
-        Some("lib" | "main" | "mod")
-    ) {
+    let child_directory = if is_crate_root(file)
+        || matches!(path.file_stem().and_then(|stem| stem.to_str()), Some("mod"))
+    {
         directory.to_path_buf()
     } else {
         directory.join(path.file_stem().expect("source stem"))
@@ -211,10 +239,7 @@ pub(crate) fn test_module_files(files: &[RustFile]) -> BTreeSet<String> {
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
     let mut reached = [BTreeSet::new(), BTreeSet::new()];
     for file in files {
-        if matches!(
-            Path::new(&file.relative_path).file_name().and_then(|name| name.to_str()),
-            Some("lib.rs" | "main.rs")
-        ) {
+        if is_crate_root(file) {
             reach(file, false, &sources, &mut reached);
         }
     }
