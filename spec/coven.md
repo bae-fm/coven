@@ -5142,6 +5142,15 @@ returns none: the lost phone shares its member's key with their other devices,
 so removing the device alone changes nothing at the provider, and replacing
 the key is the member's own change (§14.3).
 
+**Telling a device it is cut off.** A lost phone of the account that holds the
+store may have sent a grant that lands after the owner's other devices took the
+account back. The person tells a device of hers when the provider step is done:
+`confirm_device_cut_off` says nothing more of the lost device can land. That
+device takes back every account the lost device's invite shares named which no
+active member or open invite uses, as it takes back any account, so a grant
+that landed late is revoked (§20.9). It records no entry: any one of her
+devices doing it is enough.
+
 Removal changes no ciphertext or private key anyone already obtained. Confirmed
 cut-off prevents further reads and publishing. Until then, every device still
 applies the sequence's rules on who counts.
@@ -9650,7 +9659,20 @@ names it, whichever of the owner's devices recorded the share (§13.2).
   without recording the reply. Dan's account stays shared with nothing listed
   on either device
   ([`gone_device_strands_share`](proofs/storage/CovenStorage/ProviderAccess.lean)):
-  no device of Ana's takes that grant back.
+  no device of Ana's can tell that it landed or that it never will. Ana can:
+  when she has signed the phone out at the provider (§14.2), she tells the
+  laptop with `confirm_device_cut_off`. Nothing the phone sent lands after
+  that, so the laptop forgets what it confirmed for every account the phone's
+  shares named that nothing intends now, queues a revocation for each, and
+  Dan's account is taken back, however the phone's grant timed against its
+  own revocation
+  ([`take_back_closes`](proofs/storage/CovenStorage/ProviderAccess.lean)). An
+  account an active member or another open invite uses stays shared. While a
+  request to an account runs, the call fails with
+  `DbError::ProviderRequestRunning` and changes nothing, since that request's
+  reply may come before the confirmation; Ana calls again once it ends.
+  Ana's phone is on Dropbox, OneDrive or iCloud; on S3 the call is refused,
+  since no account is shared.
 
 #### 20.10 S3 member keys
 
@@ -12073,7 +12095,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Ending an account's work on every confirmation, without comparing the target with the intention, reports a removed member's access settled while the provider still grants it | `obsolete_finish_strands` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | *Body.* An obsolete revocation whose reply lists grants left in place, reported as `AccessRemains`, tells the owner to remove grants from an account the store intends shared | `obsolete_revocation_reported` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
 | *Body.* With two owner devices, a grant one sends lands after the other's revocation, and the sender stops for good before recording the reply: the account stays shared against the sequence, with nothing listed, and only the person's confirmation that the sender is cut off is left to take it back | `gone_device_strands_share` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §20.9 |
-| Once the person confirms a stopped owner device cut off, nothing it sent lands any more. The surviving device that reads the account as unintended then takes it back: its own steps end with nothing listed or running and no grant to the account at the provider | `take_back_closes`, `cut_off_ends_stranded_share`, `cut_off_stops_a_request_in_the_air` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §14.2, §20.9 |
+| *Body.* Once the person confirms a stopped owner device cut off, nothing it sent lands any more. The surviving device that reads the account as unintended then takes it back: its own steps end with nothing listed or running and no grant to the account at the provider | `take_back_closes`, `cut_off_ends_stranded_share`, `cut_off_stops_a_request_in_the_air` | `proofs/storage/CovenStorage/ProviderAccess.lean` | §14.2, §20.9 |
 | With an atomic copy, copy publication is create-once: same effect as a create, temporaries hidden, one winner per race, lost replies settled by the marker, a marker means the session's bytes | `copy_is_create`, `stage_hidden`, `race_one_winner`, `lost_reply_settles`, `marker_settles_bytes` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | When every publication of a name is a conditional copy, at most one is accepted in any order, and none if the name was taken | `every_copy_at_most_one`, `copied_at_most` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |

@@ -1656,6 +1656,11 @@ pub enum DbError {
     /// Another claim must settle before this device reserves a new number.
     ClaimPending,
 
+    /// A request to a provider account is between its target being fixed and
+    /// its reply, so a revocation queued now could come before grants it
+    /// must follow (`confirm_device_cut_off`, §20.9).
+    ProviderRequestRunning,
+
     /// No current claim exists for this operation.
     NoClaim,
 
@@ -7011,6 +7016,22 @@ impl CovenHandle {
         &self,
         device: DeviceId,
     ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError>;
+
+    /// The person did the provider step `remove_device` named for a lost
+    /// device of the account that holds the store, signing it out: nothing
+    /// it sent can land any more (§14.2). This device takes back every
+    /// account that device's invite shares named which no active member or
+    /// open invite uses, by revocations queued as any are, which a pass
+    /// runs; a revocation already done before this call is not trusted, as a
+    /// grant of the lost device may have landed after it (§20.9). Local: it
+    /// records no entry, since any one of the owner's devices acting is
+    /// enough. Needs the connection (`NoStorage`). Fails with
+    /// `Rejected(NotAllowed)` on a device that isn't of the member whose
+    /// account holds the store, for a device not gone for good, and on S3,
+    /// where no account is shared. While a request to one of those
+    /// accounts runs it fails with `DbError::ProviderRequestRunning`,
+    /// changing nothing; call again once it ends.
+    pub async fn confirm_device_cut_off(&self, device: DeviceId) -> Result<(), SyncError>;
 }
 
 impl CovenWrite<'_> {
