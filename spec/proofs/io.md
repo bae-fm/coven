@@ -296,6 +296,17 @@ not among them. The other states come from no store history: they are what a
 provider or custody answers, what is recorded, or what is moving, and
 `every_state` reaches them from those facts.
 
+[FileReach.lean](io/CovenIO/FileReach.lean) does the same for files, reading the
+upload queue of [`Files`](storage/CovenStorage/Files.lean). `staged_queued` and
+`queue_holds_synced` prove staging a file queues its upload, and a queued upload
+holds synced off. `queued_waits` proves it shows waiting to sync on an otherwise
+settled device, waiting its turn. `completed_empties` and `completed_synced`
+prove that once storage confirmed the last queued upload the device shows
+synced. `lost_file_fails` proves a confirmed absence is a lost file, whose record
+keeps the state at failed or what outranks it. What else holds a queued upload
+is a setting or a failed attempt, not a step of `Files`; `wait_facts` covers
+those.
+
 `Reason.state` maps each pending reason to one state or none, as a
 function. A wait names none (`waits_name_no_state`), and so does a verdict
 on an admin operation or on another member's writes, and a provider failure

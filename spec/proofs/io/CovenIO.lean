@@ -9,6 +9,7 @@ import CovenIO.RetryAnswer
 import CovenIO.SyncState
 import CovenIO.SyncReach
 import CovenIO.StoreReach
+import CovenIO.FileReach
 import CovenIO.Wakes
 import CovenIO.Downloads
 import CovenIO.Recheck

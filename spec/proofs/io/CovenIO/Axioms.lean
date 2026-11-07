@@ -159,6 +159,12 @@ import CovenIO
 #print axioms CovenIO.StoreReach.unopened_reached
 #print axioms CovenIO.StoreReach.removal_reached
 #print axioms CovenIO.StoreReach.replacement_reached
+#print axioms CovenIO.FileReach.staged_queued
+#print axioms CovenIO.FileReach.queue_holds_synced
+#print axioms CovenIO.FileReach.queued_waits
+#print axioms CovenIO.FileReach.completed_empties
+#print axioms CovenIO.FileReach.completed_synced
+#print axioms CovenIO.FileReach.lost_file_fails
 #print axioms CovenIO.Wakes.initial_covered
 #print axioms CovenIO.Wakes.covered_run
 #print axioms CovenIO.Wakes.write_never_lost
