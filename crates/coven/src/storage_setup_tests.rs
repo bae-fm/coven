@@ -1,4 +1,5 @@
 use super::*;
+use coven_merge::slot;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     ObjectPath, ObjectPrefix, Storage,
@@ -168,7 +169,7 @@ async fn a_setup_cut_past_its_point_of_no_return_finishes_once_sync_starts() {
             assert_eq!(setups[0].1, None, "{at:?}: still running");
         }
         phone.handle.start_sync().await.unwrap();
-        assert_eq!(phone.ended().await, OperationOutcome::Landed(Slot(1)), "{at:?}");
+        assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)), "{at:?}");
         assert!(phone.created().await, "{at:?}");
         assert_eq!(phone.handle.storage_config().await.unwrap(), Some(phone.storage.config()));
         // Setup deletes its own credentials after its row ends, before the
@@ -239,7 +240,7 @@ async fn a_second_setup_call_is_refused_while_one_runs() {
     resume.send(()).unwrap();
 
     setup.await.unwrap().unwrap();
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(Slot(1)));
+    assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)));
     phone.handle.close().await.unwrap();
 }
 
@@ -257,7 +258,7 @@ async fn cancelling_past_the_point_of_no_return_lets_setup_finish() {
     resume.send(()).unwrap();
 
     setup.await.unwrap().unwrap();
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(Slot(1)));
+    assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)));
     assert!(phone.created().await);
     phone.handle.close().await.unwrap();
 }
@@ -274,7 +275,7 @@ async fn a_dropped_setup_keeps_going() {
     assert!(setup.await.unwrap_err().is_cancelled());
     resume.send(()).unwrap();
 
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(Slot(1)));
+    assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)));
     assert!(phone.created().await);
     assert_eq!(phone.handle.storage_config().await.unwrap(), Some(phone.storage.config()));
     phone.handle.close().await.unwrap();
@@ -339,7 +340,7 @@ async fn setup_acting_at(
 /// The slot numbers storage holds for the phone's store.
 async fn stored_slots(phone: &Phone) -> Vec<u64> {
     let objects = phone.storage.list(&ObjectPrefix::all(phone.directory.id())).await.unwrap();
-    objects.iter().filter_map(|object| object.path.slot_number()).map(|slot| slot.0).collect()
+    objects.iter().filter_map(|object| object.path.slot_number()).map(|slot| slot.get()).collect()
 }
 
 /// Ana's first setup stores slot 1 but loses the reply. Setup keeps that
@@ -375,7 +376,7 @@ async fn a_setup_whose_slot_1_reply_is_lost_settles_that_claim() {
     if result.is_err() {
         phone.handle.start_sync().await.unwrap();
     }
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(coven_merge::Slot(1)));
+    assert_eq!(phone.ended().await, OperationOutcome::Landed(coven_merge::slot(1)));
     assert!(phone.created().await);
     let members = phone.handle.members().await.unwrap();
     assert_eq!(members.len(), 1, "{members:?}");

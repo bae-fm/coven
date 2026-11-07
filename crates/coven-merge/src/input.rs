@@ -66,9 +66,70 @@ pub struct WriteId {
     pub number: u64,
 }
 
-/// A positive position in the store's shared sequence (§5).
+/// A positive position in the store's shared sequence (§5). Slot 0 names
+/// nothing: a prefix applied through 0 has applied no slot, and that count
+/// stays a plain `u64`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Slot(pub u64);
+pub struct Slot(std::num::NonZeroU64);
+
+impl Slot {
+    /// The first slot of a sequence.
+    pub const FIRST: Self = Self(std::num::NonZeroU64::MIN);
+
+    /// The slot numbered `number`, or `None` for 0.
+    pub fn new(number: u64) -> Option<Self> {
+        std::num::NonZeroU64::new(number).map(Self)
+    }
+
+    /// The slot's number, at least 1.
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// The slots from a first one through a last number, in order: empty when
+/// the first lies past the last. The last stays a plain number, since 0
+/// (nothing applied) ends an empty range.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotRange {
+    next: Option<Slot>,
+    last: u64,
+}
+
+impl SlotRange {
+    /// The slots from `first` through slot number `last`.
+    pub fn new(first: Slot, last: u64) -> Self {
+        Self { next: Some(first).filter(|first| first.get() <= last), last }
+    }
+}
+
+impl Iterator for SlotRange {
+    type Item = Slot;
+
+    fn next(&mut self) -> Option<Slot> {
+        let slot = self.next?;
+        self.next = slot.get().checked_add(1).filter(|next| *next <= self.last).and_then(Slot::new);
+        Some(slot)
+    }
+}
+
+impl From<std::num::NonZeroU64> for Slot {
+    fn from(number: std::num::NonZeroU64) -> Self {
+        Self(number)
+    }
+}
+
+impl From<Slot> for std::num::NonZeroU64 {
+    fn from(slot: Slot) -> Self {
+        slot.0
+    }
+}
+
+/// Test support: the slot numbered `number`, which must be positive.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn slot(number: u64) -> Slot {
+    Slot::new(number).expect("a test slot number is positive")
+}
 
 /// Every synced row reaches the store or one circle (§15).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

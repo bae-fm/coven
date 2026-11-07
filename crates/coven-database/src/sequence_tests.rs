@@ -4,6 +4,7 @@ use crate::{
     DownloadedWriteStream, Slot,
 };
 use coven_format::write::WriteRecord;
+use coven_merge::slot;
 use std::io::Cursor;
 
 pub(crate) fn stream(write: DownloadedWrite) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
@@ -108,7 +109,7 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
         .apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
                 digest: [0x31; 32],
-                slot: Slot(applied + 1),
+                slot: slot(applied + 1),
                 header: coven_format::sequence::SlotHeader {
                     device,
                     claim: claim.number,
@@ -149,7 +150,7 @@ impl Database {
         let slot = match existing {
             Some(Ok(slot)) => slot,
             Some(Err(error)) => return Err(error),
-            None => Slot(applied + 1),
+            None => slot(applied + 1),
         };
         let state = self.store_state().await.unwrap();
         let author =
@@ -162,7 +163,7 @@ impl Database {
                     device,
                     claim: number,
                     author,
-                    after: slot.0 - 1,
+                    after: slot.get() - 1,
                 },
                 content: crate::SlotContent::Writes { size: 1, writes: vec![write] },
             },
@@ -187,16 +188,16 @@ impl Database {
         boundary: Option<crate::Boundary>,
     ) -> Result<(), DbError> {
         let applied = self.applied_slot().await?;
-        let slot = boundary.as_ref().map_or(Slot(applied + 1), crate::Boundary::entry);
+        let slot = boundary.as_ref().map_or(slot(applied + 1), crate::Boundary::entry);
         self.apply_slot::<crate::pending::tests::Record, std::io::Empty, _>(
             crate::IncomingSlot {
                 digest: [0x31; 32],
                 slot,
                 header: coven_format::sequence::SlotHeader {
                     device: coven_foundation::id_source::DeviceId(99),
-                    claim: slot.0,
+                    claim: slot.get(),
                     author: crate::tests::member(1),
-                    after: slot.0 - 1,
+                    after: slot.get() - 1,
                 },
                 content: crate::SlotContent::Admin {
                     original: admin_original(slot, &change),
@@ -220,13 +221,15 @@ fn admin_original(
     slot: Slot,
     change: &coven_format::admin::StoreChange,
 ) -> coven_format::floor::OriginalSlot {
-    let path =
-        coven_format::path::ObjectPath::slot(crate::tests::store_id(), slot.0.try_into().unwrap());
+    let path = coven_format::path::ObjectPath::slot(
+        crate::tests::store_id(),
+        slot.get().try_into().unwrap(),
+    );
     let header = coven_format::sequence::SlotHeader {
         device: coven_foundation::id_source::DeviceId(99),
-        claim: slot.0,
+        claim: slot.get(),
         author: crate::tests::member(1),
-        after: slot.0 - 1,
+        after: slot.get() - 1,
     };
     // Boundary tests inject the checked policy result directly. Keep the real
     // framed envelope without requiring their synthetic history to contain an
@@ -256,7 +259,7 @@ pub(crate) async fn delete_circle(
     if let Some(slot) = state.circle_deletions.get(&circle) {
         return Ok(*slot);
     }
-    let slot = Slot(db.applied_slot().await? + 1);
+    let slot = slot(db.applied_slot().await? + 1);
     state.circle_deletions.insert(circle, slot);
     db.admin_fixture(coven_format::admin::StoreChange::DeleteCircle { circle }, state, None)
         .await?;
@@ -271,7 +274,7 @@ pub(crate) async fn remove_device(
     if let Some(value) = state.devices.get_mut(&device) {
         value.state = crate::DeviceState::Removed;
     }
-    let slot = Slot(db.applied_slot().await.unwrap() + 1);
+    let slot = slot(db.applied_slot().await.unwrap() + 1);
     db.admin_fixture(coven_format::admin::StoreChange::RemoveDevice { device }, state, None)
         .await
         .unwrap();
@@ -322,7 +325,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
                     let included = db
                         .query_row(
                             "SELECT included FROM _coven_boundaries WHERE slot=?1",
-                            [boundary.entry().0.to_be_bytes()],
+                            [boundary.entry().get().to_be_bytes()],
                             |r| r.get::<_, Option<Vec<u8>>>(0),
                         )
                         .unwrap();
@@ -342,7 +345,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
         .into_iter()
         .enumerate()
         .map(|(i, write)| {
-            let slot = Slot(first + i as u64 + 1);
+            let slot = slot(first + i as u64 + 1);
             let device = write.header.header.position.device;
             crate::IncomingSlot {
                 digest: [0x31; 32],
@@ -354,7 +357,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
                         .devices
                         .get(&device)
                         .map_or(crate::tests::member(1), |d| d.member),
-                    after: slot.0 - 1,
+                    after: slot.get() - 1,
                 },
                 content: crate::SlotContent::Writes { size: 1, writes: vec![write] },
             }

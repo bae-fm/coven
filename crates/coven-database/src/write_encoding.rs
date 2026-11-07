@@ -131,6 +131,12 @@ pub(crate) fn counter(bytes: Vec<u8>) -> rusqlite::Result<u64> {
     Ok(u64::from_be_bytes(bytes))
 }
 
+/// A stored slot number: a counter that is positive. Slot 0 names no slot,
+/// so a stored 0 is damage (§19.3).
+pub(crate) fn slot_counter(bytes: Vec<u8>) -> rusqlite::Result<coven_merge::Slot> {
+    coven_merge::Slot::new(counter(bytes)?).ok_or_else(|| damaged(0, Type::Blob))
+}
+
 #[cfg(test)]
 #[path = "write_encoding_tests.rs"]
 mod tests;

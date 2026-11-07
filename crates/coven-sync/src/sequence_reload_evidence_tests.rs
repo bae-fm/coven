@@ -1,5 +1,6 @@
 use super::*;
 use crate::sequence_sync::tests::*;
+use coven_merge::slot;
 use coven_storage::Storage;
 use std::time::UNIX_EPOCH;
 
@@ -68,7 +69,7 @@ async fn a_floor_naming_snapshots_out_of_order_or_below_its_first_kept_slot_is_d
     let mut reordered = floor.clone();
     reordered.announcements.reverse();
     let mut below = floor;
-    below.header.first = Slot(below.header.at + 2);
+    below.header.first = slot(below.header.at + 2);
     for damaged in [reordered, below] {
         let result = authenticate(damaged).await;
         assert!(
@@ -119,7 +120,7 @@ async fn a_snapshot_whose_author_its_history_lacks_at_its_coverage_is_damaged() 
         .await
         .unwrap()
         .into_iter()
-        .filter(|original| original.slot.0 < added)
+        .filter(|original| original.slot.get() < added)
         .collect();
     let mut short_ring = ring.clone();
     let short = History::restore(&before, group.store, &mut short_ring, &ana.identity).unwrap();
@@ -316,7 +317,7 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
         .await
         .unwrap()
         .into_iter()
-        .filter(|original| original.slot.0 <= covers)
+        .filter(|original| original.slot.get() <= covers)
         .collect();
     let moved = originals
         .iter()
@@ -324,10 +325,10 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
         .find(|original| {
             let object = coven_format::sealed_slot::BoundedSlot::decode(&original.object).unwrap();
             matches!(object.prefix.kind, coven_format::sealed_slot::SlotKind::Admin)
-                && originals.iter().all(|other| other.slot.0 != original.slot.0 - 1)
+                && originals.iter().all(|other| other.slot.get() != original.slot.get() - 1)
         })
         .expect("the laptop's registration follows the note's writes slot");
-    let to = moved.slot.0 - 1;
+    let to = moved.slot.get() - 1;
 
     let ring = ana.sync.keys.read().unwrap().unwrap();
     let announced = history.announcements[&slot].clone();
@@ -344,7 +345,7 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
     let mut plain = opened_stream(&bytes, signed, &path, prefix, &key());
     // The record's wire form: its slot, then its object's length and bytes.
     let found = [
-        &moved.slot.0.to_be_bytes()[..],
+        &moved.slot.get().to_be_bytes()[..],
         &(moved.object.len() as u32).to_be_bytes(),
         &moved.object,
     ]
@@ -359,7 +360,7 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
     let (snapshot, digest) =
         sealed_stream(&path, prefix, Some(prefix_signature), key(), &plain, &ana.identity);
 
-    let slot_path = ObjectPath::slot(group.store, slot.0.try_into().unwrap());
+    let slot_path = ObjectPath::slot(group.store, slot.get().try_into().unwrap());
     let original = group.storage.read_object(&slot_path, None).await.unwrap().bytes.to_vec();
     let (header, SlotFrame::Announcement(announcement)) =
         slot_object::bounded_plaintext(&original, &slot_path, &ring).unwrap()
@@ -446,7 +447,7 @@ async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
         .await
         .unwrap()
         .into_iter()
-        .map(|original| original.slot.0)
+        .map(|original| original.slot.get())
         .collect();
     let routes = |copy: &coven_format::floor::OriginalSlot| {
         let object = coven_format::sealed_slot::BoundedSlot::decode(&copy.object).unwrap();
@@ -458,11 +459,11 @@ async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
     let members: Vec<_> = floor.copies.iter().map(routes).collect();
     assert_eq!(members, [ana.identity.member(), carol.identity.member()]);
     for index in 0..floor.copies.len() {
-        let below = index.checked_sub(1).map_or(0, |before| floor.copies[before].slot.0);
-        let above = floor.copies.get(index + 1).map_or(floor.header.at + 1, |next| next.slot.0);
+        let below = index.checked_sub(1).map_or(0, |before| floor.copies[before].slot.get());
+        let above = floor.copies.get(index + 1).map_or(floor.header.at + 1, |next| next.slot.get());
         let to = (below + 1..above).find(|slot| !originals.contains(slot)).unwrap();
         let mut copies = floor.copies.clone();
-        copies[index].slot = Slot(to);
+        copies[index].slot = slot(to);
         plant(floor.header.clone(), copies, &ana.identity).await;
         let moved = ObjectPath::slot(group.store, to.try_into().unwrap());
         restore_refused(&group, &ana, |damaged| {

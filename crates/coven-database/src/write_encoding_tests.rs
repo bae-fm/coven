@@ -601,3 +601,29 @@ fn a_stored_audience_that_does_not_decode_is_damaged_database() {
         assert!(matches!(read(broken), Err(DbError::DamagedDatabase)), "{broken}");
     }
 }
+
+/// Slot 0 names no slot: a stored 0 where a slot belongs is damage.
+#[test]
+fn a_stored_slot_number_of_zero_is_damage() {
+    let stored = |number: u64| super::slot_counter(number.to_be_bytes().to_vec());
+    assert_eq!(stored(1).unwrap(), coven_merge::slot(1));
+    assert!(matches!(DbError::from(stored(0).unwrap_err()), DbError::DamagedDatabase));
+}
+
+/// A slot kept in journaled JSON reads back only as a positive number.
+#[test]
+fn a_journaled_slot_number_of_zero_is_refused() {
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct Kept {
+        #[serde(with = "crate::slot_json")]
+        one: coven_merge::Slot,
+        #[serde(with = "crate::slot_json::list")]
+        many: Vec<coven_merge::Slot>,
+    }
+    let kept = Kept { one: coven_merge::slot(3), many: vec![coven_merge::slot(1)] };
+    let json = serde_json::to_string(&kept).unwrap();
+    assert_eq!(json, r#"{"one":3,"many":[1]}"#);
+    assert_eq!(serde_json::from_str::<Kept>(&json).unwrap(), kept);
+    assert!(serde_json::from_str::<Kept>(r#"{"one":0,"many":[1]}"#).is_err());
+    assert!(serde_json::from_str::<Kept>(r#"{"one":3,"many":[1,0]}"#).is_err());
+}

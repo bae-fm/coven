@@ -81,7 +81,7 @@ pub(crate) fn checked_change(
     let active = state.active_member(author).is_some();
     let is_admin = state.active_admin(author);
     let permitted = match change {
-        CreateStore { .. } => slot == Slot(1) && state.store.is_none(),
+        CreateStore { .. } => slot == Slot::FIRST && state.store.is_none(),
         AddDevice { .. } => active,
         _ => active && state.device_acts_for(&writer, author),
     };
@@ -316,7 +316,7 @@ pub(crate) fn checked_change(
                     && prior.covers > announcement.covers
             }) || boundaries.iter().any(|prior| {
                 prior.boundary.snapshot().audience == announcement.snapshot.audience
-                    && prior.boundary.entry().0 > announcement.covers
+                    && prior.boundary.entry().get() > announcement.covers
             }) {
                 return Err(NotAllowed);
             }

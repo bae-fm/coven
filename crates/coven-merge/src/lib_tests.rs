@@ -35,7 +35,7 @@ pub(crate) fn stamp(n: u64) -> Timestamp {
 }
 pub(crate) fn claim_order(timestamp: Timestamp) -> ClaimOrder {
     ClaimOrder::Published {
-        slot: Slot((timestamp.milliseconds() << 16) | u64::from(timestamp.counter())),
+        slot: crate::slot((timestamp.milliseconds() << 16) | u64::from(timestamp.counter())),
         number: timestamp.device().0,
     }
 }
@@ -437,7 +437,7 @@ pub(crate) fn generated_view(
             }
             if let RemovalRow::Present { deleted_circle, .. } = view.data.get_mut(r).unwrap() {
                 *deleted_circle = (r.audience == circle(0, 2).audience && seed.is_multiple_of(7))
-                    .then_some(Slot(1));
+                    .then_some(crate::slot(1));
             }
         }
     }
@@ -498,7 +498,7 @@ mod differential {
         }
     }
     fn slot(number: u64) -> Slot {
-        Slot(number + 1)
+        crate::slot(number + 1)
     }
 
     struct Comparison {
@@ -568,7 +568,7 @@ mod differential {
                 let key = (r.table.clone(), r.audience.clone(), name.clone(), claim.value.clone());
                 let next = claims.len();
                 let key = *claims.entry(key).or_insert(next);
-                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": match claim.order { ClaimOrder::Published { slot, number } => (u128::from(slot.0) << 64) | u128::from(number), ClaimOrder::Local { number } => (1u128 << 127) | u128::from(number) }.to_string(), "other": false}));
+                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": match claim.order { ClaimOrder::Published { slot, number } => (u128::from(slot.get()) << 64) | u128::from(number), ClaimOrder::Local { number } => (1u128 << 127) | u128::from(number) }.to_string(), "other": false}));
             }
             let (deleted, started) = match data {
                 RemovalRow::Present { deleted_circle, started, .. } => {

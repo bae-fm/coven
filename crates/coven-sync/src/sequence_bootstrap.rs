@@ -8,6 +8,7 @@ use coven_database::LoadStep;
 use coven_format::{floor::OriginalSlot, sealed_slot::SlotKind};
 use coven_foundation::id_source::{DeviceId, KeyId};
 use coven_foundation::progress::ProgressReport;
+use coven_merge::{Slot, SlotRange};
 use coven_storage::{ObjectPath, StorageFailure};
 
 /// What storage supplied to a member that holds no store key yet.
@@ -137,8 +138,9 @@ impl SequenceSync {
     }
 
     /// Start the key scan after `slot`: a joiner's copies follow its invite.
-    pub(crate) fn scan_after(&self, session: &mut Session, slot: u64) {
-        session.scanned = session.scanned.max(slot.saturating_add(1));
+    pub(crate) fn scan_after(&self, session: &mut Session, after: u64) -> Result<(), SyncError> {
+        session.scanned = session.scanned.max(next_slot(after)?);
+        Ok(())
     }
 
     /// The floor supplies copies and the first kept slot before keys are held.
@@ -161,7 +163,7 @@ impl SequenceSync {
         let mut keys = Vec::new();
         let mut needed = None;
         let mut routed_past = false;
-        let mut next = session.scanned.max(1);
+        let mut next = session.scanned;
         let mut missed = false;
         loop {
             let first = match floor_object::routed_keys(
@@ -177,9 +179,9 @@ impl SequenceSync {
                     needed = Some(routing.key);
                     keys.extend(routing.keys);
                     routed_past |= routing.routed_past;
-                    routing.first.0
+                    routing.first
                 }
-                None => 1,
+                None => Slot::FIRST,
             };
             if keys.iter().any(|key| matches!(key, RoutedKey::Store(_)))
                 || (missed && first <= next)
@@ -187,11 +189,11 @@ impl SequenceSync {
                 break;
             }
             next = next.max(first);
-            let mut reads = super::SlotReads::new(self, next, u64::MAX);
+            let mut reads = super::SlotReads::new(self, SlotRange::new(next, u64::MAX));
             // The end of the sequence, found once this pass reads a slot.
             let mut located = None;
             while let Some(input) = reads.next().await? {
-                let path = self.path(next)?;
+                let path = self.path(next);
                 scanned += 1;
                 bytes += input.object().size;
                 let read = async {
@@ -208,7 +210,7 @@ impl SequenceSync {
                                     as usize,
                                 &path,
                             )?;
-                            let original = OriginalSlot { slot: coven_merge::Slot(next), object };
+                            let original = OriginalSlot { slot: next, object };
                             keys.extend(crate::snapshot_object::routed_key(
                                 &original,
                                 self.store(),
@@ -227,11 +229,11 @@ impl SequenceSync {
                 if let Some(scan) = scan.as_deref_mut() {
                     let end = match located {
                         Some(end) => end,
-                        None => *located.insert(self.locate_end(next).await?),
+                        None => *located.insert(self.locate_end(next.get()).await?),
                     };
-                    scan.count(next, end);
+                    scan.count(next.get(), end);
                 }
-                next = next_slot(next)?;
+                next = next_slot(next.get())?;
             }
             if keys.iter().any(|key| matches!(key, RoutedKey::Store(_))) {
                 break;

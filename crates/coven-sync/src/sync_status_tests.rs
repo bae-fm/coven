@@ -5,7 +5,8 @@ use crate::{
 };
 use coven_database::{EntryTarget, OperationRejection, WriteCutoff};
 use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
-use coven_merge::{Audience, Slot};
+use coven_merge::slot;
+use coven_merge::Audience;
 use coven_storage::{OAuthAccess, ObjectPath};
 use serde_json::{json, Value};
 use std::time::{Duration, UNIX_EPOCH};
@@ -176,7 +177,7 @@ fn reasons() -> Vec<PendingReason> {
         PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 }),
         PendingReason::NoStorage,
         PendingReason::Refused(Refusal::Parse { cause: None }),
-        PendingReason::WritesRefused { cutoff: Slot(3), cause: WriteCutoff::DeviceRemoved },
+        PendingReason::WritesRefused { cutoff: slot(3), cause: WriteCutoff::DeviceRemoved },
         PendingReason::ProviderPending {
             action: ProviderAccessAction::Grant,
             account: "carol@example.org".into(),
@@ -232,7 +233,7 @@ fn upload_record(n: u128, reason: PendingReason) -> PendingRecord {
 }
 
 fn record(reason: PendingReason) -> PendingRecord {
-    PendingRecord::new(PendingSubject::Slot(Slot(7)), reason)
+    PendingRecord::new(PendingSubject::Slot(slot(7)), reason)
 }
 
 /// How a pass ended, of every kind, with every provider failure and every
@@ -250,7 +251,7 @@ fn passes() -> Vec<Option<LastPass>> {
     ];
     passes.extend(failures().into_iter().map(|failure| failed(StatusFailure::Storage(failure))));
     for reason in reasons() {
-        passes.push(Some(LastPass::Blocked { slot: Slot(7), reason: reason.clone(), error: None }));
+        passes.push(Some(LastPass::Blocked { slot: slot(7), reason: reason.clone(), error: None }));
         passes.push(failed(StatusFailure::Operation(record(reason))));
     }
     passes
@@ -451,7 +452,7 @@ fn cases() -> Vec<Facts> {
         }
     }
     let cooling = RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(60)) };
-    let blocked = Some(LastPass::Blocked { slot: Slot(7), reason: key_unavailable(), error: None });
+    let blocked = Some(LastPass::Blocked { slot: slot(7), reason: key_unavailable(), error: None });
     let limited = Some(LastPass::Failed {
         failure: StatusFailure::Storage(StorageFailure::RateLimited),
         error: "slow down".into(),
@@ -601,7 +602,7 @@ fn a_waiting_pass_is_never_synced() {
     let stopped = RetrySync::Stopped;
     let started = RetrySync::Started { cooling_until: None };
     let cooling = RetrySync::Started { cooling_until: Some(until) };
-    let blocked = LastPass::Blocked { slot: Slot(7), reason: key_unavailable(), error: None };
+    let blocked = LastPass::Blocked { slot: slot(7), reason: key_unavailable(), error: None };
     let limited = LastPass::Failed {
         failure: StatusFailure::Storage(StorageFailure::RateLimited),
         error: "slow down".into(),

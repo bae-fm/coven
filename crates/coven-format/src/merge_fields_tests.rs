@@ -4,6 +4,7 @@ use crate::snapshot::{SnapshotEncoder, SnapshotRecord};
 use crate::test_utils as fixture;
 use crate::value::Slot;
 use coven_foundation::id_source::DeviceId;
+use coven_merge::slot;
 use coven_merge::{Parent, RowId, RowState};
 
 /// Encode reference parent generations using its snapshot field bytes.
@@ -89,7 +90,7 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
         match record {
             SnapshotRecord::Write(write) => {
                 take_field(&mut input, &write.id, encode_write_id, decode_write_id);
-                assert_eq!(Slot::get(&mut input).unwrap(), write.slot);
+                assert_eq!(<Slot as Wire>::get(&mut input).unwrap(), write.slot);
                 take_field(&mut input, &write.timestamp, encode_timestamp, decode_timestamp);
                 assert_eq!(u64::get(&mut input).unwrap(), write.read_through);
                 input.finish().unwrap();
@@ -291,7 +292,7 @@ fn schema_loss_uses_a_positive_u32_while_reset_ignores_retain_their_entry() {
         assert_eq!(decode_change_verdict(&bytes).unwrap(), verdict);
     }
     // Resets create no losses; an ignored change keeps the reset's entry.
-    let entry = Slot(u64::MAX);
+    let entry = slot(u64::MAX);
     let bytes = encode_change_verdict(&ChangeVerdict::Ignored(entry)).unwrap();
     assert_eq!(bytes[0], 5);
     assert_eq!(decode_change_verdict(&bytes).unwrap(), ChangeVerdict::Ignored(entry));
@@ -371,7 +372,7 @@ fn constraint_order_is_logical_with_absent_predicates_first() {
 
 #[test]
 fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
-    let entries = [Slot(1), Slot(u64::MAX), Slot(u64::MAX - 1)];
+    let entries = [slot(1), slot(u64::MAX), slot(u64::MAX - 1)];
     let rules = entries.map(Rule::DeletedCircle);
     let expected = BTreeSet::from(rules.clone());
     assert_eq!(decode_rules(&encode_rules(&expected).unwrap()).unwrap(), expected);
@@ -383,13 +384,10 @@ fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
             Err(Error::Invalid { field: "set", rule: FormatRule::Order })
         );
     }
-    let invalid = BTreeSet::from([Rule::DeletedCircle(Slot(0))]);
-    for error in [
-        encode_rules(&invalid).unwrap_err(),
+    assert_eq!(
         decode_rules(&[0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(),
-    ] {
-        assert_eq!(error, Error::Invalid { field: "positive number", rule: FormatRule::Required });
-    }
+        Error::Invalid { field: "positive number", rule: FormatRule::Required }
+    );
 }
 
 #[test]

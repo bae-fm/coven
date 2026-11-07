@@ -49,7 +49,7 @@ fn claim(value: &str, ms: u64) -> Constraints {
             UniqueClaim {
                 value: value.as_bytes().to_vec(),
                 order: coven_merge::ClaimOrder::Published {
-                    slot: coven_merge::Slot(ms),
+                    slot: coven_merge::slot(ms + 1),
                     number: 1,
                 },
             },
@@ -189,7 +189,7 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
         ["slug"].into(),
         UniqueClaim {
             value: b"shared".to_vec(),
-            order: coven_merge::ClaimOrder::Published { slot: coven_merge::Slot(0), number: 1 },
+            order: coven_merge::ClaimOrder::Published { slot: coven_merge::slot(1), number: 1 },
         },
     );
     let view = IndexedView::new(BTreeMap::from([

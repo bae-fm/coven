@@ -2,7 +2,7 @@
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::{
     sqlite::DatabaseConnection,
-    write_encoding::{counter, decoded},
+    write_encoding::{counter, decoded, slot_counter},
     DbError,
 };
 use coven_merge::{MergeError, Slot, Timestamp, WriteId, WriteOracle};
@@ -86,7 +86,7 @@ pub(crate) fn stored_write(
                     &r.get::<_, Vec<u8>>(1)?,
                 ))?,
                 read_through: counter(r.get(2)?)?,
-                slot: r.get::<_, Option<Vec<u8>>>(3)?.map(counter).transpose()?.map(Slot),
+                slot: r.get::<_, Option<Vec<u8>>>(3)?.map(slot_counter).transpose()?,
             })
         },
     )?;

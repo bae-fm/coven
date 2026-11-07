@@ -60,7 +60,7 @@ async fn fixture(db: &crate::Database) {
         ),
     ]
     .into();
-    let deletion = coven_merge::Slot(1);
+    let deletion = coven_merge::slot(1);
     state.circle_deletions.insert(CircleId(uuid::Uuid::from_u128(8)), deletion);
     db.admin_fixture(
         coven_format::admin::StoreChange::DeleteCircle {

@@ -98,7 +98,7 @@ impl SequenceSync {
         Ok(self
             .database
             .settle_claim(ClaimRead::Compacted {
-                first: floor.header.first.0,
+                first: floor.header.first.get(),
                 covers: snapshot.announcement().covers,
                 last_claim,
                 digest,
@@ -218,7 +218,7 @@ impl SequenceSync {
         self.remove_compacted_attempts(claim, floor.as_ref()).await?;
         if result == ClaimSettlement::Landed {
             if let Some(floor) =
-                floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
+                floor.filter(|floor| floor.header.first.get() > session.through.saturating_add(1))
             {
                 self.reload_floor(session, floor, ring, member, None).await?;
             }
@@ -254,7 +254,7 @@ impl SequenceSync {
         let claim = self.database.current_claim().await?.ok_or(coven_database::DbError::NoClaim)?;
         let path = claim.attempts.last().expect("claim has an attempt");
         let at = path.slot_number().expect("claim slot");
-        if at.0 > session.through {
+        if at.get() > session.through {
             let input =
                 match crate::object_input::ObjectInput::retained(&self.database, path).await? {
                     Some(input) => input,
@@ -369,7 +369,7 @@ impl SequenceSync {
             }
             let count = prepared.len() as u64;
             let at = next_slot(session.through)?;
-            let path = self.path(at)?;
+            let path = self.path(at);
             let prefix = SlotObjectPrefix {
                 format: coven_format::FormatVersion::CURRENT,
                 key: session.history.sending_key(ring, member.member(), &Audience::Store)?,
@@ -421,8 +421,12 @@ impl SequenceSync {
             let author = member.clone();
             let device = self.device;
             let seal = move |number| -> Result<_, coven_database::DbError> {
-                let header =
-                    SlotHeader { device, claim: number, author: author.member(), after: at - 1 };
+                let header = SlotHeader {
+                    device,
+                    claim: number,
+                    author: author.member(),
+                    after: at.get() - 1,
+                };
                 let head = coven_format::writes_slot::encode_head(&header, &path, count)?;
                 let input = Cursor::new(head).chain(input);
                 Ok(ClaimAttempt {

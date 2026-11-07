@@ -308,7 +308,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
         ClaimRead::Kept(None) => (ClaimSettlement::Retry, "retry"),
         ClaimRead::Compacted { first, covers, last_claim, digest } => {
             let slot = attempt.slot_number().ok_or(DbError::InvalidClaimCoverage)?;
-            if first <= slot.0 || covers < first - 1 {
+            if first <= slot.get() || covers < first - 1 {
                 return Err(DbError::InvalidClaimCoverage);
             }
             if last_claim < claim.number {

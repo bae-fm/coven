@@ -23,7 +23,7 @@ impl ObjectPath {
     pub fn slot_number(&self) -> Option<crate::value::Slot> {
         self.relative()
             .strip_prefix("seq/")
-            .map(|number| crate::value::Slot(number.parse().expect("validated slot")))
+            .map(|number| number.parse::<NonZeroU64>().expect("validated slot").into())
     }
     /// The store's conditionally replaced floor (§16.4).
     pub fn floor(store: StoreId) -> Self {

@@ -148,7 +148,7 @@ impl Database {
         .await
     }
 
-    /// The slot each of these devices had read through when it made its
+    /// The slot count each of these devices had read through when it made its
     /// last published write, for those that published one. A device's
     /// writes are numbered as it commits them and its applied slot never
     /// goes back, so its last published write read furthest, and every
@@ -156,7 +156,7 @@ impl Database {
     pub async fn published_reads(
         &self,
         devices: BTreeSet<DeviceId>,
-    ) -> Result<BTreeMap<DeviceId, Slot>, DbError> {
+    ) -> Result<BTreeMap<DeviceId, u64>, DbError> {
         self.call(move |inner| {
             inner.access.with_committed(|db| {
                 let mut reads = BTreeMap::new();
@@ -165,7 +165,7 @@ impl Database {
                         .query(
                             &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
                             [device],
-                            |r| crate::store_state_tables::slot(r, 0),
+                            |r| crate::write_encoding::counter(r.get(0)?),
                         )?
                         .pop()
                     {
@@ -271,7 +271,7 @@ impl Database {
                 writer.transaction(|db| {
                     let kept: bool = db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_cutoffs c JOIN _coven_devices d ON d.device=?1 WHERE c.slot=?2 AND (c.device=d.device OR c.member=d.member))",
-                        params![device, stop.0.to_be_bytes()],
+                        params![device, stop.get().to_be_bytes()],
                         |r| r.get(0),
                     )?;
                     if !kept {
@@ -284,7 +284,7 @@ impl Database {
                         "INSERT INTO _coven_file_scans(device,slot) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET slot=excluded.slot",
                         params![
                             device,
-                            stop.0.to_be_bytes()
+                            stop.get().to_be_bytes()
                         ],
                     )?;
                     Ok(true)

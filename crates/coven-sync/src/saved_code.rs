@@ -44,10 +44,10 @@ pub(crate) fn save(
             }
             None | Some(PersonRestoreCode::Ambiguous) => None,
         }
-        .filter(|saved| saved.code.store == code.store && saved.named_at > name.named_at.0);
+        .filter(|saved| saved.code.store == code.store && saved.named_at > name.named_at);
         let (label, named_at) = match &newer {
             Some(saved) => (saved.name.as_str(), saved.named_at),
-            None => (name.name.as_str(), name.named_at.0),
+            None => (name.name.as_str(), name.named_at),
         };
         Ok::<_, SyncError>(RestoreCodeChange::Write(encode(person, label, named_at, code)?))
     })
@@ -91,19 +91,19 @@ pub fn follow_name<E: From<KeyError>>(
                     return Ok(RestoreCodeChange::Keep);
                 };
                 tracing::warn!(?reason, "replacing an unreadable saved restore code");
-                let bytes = encode(person, &name.name, name.named_at.0, &code)?;
+                let bytes = encode(person, &name.name, name.named_at, &code)?;
                 return Ok(RestoreCodeChange::Write(bytes));
             }
         };
-        if saved.named_at >= name.named_at.0 {
+        if saved.named_at >= name.named_at {
             return Ok(RestoreCodeChange::Keep);
         }
         tracing::debug!(
-            from = saved.named_at,
-            to = name.named_at.0,
+            from = saved.named_at.get(),
+            to = name.named_at.get(),
             "rewriting the saved restore code's store name"
         );
-        let bytes = encode(person, &name.name, name.named_at.0, &saved.code)?;
+        let bytes = encode(person, &name.name, name.named_at, &saved.code)?;
         Ok(RestoreCodeChange::Write(bytes))
     })
 }
@@ -183,7 +183,7 @@ pub fn read_saved_code(
 fn encode(
     person: &PersonEntries,
     name: &str,
-    named_at: u64,
+    named_at: Slot,
     code: &RestoreCode,
 ) -> Result<SecretBytes, KeyError> {
     let encode = |name: &str| {

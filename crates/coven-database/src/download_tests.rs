@@ -541,7 +541,7 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
         if included == 2 {
             db.receive(writes[1].clone().into()).await.unwrap();
         }
-        let entry = crate::Slot(db.applied_slot().await.unwrap() + 1);
+        let entry = coven_merge::slot(db.applied_slot().await.unwrap() + 1);
         assert!(db.install_reset_fixture(entry, audience.clone(), included).await.unwrap());
         db.close().await.unwrap();
         let db = circle_db(&store).await;
@@ -674,12 +674,12 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
     sql(&source, "UPDATE notes SET title='first successor'").await.unwrap();
     sql(&source, "UPDATE notes SET title='second successor'").await.unwrap();
     let mut writes = records(&source);
-    let entry = crate::Slot(2);
+    let entry = coven_merge::slot(2);
     receiver.receive(writes[0].clone().into()).await.unwrap();
     receiver.install_reset_fixture(entry, Audience::Store, 1).await.unwrap();
     // Both successors were authored after reading the reset entry.
     for write in &mut writes[1..] {
-        write.header.read_through = entry.0;
+        write.header.read_through = entry.get();
     }
     for write in &writes[1..] {
         assert_eq!(receiver.receive(write.clone().into()).await.unwrap(), ApplyOutcome::Applied);

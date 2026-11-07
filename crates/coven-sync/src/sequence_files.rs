@@ -214,8 +214,8 @@ impl SequenceSync {
             .await?;
         Ok(move |since: Slot| {
             others.iter().all(|(device, added)| {
-                added.is_some_and(|added| added > since.0)
-                    || reads.get(device).is_some_and(|read| *read >= since)
+                added.is_some_and(|added| added > since.get())
+                    || reads.get(device).is_some_and(|read| *read >= since.get())
             })
         })
     }
@@ -247,9 +247,10 @@ impl SequenceSync {
             return Ok(());
         }
         let mut referenced = BTreeSet::new();
-        let first = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
-        for number in first..=session.through {
-            let path = self.path(number)?;
+        let first =
+            session.floor.as_ref().map_or(coven_merge::Slot::FIRST, |floor| floor.header.first);
+        for number in coven_merge::SlotRange::new(first, session.through) {
+            let path = self.path(number);
             let input = match ObjectInput::retained(&self.database, &path).await? {
                 Some(input) => input,
                 None => self.fetch(&path).await?.ok_or(StorageFailure::NotFound)?,

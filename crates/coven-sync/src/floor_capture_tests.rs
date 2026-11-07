@@ -77,7 +77,7 @@ async fn a_later_floor_advances_while_a_slot_deletion_is_still_failing() {
         .await;
     group.clock.set(grace(1));
     ana.sync.pass().await.unwrap();
-    let first_floor = stored_floor(&ana).await.header.first.0;
+    let first_floor = stored_floor(&ana).await.header.first.get();
     assert!(first_floor > 1);
     let failing = ana
         .database()
@@ -101,7 +101,7 @@ async fn a_later_floor_advances_while_a_slot_deletion_is_still_failing() {
     ana.sync.snapshot(Audience::Store).await.unwrap();
     group.clock.set(grace(3));
     ana.sync.pass().await.unwrap();
-    let second_floor = stored_floor(&ana).await.header.first.0;
+    let second_floor = stored_floor(&ana).await.header.first.get();
     assert!(second_floor > first_floor, "{second_floor} {first_floor}");
     // The new floor's own deletions ran past the refused one.
     let between = ObjectPath::slot(group.store, first_floor.try_into().unwrap());
@@ -133,7 +133,7 @@ async fn history_a_circle_already_covers_is_deleted_while_its_members_are_away()
     group.clock.set(std::time::UNIX_EPOCH + GRACE + std::time::Duration::from_secs(1));
     ana.sync.pass().await.unwrap();
     let floor = stored_floor(&ana).await;
-    assert_eq!(floor.header.first.0, gifts_covers + 1);
+    assert_eq!(floor.header.first.get(), gifts_covers + 1);
     let slot = |number: u64| ObjectPath::slot(group.store, number.try_into().unwrap());
     for deleted in 1..=gifts_covers {
         assert!(group.storage.status(&slot(deleted)).await.unwrap().is_none(), "{deleted}");

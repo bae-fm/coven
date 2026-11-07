@@ -425,7 +425,7 @@ mod sequence {
         let mut routing =
             FloorPrefixDecoder::start(&bytes[..FloorPrefixDecoder::HEADER_LENGTH]).unwrap();
         assert_eq!(routing.key, f::store_key().id());
-        assert_eq!(routing.first.0, 6);
+        assert_eq!(routing.first.get(), 6);
         let first = routing.first;
         let mut prefix_length = FloorPrefixDecoder::HEADER_LENGTH;
         let mut copies = Vec::new();
@@ -436,9 +436,9 @@ mod sequence {
         }
         routing.finish().unwrap();
         assert_eq!(copies.len(), 2);
-        assert_eq!(copies[1].slot.0, 8);
+        assert_eq!(copies[1].slot.get(), 8);
         assert_eq!(copies[1].object, hex(include_str!("../fixtures/sealed-circle-key.hex")));
-        assert_eq!(copies[0].slot.0, 2);
+        assert_eq!(copies[0].slot.get(), 2);
         assert_eq!(copies[0].object, hex(include_str!("../fixtures/sealed-store-key.hex")));
         let path = crate::path::ObjectPath::floor(f::STORE_ID);
         let plain = open_stream(&bytes, prefix_length, path.as_str()).unwrap();
@@ -446,7 +446,7 @@ mod sequence {
         let mut frames = FrameDecoder::new(None);
         let mut floor =
             FloorFrames::decode_header(&frames.next(&mut input).unwrap().unwrap(), first).unwrap();
-        assert_eq!(floor.header().first.0, 6);
+        assert_eq!(floor.header().first.get(), 6);
         assert_eq!(floor.header().at, 11);
         let mut originals = Vec::new();
         while let Some(frame) = frames.next(&mut input).unwrap() {
@@ -482,7 +482,7 @@ mod sequence {
         ] {
             assert_eq!(original.object, sealed_announcement);
             let original_prefix = SlotObjectPrefix::length(&original.object).unwrap();
-            let path = f::slot_path(original.slot.0);
+            let path = f::slot_path(original.slot.get());
             let original_plain =
                 open_stream(&original.object, original_prefix, path.as_str()).unwrap();
             let (_, crate::sequence::SlotFrame::Announcement(announcement)) =
@@ -534,7 +534,7 @@ mod sequence {
             decoder.finish().unwrap();
             assert_eq!(decoder.header().unwrap().schema_version, 2);
             assert_eq!(included, claims);
-            assert!(coverage >= floor.header().first.0 - 1);
+            assert!(coverage >= floor.header().first.get() - 1);
         }
         // A stored slot below the advanced floor can still exist until deletion finishes.
         assert!(copies[0].slot < floor.header().first);

@@ -101,7 +101,7 @@ pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Resu
         "INSERT INTO _coven_boundaries(slot,kind,version,audience,snapshot_device,snapshot_number)
          VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(slot) DO NOTHING",
         params![
-            entry.0.to_be_bytes().as_slice(),
+            entry.get().to_be_bytes().as_slice(),
             kind,
             version,
             &snapshot.audience,
@@ -122,7 +122,7 @@ pub(crate) fn record_coverage(
     record(database, &coverage.boundary)?;
     let previous: (Option<Vec<u8>>, bool) = database.query_row(
         "SELECT included,applied FROM _coven_boundaries WHERE slot=?1",
-        [coverage.boundary.entry().0.to_be_bytes().as_slice()],
+        [coverage.boundary.entry().get().to_be_bytes().as_slice()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let included = coverage.included.to_be_bytes().to_vec();
@@ -136,7 +136,7 @@ pub(crate) fn record_coverage(
     }
     database.internal_execute(
         "UPDATE _coven_boundaries SET included=?2,applied=1 WHERE slot=?1",
-        params![coverage.boundary.entry().0.to_be_bytes().as_slice(), included],
+        params![coverage.boundary.entry().get().to_be_bytes().as_slice(), included],
     )?;
     Ok(true)
 }
@@ -274,7 +274,7 @@ impl WriteBoundary {
         audience: &Audience,
         slot: Option<Slot>,
     ) -> Option<ChangeVerdict> {
-        if *audience != self.audience || slot.is_some_and(|slot| slot.0 <= self.included) {
+        if *audience != self.audience || slot.is_some_and(|slot| slot.get() <= self.included) {
             return None;
         }
         match &self.rule {
@@ -282,7 +282,7 @@ impl WriteBoundary {
                 (header.schema_version < *version).then_some(ChangeVerdict::Excluded(*version))
             }
             BoundaryRule::Reset(entry) => {
-                (header.read_through < entry.0).then_some(ChangeVerdict::Ignored(*entry))
+                (header.read_through < entry.get()).then_some(ChangeVerdict::Ignored(*entry))
             }
         }
     }

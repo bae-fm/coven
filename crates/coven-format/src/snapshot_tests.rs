@@ -2,6 +2,7 @@ use super::*;
 use crate::test_utils;
 use crate::value::Value;
 use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_merge::slot;
 use coven_merge::{Audience, Cell, ColumnValue, MergeError, Parent, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -87,7 +88,7 @@ fn duplicate_identity_and_uncovered_writes_are_rejected() {
         SnapshotRecord::Write(AppliedWrite {
             id: WriteId { device: DeviceId(1), number },
             timestamp: Timestamp::new(number, 0, DeviceId(1)).unwrap(),
-            slot: Slot(number * 3),
+            slot: slot(number * 3),
             read_through: 0,
         })
     };
@@ -289,7 +290,7 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
     invalid.timestamp = Timestamp::new(1, 0, DeviceId(9)).unwrap();
     cases.push((invalid, Rule::TimestampDevice));
     let mut invalid = write;
-    invalid.read_through = invalid.slot.0;
+    invalid.read_through = invalid.slot.get();
     cases.push((invalid, Rule::Coverage));
     for (write, rule) in cases {
         let (mut writer, first) =
@@ -465,7 +466,7 @@ fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
     for (bytes, verdict, last_claim) in include_str!("../fixtures/snapshot-claims.hex")
         .lines()
         .map(crate::tests::hex)
-        .zip([ChangeVerdict::Refused, ChangeVerdict::Ignored(Slot(2))])
+        .zip([ChangeVerdict::Refused, ChangeVerdict::Ignored(slot(2))])
         .zip([8, 9])
         .map(|((bytes, verdict), claim)| (bytes, verdict, claim))
     {

@@ -11,7 +11,6 @@ use coven_crypto::MemberIdentity;
 use coven_database::{Journal, OperationId, SqlContext, StoreState};
 use coven_format::{admin::StoreChange, sequence::SlotHeader};
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId};
-use coven_merge::Slot;
 use std::sync::Arc;
 
 impl OperationSteps {
@@ -121,7 +120,7 @@ pub(crate) fn changes(
 ) -> Result<bool, SyncError> {
     let through = journal.applied_slot()?;
     let header = SlotHeader { device, claim: 1, author, after: through };
-    let next = Slot(next_slot(through)?);
+    let next = next_slot(through)?;
     match effects::checked_change(applied, &header, next, change, &Default::default(), &[]) {
         Err(OperationRejection::TargetGone(target)) if unseen(applied, &target) => Ok(true),
         checked => Ok(checked?.is_some()),

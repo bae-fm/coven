@@ -52,7 +52,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         "write",
         encode_write_id(&setter(2)).unwrap(),
     );
-    let entry = coven_merge::Slot(u64::MAX);
+    let entry = coven_merge::slot(u64::MAX);
     let values: BTreeMap<String, ColumnValue<WireValue>> = BTreeMap::from([
         ("a".into(), cell(WireValue::Null)),
         ("b".into(), cell(WireValue::Integer(i64::MIN))),
@@ -226,7 +226,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     let values: BTreeMap<String, ColumnValue<WireValue>> =
         BTreeMap::from([("title".into(), cell(WireValue::Text("lost".into())))]);
     let setters = BTreeMap::from([("title".into(), setter(1))]);
-    let rules = encode_rules(&BTreeSet::from([Rule::DeletedCircle(coven_merge::Slot(1))])).unwrap();
+    let rules = encode_rules(&BTreeSet::from([Rule::DeletedCircle(coven_merge::slot(1))])).unwrap();
     insert(
         &db,
         None,

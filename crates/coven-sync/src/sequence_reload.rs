@@ -18,7 +18,7 @@ use coven_database::{
 };
 use coven_format::sequence::{Purpose, SlotFrame, SnapshotAnnouncement};
 use coven_foundation::progress::ProgressReport;
-use coven_merge::{Audience, Slot};
+use coven_merge::{Audience, Slot, SlotRange};
 use coven_storage::ObjectPath;
 use std::sync::Arc;
 
@@ -261,7 +261,7 @@ impl SequenceSync {
     ) -> Result<SnapshotAnnouncement, SyncError> {
         let original = floor.announcements.first().expect("floor requires snapshots");
         let (_, frame) =
-            slot_object::bounded_plaintext(&original.object, &self.path(original.slot.0)?, ring)?;
+            slot_object::bounded_plaintext(&original.object, &self.path(original.slot), ring)?;
         let SlotFrame::Announcement(announcement) = frame else {
             unreachable!("floor announcement kind");
         };
@@ -350,9 +350,10 @@ impl SequenceSync {
         let started = self.clock.elapsed();
         let mut bytes = 0;
         let from = next_slot(after)?;
-        let mut reads = crate::sequence_sync::SlotReads::new(self, from, through);
-        for number in from..=through {
-            let path = self.path(number)?;
+        let range = SlotRange::new(from, through);
+        let mut reads = crate::sequence_sync::SlotReads::new(self, range);
+        for number in range {
+            let path = self.path(number);
             let input = reads.next().await?.ok_or_else(|| {
                 crate::write_object::damaged(&path, Refusal::Parse { cause: None })
             })?;
@@ -493,7 +494,7 @@ impl SequenceSync {
                 // needs slots below its first kept slot, or has none.
                 let from_floor = match (&own, &floor) {
                     (Some(own), Some(floor))
-                        if own.covers.saturating_add(1) >= floor.header.first.0 =>
+                        if own.covers.saturating_add(1) >= floor.header.first.get() =>
                     {
                         None
                     }
@@ -506,10 +507,10 @@ impl SequenceSync {
                             Some(later) => later,
                             None => {
                                 let mut later = history.clone();
-                                if floor.header.at > slot.0 {
+                                if floor.header.at > slot.get() {
                                     self.advance_history(
                                         &mut later,
-                                        slot.0,
+                                        slot.get(),
                                         floor.header.at,
                                         &mut ring,
                                         member,
@@ -529,12 +530,12 @@ impl SequenceSync {
                         match (named, own) {
                             // A raise or reset is replaced only by a snapshot
                             // announced after it, which covers it.
-                            (Some(named), _) if !boundary || named.covers >= slot.0 => {
+                            (Some(named), _) if !boundary || named.covers >= slot.get() => {
                                 ReloadStart::Stored(self.select(named, &ring, None).await?)
                             }
                             (_, Some(own)) => {
                                 return Err(crate::write_object::damaged(
-                                    &self.path(next_slot(own.covers)?)?,
+                                    &self.path(next_slot(own.covers)?),
                                     Refusal::Parse { cause: None },
                                 ))
                             }
@@ -573,10 +574,10 @@ impl SequenceSync {
             .map(|start| start.covers(session.through))
             .max()
             .expect("required audience")
-            .max(slot.0);
+            .max(slot.get());
         let (history, through) = match (through_floor, &floor) {
-            (Some(later), Some(floor)) => (later, floor.header.at.max(slot.0)),
-            _ => (history, slot.0),
+            (Some(later), Some(floor)) => (later, floor.header.at.max(slot.get())),
+            _ => (history, slot.get()),
         };
         if let Some(newer) = self
             .install_selected(
@@ -666,9 +667,10 @@ impl SequenceSync {
         let mut slots = Vec::new();
         let mut missing = None;
         let from = next_slot(first)?;
-        let mut reads = crate::sequence_sync::SlotReads::new(self, from, target);
-        for number in from..=target {
-            let path = self.path(number)?;
+        let range = SlotRange::new(from, target);
+        let mut reads = crate::sequence_sync::SlotReads::new(self, range);
+        for number in range {
+            let path = self.path(number);
             let Some(input) = reads.next().await? else {
                 missing = Some(number);
                 break;
@@ -678,10 +680,10 @@ impl SequenceSync {
                 slot_object::open(input.local_bytes().await?, &path, ring, &history, |audience| {
                     starts.iter().any(|start| start.audience() == audience)
                 })?;
-            if number > session.through && number > store_covers {
+            if number.get() > session.through && number.get() > store_covers {
                 self.check_copy(&received, &path).await?;
             }
-            let incoming = if number > store_covers {
+            let incoming = if number.get() > store_covers {
                 let incoming = at_target.consume(received, member.member());
                 at_target.acquire(ring, member)?;
                 incoming
@@ -691,12 +693,12 @@ impl SequenceSync {
             slots.push(incoming);
         }
         let floor = self.read_floor(previous_floor, ring, member).await?;
-        if floor.as_ref().is_some_and(|floor| floor.header.first.0 > from) {
+        if floor.as_ref().is_some_and(|floor| floor.header.first > from) {
             return Ok(floor);
         }
         if let Some(number) = missing {
             return Err(crate::write_object::damaged(
-                &self.path(number)?,
+                &self.path(number),
                 Refusal::Parse { cause: None },
             ));
         }
@@ -805,7 +807,7 @@ fn retained_slot(
         }
     };
     IncomingSlot {
-        slot: Slot(received.header.after + 1),
+        slot: received.slot(),
         header: received.header,
         digest: received.digest,
         content,
@@ -822,7 +824,7 @@ impl History {
             .boundaries
             .iter()
             .filter(|boundary| {
-                boundary.boundary.entry().0 <= through
+                boundary.boundary.entry().get() <= through
                     && boundary.boundary.snapshot().audience == announcement.snapshot.audience
             })
             .collect();
@@ -851,7 +853,7 @@ impl History {
         };
         selected
             && boundaries.iter().all(|coverage| {
-                coverage.boundary.entry().0 <= announcement.covers
+                coverage.boundary.entry().get() <= announcement.covers
                     || (announcement.purpose != Purpose::Ordinary
                         && coverage.boundary.snapshot() == &announcement.snapshot)
             })

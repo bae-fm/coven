@@ -186,7 +186,7 @@ async fn a_lost_claim_accepts_a_floor_past_the_slots_it_has_read() {
         // The floor keeps the contested slot, and its `at` is past every
         // slot Ana has read.
         assert!(
-            floor.header.first.0 <= contested && floor.header.at >= contested,
+            floor.header.first.get() <= contested && floor.header.at >= contested,
             "{:?}",
             floor.header
         );

@@ -541,7 +541,7 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
         .iter()
         .any(|record| record.subject == PendingSubject::Slot(slot)));
     // Nothing after the blocked slot applies.
-    assert!(reader.applied_slot().await < slot.0);
+    assert!(reader.applied_slot().await < slot.get());
     assert!(reader.applied_slot().await >= before);
     storage.create(path, &bytes).await.unwrap();
     network.sync(1).await;
@@ -583,7 +583,7 @@ mod pending_records {
         let mut last = reader.test_last_pass();
         last.wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
         let record = PendingRecord::new(
-            PendingSubject::Slot(Slot(slot)),
+            PendingSubject::Slot(coven_merge::slot(slot)),
             PendingReason::Refused(Refusal::Signature { cause: None }),
         );
         assert_eq!(
@@ -615,7 +615,9 @@ mod pending_records {
 /// fixture store was created with (§13.1).
 pub(crate) fn keychain_entry(code: &coven_format::codes::RestoreCode) -> SecretBytes {
     SecretBytes::new(
-        coven_format::codes::KeychainRestoreCode::encode("Household", 1, code).unwrap().to_vec(),
+        coven_format::codes::KeychainRestoreCode::encode("Household", coven_merge::slot(1), code)
+            .unwrap()
+            .to_vec(),
     )
 }
 

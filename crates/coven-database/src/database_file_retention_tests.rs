@@ -2,6 +2,7 @@ use super::*;
 use crate::{tests::TestStore, FileColumn, RowIdentity, SyncedTable};
 use coven_format::write::RowChange;
 use coven_foundation::id_source::FileId;
+use coven_merge::slot;
 
 #[tokio::test]
 async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
@@ -212,7 +213,7 @@ async fn a_records_lost_coordinates_protect_nothing() {
     assert!(references.contains(&(DeviceId(3), ObjectId(uuid::Uuid::from_u128(8)))));
     assert_eq!(
         db.file_candidates(candidates_of(DeviceId(2))).await.unwrap(),
-        vec![FileCandidate { device: DeviceId(2), object: file, protected: false, since: Slot(2) }]
+        vec![FileCandidate { device: DeviceId(2), object: file, protected: false, since: slot(2) }]
     );
 }
 
@@ -236,16 +237,16 @@ async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
                 .collect::<Vec<_>>()
         }
     };
-    assert_eq!(candidate(&db).await, [(false, Slot(2))]);
+    assert_eq!(candidate(&db).await, [(false, slot(2))]);
     let later = [
         write(4, 3, stored(2, file, "ab")),
         write(5, 4, stored(5, ObjectId(uuid::Uuid::from_u128(9)), "ef")),
         write(6, 5, stored(6, ObjectId(uuid::Uuid::from_u128(10)), "01")),
     ];
     db.receive(later[0].clone().into()).await.unwrap();
-    assert_eq!(candidate(&db).await, [(true, Slot(2))]);
+    assert_eq!(candidate(&db).await, [(true, slot(2))]);
     db.receive(later[1].clone().into()).await.unwrap();
-    assert_eq!(candidate(&db).await, [(false, Slot(4))]);
+    assert_eq!(candidate(&db).await, [(false, slot(4))]);
 
     let source_store = TestStore::new();
     let source = source_store.schema(vec![files_table()], FILES).await.unwrap();
@@ -268,7 +269,7 @@ async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
     )
     .await
     .unwrap();
-    assert_eq!(candidate(&db).await, [(false, Slot(5))]);
+    assert_eq!(candidate(&db).await, [(false, slot(5))]);
 }
 
 /// A write a raised schema excludes leaves its record as a frozen loss,
@@ -436,7 +437,7 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(
         db.file_candidates(candidates_of(device)).await.unwrap(),
-        vec![FileCandidate { device, object: file, protected: false, since: Slot(4) }]
+        vec![FileCandidate { device, object: file, protected: false, since: slot(4) }]
     );
 }
 
@@ -451,8 +452,8 @@ async fn protected_candidates_settle_only_while_still_protected() {
     assert_eq!(
         db.file_candidates(candidates_of(DeviceId(3))).await.unwrap(),
         vec![
-            FileCandidate { device: named.0, object: named.1, protected: true, since: Slot(2) },
-            FileCandidate { device: orphan.0, object: orphan.1, protected: false, since: Slot(2) },
+            FileCandidate { device: named.0, object: named.1, protected: true, since: slot(2) },
+            FileCandidate { device: orphan.0, object: orphan.1, protected: false, since: slot(2) },
         ]
     );
     // Other uploaders' candidates are not read.
@@ -478,7 +479,7 @@ async fn a_scan_needs_a_counted_removal_and_survives_reopening() {
     let found = ObjectId(uuid::Uuid::from_u128(11));
     let later = ObjectId(uuid::Uuid::from_u128(12));
     assert!(!db
-        .complete_file_scan(uploader, coven_merge::Slot(removal.0 + 1), [found].into())
+        .complete_file_scan(uploader, coven_merge::slot(removal.get() + 1), [found].into())
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
@@ -516,7 +517,7 @@ async fn a_scan_is_recorded_against_a_replacement_of_its_members_keys() {
     let keys = crate::tests::keys(3);
     state.members.get_mut(&member).unwrap().keys = keys;
     state.bound_keys.insert(keys);
-    let replaced = coven_merge::Slot(db.applied_slot().await.unwrap() + 1);
+    let replaced = coven_merge::slot(db.applied_slot().await.unwrap() + 1);
     db.admin_fixture(
         coven_format::admin::StoreChange::ReplaceMemberKeys { member, expected, keys },
         state,

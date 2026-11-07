@@ -27,6 +27,7 @@ uuid = { workspace = true, features = ["serde"] }
 const-random.workspace = true
 
 [dev-dependencies]
+coven-merge = { workspace = true, features = ["test-utils"] }
 coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-database = { workspace = true, features = ["test-utils"] }
 coven-storage = { workspace = true, features = ["test-utils"] }

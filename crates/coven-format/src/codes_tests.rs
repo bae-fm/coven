@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_utils;
 use crate::tests::Generator;
+use coven_merge::slot;
 
 #[test]
 fn codes_use_their_assigned_frame_kinds() {
@@ -252,6 +253,16 @@ fn restore_layout_places_member_immediately_after_store() {
     assert_eq!(&bytes[43..48], b"CVMK\x01");
 }
 
+/// The slot that named the store is positive: a frame carrying 0 there is refused.
+#[test]
+fn saved_code_decoder_refuses_slot_zero() {
+    let mut bytes = test_utils::keychain_restore().to_bytes().unwrap().to_vec();
+    let slot_at = bytes.len() - 4 - test_utils::restore().to_bytes().unwrap().len() - 8;
+    assert_eq!(bytes[slot_at..slot_at + 8], 41u64.to_be_bytes());
+    bytes[slot_at..slot_at + 8].copy_from_slice(&0u64.to_be_bytes());
+    assert!(KeychainRestoreCode::from_bytes(&bytes).is_err());
+}
+
 #[test]
 fn saved_code_fixture_is_canonical_under_every_truncation_and_bit_change() {
     let bytes = crate::tests::hex(include_str!("../fixtures/keychain-restore-code.hex"));
@@ -260,7 +271,7 @@ fn saved_code_fixture_is_canonical_under_every_truncation_and_bit_change() {
     assert_eq!(bytes[0], 17);
     let reencode = |bytes: &[u8]| KeychainRestoreCode::from_bytes(bytes)?.to_bytes();
     let decoded = KeychainRestoreCode::from_bytes(&bytes).unwrap();
-    assert_eq!((decoded.name.as_str(), decoded.named_at), ("Family", 41));
+    assert_eq!((decoded.name.as_str(), decoded.named_at), ("Family", slot(41)));
     assert_eq!(decoded.code.to_bytes().unwrap(), test_utils::restore().to_bytes().unwrap());
     for end in 0..bytes.len() {
         assert!(reencode(&bytes[..end]).is_err());
@@ -283,11 +294,8 @@ fn saved_code_fixture_is_canonical_under_every_truncation_and_bit_change() {
 }
 
 #[test]
-fn saved_codes_refuse_an_empty_name_or_a_zero_slot() {
+fn saved_codes_refuse_an_empty_name() {
     let mut saved = test_utils::keychain_restore();
-    saved.named_at = 0;
-    assert!(saved.to_bytes().is_err());
-    saved.named_at = 1;
     saved.name = String::new();
     assert!(saved.to_bytes().is_err());
     saved.name = "x".repeat(1024);

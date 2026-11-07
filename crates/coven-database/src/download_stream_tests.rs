@@ -270,7 +270,7 @@ async fn an_unread_slot_prevents_a_later_slot_from_committing() {
         b.apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
                 digest: [0x31; 32],
-                slot: crate::Slot(3),
+                slot: coven_merge::slot(3),
                 header: coven_format::sequence::SlotHeader {
                     device: record.header.position.device,
                     claim: 1,

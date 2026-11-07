@@ -1,13 +1,14 @@
 use super::*;
 use crate::test_utils::STORE_ID;
 use coven_foundation::id_source::CircleId;
+use coven_merge::slot;
 
 #[test]
 fn sequence_slots_have_one_store_wide_identity_and_floor_is_replaceable() {
     for number in [1, u64::MAX] {
         let path = ObjectPath::slot(STORE_ID, NonZeroU64::new(number).unwrap());
         assert_eq!(path.as_str(), format!("{STORE_ID}/seq/{number}"));
-        assert_eq!(path.slot_number(), Some(crate::value::Slot(number)));
+        assert_eq!(path.slot_number(), Some(slot(number)));
         assert_eq!(path.device(), None);
         assert!(!path.is_replaceable());
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);

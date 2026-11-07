@@ -23,6 +23,6 @@ impl SnapshotCoverage {
         self.audiences.values().copied().min().ok_or_else(|| invalid("reload has no audiences"))
     }
     pub(crate) fn needs(&self, audience: &Audience, slot: Slot) -> bool {
-        self.audiences.get(audience).is_some_and(|covers| *covers < slot.0)
+        self.audiences.get(audience).is_some_and(|covers| *covers < slot.get())
     }
 }

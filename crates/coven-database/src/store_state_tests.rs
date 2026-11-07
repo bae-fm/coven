@@ -5,7 +5,7 @@ fn settings_check_only_the_store_identity() {
     let store = StoreIdentity {
         id: StoreId(uuid::Uuid::from_u128(1)),
         name: "Renamed".into(),
-        named_at: coven_merge::Slot(4),
+        named_at: coven_merge::slot(4),
     };
     let mut settings =
         coven_foundation::files::StoreSettings { id: store.id, device_id: DeviceId(2) };

@@ -65,7 +65,7 @@ async fn an_interrupted_floor_write_that_moves_only_the_names_publishes_on_retry
     let super::Retention::Floor(artifact) = serde_json::from_slice(&record.data).unwrap() else {
         panic!("upload lost its artifact");
     };
-    assert_eq!(artifact.capture.first, 1);
+    assert_eq!(artifact.capture.first, coven_merge::Slot::FIRST);
     let bytes = ana
         .sync
         .artifact_file(&artifact.capture.name)

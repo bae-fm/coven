@@ -397,7 +397,7 @@ async fn a_setup_failing_past_its_location_claim_finishes_through_the_loop() {
         .await
         .unwrap();
     let outcome = opened.handle.operation_outcome(OperationId(setups[0])).await.unwrap();
-    assert_eq!(outcome, OperationOutcome::Landed(coven_merge::Slot(1)));
+    assert_eq!(outcome, OperationOutcome::Landed(coven_merge::slot(1)));
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2()));
     setup(&opened.handle, r2()).await.unwrap();
     opened.handle.close().await.unwrap();

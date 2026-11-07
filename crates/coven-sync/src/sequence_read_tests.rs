@@ -204,7 +204,10 @@ async fn a_missing_slot_before_a_known_later_one_is_damage_named_by_its_path() {
     let SequenceStatus::Blocked(record) = ben.sync.state.subscribe().borrow().clone() else {
         panic!("the missing slot blocks the device");
     };
-    assert!(matches!(&record.subject, PendingSubject::Slot(slot) if slot.0 == gap), "{record:?}");
+    assert!(
+        matches!(&record.subject, PendingSubject::Slot(slot) if slot.get() == gap),
+        "{record:?}"
+    );
     insert(ben.database(), "local", "kept").await;
     let count = ben.storage.request_count();
     assert!(ben.sync.pass().await.is_err());
@@ -351,12 +354,12 @@ async fn each_kind_of_work_adds_the_requests_the_cost_table_names() {
     let deleted: Vec<_> = trace
         .iter()
         .filter_map(|request| match request {
-            Request::Delete(path) => path.slot_number().map(|slot| slot.0),
+            Request::Delete(path) => path.slot_number().map(|slot| slot.get()),
             _ => None,
         })
         .collect();
     ana.sync.pass().await.unwrap();
-    let first = ana.sync.session.lock().await.floor.as_ref().unwrap().header.first.0;
+    let first = ana.sync.session.lock().await.floor.as_ref().unwrap().header.first.get();
     assert!(first > 1);
     assert_eq!(deleted, (1..first).collect::<Vec<_>>(), "{trace:?}");
     assert_eq!(
@@ -391,7 +394,7 @@ async fn a_gap_below_the_floor_s_at_reports_the_gap() {
     let gap = applied + 2;
     let mut ring = ben.sync.keys.read().unwrap().unwrap();
     let floor = ben.sync.read_floor(None, &mut ring, &ben.identity).await.unwrap().unwrap();
-    assert!(floor.header.first.0 <= applied + 1 && floor.header.at >= gap);
+    assert!(floor.header.first.get() <= applied + 1 && floor.header.at >= gap);
     let path = ObjectPath::slot(group.store, gap.try_into().unwrap());
     group.storage.delete(&path).await.unwrap();
 
@@ -403,7 +406,7 @@ async fn a_gap_below_the_floor_s_at_reports_the_gap() {
     let blocked = ben.sync.session.lock().await.blocked.clone();
     assert_eq!(
         blocked.map(|record| record.subject),
-        Some(PendingSubject::Slot(coven_merge::Slot(gap)))
+        Some(PendingSubject::Slot(coven_merge::slot(gap)))
     );
     assert_eq!(ben.database().applied_slot().await.unwrap(), gap - 1);
     assert_eq!(rows(ben.database()).await, [("a".into(), "written".into())]);
@@ -510,8 +513,9 @@ async fn compare_read_pass(writes: usize, offset: u64, lost: Lost, corrupt: bool
         group.storage.delete(&path).await.unwrap();
     }
     let floor = floor.map_or(serde_json::Value::Null, |floor| {
-        let named: Vec<u64> = floor.announcements.iter().map(|original| original.slot.0).collect();
-        serde_json::json!({"first":floor.header.first.0,"at":floor.header.at,"named":named})
+        let named: Vec<u64> =
+            floor.announcements.iter().map(|original| original.slot.get()).collect();
+        serde_json::json!({"first":floor.header.first.get(),"at":floor.header.at,"named":named})
     });
     let input = serde_json::json!({"kind":"readPass","applied":applied,"stop":stop,
         "why":if corrupt {"fault"} else {"missing"},"known":stop - 1,"floor":floor});
@@ -527,8 +531,8 @@ async fn compare_read_pass(writes: usize, offset: u64, lost: Lost, corrupt: bool
                 panic!("blocked on {:?}; {input}", record.subject)
             };
             assert_eq!(object.path, path.as_str(), "{input}");
-            assert_eq!(through, slot.0 - 1, "{input}");
-            serde_json::json!({"stops":slot.0})
+            assert_eq!(through, slot.get() - 1, "{input}");
+            serde_json::json!({"stops":slot.get()})
         }
         (Err(SyncError::Damaged(object)), None)
             if object.path == ObjectPath::floor(group.store).as_str() =>
@@ -665,7 +669,7 @@ async fn settle_under_floor(later: usize, compacted: bool, lost: Option<u64>) ->
             .get(&floor.announcements[0].slot)
             .expect("floor's store announcement")
             .covers;
-        assert_eq!(floor.header.first.0 > applied + 1, compacted, "{:?}", floor.header);
+        assert_eq!(floor.header.first.get() > applied + 1, compacted, "{:?}", floor.header);
         let lost = lost.map(|offset| applied + 1 + offset);
         let fits = lost.is_none_or(|slot| slot <= floor.header.at);
         if let Some(slot) = lost.filter(|_| fits) {
@@ -683,9 +687,10 @@ async fn settle_under_floor(later: usize, compacted: bool, lost: Option<u64>) ->
             }
         }
         resume.send(()).unwrap();
-        let named: Vec<u64> = floor.announcements.iter().map(|original| original.slot.0).collect();
+        let named: Vec<u64> =
+            floor.announcements.iter().map(|original| original.slot.get()).collect();
         let input = serde_json::json!({"kind":"floorCheck","applied":applied,"covers":covers,
-            "floor":{"first":floor.header.first.0,"at":floor.header.at,"named":named},
+            "floor":{"first":floor.header.first.get(),"at":floor.header.at,"named":named},
             "missing":missing});
         (fits, input)
     };
@@ -816,7 +821,7 @@ async fn a_live_query_reruns_as_a_pass_applies_another_devices_slot() {
 /// has none, and the sequence is exhausted there (E5).
 #[test]
 fn no_slot_follows_the_last_slot_number() {
-    assert_eq!(super::next_slot(u64::MAX - 1).unwrap(), u64::MAX);
+    assert_eq!(super::next_slot(u64::MAX - 1).unwrap(), coven_merge::slot(u64::MAX));
     let exhausted = super::next_slot(u64::MAX);
     assert!(matches!(exhausted, Err(SyncError::SequenceExhausted)), "{exhausted:?}");
 }

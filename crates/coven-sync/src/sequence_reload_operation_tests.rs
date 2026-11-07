@@ -86,7 +86,7 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
     ana.sync.pass().await.unwrap();
     assert!(ana.storage.status(&path).await.unwrap().is_none());
     let floor = stored_floor(&ana).await;
-    assert_eq!(floor.header.first.0 > old.covers + 1, !older_circle_coverage);
+    assert_eq!(floor.header.first.get() > old.covers + 1, !older_circle_coverage);
     let ben = group.reopen(ben).await;
     let result = ben.sync.reload_from_snapshot().await;
     assert!(
@@ -100,7 +100,7 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
         format!("{result:?}").contains(&format!(
             "slots {} to {} this reload needs were deleted",
             old.covers + 1,
-            floor.header.first.0 - 1
+            floor.header.first.get() - 1
         )),
         !older_circle_coverage,
         "{result:?}"
@@ -108,7 +108,7 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
     assert!(ben.database().operations().await.unwrap().is_empty());
     assert_eq!(ben.database().applied_slot().await.unwrap(), old_target);
     ben.sync.reload_from_snapshot().await.unwrap();
-    assert!(ben.database().applied_slot().await.unwrap() >= floor.header.first.0 - 1);
+    assert!(ben.database().applied_slot().await.unwrap() >= floor.header.first.get() - 1);
     if let Some(departed_at) = departed_at {
         // §16.5: the chosen followed set and installed prefix agree.
         assert!(ben.database().applied_slot().await.unwrap() >= departed_at);
@@ -173,7 +173,7 @@ async fn reset(count: usize) -> (Value, Value) {
     let originals = ben.database().waiting_snapshot_headers().await.unwrap();
     let boundary =
         ana.sync.session.lock().await.history.boundaries.last().unwrap().boundary.clone();
-    let reset_at = boundary.entry().0;
+    let reset_at = boundary.entry().get();
     let snapshot = boundary.snapshot().clone();
     let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
     during_load(&ben, path, async {
@@ -522,7 +522,7 @@ async fn self_replacement() -> (Value, Value) {
     let later = ana.sync.check_binding(&session, &current);
     assert!(matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })), "{later:?}");
     let replacements: Vec<_> = session.history.cutoffs.iter().filter_map(|cutoff|
-        matches!(cutoff.change, StoreChange::ReplaceMemberKeys { member, .. } if member == ana.identity.member()).then_some(cutoff.slot.0)).collect();
+        matches!(cutoff.change, StoreChange::ReplaceMemberKeys { member, .. } if member == ana.identity.member()).then_some(cutoff.slot.get())).collect();
     let later_slot = session.through;
     let generations: Vec<_> = session
         .history
@@ -593,7 +593,7 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
         .announcements
         .iter()
         .filter(|(_, a)| a.snapshot.audience == Audience::Store && session.history.usable(a))
-        .map(|(slot, a)| json!({"slot":slot.0,"audience":0,"covers":a.covers}))
+        .map(|(slot, a)| json!({"slot":slot.get(),"audience":0,"covers":a.covers}))
         .collect();
     drop(session);
     // Hold both possible selections so the retained operation exposes which
@@ -623,7 +623,7 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
         panic!("store has announced snapshots")
     };
     assert_eq!(*slot, newest, "an existing floor must not select an older body");
-    let actual = json!(slot.0);
+    let actual = json!(slot.get());
     ben.storage.set_faults(Faults::none()).await;
     if damaged {
         group.storage.corrupt_byte(&path, 0).await.unwrap();

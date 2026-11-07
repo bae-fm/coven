@@ -1,14 +1,13 @@
 use super::*;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
-use coven_merge::Slot;
 
 /// Write `number` of `device`, in `slot`, stamped at `milliseconds`, having
 /// read through slot `through`.
 fn write(device: u64, number: u64, slot: u64, through: u64, milliseconds: u64) -> AppliedWrite {
     AppliedWrite {
         id: WriteId { device: DeviceId(device), number },
-        slot: Slot(slot),
+        slot: coven_merge::slot(slot),
         timestamp: Timestamp::new(milliseconds, 0, DeviceId(device)).unwrap(),
         read_through: through,
     }
@@ -53,7 +52,7 @@ fn refused_as_uncovered(result: Result<(), DbError>) {
 /// its own slot is refused.
 #[tokio::test]
 async fn a_write_outside_the_snapshots_coverage_is_refused() {
-    for (slot, through) in [(0, 0), (3, 1), (2, 2)] {
+    for (slot, through) in [(3, 1), (2, 2)] {
         let writes = [write(1, 1, slot, through, 1_000), write(2, 1, 1, 0, 2_000)];
         refused_as_uncovered(
             staged(&writes, |db| SnapshotMetadata::staged(db, 1).validate(2)).await,

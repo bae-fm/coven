@@ -2,7 +2,7 @@
 use crate::{
     sqlite::DatabaseConnection,
     store_state::*,
-    write_encoding::{counter, damaged, stored},
+    write_encoding::{damaged, stored},
     DbError,
 };
 use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
@@ -13,7 +13,7 @@ use rusqlite::{params, types::Type, Row};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn slot(row: &Row<'_>, column: usize) -> rusqlite::Result<Slot> {
-    Ok(Slot(counter(row.get(column)?)?))
+    crate::write_encoding::slot_counter(row.get(column)?)
 }
 
 /// A member id as the membership tables hold it: its canonical text.
@@ -188,7 +188,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
 }
 pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.0.to_be_bytes().as_slice()])?;
+        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
     }
     for table in [
         "_coven_circle_deletions",
@@ -255,7 +255,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
     for (circle, entry) in &state.circle_deletions {
         database.internal_execute(
             "INSERT INTO _coven_circle_deletions(circle,slot) VALUES(?1,?2)",
-            (circle, entry.0.to_be_bytes().as_slice()),
+            (circle, entry.get().to_be_bytes().as_slice()),
         )?;
     }
     Ok(())

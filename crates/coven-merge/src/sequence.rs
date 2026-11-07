@@ -24,7 +24,7 @@ pub enum ClaimOrder {
 /// A later publication never enlarges that prefix.
 pub fn had_read(reader: WriteId, read_through: u64, earlier: WriteId, slot: Option<Slot>) -> bool {
     (reader.device == earlier.device && earlier.number < reader.number)
-        || slot.is_some_and(|slot| slot.0 > 0 && slot.0 <= read_through)
+        || slot.is_some_and(|slot| slot.get() <= read_through)
 }
 
 /// A sequence past backed by the consumer's write-to-slot lookup.

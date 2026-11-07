@@ -27,7 +27,11 @@ impl AppliedWrite {
             "applied write timestamp",
             FormatRule::TimestampDevice,
         )?;
-        require(self.read_through < self.slot.0, "applied write read-through", FormatRule::Coverage)
+        require(
+            self.read_through < self.slot.get(),
+            "applied write read-through",
+            FormatRule::Coverage,
+        )
     }
 }
 
@@ -108,7 +112,7 @@ impl ChangeVerdict {
             Self::Excluded(version) => {
                 require(*version > 0, "breaking schema version", FormatRule::Required)
             }
-            Self::Ignored(entry) => positive(entry.0),
+            Self::Ignored(_) => Ok(()),
             Self::Dependent(sources) | Self::Derived(sources) => {
                 require(!sources.is_empty(), "verdict sources", FormatRule::Required)?;
                 sources.iter().try_for_each(|s| positive(s.write.number))

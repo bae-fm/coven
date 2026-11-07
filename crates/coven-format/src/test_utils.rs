@@ -15,6 +15,7 @@ use crate::write::*;
 use crate::Object;
 use coven_crypto::{InviteSecret, MemberIdentity, MemberKeys, SecretBytes};
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId, StoreId};
+use coven_merge::slot;
 use coven_merge::{
     Audience, Cell, Change, ColumnValue, LostKey, LostValue, MergeError, Operation, Parent, RowId,
     RowState, Timestamp, WriteId, WriteOracle,
@@ -204,7 +205,7 @@ pub fn member_removal() -> StoreChange {
 }
 /// A reset's slot used by loss examples.
 pub fn loss_entry() -> Slot {
-    Slot(2)
+    slot(2)
 }
 /// A canonical path for one positive slot number.
 pub fn slot_path(number: u64) -> crate::path::ObjectPath {
@@ -282,23 +283,23 @@ pub fn oracle() -> TestOracle {
         writes: [
             AppliedWrite {
                 id: first,
-                slot: Slot(3),
+                slot: slot(3),
                 timestamp: Timestamp::new(1, 0, first.device).unwrap(),
                 read_through: 0,
             },
             AppliedWrite {
                 id: winner,
-                slot: Slot(5),
+                slot: slot(5),
                 timestamp: Timestamp::new(4, 0, winner.device).unwrap(),
                 read_through: 0,
             },
             AppliedWrite {
                 id: loser,
-                slot: Slot(4),
+                slot: slot(4),
                 timestamp: Timestamp::new(3, 0, loser.device).unwrap(),
                 read_through: 3,
             },
-            AppliedWrite { id: position(), slot: Slot(6), timestamp: timestamp(), read_through: 5 },
+            AppliedWrite { id: position(), slot: slot(6), timestamp: timestamp(), read_through: 5 },
         ]
         .into_iter()
         .map(|w| (w.id, w))
@@ -351,7 +352,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
         AppliedWrite {
             id: header.position,
             timestamp: header.timestamp,
-            slot: Slot(6),
+            slot: slot(6),
             read_through: header.read_through,
         },
     );
@@ -368,7 +369,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
     records.push(SnapshotRecord::Creation(creation()));
     records.push(SnapshotRecord::Evidence(write_evidence()));
     records.push(SnapshotRecord::Admin(crate::floor::OriginalSlot {
-        slot: Slot(1),
+        slot: slot(1),
         object: bounded_slot(
             1,
             1,
@@ -377,11 +378,11 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
         ),
     }));
     records.push(SnapshotRecord::KeyCopy(crate::floor::OriginalSlot {
-        slot: Slot(2),
+        slot: slot(2),
         object: hex::decode(include_str!("../fixtures/sealed-store-key.hex").trim()).unwrap(),
     }));
     records.push(SnapshotRecord::Announcement(crate::floor::OriginalSlot {
-        slot: Slot(7),
+        slot: slot(7),
         object: bounded_slot(
             7,
             6,
@@ -527,7 +528,7 @@ pub fn restore() -> RestoreCode {
 }
 /// The restore code as coven saves it for the person, named by a rename at slot 41.
 pub fn keychain_restore() -> KeychainRestoreCode {
-    KeychainRestoreCode { name: "Family".into(), named_at: 41, code: restore() }
+    KeychainRestoreCode { name: "Family".into(), named_at: slot(41), code: restore() }
 }
 /// Invite contents with a fixed test secret.
 pub fn invite() -> InviteCode {
@@ -575,8 +576,8 @@ pub fn store_changes() -> Vec<StoreChange> {
         StoreChange::DeleteCircle { circle: c },
         StoreChange::AddCircleMember { circle: c, member: m },
         StoreChange::RemoveCircleMember { circle: c, member: m },
-        StoreChange::RaiseSchema { version: 2, announcement: Slot(7) },
-        StoreChange::Reset { announcement: Slot(8) },
+        StoreChange::RaiseSchema { version: 2, announcement: slot(7) },
+        StoreChange::Reset { announcement: slot(8) },
         StoreChange::SetAccess {
             member: m,
             access: crate::MemberAccess::S3AccessKey { access_key_id: "replacement-key".into() },

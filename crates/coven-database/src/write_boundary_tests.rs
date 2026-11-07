@@ -3,13 +3,14 @@ use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Boundary, BoundaryCoverage, DbError, StoreVersion};
 use coven_format::admin::{SnapshotId, StoreChange};
 use coven_foundation::id_source::DeviceId;
+use coven_merge::slot;
 use coven_merge::{Audience, Slot};
 
 #[test]
 fn an_established_version_does_not_select_a_later_preparation() {
     let first = SnapshotId { audience: Audience::Store, device: DeviceId(1), number: 1 };
     let mut state = crate::StoreState::default();
-    Boundary::SchemaChange(StoreVersion { number: 2, snapshot: first, entry: Slot(4) })
+    Boundary::SchemaChange(StoreVersion { number: 2, snapshot: first, entry: slot(4) })
         .apply(&mut state);
     let later = SnapshotId { audience: Audience::Store, device: DeviceId(2), number: 1 };
     assert!(Boundary::schema_in_place(&state, 2, &later));
@@ -61,10 +62,10 @@ impl crate::Database {
         {
             return Ok(Boundary::SchemaChange(v.clone()));
         }
-        let slot = Slot(self.applied_slot().await? + 1);
+        let slot = slot(self.applied_slot().await? + 1);
         Ok(Boundary::SchemaChange(StoreVersion {
             number: version,
-            snapshot: SnapshotId { audience, device: DeviceId(98), number: slot.0 },
+            snapshot: SnapshotId { audience, device: DeviceId(98), number: slot.get() },
             entry: slot,
         }))
     }
@@ -112,7 +113,7 @@ impl crate::Database {
             snapshot: SnapshotId {
                 audience: audience.clone(),
                 device: DeviceId(99),
-                number: entry.0,
+                number: entry.get(),
             },
         })
         .await?;
@@ -124,14 +125,14 @@ impl crate::Database {
 async fn coverage_survives_restart_and_rejects_replacement() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    assert!(db.install_reset_fixture(Slot(1), Audience::Store, 0).await.unwrap());
-    assert!(!db.coverage_fixture(Slot(1), Audience::Store, 0).unwrap());
-    assert!(db.coverage_fixture(Slot(1), Audience::Store, 1).is_err());
+    assert!(db.install_reset_fixture(slot(1), Audience::Store, 0).await.unwrap());
+    assert!(!db.coverage_fixture(slot(1), Audience::Store, 0).unwrap());
+    assert!(db.coverage_fixture(slot(1), Audience::Store, 1).is_err());
     db.close().await.unwrap();
     let db = store.schema(notes(), NOTES).await.unwrap();
     let boundaries = db.inspect_writer(|db| super::WriteBoundary::load(db)).unwrap();
     assert_eq!(boundaries.len(), 1);
-    assert_eq!(boundaries[0].rule, super::BoundaryRule::Reset(Slot(1)));
+    assert_eq!(boundaries[0].rule, super::BoundaryRule::Reset(slot(1)));
     assert_eq!(boundaries[0].included, 0);
     db.close().await.unwrap();
 }
@@ -167,7 +168,7 @@ async fn reset_uses_the_authored_prefix_and_precedes_schema_exclusion() {
     let mut header = records(&db).remove(0).header;
     let reset = super::WriteBoundary {
         audience: Audience::Store,
-        rule: super::BoundaryRule::Reset(Slot(5)),
+        rule: super::BoundaryRule::Reset(slot(5)),
         included: 3,
     };
     let raise = super::WriteBoundary {
@@ -177,16 +178,16 @@ async fn reset_uses_the_authored_prefix_and_precedes_schema_exclusion() {
     };
     let boundaries = [raise, reset];
     assert_eq!(
-        super::WriteBoundary::part_verdict(&boundaries, &header, &Audience::Store, Some(Slot(3))),
+        super::WriteBoundary::part_verdict(&boundaries, &header, &Audience::Store, Some(slot(3))),
         None
     );
     assert_eq!(
-        super::WriteBoundary::part_verdict(&boundaries, &header, &Audience::Store, Some(Slot(6))),
-        Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(Slot(5)))
+        super::WriteBoundary::part_verdict(&boundaries, &header, &Audience::Store, Some(slot(6))),
+        Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(slot(5)))
     );
     header.read_through = 5;
     assert_eq!(
-        super::WriteBoundary::part_verdict(&boundaries, &header, &Audience::Store, Some(Slot(6))),
+        super::WriteBoundary::part_verdict(&boundaries, &header, &Audience::Store, Some(slot(6))),
         Some(coven_format::snapshot_rows::ChangeVerdict::Excluded(2))
     );
     db.close().await.unwrap();
@@ -227,9 +228,9 @@ async fn a_change_built_on_a_reset_ignored_part_is_a_data_dependency_loss() {
         .await
         .unwrap();
     receiver.exclude_later_writes(2).await;
-    let reset = Slot(receiver.applied_slot().await.unwrap() + 1);
+    let reset = slot(receiver.applied_slot().await.unwrap() + 1);
     assert!(receiver.install_reset_fixture(reset, Audience::Store, 1).await.unwrap());
-    writes[1].header.read_through = reset.0;
+    writes[1].header.read_through = reset.get();
     for write in &writes {
         receiver.receive(write.clone().into()).await.unwrap();
     }
@@ -262,7 +263,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 async fn a_stored_boundary_of_no_known_kind_is_damaged_database() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    assert!(db.install_reset_fixture(Slot(1), Audience::Store, 0).await.unwrap());
+    assert!(db.install_reset_fixture(slot(1), Audience::Store, 0).await.unwrap());
     db.inspect_writer(|sql| {
         sql.batch(
             "PRAGMA ignore_check_constraints=ON; UPDATE _coven_boundaries SET kind='lost';

@@ -36,7 +36,7 @@ impl SequenceSync {
     /// above the floor's first kept slot. Missing from storage, it is damaged,
     /// as a pass reports a kept slot it can't find (§6.1, §16.6).
     async fn kept_announcement_metadata(&self, slot: Slot) -> Result<StoredObject, SyncError> {
-        let path = self.path(slot.0)?;
+        let path = self.path(slot);
         self.observed_metadata(&path).await?.ok_or_else(|| {
             crate::write_object::damaged(&path, crate::Refusal::Parse { cause: None })
         })
@@ -64,10 +64,10 @@ impl SequenceSync {
     /// (`Retention.kept_candidates_same_first`, `Retention.kept_replacement`).
     pub(super) async fn newest_mature_snapshot<'a>(
         &self,
-        first: u64,
+        first: Slot,
         candidates: impl Iterator<Item = (&'a Slot, &'a SnapshotAnnouncement)>,
     ) -> Result<Option<(&'a Slot, &'a SnapshotAnnouncement)>, SyncError> {
-        for (slot, snapshot) in candidates.take_while(|(slot, _)| slot.0 >= first) {
+        for (slot, snapshot) in candidates.take_while(|(slot, _)| **slot >= first) {
             if self.past_grace(&self.kept_announcement_metadata(*slot).await?) {
                 return Ok(Some((slot, snapshot)));
             }

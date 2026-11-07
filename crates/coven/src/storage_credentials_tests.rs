@@ -593,7 +593,7 @@ async fn a_reconnect_with_another_key_records_set_access_before_committing_it() 
         .filter_map(|object| object.path.slot_number())
         .max()
         .unwrap()
-        .0
+        .get()
         + 1;
     f.storage
         .set_faults(Faults {

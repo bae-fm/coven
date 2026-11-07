@@ -3,12 +3,13 @@
 
 use crate::{OperationKind, OperationOutcome, SyncError};
 use coven_database::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
+use coven_merge::Slot;
 
 /// The landed slot, or the rejection as the error of a call that waits for
 /// the operation itself.
-pub(crate) fn into_slot(outcome: OperationOutcome) -> Result<Option<u64>, SyncError> {
+pub(crate) fn into_slot(outcome: OperationOutcome) -> Result<Option<Slot>, SyncError> {
     match outcome {
-        OperationOutcome::Landed(slot) => Ok(Some(slot.0)),
+        OperationOutcome::Landed(slot) => Ok(Some(slot)),
         OperationOutcome::Satisfied => Ok(None),
         OperationOutcome::Rejected(reason) => Err(SyncError::Rejected(reason)),
         // Only an operation the app's write journaled ends stopped, and no

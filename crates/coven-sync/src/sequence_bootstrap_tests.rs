@@ -104,7 +104,10 @@ async fn a_restored_device_starts_from_a_fresh_snapshot_while_every_slot_is_kept
             _ => None,
         })
         .collect();
-    assert!(read.iter().all(|slot| slot.0 > covers), "read {read:?} at or below coverage {covers}");
+    assert!(
+        read.iter().all(|slot| slot.get() > covers),
+        "read {read:?} at or below coverage {covers}"
+    );
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
     }
@@ -411,7 +414,7 @@ fn slot_reads(storage: &coven_storage::test_utils::MemoryStorage) -> Vec<u64> {
         .into_iter()
         .filter_map(|request| match request {
             coven_storage::test_utils::MemoryRequest::Read(path, None) => {
-                path.slot_number().map(|slot| slot.0)
+                path.slot_number().map(|slot| slot.get())
             }
             _ => None,
         })
@@ -835,7 +838,7 @@ async fn reads_already_started_past_a_blocked_slot_move_nothing_past_it() {
                 coven_storage::test_utils::MemoryRequest::Read(path, _) => path.slot_number(),
                 _ => None,
             })
-            .any(|slot| slot.0 > blocked);
+            .any(|slot| slot.get() > blocked);
         assert!(read_past, "the reads in flight finish past the blocked slot");
         let applied = device.database().applied_slot().await.unwrap();
         assert!(applied < blocked, "applied through {applied}, past the blocked slot {blocked}");
@@ -891,7 +894,7 @@ async fn a_restore_s_scan_goes_on_past_a_damaged_slot_once_a_floor_carries_its_c
                     _ => None,
                 })
                 .collect();
-            assert!(read.iter().all(|slot| slot.0 >= damaged), "read {read:?} again");
+            assert!(read.iter().all(|slot| slot.get() >= damaged), "read {read:?} again");
         }
     }
 

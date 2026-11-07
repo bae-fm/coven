@@ -15,7 +15,7 @@ fn key() -> StorageCredentials {
 }
 
 fn household() -> SavedName {
-    SavedName { name: "Household".into(), named_at: coven_merge::Slot(1) }
+    SavedName { name: "Household".into(), named_at: coven_merge::slot(1) }
 }
 
 /// The saved entry's code bytes and name.

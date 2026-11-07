@@ -45,7 +45,7 @@ impl SlotHeader {
     pub fn validate_at(&self, path: &ObjectPath) -> Result<(), Error> {
         positive(self.claim)?;
         require(
-            path.slot_number().is_some_and(|slot| slot.0 - 1 == self.after),
+            path.slot_number().is_some_and(|slot| slot.get() - 1 == self.after),
             "slot predecessor",
             Rule::Coverage,
         )
@@ -137,7 +137,7 @@ impl SnapshotAnnouncement {
     }
     fn validate_at(&self, slot: Slot) -> Result<(), Error> {
         positive(self.snapshot.number)?;
-        require(self.covers < slot.0, "announcement coverage", Rule::Coverage)?;
+        require(self.covers < slot.get(), "announcement coverage", Rule::Coverage)?;
         self.purpose.validate()
     }
 }
@@ -203,7 +203,7 @@ fn check_admin(change: &StoreChange, header: &SlotHeader, path: &ObjectPath) -> 
             require(*replaces != Some(header.device), "replacement device", Rule::DeviceReplacement)
         }
         StoreChange::RaiseSchema { announcement, .. } | StoreChange::Reset { announcement } => {
-            require(announcement.0 <= header.after, "activation announcement", Rule::Coverage)
+            require(announcement.get() <= header.after, "activation announcement", Rule::Coverage)
         }
         _ => Ok(()),
     }

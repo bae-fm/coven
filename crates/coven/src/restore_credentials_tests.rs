@@ -516,7 +516,7 @@ async fn another_key_waits_for_a_replacement_under_way() {
     .await
     .iter()
     .filter_map(|object| object.path.slot_number())
-    .map(|slot| slot.0)
+    .map(|slot| slot.get())
     .max()
     .unwrap()
         + 1;
@@ -570,7 +570,7 @@ async fn retrying_a_refused_replacement_with_its_key_finishes_it_once() {
         .await
         .iter()
         .filter_map(|object| object.path.slot_number())
-        .map(|slot| slot.0)
+        .map(|slot| slot.get())
         .collect::<Vec<_>>()
     };
     let before = slots().await;
@@ -623,7 +623,7 @@ async fn a_cooldown_holds_a_retried_replacement() {
     .await
     .iter()
     .filter_map(|object| object.path.slot_number())
-    .map(|slot| slot.0)
+    .map(|slot| slot.get())
     .max()
     .unwrap()
         + 1;

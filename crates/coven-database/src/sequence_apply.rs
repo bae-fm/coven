@@ -61,7 +61,7 @@ pub(crate) fn retain(
     original: &OriginalSlot,
 ) -> Result<(), DbError> {
     db.internal_execute("INSERT INTO _coven_slot_records(slot,kind,record) VALUES(?1,?2,?3) ON CONFLICT(slot) DO NOTHING",
-        rusqlite::params![original.slot.0.to_be_bytes().as_slice(),kind,original.object])?;
+        rusqlite::params![original.slot.get().to_be_bytes().as_slice(),kind,original.object])?;
     Ok(())
 }
 
@@ -79,10 +79,10 @@ pub(crate) fn apply<P: crate::PendingValue>(
         // Applying a slot runs no migration and no DDL.
         let _constants = db.keep_constants();
         let applied = crate::sequence::applied(db)?;
-        if incoming.slot.0 <= applied {
+        if incoming.slot.get() <= applied {
             return Ok(crate::ApplyOutcome::AlreadyApplied);
         }
-        if applied.checked_add(1) != Some(incoming.slot.0) || incoming.header.after > applied {
+        if applied.checked_add(1) != Some(incoming.slot.get()) || incoming.header.after > applied {
             return Err(DbError::SequenceGap { applied, received: incoming.slot });
         }
         if let SlotContent::Admin { effect: Some(effect), .. } = &incoming.content {
@@ -152,7 +152,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         }
         authenticate()?;
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
-        crate::sequence::set_applied(db, incoming.slot.0)?;
+        crate::sequence::set_applied(db, incoming.slot.get())?;
         let refold = if whole {
             crate::queued_writes::Refold::Whole
         } else {
@@ -194,7 +194,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
     let stored = crate::sqlite::integer("writes slot size", size)?;
     db.internal_execute(
         "INSERT INTO _coven_write_slots(slot,size) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
-        rusqlite::params![slot.0.to_be_bytes(), stored],
+        rusqlite::params![slot.get().to_be_bytes(), stored],
     )?;
     let mut previous = None;
     for write in writes {
@@ -209,7 +209,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
             crate::sequence::refusal(db, slot, header.device, header.author, write.signer())?;
         if let Some((cutoff, cause)) = cutoff {
             db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
-                rusqlite::params![slot.0.to_be_bytes(), cutoff.0.to_be_bytes()])?;
+                rusqlite::params![slot.get().to_be_bytes(), cutoff.get().to_be_bytes()])?;
             crate::pending::save(db, &P::writes_refused(slot, cutoff, cause))?;
         }
         if let Staging::Reload(coverage) = &staging {

@@ -29,7 +29,11 @@ fn name(store: StoreId) -> String {
 }
 
 fn entry(code: &RestoreCode) -> SecretBytes {
-    SecretBytes::new(KeychainRestoreCode::encode(&name(code.store), 1, code).unwrap().to_vec())
+    SecretBytes::new(
+        KeychainRestoreCode::encode(&name(code.store), coven_merge::slot(1), code)
+            .unwrap()
+            .to_vec(),
+    )
 }
 
 fn save(app: &Coven, code: &RestoreCode) -> PersonEntries {
@@ -356,7 +360,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
 /// The saved entry's name and the slot that set it, as `app` sees it.
 fn saved_name(app: &Coven, store: StoreId) -> (String, u64) {
     let saved = crate::tests::saved_entry(app, store).unwrap();
-    (saved.name, saved.named_at)
+    (saved.name, saved.named_at.get())
 }
 
 #[tokio::test]
@@ -414,7 +418,9 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     let rewrite = |name: &str, named_at: u64| {
         person
             .set_restore_code(&SecretBytes::new(
-                KeychainRestoreCode::encode(name, named_at, &saved.code).unwrap().to_vec(),
+                KeychainRestoreCode::encode(name, coven_merge::slot(named_at), &saved.code)
+                    .unwrap()
+                    .to_vec(),
             ))
             .unwrap();
     };
@@ -535,7 +541,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     };
     let expect_current = || {
         let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
-        assert_eq!((saved.name.as_str(), saved.named_at), ("Family", renamed_at));
+        assert_eq!((saved.name.as_str(), saved.named_at.get()), ("Family", renamed_at));
         assert_eq!(saved.code.to_text().unwrap().as_str(), current);
     };
     for unreadable in unreadable_entries() {

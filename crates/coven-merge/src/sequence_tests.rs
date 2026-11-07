@@ -11,7 +11,8 @@ fn authored_prefix_and_own_predecessors_match_causality() {
             for device in 1..=2 {
                 for number in 1..6 {
                     let earlier = WriteId { device: DeviceId(device), number };
-                    let past = SlotPast::new(reader, read_through, |_| Some(Slot(slot)), None);
+                    let past =
+                        SlotPast::new(reader, read_through, |_| Some(crate::slot(slot)), None);
                     assert_eq!(
                         past.contains(&earlier),
                         slot <= read_through || (device == 1 && number < 4)
@@ -22,7 +23,6 @@ fn authored_prefix_and_own_predecessors_match_causality() {
     }
     assert!(had_read(reader, 0, WriteId { number: 3, ..reader }, None));
     assert!(!had_read(reader, 0, id(2), None));
-    assert!(!had_read(reader, 0, id(2), Some(Slot(0))));
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn unique_values_use_slot_then_write_then_primary_key() {
     for n in 1..=3 {
         view.present(row(n), 1, stamp(100 - n));
     }
-    let claimed = |slot, number| ClaimOrder::Published { slot: Slot(slot), number };
+    let claimed = |slot, number| ClaimOrder::Published { slot: crate::slot(slot), number };
     view.claim(&row(1), ["title"], "Plan", claimed(2, 1));
     view.claim(&row(2), ["title"], "Plan", claimed(1, 2));
     view.claim(&row(3), ["title"], "Plan", claimed(1, 1));
@@ -51,7 +51,12 @@ fn older_live_loser_returns_before_a_new_claim() {
     let mut view = MemoryView::default();
     for n in 1..=3 {
         view.present(row(n), 1, stamp(4 - n));
-        view.claim(&row(n), ["title"], "Plan", ClaimOrder::Published { slot: Slot(n), number: 1 });
+        view.claim(
+            &row(n),
+            ["title"],
+            "Plan",
+            ClaimOrder::Published { slot: crate::slot(n), number: 1 },
+        );
     }
     view.data.insert(row(1), RemovalRow::Absent { generation: 2 });
     let result = removals(&view).unwrap();
@@ -80,7 +85,7 @@ mod differential {
                     *reader,
                     *read,
                     |id: &WriteId| {
-                        writes.iter().find(|(w, _, _)| w == id).map(|(_, s, _)| Slot(*s))
+                        writes.iter().find(|(w, _, _)| w == id).map(|(_, s, _)| crate::slot(*s))
                     },
                     None,
                 );

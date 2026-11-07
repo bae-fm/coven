@@ -10,6 +10,7 @@ use coven_foundation::{
     files::StoreDirectories,
     id_source::{DeviceId, IdSource, MemberId, SequentialIds, StoreId},
 };
+use coven_merge::slot;
 use coven_merge::{Audience, Change, ColumnValue, Operation, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Cursor};
@@ -43,7 +44,7 @@ impl PendingValue for Pending {
         None
     }
     fn slot(&self) -> Option<Slot> {
-        Some(Slot(self.subject))
+        Slot::new(self.subject)
     }
     fn ends_when_covered(&self) -> bool {
         false
@@ -71,7 +72,7 @@ impl PendingValue for Pending {
         Self { subject: id.0 as u64, cutoff: None }
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff) -> Self {
-        Self { subject: slot.0, cutoff: Some((cutoff.0, format!("{cause:?}"))) }
+        Self { subject: slot.get(), cutoff: Some((cutoff.get(), format!("{cause:?}"))) }
     }
 }
 async fn open(owned: bool) -> (tempfile::TempDir, Database) {
@@ -200,7 +201,7 @@ async fn apply_claim(
     db.apply_slot::<Pending, _, _>(
         IncomingSlot {
             digest,
-            slot: Slot(slot),
+            slot: coven_merge::slot(slot),
             header: SlotHeader { device, claim, author: member(device.0 as u128), after: slot - 1 },
             content: SlotContent::Writes {
                 size: 1,
@@ -257,7 +258,7 @@ async fn applied_slot_and_all_effects_commit_together() {
     let two = insert(10, 2, 2, "b", "second");
     let incoming = IncomingSlot {
         digest: [0x31; 32],
-        slot: Slot(1),
+        slot: slot(1),
         header: SlotHeader { device: DeviceId(10), claim: 1, author: member(10), after: 0 },
         content: SlotContent::Writes {
             size: 1,
@@ -342,7 +343,7 @@ async fn admin(
     db.apply_slot::<Pending, std::io::Empty, _>(
         IncomingSlot {
             digest: [0x31; 32],
-            slot: Slot(slot),
+            slot: coven_merge::slot(slot),
             header: SlotHeader {
                 device: DeviceId(99),
                 claim: slot,
@@ -351,7 +352,7 @@ async fn admin(
             },
             content: SlotContent::Admin {
                 original: coven_format::floor::OriginalSlot {
-                    slot: Slot(slot),
+                    slot: coven_merge::slot(slot),
                     object: vec![slot as u8],
                 },
                 effect: Some(AdminEffect {
@@ -419,7 +420,7 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
             db.apply_slot::<Pending, _, _>(
                 IncomingSlot {
                     digest: [0x31; 32],
-                    slot: Slot(5),
+                    slot: slot(5),
                     header: SlotHeader {
                         device: DeviceId(10),
                         claim: 5,
@@ -627,7 +628,7 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         snapshots: vec![SnapshotSource::<coven_database::SnapshotStaging>::Empty(Audience::Store)],
         slots: vec![IncomingSlot {
             digest: [0x31; 32],
-            slot: Slot(1),
+            slot: slot(1),
             header: SlotHeader { device: DeviceId(10), claim: 1, author: member(10), after: 0 },
             content: SlotContent::Writes {
                 size: 1,
@@ -673,10 +674,10 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     let (_temp, db) = open(false).await;
     let incoming = || IncomingSlot::<DownloadedWriteStream<std::io::Empty>> {
         digest: [0x31; 32],
-        slot: Slot(1),
+        slot: slot(1),
         header: SlotHeader { device: DeviceId(10), claim: 1, author: member(10), after: 0 },
         content: SlotContent::Admin {
-            original: coven_format::floor::OriginalSlot { slot: Slot(1), object: vec![1] },
+            original: coven_format::floor::OriginalSlot { slot: slot(1), object: vec![1] },
             effect: Some(AdminEffect {
                 change: coven_format::admin::StoreChange::AddDevice {
                     name: "fixture".into(),
@@ -739,7 +740,7 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
         receiving
             .apply_slot::<Pending, _, _>(
                 IncomingSlot {
-                    slot: Slot(1),
+                    slot: slot(1),
                     digest: [0x31; 32],
                     header: SlotHeader {
                         device: DeviceId(10),
@@ -793,7 +794,7 @@ async fn a_failed_slot_apply_shows_no_lost_values_or_refusals() {
     let losing = insert(20, 1, 2, "b", "same");
     let incoming = |writes: Vec<WriteRecord>| IncomingSlot {
         digest: [0x31; 32],
-        slot: Slot(2),
+        slot: slot(2),
         header: SlotHeader { device: DeviceId(20), claim: 2, author: member(20), after: 1 },
         content: SlotContent::Writes { size: 1, writes: writes.into_iter().map(stream).collect() },
     };

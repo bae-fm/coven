@@ -681,7 +681,7 @@ impl StorageConnections {
             .await?;
         }
         progress.done(1);
-        Ok(Some(coven_merge::Slot(1)))
+        Ok(Some(coven_merge::Slot::FIRST))
     }
 
     /// The store key a creation's slot 1 introduces, kept in custody before

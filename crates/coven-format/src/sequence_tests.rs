@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_utils as f;
+use coven_merge::slot;
 
 #[test]
 fn headers_bind_claims_to_exact_slot_paths() {
@@ -45,7 +46,7 @@ fn bounded_frames_round_trip_and_refuse_wrong_placement() {
         replaces: Some(f::slot_header(2, 2).device),
     });
     assert!(self_replacement.encode(&f::slot_header(2, 2), &f::slot_path(2)).is_err());
-    let future = SlotFrame::Admin(StoreChange::Reset { announcement: Slot(3) });
+    let future = SlotFrame::Admin(StoreChange::Reset { announcement: slot(3) });
     assert!(future.encode(&f::slot_header(2, 2), &f::slot_path(2)).is_err());
 }
 
@@ -54,12 +55,12 @@ fn announcements_name_prior_coverage_and_explicit_purpose() {
     for purpose in [Purpose::Ordinary, Purpose::Raise(1), Purpose::Raise(u32::MAX), Purpose::Reset]
     {
         let announcement = SnapshotAnnouncement { purpose, ..f::announcement() };
-        let bytes = announcement.encode(Slot(7)).unwrap();
-        assert_eq!(SnapshotAnnouncement::decode(&bytes, Slot(7)).unwrap(), announcement);
-        assert!(SnapshotAnnouncement::decode(&bytes, Slot(6)).is_err());
+        let bytes = announcement.encode(slot(7)).unwrap();
+        assert_eq!(SnapshotAnnouncement::decode(&bytes, slot(7)).unwrap(), announcement);
+        assert!(SnapshotAnnouncement::decode(&bytes, slot(6)).is_err());
     }
     assert!(SnapshotAnnouncement { purpose: Purpose::Raise(0), ..f::announcement() }
-        .encode(Slot(7))
+        .encode(slot(7))
         .is_err());
 }
 

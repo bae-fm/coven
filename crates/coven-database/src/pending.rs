@@ -304,7 +304,7 @@ pub(crate) fn set_build(db: &DatabaseConnection, build: u128) -> Result<(), DbEr
 
 fn slot_key(slot: coven_merge::Slot, covered: bool) -> Vec<u8> {
     let mut key = vec![u8::from(covered)];
-    key.extend(slot.0.to_be_bytes());
+    key.extend(slot.get().to_be_bytes());
     key
 }
 const COVERED_SLOT: u8 = 1;

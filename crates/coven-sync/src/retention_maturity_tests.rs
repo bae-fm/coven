@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use coven_foundation::id_source::IdSource;
-use coven_merge::{Audience, Slot};
+use coven_merge::slot;
+use coven_merge::Audience;
 use coven_storage::{ObjectPath, Storage};
 use std::{sync::Arc, time::UNIX_EPOCH};
 
@@ -38,7 +39,7 @@ async fn retention_never_reads_an_announcement_slot_below_the_floor() {
     ben.sync.pass().await.unwrap();
     ben.sync.snapshot(Audience::Store).await.unwrap();
     let his = ben.sync.database.applied_slot().await.unwrap();
-    let id = ben.sync.session.lock().await.history.announcements[&Slot(his)].snapshot.clone();
+    let id = ben.sync.session.lock().await.history.announcements[&slot(his)].snapshot.clone();
     let body = crate::snapshot_object::path(group.store, &id).unwrap();
 
     ana.sync.pass().await.unwrap();
@@ -52,7 +53,7 @@ async fn retention_never_reads_an_announcement_slot_below_the_floor() {
     group.clock.set(UNIX_EPOCH + super::GRACE + std::time::Duration::from_secs(1));
     ana.sync.pass().await.unwrap();
     let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
-    assert!(older < floor.header.first.0, "{:?}", floor.header);
+    assert!(older < floor.header.first.get(), "{:?}", floor.header);
     for slot in [his, older] {
         let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
         assert!(group.storage.status(&path).await.unwrap().is_none(), "slot {slot}");
@@ -61,7 +62,7 @@ async fn retention_never_reads_an_announcement_slot_below_the_floor() {
     let mut ring = ben.sync.keys.read().unwrap().unwrap();
     let mut session = ben.sync.session.lock().await;
     ben.sync.read_forward(&mut session, &mut ring, &ben.identity).await.unwrap();
-    assert!(session.history.announcements.contains_key(&Slot(older)));
+    assert!(session.history.announcements.contains_key(&slot(older)));
     ben.sync.retain_snapshots(&mut session, &mut ring, &ben.identity).await.unwrap();
     assert!(
         group.storage.status(&body).await.unwrap().is_some(),

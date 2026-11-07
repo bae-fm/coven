@@ -1,5 +1,6 @@
 use super::*;
 use crate::{encode_frame, test_utils, Object};
+use coven_merge::slot;
 
 // The admin frame begins directly with its change tag.
 const HEADER: usize = 7;
@@ -232,7 +233,7 @@ fn creation_names_its_writing_device() {
 
 #[test]
 fn unused_tag_12_is_rejected() {
-    let entry = StoreChange::Reset { announcement: crate::value::Slot(7) };
+    let entry = StoreChange::Reset { announcement: slot(7) };
     let mut bytes = Object::Admin(entry).encode().unwrap();
     bytes[HEADER] = 12;
     bytes.splice(HEADER + 1..HEADER + 1, 1u16.to_be_bytes());

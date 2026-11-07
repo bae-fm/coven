@@ -1,6 +1,6 @@
 //! Audience snapshots stream the counted prefix from one pinned transaction.
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::write_encoding::{counter, decoded};
+use crate::write_encoding::{counter, decoded, slot_counter};
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
     admin::SnapshotId,
@@ -134,7 +134,7 @@ pub(crate) fn write<E>(
     if audience == Audience::Store {
         for kind in ["admin", "key", "announcement"] {
             db.for_each("SELECT slot,record FROM _coven_slot_records WHERE kind=?1 AND slot<=?2 ORDER BY slot",rusqlite::params![kind,covers.to_be_bytes()],|r| {
-                let original=coven_format::floor::OriginalSlot {slot:coven_merge::Slot(counter(r.get(0).map_err(DbError::from)?).map_err(DbError::from)?),object:r.get(1).map_err(DbError::from)?};
+                let original=coven_format::floor::OriginalSlot {slot:slot_counter(r.get(0).map_err(DbError::from)?).map_err(DbError::from)?,object:r.get(1).map_err(DbError::from)?};
                 record(match kind {"admin"=>SnapshotRecord::Admin(original),"key"=>SnapshotRecord::KeyCopy(original),_=>SnapshotRecord::Announcement(original)})
             })?;
         }
@@ -152,7 +152,7 @@ pub(crate) fn read_write(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite
         id: WriteId { device: timestamp.device(), number: counter(r.get(1)?)? },
         timestamp,
         read_through: counter(r.get(2)?)?,
-        slot: coven_merge::Slot(counter(r.get(3)?)?),
+        slot: slot_counter(r.get(3)?)?,
     })
 }
 

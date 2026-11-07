@@ -248,7 +248,7 @@ async fn a_lost_floor_reply_confirms_a_floor_moved_past_the_applied_slots() {
     ben.sync.pass().await.unwrap();
     let moved = crate::sequence_sync::sequence_reload::tests::stored_floor(&ben).await;
     assert_ne!(moved.object(), own.object());
-    assert!(moved.header.first.0 > applied + 1, "{:?} after {applied}", moved.header);
+    assert!(moved.header.first.get() > applied + 1, "{:?} after {applied}", moved.header);
     let next = ObjectPath::slot(group.store, (applied + 1).try_into().unwrap());
     assert!(group.storage.status(&next).await.unwrap().is_none(), "Ben deleted the slots between");
 
@@ -260,11 +260,11 @@ async fn a_lost_floor_reply_confirms_a_floor_moved_past_the_applied_slots() {
     let pending = ana.sync.database.pending::<crate::PendingRecord>().await.unwrap();
     assert!(pending.is_empty(), "{pending:?}");
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
-    for slot in 1..moved.header.first.0 {
+    for slot in 1..moved.header.first.get() {
         let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
         assert!(group.storage.status(&path).await.unwrap().is_none(), "slot {slot} kept");
     }
-    assert!(ana.sync.database.applied_slot().await.unwrap() >= moved.header.first.0 - 1);
+    assert!(ana.sync.database.applied_slot().await.unwrap() >= moved.header.first.get() - 1);
     ana.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
@@ -474,7 +474,7 @@ async fn a_floor_advance_deletes_only_the_slots_the_previous_floor_kept() {
                 MemoryRequest::Delete(path) => path.slot_number(),
                 _ => None,
             })
-            .map(|slot| slot.0)
+            .map(|slot| slot.get())
             .collect();
         let previous = *firsts.last().unwrap();
         assert_eq!(deleted, (previous..first).collect::<Vec<_>>());
@@ -511,7 +511,7 @@ async fn a_failed_slot_deletion_stays_journaled_and_the_next_floor_does_not_wait
                 + (super::GRACE + std::time::Duration::from_secs(1)) * (index as u32 + 1),
         );
         ana.sync.pass().await.unwrap();
-        firsts.push(stored_floor(&ana).await.header.first.0);
+        firsts.push(stored_floor(&ana).await.header.first.get());
     }
     assert!(firsts[1] > firsts[0] && firsts[0] > 1);
     let retention: Vec<_> = ana
@@ -574,7 +574,7 @@ async fn idle_circle_coverage(compare: bool) {
         let session = ana.sync.session.lock().await;
         let proposal = ana.sync.propose_floor(&session, &group.ring).await.unwrap();
         let first = proposal.map(|proposal| match proposal {
-            super::Retention::Capture(capture) => capture.first,
+            super::Retention::Capture(capture) => capture.first.get(),
             _ => panic!("expected floor"),
         });
         assert_eq!(first.is_some(), covered, "an idle introduced circle still needs coverage");
@@ -618,34 +618,38 @@ async fn daily_snapshots(compare: bool) {
         let mut session = ana.sync.session.lock().await;
         let announcement = session.history.announcements[&slot].clone();
         published.push((slot, announcement.covers, announcement.snapshot));
-        let current = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
+        let current = session.floor.as_ref().map_or(1, |floor| floor.header.first.get());
         let proposal = ana.sync.propose_floor(&session, &group.ring).await.unwrap();
         let Some(super::Retention::Capture(capture)) = proposal else {
             panic!("day {day}: a new snapshot must be named at once");
         };
         // The floor names today's snapshot; `first` follows the one announced
         // seven days ago, the newest past grace.
-        assert_eq!(capture.announcements, vec![slot.0], "day {day}");
+        assert_eq!(capture.announcements, vec![slot], "day {day}");
         let expected = if day >= 7 { published[day - 7].1 + 1 } else { 1 };
-        assert_eq!(capture.first, expected, "day {day}");
+        assert_eq!(capture.first.get(), expected, "day {day}");
         if compare {
             let mut snapshots = Vec::new();
             for (slot, covers, _) in published.iter().rev() {
                 let object = ana
                     .sync
-                    .immutable_metadata(&ObjectPath::slot(group.store, slot.0.try_into().unwrap()))
+                    .immutable_metadata(&ObjectPath::slot(
+                        group.store,
+                        slot.get().try_into().unwrap(),
+                    ))
                     .await
                     .unwrap();
                 let latest = object.stored_at.elapsed_since_epoch() + object.time_resolution;
-                snapshots
-                    .push(json!({"slot":slot.0,"covers":covers,"announced_at":latest.as_nanos(),
-                    "usable":session.history.usable(&session.history.announcements[slot])}));
+                snapshots.push(
+                    json!({"slot":slot.get(),"covers":covers,"announced_at":latest.as_nanos(),
+                    "usable":session.history.usable(&session.history.announcements[slot])}),
+                );
             }
             let input = json!({"kind":"retention","snapshots":snapshots,"first":current,
                 "grace":super::GRACE.as_nanos(),"time":Duration::from_secs(now).as_nanos()});
             assert_eq!(
                 crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-                json!({"named":{"slot":slot.0,"covers":announcement.covers},"first":capture.first})
+                json!({"named":{"slot":slot.get(),"covers":announcement.covers},"first":capture.first.get()})
             );
         }
         let mut ring = group.ring.clone();

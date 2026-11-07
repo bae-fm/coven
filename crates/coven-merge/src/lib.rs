@@ -25,9 +25,11 @@ pub use error::MergeError;
 use history::from_writes;
 #[cfg(any(test, feature = "test-utils"))]
 pub use history::History;
+#[cfg(any(test, feature = "test-utils"))]
+pub use input::slot;
 pub use input::{
     Audience, Change, ColumnValue, ConstraintColumns, ForeignKey, Operation, Parent, RowId, Slot,
-    UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
+    SlotRange, UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
 };
 pub use removal::{
     recompute, resolve_reference, Constraints, Group, OnDelete, Reference, ReferenceValue,

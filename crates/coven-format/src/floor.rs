@@ -9,7 +9,6 @@ use crate::wire::{
 };
 use coven_foundation::id_source::{DeviceId, StoreId};
 use std::collections::BTreeSet;
-use std::num::NonZeroU64;
 
 /// Exact original slot evidence, verified at its original slot path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,7 +21,7 @@ pub struct OriginalSlot {
 impl OriginalSlot {
     /// Where the slot's object lived in `store`.
     pub fn path(&self, store: StoreId) -> ObjectPath {
-        ObjectPath::slot(store, NonZeroU64::new(self.slot.0).expect("an original slot is positive"))
+        ObjectPath::slot(store, self.slot.into())
     }
 }
 impl Wire for OriginalSlot {
@@ -38,7 +37,6 @@ impl OriginalSlot {
     /// Check the expected clear slot kind and bounded envelope. Authentication
     /// and the encrypted header's path binding are checked when opening it.
     pub fn validate_kind(&self, kind: u8) -> Result<(), Error> {
-        crate::value::positive(self.slot.0)?;
         crate::error::bound(self.object.len(), MAX_BOUNDED_SLOT, "retained slot")?;
         let object = crate::sealed_slot::BoundedSlot::decode(&self.object)?;
         require(object.prefix.kind.tag() == kind, "retained slot kind", Rule::Kind)
@@ -60,11 +58,10 @@ pub struct FloorHeader {
 wire_struct!(FloorHeader, author, at, first, snapshots);
 impl FloorHeader {
     fn validate(&self) -> Result<(), Error> {
-        crate::value::positive(self.first.0)?;
         require(!self.snapshots.is_empty(), "floor snapshots", Rule::Required)?;
         require(
-            self.first.0 - 1 <= self.at
-                && self.snapshots.iter().all(|slot| slot.0 > 0 && slot.0 <= self.at),
+            self.first.get() - 1 <= self.at
+                && self.snapshots.iter().all(|slot| slot.get() <= self.at),
             "floor coverage",
             Rule::Coverage,
         )?;

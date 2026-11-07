@@ -70,7 +70,7 @@ impl PendingValue for Record {
     }
     fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
         Self {
-            subject: Subject::Slot(slot.0),
+            subject: Subject::Slot(slot.get()),
             reason: Reason::WritesRefused,
             operation: None,
             cause: None,
@@ -103,7 +103,7 @@ impl PendingValue for Record {
     }
     fn slot(&self) -> Option<crate::Slot> {
         match self.subject {
-            Subject::Slot(number) => Some(crate::Slot(number)),
+            Subject::Slot(number) => crate::Slot::new(number),
             _ => None,
         }
     }
@@ -313,7 +313,7 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
 async fn judgments_clear_only_with_a_committed_changed_reset() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let entry = crate::Slot(1);
+    let entry = coven_merge::slot(1);
     db.check_boundary_fixture(crate::Boundary::Reset {
         entry,
         snapshot: coven_format::admin::SnapshotId {
@@ -444,7 +444,7 @@ async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remai
     assert_eq!(db.pending::<Record>().await.unwrap(), vec![refused.clone(), later.clone()]);
     // Applying a write itself ends any record for it, verdicts included.
     for number in [2, 3] {
-        db.commit_writer(|sql| crate::pending::clear_slot(sql, crate::Slot(number)).unwrap());
+        db.commit_writer(|sql| crate::pending::clear_slot(sql, coven_merge::slot(number)).unwrap());
     }
     assert!(db.pending::<Record>().await.unwrap().is_empty());
 }

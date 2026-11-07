@@ -24,7 +24,7 @@ fn code(store: StoreId) -> RestoreCode {
 }
 
 fn name(name: &str, slot: u64) -> SavedName {
-    SavedName { name: name.into(), named_at: Slot(slot) }
+    SavedName { name: name.into(), named_at: coven_merge::slot(slot) }
 }
 
 fn person() -> PersonEntries {
@@ -32,13 +32,15 @@ fn person() -> PersonEntries {
 }
 
 fn put(person: &PersonEntries, label: &str, slot: u64, code: &RestoreCode) {
-    person.set_restore_code(&encode(person, label, slot, code).unwrap()).unwrap();
+    person
+        .set_restore_code(&encode(person, label, coven_merge::slot(slot), code).unwrap())
+        .unwrap();
 }
 
 fn held(person: &PersonEntries) -> (String, u64, Vec<u8>) {
     let bytes = person.restore_code().unwrap().unwrap();
     let (saved, _) = read_saved_code(person.store(), bytes.as_bytes()).unwrap();
-    (saved.name, saved.named_at, saved.code.to_bytes().unwrap().to_vec())
+    (saved.name, saved.named_at.get(), saved.code.to_bytes().unwrap().to_vec())
 }
 
 #[test]
@@ -102,9 +104,13 @@ fn following_a_name_replaces_an_unreadable_entry_with_this_devices_code() {
     let ours_bytes = ours.to_bytes().unwrap().to_vec();
     let current = || Ok::<_, KeyError>(Some(code_copy(&ours)));
     let other_store = SecretBytes::new(
-        KeychainRestoreCode::encode("Elsewhere", 90, &code(StoreId(Uuid::from_u128(2))))
-            .unwrap()
-            .to_vec(),
+        KeychainRestoreCode::encode(
+            "Elsewhere",
+            coven_merge::slot(90),
+            &code(StoreId(Uuid::from_u128(2))),
+        )
+        .unwrap()
+        .to_vec(),
     );
     for unreadable in [
         SecretBytes::new(b"damaged".to_vec()),
@@ -168,9 +174,9 @@ fn a_saved_code_carrying_an_s3_key_is_unreadable() {
     }
     .encode()
     .unwrap();
-    let bytes = encode(&person(), "Household", 1, &keyed).unwrap();
+    let bytes = encode(&person(), "Household", coven_merge::slot(1), &keyed).unwrap();
     assert_eq!(read_saved_code(store(), bytes.as_bytes()).err(), Some(UnreadableSavedCode::Format));
-    let bytes = encode(&person(), "Household", 1, &code(store())).unwrap();
+    let bytes = encode(&person(), "Household", coven_merge::slot(1), &code(store())).unwrap();
     read_saved_code(store(), bytes.as_bytes()).unwrap();
 }
 

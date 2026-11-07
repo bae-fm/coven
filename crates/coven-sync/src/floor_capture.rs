@@ -16,12 +16,16 @@ pub(super) struct FloorCapture {
     pub(super) previous: Option<StoredObject>,
     /// The previous floor's `first`, or 1 without one. This floor's deletions
     /// start there: the slots below it are the previous floor's deletions.
-    pub(super) previous_first: u64,
-    pub(super) first: u64,
-    pub(super) announcements: Vec<u64>,
+    #[serde(with = "coven_database::slot_json")]
+    pub(super) previous_first: Slot,
+    #[serde(with = "coven_database::slot_json")]
+    pub(super) first: Slot,
+    #[serde(with = "coven_database::slot_json::list")]
+    pub(super) announcements: Vec<Slot>,
     pub(super) at: u64,
     pub(super) key: KeyId,
-    pub(super) copies: Vec<u64>,
+    #[serde(with = "coven_database::slot_json::list")]
+    pub(super) copies: Vec<Slot>,
     pub(super) name: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,28 +86,27 @@ impl SequenceSync {
             .collect();
         let (mut routing, mut prefix) = FloorPrefixEncoder::start(
             capture.key,
-            Slot(capture.first),
+            capture.first,
             capture.copies.len().try_into().map_err(|_| coven_format::Error::Truncated)?,
         )?;
         for slot in &capture.copies {
-            prefix.extend(routing.copy(
-                originals.get(&Slot(*slot)).ok_or(coven_database::DbError::DamagedDatabase)?,
-            )?);
+            prefix.extend(
+                routing
+                    .copy(originals.get(slot).ok_or(coven_database::DbError::DamagedDatabase)?)?,
+            );
         }
         routing.finish()?;
         let header = FloorHeader {
             author: self.device,
             at: capture.at,
-            first: Slot(capture.first),
-            snapshots: capture.announcements.iter().map(|slot| Slot(*slot)).collect(),
+            first: capture.first,
+            snapshots: capture.announcements.clone(),
         };
         let (frames, header) = FloorFrames::start(header)?;
         let announcements = capture
             .announcements
             .iter()
-            .map(|slot| {
-                originals.remove(&Slot(*slot)).ok_or(coven_database::DbError::DamagedDatabase)
-            })
+            .map(|slot| originals.remove(slot).ok_or(coven_database::DbError::DamagedDatabase))
             .collect::<Result<Vec<_>, _>>()?;
         let mut plaintext = FloorPlaintext {
             frames,

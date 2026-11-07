@@ -11,7 +11,8 @@ use coven_format::{
     write_sources::{CellSource, ChangeId, WriteSources},
 };
 use coven_foundation::id_source::DeviceId;
-use coven_merge::{Audience, Operation, Slot, Timestamp};
+use coven_merge::slot;
+use coven_merge::{Audience, Operation, Timestamp};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, ffi::OsStr};
 
@@ -139,7 +140,7 @@ async fn compare(
             "parts":[{"audience":0,"version":1,"read_through":reads[device as usize],"unique_claims":[],"owner_creations":owners,"writes":wn,"rows":rows}]}));
         db.apply_slot::<crate::pending::tests::Record, _, _>(
             IncomingSlot {
-                slot: Slot(at),
+                slot: slot(at),
                 header: SlotHeader {
                     device: DeviceId(device),
                     claim: at,
@@ -393,7 +394,7 @@ async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
         {
             db.apply_slot::<crate::pending::tests::Record, _, _>(
                 IncomingSlot {
-                    slot: Slot(slot),
+                    slot: coven_merge::slot(slot),
                     header: SlotHeader {
                         device,
                         claim: slot,
@@ -477,7 +478,7 @@ async fn applying_a_slot_leaves_the_temporary_tables_as_they_were() {
         write.parts[0].rows.retain(|row| row.row.table == "rows");
         db.apply_slot::<crate::pending::tests::Record, _, _>(
             IncomingSlot {
-                slot: Slot(slot),
+                slot: coven_merge::slot(slot),
                 header: SlotHeader {
                     device: ben,
                     claim: slot,

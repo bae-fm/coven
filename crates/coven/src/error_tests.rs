@@ -1,5 +1,6 @@
 use super::*;
 use crate::{StorageFailure, SyncFailure};
+use coven_merge::slot;
 use std::error::Error;
 
 #[test]
@@ -125,16 +126,16 @@ fn filesystem_and_settings_errors_accept_boxed_native_causes() {
 /// its boxed cause.
 #[test]
 fn setup_and_unlock_name_a_removal_and_a_required_update() {
-    use crate::{PendingReason, PendingRecord, PendingSubject, RequiredUpdate, Slot};
+    use crate::{PendingReason, PendingRecord, PendingSubject, RequiredUpdate};
     let update = RequiredUpdate::CovenFormat { version: 9 };
     let blocked = |reason| {
-        SyncError::Pending(Box::new(PendingRecord::new(PendingSubject::Slot(Slot(4)), reason)))
+        SyncError::Pending(Box::new(PendingRecord::new(PendingSubject::Slot(slot(4)), reason)))
     };
     let removals: [fn() -> SyncError; 2] = [
         || SyncError::Removed,
         || {
             SyncError::Pending(Box::new(PendingRecord::new(
-                PendingSubject::Slot(Slot(4)),
+                PendingSubject::Slot(slot(4)),
                 PendingReason::Removed,
             )))
         },

@@ -156,7 +156,8 @@ impl MemoryProvider {
             .iter()
             .filter(|(_, pending)| {
                 let path = pending.target.path();
-                path.store() == store && path.slot_number().is_some_and(|slot| slot.0 <= through)
+                path.store() == store
+                    && path.slot_number().is_some_and(|slot| slot.get() <= through)
             })
             .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
             .collect())

@@ -35,24 +35,19 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         for copy in &floor.copies {
-            if copy.slot.0 > floor.header.at {
+            if copy.slot.get() > floor.header.at {
                 return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
             }
             snapshot_object::open_routing(copy, self.store(), ring, member)?;
-            slot_object::open_bounded(
-                copy.object.clone(),
-                &self.path(copy.slot.0)?,
-                ring,
-                history,
-            )?;
+            slot_object::open_bounded(copy.object.clone(), &self.path(copy.slot), ring, history)?;
         }
-        let required = history.introduced_through(Slot(floor.header.at));
+        let required = history.introduced_through(floor.header.at);
         let mut included = std::collections::BTreeSet::new();
         let mut previous = None;
         for original in &floor.announcements {
             let received = slot_object::open_bounded(
                 original.object.clone(),
-                &self.path(original.slot.0)?,
+                &self.path(original.slot),
                 ring,
                 history,
             )?;
@@ -64,7 +59,7 @@ impl SequenceSync {
             let audience = &announcement.snapshot.audience;
             if previous.as_ref().is_some_and(|prior| prior >= audience)
                 || (previous.is_none() && *audience != Audience::Store)
-                || announcement.covers < floor.header.first.0 - 1
+                || announcement.covers < floor.header.first.get() - 1
                 || history.announcements.get(&original.slot) != Some(&announcement)
                 || !history.usable_at(&announcement, floor.header.at)
             {

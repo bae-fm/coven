@@ -57,7 +57,7 @@ impl S3Storage {
             let settled = ObjectPath::parse(&key)
                 .ok()
                 .and_then(|path| path.slot_number())
-                .is_some_and(|slot| slot.0 <= through);
+                .is_some_and(|slot| slot.get() <= through);
             if settled {
                 left.push(LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
             }

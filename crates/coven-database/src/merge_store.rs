@@ -3,7 +3,7 @@
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{counter, decoded};
+use crate::write_encoding::{counter, decoded, slot_counter};
 use crate::write_metadata::StoredWrite;
 use crate::write_rows::AppView;
 use crate::DbError;
@@ -61,11 +61,7 @@ impl<'a> WriteMetadata<'a> {
             ordinal: row.get(offset)?,
             timestamp,
             read_through: counter(row.get(offset + 3)?)?,
-            slot: row
-                .get::<_, Option<Vec<u8>>>(offset + 4)?
-                .map(counter)
-                .transpose()?
-                .map(coven_merge::Slot),
+            slot: row.get::<_, Option<Vec<u8>>>(offset + 4)?.map(slot_counter).transpose()?,
         };
         self.writes.borrow_mut().insert(id, applied);
         Ok(id)

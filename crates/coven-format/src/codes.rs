@@ -8,6 +8,7 @@ use crate::wire::{decode_frame_of, Decoder, Wire};
 use crate::{frame_prefix, FormatVersion, FRAME_PREFIX_LEN};
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
 use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
+use coven_merge::Slot;
 use zeroize::Zeroizing;
 
 // The largest invite: two 1,024-byte names and 16 KiB of storage.
@@ -82,7 +83,7 @@ pub struct KeychainRestoreCode {
     pub name: String,
     /// The slot that set `name`: 1 for creation, otherwise the rename's slot.
     /// Only a name from a later slot replaces it.
-    pub named_at: u64,
+    pub named_at: Slot,
     /// The member's current restore code.
     pub code: RestoreCode,
 }
@@ -94,11 +95,10 @@ impl KeychainRestoreCode {
     /// Encode the frame for these fields without owning the code.
     pub fn encode(
         label: &str,
-        named_at: u64,
+        named_at: Slot,
         code: &RestoreCode,
     ) -> Result<Zeroizing<Vec<u8>>, Error> {
         name(label)?;
-        require(named_at > 0, "name slot", Rule::Required)?;
         let code = code.to_bytes()?;
         let size = FRAME_PREFIX_LEN + 4 + label.len() + 8 + 4 + code.len();
         let mut bytes = Zeroizing::new(Vec::new());
@@ -110,7 +110,7 @@ impl KeychainRestoreCode {
         ));
         bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
         bytes.extend_from_slice(label.as_bytes());
-        bytes.extend_from_slice(&named_at.to_be_bytes());
+        bytes.extend_from_slice(&named_at.get().to_be_bytes());
         bytes.extend_from_slice(&(code.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&code);
         debug_assert_eq!(bytes.len(), size);
@@ -122,8 +122,7 @@ impl KeychainRestoreCode {
         let mut input =
             decode_frame_of(bytes, kinds::SAVED_RESTORE_CODE, "saved restore code kind")?;
         let label = crate::wire::get_name(&mut input)?;
-        let named_at = u64::get(&mut input)?;
-        require(named_at > 0, "name slot", Rule::Required)?;
+        let named_at = <Slot as Wire>::get(&mut input)?;
         let len = u32::get(&mut input)? as usize;
         let code = RestoreCode::from_bytes(input.take(len)?)?;
         input.finish()?;

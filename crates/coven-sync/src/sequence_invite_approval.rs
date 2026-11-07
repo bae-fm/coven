@@ -100,7 +100,7 @@ impl SequenceSync {
                     .await?
                     .ok_or(coven_database::DbError::OperationChanged(id))?;
                 let SequenceOperation { request, progress } = serde_json::from_slice(&record.data)?;
-                let slot = claim.attempts.last().expect("attempt").slot_number().expect("slot").0;
+                let slot = claim.attempts.last().expect("attempt").slot_number().expect("slot");
                 let step = match progress {
                     OperationProgress::Running(OperationStep::Claiming) => {
                         OperationStep::Applied(slot)

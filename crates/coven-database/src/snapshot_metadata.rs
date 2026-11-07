@@ -2,7 +2,7 @@
 
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{counter, decoded, encoded};
+use crate::write_encoding::{counter, decoded, encoded, slot_counter};
 use crate::write_metadata::MetadataFailure;
 use crate::DbError;
 use coven_format::{merge_fields, snapshot::WriteSlots, snapshot_rows::AppliedWrite};
@@ -62,7 +62,7 @@ impl<'a> SnapshotMetadata<'a> {
         Ok(())
     }
     pub(crate) fn stage(&self, write: &AppliedWrite) -> Result<(), DbError> {
-        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(source,device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5,?6)", params![self.source,write.id.device,write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.0.to_be_bytes().as_slice()])?;
+        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(source,device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5,?6)", params![self.source,write.id.device,write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.get().to_be_bytes().as_slice()])?;
         Ok(())
     }
 
@@ -98,7 +98,7 @@ impl<'a> SnapshotMetadata<'a> {
             applied,
         )?;
         let mut by_slot: Vec<(u64, Timestamp)> =
-            writes.iter().map(|write| (write.slot.0, write.timestamp)).collect();
+            writes.iter().map(|write| (write.slot.get(), write.timestamp)).collect();
         by_slot.sort_unstable();
         let latest_by_slot: Vec<Timestamp> = by_slot
             .iter()
@@ -110,7 +110,7 @@ impl<'a> SnapshotMetadata<'a> {
             .collect();
         let mut own: Option<(DeviceId, Timestamp)> = None;
         for write in &writes {
-            let (slot, through) = (write.slot.0, write.read_through);
+            let (slot, through) = (write.slot.get(), write.read_through);
             if slot == 0 || slot > covers || through >= slot {
                 return Err(invalid("applied write is outside snapshot coverage"));
             }
@@ -142,7 +142,7 @@ pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
         id: WriteId { device: r.get::<_, DeviceId>(0)?, number: counter(r.get(1)?)? },
         timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,
         read_through: counter(r.get(3)?)?,
-        slot: coven_merge::Slot(counter(r.get(4)?)?),
+        slot: slot_counter(r.get(4)?)?,
     })
 }
 

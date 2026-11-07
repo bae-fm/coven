@@ -18,7 +18,7 @@ use coven_format::{
     sequence::{SlotFrame, SlotHeader},
     writes_slot,
 };
-use coven_merge::Audience;
+use coven_merge::{Audience, Slot};
 use std::{
     io::{Read, Seek, SeekFrom},
     sync::Arc,
@@ -35,6 +35,13 @@ pub(crate) struct SlotEnvelope {
     pub(crate) header: SlotHeader,
     pub(crate) prefix: SlotObjectPrefix,
     pub(crate) digest: [u8; 32],
+}
+impl SlotEnvelope {
+    /// The slot the envelope's path names. Decoding checked the header's
+    /// predecessor against that path, so `after` is one less than it.
+    pub(crate) fn slot(&self) -> Slot {
+        self.path.slot_number().expect("an opened slot's path names a slot")
+    }
 }
 impl ReceivedSlot {
     pub(crate) fn envelope(&self) -> &SlotEnvelope {

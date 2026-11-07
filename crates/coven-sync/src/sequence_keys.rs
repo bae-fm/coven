@@ -138,7 +138,7 @@ impl SequenceSync {
                 author: member.member(),
                 after: session.through,
             },
-            coven_merge::Slot(next_slot(session.through)?),
+            next_slot(session.through)?,
             &change,
         ) {
             Ok(_) => {

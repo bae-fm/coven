@@ -26,7 +26,7 @@ async fn slot_read_failures_keep_their_pass_status_and_retry() {
             let before = ben.database().applied_slot().await.unwrap();
             insert(ana.database(), "a", "read after retry").await;
             ana.sync.pass().await.unwrap();
-            let path = ana.sync.path(before + 1).unwrap();
+            let path = ana.sync.path(coven_merge::slot(before + 1));
             let mut faults = Faults::none();
             if body {
                 faults.body_failures.insert(path, BodyFailure::Interrupted(1));
@@ -138,7 +138,7 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     let shown = last.wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
     let Some(shown) = shown else { unreachable!("waited for a blocked pass") };
     assert!(
-        matches!(&shown, LastPass::Blocked { slot: blocked, reason: PendingReason::Refused(_), .. } if blocked.0 == slot),
+        matches!(&shown, LastPass::Blocked { slot: blocked, reason: PendingReason::Refused(_), .. } if blocked.get() == slot),
         "{shown:?}"
     );
     let state = crate::sync_status(&ben.sync.database).await.unwrap().state;
@@ -150,7 +150,7 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     assert!(error.contains("damaged object"), "{error}");
     // The slot's pending record keeps the same text as its cause.
     let records = ben.sync.database.pending::<crate::PendingRecord>().await.unwrap();
-    let subject = crate::PendingSubject::Slot(coven_merge::Slot(slot));
+    let subject = crate::PendingSubject::Slot(coven_merge::slot(slot));
     let record = records.iter().find(|record| record.subject == subject).unwrap();
     assert_eq!(record.cause.as_ref(), Some(error));
     ben_loop.close().await.unwrap();
@@ -360,7 +360,7 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
     insert(ana.database(), "a", "read by a panicking pass").await;
     ana.sync.pass().await.unwrap();
     let mut faults = coven_storage::test_utils::Faults::none();
-    faults.read_panics.insert(ana.sync.path(before + 1).unwrap());
+    faults.read_panics.insert(ana.sync.path(coven_merge::slot(before + 1)));
     ben.storage.set_faults(faults).await;
     let answer = tokio::time::timeout(HANG_GUARD, async {
         ben.sync.waits.retry_requested().await.unwrap().await
@@ -425,7 +425,7 @@ async fn a_command_racing_the_loops_panic_hears_its_bug() {
     insert(ana.database(), "a", "read by a panicking pass").await;
     ana.sync.pass().await.unwrap();
     let mut faults = coven_storage::test_utils::Faults::none();
-    faults.read_panics.insert(ana.sync.path(before + 1).unwrap());
+    faults.read_panics.insert(ana.sync.path(coven_merge::slot(before + 1)));
     ben.storage.set_faults(faults).await;
     ben_loop.sync_now().unwrap();
     let bug = tokio::time::timeout(HANG_GUARD, group.bugs.next()).await.expect("the sink hears it");
@@ -537,7 +537,9 @@ async fn a_halt_during_a_pass_ends_the_loop_and_the_pass_writes_nothing_after_it
     ana.sync.pass().await.unwrap();
     let (observed, observing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    ben.storage.hold_next_read(ana.sync.path(before + 1).unwrap(), observed, resumed).await;
+    ben.storage
+        .hold_next_read(ana.sync.path(coven_merge::slot(before + 1)), observed, resumed)
+        .await;
     ben_loop.sync_now().unwrap();
     tokio::time::timeout(HANG_GUARD, observing).await.unwrap().unwrap();
     let bug = coven_foundation::task::Bug {
@@ -697,7 +699,7 @@ async fn a_pass_moving_a_slot_shows_syncing_until_it_ends() {
     let end = ana.database().applied_slot().await.unwrap() + 1;
     let (observed, observing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    ben.storage.hold_next_read(ben.sync.path(end).unwrap(), observed, resumed).await;
+    ben.storage.hold_next_read(ben.sync.path(coven_merge::slot(end)), observed, resumed).await;
     let mut status = follow(&ben);
     assert_eq!(status.next().await.state, SyncState::Synced);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("moving-ben").unwrap());
@@ -734,7 +736,7 @@ async fn a_write_while_offline_shows_unsent_changes_with_no_pass() {
     group.create(&ana).await;
     let end = ana.database().applied_slot().await.unwrap() + 1;
     let mut faults = Faults::none();
-    faults.read_failures.insert(ana.sync.path(end).unwrap(), StorageFailure::Network);
+    faults.read_failures.insert(ana.sync.path(coven_merge::slot(end)), StorageFailure::Network);
     ana.storage.set_faults(faults).await;
     let mut status = follow(&ana);
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("offline-ana").unwrap());

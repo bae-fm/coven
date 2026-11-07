@@ -36,8 +36,10 @@ enum Retention {
     Capture(FloorCapture),
     Floor(FloorArtifact),
     Delete {
-        next: u64,
-        first: u64,
+        #[serde(with = "coven_database::slot_json")]
+        next: Slot,
+        #[serde(with = "coven_database::slot_json")]
+        first: Slot,
     },
 }
 impl OperationState for Retention {}
@@ -113,7 +115,7 @@ impl SequenceSync {
             return Ok(());
         }
         let history = &session.history;
-        let first_kept = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
+        let first_kept = session.floor.as_ref().map_or(Slot::FIRST, |floor| floor.header.first);
         // The devices gone for good whose files this device deletes: their
         // stored bytes are its to delete, and they never return to delete
         // their own (§16.6).
@@ -138,12 +140,8 @@ impl SequenceSync {
                 continue;
             }
             match serde_json::from_slice(&record.data)? {
-                Retention::Capture(capture) => {
-                    kept.extend(capture.announcements.into_iter().map(Slot))
-                }
-                Retention::Floor(artifact) => {
-                    kept.extend(artifact.capture.announcements.into_iter().map(Slot))
-                }
+                Retention::Capture(capture) => kept.extend(capture.announcements),
+                Retention::Floor(artifact) => kept.extend(artifact.capture.announcements),
                 Retention::Snapshot(id) => pending_snapshots.push(id),
                 Retention::GoneListing(device) => {
                     pending_listings.insert(device);
@@ -191,7 +189,7 @@ impl SequenceSync {
             }
             if history.boundaries.iter().any(|coverage| {
                 coverage.boundary.snapshot() == id
-                    && coverage.boundary.entry().0 > floor_covers(&id.audience)
+                    && coverage.boundary.entry().get() > floor_covers(&id.audience)
             }) {
                 continue;
             }
@@ -235,7 +233,7 @@ impl SequenceSync {
         // Every introduced audience needs coverage, even without data writes:
         // its membership and boundary history also crosses the floor.
         let audiences = session.history.introduced_audiences();
-        let previous_first = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
+        let previous_first = session.floor.as_ref().map_or(Slot::FIRST, |floor| floor.header.first);
         // Two selections per audience. The floor names the newest applicable
         // snapshot, mature or not, so a new device starts from it at once.
         // `first`, which says what may be deleted, follows only snapshots past
@@ -269,7 +267,7 @@ impl SequenceSync {
                     return Ok(None);
                 }
             }
-            named.push(slot.0);
+            named.push(*slot);
             mature.push(
                 self.newest_mature_snapshot(previous_first, candidates())
                     .await?
@@ -284,9 +282,8 @@ impl SequenceSync {
             }
             None => previous_first,
         };
-        let names_advance = session.floor.as_ref().is_none_or(|floor| {
-            floor.header.snapshots.iter().map(|slot| slot.0).ne(named.iter().copied())
-        });
+        let names_advance =
+            session.floor.as_ref().is_none_or(|floor| floor.header.snapshots != named);
         if first == previous_first && !names_advance {
             return Ok(None);
         }
@@ -294,7 +291,7 @@ impl SequenceSync {
         let key = session.history.metadata_key(ring)?;
         let copies = session.history.copies.iter().filter(|copy|
             matches!(&copy.prefix.kind, coven_format::sealed_slot::SlotKind::KeyCopy(copy) if copy.routing.audience == Audience::Store && copy.routing.key == key))
-            .map(|copy| copy.path.slot_number().expect("copy slot").0).collect();
+            .map(|copy| copy.path.slot_number().expect("copy slot")).collect();
         Ok(Some(Retention::Capture(FloorCapture {
             previous: session.floor.as_ref().map(|floor| floor.object().clone()),
             previous_first,
@@ -357,8 +354,8 @@ impl SequenceSync {
                 let same_revision =
                     session.floor.as_ref().map(|floor| floor.object()) == previous.as_ref();
                 if let Some(floor) = session.floor.as_ref().filter(|_| !same_revision) {
-                    if floor.header.first.0 >= first {
-                        confirmed = Some(floor.header.first.0);
+                    if floor.header.first >= first {
+                        confirmed = Some(floor.header.first);
                     }
                 }
                 if confirmed.is_none() && !same_revision {
@@ -408,8 +405,8 @@ impl SequenceSync {
         };
         while next < first {
             self.state.check()?;
-            self.storage.delete(&self.path(next)?).await?;
-            next += 1;
+            self.storage.delete(&self.path(next)).await?;
+            next = next_slot(next.get())?;
             let update = Retention::Delete { next, first }.update(&record)?;
             record.last_step = update.last_step;
             self.database.advance_operation(update).await?;

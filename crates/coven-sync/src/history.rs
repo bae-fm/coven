@@ -95,7 +95,7 @@ fn changed<K: Ord + Clone, V: PartialEq + Clone>(
 ) {
     for (id, value) in after {
         if before.get(id) != Some(value) {
-            history.entry(id.clone()).or_default().insert(slot.0, value.clone());
+            history.entry(id.clone()).or_default().insert(slot.get(), value.clone());
         }
     }
 }
@@ -182,7 +182,9 @@ impl History {
                     DeviceStop::Replaced
                 }
                 StoreChange::ReplaceMemberKeys { member: replaced, .. }
-                    if *replaced == member && cutoff.slot.0 > added && cutoff.author != device =>
+                    if *replaced == member
+                        && cutoff.slot.get() > added
+                        && cutoff.author != device =>
                 {
                     DeviceStop::MemberKeysReplaced
                 }
@@ -379,16 +381,16 @@ impl History {
     /// The store's audience and every audience a key introduction names:
     /// those whose history and snapshots the store keeps.
     pub(crate) fn introduced_audiences(&self) -> BTreeSet<Audience> {
-        self.introduced_through(Slot(u64::MAX))
+        self.introduced_through(u64::MAX)
     }
 
-    /// [`Self::introduced_audiences`] as the slots through `slot` left them.
-    pub(crate) fn introduced_through(&self, slot: Slot) -> BTreeSet<Audience> {
+    /// [`Self::introduced_audiences`] as the slots through number `through` left them.
+    pub(crate) fn introduced_through(&self, through: u64) -> BTreeSet<Audience> {
         std::iter::once(Audience::Store)
             .chain(
                 self.introductions
                     .iter()
-                    .filter(|intro| intro.slot <= slot)
+                    .filter(|intro| intro.slot.get() <= through)
                     .map(|intro| intro.audience.clone()),
             )
             .collect()
@@ -468,7 +470,7 @@ impl History {
                 .filter(|prior| {
                     prior.boundary.snapshot().audience == announcement.snapshot.audience
                 })
-                .all(|prior| prior.boundary.entry().0 <= announcement.covers)
+                .all(|prior| prior.boundary.entry().get() <= announcement.covers)
     }
 
     pub(crate) fn metadata_key(&self, ring: &StoreKeyring) -> Result<KeyId, SyncError> {

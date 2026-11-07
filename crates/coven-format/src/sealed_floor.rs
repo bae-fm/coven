@@ -55,7 +55,7 @@ impl FloorPrefixDecoder {
         crate::sealed::prefix(bytes, crate::kinds::FLOOR)?;
         let mut input = Decoder::new(&bytes[3..])?;
         let key = KeyId::get(&mut input)?;
-        let first = Slot::get(&mut input)?;
+        let first = <Slot as Wire>::get(&mut input)?;
         let remaining = u32::get(&mut input)?;
         bound(remaining as usize, MAX_ITEMS, "floor key copies")?;
         input.finish()?;

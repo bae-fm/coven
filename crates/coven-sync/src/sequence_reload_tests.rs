@@ -358,8 +358,8 @@ async fn activation_whose_suffix_is_below_the_floor(raise: bool) {
     );
     ana.sync.pass().await.unwrap();
     let floor = stored_floor(&ana).await;
-    assert_eq!(floor.header.first.0, before);
-    assert!(floor.header.first.0 > prepared + 1);
+    assert_eq!(floor.header.first.get(), before);
+    assert!(floor.header.first.get() > prepared + 1);
     assert!(group
         .storage
         .status(&ObjectPath::slot(group.store, (prepared + 1).try_into().unwrap()))
@@ -424,7 +424,7 @@ async fn a_newly_readable_circle_starts_from_the_floor_snapshot_announced_after_
     );
     ana.sync.pass().await.unwrap();
     let floor = stored_floor(&ana).await;
-    assert_eq!(floor.header.first.0, before);
+    assert_eq!(floor.header.first.get(), before);
     assert!(group
         .storage
         .status(&ObjectPath::slot(group.store, 1.try_into().unwrap()))
@@ -625,7 +625,7 @@ async fn a_reload_keeps_its_selected_audiences_when_a_later_floor_records_depart
     ana.sync.pass().await.unwrap();
     let floor = stored_floor(&ana).await;
     assert!(floor.header.at > target);
-    assert!(floor.header.first.0 <= selected.covers + 1);
+    assert!(floor.header.first.get() <= selected.covers + 1);
     assert!(ana.storage.status(&path).await.unwrap().is_some());
     let ben = group.reopen(ben).await;
     ben.sync.reload_from_snapshot().await.unwrap();
@@ -766,7 +766,7 @@ async fn blocked_floor(compare: bool) {
     let mut session = ben.sync.session.lock().await;
     let mut ring = ben.sync.ring(&mut session, &ben.identity).await.unwrap();
     let floor = stored_floor(&ben).await;
-    let first = floor.header.first.0;
+    let first = floor.header.first.get();
     assert!(first > applied + 1);
     let requests = ben.storage.request_count();
     let result = ben.sync.reload_floor(&mut session, floor, &mut ring, &ben.identity, None).await;

@@ -1,6 +1,7 @@
 use super::*;
 use crate::{encode_frame, test_utils, Object};
 use coven_crypto::SigningKey;
+use coven_merge::slot;
 
 fn bytes<T: Wire>(value: &T) -> Vec<u8> {
     let mut out = Encoder::new();
@@ -132,11 +133,11 @@ fn value_tags_preserve_equal_integer_and_real_storage_classes() {
 #[test]
 fn slots_are_positive_unsigned_numbers() {
     for n in [1, u64::MAX] {
-        let slot = Slot(n);
+        let slot = slot(n);
         assert_eq!(bytes(&slot), n.to_be_bytes());
-        assert_eq!(Slot::get(&mut Decoder::new(&bytes(&slot)).unwrap()).unwrap(), slot);
+        assert_eq!(<Slot as Wire>::get(&mut Decoder::new(&bytes(&slot)).unwrap()).unwrap(), slot);
     }
-    assert!(Slot::get(&mut Decoder::new(&[0; 8]).unwrap()).is_err());
+    assert!(<Slot as Wire>::get(&mut Decoder::new(&[0; 8]).unwrap()).is_err());
 }
 
 fn row_id(table: &str, key: &[u8], audience: Audience) -> RowId {

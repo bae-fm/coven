@@ -2,6 +2,7 @@
 //! slots keep arriving (§21.1).
 
 use crate::{object_input::ObjectInput, sequence_sync::SequenceSync, SyncError};
+use coven_merge::SlotRange;
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use std::{future::Future, pin::Pin};
 
@@ -14,7 +15,7 @@ const AHEAD: usize = 16;
 type SlotRead<'a> =
     Pin<Box<dyn Future<Output = Result<(Option<ObjectInput>, bool), SyncError>> + Send + 'a>>;
 
-/// Reads slots `first`, `first + 1`, … up to `last`, returning them in order.
+/// Reads the slots of a range in order.
 /// It starts with one read, so a quiet pass sends only the one miss, and
 /// doubles the reads in flight with each slot the provider sends, up to
 /// [`AHEAD`]; slots this device already holds don't widen it. So reading a
@@ -24,39 +25,31 @@ type SlotRead<'a> =
 /// received stays retained for the next read of the slot.
 pub(crate) struct SlotReads<'a> {
     sync: &'a SequenceSync,
-    /// The next slot to send a read for, None past `last`.
-    requested: Option<u64>,
-    last: u64,
+    /// The slots still to send a read for.
+    requested: SlotRange,
     ahead: usize,
     reads: FuturesOrdered<SlotRead<'a>>,
 }
 
 impl<'a> SlotReads<'a> {
-    pub(crate) fn new(sync: &'a SequenceSync, first: u64, last: u64) -> Self {
-        Self {
-            sync,
-            requested: (first <= last).then_some(first),
-            last,
-            ahead: 1,
-            reads: FuturesOrdered::new(),
-        }
+    pub(crate) fn new(sync: &'a SequenceSync, slots: SlotRange) -> Self {
+        Self { sync, requested: slots, ahead: 1, reads: FuturesOrdered::new() }
     }
 
-    /// The next slot in order, None once it is absent or past `last`.
+    /// The next slot in order, None once it is absent or past the range.
     pub(crate) async fn next(&mut self) -> Result<Option<ObjectInput>, SyncError> {
         while self.reads.len() < self.ahead {
-            let Some(number) = self.requested else {
+            let Some(slot) = self.requested.next() else {
                 break;
             };
             let sync = self.sync;
             self.reads.push_back(Box::pin(async move {
-                let path = sync.path(number)?;
+                let path = sync.path(slot);
                 match sync.held_slot(&path).await? {
                     Some(input) => Ok((Some(input), false)),
                     None => Ok((sync.read_slot(&path).await?, true)),
                 }
             }));
-            self.requested = number.checked_add(1).filter(|next| *next <= self.last);
         }
         let Some(read) = self.reads.next().await else {
             return Ok(None);

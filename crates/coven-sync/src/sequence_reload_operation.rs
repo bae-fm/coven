@@ -164,14 +164,14 @@ impl SequenceSync {
             // snapshot has passed grace. The reload then ends with the error,
             // and the next call selects afresh (§16.5).
             if let Some(floor) =
-                floor.as_ref().filter(|floor| floor.header.first.0 > first.saturating_add(1))
+                floor.as_ref().filter(|floor| floor.header.first.get() > first.saturating_add(1))
             {
                 self.database.finish_operation(record.id).await?;
                 return Err(coven_storage::StorageFailure::NotFound
                     .with_source(format!(
                         "slots {} to {} this reload needs were deleted",
                         first + 1,
-                        floor.header.first.0 - 1
+                        floor.header.first.get() - 1
                     ))
                     .into());
             }
@@ -233,14 +233,19 @@ mod announcement {
         value: &(Slot, SnapshotAnnouncement),
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        (value.0 .0, value.1.encode(value.0).map_err(serde::ser::Error::custom)?)
+        (value.0.get(), value.1.encode(value.0).map_err(serde::ser::Error::custom)?)
             .serialize(serializer)
     }
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<(Slot, SnapshotAnnouncement), D::Error> {
         let (slot, bytes) = <(u64, Vec<u8>)>::deserialize(deserializer)?;
-        let slot = Slot(slot);
+        let slot = Slot::new(slot).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Unsigned(slot),
+                &"a positive slot number",
+            )
+        })?;
         Ok((slot, SnapshotAnnouncement::decode(&bytes, slot).map_err(serde::de::Error::custom)?))
     }
 }

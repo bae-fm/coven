@@ -6,12 +6,12 @@ use crate::{slot_object, PendingRecord, Refusal, SequenceStatus, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{LoadStep, SlotContent};
 use coven_foundation::progress::ProgressReport;
-use coven_merge::Slot;
+use coven_merge::{Slot, SlotRange};
 
 /// The slot after `slot`. Slot numbers are `u64`s, so none follows the last
 /// one: there the sequence is exhausted (E5).
-pub(crate) fn next_slot(slot: u64) -> Result<u64, SyncError> {
-    slot.checked_add(1).ok_or(SyncError::SequenceExhausted)
+pub(crate) fn next_slot(slot: u64) -> Result<Slot, SyncError> {
+    slot.checked_add(1).and_then(Slot::new).ok_or(SyncError::SequenceExhausted)
 }
 
 impl SequenceSync {
@@ -21,13 +21,13 @@ impl SequenceSync {
         let mut low = start;
         let mut step = 1u64;
         let high = loop {
-            let Some(next) = start.checked_add(step) else {
+            let Some(probe) = start.checked_add(step).and_then(Slot::new) else {
                 break u64::MAX;
             };
-            if self.storage.status(&self.path(next)?).await?.is_none() {
-                break next;
+            if self.storage.status(&self.path(probe)).await?.is_none() {
+                break probe.get();
             }
-            low = next;
+            low = probe.get();
             let Some(next_step) = step.checked_mul(2) else {
                 break u64::MAX;
             };
@@ -35,11 +35,12 @@ impl SequenceSync {
         };
         let mut high = high;
         while high - low > 1 {
-            let middle = low + (high - low) / 2;
-            if self.storage.status(&self.path(middle)?).await?.is_some() {
-                low = middle;
+            // Between `low` and `high` the probe is past 0.
+            let middle = Slot::new(low + (high - low) / 2).expect("a probe past low is positive");
+            if self.storage.status(&self.path(middle)).await?.is_some() {
+                low = middle.get();
             } else {
-                high = middle;
+                high = middle.get();
             }
         }
         Ok(low)
@@ -99,9 +100,9 @@ impl SequenceSync {
             let mut failure = None;
             let mut timing = SlotReading::new(self.clock.elapsed());
             let floor = loop {
-                let mut reads = SlotReads::new(self, next, u64::MAX);
+                let mut reads = SlotReads::new(self, SlotRange::new(next, u64::MAX));
                 loop {
-                    let path = self.path(next)?;
+                    let path = self.path(next);
                     let fetching = self.clock.elapsed();
                     let fetched = reads.next().await;
                     timing.fetched(self.clock.elapsed() - fetching, &fetched);
@@ -113,9 +114,9 @@ impl SequenceSync {
                             input
                         }
                         Ok(None) => {
-                            if next <= known_end {
+                            if next.get() <= known_end {
                                 failure = Some((
-                                    Slot(next),
+                                    next,
                                     crate::write_object::damaged(
                                         &path,
                                         Refusal::Parse { cause: None },
@@ -125,7 +126,7 @@ impl SequenceSync {
                             break;
                         }
                         Err(error) => {
-                            failure = Some((Slot(next), error));
+                            failure = Some((next, error));
                             break;
                         }
                     };
@@ -147,31 +148,31 @@ impl SequenceSync {
                     let received = match received {
                         Ok(slot) => slot,
                         Err(error) => {
-                            failure = Some((Slot(next), error));
+                            failure = Some((next, error));
                             break;
                         }
                     };
                     if let Err(error) = self.check_copy(&received, &path).await {
-                        failure = Some((Slot(next), error));
+                        failure = Some((next, error));
                         break;
                     }
                     let metadata = !received.writes();
                     let incoming = virtual_history.consume(received, member.member());
                     if let Err(error) = virtual_history.acquire(&mut tentative_ring, member) {
-                        failure = Some((Slot(next), error));
+                        failure = Some((next, error));
                         break;
                     }
                     slots.push((incoming, metadata.then(|| virtual_history.clone()), input));
-                    known_end = known_end.max(next);
+                    known_end = known_end.max(next.get());
                     if slots.len() == 32 {
                         let locating = self.clock.elapsed();
-                        known_end = self.locate_end(next).await?;
+                        known_end = self.locate_end(next.get()).await?;
                         timing.locating += self.clock.elapsed() - locating;
                     }
                     if let Some(progress) = progress.as_deref_mut() {
-                        reading.count(progress, next, known_end);
+                        reading.count(progress, next.get(), known_end);
                     }
-                    next = next_slot(next)?;
+                    next = next_slot(next.get())?;
                 }
                 // The final floor observation follows every input read. A
                 // floor written after the ending miss may name new slots: read
@@ -180,14 +181,15 @@ impl SequenceSync {
                 let floor =
                     self.read_floor(session.floor.as_ref(), &mut tentative_ring, member).await?;
                 timing.floor += self.clock.elapsed() - reading_floor;
-                if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first) {
+                if floor.as_ref().is_some_and(|floor| floor.header.first > first) {
                     break floor;
                 }
-                if failure.is_none() && floor.as_ref().is_some_and(|floor| floor.header.at >= next)
+                if failure.is_none()
+                    && floor.as_ref().is_some_and(|floor| floor.header.at >= next.get())
                 {
                     known_end = floor.as_ref().expect("observed floor").header.at;
                     if let Some(progress) = progress.as_deref_mut() {
-                        reading.count(progress, next - 1, known_end);
+                        reading.count(progress, next.get() - 1, known_end);
                     }
                     continue;
                 }
@@ -195,7 +197,8 @@ impl SequenceSync {
                 // stop at or below `at` leaves that history unread: the floor
                 // stays unchecked, and the stop is reported (§6.1, §6.2).
                 if let Some(floor) = floor.as_ref().filter(|floor| {
-                    floor.header.at < next && session.checked_floor.as_ref() != Some(floor.object())
+                    floor.header.at < next.get()
+                        && session.checked_floor.as_ref() != Some(floor.object())
                 }) {
                     self.authenticate_floor(floor, &virtual_history, &mut tentative_ring, member)
                         .await?;
@@ -203,7 +206,7 @@ impl SequenceSync {
                 }
                 break floor;
             };
-            if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first) {
+            if floor.as_ref().is_some_and(|floor| floor.header.first > first) {
                 for (_, _, input) in slots {
                     input.release().await?;
                 }
@@ -227,7 +230,7 @@ impl SequenceSync {
             self.follow_person_entries(&session.history, &virtual_history, member)?;
             // The slots before the stop apply under the floor's first kept
             // slot; the session keeps the last floor it checked.
-            if floor.as_ref().is_none_or(|floor| floor.header.at < next) {
+            if floor.as_ref().is_none_or(|floor| floor.header.at < next.get()) {
                 session.floor = floor;
             }
             let applying = self.clock.elapsed();
@@ -275,7 +278,7 @@ impl SequenceSync {
             // no longer this installation's to read: a later slot it can't
             // open, under a key rotated since, would otherwise hide why it
             // stopped (§13.1).
-            if failure.is_some() || next <= known_end {
+            if failure.is_some() || next.get() <= known_end {
                 self.check_left(session, member)?;
             }
             if let Some((slot, error)) = failure {
@@ -288,10 +291,10 @@ impl SequenceSync {
                 }
                 return Err(self.block(session, slot, error).await);
             }
-            if next <= known_end {
+            if next.get() <= known_end {
                 let error =
-                    crate::write_object::damaged(&self.path(next)?, Refusal::Parse { cause: None });
-                return Err(self.block(session, Slot(next), error).await);
+                    crate::write_object::damaged(&self.path(next), Refusal::Parse { cause: None });
+                return Err(self.block(session, next, error).await);
             }
             session.blocked = None;
             self.check_binding(session, member)?;

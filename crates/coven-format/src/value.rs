@@ -84,13 +84,11 @@ impl Wire for Audience {
 wire_struct!(WriteId, device, number);
 impl Wire for Slot {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        positive(self.0)?;
-        self.0.put(out)
+        self.get().put(out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        let slot = Self(u64::get(input)?);
-        positive(slot.0)?;
-        Ok(slot)
+        Self::new(u64::get(input)?)
+            .ok_or(Error::Invalid { field: "positive number", rule: Rule::Required })
     }
 }
 

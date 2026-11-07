@@ -62,14 +62,14 @@ fn retain(
         if let Some(slot) = slot.filter(|_| known.slot.is_none()) {
             database.internal_execute(
                 "UPDATE _coven_writes SET slot=?1 WHERE id=?2",
-                params![slot.0.to_be_bytes().as_slice(), known.ordinal],
+                params![slot.get().to_be_bytes().as_slice(), known.ordinal],
             )?;
         }
         return Ok(known.ordinal);
     }
     database.query_row(
         "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4) RETURNING id",
-        params![stamp, id.number.to_be_bytes().as_slice(), read_through.to_be_bytes().as_slice(), slot.map(|s|s.0.to_be_bytes().to_vec())],
+        params![stamp, id.number.to_be_bytes().as_slice(), read_through.to_be_bytes().as_slice(), slot.map(|s|s.get().to_be_bytes().to_vec())],
         |r| r.get(0))
 }
 

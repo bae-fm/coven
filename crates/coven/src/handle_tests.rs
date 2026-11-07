@@ -1,5 +1,6 @@
 use crate::*;
 use coven_foundation::clock::HANG_GUARD;
+use coven_merge::slot;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -690,8 +691,8 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
         [WriteCutoff::DeviceRemoved, WriteCutoff::MemberRemoved, WriteCutoff::MemberKeysReplaced]
     {
         let record = PendingRecord::new(
-            PendingSubject::Slot(Slot(7)),
-            PendingReason::WritesRefused { cutoff: Slot(5), cause },
+            PendingSubject::Slot(slot(7)),
+            PendingReason::WritesRefused { cutoff: slot(5), cause },
         );
         assert_eq!(record.retry(), Retry::Never, "{record:?}");
     }
@@ -827,7 +828,7 @@ mod mutual_removal {
         let settled = ana.handle.applied_slot().await;
         network.pass(0).await;
         assert_eq!(ana.handle.applied_slot().await, settled);
-        assert_eq!(ben.handle.applied_slot().await, removal.0);
+        assert_eq!(ben.handle.applied_slot().await, removal.get());
         for device in [ana, ben] {
             let members = device.handle.members().await.unwrap();
             let ids: Vec<_> = members.iter().map(|m| m.id).collect();

@@ -115,7 +115,7 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
     let session = ben.sync.session.lock().await;
     let (announced, announcement) = session.history.announcements.last_key_value().unwrap();
-    assert!(announced.0 > before);
+    assert!(announced.get() > before);
     let announced = *announced;
     let path = crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap();
     assert!(group.storage.status(&path).await.unwrap().is_none(), "undo must delete its artifact");
@@ -126,9 +126,9 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
         result.is_ok(),
         "honest undo must preserve Carol's ability to reach the head: {result:?}"
     );
-    assert!(carol.sync.database.applied_slot().await.unwrap() > announced.0);
+    assert!(carol.sync.database.applied_slot().await.unwrap() > announced.get());
     assert!(
-        matches!(&*carol.sync.state.subscribe().borrow(),SequenceStatus::Synced {through} if *through > announced.0)
+        matches!(&*carol.sync.state.subscribe().borrow(),SequenceStatus::Synced {through} if *through > announced.get())
     );
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
@@ -638,7 +638,7 @@ async fn a_preparation_covered_by_a_later_announcement_is_recaptured() {
         .find(|announcement| &announcement.snapshot == boundary.boundary.snapshot())
         .unwrap();
     assert!(activated.covers >= covered);
-    assert!(boundary.boundary.entry().0 > ordinary.0);
+    assert!(boundary.boundary.entry().get() > ordinary.get());
     ben.sync.pass().await.unwrap();
     assert_eq!(
         ana.sync.database.applied_slot().await.unwrap(),

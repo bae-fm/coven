@@ -128,8 +128,19 @@ pub struct WriteId {
     pub number: u64,
 }
 
-/// A positive slot number in the store's one sequence (§5).
-pub struct Slot(pub u64);
+/// A positive slot number in the store's one sequence (§5). Slot 0 names
+/// nothing: a count of the slots applied or read through stays a `u64`, and 0
+/// there means none.
+pub struct Slot(NonZeroU64);
+
+impl Slot {
+    /// The first slot, where a store's creation lands.
+    pub const FIRST: Self;
+    /// The slot numbered `number`, or `None` for 0.
+    pub fn new(number: u64) -> Option<Self>;
+    /// The slot's number, at least 1.
+    pub fn get(self) -> u64;
+}
 
 /// Row audience; ToSql/FromSql bind/read canonical text (§15).
 pub enum Audience {

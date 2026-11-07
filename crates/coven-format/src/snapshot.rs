@@ -265,7 +265,9 @@ impl SnapshotRecord {
         let audience =
             |r: &RowId| require(r.audience == h.id.audience, "snapshot audience", Rule::Audience);
         match self {
-            Self::Write(v) => require(v.slot.0 <= h.covers, "snapshot write slot", Rule::Coverage),
+            Self::Write(v) => {
+                require(v.slot.get() <= h.covers, "snapshot write slot", Rule::Coverage)
+            }
             Self::Column(_) | Self::Evidence(_) | Self::Claim(_) => Ok(()),
             Self::Loss(v) => {
                 audience(&v.row)?;
@@ -275,7 +277,7 @@ impl SnapshotRecord {
                 if let LossCause::Rules(rules) = &v.cause {
                     for rule in rules {
                         if let coven_merge::Rule::DeletedCircle(entry) = rule {
-                            require(entry.0 <= h.covers, "loss cause", Rule::Coverage)?;
+                            require(entry.get() <= h.covers, "loss cause", Rule::Coverage)?;
                         }
                     }
                 }
@@ -295,13 +297,13 @@ impl SnapshotRecord {
                         require(*version <= h.schema_version, "change verdict", Rule::Coverage)
                     }
                     ChangeVerdict::Ignored(entry) => {
-                        require(entry.0 <= h.covers, "change verdict", Rule::Coverage)
+                        require(entry.get() <= h.covers, "change verdict", Rule::Coverage)
                     }
                     _ => Ok(()),
                 }
             }
             Self::Admin(v) | Self::KeyCopy(v) | Self::Announcement(v) => require(
-                h.id.audience == coven_merge::Audience::Store && v.slot.0 <= h.covers,
+                h.id.audience == coven_merge::Audience::Store && v.slot.get() <= h.covers,
                 "snapshot historical slot",
                 Rule::Coverage,
             ),
@@ -315,7 +317,7 @@ impl SnapshotRecord {
         S::Error: From<Error>,
     {
         for write in self.named_writes() {
-            let covered = slots.slot(write)?.is_some_and(|slot| slot.0 > 0 && slot.0 <= covers);
+            let covered = slots.slot(write)?.is_some_and(|slot| slot.get() <= covers);
             require(covered, "snapshot write coverage", Rule::Coverage)?;
         }
         Ok(())

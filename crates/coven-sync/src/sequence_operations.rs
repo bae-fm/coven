@@ -36,13 +36,21 @@ pub(crate) enum OperationStep {
     Preparing,
     Copy(#[serde(with = "route")] KeyCopyPrefix),
     Claiming,
-    CreatorCopy(u64),
+    CreatorCopy(#[serde(with = "coven_database::slot_json")] Slot),
     Capturing(Capture),
     Uploading(SnapshotArtifact),
     Announcing(SnapshotArtifact),
-    Activating { artifact: SnapshotArtifact, announcement: u64 },
-    Applied(u64),
-    SnapshotApplied { artifact: SnapshotArtifact, slot: u64 },
+    Activating {
+        artifact: SnapshotArtifact,
+        #[serde(with = "coven_database::slot_json")]
+        announcement: Slot,
+    },
+    Applied(#[serde(with = "coven_database::slot_json")] Slot),
+    SnapshotApplied {
+        artifact: SnapshotArtifact,
+        #[serde(with = "coven_database::slot_json")]
+        slot: Slot,
+    },
     Satisfied,
 }
 #[derive(Serialize, Deserialize)]
@@ -116,7 +124,7 @@ impl SequenceSync {
         self: &std::sync::Arc<Self>,
         change: StoreChange,
     ) -> Result<Option<Slot>, SyncError> {
-        Ok(self.submit(Request::Change(change)).await?.map(Slot))
+        self.submit(Request::Change(change)).await
     }
 
     /// Catch up, settle this device's open claim and run its journaled
@@ -160,7 +168,7 @@ impl SequenceSync {
     ) -> Result<Slot, SyncError> {
         self.submit(Request::Snapshot(SnapshotRequest { audience, purpose: Purpose::Ordinary }))
             .await
-            .map(|slot| Slot(slot.expect("snapshot completion has a counted announcement")))
+            .map(|slot| slot.expect("snapshot completion has a counted announcement"))
     }
 
     /// Publish a prepared reset and activate it through the same operation journal.
@@ -188,7 +196,7 @@ impl SequenceSync {
     async fn submit(
         self: &std::sync::Arc<Self>,
         request: Request,
-    ) -> Result<Option<u64>, SyncError> {
+    ) -> Result<Option<Slot>, SyncError> {
         let owner = self.clone();
         // The owned task survives cancellation of the app's waiter, including
         // requests that the provider cannot cancel once sent.
@@ -293,7 +301,7 @@ impl SequenceSync {
                 .history
                 .validate(
                     &self.operation_header(session, member, 1),
-                    Slot(next_slot(session.through)?),
+                    next_slot(session.through)?,
                     change,
                 )
                 .map(|effect| effect.is_some()),
@@ -462,14 +470,14 @@ impl SequenceSync {
             };
             match &step {
                 OperationStep::Applied(slot) => {
-                    return self.finish(&record, OperationOutcome::Landed(Slot(*slot))).await
+                    return self.finish(&record, OperationOutcome::Landed(*slot)).await
                 }
                 OperationStep::Satisfied => {
                     return self.finish(&record, OperationOutcome::Satisfied).await
                 }
                 OperationStep::SnapshotApplied { artifact, slot } => {
                     self.artifact_file(&artifact.capture.name)?.remove()?;
-                    return self.finish(&record, OperationOutcome::Landed(Slot(*slot))).await;
+                    return self.finish(&record, OperationOutcome::Landed(*slot)).await;
                 }
                 _ => (),
             }
@@ -488,8 +496,7 @@ impl SequenceSync {
                             .last()
                             .expect("claim attempt")
                             .slot_number()
-                            .expect("slot")
-                            .0;
+                            .expect("slot");
                         step = match step {
                             OperationStep::Copy(_) => OperationStep::Preparing,
                             OperationStep::Claiming
@@ -529,7 +536,13 @@ impl SequenceSync {
                         continue;
                     }
                     ClaimSettlement::NotLanded => {
-                        if claim.attempts.last().expect("attempt").slot_number().expect("slot").0
+                        if claim
+                            .attempts
+                            .last()
+                            .expect("attempt")
+                            .slot_number()
+                            .expect("slot")
+                            .get()
                             > session.through
                         {
                             match self.read_forward(session, ring, member).await {
@@ -726,7 +739,7 @@ impl SequenceSync {
         request: &Request,
         step: &OperationStep,
     ) -> Result<(), SyncError> {
-        let path = self.path(next_slot(session.through)?)?;
+        let path = self.path(next_slot(session.through)?);
         let store_key = match request {
             Request::Change(StoreChange::CreateStore { key, .. }) => *key,
             _ => session.history.metadata_key(ring)?,
@@ -780,14 +793,14 @@ impl SequenceSync {
             OperationStep::Activating { artifact, announcement } => {
                 let change = match artifact.capture.purpose {
                     Purpose::Raise(version) => {
-                        StoreChange::RaiseSchema { version, announcement: Slot(*announcement) }
+                        StoreChange::RaiseSchema { version, announcement: *announcement }
                     }
-                    Purpose::Reset => StoreChange::Reset { announcement: Slot(*announcement) },
+                    Purpose::Reset => StoreChange::Reset { announcement: *announcement },
                     Purpose::Ordinary => unreachable!("ordinary snapshots need no activation"),
                 };
                 session.history.validate(
                     &self.operation_header(session, member, 1),
-                    Slot(next_slot(session.through)?),
+                    next_slot(session.through)?,
                     &change,
                 )?;
                 (SlotFrame::Admin(change), SlotKind::Admin)

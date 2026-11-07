@@ -18,8 +18,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
         progress.begin(LoadStep::InstallingSlots, slots.len() as u64);
     }
     for incoming in slots {
-        if applied.checked_add(1) != Some(incoming.slot.0)
-            || incoming.slot.0 > coverage.target
+        if applied.checked_add(1) != Some(incoming.slot.get())
+            || incoming.slot.get() > coverage.target
             || incoming.header.after > applied
         {
             return Err(DbError::SequenceGap { applied, received: incoming.slot });
@@ -43,7 +43,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             }
         }
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
-        applied = incoming.slot.0;
+        applied = incoming.slot.get();
         crate::sequence::set_applied(db, applied)?;
         progress.advance();
     }

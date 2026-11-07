@@ -30,7 +30,7 @@ async fn an_authenticated_floor_fixture_coexists_with_undeleted_original_slots()
             .unwrap()
             .unwrap();
     observed.authenticate(&history).unwrap();
-    assert_eq!(observed.header.first.0, 6);
+    assert_eq!(observed.header.first.get(), 6);
     for number in [1, 2] {
         let old = f::slot_path(number);
         assert!(old.slot_number().unwrap() < observed.header.first);
@@ -87,7 +87,7 @@ async fn a_signed_floor_whose_clear_first_disagrees_with_its_body_is_damaged() {
         let device = group.device(1).await;
         let (mut encoder, mut prefix) = FloorPrefixEncoder::start(
             f::store_key().id(),
-            coven_merge::Slot(first),
+            coven_merge::slot(first),
             copies.len().try_into().unwrap(),
         )
         .unwrap();

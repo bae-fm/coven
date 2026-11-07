@@ -115,12 +115,47 @@ pub mod slot_json {
         value: &coven_merge::Slot,
         output: S,
     ) -> Result<S::Ok, S::Error> {
-        value.0.serialize(output)
+        value.get().serialize(output)
     }
     /// Read a slot from its number.
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         input: D,
     ) -> Result<coven_merge::Slot, D::Error> {
-        Ok(coven_merge::Slot(u64::deserialize(input)?))
+        let number = u64::deserialize(input)?;
+        coven_merge::Slot::new(number).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Unsigned(number),
+                &"a positive slot number",
+            )
+        })
+    }
+
+    /// A list of slots in the same form, for
+    /// `#[serde(with = "coven_database::slot_json::list")]`.
+    pub mod list {
+        use serde::{Deserialize, Serialize};
+        /// Write each slot's number.
+        pub fn serialize<S: serde::Serializer>(
+            value: &[coven_merge::Slot],
+            output: S,
+        ) -> Result<S::Ok, S::Error> {
+            value.iter().map(|slot| slot.get()).collect::<Vec<_>>().serialize(output)
+        }
+        /// Read slots from their numbers, refusing 0.
+        pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+            input: D,
+        ) -> Result<Vec<coven_merge::Slot>, D::Error> {
+            Vec::<u64>::deserialize(input)?
+                .into_iter()
+                .map(|number| {
+                    coven_merge::Slot::new(number).ok_or_else(|| {
+                        serde::de::Error::invalid_value(
+                            serde::de::Unexpected::Unsigned(number),
+                            &"a positive slot number",
+                        )
+                    })
+                })
+                .collect()
+        }
     }
 }

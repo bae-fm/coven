@@ -768,9 +768,9 @@ async fn writes_claimed_after_their_device_removal_are_consumed_and_refused() {
     );
     assert_eq!(rows(&ana.sync.database).await, [("kept".into(), "before removal".into())]);
     let refused: Vec<_> = ana.sync.database.pending::<PendingRecord>().await.unwrap().into_iter()
-        .filter(|record| matches!(record.reason, PendingReason::WritesRefused {cutoff, ..} if cutoff.0 == removal)).collect();
+        .filter(|record| matches!(record.reason, PendingReason::WritesRefused {cutoff, ..} if cutoff.get() == removal)).collect();
     assert_eq!(refused.len(), 1);
-    assert_eq!(refused[0].subject, PendingSubject::Slot(coven_merge::Slot(removal + 1)));
+    assert_eq!(refused[0].subject, PendingSubject::Slot(coven_merge::slot(removal + 1)));
     insert(&ana.sync.database, "after", "refusal").await;
     ana.sync.pass().await.unwrap();
     assert_eq!(
@@ -795,7 +795,7 @@ async fn a_slot_this_copy_never_attempted_shows_another_copy_of_its_device_id() 
     insert(&copy.sync.database, "b", "never sent").await;
     let result = copy.sync.pass().await;
     assert!(
-        matches!(result, Err(SyncError::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot {slot})) if slot.0 == applied + 1),
+        matches!(result, Err(SyncError::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot {slot})) if slot.get() == applied + 1),
         "{result:?}"
     );
     assert!(matches!(

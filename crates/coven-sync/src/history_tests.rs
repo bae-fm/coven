@@ -3,6 +3,7 @@ use coven_crypto::{CircleKey, SealingKey, StoreKey};
 use coven_database::{StoreCircle, StoreMember};
 use coven_format::{admin::MemberRole, sealed_key::CopyBox, sealed_slot::SlotKind};
 use coven_foundation::id_source::StoreId;
+use coven_merge::slot;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -83,14 +84,14 @@ impl Projection {
     pub(crate) fn slots(&self, history: &History, through: u64) -> Vec<Value> {
         let mut slots = vec![json!({"kind":"other"}); usize::try_from(through).unwrap()];
         for i in &history.introductions {
-            slots[usize::try_from(i.slot.0 - 1).unwrap()] = self.introduction(i);
+            slots[usize::try_from(i.slot.get() - 1).unwrap()] = self.introduction(i);
         }
         for copy in &history.copies {
             let SlotKind::KeyCopy(copy_box) = &copy.prefix.kind else {
                 panic!("key routing");
             };
             let r = &copy_box.routing;
-            let slot = copy.path.slot_number().unwrap().0;
+            let slot = copy.path.slot_number().unwrap().get();
             let index = usize::try_from(slot - 1).unwrap();
             assert_eq!(slots[index], json!({"kind":"other"}));
             slots[index] = json!({"kind":"copy", "audience":self.audience(&r.audience),
@@ -260,7 +261,7 @@ fn sequence_key_selection_matches_lean() {
         );
         for (index, (audience, id)) in keys.iter().enumerate() {
             history.introductions.push(Introduction {
-                slot: Slot(if index == 0 { 1 } else { 2 * index as u64 + 2 }),
+                slot: slot(if index == 0 { 1 } else { 2 * index as u64 + 2 }),
                 audience: audience.clone(),
                 key: *id,
                 hash: crate::write_seal::held(&material, audience, *id)
@@ -310,7 +311,7 @@ fn sequence_key_selection_matches_lean() {
         copy(&mut history, &material, 10, duplicate.routing);
         if matches!(mode, 6 | 7) {
             let mut repeated = history.introductions[0].clone();
-            repeated.slot = Slot(11);
+            repeated.slot = slot(11);
             if mode == 7 {
                 repeated.hash = [99; 32];
             }
@@ -350,8 +351,8 @@ fn sequence_key_selection_matches_lean() {
         // unaccepted custody and conflicting commitments, use the same selector.
         for end in 0..=through {
             let mut prefix = history.clone();
-            prefix.introductions.retain(|i| i.slot.0 <= end);
-            prefix.copies.retain(|c| c.path.slot_number().unwrap().0 <= end);
+            prefix.introductions.retain(|i| i.slot.get() <= end);
+            prefix.copies.retain(|c| c.path.slot_number().unwrap().get() <= end);
             let projection = Projection::new(&history, &material);
             let input = projection.input(&prefix, &material, member(1), end);
             assert_eq!(
@@ -433,9 +434,13 @@ impl Household {
     /// Claim the next slot with `change`, written by `device` for `author`.
     fn entry(&mut self, device: u64, author: MemberId, change: StoreChange) -> Slot {
         self.slots += 1;
-        let slot = Slot(self.slots);
-        let header =
-            SlotHeader { device: DeviceId(device), claim: slot.0, author, after: slot.0 - 1 };
+        let slot = slot(self.slots);
+        let header = SlotHeader {
+            device: DeviceId(device),
+            claim: slot.get(),
+            author,
+            after: slot.get() - 1,
+        };
         let effect = self.history.validate(&header, slot, &change).unwrap().unwrap();
         self.history.accept_admin(slot, &header, &effect);
         slot
@@ -448,9 +453,13 @@ impl Household {
         author: MemberId,
         change: StoreChange,
     ) -> Result<Option<AdminEffect>, OperationRejection> {
-        let slot = Slot(self.slots + 1);
-        let header =
-            SlotHeader { device: DeviceId(device), claim: slot.0, author, after: slot.0 - 1 };
+        let slot = slot(self.slots + 1);
+        let header = SlotHeader {
+            device: DeviceId(device),
+            claim: slot.get(),
+            author,
+            after: slot.get() - 1,
+        };
         self.history.validate(&header, slot, &change)
     }
 
@@ -772,9 +781,9 @@ fn an_admin_entry_is_signed_with_its_members_key_as_of_the_state_before_its_slot
     assert_eq!(signer(&household, household.slots), original);
 
     let at = household.replace_anas_keys(1, 5);
-    assert_eq!(signer(&household, at.0 - 1), original);
-    assert_eq!(signer(&household, at.0), replacement);
-    assert_ne!(signer(&household, at.0), original);
+    assert_eq!(signer(&household, at.get() - 1), original);
+    assert_eq!(signer(&household, at.get()), replacement);
+    assert_ne!(signer(&household, at.get()), original);
 }
 
 /// An admin entry's device is active, or is the fresh device the entry
@@ -825,14 +834,14 @@ fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
         member: member(1),
         sealing: ana.sealing,
     };
-    for (slot, id) in [(1, key(90)), (3, key(10))] {
+    for (number, id) in [(1, key(90)), (3, key(10))] {
         history.introductions.push(Introduction {
-            slot: Slot(slot + 1),
+            slot: slot(number + 1),
             audience: Audience::Store,
             key: id,
             hash: material.store_key(id).unwrap().hash(),
         });
-        copy(&mut history, &material, slot, to_ana(id));
+        copy(&mut history, &material, number, to_ana(id));
     }
     let sending =
         |history: &History| history.sending_key(&material, member(1), &Audience::Store).unwrap();
@@ -879,19 +888,19 @@ fn a_raise_or_reset_of_a_deleted_circle_finds_its_target_gone() {
     household.entry(1, ana, StoreChange::AddCircleMember { circle: gifts, member: ben });
     let mut announce = |purpose| {
         household.slots += 1;
-        let slot = Slot(household.slots);
+        let slot = slot(household.slots);
         household.history.announcements.insert(
             slot,
             SnapshotAnnouncement {
                 snapshot: coven_format::admin::SnapshotId {
                     audience: Audience::Circle(gifts),
                     device: DeviceId(1),
-                    number: slot.0,
+                    number: slot.get(),
                 },
-                covers: slot.0 - 1,
+                covers: slot.get() - 1,
                 breaking_version: 0,
                 purpose,
-                digest: [slot.0 as u8; 32],
+                digest: [slot.get() as u8; 32],
             },
         );
         slot

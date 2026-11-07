@@ -1,7 +1,11 @@
 //! One committed store prefix, including claims whose contents were refused.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::{sqlite::DatabaseConnection, write_encoding::counter, DbError};
+use crate::{
+    sqlite::DatabaseConnection,
+    write_encoding::{counter, slot_counter},
+    DbError,
+};
 use coven_crypto::SigningKey;
 use coven_format::{admin::StoreChange, sequence::SlotHeader, snapshot::LastClaim};
 use coven_foundation::id_source::{DeviceId, MemberId};
@@ -59,7 +63,7 @@ pub(crate) fn note_claim(
     note_record(
         db,
         &LastClaim { device: header.device, number: header.claim, digest: Some(digest) },
-        slot.0,
+        slot.get(),
     )
 }
 
@@ -69,7 +73,7 @@ pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Opti
             "SELECT (SELECT slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"
         ),
         params![write.device, write.number.to_be_bytes().as_slice()],
-        |r| Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()?.map(Slot)),
+        |r| r.get::<_, Option<Vec<u8>>>(0)?.map(slot_counter).transpose(),
     )
 }
 
@@ -98,7 +102,7 @@ pub(crate) fn cutoff(
     };
     db.internal_execute(
         "INSERT INTO _coven_cutoffs(slot,device,member,signing) VALUES(?1,?2,?3,?4)",
-        params![slot.0.to_be_bytes().as_slice(), device, member, signing],
+        params![slot.get().to_be_bytes().as_slice(), device, member, signing],
     )?;
     Ok(())
 }
@@ -136,12 +140,12 @@ pub(crate) fn refusal(
     signer: &SigningKey,
 ) -> Result<Option<(Slot, WriteCutoff)>, DbError> {
     Ok(db.query("SELECT slot,device,signing FROM _coven_cutoffs WHERE slot<?1 AND (device=?2 OR (member=?3 AND (signing IS NULL OR signing=?4))) ORDER BY slot LIMIT 1",
-        params![slot.0.to_be_bytes().as_slice(),device,member,signer.as_bytes().as_slice()],
+        params![slot.get().to_be_bytes().as_slice(),device,member,signer.as_bytes().as_slice()],
         |r| {
             let cause = if r.get::<_,Option<Vec<u8>>>(1)?.is_some() { WriteCutoff::DeviceRemoved }
                 else if r.get::<_,Option<Vec<u8>>>(2)?.is_some() { WriteCutoff::MemberKeysReplaced }
                 else { WriteCutoff::MemberRemoved };
-            Ok((Slot(counter(r.get(0)?)?), cause))
+            Ok((slot_counter(r.get(0)?)?, cause))
         })?.pop())
 }
 

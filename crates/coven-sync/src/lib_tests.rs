@@ -37,7 +37,7 @@ pub(crate) async fn apply_write(
     database
         .apply_slot::<crate::PendingRecord, _, _>(
             IncomingSlot {
-                slot: coven_merge::Slot(position.number),
+                slot: coven_merge::slot(position.number),
                 digest: [1; 32],
                 header: coven_format::sequence::SlotHeader {
                     device: position.device,

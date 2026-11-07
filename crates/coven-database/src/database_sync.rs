@@ -138,7 +138,7 @@ impl Database {
                     })
                 });
                 tracing::debug!(
-                    slot = slot.0,
+                    slot = slot.get(),
                     preparing = ?(prepared - started),
                     applying = ?(inner.clock.elapsed() - prepared),
                     "applied slot"
@@ -719,7 +719,7 @@ impl Database {
             inner.access.with_committed(|db| {
                 db.query("SELECT slot,record FROM _coven_slot_records ORDER BY slot", [], |row| {
                     Ok(coven_format::floor::OriginalSlot {
-                        slot: coven_merge::Slot(crate::write_encoding::counter(row.get(0)?)?),
+                        slot: crate::write_encoding::slot_counter(row.get(0)?)?,
                         object: row.get(1)?,
                     })
                 })

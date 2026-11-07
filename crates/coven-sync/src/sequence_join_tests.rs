@@ -66,7 +66,7 @@ async fn retained_prefix(group: &Group, ana: &Device) {
         .is_none());
     // Every slot is past grace, so the pass also snapshots slot 13, the
     // announcement, before its floor write names that newer snapshot.
-    assert_eq!(floor(group, ana).await.header.first.0, 14);
+    assert_eq!(floor(group, ana).await.header.first.get(), 14);
 }
 
 async fn approved_with_retention(
@@ -97,7 +97,7 @@ async fn approved_with_retention(
         .iter()
         .filter_map(|copy| match &copy.prefix.kind {
             SlotKind::KeyCopy(route) if route.routing.held_by(&carol.device.identity) => {
-                Some(copy.path.slot_number().unwrap().0)
+                Some(copy.path.slot_number().unwrap().get())
             }
             _ => None,
         })
@@ -109,7 +109,7 @@ async fn approved_with_retention(
     }
     let current = floor(&group, &ana).await;
     for copy in &copies {
-        assert_eq!(*copy < current.header.first.0, deleted_copy);
+        assert_eq!(*copy < current.header.first.get(), deleted_copy);
         assert_eq!(
             group
                 .storage
@@ -119,15 +119,18 @@ async fn approved_with_retention(
                 .is_none(),
             deleted_copy
         );
-        assert_eq!(current.copies.iter().any(|original| original.slot.0 == *copy), deleted_copy);
+        assert_eq!(
+            current.copies.iter().any(|original| original.slot.get() == *copy),
+            deleted_copy
+        );
     }
     assert!(!carol.request.pending(carol.device.sync.storage.as_ref()).await.unwrap());
     let outcome = carol.device.sync.join_outcome(&mut carol.request).await.unwrap();
     assert_eq!(outcome, JoinOutcome::Admitted);
     if compare {
-        let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.0,
+        let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
             "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
-            "copies":copies, "scanned":scanned, "binding":true, "pending":false});
+            "copies":copies, "scanned":scanned.get(), "binding":true, "pending":false});
         assert_eq!(
             crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
             serde_json::json!(format!("{outcome:?}"))
@@ -178,9 +181,9 @@ async fn declined_with_retention(compare: bool) {
     assert_eq!(outcome, JoinOutcome::Declined);
     if compare {
         let current = floor(&group, &ana).await;
-        let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.0,
+        let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
             "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
-            "copies":[], "scanned":scanned, "binding":false, "pending":false});
+            "copies":[], "scanned":scanned.get(), "binding":false, "pending":false});
         assert_eq!(
             crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
             serde_json::json!(format!("{outcome:?}"))
@@ -207,7 +210,7 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
     carol
         .device
         .storage
-        .hold_next_read(ObjectPath::slot(group.store, scanned.try_into().unwrap()), missed, held)
+        .hold_next_read(ObjectPath::slot(group.store, scanned.into()), missed, held)
         .await;
     let polling = async { carol.device.sync.join_outcome(&mut carol.request).await.unwrap() };
     let retention = async {
@@ -250,7 +253,7 @@ async fn a_joiner_whose_request_disappears_reads_forward_before_concluding() {
     carol
         .device
         .storage
-        .hold_next_read(ObjectPath::slot(group.store, scanned.try_into().unwrap()), missed, held)
+        .hold_next_read(ObjectPath::slot(group.store, scanned.into()), missed, held)
         .await;
     let polling = async { carol.device.sync.join_outcome(&mut carol.request).await.unwrap() };
     let approval = async {
@@ -470,7 +473,7 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
     insert(ana.database(), "d", "after the snapshot").await;
     ana.sync.pass().await.unwrap();
     let current = floor(&group, &ana).await;
-    assert_eq!(current.header.first.0, 1, "nothing is deleted yet");
+    assert_eq!(current.header.first.get(), 1, "nothing is deleted yet");
     assert_eq!(current.header.snapshots, [announced]);
     let before = carol.device.storage.request_trace().len();
     assert_eq!(
@@ -485,7 +488,10 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
             _ => None,
         })
         .collect();
-    assert!(read.iter().all(|slot| slot.0 > covers), "read {read:?} at or below coverage {covers}");
+    assert!(
+        read.iter().all(|slot| slot.get() > covers),
+        "read {read:?} at or below coverage {covers}"
+    );
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }

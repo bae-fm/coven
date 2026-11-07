@@ -1,7 +1,7 @@
 //! Admin changes in sequence slots (D6). The enclosing slot supplies identity and author.
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, positive, Slot};
+use crate::value::{name, Slot};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 pub use coven_crypto::MemberPublicKeys;
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId, StoreId};
@@ -216,11 +216,10 @@ impl StoreChange {
             | Self::AddDevice { name: n, .. }
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
-            Self::RaiseSchema { version, announcement, .. } => {
-                require(*version > 0, "schema version", Rule::Required)?;
-                positive(announcement.0)
+            Self::RaiseSchema { version, .. } => {
+                require(*version > 0, "schema version", Rule::Required)
             }
-            Self::Reset { announcement } => positive(announcement.0),
+            Self::Reset { .. } => Ok(()),
             Self::AddInviteShare { account, .. } => {
                 require(!account.trim().is_empty(), "invite share account", Rule::Required)?;
                 crate::error::bound(

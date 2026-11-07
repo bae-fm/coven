@@ -9,7 +9,7 @@ use crate::{EntryTarget, OperationRejection};
 use coven_database::{AdminEffect, StoreState};
 use coven_format::admin::StoreChange;
 use coven_foundation::id_source::CircleId;
-use coven_merge::Slot;
+use coven_merge::slot;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 const PEOPLE: [u128; 4] = [1, 2, 3, 4];
 const CIRCLES: [u128; 2] = [1, 2];
 const NAMES: [&str; 2] = ["Gifts", "Presents"];
-/// The setup's slots come first: a history's slot `i` is `Slot(BEFORE + i)`.
+/// The setup's slots come first: a history's slot `i` is `slot(BEFORE + i)`.
 const BEFORE: u64 = 5;
 
 #[derive(Clone, Copy, Debug)]
@@ -140,7 +140,8 @@ fn observe(state: &StoreState, outcome: &str) -> Value {
         .map(|&c| {
             let record = state.circles.get(&circle(c)).map(|record| {
                 let members: Vec<_> = record.members.iter().map(|m| m.0.as_u128() as u64).collect();
-                let deleted = state.circle_deletions.get(&circle(c)).map(|slot| slot.0 - BEFORE);
+                let deleted =
+                    state.circle_deletions.get(&circle(c)).map(|slot| slot.get() - BEFORE);
                 json!({"name": record.name, "members": members, "deleted": deleted})
             });
             json!([c as u64, record])
@@ -194,11 +195,11 @@ fn circle_lifecycle_matches_lean() {
         assert_eq!(expected.as_array().unwrap().len(), history.len(), "{}", json!(case));
         let mut state = start.clone();
         for (i, entry) in history.iter().enumerate() {
-            let slot = Slot(BEFORE + i as u64 + 1);
+            let slot = slot(BEFORE + i as u64 + 1);
             let author = entry.author();
             let checked = checked_change(
                 &state,
-                &header(author as u64, author, slot.0 - 1),
+                &header(author as u64, author, slot.get() - 1),
                 slot,
                 &entry.change(),
                 &BTreeMap::new(),

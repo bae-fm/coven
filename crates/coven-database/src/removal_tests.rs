@@ -789,7 +789,7 @@ pub(crate) async fn hidden_plan_note(db: &Database) {
 }
 
 fn deleting_entry() -> crate::Slot {
-    crate::Slot(1)
+    coven_merge::slot(1)
 }
 
 /// A child moving its unique value and taking a parent that returns with the

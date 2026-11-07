@@ -1,4 +1,5 @@
 use super::*;
+use coven_merge::slot;
 
 #[test]
 fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
@@ -108,7 +109,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
             assert_eq!(record(operation(kind), reason.clone()).retry(), app, "{kind:?} {reason:?}");
         }
     }
-    assert_eq!(record(PendingSubject::Slot(Slot(1)), PendingReason::Removed).retry(), Retry::Never);
+    assert_eq!(record(PendingSubject::Slot(slot(1)), PendingReason::Removed).retry(), Retry::Never);
 }
 
 /// No app call asks again for a slot or a pass, so a local failure that
@@ -116,7 +117,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
 /// backoff. A lasting one still waits for the app (E5).
 #[test]
 fn local_failures_retry_slots_and_passes_as_they_clear() {
-    for subject in [PendingSubject::Slot(Slot(4)), PendingSubject::Connection] {
+    for subject in [PendingSubject::Slot(slot(4)), PendingSubject::Connection] {
         for (failure, retry) in [
             (LocalFailure::Database, Retry::Automatic),
             (LocalFailure::Disk, Retry::Automatic),
@@ -182,7 +183,7 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
     };
     let expected = vec![
         PendingSubject::Write(WriteId { device: DeviceId(9), number: 9 }),
-        PendingSubject::Slot(Slot(1)),
+        PendingSubject::Slot(slot(1)),
         PendingSubject::KeyCopy {
             audience: Audience::Store,
             key: KeyId(Uuid::from_u128(1)),
@@ -249,7 +250,7 @@ async fn a_refused_slot_is_rechecked_once_by_another_build() {
     ana.sync.pass().await.unwrap();
     let n = ana.database().applied_slot().await.unwrap();
     let path = ObjectPath::slot(group.store, n.try_into().unwrap());
-    let subject = PendingSubject::Slot(Slot(n));
+    let subject = PendingSubject::Slot(slot(n));
     let another = !PendingRecord::BUILD;
     let blocked = |result: Result<crate::SequenceStatus, crate::SyncError>| {
         matches!(result, Err(crate::SyncError::Pending(record))
@@ -323,7 +324,7 @@ async fn a_slot_garbled_on_the_way_is_read_again_not_refused() {
     ana.sync.pass().await.unwrap();
     let n = ana.database().applied_slot().await.unwrap();
     let path = ObjectPath::slot(group.store, n.try_into().unwrap());
-    let subject = PendingSubject::Slot(Slot(n));
+    let subject = PendingSubject::Slot(slot(n));
     let garble = |reads| {
         let garble = Garble { at: 0, reads };
         let (storage, garbled) = (group.storage.clone(), [(path.clone(), garble)].into());

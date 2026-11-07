@@ -80,7 +80,7 @@ impl SequenceSync {
         if member.keys().public_keys() != request.identity().keys().public_keys() {
             return Err(SyncError::InvitationChanged);
         }
-        self.scan_after(&mut session, request.read_through());
+        self.scan_after(&mut session, request.read_through())?;
         let held = self.keys.read()?;
         // The keys first open in a check whose custody held none: a new
         // installation's, or a resumed join's, which may have applied slots

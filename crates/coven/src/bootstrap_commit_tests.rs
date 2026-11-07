@@ -439,7 +439,7 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
 
 /// The name the fixture store was created with, set by slot 1.
 fn household() -> coven_sync::SavedName {
-    coven_sync::SavedName { name: "Household".into(), named_at: coven_merge::Slot(1) }
+    coven_sync::SavedName { name: "Household".into(), named_at: coven_merge::slot(1) }
 }
 
 /// Identity custody that panics as it persists, as a bug in an app's

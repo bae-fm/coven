@@ -425,7 +425,7 @@ fn deleted_circle_entries_hide_existing_and_arriving_rows_without_deleting_them(
     let states = agree(&writes, &[&[0, 1]]);
     let original = MemoryView::from_states(&states, &History::new(writes).unwrap());
     let mut before = original.clone();
-    for entry in [Slot(1), Slot(2), Slot(3)] {
+    for entry in [crate::slot(1), crate::slot(2), crate::slot(3)] {
         let mut view = original.clone();
         for facts in view.data.values_mut() {
             if let RemovalRow::Present { deleted_circle, .. } = facts {

@@ -35,7 +35,7 @@ impl SequenceSync {
             match history.gone_for_good(*device) {
                 // A reset registers this installation in the same slot that
                 // replaces the one it carries on from.
-                Some((slot, _)) if slot.0 >= added => {
+                Some((slot, _)) if slot.get() >= added => {
                     self.end_requests(*device).await?;
                     self.database.record_requests_ended(*device).await?;
                 }

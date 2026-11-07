@@ -48,11 +48,11 @@ async fn compare_rotation(
     assert_eq!(crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input), expected);
 
     let originals = ana.sync.database.original_slots().await.unwrap();
-    for original in originals.iter().filter(|o| o.slot.0 > through) {
+    for original in originals.iter().filter(|o| o.slot.get() > through) {
         let bounded = BoundedSlot::decode(&original.object).unwrap();
         assert_eq!(bounded.prefix.key, outer, "rotation never needs an unheld outer key");
     }
-    for saved in after.copies.iter().filter(|c| c.path.slot_number().unwrap().0 > through) {
+    for saved in after.copies.iter().filter(|c| c.path.slot_number().unwrap().get() > through) {
         let SlotKind::KeyCopy(copy) = &saved.prefix.kind else {
             panic!("copy");
         };
@@ -312,7 +312,7 @@ async fn a_device_with_no_usable_key_rotates_before_sending() {
         .expect("the write's key was introduced");
     assert_eq!(introduced.audience, Audience::Store);
     assert!(
-        introduced.slot.0 > removal,
+        introduced.slot.get() > removal,
         "introduced at {:?}, removal at {removal}",
         introduced.slot
     );

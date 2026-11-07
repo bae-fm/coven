@@ -640,7 +640,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
             let header =
                 merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(0).map_err(DbError::from)?)
                     .map_err(DbError::from)?;
-            if crate::sequence::write_slot(db, header.position)?.is_none_or(|slot| slot.0 > covered)
+            if crate::sequence::write_slot(db, header.position)?.is_none_or(|slot| slot.get() > covered)
             {
                 return Ok(());
             }
@@ -684,7 +684,7 @@ pub(crate) fn forget_own_migration(
         if header.disposition != coven_format::write::WriteDisposition::Migration
             || (header.schema_version > version
                 && crate::sequence::write_slot(db, header.position)?
-                    .is_none_or(|slot| slot.0 > covered))
+                    .is_none_or(|slot| slot.get() > covered))
         {
             continue;
         }

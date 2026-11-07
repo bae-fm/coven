@@ -27,7 +27,7 @@ use coven_foundation::{
 };
 use coven_merge::{Audience, Slot};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
-use std::{num::NonZeroU64, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub(crate) struct Session {
@@ -40,7 +40,7 @@ pub(crate) struct Session {
     checked_floor: Option<coven_storage::StoredObject>,
     blocked: Option<PendingRecord>,
     /// The next slot a member without store keys inspects for its copies.
-    scanned: u64,
+    scanned: Slot,
     /// Committed originals wait for store keys before their history is
     /// reconstructed: custody held none when this owner opened.
     locked: bool,
@@ -111,7 +111,7 @@ impl SequenceSync {
             None => (History::default(), !originals.is_empty()),
         };
         let blocked = database.pending::<PendingRecord>().await?.into_iter().find(|record| {
-            record.subject == PendingSubject::Slot(Slot(through.saturating_add(1)))
+            next_slot(through).is_ok_and(|next| record.subject == PendingSubject::Slot(next))
                 && !matches!(record.reason, PendingReason::WritesRefused { .. })
         });
         if let Some(record) = &blocked {
@@ -137,7 +137,7 @@ impl SequenceSync {
                 floor: None,
                 checked_floor: None,
                 blocked,
-                scanned: 1,
+                scanned: Slot::FIRST,
                 locked,
             })),
         })
@@ -184,11 +184,8 @@ impl SequenceSync {
             self.state.clone(),
         )
     }
-    pub(crate) fn path(&self, slot: u64) -> Result<ObjectPath, SyncError> {
-        Ok(ObjectPath::slot(
-            self.store(),
-            NonZeroU64::new(slot).ok_or(SyncError::SequenceExhausted)?,
-        ))
+    pub(crate) fn path(&self, slot: Slot) -> ObjectPath {
+        ObjectPath::slot(self.store(), slot.into())
     }
 
     /// Reach the current read end, publish this pass's captured eligible queue,
@@ -312,7 +309,7 @@ impl SequenceSync {
     /// dropped so the next pass reads the slot again, and this pass fails
     /// with `Corrupted`.
     async fn confirm_refusal(&self, session: &mut Session, slot: Slot) -> Result<(), SyncError> {
-        let path = self.path(slot.0)?;
+        let path = self.path(slot);
         let Some(kept) = self.held_slot(&path).await? else {
             return Ok(());
         };
@@ -355,9 +352,7 @@ impl SequenceSync {
                 .await?
         {
             return Err(self
-                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                    slot: Slot(received.header.after + 1),
-                })
+                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot { slot: received.slot() })
                 .await);
         }
         Ok(())
@@ -442,7 +437,7 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let at = incoming.slot;
         // A reload's fixed target already installed this slot.
-        if at.0 <= session.through {
+        if at.get() <= session.through {
             return Ok(());
         }
         if let SlotContent::Admin { effect: Some(effect), .. } = &mut incoming.content {
@@ -455,19 +450,15 @@ impl SequenceSync {
             }
         }
         self.keys.persist(ring)?;
-        let result =
-            self.database.apply_slot::<PendingRecord, _, _>(incoming, || Ok(())).await.map_err(
-                |error| {
-                    crate::write_object::database_failure(
-                        &self.path(at.0).expect("positive slot"),
-                        error,
-                    )
-                },
-            )?;
+        let result = self
+            .database
+            .apply_slot::<PendingRecord, _, _>(incoming, || Ok(()))
+            .await
+            .map_err(|error| crate::write_object::database_failure(&self.path(at), error))?;
         match result {
             coven_database::ApplyOutcome::Applied
             | coven_database::ApplyOutcome::AlreadyApplied => {
-                session.through = at.0;
+                session.through = at.get();
                 session.history = history;
                 self.check_binding(session, member)?;
                 Ok(())
@@ -501,9 +492,8 @@ impl SequenceSync {
             self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
             return error;
         }
-        let refused = self.path(slot.0).is_ok_and(
-            |path| matches!(&error, SyncError::Damaged(object) if object.path == path.as_str()),
-        );
+        let path = self.path(slot);
+        let refused = matches!(&error, SyncError::Damaged(object) if object.path == path.as_str());
         if refused {
             if let Err(failed) = self.confirm_refusal(session, slot).await {
                 return failed;
@@ -577,7 +567,7 @@ impl History {
         member: coven_foundation::id_source::MemberId,
     ) -> IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>> {
         let (received, body) = received.into_parts();
-        let slot = Slot(received.header.after + 1);
+        let slot = received.slot();
         let content = match body {
             SlotBody::Writes { size, writes } => SlotContent::Writes { size, writes },
             SlotBody::Bounded { frame: SlotFrame::Admin(change), original } => {
@@ -644,7 +634,7 @@ impl History {
         if !crate::effects::belongs(&self.state, &announcement.snapshot.audience, &header.author)
             || !self.state.device_acts_for(&header.device, &header.author)
             || announcement.snapshot.device != header.device
-            || announcement.covers >= slot.0
+            || announcement.covers >= slot.get()
         {
             return false;
         }
@@ -658,7 +648,7 @@ impl History {
             .boundaries
             .iter()
             .filter(|prior| prior.boundary.snapshot().audience == announcement.snapshot.audience)
-            .map(|prior| prior.boundary.entry().0)
+            .map(|prior| prior.boundary.entry().get())
             .max();
         // Covering the latest raise, the audience's version at the coverage
         // is its version now (§16.3).

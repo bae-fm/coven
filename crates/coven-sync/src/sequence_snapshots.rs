@@ -10,6 +10,7 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
 use coven_format::sequence::Purpose;
+use coven_merge::Slot;
 use std::collections::BTreeSet;
 
 /// The sealed slot bytes that request an audience's first snapshot (§16.2).
@@ -81,14 +82,14 @@ impl SequenceSync {
             };
             let growth = self.database.snapshot_slot_bytes(audience.clone(), covers).await?;
             let next = next_slot(covers)?
-                .max(session.floor.as_ref().map_or(1, |floor| floor.header.first.0));
+                .max(session.floor.as_ref().map_or(Slot::FIRST, |floor| floor.header.first));
             // History older than grace also asks for coverage, so retention can
             // delete it even where the slots never reach the threshold: a
             // store of few small writes may stay below it.
             // Age comes from the exact slot observation already made by reading
             // or claiming it. An idle pass never probes metadata to find work.
-            let aged = if next <= session.through {
-                match ObjectInput::retained(&self.database, &self.path(next)?).await? {
+            let aged = if next.get() <= session.through {
+                match ObjectInput::retained(&self.database, &self.path(next)).await? {
                     Some(input) => self.past_grace(input.object()),
                     None => false,
                 }

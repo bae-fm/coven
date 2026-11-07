@@ -12,7 +12,7 @@ async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
     ana.sync.pass().await.unwrap();
     let covered = ana.sync.database.applied_slot().await.unwrap();
     let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
-    assert_eq!(announced.0, covered + 1);
+    assert_eq!(announced.get(), covered + 1);
     ben.sync.pass().await.unwrap();
     let session = ben.sync.session.lock().await;
     let announcement = &session.history.announcements[&announced];
@@ -387,7 +387,7 @@ async fn an_announcement_counts_only_at_or_above_the_coverage_and_the_latest_res
     let covers = ana.sync.session.lock().await.history.announcements[&announced].covers;
     let allowed = |history: &crate::history::History, covers: u64| {
         let (announcement, header) = announcement_by(&ben, covers);
-        history.announcement_allowed(coven_merge::Slot(1_000), &header, &announcement)
+        history.announcement_allowed(coven_merge::slot(1_000), &header, &announcement)
     };
     let history = ana.sync.session.lock().await.history.clone();
     assert!(allowed(&history, covers), "equal coverage counts");
@@ -396,7 +396,7 @@ async fn an_announcement_counts_only_at_or_above_the_coverage_and_the_latest_res
 
     ana.sync.reset(coven_merge::Audience::Store).await.unwrap();
     let history = ana.sync.session.lock().await.history.clone();
-    let entry = history.boundaries.last().unwrap().boundary.entry().0;
+    let entry = history.boundaries.last().unwrap().boundary.entry().get();
     assert!(allowed(&history, entry), "covering the reset's entry counts");
     assert!(!allowed(&history, entry - 1), "covering less than the reset does not");
     for device in [&ana, &ben] {
@@ -601,7 +601,7 @@ async fn an_announcement_counts_only_at_a_breaking_version_its_audience_reached(
             purpose,
             ..announcement
         };
-        history.announcement_allowed(coven_merge::Slot(1_000), &header, &announcement)
+        history.announcement_allowed(coven_merge::slot(1_000), &header, &announcement)
     };
     let history = ana.sync.session.lock().await.history.clone();
     assert_eq!(history.announcements[&before].breaking_version, 0);

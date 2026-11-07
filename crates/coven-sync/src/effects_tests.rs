@@ -1,6 +1,6 @@
 use super::*;
-use coven_database::StoreCircle;
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
+use {coven_database::StoreCircle, coven_merge::slot};
 
 pub(crate) fn id(n: u128) -> MemberId {
     MemberId(uuid::Uuid::from_u128(n))
@@ -27,7 +27,7 @@ pub(crate) fn household() -> StoreState {
     let mut state = checked_change(
         &StoreState::default(),
         &header(1, 1, 0),
-        Slot(1),
+        slot(1),
         &change,
         &BTreeMap::new(),
         &[],
@@ -38,7 +38,7 @@ pub(crate) fn household() -> StoreState {
     state = checked_change(
         &state,
         &header(1, 1, 1),
-        Slot(2),
+        slot(2),
         &StoreChange::AddMember {
             member: id(2),
             keys: keys(2),
@@ -54,7 +54,7 @@ pub(crate) fn household() -> StoreState {
     checked_change(
         &state,
         &header(2, 2, 2),
-        Slot(3),
+        slot(3),
         &StoreChange::AddDevice { name: "Ben".into(), replaces: None },
         &BTreeMap::new(),
         &[],
@@ -71,7 +71,7 @@ fn apply(
     checked_change(
         state,
         &header(author, author as u128, 3),
-        Slot(4),
+        slot(4),
         &change,
         &BTreeMap::new(),
         &[],
@@ -184,7 +184,7 @@ fn already_satisfied_deletion_finishes_without_requiring_lost_membership() {
     state
         .circles
         .insert(circle, StoreCircle { name: "Gifts".into(), members: Default::default(), base: 0 });
-    state.circle_deletions.insert(circle, Slot(3));
+    state.circle_deletions.insert(circle, slot(3));
     assert!(apply(&state, 1, StoreChange::DeleteCircle { circle }).unwrap().is_none());
 }
 #[test]
@@ -201,12 +201,12 @@ fn activating_a_preparation_checks_coverage_against_later_announcements() {
         purpose: Purpose::Reset,
         digest: [number as u8; 32],
     };
-    let announcements = [(Slot(4), snapshot(1, 3)), (Slot(6), snapshot(2, 5))].into();
+    let announcements = [(slot(4), snapshot(1, 3)), (slot(6), snapshot(2, 5))].into();
     assert!(checked_change(
         &state,
         &header(1, 1, 6),
-        Slot(7),
-        &StoreChange::Reset { announcement: Slot(4) },
+        slot(7),
+        &StoreChange::Reset { announcement: slot(4) },
         &announcements,
         &[]
     )
@@ -235,7 +235,7 @@ fn a_floor_keeps_the_schema_and_reset_selected_at_its_own_prefix() {
         digest: [8; 32],
     };
     history.boundaries.push(coven_database::BoundaryCoverage {
-        boundary: Boundary::Reset { entry: Slot(15), snapshot: prepared.snapshot.clone() },
+        boundary: Boundary::Reset { entry: slot(15), snapshot: prepared.snapshot.clone() },
         included: 12,
     });
     assert!(history.usable_at(&ordinary, 11));
@@ -263,16 +263,16 @@ fn activate(
     announcements: &BTreeMap<Slot, SnapshotAnnouncement>,
     boundaries: &[coven_database::BoundaryCoverage],
 ) -> Result<Option<AdminEffect>, OperationRejection> {
-    checked_change(&household(), &header(1, 1, 19), Slot(20), &change, announcements, boundaries)
+    checked_change(&household(), &header(1, 1, 19), slot(20), &change, announcements, boundaries)
 }
 
 #[test]
 fn a_raise_covering_less_than_an_earlier_announcement_is_refused() {
-    let raise = StoreChange::RaiseSchema { version: 2, announcement: Slot(10) };
+    let raise = StoreChange::RaiseSchema { version: 2, announcement: slot(10) };
     let ordinary = |covers| {
         BTreeMap::from([
-            (Slot(10), announced(1, 8, Purpose::Raise(2))),
-            (Slot(12), announced(2, covers, Purpose::Ordinary)),
+            (slot(10), announced(1, 8, Purpose::Raise(2))),
+            (slot(12), announced(2, covers, Purpose::Ordinary)),
         ])
     };
     assert!(matches!(
@@ -282,7 +282,7 @@ fn a_raise_covering_less_than_an_earlier_announcement_is_refused() {
     // Equal coverage and another audience's later coverage are allowed.
     assert!(activate(raise.clone(), &ordinary(8), &[]).unwrap().is_some());
     let mut circle = ordinary(11);
-    circle.get_mut(&Slot(12)).unwrap().snapshot.audience =
+    circle.get_mut(&slot(12)).unwrap().snapshot.audience =
         Audience::Circle(CircleId(uuid::Uuid::from_u128(30)));
     assert!(activate(raise, &circle, &[]).unwrap().is_some());
 }
@@ -290,25 +290,25 @@ fn a_raise_covering_less_than_an_earlier_announcement_is_refused() {
 #[test]
 fn a_reset_covering_less_than_a_preceding_raise_slot_is_refused() {
     let announcements = BTreeMap::from([
-        (Slot(10), announced(1, 8, Purpose::Raise(2))),
-        (Slot(14), announced(2, 13, Purpose::Reset)),
-        (Slot(15), announced(3, 9, Purpose::Reset)),
+        (slot(10), announced(1, 8, Purpose::Raise(2))),
+        (slot(14), announced(2, 13, Purpose::Reset)),
+        (slot(15), announced(3, 9, Purpose::Reset)),
     ]);
     let raised = coven_database::BoundaryCoverage {
         boundary: Boundary::SchemaChange(StoreVersion {
             number: 2,
-            snapshot: announcements[&Slot(10)].snapshot.clone(),
-            entry: Slot(11),
+            snapshot: announcements[&slot(10)].snapshot.clone(),
+            entry: slot(11),
         }),
         included: 8,
     };
     // The reset covering 9 was captured before the raise at slot 11.
     assert!(matches!(
         activate(
-            StoreChange::Reset { announcement: Slot(15) },
+            StoreChange::Reset { announcement: slot(15) },
             &BTreeMap::from([
-                (Slot(10), announcements[&Slot(10)].clone()),
-                (Slot(15), announcements[&Slot(15)].clone())
+                (slot(10), announcements[&slot(10)].clone()),
+                (slot(15), announcements[&slot(15)].clone())
             ]),
             std::slice::from_ref(&raised),
         ),
@@ -316,10 +316,10 @@ fn a_reset_covering_less_than_a_preceding_raise_slot_is_refused() {
     ));
     // Covering the raise slot and every earlier announcement, it activates.
     assert!(activate(
-        StoreChange::Reset { announcement: Slot(14) },
+        StoreChange::Reset { announcement: slot(14) },
         &BTreeMap::from([
-            (Slot(10), announcements[&Slot(10)].clone()),
-            (Slot(14), announcements[&Slot(14)].clone())
+            (slot(10), announcements[&slot(10)].clone()),
+            (slot(14), announcements[&slot(14)].clone())
         ]),
         std::slice::from_ref(&raised),
     )
@@ -361,9 +361,9 @@ fn only_an_admin_resets_the_store_and_only_a_circle_member_resets_its_circle() {
         checked_change(
             &state,
             &header(author, author as u128, 19),
-            Slot(20),
-            &StoreChange::Reset { announcement: Slot(10) },
-            &BTreeMap::from([(Slot(10), announcement(audience))]),
+            slot(20),
+            &StoreChange::Reset { announcement: slot(10) },
+            &BTreeMap::from([(slot(10), announcement(audience))]),
             &[],
         )
     };
@@ -442,8 +442,8 @@ mod sequence_differential {
         effect: Option<AdminEffect>,
         seed: u8,
     ) {
-        let slot = Slot(header.after + 1);
-        let path = coven_storage::ObjectPath::slot(group.store, slot.0.try_into().unwrap());
+        let slot = slot(header.after + 1);
+        let path = coven_storage::ObjectPath::slot(group.store, slot.get().try_into().unwrap());
         let signer = coven_crypto::MemberIdentity::new(
             header.author,
             coven_format::test_utils::keys_from_seed(seed),
@@ -521,7 +521,7 @@ mod sequence_differential {
             let effect = checked_change(
                 &state,
                 &header,
-                Slot(header.after + 1),
+                slot(header.after + 1),
                 &change,
                 &BTreeMap::new(),
                 &[],
@@ -541,7 +541,7 @@ mod sequence_differential {
                 _ => before.devices.get(&DeviceId(*author)).map_or(2, |d| d.member.0.as_u128()),
             };
             let hdr = header(*author, member, i as u64 + 3);
-            let at = Slot(i as u64 + 4);
+            let at = slot(i as u64 + 4);
             let change = action.change(&before, (i + 10) as u8);
             let checked = checked_change(&before, &hdr, at, &change, &BTreeMap::new(), &[]);
             // addDevice has no independently supplied target in the Rust format:
@@ -611,7 +611,7 @@ mod sequence_differential {
             if refused {
                 assert!(!had_effect, "refused slot changed Rust state: {input}");
             }
-            assert_eq!(db.applied_slot().await.unwrap(), at.0);
+            assert_eq!(db.applied_slot().await.unwrap(), at.get());
         }
         db.close().await.unwrap();
         actions.len()
@@ -720,7 +720,7 @@ fn apply_from(
     author: u128,
     change: StoreChange,
 ) -> Result<Option<AdminEffect>, OperationRejection> {
-    checked_change(state, &header(device, author, 3), Slot(4), &change, &BTreeMap::new(), &[])
+    checked_change(state, &header(device, author, 3), slot(4), &change, &BTreeMap::new(), &[])
 }
 
 fn gifts() -> CircleId {
@@ -790,9 +790,9 @@ fn a_raise_of_a_circle_must_go_past_its_base() {
         checked_change(
             &made,
             &header(2, 2, 19),
-            Slot(20),
-            &StoreChange::RaiseSchema { version, announcement: Slot(10) },
-            &BTreeMap::from([(Slot(10), announcement)]),
+            slot(20),
+            &StoreChange::RaiseSchema { version, announcement: slot(10) },
+            &BTreeMap::from([(slot(10), announcement)]),
             &[],
         )
     };
@@ -839,7 +839,7 @@ fn removing_a_circles_last_member_deletes_it_at_that_slot() {
     }
     let removed =
         apply(&state, 1, StoreChange::RemoveMember { member: id(2) }).unwrap().unwrap().state;
-    assert_eq!(removed.circle_deletions.get(&gifts()), Some(&Slot(4)));
+    assert_eq!(removed.circle_deletions.get(&gifts()), Some(&slot(4)));
     assert!(removed.circles[&gifts()].members.is_empty());
     assert_eq!(removed.circle_deletions.get(&shared), None);
     assert_eq!(removed.circles[&shared].members, [id(1)].into());
@@ -986,7 +986,7 @@ fn a_circle_left_empty_is_deleted_at_that_slot() {
             .unwrap()
             .state;
     for state in [left, removed] {
-        assert_eq!(state.circle_deletions[&gifts()], Slot(4));
+        assert_eq!(state.circle_deletions[&gifts()], slot(4));
         assert!(state.circles[&gifts()].members.is_empty());
         for change in [
             StoreChange::AddCircleMember { circle: gifts(), member: id(2) },

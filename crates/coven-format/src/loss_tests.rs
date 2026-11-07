@@ -2,6 +2,7 @@ use super::*;
 use crate::snapshot::{SnapshotDecoder, SnapshotEncoder, SnapshotRecord};
 use crate::test_utils;
 use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_merge::slot;
 use coven_merge::{Audience, Parent};
 
 fn encoder(count: u64) -> (SnapshotEncoder, SnapshotDecoder) {
@@ -227,7 +228,7 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
     let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(&header)).unwrap();
-    for invalid in [crate::value::Slot(header.covers + 1), crate::value::Slot(u64::MAX)] {
+    for invalid in [slot(header.covers + 1), slot(u64::MAX)] {
         let mut refused = loss.clone();
         refused.cause = LossCause::Rules([Rule::DeletedCircle(invalid)].into());
         assert!(encoder.record(SnapshotRecord::Loss(refused.clone())).is_err());
