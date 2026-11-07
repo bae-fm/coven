@@ -407,6 +407,20 @@ async fn a_setup_whose_claim_is_refused_undoes_what_it_made() {
     phone.handle.close().await.unwrap();
 }
 
+/// A claim that lost slot 1 to another installation of the store, or found
+/// the location another store's, is refused and setup undoes itself; a
+/// failure that may pass (the network, a damaged object) is retried instead
+/// (E5, §11.6).
+#[test]
+fn a_claim_another_installation_won_is_refused_and_a_passing_failure_is_retried() {
+    for failure in [StorageFailure::StoreExists, StorageFailure::OwnLocationRequired] {
+        assert!(refused(&SyncError::Storage(failure.into())), "{failure:?}");
+    }
+    for failure in [StorageFailure::Network, StorageFailure::Authentication] {
+        assert!(!refused(&SyncError::Storage(failure.into())), "{failure:?}");
+    }
+}
+
 /// The first setup registers the device under the name it was given; a
 /// reconnect after this device lost its credentials keeps that name and
 /// claims nothing (E5).
