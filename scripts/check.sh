@@ -407,9 +407,11 @@ proofs() {
     lean_proof "storage publication, files and clocks" spec/proofs/storage CovenStorage covenStorage
     lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
     lean_proof "queued originals and conversion" spec/proofs/queue CovenQueue covenQueue
-    lean_proof "file IO, retries and wakes" spec/proofs/io CovenIO covenIO
+    # The sequence comes first: the IO package requires it, and cleaning it
+    # after that package's build would build it twice.
     lean_proof "the store sequence and its JSON runner" spec/proofs/sequence CovenSequence covenSequence \
         CovenSequence sequenceRunner SequenceTests
+    lean_proof "file IO, retries and wakes" spec/proofs/io CovenIO covenIO
 
     local runner
     if proof_selected sequence || crate_selected coven-merge; then
