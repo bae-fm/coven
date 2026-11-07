@@ -14,9 +14,10 @@ impl SequenceSync {
     /// earlier revocation of the account. An account a member or an open
     /// invite uses stays shared.
     ///
-    /// Refused with `Rejected(NotAllowed)` unless this device is the owner's
-    /// and the applied history has `device` gone for good, and on S3, where
-    /// no account is shared. Fails with `ProviderRequestRunning`, changing
+    /// Refused with `CutOffRefused`, naming why: `NoAccountShared` on S3,
+    /// `NotStoreOwner` unless this device's member holds the store's account,
+    /// and `DeviceNotGone` unless the applied history has `device` gone for
+    /// good, which the next pass may bring. Fails with `ProviderRequestRunning`, changing
     /// nothing, while a request to one of those accounts runs; the call is
     /// made again once it ends.
     pub async fn confirm_device_cut_off(&self, device: DeviceId) -> Result<(), SyncError> {
@@ -26,6 +27,18 @@ impl SequenceSync {
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
         self.retake_accounts(&session, member.member(), device).await
+    }
+
+    /// Whether this device's member reaches storage through the account that
+    /// holds the store (§20.9): only their devices share it and take sharing
+    /// back, so only they can confirm a device cut off. Reads the sequence
+    /// forward first, so it answers for the history as it stands.
+    pub async fn holds_store(&self) -> Result<bool, SyncError> {
+        let mut session = self.session.lock().await;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
+        self.read_forward(&mut session, &mut ring, &member).await?;
+        Ok(session.history.holds_store(member.member()))
     }
 
     async fn retake_accounts(

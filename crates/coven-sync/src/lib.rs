@@ -67,7 +67,7 @@ pub use coven_database::{
     DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
 };
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
-pub use error::{DamagedObject, SyncError, SyncFailure};
+pub use error::{CutOffRefusal, DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
 pub use joining_identity::{ended_for, record_ending, sealed_join_request, JoiningIdentity};
 pub use last_pass::{LastPass, PassFailure, StatusFailure};

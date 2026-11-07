@@ -74,22 +74,23 @@ async fn confirming_a_device_cut_off_leaves_an_account_something_still_uses() {
     }
 }
 
-/// §20.9: a device that isn't gone for good, and a device of a member who
-/// doesn't hold the store's account, are refused.
+/// §20.9: a device whose removal this device hasn't read can be confirmed
+/// after the next pass; one of a member who doesn't hold the store's account
+/// never can, and the answers say which.
 #[tokio::test]
-async fn confirming_is_refused_for_a_device_not_gone_and_by_a_device_not_the_owners() {
+async fn confirming_names_why_a_device_is_refused() {
     let group = Group::shared();
     let (phone, ben, laptop) = household(&group).await;
     invite(&phone).await;
     assert!(matches!(
         laptop.sync.confirm_device_cut_off(phone.sync.device).await,
-        Err(SyncError::Rejected(OperationRejection::NotAllowed))
+        Err(SyncError::CutOffRefused(CutOffRefusal::DeviceNotGone))
     ));
     ben.sync.pass().await.unwrap();
     ben.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
     assert!(matches!(
         ben.sync.confirm_device_cut_off(phone.sync.device).await,
-        Err(SyncError::Rejected(OperationRejection::NotAllowed))
+        Err(SyncError::CutOffRefused(CutOffRefusal::NotStoreOwner))
     ));
     for device in [&phone, &ben, &laptop] {
         device.database().close().await.unwrap();
@@ -108,9 +109,29 @@ async fn confirming_is_refused_on_s3() {
     ana.sync.administer(StoreChange::RemoveDevice { device: ben.sync.device }).await.unwrap();
     assert!(matches!(
         ana.sync.confirm_device_cut_off(ben.sync.device).await,
-        Err(SyncError::Rejected(OperationRejection::NotAllowed))
+        Err(SyncError::CutOffRefused(CutOffRefusal::NoAccountShared))
     ));
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
+}
+
+/// §20.9: the member whose account holds the store is the only one whose
+/// devices can confirm a cut-off; a device says whether its member is that
+/// member, and on S3 none is.
+#[tokio::test]
+async fn a_device_says_whether_its_member_holds_the_store() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    assert!(phone.sync.holds_store().await.unwrap());
+    assert!(laptop.sync.holds_store().await.unwrap());
+    assert!(!ben.sync.holds_store().await.unwrap());
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+    let s3 = Group::new();
+    let ana = s3.device(1).await;
+    s3.create(&ana).await;
+    assert!(!ana.sync.holds_store().await.unwrap());
+    ana.database().close().await.unwrap();
 }

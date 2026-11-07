@@ -65,6 +65,16 @@ impl StorageConnections {
         Ok(())
     }
 
+    /// Whether this device's member holds the store's account (§20.9).
+    pub(crate) async fn holds_store(&self) -> Result<bool, SyncError> {
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let ConnectionState::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.holds_store().await
+    }
+
     /// Install and record a replacement S3 key; it needs the connection.
     pub(crate) async fn replace_access_key(
         &self,

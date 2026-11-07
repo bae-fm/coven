@@ -5177,7 +5177,11 @@ account back. The person tells a device of hers when the provider step is done:
 device takes back every account the lost device's invite shares named which no
 active member or open invite uses, as it takes back any account, so a grant
 that landed late is revoked (§20.9). It records no entry: any one of her
-devices doing it is enough.
+devices doing it is enough. A refusal names why: `DeviceNotGone` when the
+device's removal hasn't reached this device's history yet, so the call works
+after the next pass; `NotStoreOwner` when her account doesn't hold the store,
+which `holds_store` tells the app beforehand, so it can leave the button out;
+and `NoAccountShared` on S3.
 
 Removal changes no ciphertext or private key anyone already obtained. Confirmed
 cut-off prevents further reads and publishing. Until then, every device still
@@ -9722,8 +9726,8 @@ names it, whichever of the owner's devices recorded the share (§13.2).
   request to an account runs, the call fails with
   `DbError::ProviderRequestRunning` and changes nothing, since that request's
   reply may come before the confirmation; Ana calls again once it ends.
-  Ana's phone is on Dropbox, OneDrive or iCloud; on S3 the call is refused,
-  since no account is shared.
+  Ana's phone is on Dropbox, OneDrive or iCloud; on S3 the call is refused
+  with `NoAccountShared`, since no account is shared.
 
 #### 20.10 S3 member keys
 

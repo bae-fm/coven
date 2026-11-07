@@ -1,6 +1,8 @@
 //! Authenticated administrative history, indexed by its counted slots.
 
-use crate::{effects, snapshot_object::RoutedKey, OperationRejection, Refusal, SyncError};
+use crate::{
+    effects, snapshot_object::RoutedKey, CutOffRefusal, OperationRejection, Refusal, SyncError,
+};
 use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
 use coven_database::{AdminEffect, DeviceStop, StoreCircle, StoreDevice, StoreMember, StoreState};
 use coven_format::{
@@ -206,7 +208,8 @@ impl History {
     /// may have granted after this device's own revocations: every account
     /// those shares named that nothing intends now (§20.9). Refused when
     /// `member`'s devices don't change sharing here (S3, or another account
-    /// holds the store) or the device isn't gone for good.
+    /// holds the store) or the device isn't gone for good, each as its own
+    /// `CutOffRefusal`.
     pub(crate) fn cut_off_retakes(
         &self,
         member: MemberId,
@@ -214,8 +217,14 @@ impl History {
     ) -> Result<Vec<coven_database::ProviderAccessChange>, SyncError> {
         let provider_account =
             matches!(self.store_access(), Some(MemberAccess::ProviderAccount(_)));
-        if !provider_account || !self.owns_storage(member) || self.gone_for_good(device).is_none() {
-            return Err(OperationRejection::NotAllowed.into());
+        if !provider_account {
+            return Err(CutOffRefusal::NoAccountShared.into());
+        }
+        if !self.owns_storage(member) {
+            return Err(CutOffRefusal::NotStoreOwner.into());
+        }
+        if self.gone_for_good(device).is_none() {
+            return Err(CutOffRefusal::DeviceNotGone.into());
         }
         let accounts: BTreeSet<String> = self
             .invite_shares

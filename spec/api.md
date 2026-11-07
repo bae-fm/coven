@@ -5184,6 +5184,8 @@ pub enum SyncError {
     /// The latest applied prefix no longer permits the operation; its journal
     /// undoes owned artifacts before completion (§11).
     Rejected(OperationRejection),
+    /// `confirm_device_cut_off` changed nothing, for this reason.
+    CutOffRefused(CutOffRefusal),
     /// The sequence has no next slot: slot numbers are `u64`s, and the
     /// slot it would follow is the last one.
     SequenceExhausted,
@@ -5486,6 +5488,20 @@ pub enum EntryTarget {
     Member(MemberId),
     Device(DeviceId),
     Circle(CircleId),
+}
+
+/// Why `confirm_device_cut_off` refused (§14.2, §20.9).
+pub enum CutOffRefusal {
+    /// The applied history doesn't have the device gone for good: its removal
+    /// hasn't reached this device yet, or it was never removed. The call can
+    /// succeed after the next pass has read the removal.
+    DeviceNotGone,
+    /// The member whose device this is doesn't hold the store's account, so
+    /// their devices don't change sharing. The call can't succeed here.
+    NotStoreOwner,
+    /// The store is on S3, where no account is shared. The call can't
+    /// succeed.
+    NoAccountShared,
 }
 
 /// Why validation refused an administrative operation (§10, §11).
@@ -7064,12 +7080,20 @@ impl CovenHandle {
     /// grant of the lost device may have landed after it (§20.9). Local: it
     /// records no entry, since any one of the owner's devices acting is
     /// enough. Needs the connection (`NoStorage`). Fails with
-    /// `Rejected(NotAllowed)` on a device that isn't of the member whose
-    /// account holds the store, for a device not gone for good, and on S3,
-    /// where no account is shared. While a request to one of those
+    /// `CutOffRefused` naming why: `NoAccountShared` on S3, `NotStoreOwner`
+    /// on a device that isn't of the member whose account holds the store
+    /// (`holds_store`), and `DeviceNotGone` for a device not gone for good,
+    /// which a later pass may change. While a request to one of those
     /// accounts runs it fails with `DbError::ProviderRequestRunning`,
     /// changing nothing; call again once it ends.
     pub async fn confirm_device_cut_off(&self, device: DeviceId) -> Result<(), SyncError>;
+
+    /// Whether this device's member reaches storage through the account that
+    /// holds the store (§20.9): only their devices share it and take sharing
+    /// back, so only they can confirm a device cut off. False on S3, where no
+    /// account holds the store. Reads the sequence forward first; needs the
+    /// connection (`NoStorage`).
+    pub async fn holds_store(&self) -> Result<bool, SyncError>;
 }
 
 impl CovenWrite<'_> {

@@ -8,6 +8,23 @@ use coven_foundation::id_source::KeyId;
 use coven_storage::{StorageError, StorageFailure};
 use std::sync::Arc;
 
+/// Why `confirm_device_cut_off` refused (§14.2, §20.9). Each is a reason the
+/// call can't change anything; the app tells the person which one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutOffRefusal {
+    /// The applied history doesn't have the device gone for good: its
+    /// removal hasn't reached this device yet, or it was never removed.
+    /// After the next pass has read the removal the call can succeed.
+    DeviceNotGone,
+    /// The member whose device this is doesn't hold the store: another
+    /// member's account does, and only their devices change sharing. The
+    /// call can't succeed here.
+    NotStoreOwner,
+    /// The store is on S3, where no account is shared, so there is nothing to
+    /// take back. The call can't succeed.
+    NoAccountShared,
+}
+
 /// A synchronization request failed; its durable queue, if any, remains retryable.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -87,6 +104,9 @@ pub enum SyncError {
     /// The proposed change is already invalid in the author's applied view.
     #[error("administrative change rejected: {0:?}")]
     Rejected(OperationRejection),
+    /// `confirm_device_cut_off` changed nothing, for this reason.
+    #[error("the device cut-off was refused: {0:?}")]
+    CutOffRefused(CutOffRefusal),
     /// A required object failed authentication or parsing.
     #[error(transparent)]
     Damaged(#[from] crate::DamagedObject),
@@ -137,6 +157,12 @@ pub enum SyncError {
     /// again (E15). Its category is `LocalFailure::Bug`.
     #[error("{0}; it has stopped")]
     WorkerFailed(coven_foundation::task::Bug),
+}
+
+impl From<CutOffRefusal> for SyncError {
+    fn from(refusal: CutOffRefusal) -> Self {
+        Self::CutOffRefused(refusal)
+    }
 }
 
 impl coven_foundation::task::CarriesBug for SyncError {
@@ -253,6 +279,7 @@ impl SyncError {
             | SyncError::NoStorage
             | SyncError::StoreOwner
             | SyncError::InvitationChanged
+            | SyncError::CutOffRefused(_)
             | SyncError::ReplacementPending { .. }
             | SyncError::NotPending(_)
             | SyncError::ReloadPending(_)
@@ -300,6 +327,7 @@ impl SyncError {
             | Self::Format(_)
             | Self::KeyUnavailable(_)
             | Self::Rejected(_)
+            | Self::CutOffRefused(_)
             | Self::Damaged(_)
             | Self::Removed
             | Self::DeviceIdInUse(_)

@@ -328,13 +328,22 @@ impl CovenHandle {
     /// invite shares named which no member or open invite uses, with
     /// requests like any other revocation, which run after this call
     /// returns. Needs the connection (`NoStorage` without it), and is refused
-    /// with `Rejected(NotAllowed)` on a device that isn't of the account's
-    /// owner, for a device not gone for good, and on S3, where no account is
-    /// shared. While a request to one of those accounts runs it fails with
+    /// with `CutOffRefused` naming why: `NoAccountShared` on S3, `NotStoreOwner`
+    /// on a device that isn't of the member whose account holds the store (see
+    /// `holds_store`), and `DeviceNotGone` for a device not gone for good,
+    /// which a later pass may change. While a request to one of those accounts runs it fails with
     /// `DbError::ProviderRequestRunning` and changes nothing: call again
     /// once it ends (§20.9).
     pub async fn confirm_device_cut_off(&self, device: DeviceId) -> Result<(), SyncError> {
         self.storage.confirm_device_cut_off(device).await
+    }
+    /// Whether this device's member reaches storage through the account
+    /// that holds the store (§20.9): only their devices share it and take
+    /// sharing back, so only they can confirm a device cut off. False on S3,
+    /// where no account holds the store. Reads the sequence forward first;
+    /// needs the connection (`NoStorage` without it).
+    pub async fn holds_store(&self) -> Result<bool, SyncError> {
+        self.storage.holds_store().await
     }
     /// Waits for an operation the app's writes journaled to end and returns
     /// its outcome, as `coven_operations` lists it (§11.4, E6); the outcome
