@@ -189,7 +189,9 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                         .await
                         .unwrap();
                     assert_eq!(rows, old_rows);
-                    db.inspect_writer(|writer| assert_eq!(writer.query_row("SELECT count(*) FROM temp.sqlite_schema WHERE name GLOB '_coven_download_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 0));
+                    // The staging tables stay on the writer, and the rollback
+                    // empties them of what the failed slot staged.
+                    db.inspect_writer(|writer| assert_eq!(writer.query_row("SELECT (SELECT count(*) FROM temp._coven_download_rows)+(SELECT count(*) FROM temp._coven_download_dismissals)+(SELECT count(*) FROM temp._coven_download_replaced)", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "streamed={streamed}, step={step}"));
                 }
                 Ok(ApplyOutcome::Applied) => {
                     let mutations = db.inspect_writer(|writer| {
