@@ -156,7 +156,9 @@ impl Coven {
     fn drive_network(&self, change: impl FnOnce(&TestNetwork)) {
         match &self.network {
             NetworkSource::Test(network) => change(network),
-            NetworkSource::Platform => panic!("an installation made for a test drives its network"),
+            NetworkSource::Platform | NetworkSource::Refused(_) => {
+                panic!("an installation made for a test drives its network")
+            }
         }
     }
 

@@ -50,6 +50,9 @@ pub struct CovenBuilder {
     /// disk would.
     #[cfg(test)]
     fail_device_reset_notice: bool,
+    /// Have SQLite refuse to close the store this builder opens.
+    #[cfg(test)]
+    refuse_database_close: bool,
     /// Stop a replacement right after its fresh device registered, before
     /// its swap, as if the process ended there.
     #[cfg(test)]
@@ -119,6 +122,8 @@ impl CovenBuilder {
             interrupt_after_swap: false,
             #[cfg(test)]
             fail_device_reset_notice: false,
+            #[cfg(test)]
+            refuse_database_close: false,
             #[cfg(test)]
             interrupt_after_registering: false,
             #[cfg(test)]
@@ -531,7 +536,7 @@ impl CovenBuilder {
             .migrations
             .clone()
             .ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
-        Ok(DatabaseBuilder::new(directory)
+        let database = DatabaseBuilder::new(directory)
             .migration_operation(coven_sync::SequenceSync::migration_operation)
             .synced_tables(tables)
             .namespaces(self.namespaces.clone())
@@ -539,7 +544,10 @@ impl CovenBuilder {
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
             .sqlite_settings(self.sqlite.clone())
-            .sql_functions(self.sql_functions.clone()))
+            .sql_functions(self.sql_functions.clone());
+        #[cfg(test)]
+        let database = if self.refuse_database_close { database.refuse_close() } else { database };
+        Ok(database)
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {
@@ -689,6 +697,20 @@ impl CovenBuilder {
     #[cfg(test)]
     pub(crate) fn interrupt_after_swap(mut self) -> Self {
         self.interrupt_after_swap = true;
+        self
+    }
+
+    /// Have SQLite refuse to close the store this builder opens.
+    #[cfg(test)]
+    pub(crate) fn refuse_database_close(mut self) -> Self {
+        self.refuse_database_close = true;
+        self
+    }
+
+    /// Have the platform refuse this store's network watch with `error`.
+    #[cfg(test)]
+    pub(crate) fn refuse_network_watch(mut self, error: NetworkWatchError) -> Self {
+        self.network = coven_foundation::network_watch::NetworkSource::Refused(error);
         self
     }
 

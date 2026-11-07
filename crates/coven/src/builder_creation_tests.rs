@@ -249,6 +249,109 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
     }
 }
 
+/// The cleanup half of a creation whose close failed: the connection SQLite
+/// wouldn't close, as sync reports it.
+fn assert_writer_refused_to_close(cleanup: &StoreCreationError) {
+    let StoreCreationError::Sync(SyncError::Database(DbError::Closing { failures })) = cleanup
+    else {
+        panic!("closing failed, not {cleanup:?}");
+    };
+    assert_eq!(failures.len(), 1, "{failures:?}");
+}
+
+/// Creation fails after saving the identity, and SQLite won't close the
+/// store. Both causes remain (E1), and what creation made is still undone.
+#[tokio::test]
+async fn a_close_failing_in_a_failed_creation_keeps_both_causes_and_leaves_no_store() {
+    let root = tempfile::tempdir().unwrap();
+    let keychain = Keychain::in_memory("creation-close").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
+    let identity = Arc::new(FailAfterIdentity {
+        keychain: keychain.clone(),
+        identity: Mutex::new(None),
+        fail_cleanup: false,
+    });
+    let expected = StoreId(SequentialIds::new().new_id());
+    let error = app
+        .builder()
+        .synced_tables(vec![])
+        .migrations(vec![])
+        .id_source(Arc::new(SequentialIds::new()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
+        .refuse_database_close()
+        .create_store("Refused")
+        .await
+        .unwrap_err();
+    let StoreCreationError::Cleanup { operation, cleanup } = &error else {
+        panic!("both causes, not {error:?}");
+    };
+    assert!(matches!(**operation, StoreCreationError::Store(CovenError::Key(_))), "{operation:?}");
+    assert_writer_refused_to_close(cleanup);
+    assert!(identity.identity.lock().unwrap().is_none());
+    assert!(app.stores().await.unwrap().is_empty());
+    assert!(!app.store_dir(&expected).database_path().exists());
+}
+
+/// Publishing's directory sync fails, and SQLite won't close the published
+/// store. The error still names the store and keeps both causes (E1), and
+/// the store opens.
+#[tokio::test]
+async fn a_close_failing_after_a_published_store_keeps_both_causes_and_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
+    let expected = StoreId(SequentialIds::new().new_id());
+    let error = super::create(
+        builder().id_source(Arc::new(SequentialIds::new())).refuse_database_close(),
+        "Household".into(),
+        fail_publication_sync,
+    )
+    .await
+    .unwrap_err();
+    let StoreCreationError::PublishedButNotSynced { store, source } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*store, expected);
+    let StoreCreationError::Cleanup { operation, cleanup } = source.as_ref() else {
+        panic!("both causes, not {source:?}");
+    };
+    assert!(matches!(**operation, StoreCreationError::Directory(_)), "{operation:?}");
+    assert_writer_refused_to_close(cleanup);
+    builder().open(expected, |_| ()).await.unwrap().close().await.unwrap();
+}
+
+/// The platform refuses the network watch. Creating fails and leaves no
+/// store; opening fails and leaves the store as it was, so it opens once
+/// the platform allows the watch (E1, E5).
+#[tokio::test]
+async fn a_refused_network_watch_fails_creating_and_opening_and_changes_no_store() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
+    let refused = NetworkWatchError::MonitorUnavailable;
+    let error =
+        builder().refuse_network_watch(refused.clone()).create_store("Refused").await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StoreCreationError::Store(CovenError::NetworkWatch(
+                NetworkWatchError::MonitorUnavailable
+            ))
+        ),
+        "{error:?}"
+    );
+    assert!(app.stores().await.unwrap().is_empty());
+    let handle = builder().create_store("Household").await.unwrap();
+    let store = handle.store_id();
+    handle.close().await.unwrap();
+    let error = builder().refuse_network_watch(refused).open(store, |_| ()).await.err().unwrap();
+    assert!(
+        matches!(error, CovenError::NetworkWatch(NetworkWatchError::MonitorUnavailable)),
+        "{error:?}"
+    );
+    builder().open(store, |_| ()).await.unwrap().close().await.unwrap();
+}
+
 #[tokio::test]
 async fn creation_does_not_replace_an_existing_custom_identity() {
     let root = tempfile::tempdir().unwrap();

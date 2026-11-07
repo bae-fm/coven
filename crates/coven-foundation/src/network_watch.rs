@@ -201,6 +201,9 @@ pub enum NetworkSource {
     /// A network a test drives (api.md E1 `network`).
     #[cfg(any(test, feature = "test-utils"))]
     Test(TestNetwork),
+    /// A platform that refuses the watch with this error.
+    #[cfg(any(test, feature = "test-utils"))]
+    Refused(NetworkWatchError),
 }
 
 /// The platform refused to let coven watch the device's network (api.md
@@ -300,6 +303,8 @@ impl NetworkWatch {
             NetworkSource::Platform => Ok(Self::unwatched()),
             #[cfg(any(test, feature = "test-utils"))]
             NetworkSource::Test(network) => Ok(Self::without_platform(network.subscribe())),
+            #[cfg(any(test, feature = "test-utils"))]
+            NetworkSource::Refused(error) => Err(error.clone()),
         }
     }
 

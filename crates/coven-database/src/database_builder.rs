@@ -21,6 +21,8 @@ pub struct DatabaseBuilder {
     progress: ProgressChannel<OpenStep>,
     #[cfg(test)]
     upkeep_threads: Option<usize>,
+    #[cfg(any(test, feature = "test-utils"))]
+    refuse_close: bool,
 }
 
 impl DatabaseBuilder {
@@ -40,7 +42,16 @@ impl DatabaseBuilder {
             progress: ProgressChannel::new(),
             #[cfg(test)]
             upkeep_threads: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            refuse_close: false,
         }
+    }
+
+    /// Have SQLite refuse to close the opened store's writer.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn refuse_close(mut self) -> Self {
+        self.refuse_close = true;
+        self
     }
 
     /// Let `started` upkeep threads start, and have the system refuse the next.
@@ -267,6 +278,10 @@ impl DatabaseBuilder {
                 Ok((outcomes, write_schema, inputs, checkpoints, migrating, migrated, optimized))
             })?;
         writer.observe_commits(observer.clone(), settings.device_id, &tables);
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.refuse_close {
+            writer.leave_statement_open();
+        }
         let writer = Arc::new(Mutex::new(writer));
         if let Some(pages) = self.sqlite.checkpoint_pages() {
             let checkpointing = DatabaseConnection::open(
