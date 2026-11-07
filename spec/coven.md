@@ -9942,10 +9942,11 @@ What they don't cover:
   which slots a device can apply.
 - **Refusals before a claim, and checks of bytes.** Coven refuses to remove the
   member whose account holds the store, or to move that member's access, before
-  it claims anything (§10.1), and checks that slot 1's key verifies its
-  signature and its store id matches its path (§10.3). Rust makes these checks;
-  the models take the store's owner policy, the signatures and the bytes as
-  given.
+  it claims anything (§10.1). It checks that slot 1's key verifies its
+  signature and its store id matches its path (§10.3), and that the floor's
+  clear `first` equals the one its body authenticates (§16.4). Rust makes these
+  checks; the models take the store's owner policy, the signatures and the
+  bytes as given.
 - **Their own assumptions.** The models take as given correct cryptography,
   honest snapshot contents, a prepared snapshot's body in storage before its
   announcement counts, and providers that behave as §20 requires. They take the
