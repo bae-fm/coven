@@ -110,6 +110,36 @@ async fn a_writes_staged_files_are_flushed_once_before_its_commit() {
     db.close().await.unwrap();
 }
 
+/// The system refuses the random key of a file the write stages for the
+/// cloud: the write fails, nothing commits, no upload waits, and the bytes it
+/// staged are removed. The next write stages its files as usual.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_file_key_fails_the_write_and_commits_nothing() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let error = db
+        .staged_write::<_, _, _, _, DbError>(
+            |batch| Ok(batch.put_file("files", b"one".to_vec(), crate::Place::Cloud)),
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                coven_crypto::refuse_randomness(1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DbError::FileKey(coven_crypto::CryptoError::Unavailable(_))),
+        "{error:?}"
+    );
+    assert_eq!(committed_rows(&store), 0);
+    assert!(owned_paths(&store).is_empty());
+    assert!(db.unsent().await.unwrap().is_empty());
+    write_two(&db, Arc::new(AtomicBool::new(false))).await.unwrap();
+    assert_eq!(committed_rows(&store), 2);
+    db.close().await.unwrap();
+}
+
 /// A flush that fails fails the write: its SQL never runs, nothing commits,
 /// and the bytes it staged are removed.
 #[tokio::test(flavor = "current_thread")]

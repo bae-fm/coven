@@ -19,6 +19,8 @@ pub struct DatabaseBuilder {
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
     progress: ProgressChannel<OpenStep>,
+    #[cfg(test)]
+    upkeep_threads: Option<usize>,
 }
 
 impl DatabaseBuilder {
@@ -36,7 +38,16 @@ impl DatabaseBuilder {
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
             progress: ProgressChannel::new(),
+            #[cfg(test)]
+            upkeep_threads: None,
         }
+    }
+
+    /// Let `started` upkeep threads start, and have the system refuse the next.
+    #[cfg(test)]
+    pub(crate) fn refuse_upkeep_thread_after(mut self, started: usize) -> Self {
+        self.upkeep_threads = Some(started);
+        self
     }
 
     /// The steps a writable open reports as it runs them, each with how
@@ -166,6 +177,8 @@ impl DatabaseBuilder {
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
         let observer = CommitObserver::new(self.directory.bugs().clone());
+        #[cfg(test)]
+        observer.refuse_upkeep_thread_after(self.upkeep_threads);
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let mut writer = DatabaseConnection::open(

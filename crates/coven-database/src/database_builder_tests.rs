@@ -188,3 +188,69 @@ async fn a_discarded_journal_is_read_past_damage_elsewhere_but_not_when_it_is_da
     .await;
     assert!(matches!(damaged, Err(DbError::DamagedDatabase)), "{damaged:?}");
 }
+
+const ONE_NOTE: &str =
+    "INSERT INTO notes(id,title) VALUES('00000000-0000-4000-8000-000000000001','Note')";
+
+/// The notes `store`'s database holds, read through a fresh open.
+async fn notes_after_opening(store: &TestStore) -> i64 {
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let notes = database
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    database.close().await.unwrap();
+    notes
+}
+
+/// The system refuses each of the store's upkeep threads in turn: the input
+/// database's checkpointer, the main one's, the planner's statistics. The
+/// store doesn't open (§4); what had started stops and lets go of the store,
+/// so the next open finds it as it was.
+#[tokio::test]
+async fn a_refused_upkeep_thread_fails_the_open_and_the_store_opens_again() {
+    let store = TestStore::new();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    crate::write::tests::sql(&database, ONE_NOTE).await.unwrap();
+    database.close().await.unwrap();
+    for started in 0..3 {
+        let error = store
+            .builder(notes_tables(), notes_migrations())
+            .refuse_upkeep_thread_after(started)
+            .open()
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("the thread after {started} is refused"));
+        let error = crate::tests::database_error(error);
+        assert!(matches!(error, DbError::UpkeepThread(_)), "{error:?}");
+        assert_eq!(notes_after_opening(&store).await, 1);
+    }
+}
+
+/// SQLite refuses to close every reader and the writer, which closes after
+/// them. Closing tries each and reports each failure (E1). The store is
+/// closed all the same: every later call says so, and it opens again.
+#[tokio::test]
+async fn a_connection_that_wont_close_fails_close_after_every_one_was_tried() {
+    let store = TestStore::new();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    crate::write::tests::sql(&database, ONE_NOTE).await.unwrap();
+    database.inspect_readers(|reader| reader.leave_statement_open());
+    database.inspect_writer(|writer| writer.leave_statement_open());
+    let error = database.close().await.unwrap_err();
+    let DbError::Closing { failures } = error else { panic!("closing failed, not {error:?}") };
+    assert_eq!(failures.len(), 5, "{failures:?}");
+    assert!(
+        failures.iter().all(|failure| matches!(
+            failure,
+            DbError::Sqlite(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+        )),
+        "{failures:?}"
+    );
+    assert!(matches!(database.close().await, Err(DbError::StoreClosed)));
+    assert!(matches!(database.write(|_| Ok(())).await, Err(DbError::StoreClosed)));
+    assert_eq!(notes_after_opening(&store).await, 1);
+}

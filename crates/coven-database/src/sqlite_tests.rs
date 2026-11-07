@@ -34,6 +34,24 @@ impl DatabaseConnection {
         .unwrap();
     }
 
+    /// Prepare a statement and never finalize it, so SQLite refuses to close
+    /// this connection, as it does with `SQLITE_BUSY`.
+    pub(crate) fn leave_statement_open(&self) {
+        let mut statement = std::ptr::null_mut();
+        // SAFETY: the handle is this live connection's and the text is a
+        // NUL-terminated literal. The statement is never used or finalized.
+        let prepared = unsafe {
+            rusqlite::ffi::sqlite3_prepare_v2(
+                self.connection.handle(),
+                c"SELECT 1".as_ptr(),
+                -1,
+                &mut statement,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(prepared, rusqlite::ffi::SQLITE_OK);
+    }
+
     pub(crate) fn record_merge_load(&self, table: &str) {
         *self.merge_loads.lock().unwrap().entry(table.into()).or_default() += 1;
     }

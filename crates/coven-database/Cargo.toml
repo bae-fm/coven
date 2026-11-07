@@ -24,6 +24,7 @@ uuid.workspace = true
 [dev-dependencies]
 proc-macro2.workspace = true
 syn.workspace = true
+coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-merge = { workspace = true, features = ["test-utils"] }
 coven-format = { workspace = true, features = ["test-utils"] }
 rusqlite = { workspace = true, features = ["trace"] }

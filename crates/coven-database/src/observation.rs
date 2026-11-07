@@ -465,6 +465,10 @@ pub(crate) struct CommitObserver {
     state: Arc<Mutex<ObserverState>>,
     /// Where a bug that fails the handle outside its calls goes (E15).
     bugs: BugSinkRef,
+    /// How many more of the store's upkeep threads start before the next is
+    /// refused, when a test asked for that.
+    #[cfg(test)]
+    upkeep_threads: Arc<Mutex<Option<usize>>>,
 }
 
 impl CommitObserver {
@@ -476,6 +480,28 @@ impl CommitObserver {
                 failure: None,
             })),
             bugs,
+            #[cfg(test)]
+            upkeep_threads: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Let `started` upkeep threads start, if given, and refuse the next.
+    #[cfg(test)]
+    pub(crate) fn refuse_upkeep_thread_after(&self, started: Option<usize>) {
+        *lock_unpoisoned(&self.upkeep_threads) = started;
+    }
+
+    /// Whether the system refuses the upkeep thread starting now.
+    #[cfg(test)]
+    pub(crate) fn upkeep_thread_refused(&self) -> bool {
+        let mut left = lock_unpoisoned(&self.upkeep_threads);
+        match left.as_mut() {
+            Some(0) => true,
+            Some(left) => {
+                *left -= 1;
+                false
+            }
+            None => false,
         }
     }
 

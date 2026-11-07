@@ -64,6 +64,10 @@ impl<U: Upkeep> UpkeepThread<U> {
     /// Run `upkeep` at each wake from now on, failing `handle` once a run
     /// fails.
     pub(crate) fn spawn(upkeep: U, handle: CommitObserver) -> Result<Self, DbError> {
+        #[cfg(test)]
+        if handle.upkeep_thread_refused() {
+            return Err(DbError::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
+        }
         let shared = Arc::new(Shared { closing: AtomicBool::new(false), upkeep });
         let serving = Serving { shared: shared.clone(), handle };
         let thread = std::thread::Builder::new()
