@@ -1,18 +1,20 @@
-{
- "version": "1.2.0",
+{"version": "1.2.0",
  "packagesDir": ".lake/packages",
- "packages": [
-  {
-   "type": "path",
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "covenSequence",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../sequence",
+   "configFile": "lakefile.toml"},
+  {"type": "path",
    "scope": "",
    "name": "covenStorage",
    "manifestFile": "lake-manifest.json",
    "inherited": false,
    "dir": "../storage",
-   "configFile": "lakefile.toml"
-  }
- ],
+   "configFile": "lakefile.toml"}],
  "name": "covenIO",
  "lakeDir": ".lake",
- "fixedToolchain": false
-}
+ "fixedToolchain": false}

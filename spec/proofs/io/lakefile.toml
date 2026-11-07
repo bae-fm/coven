@@ -5,6 +5,10 @@ defaultTargets = ["CovenIO", "ioRunner"]
 name = "covenStorage"
 path = "../storage"
 
+[[require]]
+name = "covenSequence"
+path = "../sequence"
+
 [[lean_lib]]
 name = "CovenIO"
 

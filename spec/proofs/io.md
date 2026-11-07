@@ -281,6 +281,21 @@ synced, with nothing moving, every upload stored and no record naming a state.
 `every_wait` run the model's events from a synced device to each state and each
 wait, so none of them is dead.
 
+[StoreReach.lean](io/CovenIO/StoreReach.lean) goes from a store history to those
+facts, with the [sequence](sequence.md) package's device reading the history.
+`PassEnd` says how a pass ends from where the device's readers stand; Rust's
+pass makes these reports, and the link to it is by name. `synced_reached` proves
+a device with its keys that can open every slot can end a pass synced.
+`key_wait_reached` and `unopened_reached` prove a device held at a slot, without
+the key or unable to open it, never ends synced from there, however it steps,
+and shows waiting to sync on the slot, or failed, or update needed.
+`removal_reached` and `replacement_reached` prove that once a reader has applied
+its member's removal or a replacement of its keys, the device shows removed or
+device needs reset. A device's own removal, and a registration in its place, are
+not among them. The other states come from no store history: they are what a
+provider or custody answers, what is recorded, or what is moving, and
+`every_state` reaches them from those facts.
+
 `Reason.state` maps each pending reason to one state or none, as a
 function. A wait names none (`waits_name_no_state`), and so does a verdict
 on an admin operation or on another member's writes, and a provider failure

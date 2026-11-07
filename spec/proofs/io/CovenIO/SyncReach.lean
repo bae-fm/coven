@@ -12,7 +12,8 @@ one. `synced_iff` unfolds that for synced, the only state every other fact
 keeps away. `wait_facts` gives what each wait says of the facts.
 
 `Reached.every_state` and `Reached.every_wait` run the model's events from a
-synced device to each state and each wait, so none of them is dead.
+synced device to each state and each wait, so none of them is dead. Which store
+histories produce those facts is `StoreReach`'s.
 -/
 namespace CovenIO.SyncState
 

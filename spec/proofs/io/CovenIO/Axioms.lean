@@ -153,6 +153,12 @@ import CovenIO
 #print axioms CovenIO.SyncState.wait_facts
 #print axioms CovenIO.SyncState.Reached.every_state
 #print axioms CovenIO.SyncState.Reached.every_wait
+#print axioms CovenIO.StoreReach.quiet_shows
+#print axioms CovenIO.StoreReach.synced_reached
+#print axioms CovenIO.StoreReach.key_wait_reached
+#print axioms CovenIO.StoreReach.unopened_reached
+#print axioms CovenIO.StoreReach.removal_reached
+#print axioms CovenIO.StoreReach.replacement_reached
 #print axioms CovenIO.Wakes.initial_covered
 #print axioms CovenIO.Wakes.covered_run
 #print axioms CovenIO.Wakes.write_never_lost
