@@ -8190,6 +8190,15 @@ discard it.
   Until her edit and her migration write count, the kept state's frozen
   album holds the counted title and the app's holds hers; after, both hold
   hers, as the raise's snapshot does.
+- The two states need not freeze the same rows. Had Ana's unsent edit set
+  the album's other column so that it passed its CHECK again, only the kept
+  state would hold a taken-out record to freeze, and her migration write
+  would put none. So the migration write changes the lost values of the rows
+  of both: those it puts, and the kept state's frozen ones it replaces. A
+  slot reaches all of them (§6.2). Counting only the rows it puts, her
+  migration write's slot would remove the album's counted lost value without
+  reaching the album, and once her queue was empty, putting back the kept
+  album would bring that lost value back.
 - It keeps its table and column names, key, audience, plain values, the writes
   that set them and its original cause. Live parent links are stripped; the old
   schema need not exist.

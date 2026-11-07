@@ -475,6 +475,45 @@ async fn a_dropped_table_freezes_a_kept_rows_counted_removal() {
     db.close().await.unwrap();
 }
 
+/// Ana's album `first` passes its CHECK `a > 0 OR b > 0` through `b`. She
+/// sets `a` on this device, and Ben clears `b`: the slots alone take the
+/// album out, while her queued edit keeps it showing in the app. Version 2
+/// drops `albums`. Freezing the kept state freezes the counted removal; the
+/// app's album has none to freeze, so her migration write puts no lost value
+/// of it, and removes the counted one once it counts (§18.7). The write's
+/// slot changes the album's lost values, so it reaches the album: once her
+/// queue is empty, nothing kept is left to put the counted removal back.
+#[tokio::test]
+async fn a_migration_write_reaches_the_counted_removal_it_replaces_with_none() {
+    const SCHEMA: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, a INTEGER, b INTEGER,
+           CHECK(a > 0 OR b > 0)); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
+    let db = store.builder(synced(&["albums", "notes"]), initial()).open().await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first',0,1); INSERT INTO notes VALUES('n','Note')")
+        .await
+        .unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE albums SET a=1 WHERE id='first'").await.unwrap();
+    crate::tests::remote_update_beside_queue(&db, "albums", "first", &[("b", Value::Integer(0))])
+        .await;
+    let [counted] = &counted_losses(&db)[..] else { panic!("one counted removal loss") };
+    assert!(!counted.frozen);
+    assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    let [counted] = &counted_losses(&db)[..] else { panic!("one counted removal loss") };
+    assert!(counted.frozen);
+    assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
+    // Her edit and her migration write count.
+    count_own(&db).await;
+    assert!(counted_losses(&db).is_empty(), "{:?}", counted_losses(&db));
+    assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
+    db.close().await.unwrap();
+}
+
 /// Ana renames her counted album `first` on this device while Ben, who
 /// hasn't seen that, renames it too. Folding her unsent rename over Ben's
 /// leaves her title as a lost value the app shows, but the slots alone hold

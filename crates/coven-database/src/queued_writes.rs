@@ -108,8 +108,8 @@ pub(crate) struct WriteRows {
 
 /// The rows the write `header` changes: its retained records' rows under the
 /// current schema's names, the rows its dismissals name, `dismissed`, and
-/// the rows a captured migration write puts losses on, those of a row it
-/// doesn't change or whose table it dropped among them.
+/// the rows whose losses a captured migration write puts or replaces, those
+/// of a row it doesn't change or whose table it dropped among them.
 pub(crate) fn rows(
     db: &DatabaseConnection,
     schema: &WriteSchema,

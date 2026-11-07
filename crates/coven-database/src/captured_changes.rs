@@ -133,7 +133,10 @@ pub(crate) fn project(
     Ok(())
 }
 
-/// The rows whose losses `losses` puts for the write `header` names.
+/// The rows whose losses `losses` changes for the write `header` names: those
+/// it removes, the migration's freezes of the kept state, and those it puts.
+/// The two differ where only the kept state or only the app's state had a
+/// loss to freeze, so the write changes the rows of both.
 pub(crate) fn loss_rows(
     db: &DatabaseConnection,
     header: &WriteHeader,
@@ -143,16 +146,24 @@ pub(crate) fn loss_rows(
     {
         return Ok(Vec::new());
     }
-    db.query(
+    let write = coven_format::merge_fields::encode_write_id(&header.position)?;
+    let row = |r: &rusqlite::Row<'_>| {
+        Ok(crate::write_encoding::decoded(coven_format::merge_fields::decode_loss(
+            &r.get::<_, Vec<u8>>(0)?,
+        ))?
+        .row)
+    };
+    let mut rows = db.query(
+        "SELECT record FROM _coven_migration_counted_losses WHERE write_id=?1",
+        [&write],
+        row,
+    )?;
+    rows.extend(db.query(
         "SELECT record FROM _coven_migration_losses WHERE write_id=?1",
-        [coven_format::merge_fields::encode_write_id(&header.position)?],
-        |r| {
-            Ok(crate::write_encoding::decoded(coven_format::merge_fields::decode_loss(
-                &r.get::<_, Vec<u8>>(0)?,
-            ))?
-            .row)
-        },
-    )
+        [&write],
+        row,
+    )?);
+    Ok(rows)
 }
 
 pub(crate) fn losses(
