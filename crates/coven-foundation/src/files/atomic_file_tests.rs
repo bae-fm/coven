@@ -75,6 +75,30 @@ fn removing_with_temporaries_takes_the_files_own_and_no_others() {
     file.remove_with_temporaries().unwrap();
 }
 
+/// A crash left a temporary sibling, and a failed rename whose removal failed
+/// too left another. Both go; the live file and a name that only looks close
+/// stay. One that can't be removed fails loudly.
+#[cfg(unix)]
+#[test]
+fn removing_temporaries_takes_what_writes_left_and_nothing_else() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    let file = AtomicFile::new(path.clone());
+    file.replace(b"live").unwrap();
+    fs::write(directory.path().join(".coven-writer"), b"another's").unwrap();
+    file.leave_temporary(b"crash");
+    let temp = prepare(&path, b"failed", TEMPORARY).unwrap();
+    set_mode(directory.path(), 0o500);
+    assert!(matches!(install(temp, &path), Err(FileError::Cleanup { .. })));
+    set_mode(directory.path(), 0o700);
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 4);
+    remove_temporaries(directory.path()).unwrap();
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    assert_eq!(file.read_optional().unwrap().unwrap(), b"live");
+    fs::create_dir(directory.path().join(".coven-write-stuck")).unwrap();
+    assert!(matches!(remove_temporaries(directory.path()), Err(FileError::Io { .. })));
+}
+
 #[test]
 fn missing_and_unreadable_are_distinct() {
     let directory = tempfile::tempdir().unwrap();

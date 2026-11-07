@@ -10285,6 +10285,16 @@ pins) consistent with its database across crashes.
   goes only while it has the size and modification time coven recorded, and
   a folder only while it is empty, so nothing the person changed or added is
   lost.
+- **What an unfinished save leaves.** A save of one of a store's own files,
+  such as its settings, writes a temporary copy beside the file and renames it
+  into place. A crash, or a failed rename whose copy can't be removed either,
+  leaves the copy with nothing naming it, and a copy of sealed keys still
+  opens with the passphrase. So opening removes every such copy at the top of
+  the store's directory, under the store's writer lock, and resuming an
+  installation does under its bootstrap lock. No save runs then: closing waits
+  for the saves a handle started, and a dropped call's ran inside it. A copy
+  that can't be removed fails the open. `write_atomic` writes beside an app's
+  own paths, outside any store, and coven looks for no copy there.
 - Original user files are never deleted by this work. Deleting files in storage
   follows §17.10.
 

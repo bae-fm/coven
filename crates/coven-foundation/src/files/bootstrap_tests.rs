@@ -15,6 +15,25 @@ fn creation_failures_preserve_recursive_error_sources() {
     assert!(error.source().unwrap().to_string().contains("already exists"));
 }
 
+/// A crash left a temporary copy of a join's sealed identity. Resuming the
+/// installation removes it, and the sealed file stays.
+#[tokio::test]
+async fn resuming_a_bootstrap_removes_what_unfinished_writes_left() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
+    let id = StoreId(uuid::Uuid::from_u128(18));
+    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
+    let sealed =
+        crate::files::StoreDirAccess::owned_file(&pending.directory(), StoreFile::Bootstrap);
+    sealed.replace(b"identity").unwrap();
+    let copy = sealed.leave_temporary(b"older identity");
+    drop(pending);
+    let resumed = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
+    assert!(!copy.exists());
+    assert_eq!(sealed.read_optional().unwrap().unwrap(), b"identity");
+    resumed.cancel().unwrap();
+}
+
 #[tokio::test]
 async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let temp = tempfile::tempdir().unwrap();

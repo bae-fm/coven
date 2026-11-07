@@ -43,7 +43,7 @@ pub use creation::DirectoryCreationError;
 pub use deletion::IfUnsent;
 pub use device_reset::{DeviceReset, ReplacedBy, ReplacementPhase, ReplacementRecord};
 pub use directory::{
-    protect_files, verify_lock, FileArea, FileName, FileNameError, StoreDir, StoreDirAccess,
+    settle_files, verify_lock, FileArea, FileName, FileNameError, StoreDir, StoreDirAccess,
     StoreFile, TemporaryFolder, WriterError,
 };
 pub use file_lock::{FileLock, LockMode};

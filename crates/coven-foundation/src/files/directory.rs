@@ -328,11 +328,13 @@ pub fn verify_lock(directory: &StoreDir, lock: &StoreLock) -> Result<(), StoreLo
     lock.verify(&directory.path, directory.id)
 }
 
-/// Give every folder and file of the store `lock` holds for writing the class
-/// its layout gives the store's files, as `directory` names it, unless the
+/// Remove what unfinished writes left at the top of the store `lock` holds
+/// for writing (Appendix C.3), then give every folder and file the class its
+/// layout gives the store's files, as `directory` names it, unless the
 /// store's record shows they were last given it (E1). Blocks while it walks
 /// the store.
-pub fn protect_files(directory: &StoreDir, lock: &StoreLock) -> Result<(), FileError> {
+pub fn settle_files(directory: &StoreDir, lock: &StoreLock) -> Result<(), FileError> {
+    super::atomic_file::remove_temporaries(lock.directory())?;
     directory.protection.apply(lock.directory())
 }
 

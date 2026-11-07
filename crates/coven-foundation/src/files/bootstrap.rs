@@ -249,6 +249,8 @@ pub(super) async fn reserve_bootstrap_directory(
     if !is_pending(&path)? {
         return Err(DirectoryCreationError::AlreadyExists(id).into());
     }
+    // Neither lock's holder is writing: a dropped call's saves ran inside it.
+    super::atomic_file::remove_temporaries(&path)?;
     // A resumed installation may have been made with another class (E1).
     protection.apply(&path)?;
     let store = BootstrapStore { _closing: closing, path, id, lease, protection, bugs };

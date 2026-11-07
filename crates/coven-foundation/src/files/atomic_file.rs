@@ -251,25 +251,11 @@ impl AtomicFile {
     /// bytes. The caller holds what guards this file's writes, so none of
     /// them is a write in flight.
     pub fn remove_with_temporaries(&self) -> Result<(), FileError> {
-        let folder = parent(&self.path);
         let prefix = own_temporaries(&self.path);
-        let entries = match fs::read_dir(folder) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                tracing::debug!(path = %self.path.display(), "file's parent is absent");
-                return Ok(());
-            }
-            Err(source) => return Err(FileError::at("list file's folder", folder, source)),
-        };
-        for entry in entries {
-            let entry =
-                entry.map_err(|source| FileError::at("list file's folder", folder, source))?;
-            let name = entry.file_name();
-            let random = name.as_encoded_bytes().strip_prefix(prefix.as_bytes());
-            if random.is_some_and(|random| random.len() == TEMPORARY_RANDOM) {
-                remove(&entry.path())?;
-            }
-        }
+        remove_named(parent(&self.path), |name| {
+            let random = name.strip_prefix(prefix.as_bytes());
+            random.is_some_and(|random| random.len() == TEMPORARY_RANDOM)
+        })?;
         remove(&self.path)
     }
 
@@ -537,6 +523,33 @@ fn open_reader(path: &Path) -> io::Result<fs::File> {
 /// Windows requires the POSIX replacement support described by [`AtomicFile::replace`].
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
     install(prepare(path, bytes, TEMPORARY)?, path)
+}
+
+/// Remove every temporary sibling in `folder`, the top of a store's
+/// directory: what a crash or a failed removal left of its writes. The caller
+/// holds the store's writer or bootstrap lock, so none is a write in flight.
+pub(super) fn remove_temporaries(folder: &Path) -> Result<(), FileError> {
+    remove_named(folder, |name| name.starts_with(TEMPORARY.as_bytes()))
+}
+
+/// Remove each entry of `folder` whose name `named` picks. A folder that is
+/// absent holds none.
+fn remove_named(folder: &Path, named: impl Fn(&[u8]) -> bool) -> Result<(), FileError> {
+    let entries = match fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tracing::debug!(path = %folder.display(), "folder is absent");
+            return Ok(());
+        }
+        Err(source) => return Err(FileError::at("list folder", folder, source)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| FileError::at("list folder", folder, source))?;
+        if named(entry.file_name().as_encoded_bytes()) {
+            remove(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// How every temporary sibling's name starts.

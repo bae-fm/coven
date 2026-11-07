@@ -352,6 +352,32 @@ async fn a_refused_network_watch_fails_creating_and_opening_and_changes_no_store
     builder().open(store, |_| ()).await.unwrap().close().await.unwrap();
 }
 
+/// A crash during a save left a temporary copy in the store's folder.
+/// Opening removes it and leaves the store's own files. One it can't remove,
+/// here a folder under such a name, fails the open and stays (Appendix C.3).
+#[tokio::test]
+async fn opening_removes_what_unfinished_writes_left_or_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
+    let handle = builder().create_store("Household").await.unwrap();
+    let store = handle.store_id();
+    handle.close().await.unwrap();
+    let directory = app.store_dir(&store);
+    let file = directory.owned_file(coven_foundation::files::StoreFile::StoreKeys);
+    let copy = file.leave_temporary(b"sealed keys");
+    let settings = directory.settings().unwrap();
+    builder().open(store, |_| ()).await.unwrap().close().await.unwrap();
+    assert!(!copy.exists());
+    assert_eq!(directory.settings().unwrap(), settings);
+    let stuck = copy.with_file_name(".coven-write-stuck");
+    std::fs::create_dir(&stuck).unwrap();
+    assert!(builder().open(store, |_| ()).await.is_err());
+    assert!(stuck.exists());
+    std::fs::remove_dir(&stuck).unwrap();
+    builder().open(store, |_| ()).await.unwrap().close().await.unwrap();
+}
+
 #[tokio::test]
 async fn creation_does_not_replace_an_existing_custom_identity() {
     let root = tempfile::tempdir().unwrap();
