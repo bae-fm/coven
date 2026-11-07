@@ -271,6 +271,55 @@ async fn a_release_imports_cost_with_joined_live_queries_open() {
     );
 }
 
+/// Runs of each joined query measured.
+const RUNS: usize = 200;
+
+/// The median time of one run of each `JOINED` query over the releases of
+/// `WRITES` writes, as a live query and as a one-shot read of the same SQL.
+/// The live query's request switches between two albums, so each run
+/// answers a new request and records its scope anew; the read follows it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn a_joined_live_querys_run_cost() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = open_library(&directory).await;
+    for write in 0..WRITES {
+        write_releases(&db, false, write * RELEASES..(write + 1) * RELEASES).await;
+    }
+    for sql in JOINED {
+        let mut query = db.subscribe_reconfigurable(uuid(1, 0), move |album: &String, read| {
+            Ok::<_, DbError>(
+                read.query(sql, [album], |r| r.get::<_, coven_database::types::Value>(0))?,
+            )
+        });
+        assert!(!query.next().await.unwrap().result.unwrap().is_empty(), "{sql}");
+        let requests = query.requests();
+        let (mut live, mut once) = (Vec::new(), Vec::new());
+        for run in 1..=RUNS {
+            let album = uuid(1, run % 2);
+            requests.set(album.clone()).unwrap();
+            let started = Instant::now();
+            let answered = query.next().await.unwrap().result.unwrap();
+            live.push(started.elapsed());
+            let started = Instant::now();
+            let read = db
+                .read(move |read| {
+                    Ok::<_, DbError>(
+                        read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?,
+                    )
+                })
+                .await
+                .unwrap();
+            once.push(started.elapsed());
+            assert_eq!(answered, read, "{sql}");
+        }
+        live.sort();
+        once.sort();
+        eprintln!("{sql}\n  a live run {:?}, a one-shot read {:?}", live[RUNS / 2], once[RUNS / 2]);
+    }
+    db.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_release_with_files_imports_cost() {
