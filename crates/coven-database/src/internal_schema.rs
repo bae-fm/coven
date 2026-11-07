@@ -241,28 +241,6 @@ pub(crate) fn initial_schema() -> String {
     sql
 }
 
-/// Canonical lowercase hyphenated text of a 16-byte UUID, as `UuidText`
-/// binds one.
-macro_rules! uuid_text {
-    ($blob:literal) => {
-        concat!(
-            "lower(substr(hex(",
-            $blob,
-            "),1,8)||'-'||substr(hex(",
-            $blob,
-            "),9,4)||'-'||",
-            "substr(hex(",
-            $blob,
-            "),13,4)||'-'||substr(hex(",
-            $blob,
-            "),17,4)||'-'||",
-            "substr(hex(",
-            $blob,
-            "),21))"
-        )
-    };
-}
-
 #[path = "internal_schema_files.rs"]
 mod files;
 pub(crate) use files::FILES;

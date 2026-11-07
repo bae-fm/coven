@@ -47,7 +47,8 @@ impl FromSql for CircleId {
     }
 }
 
-/// A member id as canonical UUID text, as `coven_members` holds it.
+/// A member id as canonical UUID text, as coven's member columns and the
+/// `coven_members` view hold it.
 impl ToSql for MemberId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::Owned(UuidText(self.0).into()))

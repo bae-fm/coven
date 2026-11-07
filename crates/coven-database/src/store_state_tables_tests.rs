@@ -26,7 +26,7 @@ pub(crate) const MEMBER_DAMAGE: [&str; 6] = [
     "UPDATE _coven_members SET sealing=x'00'",
     "UPDATE _coven_members SET access=x'00'",
     "UPDATE _coven_devices SET state='lost'",
-    "UPDATE _coven_devices SET member=x'00'",
+    "UPDATE _coven_devices SET member='00'",
 ];
 
 /// Each way damaged storage can break a stored circle or slot past the

@@ -31,9 +31,9 @@ fn stored<T: rusqlite::types::FromSql>(
     })
 }
 
-/// A member id as the membership tables hold it: its sixteen UUID bytes.
+/// A member id as the membership tables hold it: its canonical text.
 pub(crate) fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
-    Ok(MemberId(uuid::Uuid::from_bytes(stored(row, column, Type::Blob)?)))
+    stored(row, column, Type::Text)
 }
 
 /// The member a device registered under, once its registration has applied.
@@ -231,7 +231,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
             "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
              VALUES(?1,?2,?3,?4,?5,?6)",
             params![
-                id.0.as_bytes().as_slice(),
+                id,
                 member.keys.signing.as_bytes().as_slice(),
                 member.keys.sealing.as_bytes().as_slice(),
                 role,
@@ -252,7 +252,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
             "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,?3,?4)",
             params![
                 id,
-                device.member.0.as_bytes().as_slice(),
+                device.member,
                 device.name,
                 match device.state {
                     DeviceState::Active => "active",
@@ -270,7 +270,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         for member in &circle.members {
             database.internal_execute(
                 "INSERT INTO _coven_circle_members(circle,member) VALUES(?1,?2)",
-                (id.to_string(), member.0.as_bytes().as_slice()),
+                (id.to_string(), member),
             )?;
         }
     }

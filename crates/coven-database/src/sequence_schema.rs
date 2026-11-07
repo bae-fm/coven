@@ -31,7 +31,7 @@ macro_rules! coven_applied_sequence_tables {
             CREATE TABLE _coven_cutoffs (
                 slot BLOB PRIMARY KEY NOT NULL CHECK(length(slot)=8),
                 device BLOB CHECK(device IS NULL OR length(device)=8),
-                member BLOB CHECK(member IS NULL OR length(member)=16),
+                member TEXT CHECK(member IS NULL OR length(member)=36),
                 signing BLOB CHECK(signing IS NULL OR length(signing)=32),
                 CHECK((device IS NULL)<>(member IS NULL)),
                 CHECK(signing IS NULL OR member IS NOT NULL)

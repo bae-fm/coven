@@ -90,9 +90,9 @@ pub(crate) fn cutoff(
     let (device, member, signing) = match change {
         StoreChange::RemoveDevice { device }
         | StoreChange::AddDevice { replaces: Some(device), .. } => (Some(*device), None, None),
-        StoreChange::RemoveMember { member } => (None, Some(member.0.as_bytes().to_vec()), None),
+        StoreChange::RemoveMember { member } => (None, Some(*member), None),
         StoreChange::ReplaceMemberKeys { member, expected, .. } => {
-            (None, Some(member.0.as_bytes().to_vec()), Some(expected.signing.as_bytes().to_vec()))
+            (None, Some(*member), Some(expected.signing.as_bytes().to_vec()))
         }
         _ => return Ok(()),
     };
@@ -136,7 +136,7 @@ pub(crate) fn refusal(
     signer: &SigningKey,
 ) -> Result<Option<(Slot, WriteCutoff)>, DbError> {
     Ok(db.query("SELECT slot,device,signing FROM _coven_cutoffs WHERE slot<?1 AND (device=?2 OR (member=?3 AND (signing IS NULL OR signing=?4))) ORDER BY slot LIMIT 1",
-        params![slot.0.to_be_bytes().as_slice(),device,member.0.as_bytes().as_slice(),signer.as_bytes().as_slice()],
+        params![slot.0.to_be_bytes().as_slice(),device,member,signer.as_bytes().as_slice()],
         |r| {
             let cause = if r.get::<_,Option<Vec<u8>>>(1)?.is_some() { WriteCutoff::DeviceRemoved }
                 else if r.get::<_,Option<Vec<u8>>>(2)?.is_some() { WriteCutoff::MemberKeysReplaced }

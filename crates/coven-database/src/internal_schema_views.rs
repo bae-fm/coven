@@ -144,17 +144,13 @@ pub(super) const SCHEMA: &str = concat!(
     // S3 key id the stored access names, whichever it is.
     "CREATE VIEW coven_members(member,role,removed,is_self,signing,sealing,account,
             access_key_id) AS
-        SELECT ",
-    uuid_text!("m.member"),
-    ",m.role,m.removed,d.device IS NOT NULL,m.signing,m.sealing,
+        SELECT m.member,m.role,m.removed,d.device IS NOT NULL,m.signing,m.sealing,
             json_extract(CAST(m.access AS TEXT),'$.ProviderAccount'),
             json_extract(CAST(m.access AS TEXT),'$.S3AccessKey.access_key_id')
         FROM _coven_members AS m
         LEFT JOIN _coven_devices AS d ON d.member=m.member AND d.device=_coven_device();",
     "CREATE VIEW coven_devices(device,member,name,state,is_self) AS
-        SELECT d.device,",
-    uuid_text!("d.member"),
-    ",d.name,d.state,d.device=_coven_device()
+        SELECT d.device,d.member,d.name,d.state,d.device=_coven_device()
         FROM _coven_devices AS d;",
     // The circles this device's member is in, as `Circles::list()` lists
     // them: a deleted circle isn't listed.
@@ -168,9 +164,7 @@ pub(super) const SCHEMA: &str = concat!(
     // Each circle's members who remain in the store, as
     // `Circles::members()` lists them: none for a deleted circle.
     "CREATE VIEW coven_circle_members(circle,member,is_self) AS
-        SELECT m.circle,",
-    uuid_text!("m.member"),
-    ",me.device IS NOT NULL
+        SELECT m.circle,m.member,me.device IS NOT NULL
         FROM _coven_circle_members AS m
         JOIN _coven_members AS s ON s.member=m.member
         LEFT JOIN _coven_circle_deletions AS x ON x.circle=m.circle

@@ -72,7 +72,7 @@ pub(crate) fn members(
         .map(|(id, crate::StoreMember { keys, access, role, .. })| {
             let devices = db.query(
                 "SELECT device,name,state FROM _coven_devices WHERE member=?1 ORDER BY device",
-                [id.0.as_bytes().as_slice()],
+                [id],
                 |r| {
                     let id = r.get::<_, DeviceId>(0)?;
                     Ok(DeviceInfo {
@@ -98,7 +98,7 @@ pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<C
         "SELECT c.circle,c.name FROM _coven_circle_members m JOIN _coven_circles c ON c.circle=m.circle
          WHERE m.member=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)
          ORDER BY m.circle",
-        [me.0.as_bytes().as_slice()],
+        [me],
         |r| {
             Ok(Circle {
                 id: circle(r.get(0)?)?,
