@@ -1,5 +1,7 @@
 use crate::sequence_sync::tests::*;
-use crate::{PendingSubject, SequenceStatus, SyncError};
+use crate::{
+    PendingReason, PendingRecord, PendingSubject, RequiredUpdate, SequenceStatus, SyncError,
+};
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
 
 /// A device far behind brackets the end of the sequence with doubling
@@ -824,4 +826,82 @@ fn no_slot_follows_the_last_slot_number() {
     assert_eq!(super::next_slot(u64::MAX - 1).unwrap(), coven_merge::slot(u64::MAX));
     let exhausted = super::next_slot(u64::MAX);
     assert!(matches!(exhausted, Err(SyncError::SequenceExhausted)), "{exhausted:?}");
+}
+
+/// Ana's laptop meets a slot written by an app newer than hers, with an admin
+/// entry, a reset, a snapshot and a floor after it. The slot has one pending
+/// record naming the update, none names a later slot, and nothing after the
+/// slot applies, sends or reloads past it (§5.4, §19.1).
+#[tokio::test]
+async fn a_stuck_slot_has_one_record_and_nothing_gets_past_it() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let laptop = group.laptop(&ana).await;
+    insert(ana.database(), "a", "before the update").await;
+    ana.sync.pass().await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    let stuck = laptop.database().applied_slot().await.unwrap() + 1;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    insert(ana.database(), "b", "written by the newer app").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync.reset(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let last = ana.database().applied_slot().await.unwrap();
+    assert!(last > stuck + 2, "slots follow the stuck one");
+    assert!(
+        crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await.header.first.get()
+            <= stuck,
+        "the floor leaves the stuck slot in place"
+    );
+
+    insert(laptop.database(), "local", "queued behind the stuck slot").await;
+    let update = PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 });
+    let only_the_stuck_slot = async || {
+        let pending = laptop.database().pending::<PendingRecord>().await.unwrap();
+        assert!(
+            matches!(&pending[..], [record]
+                if record.subject == PendingSubject::Slot(coven_merge::slot(stuck))
+                    && record.reason == update),
+            "{pending:?}"
+        );
+        assert!(matches!(&*laptop.sync.state.subscribe().borrow(),
+            SequenceStatus::Blocked(record) if record.reason == update));
+        assert_eq!(laptop.database().applied_slot().await.unwrap(), stuck - 1);
+        assert_eq!(
+            rows(laptop.database()).await,
+            [
+                ("a".into(), "before the update".into()),
+                ("local".into(), "queued behind the stuck slot".into())
+            ]
+        );
+    };
+    assert!(laptop.sync.pass().await.is_err());
+    only_the_stuck_slot().await;
+    let requests = laptop.storage.request_count();
+    assert!(laptop.sync.pass().await.is_err());
+    assert_eq!(laptop.storage.request_count(), requests, "a stuck pass reads and sends nothing");
+    only_the_stuck_slot().await;
+    assert!(laptop.sync.reload_from_snapshot().await.is_err());
+    only_the_stuck_slot().await;
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, (last + 1).try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_none());
+    for device in [&ana, &laptop] {
+        device.database().close().await.unwrap();
+    }
 }
