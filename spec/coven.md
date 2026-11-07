@@ -9955,7 +9955,8 @@ What they don't cover:
   App-folder share before any request and refreshing once then retrying once,
   is tested in Rust.
 - **Costs.** The request counts and bounds of §21, the database writer never
-  held across a network request among them, are tested (§21.3), not proved.
+  held across a network request and the interval between idle passes (§6.7)
+  among them, are tested (§21.3), not proved.
 - **The composition.** The merge and conversion proofs cover their stated inputs;
   they don't establish the whole storage protocol built from them. The orders a
   pass's reading, applying and claiming rely on are modelled step by step

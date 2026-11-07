@@ -1935,6 +1935,11 @@ they do not replace the separate byte-format, merge or queue tests.
   checked against slot 1's record of the store's creation. The model checks
   the write permission at `read_through` (`authoredPermission`), not the key
   that signed it.
+- A floor read is a success or an absence. A floor read that fails is no step
+  of the model, so a device does not apply, reload or skip anything on it
+  (§6.1). A slot read that fails stops a pass like a slot it can't open or
+  apply (`ReadPass.Stop.fault`). Telling a provider's error from its "not
+  found" is Rust.
 - Snapshot bodies are honest: ordinary bodies contain the covered state;
   raise bodies contain migrated rows; reset bodies contain the chosen rows.
   Coven's raise body differs from that for a part that lands after its raising
