@@ -1,4 +1,6 @@
-//! How a join that ends without a store stops part way and finishes (§13.4).
+//! How a join that ends without a store stops part way and finishes (§13.4),
+//! and how one that recorded its send before the create sends it again
+//! (§13.2).
 
 use super::*;
 
@@ -119,4 +121,44 @@ async fn joins_and_is_approved(owner: &Owner, install: &Installation, invite: &I
     );
     let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
     result.unwrap().unwrap().close().await.unwrap();
+}
+
+/// Carol's phone recorded the send and stopped before the create reached
+/// storage. Her next call finds nothing at the request's path and the invite
+/// open, so it sends the request, and Ana approves it.
+#[tokio::test]
+async fn a_join_that_stopped_before_its_create_sends_the_request_on_resume() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    // As if the create had never reached storage.
+    let path = crate::tests::request_path(&invite);
+    owner.storage.delete_if_present(&path).await.unwrap();
+    let control = JoinControl::new();
+    let resumed = install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
+    let (result, _) = owner.join_and_approve(resumed, &control, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+    owner.close().await;
+}
+
+/// Past the invite's end, nothing is sent again: no first request is sent
+/// once the invite has expired by the device's clock.
+#[tokio::test]
+async fn a_join_that_stopped_before_its_create_sends_nothing_once_the_invite_ended() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    let path = crate::tests::request_path(&invite);
+    owner.storage.delete_if_present(&path).await.unwrap();
+    owner.clock.set(invite.expires_at);
+    let control = JoinControl::new();
+    let resumed =
+        install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
+    assert!(matches!(resumed, Ok(None)), "{resumed:?}");
+    assert!(crate::tests::no_request(&owner.storage, &path).await, "no request was sent");
+    owner.close().await;
 }

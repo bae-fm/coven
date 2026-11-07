@@ -4666,10 +4666,13 @@ reuses them, and the same device id.
   cancel succeeds. On OneDrive and iCloud a cancel takes nothing back: the
   folder or zone counts against Ana's account only, and Dan's access ends
   with the invite (Appendix E.2). On S3 there is nothing to accept.
-- It records the create before sending it. If the reply is lost, and on retry
-  neither the request nor his sealed keys exist, it treats the invite as finished.
-  Sending the request again could revive an invite Ana already declined; Ana can
-  make a new invite instead.
+- It records the create before sending it. If the call stops before the create
+  reaches storage, the next call finds nothing at the request's path. While the
+  invite is open it sends the request again: Ana's ending of an invite leaves
+  its marker at that path (below), and a create finds the path taken, so an
+  invite she declined or approved is never revived, and a request that is
+  there already is left alone. Once the invite has expired by its own clock it
+  sends nothing, and the join ends as an expired one does.
 - A request the provider refused was never stored, so the retry sends it again.
 - Provider permission errors reach the app, even when they come from access being
   taken back after a decline or expiry. A request it can't read is not a request

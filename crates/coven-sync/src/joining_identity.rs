@@ -339,8 +339,9 @@ impl JoiningIdentity {
         }
     }
 
-    /// Record possible publication before issuing it. On restart an absent
-    /// request is terminal: re-creating it could resurrect a declined invite.
+    /// Record possible publication before issuing it. On restart a request
+    /// that is absent with nothing in its place is sent again; an ended
+    /// invite's marker in its place ends the join (`resend`).
     pub fn record_attempt(&mut self) -> Result<(), SyncError> {
         self.record(JoinStage::Sent)
     }
@@ -404,6 +405,22 @@ impl JoiningIdentity {
                     return Ok(false);
                 }
                 Err(SyncError::InvitationChanged)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Send the request again when nothing is in its place: the call that
+    /// recorded the send stopped before the create reached storage. Any end
+    /// of the invite leaves its marker at the path, which the create finds
+    /// taken, so a declined or approved invite is never revived; a request
+    /// that is there already is left alone. What the join concludes is for
+    /// the check that follows, not for this send (§13.2).
+    pub(crate) async fn resend(&self, storage: &dyn Storage) -> Result<(), SyncError> {
+        match storage.read(&self.path).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.failure() == StorageFailure::NotFound => {
+                self.publish(storage).await.map(drop)
             }
             Err(error) => Err(error.into()),
         }

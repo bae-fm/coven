@@ -103,6 +103,7 @@ impl Joining {
         status(BootstrapStatus::Connecting);
         self.identity.record_acceptance()?;
         sync.accept_join(&self.invitation).await?;
+        let sent_before = self.identity.attempted() && !self.identity.opened();
         if !self.identity.attempted() {
             self.identity.record_attempt()?;
             match sync.submit_join(&self.identity).await {
@@ -117,6 +118,10 @@ impl Joining {
                     return Err(error.into());
                 }
             }
+        }
+        // A send an earlier call recorded may not have reached storage.
+        if sent_before {
+            sync.resend_join(&self.identity).await?;
         }
         let confirmation = self.identity.confirmation();
         // Each status is shown once, when the next check changes.

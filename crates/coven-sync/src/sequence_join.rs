@@ -63,6 +63,15 @@ impl SequenceSync {
         request.publish(self.storage.as_ref()).await
     }
 
+    /// Send the request of a join that recorded its send in an earlier call
+    /// and may have stopped before the create, while the invite is open.
+    pub async fn resend_join(&self, request: &JoiningIdentity) -> Result<(), SyncError> {
+        if self.join_open(request) {
+            request.resend(self.storage.as_ref()).await?;
+        }
+        Ok(())
+    }
+
     /// Inspect the slots after the invite for copies routed to the request's
     /// pair; once they open a store key, record that approval has begun,
     /// apply the sequence and look for the approving device's binding.
