@@ -501,3 +501,64 @@ async fn applying_a_slot_leaves_the_temporary_tables_as_they_were() {
     assert_eq!(versions[2], versions[1]);
     db.close().await.unwrap();
 }
+
+/// Ana's queued writes move email `a@` from user `a` to user `p`: one
+/// renames `a` to `x@`, the next gives `p` the freed address. Ben's slot
+/// edits `a`'s name, which reaches `a` and her first write, but not her
+/// second, whose row `p` keeps its fold. Counting `a` before her first write
+/// folds again sees `a` still holding `a@` beside `p`, but once the queue
+/// folds the two claims no longer meet: both users show, and nothing is
+/// taken out (§6.2).
+#[tokio::test]
+async fn a_unique_claim_counted_beside_an_unreached_row_leaves_nothing_taken_out() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![SyncedTable::new("users", RowIdentity::SharedKey)],
+            vec![Migration::addition(
+                1,
+                "users",
+                "CREATE TABLE users(id TEXT NOT NULL PRIMARY KEY, email TEXT UNIQUE, name TEXT)",
+            )],
+        )
+        .open()
+        .await
+        .unwrap();
+    crate::write::tests::sql(
+        &db,
+        "INSERT INTO users VALUES('a','a@','A'); INSERT INTO users VALUES('p','p@','P')",
+    )
+    .await
+    .unwrap();
+    for record in crate::write::tests::records(&db) {
+        db.receive(record.into()).await.unwrap();
+    }
+    crate::write::tests::sql(&db, "UPDATE users SET email='x@' WHERE id='a'").await.unwrap();
+    crate::write::tests::sql(&db, "UPDATE users SET email='a@' WHERE id='p'").await.unwrap();
+    let users = |db: &Database| -> Vec<(String, String, String)> {
+        db.inspect_writer(|db| {
+            db.query("SELECT id,email,name FROM users ORDER BY id", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+        })
+    };
+    let name = [("name", Scalar::Text("Ben's A".into()))];
+    crate::tests::remote_update_beside_queue(&db, "users", "a", &name).await;
+    assert_eq!(
+        users(&db),
+        [
+            ("a".to_owned(), "x@".to_owned(), "Ben's A".to_owned()),
+            ("p".to_owned(), "a@".to_owned(), "P".to_owned()),
+        ]
+    );
+    assert!(db.lost_values().await.unwrap().is_empty(), "{:?}", db.lost_values().await);
+    let taken_out: i64 = db.inspect_writer(|db| {
+        db.query_row("SELECT count(*) FROM _coven_lost WHERE replacement_kind='rules'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    });
+    assert_eq!(taken_out, 0);
+    db.close().await.unwrap();
+}

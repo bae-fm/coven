@@ -1682,8 +1682,16 @@ row, and put back nothing. Once no unsent write is left, the device puts back
 every row still kept: no slot reached it, so what it kept is the state the
 slots give.
 
-The device counts again only the rows the slot and the rows put back reach. A
-row an unsent write's removal reaches (§9), such as a note in a folder Ben
+The device counts again only the rows the slot and the rows put back reach.
+Counting can reach, through a removal rule, a row no write of the slot reached,
+which still holds what the unsent writes made of it. Ana's unsent writes move
+the address `a@` from user `a` to user `p`, and Ben's slot edits `a`'s name:
+counted, `a` holds `a@` again beside `p`'s, and the UNIQUE rule takes `p` out.
+Once her writes fold again the two no longer meet. So after the fold the device
+works out again whether each counted row shows, under the state the unsent
+writes leave, and both users show.
+
+A row an unsent write's removal reaches (§9), such as a note in a folder Ben
 deleted, keeps the records the slots give: the removal changes only its app
 row, which coven derives from those records again whenever a slot reaches the
 row.

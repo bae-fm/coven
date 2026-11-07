@@ -318,6 +318,11 @@ pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
 }
 
 /// The counted projection's losses must be captured before the local overlay.
+/// A removal rule can carry the region to a row no write of the slot reached,
+/// which still holds the queue's fold, so what this records for it can be
+/// neither the counted nor the final outcome. Every row of the region is
+/// staged, so materializing works each one out again under the state the
+/// queue leaves (§6.2).
 pub(crate) fn count(
     database: &DatabaseConnection,
     schema: &WriteSchema,
