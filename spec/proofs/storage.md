@@ -213,7 +213,12 @@ abandon or by a later write or opening once no running call reserves them.
 `removal_takes_unchanged` shows removing a copy coven placed, as it left it,
 leaves nothing at its path; `person_files_stay` and
 `abandon_person_files_stay` that no step of coven's takes away a file the
-person wrote or changed; `kept_stays` and `abandon_kept_stays` that none
+person wrote or changed; `person_files_unchanged` and
+`abandon_person_files_unchanged` that none writes onto it or marks it as
+coven's own, since a copy is placed only at a path with nothing at it (the
+model records presence and whether coven wrote or the person changed a file,
+not its bytes, so this is the whole of coven's writes into a person's folder);
+`kept_stays` and `abandon_kept_stays` that none
 takes a kept copy; and `switch_whole` that a call's switch keeps every one
 of its copies, each placed before it. `made_only_by_mkdir` shows a folder
 counts as made only in the step whose mkdir found nothing at its path, and

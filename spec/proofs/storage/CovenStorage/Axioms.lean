@@ -85,6 +85,8 @@ import CovenStorage
 #print axioms CovenStorage.DeviceOnly.kept_stays
 #print axioms CovenStorage.DeviceOnly.switch_whole
 #print axioms CovenStorage.DeviceOnly.abandon_person_files_stay
+#print axioms CovenStorage.DeviceOnly.person_files_unchanged
+#print axioms CovenStorage.DeviceOnly.abandon_person_files_unchanged
 #print axioms CovenStorage.DeviceOnly.abandon_kept_stays
 #print axioms CovenStorage.DeviceOnly.made_only_by_mkdir
 #print axioms CovenStorage.DeviceOnly.folder_removal_made_empty

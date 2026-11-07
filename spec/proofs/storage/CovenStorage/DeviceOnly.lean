@@ -14,6 +14,7 @@ when the call's own mkdir made it and it is empty.
 Proved here: removing an unchanged copy coven placed leaves nothing at its
 path (`removal_takes_unchanged`); no step of coven's takes away a file the
 person wrote or changed (`person_files_stay`, `abandon_person_files_stay`),
+nor writes onto it (`person_files_unchanged`, `abandon_person_files_unchanged`),
 nor a kept copy (`kept_stays`, `abandon_kept_stays`); a call's switch keeps
 every one of its copies, all placed before it (`switch_whole`). A folder
 counts as made only in the step whose mkdir found nothing there
@@ -171,6 +172,28 @@ theorem person_files_stay {s t : State} (st : Step s t) (p : Nat) (there : s.pre
     · exact take_keeps_theirs s q p there (Or.inl e)
   | sweepFolder f made unneeded => exact there
 
+/-- **A file the person wrote or changed is left as it is.** No step of coven's
+takes it away, or marks it as coven's own or as unchanged: coven places a copy
+only at a path with nothing at it, and removes only a copy as it left it. -/
+theorem person_files_unchanged {s t : State} (st : Step s t) (p : Nat)
+    (there : s.present p = true) (theirs : s.written p = false ∨ s.changed p = true) :
+    t.present p = true ∧ t.written p = s.written p ∧ t.changed p = s.changed p := by
+  refine ⟨person_files_stay st p there theirs, ?_⟩
+  cases st with
+  | place q writing empty =>
+    have e : p ≠ q := by
+      intro h; subst h; rw [empty] at there; exact Bool.false_ne_true there
+    simp [e]
+  | record paths folders links free linked => exact ⟨rfl, rfl⟩
+  | mkdir f recorded absent => exact ⟨rfl, rfl⟩
+  | switch paths placed => exact ⟨rfl, rfl⟩
+  | release paths => exact ⟨rfl, rfl⟩
+  | crash => exact ⟨rfl, rfl⟩
+  | lose q kept => exact ⟨rfl, rfl⟩
+  | forget q kept => exact ⟨rfl, rfl⟩
+  | sweep q phase recorded removable unreserved => exact ⟨rfl, rfl⟩
+  | sweepFolder f made unneeded => exact ⟨rfl, rfl⟩
+
 /-- Nor does a call abandoning its own copies. -/
 theorem abandon_person_files_stay {s t : State} (st : Abandon s t) (p : Nat)
     (there : s.present p = true) (theirs : s.written p = false ∨ s.changed p = true) :
@@ -180,6 +203,14 @@ theorem abandon_person_files_stay {s t : State} (st : Abandon s t) (p : Nat)
     by_cases e : q = p
     · subst e; exact take_keeps_theirs s q q there (Or.inr theirs)
     · exact take_keeps_theirs s q p there (Or.inl e)
+
+/-- Nor does a call abandoning its own copies change it. -/
+theorem abandon_person_files_unchanged {s t : State} (st : Abandon s t) (p : Nat)
+    (there : s.present p = true) (theirs : s.written p = false ∨ s.changed p = true) :
+    t.present p = true ∧ t.written p = s.written p ∧ t.changed p = s.changed p := by
+  have stay := abandon_person_files_stay st p there theirs
+  cases st with
+  | abandon q phase recorded own unswitched => exact ⟨stay, rfl, rfl⟩
 
 /-- A kept copy is an original this device records: no removal takes it
 while it is kept, whatever coven wrote there. -/
