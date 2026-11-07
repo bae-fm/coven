@@ -150,6 +150,9 @@ pub(crate) struct StorageConnections {
     /// follows a failed close.
     #[cfg(test)]
     close_failure: std::sync::Mutex<Option<SyncError>>,
+    /// Run where the next deletion is about to write its record.
+    #[cfg(test)]
+    deletion_gate: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// This store's device-only entries, where a setup keeps its own
     /// credentials until it finishes (§11.6).
     keychain: Arc<coven_crypto::custody::StoreKeychain>,
@@ -227,6 +230,8 @@ impl StorageConnections {
             call_waits: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             close_failure: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            deletion_gate: std::sync::Mutex::new(None),
             keychain,
             setup: std::sync::Mutex::new(match setup_finishing {
                 true => setup::SetupRun::Finishing,

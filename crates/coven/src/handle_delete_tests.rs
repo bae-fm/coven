@@ -309,6 +309,34 @@ fn files_named_for(app_dir: &std::path::Path, store: StoreId) -> Vec<String> {
         .collect()
 }
 
+/// The phone's deletion is writing its record when the app closes the
+/// handle. The owner closing waits on stays held until the record is written,
+/// so no later open can meet the write half done (E1).
+#[tokio::test]
+async fn closing_waits_for_the_deletion_record_being_written() {
+    let mut network = Network::new(2).await;
+    let phone = &network.devices[1];
+    let (reached, arrived) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    phone.handle.storage.gate_deletion_record(move || {
+        reached.send(()).unwrap();
+        released.recv().unwrap();
+    });
+    let handle = phone.handle.clone();
+    let deleting = tokio::spawn(async move { handle.delete_store(IfUnsent::Refuse).await });
+    tokio::time::timeout(HANG_GUARD, arrived).await.unwrap().unwrap();
+    // One poll: a free owner would close here.
+    tokio::select! {
+        biased;
+        () = phone.handle.codes.close() => panic!("closing didn't wait for the record"),
+        () = std::future::ready(()) => {}
+    }
+    release.send(()).unwrap();
+    deleting.await.unwrap().unwrap();
+    network.devices.remove(1);
+    network.close().await;
+}
+
 /// Closing fails once the phone's removal is published: deleting says so
 /// apart from a failed removal, nothing is deleted yet, and discarding the
 /// store finishes it. The owner lists the phone removed (§14.1, E1).

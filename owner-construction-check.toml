@@ -1468,12 +1468,14 @@ tables = [
 # storage owner keeps it and stops it as it closes.
 "crates/coven-sync/src/invite_expiry.rs" = ["InviteExpiry::start"]
 # Credential changes run as owned tasks, so a dropped app future cannot
-# leave custody and the live connection disagreeing.
+# leave custody and the live connection disagreeing. A write of the store's
+# files runs as one too, under the owner closing waits for.
 "crates/coven-sync/src/restore_codes.rs" = [
     "RestoreCodes::new",
     "RestoreCodes::replace_member_keys",
     "RestoreCodes::replace_access_key",
     "RestoreCodes::update_credentials",
+    "RestoreCodes::while_open",
 ]
 # A sign-in's custody: device custody once per opened installation, session
 # custody per completed sign-in until publication (§20.2).

@@ -388,6 +388,24 @@ impl RestoreCodes {
     pub async fn close(&self) {
         self.inner.lock().await.take();
     }
+
+    /// Run `work`, named `operation`, on the store's directory while this
+    /// owner stays open: closing waits for it, so the store's writer lock
+    /// isn't released under a write of its files, and a closed store refuses
+    /// it with `StoreClosed`.
+    pub async fn while_open(
+        &self,
+        operation: &'static str,
+        work: impl FnOnce(&StoreDir) -> Result<(), coven_foundation::files::FileError> + Send + 'static,
+    ) -> Result<(), SyncError> {
+        let owner = self.inner.lock().await;
+        let directory = owner.as_ref().ok_or(DbError::StoreClosed)?.directory.clone();
+        coven_foundation::task::blocking_completing(operation, self.bugs.clone(), move || {
+            work(&directory)
+        })
+        .await??;
+        Ok(())
+    }
 }
 
 impl RestoreCodesInner {

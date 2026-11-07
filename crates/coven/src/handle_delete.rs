@@ -67,12 +67,17 @@ impl CovenHandle {
                     self.forget_deletion().await?;
                     return Err(StoreDeletionError::Unsent(work));
                 }
-                let directory = self.directory.clone();
-                let bugs = self.database.bugs().clone();
-                crate::task::blocking_completing("record the deletion", bugs, move || {
-                    directory.record_deletion(unsent)
-                })
-                .await??;
+                #[cfg(test)]
+                let gate = self.storage.deletion_gate();
+                self.codes
+                    .while_open("record the deletion", move |directory| {
+                        #[cfg(test)]
+                        if let Some(gate) = gate {
+                            gate();
+                        }
+                        directory.record_deletion(unsent)
+                    })
+                    .await?;
             }
             // A device stopped for good has nothing left to remove.
             if !stopped {

@@ -2561,7 +2561,8 @@ impl CovenHandle {
 
     /// Closes the store: stops syncing, operation and file work, closes every
     /// connection, erases the unlocked custody sessions and releases the writer
-    /// lock. Open file streams and outstanding file I/O
+    /// lock. A deletion writing its record finishes that first, so no later open
+    /// meets the write half done. Open file streams and outstanding file I/O
     /// retain their shared deletion guards. Later database calls on any clone
     /// fail with `DbError::StoreClosed`; custody calls fail with `KeyError::StoreClosed`.
     /// Reports every failure of closing workers and connections, one alone as

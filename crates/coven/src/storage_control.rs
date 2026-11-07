@@ -395,6 +395,18 @@ impl StorageConnections {
         released.and(stopped.map_err(SyncError::from))
     }
 
+    /// Run `gate` where the next deletion is about to write its record.
+    #[cfg(test)]
+    pub(crate) fn gate_deletion_record(&self, gate: impl FnOnce() + Send + 'static) {
+        *lock_unpoisoned(&self.deletion_gate) = Some(Box::new(gate));
+    }
+
+    /// What runs where this deletion is about to write its record.
+    #[cfg(test)]
+    pub(crate) fn deletion_gate(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        lock_unpoisoned(&self.deletion_gate).take()
+    }
+
     /// Make the next close return `failure` once it has closed.
     #[cfg(test)]
     pub(crate) fn fail_next_close(&self, failure: SyncError) {
