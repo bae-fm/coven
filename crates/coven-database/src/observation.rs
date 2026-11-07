@@ -154,8 +154,25 @@ impl CommitState {
 }
 
 enum Tracking {
-    Reading(Vec<Arc<Vec<RowChange>>>),
+    /// A run whose reads aren't known until it ends: the commits made
+    /// since it began, kept to judge then, and the reads of the run before
+    /// it, whose scopes name the values those commits record (§4).
+    Reading {
+        commits: Vec<Arc<Vec<RowChange>>>,
+        previous: Arc<ReadSet>,
+    },
     Waiting(Arc<ReadSet>),
+}
+
+impl Tracking {
+    /// The reads whose scopes a write records values for: those waited on,
+    /// or, while a run reads, its previous run's, which a run with the
+    /// same statements tests again.
+    fn scoped(&self) -> &Arc<ReadSet> {
+        match self {
+            Self::Reading { previous: reads, .. } | Self::Waiting(reads) => reads,
+        }
+    }
 }
 
 /// A subscription's tracking, and how many times it began or finished a
@@ -202,9 +219,13 @@ impl CommitSubscription {
         self.receiver.changed().await.expect("subscription owns its sender");
     }
 
+    /// Start keeping the commits a run meets, until it finishes. Meanwhile
+    /// a write records the values the scopes this subscription went by
+    /// until now test.
     pub(crate) fn begin(&self) {
         let mut tracked = lock_unpoisoned(&self.shared.tracking);
-        tracked.tracking = Tracking::Reading(Vec::new());
+        let previous = Arc::clone(tracked.tracking.scoped());
+        tracked.tracking = Tracking::Reading { commits: Vec::new(), previous };
         tracked.epoch += 1;
         self.shared.state.send_modify(|state| state.changed = false);
     }
@@ -247,7 +268,7 @@ impl CommitSubscription {
             // commit meanwhile are judged on the next pass.
             let commits = {
                 let mut tracked = lock_unpoisoned(&self.shared.tracking);
-                let Tracking::Reading(commits) = &mut tracked.tracking else {
+                let Tracking::Reading { commits, .. } = &mut tracked.tracking else {
                     panic!("read observation was not started")
                 };
                 if commits.is_empty() {
@@ -559,7 +580,7 @@ impl CommitObserver {
                 let mut tracked = lock_unpoisoned(&subscription.tracking);
                 let epoch = tracked.epoch;
                 match &mut tracked.tracking {
-                    Tracking::Reading(commits) => commits.push(Arc::clone(&changes)),
+                    Tracking::Reading { commits, .. } => commits.push(Arc::clone(&changes)),
                     Tracking::Waiting(reads) => {
                         let verdict = verdicts.iter().find_map(|(judged, at, found)| {
                             (*at == epoch
@@ -580,20 +601,18 @@ impl CommitObserver {
         });
     }
 
-    /// The columns some waiting subscription's scope tests, by table, all
-    /// lowercase: a write records those values of the rows it changes there.
-    /// A change to any other table needs no values to wake the
-    /// subscriptions that read it.
+    /// The columns some subscription's scope tests, by table, all
+    /// lowercase: a waiting one's, or a running one's previous run's. A
+    /// write records those values of the rows it changes there. A change to
+    /// any other table needs no values to wake the subscriptions that read
+    /// it.
     pub(crate) fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
         self.with_state(|state| {
             let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
             for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
-                if let Tracking::Waiting(reads) = &lock_unpoisoned(&subscription.tracking).tracking
-                {
-                    for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
-                        read.scope
-                            .columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
-                    }
+                let reads = Arc::clone(lock_unpoisoned(&subscription.tracking).tracking.scoped());
+                for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
+                    read.scope.columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
                 }
             }
             tables

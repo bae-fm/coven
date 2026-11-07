@@ -767,7 +767,7 @@ own, or with `x IN table`, narrows nothing: it depends on every row of each
 table it read.
 
 Applying another device's slot narrows the same way. As the slot's rows change,
-coven notes each table's changed columns and, for a table a waiting live query
+coven notes each table's changed columns and, for a table a live query
 narrows, the changed rows' keys and the values that query tests, as it does for
 a local write; it runs the lookups in the slot's own transaction before it
 commits. Loading a snapshot and coven's upload and claim bookkeeping are noted
@@ -1123,7 +1123,7 @@ how the app receives them.
   from 70.7 µs a row to 65.0 µs, and the merge state from 57.2 µs to 54.3 µs.
 - **Device-local tables.** Their row changes are kept only for live queries,
   since their rows never sync. Coven notes the tables and columns a write
-  changed. Only for a table a waiting live query narrows does it also copy the
+  changed. Only for a table a live query narrows does it also copy the
   changed rows' keys and the values of the columns that query narrows by, and
   no other values. Filling a 1,000,000-row local
   table took 0.39 s through coven against 0.35 s in plain SQLite. Clearing it
@@ -1142,7 +1142,13 @@ how the app receives them.
   The query keeps the write's changes and judges them as the run ends, with
   lookups in the run's own snapshot: a value matches a join there exactly when
   the run's partners held it. A lookup that fails there fails the run, and the
-  query runs again.
+  query runs again. The write copies the values the query's run before tested,
+  since a run of the same statements tests the same columns. Without them, a
+  write that met a run would rerun it whatever rows it changed. Ben's import
+  writes a batch of folders every few milliseconds while his import list is
+  open: each run would meet the next batch, and the list would run again and
+  again for as long as the import goes. A changed row missing a value the new
+  run tests, as a write met by a query's first run is, reruns the query.
 - **A run between a write's lookups and its commit.** A query can start a run
   after a write looked its values up and before the write commits, as when the
   app replaces its request then. That run doesn't see the write, and the
@@ -1153,7 +1159,7 @@ how the app receives them.
   one of its own statements fails.
 - **Values a change leaves alone.** SQLite's record of coven's own
   transactions names a row's key and the columns an update changed, not the
-  others. When a waiting live query narrows by one of those others, coven reads
+  others. When a live query narrows by one of those others, coven reads
   its value from the row before the transaction commits.
 - **A callback panics.** The unfinished transaction rolls back, the callback
   gives its connection back, and the call fails with `DbError::Bug`, the

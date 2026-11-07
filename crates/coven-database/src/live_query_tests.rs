@@ -184,6 +184,55 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
     db.close().await.unwrap();
 }
 
+/// A write that commits while a rerun is mid-run, to a row outside the
+/// query's scope, doesn't run it again: the write records the values the
+/// query's previous run tested. Otherwise, under a steady stream of writes,
+/// each rerun would meet the next write the same way and run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_outside_the_scope_during_a_rerun_does_not_run_it_again() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    let hold = Arc::new(Mutex::new(None::<(mpsc::Sender<()>, mpsc::Receiver<()>)>));
+    let held = Arc::clone(&hold);
+    let mut query: LiveQuery<_, DbError> = db.subscribe(move |sql| {
+        let ids = sql.query("SELECT id FROM notes WHERE title = 'Plan' ORDER BY id", [], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let hold = held.lock().unwrap().take();
+        if let Some((entered, released)) = hold {
+            entered.send(()).unwrap();
+            released.recv_timeout(HANG_GUARD).unwrap();
+        }
+        Ok(ids)
+    });
+    assert_eq!(next_result(&mut query).await.unwrap(), ["a"]);
+    for (round, id) in ["b", "c", "d"].into_iter().enumerate() {
+        let (entered, entry) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *hold.lock().unwrap() = Some((entered, released));
+        db.commit_writer(|sql| {
+            sql.batch(&format!("INSERT INTO notes VALUES ('{id}','Plan','')")).unwrap()
+        });
+        assert!(query.is_marked_for_rerun());
+        let task = tokio::spawn(async move {
+            let ids = next_result(&mut query).await.unwrap();
+            (query, ids)
+        });
+        entry.recv_timeout(HANG_GUARD).unwrap();
+        db.commit_writer(|sql| {
+            sql.batch(&format!("INSERT INTO notes VALUES ('other {id}','Other','')")).unwrap()
+        });
+        release.send(()).unwrap();
+        let (returned, ids) = task.await.unwrap();
+        query = returned;
+        assert_eq!(ids.last().map(String::as_str), Some(id));
+        assert!(!query.is_marked_for_rerun(), "round {round}");
+        assert_eq!(query.runs().writes(), round as u64 + 1);
+    }
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn errors_are_results_and_a_later_commit_can_recover() {
     let store = TestStore::new();
