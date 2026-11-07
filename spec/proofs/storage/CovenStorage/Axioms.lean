@@ -246,9 +246,17 @@ import CovenStorage
 #print axioms CovenStorage.ProviderAccess.obsolete_reversed
 #print axioms CovenStorage.ProviderAccess.Steps.trans
 #print axioms CovenStorage.ProviderAccess.progress
+#print axioms CovenStorage.ProviderAccess.settles_of_inv
 #print axioms CovenStorage.ProviderAccess.settles
+#print axioms CovenStorage.ProviderAccess.moves_intended
+#print axioms CovenStorage.ProviderAccess.moves_quiet_exact
 #print axioms CovenStorage.ProviderAccess.overlapping_requests_strand
 #print axioms CovenStorage.ProviderAccess.kept_confirmation_strands
 #print axioms CovenStorage.ProviderAccess.obsolete_finish_strands
 #print axioms CovenStorage.ProviderAccess.obsolete_revocation_reported
 #print axioms CovenStorage.ProviderAccess.gone_device_strands_share
+#print axioms CovenStorage.ProviderAccess.cut_off_ends_stranded_share
+#print axioms CovenStorage.ProviderAccess.cut_off_stops_a_request_in_the_air
+#print axioms CovenStorage.ProviderAccess.view_after
+#print axioms CovenStorage.ProviderAccess.moves_pair
+#print axioms CovenStorage.ProviderAccess.take_back_closes

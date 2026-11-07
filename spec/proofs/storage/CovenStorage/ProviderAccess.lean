@@ -383,24 +383,50 @@ theorem progress (w : World) (inv : Inv w) (busy : quiet w = false) :
         simp [enabled, act, fixTarget, Rules.correct, measure, stage]
     · refine ⟨.unshare, rfl, ?_, ?_⟩ <;> simp [enabled, act, measure, stage]
 
-/-- Every account's work ends, on every path: from any reachable state, with
-history no longer changing the intention and the provider answering, coven's
-own steps, the app retrying what it is shown and the owner removing the
-grants coven reported reach a state with nothing listed and nothing
-running, where coven's grant is the intended one (`quiet_exact`). -/
-theorem settles {w : World} (h : Reachable Rules.correct w) :
+/-- The same from any state that keeps the invariant. -/
+theorem settles_of_inv {w : World} (inv : Inv w) :
     ∃ w', Moves w w' ∧ quiet w' = true := by
   generalize hm : measure w = m
   induction m using Nat.strongRecOn generalizing w with
   | ind m ih =>
     by_cases q : quiet w = true
     · exact ⟨w, .refl w, q⟩
-    · obtain ⟨a, o, e, less⟩ := progress w (reachable_inv h) (by simpa using q)
-      have h' : Reachable Rules.correct (act Rules.correct w a) := by
-        obtain ⟨sh, ot, s⟩ := h
-        exact ⟨sh, ot, s.trans (.step a e (.refl _))⟩
-      obtain ⟨w'', more, quiet⟩ := ih _ (hm ▸ less) h' rfl
+    · obtain ⟨a, o, e, less⟩ := progress w inv (by simpa using q)
+      obtain ⟨w'', more, quiet⟩ :=
+        ih _ (hm ▸ less) (inv_step w a inv e) rfl
       exact ⟨w'', .step a o e more, quiet⟩
+
+/-- Every account's work ends, on every path: from any reachable state, with
+history no longer changing the intention and the provider answering, coven's
+own steps, the app retrying what it is shown and the owner removing the
+grants coven reported reach a state with nothing listed and nothing
+running, where coven's grant is the intended one (`quiet_exact`). -/
+theorem settles {w : World} (h : Reachable Rules.correct w) :
+    ∃ w', Moves w w' ∧ quiet w' = true :=
+  settles_of_inv (reachable_inv h)
+
+/-- Coven's own steps leave the intention as it is. -/
+theorem moves_intended {w w' : World} (m : Moves w w') : w'.intended = w.intended := by
+  induction m with
+  | refl => rfl
+  | step a h _ _ ih =>
+    rw [ih]
+    cases a <;> simp [own] at h <;> simp only [act, fixTarget] <;> (try split) <;> rfl
+
+/-- Where coven's own steps end with nothing listed or running, coven's grant
+is the intention the state had (`quiet_exact`, from a state keeping the
+invariant). -/
+theorem moves_quiet_exact {w w' : World} (inv : Inv w) (m : Moves w w')
+    (q : quiet w' = true) : w'.direct = w.intended := by
+  have inv' : Inv w' := by
+    suffices ∀ {a b}, Moves a b → Inv a → Inv b from this m inv
+    intro a b m
+    induction m with
+    | refl => exact id
+    | step x _ e _ ih => exact fun inv => ih (inv_step _ x inv e)
+  have r : w'.request = .none := by simp [quiet] at q; exact q.1.1
+  rw [← moves_intended m]
+  exact (inv'.granted _ (inv'.idle r)).1
 
 /-! ## Each rule is needed -/
 
@@ -455,10 +481,22 @@ Each of the owner's devices keeps its own row and sends its own requests, at
 its own place in history; both reach the one provider. A device reads the
 sequence's entries in order (`read`), and may stop for good at any point: its
 removal, a reset in its place, or its member's keys replaced (§14.1). A
-stopped device sends nothing more and records no reply. -/
+stopped device sends nothing more and records no reply, but a request it had
+sent may still land at the provider.
 
-/-- One owner device: its row and call, how many entries it has read, and
-whether it stopped for good. -/
+Neither device can tell when that request has landed, or that it never will.
+The person can: signing the lost device out at the provider (§14.2, "One lost
+device") ends its access, so nothing it sent can land after. The person tells
+a surviving device so with `cutOff`, which drops the lost device's request
+that had not landed and bars it from landing any. The survivor then takes
+back the account (`takeBack`): it forgets the grant it last confirmed, which
+the lost device's request may have changed, and queues a revocation, when the
+sequence no longer intends the account shared. That revocation runs and lands
+after the cut-off, so it is the last request to reach the account. -/
+
+/-- One owner device: its row and call, how many entries it has read, whether
+it stopped for good, and whether the person has confirmed that nothing it
+sent can land any more. -/
 structure Device where
   intended : Bool
   granted : Option Bool
@@ -466,6 +504,7 @@ structure Device where
   call : Call
   read : Nat
   stopped : Bool
+  cutOff : Bool
   deriving DecidableEq, Repr
 
 /-- The owner's two devices, the account's intentions in the order the
@@ -482,6 +521,10 @@ inductive Who where
   | first
   | second
   deriving DecidableEq, Repr
+
+def Who.other : Who → Who
+  | .first => .second
+  | .second => .first
 
 def Pair.device (p : Pair) : Who → Device
   | .first => p.first
@@ -501,17 +544,30 @@ inductive PairAct where
   /-- One of the single device's steps, other than applying an entry. -/
   | on (who : Who) (a : Act)
   | stop (who : Who)
+  /-- The person confirms at the provider that the stopped device can land
+  nothing more. -/
+  | cutOff (who : Who)
+  /-- The other device, confirmed cut off, took the account's sharing back. -/
+  | takeBack (who : Who)
   deriving DecidableEq, Repr
 
 def entrySteps : Act → Bool
   | .apply _ => false
   | _ => true
 
+/-- A stopped device sends nothing, but the provider may still carry out the
+request it had sent, until the person confirms it cut off. -/
 def pairEnabled (p : Pair) : PairAct → Bool
   | .read who => !(p.device who).stopped && (p.device who).read < p.history.length
-  | .on who a => !(p.device who).stopped && entrySteps a &&
+  | .on who a =>
+    (!(p.device who).stopped || (a == .land && !(p.device who).cutOff)) && entrySteps a &&
       enabled Rules.correct (view p (p.device who)) a
   | .stop who => !(p.device who).stopped
+  | .cutOff who => (p.device who).stopped && !(p.device who).cutOff
+  | .takeBack who =>
+    let d := p.device who
+    !d.stopped && (p.device who.other).cutOff && !d.intended && d.call = .none &&
+      (d.request = .none || d.request = .queued || d.request = .remains)
 
 /-- Carry a device's step back: its row and call to the device, the
 provider's grants to the pair. -/
@@ -530,7 +586,9 @@ def pairAct (p : Pair) : PairAct → Pair
       p'.set who { p'.device who with read := d.read + 1 }
     | none => p
   | .on who a => after p who (act Rules.correct (view p (p.device who)) a)
-  | .stop who => p.set who { p.device who with stopped := true, call := .none }
+  | .stop who => p.set who { p.device who with stopped := true }
+  | .cutOff who => p.set who { p.device who with cutOff := true, call := .none }
+  | .takeBack who => p.set who { p.device who with granted := none, request := .queued }
 
 def pairTrace : Pair → List PairAct → Option Pair
   | p, [] => some p
@@ -539,7 +597,7 @@ def pairTrace : Pair → List PairAct → Option Pair
 /-- Every step a pair could take. -/
 def pairActs : List PairAct :=
   [Who.first, Who.second].flatMap fun who =>
-    [.read who, .stop who] ++
+    [.read who, .stop who, .cutOff who, .takeBack who] ++
       [Act.fix, .retry, .send, .land, .landStray, .confirm, .remain, .drop, .unshare].map (.on who)
 
 /-- Ana's phone and laptop both hold Household's account. The phone records
@@ -550,20 +608,118 @@ the phone, which ends the invite's share: the laptop reads that entry,
 revokes Dan's account, and the provider confirms; nothing is left on the
 laptop. Then the phone's grant lands, and the phone, reading its own
 removal, stops for good without recording the reply. Dan's account is
-shared against the sequence, nothing is listed on any device, and the only
-step either device has left is the laptop stopping too. -/
+shared against the sequence and nothing is listed on any device. The laptop
+can only stop too, and the person's confirmation that the phone is cut off
+is the only other step left: with no confirmation the account stays shared. -/
 theorem gone_device_strands_share :
     ∃ p, pairTrace
         ⟨[true, false],
-          ⟨true, some false, .queued, .none, 1, false⟩,
-          ⟨true, some true, .none, .none, 1, false⟩, false, false⟩
+          ⟨true, some false, .queued, .none, 1, false, false⟩,
+          ⟨true, some true, .none, .none, 1, false, false⟩, false, false⟩
         [.on .first .fix, .on .first .send, .read .second, .on .second .fix,
           .on .second .send, .on .second .land, .on .second .confirm, .on .first .land,
           .stop .first] = some p ∧
       p.direct = true ∧ p.second.intended = false ∧ p.second.request = .none ∧
       p.first.stopped = true ∧
-      ∀ a ∈ pairActs, pairEnabled p a = true → a = .stop .second := by
+      ∀ a ∈ pairActs, pairEnabled p a = true → a = .stop .second ∨ a = .cutOff .first := by
   refine ⟨_, rfl, rfl, rfl, rfl, rfl, ?_⟩
   decide
+
+/-- The same story, ending as the person's confirmation ends it: she signs
+the phone out at the provider and tells the laptop, which takes Dan's account
+back; its revocation lands after the cut-off, and nothing is left shared. -/
+theorem cut_off_ends_stranded_share :
+    ∃ p, pairTrace
+        ⟨[true, false],
+          ⟨true, some false, .queued, .none, 1, false, false⟩,
+          ⟨true, some true, .none, .none, 1, false, false⟩, false, false⟩
+        [.on .first .fix, .on .first .send, .read .second, .on .second .fix,
+          .on .second .send, .on .second .land, .on .second .confirm, .on .first .land,
+          .stop .first, .cutOff .first, .takeBack .second, .on .second .fix,
+          .on .second .send, .on .second .land, .on .second .confirm] = some p ∧
+      p.direct = false ∧ p.second.intended = false ∧ p.second.granted = some false ∧
+      p.second.request = .none := by
+  exact ⟨_, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- A request the stopped device had sent that has not landed when the person
+confirms never lands: Dan's account stays unshared. -/
+theorem cut_off_stops_a_request_in_the_air :
+    ∃ p, pairTrace
+        ⟨[true, false],
+          ⟨true, some false, .queued, .none, 1, false, false⟩,
+          ⟨true, some true, .none, .none, 1, false, false⟩, false, false⟩
+        [.on .first .fix, .on .first .send, .read .second, .on .second .fix,
+          .on .second .send, .on .second .land, .on .second .confirm, .stop .first,
+          .cutOff .first] = some p ∧
+      p.direct = false ∧ p.first.call = .none ∧
+      pairEnabled p (.on .first .land) = false := by
+  exact ⟨_, rfl, rfl, rfl, rfl⟩
+
+/-! ### The takeBack closes every account the survivor reads as unintended -/
+
+/-- The survivor's own steps from a state, as the pair takes them: only the
+survivor moves. -/
+inductive PairMoves (who : Who) : Pair → Pair → Prop
+  | refl (p : Pair) : PairMoves who p p
+  | step {p p' : Pair} (a : Act) (own : own a = true)
+      (e : pairEnabled p (.on who a) = true)
+      (rest : PairMoves who (pairAct p (.on who a)) p') : PairMoves who p p'
+
+/-- A device's view of the pair after it takes a step of its own: the view
+that step gives. -/
+theorem view_after (p : Pair) (who : Who) (w : World) (s : w.stray = none) :
+    view (after p who w) ((after p who w).device who) = w := by
+  cases who <;> obtain ⟨i, g, r, c, st, d, o⟩ := w <;> simp_all [view, after, Pair.device, Pair.set]
+
+/-- The survivor's steps, taken from its view, are steps of the pair: they
+reach the pair whose survivor is in the view they reach. -/
+theorem moves_pair {who : Who} {w w' : World} (m : Moves w w') :
+    Inv w → ∀ p : Pair, (p.device who).stopped = false → view p (p.device who) = w →
+      ∃ p', PairMoves who p p' ∧ view p' (p'.device who) = w' := by
+  induction m with
+  | refl => exact fun _ p _ hv => ⟨p, .refl p, hv⟩
+  | step a o e rest ih =>
+    rename_i w w'
+    intro inv p live hv
+    subst hv
+    have en : pairEnabled p (.on who a) = true := by
+      have : entrySteps a = true := by cases a <;> simp_all [own, entrySteps]
+      simp [pairEnabled, live, this, e]
+    have s := (inv_step _ a inv e).stray
+    have hv1 : view (pairAct p (.on who a)) ((pairAct p (.on who a)).device who) =
+        act Rules.correct (view p (p.device who)) a := view_after p who _ s
+    have live' : ((pairAct p (.on who a)).device who).stopped = false := by
+      cases who <;> simpa [pairAct, after, Pair.device, Pair.set] using live
+    obtain ⟨p', pm, vw⟩ := ih (inv_step _ a inv e) (pairAct p (.on who a)) live' hv1
+    exact ⟨p', .step a o en pm, vw⟩
+
+/-- **The confirmation closes the account.** Once the person has confirmed that
+one owner device is cut off, and the other, still running, takes the account's
+sharing back because its history no longer intends it, that device's own steps
+end with nothing listed or running, and the provider holds no grant to the
+account. Nothing else reaches the account meanwhile: the cut-off device lands
+no request, and it is the only other device. -/
+theorem take_back_closes (p : Pair) (who : Who)
+    (e : pairEnabled p (.takeBack who) = true) :
+    ∃ p', PairMoves who (pairAct p (.takeBack who)) p' ∧
+      quiet (view p' (p'.device who)) = true ∧ p'.direct = false := by
+  have live : ((pairAct p (.takeBack who)).device who).stopped = false := by
+    cases who <;> simp_all [pairEnabled, pairAct, Pair.device, Pair.set]
+  have unintended : ((pairAct p (.takeBack who)).device who).intended = false := by
+    cases who <;> simp_all [pairEnabled, pairAct, Pair.device, Pair.set]
+  have inv : Inv (view (pairAct p (.takeBack who)) ((pairAct p (.takeBack who)).device who)) := by
+    simp only [pairEnabled, Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq,
+      Bool.not_eq_true'] at e
+    obtain ⟨⟨⟨⟨-, -⟩, -⟩, hc⟩, -⟩ := e
+    cases who <;> simp only [pairAct, Pair.device, Pair.set, view] at hc ⊢ <;>
+      constructor <;> simp [hc]
+  obtain ⟨w', m, q⟩ := settles_of_inv inv
+  obtain ⟨p', pm, vw⟩ := moves_pair m inv _ live rfl
+  refine ⟨p', pm, vw ▸ q, ?_⟩
+  have exact := moves_quiet_exact inv m q
+  have : view p' (p'.device who) = w' := vw
+  have direct : p'.direct = w'.direct := by rw [← this]; rfl
+  rw [direct, exact]
+  exact unintended
 
 end CovenStorage.ProviderAccess
