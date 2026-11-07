@@ -38,12 +38,18 @@ macro_rules! coven_published_tables {
                 PRIMARY KEY(table_name,key,audience)
             ) STRICT, WITHOUT ROWID;
         ");
+        // The stored files each kept row's app row referenced when it was
+        // kept, under the kept row, so putting one row back releases only its.
         $visit!(_coven_published_file_refs, "
             CREATE TABLE _coven_published_file_refs (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                audience TEXT NOT NULL,
                 device BLOB NOT NULL CHECK(length(device)=8),
                 object BLOB NOT NULL CHECK(length(object)=16),
-                PRIMARY KEY(device,object)
+                PRIMARY KEY(table_name,key,audience,device,object)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_published_file_refs_object ON _coven_published_file_refs(device,object);
         ");
         $visit!(_coven_published_creations, "
             CREATE TABLE _coven_published_creations (

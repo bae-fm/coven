@@ -341,7 +341,8 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 
 /// Every device that has applied the same writes ends with the same merge
 /// records, not only the same app tables, whether it made some of them
-/// itself or only received them (§8).
+/// itself or only received them (§8). Records compare by the rows they name:
+/// a stored row's and a loss's local ids are each device's own.
 #[tokio::test]
 async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
     let ids = coven_foundation::id_source::SequentialIds::new();
@@ -415,21 +416,31 @@ async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
         }
     }
     let merged = |db: &Database| {
-        let mut contents = crate::tests::contents(db);
-        contents.retain(|table, _| {
-            matches!(table.as_str(), "rows" | "owned")
-                || [
-                    "_coven_writes",
-                    "_coven_rows",
-                    "_coven_cells",
-                    "_coven_references",
-                    "_coven_claims",
-                    "_coven_written_values",
-                    "_coven_lost",
-                ]
-                .contains(&table.as_str())
-        });
-        contents
+        const ROW: &str = "r.table_name,r.key,r.audience,r.generation";
+        let statements = [
+            ("rows", "SELECT * FROM rows ORDER BY 1".to_owned()),
+            ("owned", "SELECT * FROM owned ORDER BY 1".to_owned()),
+            ("_coven_writes", "SELECT * FROM _coven_writes ORDER BY 1".to_owned()),
+            ("_coven_rows", format!("SELECT {ROW},r.write_id FROM _coven_rows r ORDER BY 1,2,3,4")),
+            ("_coven_cells", format!("SELECT {ROW},c.column_id,c.write_id FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id ORDER BY 1,2,3,4,5")),
+            ("_coven_references", format!("SELECT {ROW},f.column_id,f.foreign_key_id,f.parent_table,f.parent_key,f.parent_audience,f.parent_generation FROM _coven_references f JOIN _coven_rows r ON r.id=f.row_id ORDER BY 1,2,3,4,5,6")),
+            ("_coven_claims", format!("SELECT {ROW},c.constraint_id,c.value FROM _coven_claims c JOIN _coven_rows r ON r.id=c.row_id ORDER BY 1,2,3,4,5")),
+            ("_coven_written_values", format!("SELECT {ROW},v.column_id,v.value FROM _coven_written_values v JOIN _coven_rows r ON r.id=v.row_id ORDER BY 1,2,3,4,5")),
+            ("_coven_lost", "SELECT table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by FROM _coven_lost ORDER BY 1,2,3,4,5,7,9".to_owned()),
+        ];
+        db.inspect_writer(|db| {
+            statements
+                .into_iter()
+                .map(|(table, sql)| {
+                    let values: Vec<Vec<crate::types::Value>> = db
+                        .query(&sql, [], |r| {
+                            (0..r.as_ref().column_count()).map(|i| r.get(i)).collect()
+                        })
+                        .unwrap();
+                    (table, values)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
     };
     let (ana_merge, carol_merge) = (merged(&ana), merged(&carol));
     assert_eq!(ana_merge.len(), 9, "{:?}", ana_merge.keys().collect::<Vec<_>>());

@@ -112,12 +112,12 @@ pub(crate) fn put(
 pub(crate) const LOADED: &str =
     "INSERT INTO _coven_creations(table_name,key,audience,write_id,creator) VALUES(?1,?2,?3,?4,?5)";
 
-/// Put back the creations the counted projection kept of the rows it
-/// preserved (`published`).
-pub(crate) fn restore_published(db: &DatabaseConnection) -> Result<(), DbError> {
+/// Put back the creation the counted projection kept of `row`, if it kept
+/// one (`published`).
+pub(crate) fn restore_published(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
     db.internal_execute(
-        "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations",
-        [],
+        "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
+        params![row.table, row.key, &row.audience],
     )?;
     Ok(())
 }

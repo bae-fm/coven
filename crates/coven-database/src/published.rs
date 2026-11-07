@@ -1,8 +1,9 @@
 //! The counted data beneath this installation's provisional write queue.
 //!
 //! While originals await slots, preserve the published merge state separately.
-//! Incoming slots rebuild from it, then fold the current queue once. App rows
-//! are materialized only after both folds, in the enclosing transaction.
+//! An incoming slot puts back the kept rows it reaches, then folds again the
+//! queued writes that reach them (§6.2). App rows are materialized only after
+//! both folds, in the enclosing transaction.
 //!
 //! The kept state holds only what no removal rule decides. Whether a kept row
 //! shows, and its removal loss, are worked out under the schema that reads
@@ -45,7 +46,7 @@ pub(crate) fn capture_rows<'a>(
         put_row(db, store.row_without_losses(row)?.state)?;
         keep_losses(db, row)?;
         db.internal_execute("INSERT INTO _coven_published_creations SELECT * FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",params![row.table,row.key,audience])?;
-        db.internal_execute("INSERT INTO _coven_published_file_refs SELECT device,object FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key])?;
+        db.internal_execute("INSERT INTO _coven_published_file_refs(table_name,key,audience,device,object) SELECT table_name,key,?3,device,object FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key,audience])?;
     }
     Ok(())
 }
@@ -252,10 +253,10 @@ pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Restore only merge metadata, staged values and the kept losses; the
-/// previously visible app tables remain untouched until the final
-/// materialization, which works out each restored row's removal under the
-/// current schema and records its removal loss.
+/// Put back every kept row (`put_back`) and release the kept state: a slot
+/// that changes membership, cut-offs or boundaries changes how every queued
+/// write applies, a reload replaces the state beneath them all, and once no
+/// queued write is left nothing waits to be folded over the counted state.
 pub(crate) fn restore(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -265,37 +266,74 @@ pub(crate) fn restore(
     }
     let rows=db.query("SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses UNION SELECT table_name,key,audience FROM _coven_published_dropped",[],crate::row_queries::read_identity)?;
     let mut touched = BTreeSet::new();
-    #[cfg(any(test, feature = "test-utils"))]
-    db.record_work(|work| work.published_rows += rows.len());
     for row in rows {
-        crate::write_commit::forget(db, &crate::write_commit::StoredRows::Row(&row))?;
-        crate::loss_record::forget_row(db, &row)?;
-        crate::ownership::forget_row(db, &row)?;
-        if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
+        if put_back(db, schema, &row)? {
             touched.insert(row);
         }
     }
-    // The oracle reads the originals' metadata, which provisional application
-    // never changes. It is independent of the rows being restored.
-    let oracle = crate::write_metadata::DatabaseMetadata::new(db);
-    db.for_each(
-        "SELECT record FROM _coven_published_rows ORDER BY audience,table_name,key",
-        [],
-        |r| {
-            let bytes: Vec<u8> = r.get(0)?;
-            let merged = merge_fields::decode_merge_row(&bytes, &oracle)
-                .map_err(crate::write_metadata::MetadataFailure::stored)?;
-            let row = merged.state.row().clone();
-            if !schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
-                return Ok::<_, DbError>(());
-            }
-            crate::download_stage::put_values(db, &row, &merged.state)?;
+    clear(db)?;
+    Ok(touched)
+}
+
+/// Put back those of `rows` the counted projection keeps, and release what
+/// it kept of them: a slot of writes reaches only these (§6.2). A row with
+/// nothing kept holds the counted state already. Returns the rows put back
+/// whose table the current schema has.
+pub(crate) fn restore_rows<'a>(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    rows: impl IntoIterator<Item = &'a RowId>,
+) -> Result<BTreeSet<RowId>, DbError> {
+    let mut touched = BTreeSet::new();
+    for row in rows {
+        let audience = &row.audience;
+        let kept: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3)
+             OR EXISTS(SELECT 1 FROM _coven_published_losses WHERE table_name=?1 AND key=?2 AND audience=?3)
+             OR EXISTS(SELECT 1 FROM _coven_published_dropped WHERE table_name=?1 AND key=?2 AND audience=?3)",
+            params![row.table, row.key, audience],
+            |r| r.get(0),
+        )?;
+        if !kept {
+            continue;
+        }
+        if put_back(db, schema, row)? {
+            touched.insert(row.clone());
+        }
+        for table in [
+            "_coven_published_rows",
+            "_coven_published_losses",
+            "_coven_published_creations",
+            "_coven_published_dropped",
+            "_coven_published_file_refs",
+        ] {
+            db.internal_execute(
+                &format!("DELETE FROM {table} WHERE table_name=?1 AND key=?2 AND audience=?3"),
+                params![row.table, row.key, audience],
+            )?;
+        }
+    }
+    Ok(touched)
+}
+
+/// Put back `row`'s kept merge metadata, staged values, losses and creation
+/// in place of its current ones; the previously visible app row remains
+/// untouched until the final materialization, which works out the row's
+/// removal under the current schema and records its removal loss. Returns
+/// whether the current schema has the row's table.
+fn put_back(db: &DatabaseConnection, schema: &WriteSchema, row: &RowId) -> Result<bool, DbError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    db.record_work(|work| work.published_rows += 1);
+    crate::write_commit::forget(db, &crate::write_commit::StoredRows::Row(row))?;
+    crate::loss_record::forget_row(db, row)?;
+    crate::ownership::forget_row(db, row)?;
+    let present = schema.schema.tables.contains_key(&row.table.to_ascii_lowercase());
+    if present {
+        if let Some(state) = kept_state(db, row)? {
+            crate::download_stage::put_values(db, row, &state)?;
             crate::write_commit::persist(
                 db,
-                &BTreeMap::from([(
-                    row.clone(),
-                    RowUpdate { state: merged.state, lost_changes: Vec::new() },
-                )]),
+                &BTreeMap::from([(row.clone(), RowUpdate { state, lost_changes: Vec::new() })]),
                 |row| {
                     Ok(crate::merge_store::StoredRow {
                         state: RowState::new(row.clone()),
@@ -306,19 +344,18 @@ pub(crate) fn restore(
                 },
                 |id| crate::snapshot_state::ordinal(db, id),
             )?;
-            if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
-                touched.insert(row);
-            }
-            Ok::<_, DbError>(())
+        }
+    }
+    db.for_each(
+        "SELECT record FROM _coven_published_losses WHERE table_name=?1 AND key=?2 AND audience=?3 ORDER BY id",
+        params![row.table, row.key, &row.audience],
+        |r| {
+            let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
+            crate::loss_record::keep(db, schema, &loss)
         },
     )?;
-    db.for_each("SELECT record FROM _coven_published_losses ORDER BY id", [], |r| {
-        let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
-        crate::loss_record::keep(db, schema, &loss)
-    })?;
-    crate::ownership::restore_published(db)?;
-    clear(db)?;
-    Ok(touched)
+    crate::ownership::restore_published(db, row)?;
+    Ok(present)
 }
 
 #[cfg(test)]

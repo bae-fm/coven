@@ -1652,14 +1652,41 @@ What applying means depends on the slot's kind:
 it syncs, so its next import write is usually waiting as a pass applies the slot
 holding the last one. The app's rows show his unsent writes already, but a slot
 applies to the state without them: the state the store's slots alone give. So
-the device keeps aside, for each row an unsent write reaches, its state without
-the queue, puts those rows back before the next slot applies, and then applies
-the unsent writes over the result again. It keeps aside only the rows the unsent
-writes change, and counts again only the rows the slot and the rows put back
-reach. Every other row already holds the state the slots give. A row an unsent
-write's removal reaches (§9), such as a note in a folder Ben deleted, keeps the
-records the slots give: the removal changes only its app row, which coven
-derives from those records again whenever a slot reaches the row.
+the device keeps aside, for each row an unsent write changes, its state without
+the queue. It keeps aside only those rows, the rows an unsent write's
+dismissals name among them. Every other row already holds the state the slots
+give.
+
+A slot of writes puts back only the kept rows it reaches, each just before the
+write in it that reaches the row applies, and then applies over the result
+again only the unsent writes that change those rows. The rows a slot reaches
+are those its writes change, closed over the queue: an unsent write that changes
+one of them adds all of its rows. Every other row keeps what the unsent writes
+made of it, which is what they would make of it again
+([`refold_reached`](proofs/sequence/CovenSequence/QueueFold.lean)). Ben's slot
+holding his last import write reaches that write's rows, and the next import
+write's only if the two share a row; the rest of his library stays as it is.
+
+The closure matters because an unsent write's outcome on one of its rows can
+depend on another of its rows. Ana's unsent writes create the artist `prince`
+with an album, then delete the artist, the delete carrying to the album through
+ON DELETE CASCADE. Ben's slot created `prince` first, which makes him its
+owner, so her delete is refused and the album's delete with it, though the slot
+never touched the album
+([`staged_rows_alone_too_small`](proofs/sequence/CovenSequence/QueueFold.lean)).
+
+A slot that changes membership, cut-offs or boundaries changes how every unsent
+write applies: the device puts back every kept row and applies the whole queue
+again. A key copy, a snapshot announcement and a refused admin entry change no
+row, and put back nothing. Once no unsent write is left, the device puts back
+every row still kept: no slot reached it, so what it kept is the state the
+slots give.
+
+The device counts again only the rows the slot and the rows put back reach. A
+row an unsent write's removal reaches (§9), such as a note in a folder Ben
+deleted, keeps the records the slots give: the removal changes only its app
+row, which coven derives from those records again whenever a slot reaches the
+row.
 
 A kept row holds only what no removal rule decides: its merge records, its
 creation, its frozen lost values and the cells concurrent writes displaced.
@@ -1675,8 +1702,13 @@ the old rules would still hide it.
 Keeping aside every row instead made each slot applied beside an unsent write
 rebuild the whole store: over 8 s for each of Ben's slots once his library held
 81,000 rows, so an import that took 29 s with nothing waiting took over an hour.
+Putting back every kept row at each slot still did that work for every unsent
+row: 40 slots from Ben, none touching Ana's 1,000 unsent notes, put back and
+kept aside again 80,000 rows. Putting back only the rows a slot reaches puts
+back none of them.
 A reload keeps aside the same rows: those the unsent writes change, over the
-state it loaded (§16.5).
+state it loaded (§16.5). Like a slot that changes membership, it puts back
+every kept row and applies the whole queue again.
 A migration keeps aside the rows it changes: each synced table's rows just
 before its first statement that changes that table, and the rows its new rules
 recompute (§18.1). A row it doesn't touch is kept aside already if an unsent
@@ -6777,7 +6809,8 @@ bound upload stops writes slots too, so the hold adds no failure of its own.
   changes only how this device sends its own writes, which receivers can't
   tell.
 - **Cost.** Held writes stay unsent longer, and each slot applied beside
-  unsent writes keeps aside the rows they reach (§6.2). With files under
+  unsent writes puts back and keeps aside again the rows of theirs it reaches
+  (§6.2). With files under
   1.5 MiB the hold lasts seconds, so that work stays bounded by a few seconds of
   writes.
 
@@ -11711,6 +11744,7 @@ Write-ups explain each model and state its assumptions:
 | In storage in good order every slot from the first kept slot through the head is present, so one missing there, through the floor's `at` or a slot the device has applied, is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §16.6 |
 | *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | *Body.* The end search answers the same on storage that ends at its answer, so a missing slot its checks land on reads as the end until a later slot is known to exist; one they pass over is found | `end_search_sees_an_end`, `checked_gap_reads_as_end` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
+| *Body.* A slot of writes applied beside the queue changes only the rows its writes change; closed over the queue, those are the only rows to put back, and folding there only the unsent writes that reach them gives what folding the whole queue over the state after the slot gives. The rows the slot's writes change, without the closure, are too few | `untouched_rows_keep_their_fold`, `reached_rows_refold_alone`, `refold_reached`, `staged_rows_alone_too_small` | `proofs/sequence/CovenSequence/QueueFold.lean` | §6.2 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
 | A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |

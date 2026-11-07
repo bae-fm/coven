@@ -32,7 +32,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 &incoming.header,
                 size,
                 writes,
-                Some(coverage),
+                crate::sequence_apply::Staging::Reload(coverage),
             )?,
             SlotContent::Admin { original, .. } => {
                 crate::sequence_apply::retain(db, "admin", &original)?

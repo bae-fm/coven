@@ -129,7 +129,9 @@ impl PreparedWrite<'_> {
 
 /// Stage one prepared original into the store's connection, inside its
 /// containing slot's transaction. The caller materializes the complete batch
-/// only after all parts authenticate.
+/// only after all parts authenticate. Before the write merges, or is consumed
+/// refused, `reach` puts back the kept rows it reaches beside the queue
+/// (§6.2); a reload passes none, having put back every kept row first.
 pub(crate) fn stage_selected(
     database: &crate::sqlite::DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
@@ -137,6 +139,7 @@ pub(crate) fn stage_selected(
     slot: coven_merge::Slot,
     refused: bool,
     selected: impl Fn(&coven_merge::Audience) -> bool,
+    reach: Option<&mut crate::queued_writes::Reach>,
 ) -> Result<(), crate::DbError> {
     let opened: Vec<_> = write
         .header
@@ -163,12 +166,16 @@ pub(crate) fn stage_selected(
     crate::write_commit::retain_original(database, &write.header.header, Some(slot))?;
     let original_header = write.header.clone();
     let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
+    let mut dismissed = Vec::new();
     read_authenticated(
         database,
         write,
         |header, audience, frame| {
             if !selected(audience) {
                 return Ok(());
+            }
+            if let WriteFrame::Dismissal(dismissal) = &frame {
+                dismissed.push(dismissal.row.clone());
             }
             if refused {
                 if let Some(record) = frame.record() {
@@ -197,6 +204,15 @@ pub(crate) fn stage_selected(
             Ok(())
         },
     )?;
+    if let Some(reach) = reach {
+        crate::queued_writes::put_back(
+            database,
+            schema,
+            &original_header.header,
+            reach,
+            dismissed,
+        )?;
+    }
     if !refused {
         crate::download_stage::stage(
             database,

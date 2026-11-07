@@ -4,6 +4,7 @@ use crate::download_stream::PreparedWrite;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, StoreState};
 use coven_format::{admin::StoreChange, floor::OriginalSlot, sequence::SlotHeader};
 use coven_merge::Slot;
+use std::collections::BTreeSet;
 
 /// An authenticated slot whose floor check completed before installation.
 pub struct IncomingSlot<R> {
@@ -94,11 +95,27 @@ pub(crate) fn apply<P: crate::PendingValue>(
             }
         }
         crate::download_stage::begin(db)?;
-        let mut touched = crate::published::restore(db, schema)?;
+        // An admin slot with an effect changes membership, cut-offs or
+        // boundaries, and with them how every queued write applies: every
+        // kept row is put back and the whole queue folds again. Any other
+        // slot puts back only the kept rows its writes reach (§6.2).
+        let whole = matches!(&incoming.content, SlotContent::Admin { effect: Some(_), .. });
+        let mut touched = if whole {
+            crate::published::restore(db, schema)?
+        } else {
+            BTreeSet::new()
+        };
+        let mut reach = crate::queued_writes::Reach::new();
         crate::pending::clear_slot(db, incoming.slot)?;
         match incoming.content {
             SlotContent::Writes { size, writes } => stage_writes::<P>(
-                db, schema, incoming.slot, &incoming.header, size, writes, None,
+                db,
+                schema,
+                incoming.slot,
+                &incoming.header,
+                size,
+                writes,
+                Staging::Next(&mut reach),
             )?,
             SlotContent::Admin { original, effect } => {
                 retain(db, "admin", &original)?;
@@ -136,7 +153,13 @@ pub(crate) fn apply<P: crate::PendingValue>(
         authenticate()?;
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         crate::sequence::set_applied(db, incoming.slot.0)?;
-        crate::queued_writes::overlay(db, schema, &touched)?;
+        let refold = if whole {
+            crate::queued_writes::Refold::Whole
+        } else {
+            touched.extend(reach.restored().iter().cloned());
+            crate::queued_writes::Refold::Reached(&reach)
+        };
+        crate::queued_writes::overlay(db, schema, &mut touched, refold)?;
         let deleted = crate::store_state_tables::deleted_circles(db)?;
         crate::download_stage::materialize(db, before, schema, &deleted, touched, files)?;
         files.before_commit()?;
@@ -145,8 +168,18 @@ pub(crate) fn apply<P: crate::PendingValue>(
     }))
 }
 
+/// How a slot's writes are staged: as the next slot, or replayed by a reload.
+pub(crate) enum Staging<'a> {
+    /// The next slot, beside the queue: each write puts back the kept rows
+    /// it reaches before it merges (§6.2).
+    Next(&'a mut crate::queued_writes::Reach),
+    /// A reload's, into only the parts newer than their snapshots. The
+    /// reload put back every kept row first.
+    Reload(&'a crate::snapshot_coverage::SnapshotCoverage),
+}
+
 /// Ordinary application and reloads use the same ordering, cut-off and original
-/// validation. Reload coverage selects only parts newer than their snapshots.
+/// validation.
 pub(crate) fn stage_writes<P: crate::PendingValue>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -154,7 +187,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
     header: &SlotHeader,
     size: u64,
     writes: Vec<PreparedWrite<'_>>,
-    coverage: Option<&crate::snapshot_coverage::SnapshotCoverage>,
+    mut staging: Staging<'_>,
 ) -> Result<(), DbError> {
     // A slot's object never changes, so a reload that stages it again
     // finds the same size.
@@ -179,7 +212,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 rusqlite::params![slot.0.to_be_bytes(), cutoff.0.to_be_bytes()])?;
             crate::pending::save(db, &P::writes_refused(slot, cutoff, cause))?;
         }
-        if let Some(coverage) = coverage {
+        if let Staging::Reload(coverage) = &staging {
             for audience in write.unopened_audiences() {
                 if coverage.needs(audience, slot) {
                     return Err(crate::snapshot_error::invalid(
@@ -188,14 +221,26 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 }
             }
         }
-        crate::download_stream::stage_selected(
-            db,
-            schema,
-            write,
-            slot,
-            cutoff.is_some(),
-            |audience| coverage.is_none_or(|coverage| coverage.needs(audience, slot)),
-        )?;
+        match &mut staging {
+            Staging::Next(reach) => crate::download_stream::stage_selected(
+                db,
+                schema,
+                write,
+                slot,
+                cutoff.is_some(),
+                |_| true,
+                Some(reach),
+            )?,
+            Staging::Reload(coverage) => crate::download_stream::stage_selected(
+                db,
+                schema,
+                write,
+                slot,
+                cutoff.is_some(),
+                |audience| coverage.needs(audience, slot),
+                None,
+            )?,
+        }
     }
     Ok(())
 }

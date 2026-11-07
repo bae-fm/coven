@@ -11,7 +11,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
          INSERT INTO _coven_published_losses SELECT i,tab,key,audience,x'00' FROM fixture;
          INSERT INTO _coven_published_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
          INSERT INTO _coven_published_dropped SELECT tab,key,audience FROM fixture;
-         INSERT INTO _coven_published_file_refs SELECT device,substr(key,17,16) FROM fixture;",
+         INSERT INTO _coven_published_file_refs SELECT tab,key,audience,device,substr(key,17,16) FROM fixture;",
     )
     .unwrap();
 }
@@ -37,10 +37,6 @@ pub(crate) fn scan_reason(
     Some("the counted removal view touches every kept row"),
 ("published.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", "_coven_columns") =>
     Some("once per migration while rows are kept: discover every synced table to read its rules"),
-("published.rs", "SELECT record FROM _coven_published_rows ORDER BY audience,table_name,key", "_coven_published_rows") =>
-    Some("restoration reads every preserved row"),
-("published.rs", "SELECT record FROM _coven_published_losses ORDER BY id", "_coven_published_losses") =>
-    Some("restoration reads every preserved loss"),
 ("published_migration.rs", "CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows", "_coven_published_rows") =>
     Some("a migration carries every preserved row through schema changes"),
 _ => None,
@@ -114,10 +110,10 @@ async fn a_migration_keeps_the_counted_state_of_only_the_rows_it_changes() {
 
 /// Ana wrote 1,000 notes on this device while it was offline, and none is
 /// counted yet. Then 40 slots from Ben's device arrive, each editing a
-/// counted note of his that none of hers touches. Applying each slot puts
-/// back every one of her 1,000 rows and keeps it aside again.
+/// counted note of his that none of hers touches. Applying a slot puts back
+/// and keeps aside again only the rows it reaches, so none of her 1,000.
 #[tokio::test]
-async fn slots_beside_unsent_rows_put_back_and_keep_aside_every_unsent_row() {
+async fn slots_beside_unsent_rows_put_back_only_the_rows_they_reach() {
     const UNSENT: i64 = 1_000;
     const SLOTS: usize = 40;
     let store = TestStore::new();
@@ -171,7 +167,7 @@ async fn slots_beside_unsent_rows_put_back_and_keep_aside_every_unsent_row() {
             ("unsent 999".into(), "Ana".into()),
         ]
     );
-    assert_eq!(rebuilt, 2 * SLOTS * UNSENT as usize);
+    assert_eq!(rebuilt, 0);
     db.close().await.unwrap();
 }
 

@@ -132,8 +132,8 @@ impl<'a> WriteApply<'a> {
         // queue of uncounted writes keeps one (§6.2): a write's rows, and
         // the rows a migration's new rules recompute. Without a queue the
         // stored state is the counted state, and nothing needs keeping. A
-        // slot or a snapshot changes the counted state itself, beside what
-        // `published::restore` put back.
+        // slot or a snapshot changes the counted state itself, beside the
+        // kept rows it put back.
         if write.is_some() || (self.keeps_recomputed && crate::published::exists(self.database)?) {
             crate::published::capture_rows(self.database, self.store, &removal.region)?;
         }

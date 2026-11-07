@@ -116,7 +116,12 @@ pub(crate) fn load<P: crate::PendingValue>(
         // installed row shows its merged values (§8.4).
         let deleted = crate::store_state_tables::deleted_circles(database)?;
         touched.extend(crate::snapshot_conflicts::rows(database, schema, &deleted)?);
-        crate::queued_writes::overlay(database, schema, &touched)?;
+        crate::queued_writes::overlay(
+            database,
+            schema,
+            &mut touched,
+            crate::queued_writes::Refold::Whole,
+        )?;
         let region = crate::download_stage::rules(database, before, schema, &deleted, touched)?;
         crate::snapshot_materialize::materialize(database, schema, &region, files)?;
         files.retain_rows(region.into_iter().map(|row| (row.table, row.key)).collect())?;
