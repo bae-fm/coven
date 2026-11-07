@@ -9930,9 +9930,10 @@ What they don't cover:
   that panics, a rollback that fails, read-only connections, or the refusal of
   a write into a circle its member isn't in or that was deleted (§15.6,
   §15.9), though the membership it checks is modelled. Nor do they cover
-  the checks that refuse a schema at open (§9.1, §9.2, §9.4), though one
-  refusal's reason is proved (Appendix G.3); nor `UuidText`, how a CHECK is
-  judged on a merged row (§9.3), or which tables a trigger may write. Nor do
+  the checks that refuse a schema at open (§9.1, §9.2, §9.4, §15.1, §15.2),
+  though one refusal's reason is proved (Appendix G.3); nor `UuidText`, the
+  canonical spelling of an audience (§15.1), how a CHECK is judged on a merged
+  row (§9.3), or which tables a trigger may write. Nor do
   they cover how a migration write is found from the tables before and after
   the migration, renames included (§18.4), how coven's own tables migrate, or
   the format version each stored object records (§18.9). Tests check these;
