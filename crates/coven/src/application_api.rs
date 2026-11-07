@@ -102,9 +102,9 @@ pub use coven_storage::test_utils::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::Storage;
 pub use coven_storage::{
-    ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, OAuthAccess,
-    ObjectChecksum, ObjectPath, ObjectPrefix, PathError, S3BucketVersioning, S3Checksums,
-    S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
+    ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, FolderLabel,
+    OAuthAccess, ObjectChecksum, ObjectPath, ObjectPrefix, PathError, S3BucketVersioning,
+    S3Checksums, S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
     S3MultipartTimestamp, S3Probe, S3ProbeResult, S3Profile, S3ProfileName, S3ResponseHeaders,
     S3Revision, S3Settings, S3Signing, S3SinglePut, StorageConfig, StorageError, StorageFailure,
     StoredObject,
