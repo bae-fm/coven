@@ -207,3 +207,8 @@ import CovenIO
 #print axioms CovenIO.Retired.every_gone_folder_cleaned
 #print axioms CovenIO.Keep.original_only_here
 #print axioms CovenIO.Keep.stored_reads_no_original
+#print axioms CovenIO.PendingRecords.time_keeps
+#print axioms CovenIO.PendingRecords.repeat_keeps
+#print axioms CovenIO.PendingRecords.reopen_keeps_condition
+#print axioms CovenIO.PendingRecords.ended_only_by_its_end
+#print axioms CovenIO.PendingRecords.condition_changes_only_by_save

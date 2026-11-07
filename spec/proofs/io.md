@@ -373,6 +373,30 @@ The premise matters: a successful listing is complete. That is a provider
 assumption. A listing discovers candidates; retained references and snapshots
 still determine whether any file can be deleted.
 
+## Pending records
+
+[PendingRecords.lean](io/CovenIO/PendingRecords.lean) models `_coven_pending`
+(§19.1): one record per subject, naming the first unmet condition, the error
+behind it if one was met in this run, and what ends it besides the work
+settling: a slot's progress, a snapshot's coverage of a waiting write, a move's
+cancellation, an operation advancing or finishing, a raise capturing an own
+write. A reset ends all but the records of an operation that still has
+provider access to settle.
+
+- `time_keeps`, `repeat_keeps`: time passing changes no record, and neither
+  does an attempt that meets the same condition again.
+- `reopen_keeps_condition`: opening drops every record's cause and keeps its
+  condition and what ends it.
+- `ended_only_by_its_end`: a record is gone after an event only if the event
+  settles its work, is the progress its record names, or is a reset.
+- `condition_changes_only_by_save`: a record's condition changes only when an
+  attempt records another.
+
+The model is the writes to the table. That each Rust owner records the
+condition its work meets, and settles or ends its records at the right
+moment, is tested against the Rust, as is the download rule that a record
+lasts only while a file over the bytes does.
+
 ## What a refusal judges
 
 [Reread.lean](io/CovenIO/Reread.lean) models what a refused slot's verdict is
