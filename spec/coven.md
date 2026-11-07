@@ -9986,6 +9986,8 @@ What they don't cover:
   for a snapshot (§16.2): the deletion deadline (Appendix G.1) takes covering
   announcements as given, which the request once uncovered history passes
   grace supplies.
+  Nor does a model run a device's raise across every audience it read: each
+  audience's raise is modelled alone (§18.3).
 - **What a stopped device sends.** The model proves a stopped device takes no
   apply or reload step (§5.4). The restriction on sending, its bootstrap
   join-request exception, and recovery once the cause clears are outside the model.
