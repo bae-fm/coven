@@ -9947,7 +9947,14 @@ What they don't cover:
   given.
 - **Their own assumptions.** The models take as given correct cryptography,
   honest snapshot contents, a prepared snapshot's body in storage before its
-  announcement counts, and providers that behave as §20 requires.
+  announcement counts, and providers that behave as §20 requires. They take the
+  platform's keychain and Block Store to keep, list and delete a person's saved
+  restore-code entries as §13.1 says, and device clocks that lag an inviting
+  device's by less than the week a decline marker is kept (§13.2).
+- **What the app is told.** Which entry a `WritesRefused` record names (§14.1),
+  and what each pending record and status says (§19.1, Appendix H), are tested
+  against the Rust. The models give the states they depend on, such as the sync
+  state (Appendix G.7) and the refusal itself (§14.1).
 - **The providers.** Whether a real service really is create-once is checked
   live: certification races writers against each service (§20.7), and every
   setup re-checks the server (§20.8). A live sample measures listing lag; it

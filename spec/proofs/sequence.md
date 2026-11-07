@@ -1979,6 +1979,12 @@ they do not replace the separate byte-format, merge or queue tests.
   that member's access (`StoreOwner`, §10.1), is made before a claim and is not
   an entry rule. Slot 1 carrying the key that verifies it, and the store id it
   names matching its path (§10.3), are checks of bytes outside the model.
+- The invite lifecycle has its expiry as a step, with no clock in it: the wake
+  at the expiry time and the write it makes (§13.2) are Rust. A joining device
+  sends no first request once the invite has expired by its own clock, and the
+  decline marker is kept a week past the expiry, so a request can find the
+  marker gone only from a clock lagging the inviting device's by more than that
+  week, which coven assumes none does.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, store renames,
     the runner's device/key actions, circle membership changes and store resets,
