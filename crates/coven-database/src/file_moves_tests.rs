@@ -71,6 +71,34 @@ async fn move_files(db: &Database, files: Vec<MoveFile>) -> Result<MoveId, DbErr
     db.write(move |sql| sql.move_to_cloud(files)).await
 }
 
+/// The system refuses the key of a move's upload. The write fails with
+/// nothing of it committed, so the file stays on this device only and in no
+/// move, and moving it again isn't `FileInMove` (§17.3).
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_file_key_fails_a_move_and_leaves_its_file_in_none() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let local = stage(&db, &["local"], Place::DeviceOnly).await[0];
+    let error = db
+        .write(move |sql| {
+            let moved = sql.move_to_cloud(vec![MoveFile::App(local)])?;
+            coven_crypto::refuse_randomness(1);
+            Ok(moved)
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DbError::FileKey(coven_crypto::CryptoError::Unavailable(_))),
+        "{error:?}"
+    );
+    assert!(!cloud(&db, local));
+    assert!(listed(&db).await.is_empty());
+    assert_eq!(db.unsent().await.unwrap().files, 0);
+    let moved = move_files(&db, vec![MoveFile::App(local)]).await.unwrap();
+    assert_eq!(listed(&db).await, listing(moved, "moving", &[local]));
+    db.close().await.unwrap();
+}
+
 /// One write's cloud files are one move: storing one switches nothing, and
 /// storing the last switches every one in one write, changing no row.
 #[tokio::test]

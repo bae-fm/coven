@@ -135,6 +135,8 @@ async fn a_refused_file_key_fails_the_write_and_commits_nothing() {
     assert_eq!(committed_rows(&store), 0);
     assert!(owned_paths(&store).is_empty());
     assert!(db.unsent().await.unwrap().is_empty());
+    assert_eq!(local_count(&db, "main.coven_files"), 0, "the same transaction made its record");
+    assert_eq!(local_count(&db, "coven_moves"), 0, "and its move");
     write_two(&db, Arc::new(AtomicBool::new(false))).await.unwrap();
     assert_eq!(committed_rows(&store), 2);
     db.close().await.unwrap();

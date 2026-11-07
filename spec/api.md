@@ -1599,7 +1599,8 @@ pub enum DbError {
     CopyPathTaken { path: PathBuf },
     /// Reading or keeping file bytes failed (E3).
     Disk(FileError),
-    /// The staging write could not create its file's random key (§17.3).
+    /// A write queueing a file's upload, as staging for the cloud or a move
+    /// does, could not create the file's random key (§17.3).
     FileKey(CryptoError),
     /// Retaining the store while staging file bytes failed.
     Lock(StoreLockError),
