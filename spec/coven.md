@@ -1293,8 +1293,9 @@ run computed every folder's place. The app instead keeps each list row's tab,
 state, group and sort keys in a local table, indexed in the list's order, and
 local triggers (§9.4) rewrite a folder's row in the same write that changes
 any of its inputs, for about 0.5 ms. The list's live query reads only that
-table: a window of rows takes about 0.1 ms, and the counts for every tab under a
-millisecond.
+table: at 100,000 folders a window of 50 rows takes about 1 ms when the list
+scrolls on from where it was and 29 to 70 ms when it jumps to the middle or the
+end, and the counts for every tab under a millisecond.
 
 Which commits run a live query again is §4's: what its statements read,
 narrowed by their conditions and joins.
