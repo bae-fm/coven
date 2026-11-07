@@ -122,6 +122,9 @@ import SequenceApply
 #print axioms CovenSequence.SavedName.absent_stays
 #print axioms CovenSequence.SavedName.never_back
 #print axioms CovenSequence.SavedName.saved_latest
+#print axioms CovenSequence.SavedName.rewrite_keeps_code
+#print axioms CovenSequence.SavedName.rewrites_keep_code
+#print axioms CovenSequence.SavedName.overwrite_puts_back_code
 #print axioms CovenSequence.SavedName.slotless_puts_back
 
 #print axioms CovenSequence.Deadline.bounded_retention

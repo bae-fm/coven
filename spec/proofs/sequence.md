@@ -998,12 +998,19 @@ The same file models the race and the procedure:
 [`SavedName`](sequence/CovenSequence/SavedName.lean) models the name a
 person's saved restore code carries with the slot that set it (coven.md §13.1).
 A device rewrites it only for a later slot than the entry's, and never
-creates an absent entry.
+creates an absent entry. The entry holds the restore code too, and a rewrite
+keeps it, as `follow_name` does in Rust: only setup, joining, restoring,
+resetting and member-key replacement save a code over a readable entry.
 
 - `saved_latest`, `never_back`: rewrites from any number of devices, in any
   order, leave the latest slot among them and that slot's name; no rewrite
   moves the entry back.
+- `rewrite_keeps_code`, `rewrites_keep_code`: a rewrite leaves the code the
+  entry holds, and so do any number of them in any order.
 - `absent_stays`: a forgotten entry stays forgotten.
+- `overwrite_puts_back_code` is a checked counterexample: a laptop that
+  rewrites with its own code, after the phone replaced the member keys and
+  saved code 2, puts its code 1 back.
 - `slotless_puts_back` is a checked counterexample: overwriting without the
   slot, a phone still behind at slot 1 puts Household back over Family from
   slot 41.
