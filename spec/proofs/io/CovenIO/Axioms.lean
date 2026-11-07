@@ -147,6 +147,12 @@ import CovenIO
 #print axioms CovenIO.SyncState.ended_names
 #print axioms CovenIO.SyncState.failed_worker_shows
 #print axioms CovenIO.SyncState.halted_uploads_wait
+#print axioms CovenIO.SyncState.state_iff
+#print axioms CovenIO.SyncState.candidate_iff
+#print axioms CovenIO.SyncState.synced_iff
+#print axioms CovenIO.SyncState.wait_facts
+#print axioms CovenIO.SyncState.Reached.every_state
+#print axioms CovenIO.SyncState.Reached.every_wait
 #print axioms CovenIO.Wakes.initial_covered
 #print axioms CovenIO.Wakes.covered_run
 #print axioms CovenIO.Wakes.write_never_lost

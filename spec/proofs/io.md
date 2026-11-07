@@ -271,6 +271,16 @@ upload waits for the network only then. `network_keeps_state` proves that a
 change of network never changes which state shows: the state doesn't read
 the network, only what a waiting upload waits for does.
 
+[SyncReach.lean](io/CovenIO/SyncReach.lean) goes the other way, from the facts
+to the state. `state_iff` proves a state shows exactly when a fact names it and
+none names one above it, and `candidate_iff` says which facts can name one: the
+loop, a download, an upload, missing credentials or a pending record.
+`synced_iff` unfolds that for synced: a connected device whose last pass ended
+synced, with nothing moving, every upload stored and no record naming a state.
+`wait_facts` gives what each wait says of the facts. `every_state` and
+`every_wait` run the model's events from a synced device to each state and each
+wait, so none of them is dead.
+
 `Reason.state` maps each pending reason to one state or none, as a
 function. A wait names none (`waits_name_no_state`), and so does a verdict
 on an admin operation or on another member's writes, and a provider failure
