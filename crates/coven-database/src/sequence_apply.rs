@@ -120,7 +120,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                     for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
                         touched.extend(db.query(
                             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
-                            [circle.to_string()],
+                            [coven_merge::Audience::Circle(*circle)],
                             crate::row_queries::read_identity,
                         )?);
                     }

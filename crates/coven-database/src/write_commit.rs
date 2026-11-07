@@ -353,7 +353,7 @@ pub(crate) fn check_membership(
     if let Audience::Circle(circle) = audience {
         let deleted: bool = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_circle_deletions WHERE circle=?1)",
-            params![circle.to_string()],
+            params![circle],
             |row| row.get(0),
         )?;
         if deleted {
@@ -368,7 +368,7 @@ pub(crate) fn check_membership(
                 WHERE cm.circle=?1 AND d.device=?2
                   AND d.state<>'removed' AND m.removed=0
             )",
-            params![circle.to_string(), device],
+            params![circle, device],
             |row| row.get(0),
         )?;
         if !member {

@@ -101,7 +101,7 @@ pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<C
         [me],
         |r| {
             Ok(Circle {
-                id: circle(r.get(0)?)?,
+                id: circle(r, 0)?,
                 name: r.get(1)?,
             })
         },
@@ -121,7 +121,7 @@ pub(crate) fn circle_members(
          WHERE m.circle=?1 AND s.removed=0
            AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)
          ORDER BY m.member",
-        [circle.to_string()],
+        [circle],
         |r| member(r, 0),
     )?;
     Ok(members

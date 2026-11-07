@@ -2,13 +2,13 @@
 use crate::{
     sqlite::DatabaseConnection,
     store_state::*,
-    write_encoding::{audience, counter, damaged},
+    write_encoding::{counter, damaged},
     DbError,
 };
 use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
 use coven_format::admin::MemberRole;
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId, StoreId};
-use coven_merge::{Audience, Slot};
+use coven_merge::Slot;
 use rusqlite::{params, types::Type, Row};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,11 +86,10 @@ pub(crate) fn device_state(row: &Row<'_>, column: usize) -> rusqlite::Result<Dev
     }
 }
 
-pub(crate) fn circle(text: String) -> rusqlite::Result<CircleId> {
-    match audience(&text)? {
-        Audience::Circle(circle) => Ok(circle),
-        Audience::Store => Err(damaged(0, Type::Text)),
-    }
+/// A circle id as the membership and audience tables hold it: its canonical
+/// text.
+pub(crate) fn circle(row: &Row<'_>, column: usize) -> rusqlite::Result<CircleId> {
+    stored(row, column, Type::Text)
 }
 
 pub(crate) fn deleted_circles(
@@ -98,7 +97,7 @@ pub(crate) fn deleted_circles(
 ) -> Result<BTreeMap<CircleId, Slot>, DbError> {
     Ok(db
         .query("SELECT circle,slot FROM _coven_circle_deletions", [], |r| {
-            Ok((circle(r.get(0)?)?, slot(r, 1)?))
+            Ok((circle(r, 0)?, slot(r, 1)?))
         })?
         .into_iter()
         .collect())
@@ -183,7 +182,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
     state.circles = database
         .query("SELECT circle,name,base FROM _coven_circles", [], |row| {
             Ok((
-                circle(row.get(0)?)?,
+                circle(row, 0)?,
                 StoreCircle { name: row.get(1)?, members: BTreeSet::new(), base: row.get(2)? },
             ))
         })?
@@ -191,7 +190,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
         .collect();
     for (circle, member) in
         database.query("SELECT circle,member FROM _coven_circle_members", [], |row| {
-            Ok((circle(row.get(0)?)?, member(row, 1)?))
+            Ok((circle(row, 0)?, member(row, 1)?))
         })?
     {
         state.circles.get_mut(&circle).ok_or(DbError::DamagedDatabase)?.members.insert(member);
@@ -259,19 +258,19 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
     for (id, circle) in &state.circles {
         database.internal_execute(
             "INSERT INTO _coven_circles(circle,name,base) VALUES(?1,?2,?3)",
-            params![id.to_string(), circle.name, circle.base],
+            params![id, circle.name, circle.base],
         )?;
         for member in &circle.members {
             database.internal_execute(
                 "INSERT INTO _coven_circle_members(circle,member) VALUES(?1,?2)",
-                (id.to_string(), member),
+                (id, member),
             )?;
         }
     }
     for (circle, entry) in &state.circle_deletions {
         database.internal_execute(
             "INSERT INTO _coven_circle_deletions(circle,slot) VALUES(?1,?2)",
-            (circle.to_string(), entry.0.to_be_bytes().as_slice()),
+            (circle, entry.0.to_be_bytes().as_slice()),
         )?;
     }
     Ok(())
