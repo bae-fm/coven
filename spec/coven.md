@@ -10293,7 +10293,9 @@ pins) consistent with its database across crashes.
   the store's directory, under the store's writer lock, and resuming an
   installation does under its bootstrap lock. No save runs then: closing waits
   for the saves a handle started, and a dropped call's ran inside it. A copy
-  that can't be removed fails the open. `write_atomic` writes beside an app's
+  that can't be removed fails the open. A reset removes them too before it
+  moves the old installation aside, so the archive it keeps for inspection
+  holds none. `write_atomic` writes beside an app's
   own paths, outside any store, and coven looks for no copy there.
 - Original user files are never deleted by this work. Deleting files in storage
   follows §17.10.

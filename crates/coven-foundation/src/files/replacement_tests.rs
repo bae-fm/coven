@@ -34,6 +34,23 @@ fn archive(f: &Fixture, replacement: &ReplacementStore) -> PathBuf {
     f.path.join(format!("discarded-device-{}", replacement.device_reset().old_device.0))
 }
 
+/// A crash left a temporary copy of the sealed store keys. A reset keeps the
+/// old installation's archive for inspection, and no such copy goes in it
+/// (Appendix C.3).
+#[tokio::test]
+async fn a_resets_archive_holds_no_temporary_copies() {
+    let f = store(31);
+    let copy = f.store.owned_file(StoreFile::StoreKeys).leave_temporary(b"sealed keys");
+    let replacement =
+        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    load(&replacement);
+    replacement.swap("Household".into()).unwrap();
+    let archive = archive(&f, &replacement);
+    assert!(archive.is_dir());
+    assert!(!archive.join(copy.file_name().unwrap()).exists());
+    assert!(!copy.exists());
+}
+
 #[tokio::test]
 async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
     for discard in [false, true] {

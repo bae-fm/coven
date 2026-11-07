@@ -170,6 +170,9 @@ pub(super) fn forward(
                 FileError::at("create discarded device archive", &archive, source)
             })?;
         }
+        // The archive stays for inspection, so what unfinished saves left,
+        // sealed keys among it, doesn't go in. The writer lock is held.
+        atomic_file::remove_temporaries(directory)?;
         move_local_state(directory, &archive)?;
         atomic_file::replace(&marker, b"")?;
     }
