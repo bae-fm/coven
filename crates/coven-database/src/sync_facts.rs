@@ -1,9 +1,10 @@
 //! What the sync state is computed from (§19.1, api.md E5), read in one
 //! committed snapshot: `coven_sync_status`'s row, `coven_retry_effect`'s,
-//! the send queue, the upload queue with its pause and each upload's retry
-//! wait and record, the network and the setting to move files only on
-//! unmetered networks, the files being sent or downloaded, and the pending
-//! records. Sync computes the state; this reads what it needs.
+//! the send queue, the upload queue with its pause (the uploads the state
+//! can show, each with its retry wait and record), the network and the
+//! setting to move files only on unmetered networks, the files being sent or
+//! downloaded, and the pending records. Sync computes the state; this reads
+//! what it needs.
 //!
 //! A live query over this read runs again whenever one of them changes: the
 //! files in flight are read through `coven_sending` and `coven_downloading`,
@@ -26,8 +27,16 @@ pub struct SyncFacts<P> {
     pub retry: crate::RetryState,
     /// Whether the send queue holds a write.
     pub unsent: bool,
-    /// Each upload a file waits for, in queue order.
+    /// The uploads a file waits for that the state can show, in queue
+    /// order: the first one sending, the first queued one (neither sending
+    /// nor stored) with no record, and every one with a record. The state
+    /// shows the first candidate of the highest rank, so no other upload
+    /// changes it: later sending or waiting ones tie with the first, and a
+    /// stored one names none.
     pub uploads: Vec<UploadFacts<P>>,
+    /// Whether the upload queue holds a file, whether `uploads` lists it or
+    /// not.
+    pub queued: bool,
     /// Whether this process is downloading a file.
     pub downloading: bool,
     /// Every pending record, in the order the records arose.
@@ -56,6 +65,35 @@ pub struct UploadFacts<P> {
     pub record: Option<P>,
 }
 
+/// The uploads the sync state can show (`SyncFacts::uploads`), each read from
+/// where its kind is small: the uploads with a record from the pending
+/// records, the first one sending from the files in flight, and the first
+/// queued one with no record by walking the queue in id order to the first
+/// match. The outer query then reads only those rows.
+pub(crate) const UPLOADS: &str = "SELECT u.id,u.stored,u.holds IS NOT NULL,r.not_before,e.id
+     FROM _coven_file_uploads AS u
+     LEFT JOIN _coven_retries AS r ON r.upload=u.id
+     LEFT JOIN _coven_pending AS e
+         ON e.work='upload' AND e.device=u.device AND e.object=u.object
+     WHERE u.id IN (
+         SELECT f.id FROM _coven_pending AS p
+         JOIN _coven_file_uploads AS f ON f.device=p.device AND f.object=p.object
+         WHERE p.work='upload'
+         UNION
+         SELECT MIN(position) FROM coven_sending
+         UNION
+         SELECT * FROM (
+             SELECT f.id FROM _coven_file_uploads AS f
+             WHERE NOT f.stored
+               AND f.id NOT IN (SELECT position FROM coven_sending)
+               AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=f.id)
+               AND NOT EXISTS(SELECT 1 FROM _coven_pending AS p
+                              WHERE p.work='upload' AND p.device=f.device
+                                AND p.object=f.object)
+             ORDER BY f.id LIMIT 1))
+       AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
+     ORDER BY u.id";
+
 /// Read the facts in the caller's snapshot.
 pub(crate) fn read<P: crate::PendingValue + Clone>(
     db: &DatabaseConnection,
@@ -66,25 +104,15 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
     let sending: BTreeSet<i64> =
         db.query("SELECT position FROM coven_sending", [], |row| row.get(0))?.into_iter().collect();
     let uploads = db
-        .query(
-            "SELECT u.id,u.stored,u.holds IS NOT NULL,r.not_before,e.id
-             FROM _coven_file_uploads AS u
-             LEFT JOIN _coven_retries AS r ON r.upload=u.id
-             LEFT JOIN _coven_pending AS e
-                 ON e.work='upload' AND e.device=u.device AND e.object=u.object
-             WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
-             ORDER BY u.id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, bool>(2)?,
-                    row.get::<_, Option<Vec<u8>>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                ))
-            },
-        )?
+        .query(UPLOADS, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })?
         .into_iter()
         .map(|(id, stored, bound, retry_at, position)| {
             let record = position
@@ -114,6 +142,12 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
         retry: crate::internal_schema::retry_effect::read(db)?,
         unsent: db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_uploads)", [], |r| r.get(0))?,
         uploads,
+        queued: db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads AS u
+                 WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))",
+            [],
+            |r| r.get(0),
+        )?,
         downloading: db
             .query_row("SELECT EXISTS(SELECT 1 FROM coven_downloading)", [], |r| r.get(0))?,
         records: records.into_iter().map(|(_, record)| record).collect(),
@@ -122,3 +156,7 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
         metered,
     })
 }
+
+#[cfg(test)]
+#[path = "sync_facts_tests.rs"]
+mod tests;

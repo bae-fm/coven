@@ -319,6 +319,7 @@ fn connected() -> Facts {
         moving: false,
         downloading: false,
         uploads: Vec::new(),
+        queued: false,
         unsent: false,
         records: Vec::new(),
         sync: RetrySync::Started { cooling_until: None },
@@ -497,6 +498,9 @@ fn cases() -> Vec<Facts> {
             }
         }
     }
+    for case in &mut cases {
+        case.queued = !case.uploads.is_empty();
+    }
     cases
 }
 
@@ -634,5 +638,99 @@ fn a_bug_names_failed_while_its_work_retries() {
         let bugged = upload_record(1, reason);
         let facts = Facts { records: vec![bugged.clone()], ..connected() };
         assert_eq!(facts.state(), SyncState::Failed(SyncCause::Pending(bugged)));
+    }
+}
+
+/// The uploads the database reads: the first one sending, the first queued
+/// one with no record, and every one with a record, in queue order
+/// (`sync_facts.rs`).
+fn reduced(queue: &[Upload]) -> Vec<Upload> {
+    let first = |wanted: &dyn Fn(&Upload) -> bool| queue.iter().position(wanted);
+    let sending = first(&|upload| upload.progress == Progress::Moving);
+    let waiting = first(&|upload| upload.progress == Progress::Queued && upload.record.is_none());
+    queue
+        .iter()
+        .enumerate()
+        .filter(|(at, upload)| {
+            upload.record.is_some() || Some(*at) == sending || Some(*at) == waiting
+        })
+        .map(|(_, upload)| upload.clone())
+        .collect()
+}
+
+/// The state from the reduced uploads equals the state from the whole queue,
+/// for every queue of up to three uploads over every progress, bound, retry
+/// and record (none, one that names a state, one that names none), under
+/// each pause, metered and download setting and each way the last pass ended.
+#[test]
+fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
+    let at = |n: u64| UNIX_EPOCH + Duration::from_secs(n);
+    let kinds = [
+        PendingReason::FileUnavailable(FileMissingReason::Lost),
+        PendingReason::Storage {
+            provider: CloudProvider::S3,
+            failure: StorageFailure::QuotaExceeded,
+            answered: false,
+        },
+        PendingReason::Paused,
+        PendingReason::Waits(Prerequisite::SequenceCatchUp),
+    ];
+    let mut alphabet = Vec::new();
+    for progress in [Progress::Moving, Progress::Stored, Progress::Queued] {
+        for bound in [false, true] {
+            for retrying in [false, true] {
+                for record in [None, Some(0), Some(1), Some(2)] {
+                    alphabet.push((progress, bound, retrying, record));
+                }
+            }
+        }
+    }
+    let build = |picks: &[usize]| -> Vec<Upload> {
+        (0_u64..)
+            .zip(picks)
+            .map(|(n, pick)| {
+                let (progress, bound, retrying, record) = alphabet[*pick];
+                Upload {
+                    progress,
+                    bound,
+                    retry_at: retrying.then(|| at(10 + n)),
+                    record: record.map(|kind| upload_record(n.into(), kinds[kind].clone())),
+                }
+            })
+            .collect()
+    };
+    let mut queues = vec![Vec::new()];
+    for a in 0..alphabet.len() {
+        queues.push(vec![a]);
+        for b in 0..alphabet.len() {
+            queues.push(vec![a, b]);
+            for c in 0..alphabet.len() {
+                queues.push(vec![a, b, c]);
+            }
+        }
+    }
+    let settings =
+        [(false, false, false), (true, false, false), (false, true, true), (true, true, true)];
+    let lasts = [None, offline()];
+    for picks in &queues {
+        let queue = build(picks);
+        for (paused, unmetered_only, metered) in settings {
+            for last in &lasts {
+                for downloading in [false, true] {
+                    let whole = Facts {
+                        last: last.clone(),
+                        downloading,
+                        paused,
+                        unmetered_only,
+                        metered,
+                        uploads: queue.clone(),
+                        queued: !queue.is_empty(),
+                        ..connected()
+                    };
+                    let kept = Facts { uploads: reduced(&queue), ..whole.clone() };
+                    assert_eq!(kept.state(), whole.state(), "{queue:?} {paused} {metered}");
+                }
+            }
+        }
     }
 }

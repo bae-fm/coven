@@ -716,3 +716,24 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
         f.close().await;
     }
 }
+
+/// Three queued photos with no record read as the first one in the facts,
+/// and the queue still counts as holding a file: the state shows the first
+/// waiting upload and no later one (§19.1).
+#[tokio::test]
+async fn the_sync_facts_list_the_first_waiting_upload_only() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.attach("files", "a", photo(1)).await;
+    f.attach("files", "b", photo(2)).await;
+    f.attach("files", "c", photo(3)).await;
+    let queue = f.files.inner.database.uploads().await.unwrap();
+    assert_eq!(queue.len(), 3);
+    let facts = f
+        .database
+        .sync_facts::<crate::PendingRecord, _, coven_database::DbError>(Ok)
+        .await
+        .unwrap();
+    assert!(facts.queued);
+    assert_eq!(facts.uploads.len(), 1);
+    f.close().await;
+}

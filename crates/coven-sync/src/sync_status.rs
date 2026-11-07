@@ -366,8 +366,14 @@ pub(crate) struct Facts {
     pub(crate) moving: bool,
     /// A file is being downloaded.
     pub(crate) downloading: bool,
-    /// Each upload a file waits for, in queue order.
+    /// The uploads a file waits for that the state can show, in queue
+    /// order: the first one sending, the first queued one with no record,
+    /// and every one with a record. The rest change no candidate: a later
+    /// one of a rank never shows over the first, and a stored one names
+    /// none.
     pub(crate) uploads: Vec<Upload>,
+    /// The upload queue holds a file, whether `uploads` lists it or not.
+    pub(crate) queued: bool,
     /// The send queue holds a write.
     pub(crate) unsent: bool,
     /// The pending records, in the order they arose, but the connection's,
@@ -409,7 +415,7 @@ impl Candidate<'_> {
 impl Facts {
     /// A write or an upload waits to go out.
     fn unsent_work(&self) -> bool {
-        self.unsent || !self.uploads.is_empty()
+        self.unsent || self.queued
     }
 
     /// What holds every transfer, the pass's and each upload's alike: sync
@@ -542,6 +548,7 @@ impl Facts {
             moving: row.moving,
             downloading: facts.downloading,
             uploads,
+            queued: facts.queued,
             unsent: facts.unsent,
             records: facts
                 .records
