@@ -84,6 +84,13 @@ impl SnapshotHeader {
     }
 }
 
+/// The section a snapshot's frame holds a record of; none for its header and
+/// end frames.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn frame_section(frame: &[u8]) -> Option<usize> {
+    (frame[0] == kinds::SNAPSHOT_RECORD).then(|| usize::from(frame[crate::FRAME_PREFIX_LEN]))
+}
+
 /// One bounded record in a snapshot, using the owners' logical identities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotRecord<E = crate::authorship::WriteEvidence> {

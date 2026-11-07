@@ -22,6 +22,33 @@ impl Database {
         .await
     }
 
+    /// The plaintext bytes each section of a snapshot `id` would hold now:
+    /// what the sealed object's size can't tell apart.
+    pub async fn test_snapshot_section_bytes(
+        &self,
+        id: coven_format::admin::SnapshotId,
+    ) -> Result<
+        [u64; coven_format::snapshot::SECTIONS],
+        crate::SnapshotWriteError<std::convert::Infallible>,
+    > {
+        let sections =
+            std::sync::Arc::new(std::sync::Mutex::new([0; coven_format::snapshot::SECTIONS]));
+        let counted = sections.clone();
+        self.write_snapshot(
+            id,
+            |_| Ok(()),
+            move |frame| {
+                if let Some(section) = coven_format::snapshot::frame_section(&frame) {
+                    counted.lock().expect("no test panics counting")[section] += frame.len() as u64;
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        let bytes = *sections.lock().expect("no test panics counting");
+        Ok(bytes)
+    }
+
     /// Observe transaction completion and file cleanup on the writer thread.
     /// Install after setup; the callback may terminate a subprocess to simulate
     /// a crash without Rust destructors or SQLite connection shutdown.

@@ -490,6 +490,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     pass(&replayed, &clock).await;
     pass(&replayed, &clock).await;
     let code = replayed.restore_code_for_transfer().await.unwrap();
+    eprintln!("snapshot sections: {:?}", replayed.test_snapshot_section_bytes().await.unwrap());
     replayed.close().await.unwrap();
     let snapshot_bytes = newest_snapshot_bytes(&storage, store).await;
     let (after_bytes, after) = slot_bytes(&storage, store).await;

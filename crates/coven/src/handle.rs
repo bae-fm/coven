@@ -681,6 +681,24 @@ impl CovenHandle {
         self.database.test_track_work(counter).await
     }
 
+    /// The plaintext bytes each section of a store snapshot would hold now,
+    /// for a test measuring what a snapshot keeps (D7). Every section's place
+    /// is in `coven_format::snapshot::section`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_snapshot_section_bytes(
+        &self,
+    ) -> Result<
+        [u64; coven_format::snapshot::SECTIONS],
+        coven_database::SnapshotWriteError<std::convert::Infallible>,
+    > {
+        let id = coven_format::admin::SnapshotId {
+            audience: coven_merge::Audience::Store,
+            device: self.device_id(),
+            number: 1,
+        };
+        self.database.test_snapshot_section_bytes(id).await
+    }
+
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn test_queued_writes(
