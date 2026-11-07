@@ -112,6 +112,69 @@ async fn a_migration_keeps_the_counted_state_of_only_the_rows_it_changes() {
     db.close().await.unwrap();
 }
 
+/// Ana wrote 1,000 notes on this device while it was offline, and none is
+/// counted yet. Then 40 slots from Ben's device arrive, each editing a
+/// counted note of his that none of hers touches. Applying each slot puts
+/// back every one of her 1,000 rows and keeps it aside again.
+#[tokio::test]
+async fn slots_beside_unsent_rows_put_back_and_keep_aside_every_unsent_row() {
+    const UNSENT: i64 = 1_000;
+    const SLOTS: usize = 40;
+    let store = TestStore::new();
+    let migrations = vec![Migration::addition(
+        1,
+        "notes",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+    )];
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    sql(
+        &db,
+        "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<39)
+           INSERT INTO notes SELECT 'counted '||i,'Ben' FROM n",
+    )
+    .await
+    .unwrap();
+    count_own(&db).await;
+    sql(
+        &db,
+        "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<999)
+           INSERT INTO notes SELECT 'unsent '||i,'Ana' FROM n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(published(&db, "notes"), UNSENT);
+    let counter = crate::test_utils::WorkCounter::new();
+    db.test_track_work(counter.clone()).await.unwrap();
+    for slot in 0..SLOTS {
+        let title = [("title", Value::Text(format!("edit {slot}")))];
+        crate::tests::remote_update_beside_queue(&db, "notes", &format!("counted {slot}"), &title)
+            .await;
+    }
+    let rebuilt = counter.take().published_rows;
+    assert_eq!(published(&db, "notes"), UNSENT);
+    let titles: Vec<(String, String)> = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT id,title FROM notes WHERE id IN ('counted 0','counted 39','unsent 0','unsent 999') ORDER BY id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        titles,
+        [
+            ("counted 0".into(), "edit 0".into()),
+            ("counted 39".into(), "edit 39".into()),
+            ("unsent 0".into(), "Ana".into()),
+            ("unsent 999".into(), "Ana".into()),
+        ]
+    );
+    assert_eq!(rebuilt, 2 * SLOTS * UNSENT as usize);
+    db.close().await.unwrap();
+}
+
 /// Whether the counted projection a snapshot reads shows `albums` row `id`.
 fn counted_visible(database: &crate::Database, id: &str) -> bool {
     let key = crate::tests::text_key(id);
