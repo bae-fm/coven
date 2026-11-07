@@ -3,7 +3,7 @@
 
 use crate::Audience;
 use coven_foundation::id_source::CircleId;
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef};
 use rusqlite::ToSql;
 
 impl std::fmt::Display for Audience {
@@ -34,9 +34,15 @@ impl std::str::FromStr for Audience {
 #[error("not an audience: `store` or a circle's canonical id")]
 pub struct InvalidAudience;
 
+impl From<&Audience> for Value {
+    fn from(audience: &Audience) -> Self {
+        Self::Text(audience.to_string())
+    }
+}
+
 impl ToSql for Audience {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Owned(self.to_string().into()))
+        Ok(ToSqlOutput::Owned(self.into()))
     }
 }
 

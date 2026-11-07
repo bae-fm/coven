@@ -10054,9 +10054,10 @@ device consistent with the database.
   in every column of coven's tables and views that holds it: the form its type
   binds and reads in SQL ([api.md E4](api.md#e4-reading)). Member, circle and
   file ids are canonical UUID text; store, key and stored object ids are their
-  16 bytes; and a device id is its eight big-endian bytes. A second form would
-  make a lookup bound in one form miss rows held in the other, and every view
-  would have to convert. So `_coven_members.member` holds the same text
+  16 bytes; and a device id is its eight big-endian bytes. An audience column
+  holds the text `Audience` binds: `store`, or its circle's id. A second form
+  would make a lookup bound in one form miss rows held in the other, and every
+  view would have to convert. So `_coven_members.member` holds the same text
   `coven_members` shows and `MemberId` binds.
 - What changes about a row after coven writes it lives in rows of its own
   beside it, never in the row: SQLite writes a row's whole record again on

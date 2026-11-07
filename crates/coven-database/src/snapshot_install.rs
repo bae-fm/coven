@@ -8,7 +8,7 @@ use crate::snapshot_layout::{SnapshotLayout, Staged, TableLayout};
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, sql_value, value};
+use crate::write_encoding::{sql_value, value};
 use crate::write_rows::AppValues;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LoadStep};
@@ -253,7 +253,6 @@ pub(crate) fn check_synced(
     audience: &Audience,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
-    let audience = audience_text(audience);
     for table in &layout.tables {
         let installed = table.installed();
         let schema_table = schema.table(&table.table);
@@ -318,7 +317,6 @@ pub(crate) fn check_merged(
     audience: &Audience,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
-    let audience = audience_text(audience);
     for table in &layout.tables {
         let installed = table.installed();
         let schema_table = schema.table(&table.table);
@@ -346,7 +344,7 @@ pub(crate) fn check_merged(
             return Err(invalid("synced and merge values disagree"));
         }
         let defaults = crate::removal_sql::evaluate_values(db, schema_table, &AppValues::new())?;
-        let mut parameters = vec![rusqlite::types::Value::from(audience.clone())];
+        let mut parameters = vec![rusqlite::types::Value::from(audience)];
         let mut unset = Vec::new();
         for (j, name) in table.columns.iter().enumerate() {
             parameters.push(sql_value(&defaults[name]));
@@ -393,7 +391,6 @@ pub(crate) fn persist_rows(
     audience: &Audience,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
-    let audience = audience_text(audience);
     db.internal_execute(
         &format!(
             "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id)
@@ -467,7 +464,6 @@ pub(crate) fn finish(
     audience: &Audience,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
-    let audience = audience_text(audience);
     for table in &layout.tables {
         let unmatched = exists(
             db,
@@ -520,7 +516,6 @@ pub(crate) fn sources(
         ),
         "INSERT INTO temp._coven_install_authored(write_id,audience,table_name,key,record,admission) VALUES(?1,?2,?3,?4,?5,?6)",
     )?;
-    let audience = audience_text(audience);
     if exists(
         db,
         "SELECT EXISTS(SELECT 1 FROM temp._coven_install_parts s WHERE s.audience=?1
@@ -545,14 +540,14 @@ pub(crate) fn sources(
     )? {
         return Err(invalid("original source change changed"));
     }
-    crate::write_sources::install(db, &audience)
+    crate::write_sources::install(db, audience)
 }
 
 /// Whether the snapshot carries the source record of this change.
 pub(crate) fn carried(
     db: &DatabaseConnection,
     write: &[u8],
-    audience: &str,
+    audience: &Audience,
     table: &str,
     key: &[u8],
 ) -> Result<bool, DbError> {
@@ -602,7 +597,7 @@ pub(crate) fn values(
             layout.column("key"),
             layout.column("audience")
         ),
-        params![row.key, audience_text(&row.audience)],
+        params![row.key, &row.audience],
         |r| {
             let synced: Option<String> = r.get(0)?;
             let mut values = AppValues::new();
@@ -638,7 +633,7 @@ pub(crate) fn claim_holders(
         .map(|(n, expression)| format!("({expression})=?{}", n + 2))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let mut parameters = vec![rusqlite::types::Value::from(audience_text(audience))];
+    let mut parameters = vec![rusqlite::types::Value::from(audience)];
     parameters.extend(value.iter().map(sql_value));
     db.query(
         &format!(
@@ -688,7 +683,7 @@ pub(crate) fn file_locations(
             table.column("present"),
             synced = table.column("synced"),
         ),
-        params![audience_text(audience)],
+        params![audience],
         |r| visit(&value(r.get_ref(0)?)?),
     )
 }

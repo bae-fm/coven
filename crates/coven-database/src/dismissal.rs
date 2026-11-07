@@ -3,7 +3,6 @@
 use crate::lost::LossTarget;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::audience_text;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LostValue};
 use coven_format::{
@@ -241,7 +240,7 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
             "{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3",
             crate::loss_record::SELECT
         ),
-        params![row.table, row.key, audience_text(&row.audience)],
+        params![row.table, row.key, &row.audience],
         crate::loss_record::read,
     )?;
     let losses =
@@ -263,7 +262,7 @@ pub(crate) fn apply(
         let row = &dismissal.row;
         let ids = database.query(
             "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3",
-            params![row.table, row.key, audience_text(&row.audience)],
+            params![row.table, row.key, &row.audience],
             |r| r.get::<_, i64>(0),
         )?;
         for id in ids {

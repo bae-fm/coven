@@ -29,7 +29,7 @@ pub(crate) fn audiences(
     db.query(
         "SELECT audience FROM _coven_authored_parts WHERE write_id=?1 ORDER BY audience",
         [coven_format::merge_fields::encode_write_id(&header.position)?],
-        |r| crate::write_encoding::audience(&r.get::<_, String>(0)?),
+        |r| crate::write_encoding::audience(r, 0),
     )
 }
 

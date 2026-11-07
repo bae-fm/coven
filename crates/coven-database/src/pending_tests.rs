@@ -51,7 +51,7 @@ impl PendingValue for Record {
     }
     fn reload(audience: coven_merge::Audience) -> Self {
         Self {
-            subject: Subject::Audience(crate::write_encoding::audience_text(&audience)),
+            subject: Subject::Audience(audience.to_string()),
             reason: Reason::Missing,
             operation: None,
             cause: None,

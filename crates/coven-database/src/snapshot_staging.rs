@@ -10,7 +10,7 @@ use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_layout::{SnapshotLayout, Staged, TableLayout};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, encoded, sql_value};
+use crate::write_encoding::{encoded, sql_value};
 use crate::write_metadata::MetadataFailure;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -292,7 +292,7 @@ struct StagingState {
     inserts: Inserts,
     records: i64,
     columns: BTreeSet<(String, String)>,
-    parts: BTreeMap<(Vec<u8>, String), WriteHeader>,
+    parts: BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
     refusal: Option<(u8, DbError)>,
 }
 
@@ -654,7 +654,7 @@ impl RecordStaging<'_> {
         frame: &[u8],
         additions: bool,
         columns: &mut BTreeSet<(String, String)>,
-        parts: &mut BTreeMap<(Vec<u8>, String), WriteHeader>,
+        parts: &mut BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
     ) -> Result<Checked, DbError> {
         match &record {
             SnapshotRecord::Synced(row) => return self.synced(row, additions),
@@ -678,7 +678,7 @@ impl RecordStaging<'_> {
                     params![
                         creation.row.table,
                         creation.row.key,
-                        audience_text(&creation.row.audience),
+                        &creation.row.audience,
                         encoded(merge_fields::encode_write_id(&creation.write))?,
                         encoded(merge_fields::encode_change_id(&creation.creator))?
                     ],
@@ -707,7 +707,7 @@ impl RecordStaging<'_> {
         let layout = &self.inserts.layout.tables[at];
         let mut values = vec![rusqlite::types::Value::Null; layout.width()];
         values[TableLayout::KEY] = row.row.key.clone().into();
-        values[TableLayout::AUDIENCE] = audience_text(&row.row.audience).into();
+        values[TableLayout::AUDIENCE] = (&row.row.audience).into();
         values[TableLayout::SYNCED] = layout
             .columns
             .iter()
@@ -746,7 +746,7 @@ impl RecordStaging<'_> {
         let writer = state.generations()[&generation];
         let mut values = vec![rusqlite::types::Value::Null; layout.width()];
         values[TableLayout::KEY] = row.key.clone().into();
-        values[TableLayout::AUDIENCE] = audience_text(&row.audience).into();
+        values[TableLayout::AUDIENCE] = (&row.audience).into();
         values[TableLayout::MERGED] = 1.into();
         values[TableLayout::PRESENT] = state.present().into();
         values[TableLayout::GENERATION] = generation.to_be_bytes().to_vec().into();
@@ -774,7 +774,7 @@ impl RecordStaging<'_> {
                 params![
                     row.table,
                     row.key,
-                    audience_text(&row.audience),
+                    &row.audience,
                     earlier.to_be_bytes().as_slice(),
                     write.device,
                     write.number.to_be_bytes().as_slice()
@@ -789,11 +789,11 @@ impl RecordStaging<'_> {
     fn authored(
         &self,
         authored: &AuthoredChange,
-        parts: &mut BTreeMap<(Vec<u8>, String), WriteHeader>,
+        parts: &mut BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
     ) -> Result<Checked, DbError> {
         let write = encoded(merge_fields::encode_write_id(&authored.header.position))?;
         let row = authored.change.row();
-        let audience = audience_text(&row.audience);
+        let audience = &row.audience;
         // Equal headers encode to equal bytes, and decoding gives the value
         // back, so comparing values compares the bytes the part keeps.
         match parts.get(&(write.clone(), audience.clone())) {
@@ -910,7 +910,7 @@ fn put_parents<'a>(
         match column(*j).and_then(|value| value.parents.get(key)) {
             Some(parent) => {
                 values[at] = parent.row.key.clone().into();
-                values[at + 1] = audience_text(&parent.row.audience).into();
+                values[at + 1] = (&parent.row.audience).into();
                 values[at + 2] = parent.generation.to_be_bytes().to_vec().into();
             }
             None => {

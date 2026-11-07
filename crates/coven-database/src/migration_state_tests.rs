@@ -30,10 +30,7 @@ pub(crate) fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteR
     cols.insert("parent".into(), ColumnValue { value: Scalar::Null, parents: BTreeMap::new() });
     cols.insert(
         "audience".into(),
-        ColumnValue {
-            value: Scalar::Text(crate::write_encoding::audience_text(&audience)),
-            parents: BTreeMap::new(),
-        },
+        ColumnValue { value: Scalar::Text(audience.to_string()), parents: BTreeMap::new() },
     );
     write.parts[0].audience = audience;
     write

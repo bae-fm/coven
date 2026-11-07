@@ -10,7 +10,7 @@ use crate::file_location::Place;
 use crate::internal_schema::FILES;
 use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, encoded, sql_value};
+use crate::write_encoding::{encoded, sql_value};
 use crate::write_rows::AppValues;
 use crate::{DbError, RowIdentity, SyncedTable};
 use coven_crypto::ContentHash;
@@ -310,7 +310,7 @@ pub(crate) fn insert(db: &DatabaseConnection, record: &Record) -> Result<(), DbE
          VALUES(?1,?2,?3,?4,?5,?6)",
         params![
             record.id,
-            audience_text(&record.audience),
+            &record.audience,
             size,
             record.hash.map(|hash| hash.as_bytes().to_vec()),
             sql_value(&record.place.value()),

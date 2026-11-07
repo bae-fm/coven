@@ -11,7 +11,7 @@
 use crate::removal_schema::TableRules;
 use crate::removal_view::DatabaseRemovalView;
 use crate::schema::Schema;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::{decoded, encoded};
 use crate::{
     merge_store::MergeStore, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError,
 };
@@ -35,7 +35,7 @@ pub(crate) fn capture_rows<'a>(
         [],
     )?;
     for row in rows {
-        let audience = audience_text(&row.audience);
+        let audience = &row.audience;
         let kept:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3)",params![row.table,row.key,audience],|r|r.get(0))?;
         if kept {
             continue;
@@ -58,7 +58,7 @@ pub(crate) fn put_row(db: &DatabaseConnection, state: RowState<Value>) -> Result
         params![
             row.table,
             row.key,
-            audience_text(&row.audience),
+            &row.audience,
             encoded(merge_fields::encode_merge_row(&MergeRow { state }))?
         ],
     )?;
@@ -72,7 +72,7 @@ pub(crate) fn put_loss(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbErr
         params![
             loss.row.table,
             loss.row.key,
-            audience_text(&loss.row.audience),
+            &loss.row.audience,
             encoded(merge_fields::encode_loss(loss))?
         ],
     )?;
@@ -85,7 +85,7 @@ pub(crate) fn put_loss(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbErr
 /// them (`removals`). Only what no rule decides is kept: frozen losses, and
 /// the cells concurrent writes displaced.
 fn keep_losses(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
-    let audience = audience_text(&row.audience);
+    let audience = &row.audience;
     db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND NOT (l.replacement_kind='rules' AND l.frozen=0)",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
         put_loss(db, &crate::loss_record::read(r)?)
     })
@@ -103,7 +103,7 @@ pub(crate) fn capture_dropped<'a>(
         [],
     )?;
     for row in rows {
-        let audience = audience_text(&row.audience);
+        let audience = &row.audience;
         let kept: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_published_dropped WHERE table_name=?1 AND key=?2 AND audience=?3)
              OR EXISTS(SELECT 1 FROM _coven_published_losses WHERE table_name=?1 AND key=?2 AND audience=?3)",
@@ -152,7 +152,7 @@ pub(crate) fn kept_state(
     let Some(bytes) = db
         .query(
             "SELECT record FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
-            params![row.table, row.key, audience_text(&row.audience)],
+            params![row.table, row.key, &row.audience],
             |r| r.get::<_, Vec<u8>>(0),
         )?
         .pop()

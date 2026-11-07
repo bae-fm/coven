@@ -1,7 +1,7 @@
 //! The common durable loss record and its snapshot projection.
 
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, counter, damaged, decoded, encoded};
+use crate::write_encoding::{counter, damaged, decoded, encoded};
 use crate::DbError;
 use coven_format::value::Value;
 use coven_format::{
@@ -68,7 +68,7 @@ pub(crate) fn visit_table<E: From<DbError>>(
     let select = SELECT.replace("_coven_lost", table.statements().name);
     database.for_each(
         &format!("{select} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.frozen,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 WHEN 'dependency' THEN 3 ELSE 4 END,CASE WHEN l.replacement_kind IN ('excluded','dependency','unauthorized') THEN substr(l.replaced_by,1,16) END"),
-        [audience_text(audience)],
+        [audience],
         |r| visit(read(r).map_err(DbError::from)?),
     )
 }
@@ -213,7 +213,7 @@ pub(crate) fn put_table(
             params![
                 loss.row.table,
                 loss.row.key,
-                audience_text(&loss.row.audience),
+                &loss.row.audience,
                 loss.generation.to_be_bytes(),
                 column,
                 setter,
@@ -230,7 +230,7 @@ pub(crate) fn put_table(
         params![
             loss.row.table,
             loss.row.key,
-            audience_text(&loss.row.audience),
+            &loss.row.audience,
             loss.generation.to_be_bytes().as_slice(),
             column,
             value,
@@ -269,7 +269,7 @@ pub(crate) fn put_write_loss(
         )?;
     } else {
         let column = database.column_id(&row.table, &key.column)?;
-        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,audience_text(&row.audience),value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
+        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,&row.audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
     }
     Ok(())
 }
@@ -292,7 +292,7 @@ pub(crate) fn put_rules_loss(
     let rules = encoded(merge_fields::encode_rules(rules))?;
     match id {
         Some(id) => database.internal_execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,id])?,
-        None => database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![row.table,row.key,audience_text(&row.audience),generation.to_be_bytes().as_slice(),values,setters,rules])?,
+        None => database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![row.table,row.key,&row.audience,generation.to_be_bytes().as_slice(),values,setters,rules])?,
     };
     Ok(())
 }
@@ -301,15 +301,15 @@ pub(crate) fn put_rules_loss(
 pub(crate) fn forget_row(database: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
     database.internal_execute(
         "DELETE FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3",
-        params![row.table, row.key, audience_text(&row.audience)],
+        params![row.table, row.key, &row.audience],
     )?;
     Ok(())
 }
 
-/// Delete every loss of the audience `audience` names.
+/// Delete every loss of `audience`.
 pub(crate) fn forget_audience(
     database: &DatabaseConnection,
-    audience: &str,
+    audience: &Audience,
 ) -> Result<(), DbError> {
     database.internal_execute("DELETE FROM _coven_lost WHERE audience=?1", [audience])?;
     Ok(())
@@ -393,7 +393,7 @@ pub(crate) fn carry_cell_values(
 pub(crate) fn remove(database: &DatabaseConnection, loss: &Loss) -> Result<bool, DbError> {
     let ids = database.query(
         "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND frozen=1",
-        params![loss.row.table, loss.row.key, audience_text(&loss.row.audience)],
+        params![loss.row.table, loss.row.key, &loss.row.audience],
         |r| r.get::<_, i64>(0),
     )?;
     for id in ids {
@@ -455,7 +455,7 @@ pub(crate) fn removed(
 ) -> Result<Option<RemovedRow>, DbError> {
     let mut removed = database.query(
         "SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0",
-        params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
+        params![row.table, row.key, &row.audience, generation.to_be_bytes().as_slice()],
         |r| {
             Ok(RemovedRow {
                 loss: r.get(0)?,

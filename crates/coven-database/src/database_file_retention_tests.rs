@@ -168,10 +168,7 @@ pub(crate) fn write(
                     &record,
                     vec![
                         ("id", Value::Text(record.clone())),
-                        (
-                            "audience",
-                            Value::Text(crate::write_encoding::audience_text(&Audience::Store)),
-                        ),
+                        ("audience", Value::Text(Audience::Store.to_string())),
                         ("size", Value::Integer(1)),
                         ("hash", Value::Blob(vec![3; 32])),
                         ("coordinates", coordinates),
@@ -591,7 +588,7 @@ async fn a_deleted_circles_lost_value_keeps_its_stored_file() {
     for row in &mut part.rows {
         row.row.audience = audience.clone();
         let Operation::Insert(columns) = &mut row.change.operation else { unreachable!() };
-        let text = crate::write_encoding::audience_text(&audience);
+        let text = audience.to_string();
         if row.row.table == "t" {
             let id = "00000000-0000-4000-8000-000000000046";
             row.row.key = crate::tests::text_key(id);

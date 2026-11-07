@@ -3,7 +3,7 @@
 //! A capture fixes eligibility through its marker. Snapshot bytes are made from
 //! the counted base only after that prefix has acquired slots; later local
 //! originals remain outside it.
-use crate::write_encoding::{audience, audience_text, counter};
+use crate::write_encoding::{audience, counter};
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{admin::SnapshotId, snapshot::SnapshotHeader};
 use coven_foundation::id_source::DeviceId;
@@ -40,7 +40,7 @@ pub(crate) fn capture(
         return Ok(false);
     };
     for selected in state.readable_audiences(&member) {
-        db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![audience_text(&selected),version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
+        db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![&selected,version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
     crate::pending::end_captured_raise_waits(db, marker.number)?;
     Ok(true)
@@ -116,7 +116,7 @@ pub(crate) fn capture_made(
     db.internal_execute(
         "INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",
         params![
-            audience_text(&audience),
+            &audience,
             db.schema_version()?,
             through.to_be_bytes(),
             crate::sequence::applied(db)?.to_be_bytes()
@@ -177,7 +177,7 @@ pub(crate) fn prepare(
 ) -> Result<Option<RaiseCapture>, DbError> {
     db.internal_execute(
         "UPDATE _coven_raise_captures SET covers=?1 WHERE audience=?2 AND version=?3",
-        params![crate::sequence::applied(db)?.to_be_bytes(), audience_text(selected), version],
+        params![crate::sequence::applied(db)?.to_be_bytes(), selected, version],
     )?;
     Ok(captures(db, device)?
         .into_iter()
@@ -262,7 +262,7 @@ pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32,
     db.query(
         "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
         [],
-        |r| Ok((audience(&r.get::<_, String>(0)?)?, r.get(1)?, counter(r.get(2)?)?)),
+        |r| Ok((audience(r, 0)?, r.get(1)?, counter(r.get(2)?)?)),
     )
 }
 
@@ -275,7 +275,7 @@ pub(crate) fn captures(
         [],
         |r| {
             Ok(RaiseCapture {
-                audience: audience(&r.get::<_, String>(0)?)?,
+                audience: audience(r, 0)?,
                 version: r.get(1)?,
                 through: WriteId { device, number: counter(r.get(2)?)? },
                 covers: counter(r.get(3)?)?,
@@ -341,7 +341,7 @@ pub(crate) fn loaded(
 ) -> Result<(), DbError> {
     db.internal_execute(
         "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version<=?2",
-        params![audience_text(audience), version],
+        params![audience, version],
     )?;
     Ok(())
 }
@@ -353,7 +353,7 @@ pub(crate) fn discard(
 ) -> Result<(), DbError> {
     db.internal_execute(
         "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version=?2",
-        params![audience_text(audience), version],
+        params![audience, version],
     )?;
     Ok(())
 }

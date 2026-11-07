@@ -8,7 +8,7 @@
 //! losses, so none of them can change it.
 
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::{decoded, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_format::write_sources::ChangeId;
@@ -28,7 +28,7 @@ pub(crate) struct Creation {
 pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Creation>, DbError> {
     db.query(
         "SELECT write_id,creator FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
-        params![row.table, row.key, audience_text(&row.audience)],
+        params![row.table, row.key, &row.audience],
         |r| {
             Ok(Creation {
                 write: decoded(merge_fields::decode_write_id(&r.get::<_, Vec<u8>>(0)?))?,
@@ -99,7 +99,7 @@ pub(crate) fn put(
         params![
             row.table,
             row.key,
-            audience_text(&row.audience),
+            &row.audience,
             encoded(merge_fields::encode_write_id(&creation.write))?,
             encoded(merge_fields::encode_change_id(&creation.creator))?
         ],
@@ -127,17 +127,14 @@ pub(crate) fn restore_published(db: &DatabaseConnection) -> Result<(), DbError> 
 pub(crate) fn forget_row(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
     db.internal_execute(
         "DELETE FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
-        params![row.table, row.key, audience_text(&row.audience)],
+        params![row.table, row.key, &row.audience],
     )?;
     Ok(())
 }
 
 /// Forget an audience's creations before a loaded snapshot supplies them.
 pub(crate) fn clear_audience(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    db.internal_execute(
-        "DELETE FROM _coven_creations WHERE audience=?1",
-        [audience_text(audience)],
-    )?;
+    db.internal_execute("DELETE FROM _coven_creations WHERE audience=?1", [audience])?;
     Ok(())
 }
 
@@ -149,7 +146,7 @@ pub(crate) fn visit<E: From<DbError>>(
 ) -> Result<(), E> {
     db.for_each(
         "SELECT table_name,key,write_id,creator FROM _coven_creations WHERE audience=?1 ORDER BY table_name,key",
-        [audience_text(audience)],
+        [audience],
         |r| {
             let row = RowId {
                 table: r.get(0).map_err(DbError::from)?,

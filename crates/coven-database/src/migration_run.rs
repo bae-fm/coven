@@ -341,7 +341,7 @@ fn finish(
                 "INSERT INTO _coven_migration_counted_losses(write_id,audience,record) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     coven_format::merge_fields::encode_write_id(&record.header.position)?,
-                    crate::write_encoding::audience_text(&loss.row.audience),
+                    &loss.row.audience,
                     coven_format::merge_fields::encode_loss(loss)?
                 ],
             )?;
@@ -363,7 +363,7 @@ pub(crate) fn keep_loss(
         "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",
         rusqlite::params![
             coven_format::merge_fields::encode_write_id(&migration)?,
-            crate::write_encoding::audience_text(&loss.row.audience),
+            &loss.row.audience,
             coven_format::merge_fields::encode_loss(loss)?
         ],
     )?;
@@ -377,10 +377,7 @@ pub(crate) fn forget_audience(
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
-        db.internal_execute(
-            &format!("DELETE FROM {table} WHERE audience=?1"),
-            [crate::write_encoding::audience_text(audience)],
-        )?;
+        db.internal_execute(&format!("DELETE FROM {table} WHERE audience=?1"), [audience])?;
     }
     Ok(())
 }

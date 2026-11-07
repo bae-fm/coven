@@ -607,10 +607,6 @@ impl RetainedInput {
     }
 
     /// The checked file evidence of these bytes, if any (§17.10).
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a stored value that won't convert or decode is DamagedDatabase"
-    )]
     pub async fn files(&self) -> Result<Option<FileEvidence>, DbError> {
         self.read(|db, id| {
             let (complete, schema): (Option<bool>, Option<u32>) = db.query_row(
@@ -628,17 +624,15 @@ impl RetainedInput {
                         .query(
                             "SELECT audience,key FROM _coven_input_unread WHERE object=?1",
                             [id],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, KeyId>(1)?)),
+                            |r| {
+                                Ok((
+                                    crate::write_encoding::audience(r, 0)?,
+                                    r.get::<_, KeyId>(1)?,
+                                ))
+                            },
                         )?
                         .into_iter()
-                        .map(|(audience, key)| {
-                            Ok((
-                                crate::write_encoding::audience(&audience)
-                                    .map_err(|_| DbError::DamagedDatabase)?,
-                                key,
-                            ))
-                        })
-                        .collect::<Result<BTreeSet<_>, DbError>>()?;
+                        .collect::<BTreeSet<_>>();
                     if parts.is_empty() {
                         return Err(DbError::DamagedDatabase);
                     }
@@ -697,7 +691,7 @@ impl RetainedInput {
                             "INSERT INTO _coven_input_unread(object,audience,key) VALUES(?1,?2,?3)",
                             (
                                 id,
-                                crate::write_encoding::audience_text(&audience),
+                                &audience,
                                 key,
                             ),
                         )?;

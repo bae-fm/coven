@@ -1,8 +1,6 @@
 //! Original authored changes and their admission, independent of dismissible losses.
 
-use crate::{
-    merge_store::MergeStore, sqlite::DatabaseConnection, write_encoding::audience_text, DbError,
-};
+use crate::{merge_store::MergeStore, sqlite::DatabaseConnection, DbError};
 use coven_format::{
     merge_fields,
     snapshot_rows::{AuthoredChange, ChangeVerdict, OriginalRow},
@@ -44,8 +42,8 @@ pub(crate) fn evidence(db: &DatabaseConnection, source: &ChangeId) -> Result<Evi
 /// otherwise the evidence is still unavailable.
 pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Original, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
-    let audience = audience_text(&source.row.audience);
-    let Some((header, complete)) = db.authored_part(&write, &audience)? else {
+    let audience = &source.row.audience;
+    let Some((header, complete)) = db.authored_part(&write, audience)? else {
         return Err(DbError::MissingWriteSources(vec![source.clone()]));
     };
     let row = db.query("SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",params![write,audience,source.row.table,source.row.key],|r| r.get::<_,Vec<u8>>(0))?.pop();
@@ -79,7 +77,7 @@ pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Ori
 /// the change would have brought it along, so its absence is the proof.
 pub(crate) fn uncarried(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
-    if db.authored_part(&write, &audience_text(&source.row.audience))?.is_some() {
+    if db.authored_part(&write, &source.row.audience)?.is_some() {
         return Ok(false);
     }
     // A received marker keeps its header; the migrating device's own marker
@@ -122,10 +120,8 @@ impl<'a> PreWrite<'a> {
     }
 
     fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
-        let part = self.db.authored_part(
-            &merge_fields::encode_write_id(&write)?,
-            &audience_text(&self.row.audience),
-        )?;
+        let part =
+            self.db.authored_part(&merge_fields::encode_write_id(&write)?, &self.row.audience)?;
         let Some((bytes, _)) = part else {
             return Err(DbError::MissingWriteSources(vec![ChangeId {
                 write,
@@ -336,10 +332,7 @@ fn creation(
 ) -> Result<(), DbError> {
     let opened: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
-        params![
-            merge_fields::encode_write_id(&creator.write)?,
-            audience_text(&creator.row.audience)
-        ],
+        params![merge_fields::encode_write_id(&creator.write)?, &creator.row.audience],
         |r| r.get(0),
     )?;
     if !opened {
@@ -449,9 +442,8 @@ fn part(
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
-    let audience = audience_text(audience);
     let bytes = merge_fields::encode_write_header(header)?;
-    if let Some((original, _)) = db.authored_part(&write, &audience)? {
+    if let Some((original, _)) = db.authored_part(&write, audience)? {
         if original != bytes {
             return Err(invalid("original source header changed"));
         }
@@ -460,7 +452,7 @@ fn part(
             "INSERT INTO _coven_authored_parts VALUES(?1,?2,?3,0)",
             params![write, audience, bytes],
         )?;
-        db.authored_part_changed(&write, &audience, Some((bytes, false)));
+        db.authored_part_changed(&write, audience, Some((bytes, false)));
     }
     Ok(())
 }
@@ -473,14 +465,14 @@ pub(crate) fn retain(
     let row = record.row();
     part(db, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
-    let audience = audience_text(&row.audience);
+    let audience = &row.audience;
     let bytes = match record {
         PartRecord::Change(change) => change.encode()?,
         PartRecord::Execution(execution) => execution.encode()?,
     };
     let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.table,row.key],|r|r.get(0))?;
     let complete =
-        db.authored_part(&write, &audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?.1;
+        db.authored_part(&write, audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?.1;
     if original.is_none() && complete {
         return Err(invalid("original source part changed"));
     }
@@ -498,11 +490,10 @@ pub(crate) fn complete(
 ) -> Result<(), DbError> {
     part(db, header, audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
-    let audience = audience_text(audience);
     db.internal_execute("UPDATE _coven_authored_parts SET complete=1 WHERE write_id=?1 AND audience=?2 AND complete=0",params![write,audience])?;
     db.authored_part_changed(
         &write,
-        &audience,
+        audience,
         Some((merge_fields::encode_write_header(header)?, true)),
     );
     Ok(())
@@ -514,7 +505,10 @@ pub(crate) fn complete(
 /// device's: a part the device lacks starts incomplete, an original the
 /// device holds stays, and the snapshot's verdict replaces the device's, an
 /// unjudged one too.
-pub(crate) fn install(db: &DatabaseConnection, audience: &str) -> Result<(), DbError> {
+pub(crate) fn install(
+    db: &DatabaseConnection,
+    audience: &coven_merge::Audience,
+) -> Result<(), DbError> {
     db.internal_execute(
         "INSERT INTO _coven_authored_parts(write_id,audience,header,complete)
          SELECT write_id,audience,header,0 FROM temp._coven_install_parts s WHERE s.audience=?1
@@ -550,7 +544,7 @@ pub(crate) fn complete_installed(
     db.internal_execute(
         "UPDATE _coven_authored_parts SET complete=1 WHERE complete=0 AND (write_id,audience) IN (
            SELECT write_id,audience FROM temp._coven_install_parts WHERE audience=?1 AND complete=1)",
-        params![audience_text(audience)],
+        params![audience],
     )?;
     Ok(())
 }
@@ -565,9 +559,9 @@ pub(crate) fn admit(
     verdict: &ChangeVerdict,
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
-    let audience = audience_text(&row.audience);
+    let audience = &row.audience;
     let (original, _) =
-        db.authored_part(&write, &audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        db.authored_part(&write, audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let original = merge_fields::decode_write_header(&original)?;
     let table =
         crate::source_names::table(db, header.schema_version, &row.table, original.schema_version)?
@@ -596,7 +590,7 @@ pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<boo
              WHERE c.write_id=?1 AND c.audience=?2 AND c.table_name=?3 AND c.key=?4",
             params![
                 merge_fields::encode_write_id(&source.write)?,
-                audience_text(&source.row.audience),
+                &source.row.audience,
                 source.row.table,
                 source.row.key
             ],
@@ -641,7 +635,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
          JOIN _coven_authored_parts p ON p.write_id=c.write_id AND p.audience=c.audience
          LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
          WHERE c.audience=?1 ORDER BY c.write_id,c.table_name,c.key",
-        [audience_text(audience)],
+        [audience],
         |r| {
             let header =
                 merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(0).map_err(DbError::from)?)
@@ -674,12 +668,11 @@ pub(crate) fn forget_own_migration(
     audience: &coven_merge::Audience,
     covered: u64,
     version: u32,
-    carried: impl Fn(&[u8], &str, &str, &[u8]) -> Result<bool, DbError>,
+    carried: impl Fn(&[u8], &coven_merge::Audience, &str, &[u8]) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
     let own = db
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
-    let audience = audience_text(audience);
     let first = merge_fields::encode_write_id(&WriteId { device: own, number: 1 })?;
     let last = merge_fields::encode_write_id(&WriteId { device: own, number: u64::MAX })?;
     for (write_id, header) in db.query(
@@ -700,7 +693,7 @@ pub(crate) fn forget_own_migration(
             params![write_id, audience],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )? {
-            if !carried(&write_id, &audience, &table, &key)? {
+            if !carried(&write_id, audience, &table, &key)? {
                 db.internal_execute(
                     "DELETE FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
                     params![write_id, audience, table, key],
@@ -712,7 +705,7 @@ pub(crate) fn forget_own_migration(
              AND NOT EXISTS(SELECT 1 FROM _coven_authored_changes c WHERE c.write_id=?1 AND c.audience=?2)",
             params![write_id, audience],
         )?;
-        db.forget_authored_part(&write_id, &audience);
+        db.forget_authored_part(&write_id, audience);
     }
     Ok(())
 }

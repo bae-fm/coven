@@ -6,6 +6,7 @@ use coven_format::value::Value;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Timestamp};
 use rusqlite::types::{Type, ValueRef};
+use rusqlite::Row;
 
 use crate::DbError;
 
@@ -32,6 +33,22 @@ pub(crate) fn damaged(column: usize, kind: Type) -> rusqlite::Error {
 )]
 pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Result<T> {
     result.map_err(|_| damaged(0, Type::Blob))
+}
+
+/// The value at `column`, which the table's constraints and coven's own
+/// writes keep decodable as `T`; a value that isn't is `DamagedDatabase`
+/// (§19.3).
+pub(crate) fn stored<T: rusqlite::types::FromSql>(
+    row: &Row<'_>,
+    column: usize,
+    kind: Type,
+) -> rusqlite::Result<T> {
+    row.get(column).map_err(|error| match error {
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..) => damaged(column, kind),
+        error => error,
+    })
 }
 
 pub(crate) fn decode_failure(
@@ -93,20 +110,17 @@ pub(crate) fn sql_value(value: &Value) -> rusqlite::types::Value {
     }
 }
 
-pub(crate) fn audience_text(audience: &Audience) -> String {
-    audience.to_string()
-}
-
-/// The audience `text` names, spelled exactly as [`audience_text`] writes
-/// it: receivers compare a root's audience cell with that text, so any other
-/// spelling of the same circle id names no audience (§15).
+/// The audience `text` names, spelled exactly as [`Audience`]'s `Display`
+/// and SQL form write it: receivers compare a root's audience cell with that
+/// text, so any other spelling of the same circle id names no audience (§15).
 pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
     text.parse().ok()
 }
 
-/// A stored audience; text no audience is spelled as is damage (§19.3).
-pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
-    text.parse().map_err(|_not_an_audience: coven_merge::InvalidAudience| damaged(0, Type::Text))
+/// The audience a column of coven's tables holds; a value no audience is
+/// spelled as is damage (§19.3).
+pub(crate) fn audience(row: &Row<'_>, column: usize) -> rusqlite::Result<Audience> {
+    stored(row, column, Type::Text)
 }
 
 /// A stored counter, eight big-endian bytes; any other length is damage

@@ -2,7 +2,7 @@
 use crate::{
     sqlite::DatabaseConnection,
     store_state::*,
-    write_encoding::{counter, damaged},
+    write_encoding::{counter, damaged, stored},
     DbError,
 };
 use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
@@ -14,21 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn slot(row: &Row<'_>, column: usize) -> rusqlite::Result<Slot> {
     Ok(Slot(counter(row.get(column)?)?))
-}
-
-/// The value at `column`, which the membership tables' constraints keep
-/// decodable; a value that isn't is `DamagedDatabase`.
-fn stored<T: rusqlite::types::FromSql>(
-    row: &Row<'_>,
-    column: usize,
-    kind: Type,
-) -> rusqlite::Result<T> {
-    row.get(column).map_err(|error| match error {
-        rusqlite::Error::InvalidColumnType(..)
-        | rusqlite::Error::FromSqlConversionFailure(..)
-        | rusqlite::Error::IntegralValueOutOfRange(..) => damaged(column, kind),
-        error => error,
-    })
 }
 
 /// A member id as the membership tables hold it: its canonical text.

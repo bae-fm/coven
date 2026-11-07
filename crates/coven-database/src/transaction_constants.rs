@@ -8,6 +8,7 @@
 
 use super::DatabaseConnection;
 use crate::DbError;
+use coven_merge::Audience;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
@@ -22,7 +23,7 @@ pub(super) struct TransactionConstants {
 }
 
 /// An authored part's write id, as coven stores it, and audience.
-type PartKey = (Vec<u8>, String);
+type PartKey = (Vec<u8>, Audience);
 
 /// An authored part's header and whether it is complete.
 pub(crate) type AuthoredPart = (Vec<u8>, bool);
@@ -142,9 +143,9 @@ impl DatabaseConnection {
     pub(crate) fn authored_part(
         &self,
         write: &[u8],
-        audience: &str,
+        audience: &Audience,
     ) -> Result<Option<AuthoredPart>, DbError> {
-        let key = (write.to_vec(), audience.to_owned());
+        let key = (write.to_vec(), audience.clone());
         if let Some(part) = self.constants.parts.borrow().get(&key) {
             return Ok(part.clone());
         }
@@ -165,17 +166,17 @@ impl DatabaseConnection {
     pub(crate) fn authored_part_changed(
         &self,
         write: &[u8],
-        audience: &str,
+        audience: &Audience,
         part: Option<AuthoredPart>,
     ) {
         if self.constants.active.get() {
-            self.constants.parts.borrow_mut().insert((write.to_vec(), audience.to_owned()), part);
+            self.constants.parts.borrow_mut().insert((write.to_vec(), audience.clone()), part);
         }
     }
 
     /// The authored part may have changed: read it afresh next time.
-    pub(crate) fn forget_authored_part(&self, write: &[u8], audience: &str) {
-        self.constants.parts.borrow_mut().remove(&(write.to_vec(), audience.to_owned()));
+    pub(crate) fn forget_authored_part(&self, write: &[u8], audience: &Audience) {
+        self.constants.parts.borrow_mut().remove(&(write.to_vec(), audience.clone()));
     }
 }
 

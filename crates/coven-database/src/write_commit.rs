@@ -1,7 +1,7 @@
 //! Persist exactly the row updates produced by coven-merge, with their record.
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, encoded};
+use crate::write_encoding::encoded;
 use crate::DbError;
 use coven_format::{merge_fields, value::Value, write::WriteRecord, write_stream::WriteEncoder};
 use coven_foundation::id_source::DeviceId;
@@ -77,7 +77,7 @@ fn retain(
 /// claims.
 pub(crate) enum StoredRows<'a> {
     /// Every row an audience holds.
-    InAudience(&'a str),
+    InAudience(&'a Audience),
     /// Every generation of one row.
     Row(&'a RowId),
     /// Every row of a table, in every audience.
@@ -95,7 +95,7 @@ pub(crate) fn forget(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Re
         }
         StoredRows::Row(row) => database.internal_execute(
             "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
-            params![row.table, row.key, audience_text(&row.audience)],
+            params![row.table, row.key, &row.audience],
         ),
         StoredRows::InTable(name) => {
             database.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [name])
@@ -120,7 +120,7 @@ fn delete_children(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Resu
             ),
             StoredRows::Row(row) => database.internal_execute(
                 &format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),
-                params![row.table, row.key, audience_text(&row.audience)],
+                params![row.table, row.key, &row.audience],
             ),
             StoredRows::InTable(name) => database.internal_execute(
                 &format!(
@@ -146,7 +146,7 @@ pub(crate) fn persist(
     let mut present = BTreeMap::new();
     for (row, update) in updates {
         let old = prior(row)?;
-        let audience = audience_text(&row.audience);
+        let audience = &row.audience;
         // The id of the row's current generation, when this write stores it.
         let mut current = None;
         for (generation, writer) in update.state.generations() {
@@ -201,7 +201,7 @@ pub(crate) fn persist(
                         continue;
                     }
                     let key = crate::row_queries::foreign_key(database, &row.table, key)?;
-                    database.internal_execute("INSERT INTO _coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(row_id,column_id,foreign_key_id) DO UPDATE SET parent_table=excluded.parent_table,parent_key=excluded.parent_key,parent_audience=excluded.parent_audience,parent_generation=excluded.parent_generation",params![row_ordinal,column,key,parent.row.table,parent.row.key,audience_text(&parent.row.audience),parent.generation.to_be_bytes().as_slice()])?;
+                    database.internal_execute("INSERT INTO _coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(row_id,column_id,foreign_key_id) DO UPDATE SET parent_table=excluded.parent_table,parent_key=excluded.parent_key,parent_audience=excluded.parent_audience,parent_generation=excluded.parent_generation",params![row_ordinal,column,key,parent.row.table,parent.row.key,&parent.row.audience,parent.generation.to_be_bytes().as_slice()])?;
                 }
             }
         }
@@ -244,7 +244,7 @@ pub(crate) fn store_claims(
     }
     for (constraint, value) in claims {
         if previous.get(constraint) != Some(value) {
-            database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row,constraint,audience_text(audience),value])?;
+            database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row,constraint,audience,value])?;
         }
     }
     Ok(())

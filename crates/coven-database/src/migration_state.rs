@@ -72,10 +72,7 @@ pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbErr
         let loss = loss.freeze();
         db.internal_execute(
             "INSERT INTO temp._coven_migration_frozen(audience,record) VALUES(?1,?2)",
-            params![
-                crate::write_encoding::audience_text(&loss.row.audience),
-                encoded(merge_fields::encode_loss(&loss))?
-            ],
+            params![&loss.row.audience, encoded(merge_fields::encode_loss(&loss))?],
         )?;
         crate::loss_record::put(db, &loss, Some(id))?;
     }

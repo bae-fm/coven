@@ -3,7 +3,7 @@
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, counter, decoded};
+use crate::write_encoding::{counter, decoded};
 use crate::write_metadata::StoredWrite;
 use crate::write_rows::AppView;
 use crate::DbError;
@@ -320,7 +320,7 @@ impl<'a> MergeStore<'a> {
         if let Some(generations) = self.generations.get(id) {
             return Ok(generations);
         }
-        let generations = Generations(self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience_text(&id.audience)], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?)?, self.metadata.retain(r,2)?)))?);
+        let generations = Generations(self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, &id.audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?)?, self.metadata.retain(r,2)?)))?);
         if keep && self.generations.keeps() {
             self.generations.insert(id.clone(), generations.clone());
         }
@@ -336,7 +336,7 @@ impl<'a> MergeStore<'a> {
     fn read_row(&self, id: &RowId, with_losses: bool) -> Result<StoredRow, DbError> {
         #[cfg(test)]
         self.database.record_merge_load(&id.table);
-        let audience = audience_text(&id.audience);
+        let audience = &id.audience;
         let generations = self.generations(id, false)?.0;
         let current = generations.last().map(|(ordinal, generation, _)| (*ordinal, *generation));
         let mut cells = BTreeMap::new();
@@ -388,7 +388,7 @@ impl<'a> MergeStore<'a> {
                 values.extend(crate::written_values::load(self.database, ordinal)?);
             }
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
-            for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id JOIN _coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?)? })))? {
+            for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id JOIN _coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(r, 4)? }, generation:counter(r.get(5)?)? })))? {
                 references.entry(column).or_default().insert(key,parent);
             }
             for (name, write) in self.database.query("SELECT c.column_name,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,self.metadata.retain(r,1)?)))? {

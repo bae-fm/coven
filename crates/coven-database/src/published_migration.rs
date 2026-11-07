@@ -52,7 +52,7 @@ pub(crate) fn carry(
             // losses, never the ones the app's row leaves frozen (§18.7).
             db.internal_execute(
                 "INSERT INTO _coven_published_dropped(table_name,key,audience) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-                params![old.table, old.key, crate::write_encoding::audience_text(&old.audience)],
+                params![old.table, old.key, &old.audience],
             )?;
             return Ok::<_, DbError>(());
         };

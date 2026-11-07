@@ -4,7 +4,6 @@ use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::audience_text;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::{Audience, RowState, WriteId};
@@ -17,7 +16,6 @@ use std::collections::BTreeSet;
 /// `_coven_install_lost` the keys whose lost values it deletes, whose
 /// protection the install brings up to date once its rows are in.
 pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    let audience = audience_text(audience);
     database.internal_execute(
         &format!(
             "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
@@ -32,8 +30,8 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
          SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1 ON CONFLICT DO NOTHING",
         [&audience],
     )?;
-    crate::write_commit::forget(database, &crate::write_commit::StoredRows::InAudience(&audience))?;
-    crate::loss_record::forget_audience(database, &audience)
+    crate::write_commit::forget(database, &crate::write_commit::StoredRows::InAudience(audience))?;
+    crate::loss_record::forget_audience(database, audience)
 }
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {

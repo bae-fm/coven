@@ -10,7 +10,7 @@
 //! whole keeps them and can open any leaf again without the audience key.
 
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_crypto::AuthorshipHasher;
@@ -124,7 +124,7 @@ pub(crate) fn retain_leaves(
         "INSERT INTO _coven_part_leaves(write_id,audience,hashes) VALUES(?1,?2,?3) ON CONFLICT(write_id,audience) DO NOTHING",
         params![
             encoded(merge_fields::encode_write_id(&write))?,
-            audience_text(audience),
+            audience,
             hashes
         ],
     )?;
@@ -325,7 +325,7 @@ fn open(
     let id = encoded(merge_fields::encode_write_id(&write))?;
     let hashes: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT hashes FROM _coven_part_leaves WHERE write_id=?1 AND audience=?2)",
-        params![id, audience_text(audience)],
+        params![id, audience],
         |r| r.get(0),
     )?;
     if let Some(hashes) = hashes {
@@ -333,7 +333,7 @@ fn open(
         let mut leaves = Vec::new();
         db.for_each::<_, DbError>(
             "SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 ORDER BY table_name,key",
-            params![id, audience_text(audience)],
+            params![id, audience],
             |r| {
                 let record = OriginalRow::decode(&r.get::<_, Vec<u8>>(0)?)?;
                 leaves.extend(coven_format::authorship::record_leaves(record.record()));
@@ -356,7 +356,7 @@ fn open(
     let (proof, hashes) = db
         .query(
             "SELECT proof,hashes FROM _coven_part_proofs WHERE write_id=?1 AND audience=?2",
-            params![id, audience_text(audience)],
+            params![id, audience],
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )?
         .pop()
@@ -437,7 +437,7 @@ pub(crate) fn load(
             "INSERT INTO _coven_part_proofs(write_id,audience,proof,hashes) VALUES(?1,?2,?3,?4) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof,hashes=excluded.hashes",
             params![
                 encoded(merge_fields::encode_write_id(&evidence.write))?,
-                audience_text(audience),
+                audience,
                 encoded(merge_fields::encode_multiproof(&evidence.proof))?,
                 hashes
             ],
@@ -480,7 +480,7 @@ pub(crate) fn check(
     for declaration in schema.declarations.iter().filter(|d| d.owner_only) {
         let rows = db.query(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 AND table_name=?2",
-            params![audience_text(audience), declaration.name],
+            params![audience, declaration.name],
             crate::row_queries::read_identity,
         )?;
         for row in rows {

@@ -13,7 +13,6 @@
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::audience_text;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_foundation::id_source::CircleId;
@@ -33,7 +32,7 @@ pub(crate) fn rows(
     let replaced = db.query(
         "SELECT audience FROM temp._coven_download_replaced ORDER BY audience",
         [],
-        |r| crate::write_encoding::audience(&r.get::<_, String>(0)?),
+        |r| crate::write_encoding::audience(r, 0),
     )?;
     let cyclic = cyclic(schema);
     for table in &layout.tables {
@@ -166,7 +165,7 @@ pub(crate) fn rows(
                             key = table.column("key"),
                             audience_column = table.column("audience"),
                         ),
-                        params![table.table, audience_text(audience)],
+                        params![table.table, audience],
                     )?;
                 }
             }

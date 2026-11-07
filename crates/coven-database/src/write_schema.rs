@@ -264,7 +264,7 @@ impl WriteSchema {
         };
         match audience {
             AudienceSource::Column(_) => {
-                if value.value != Value::Text(crate::write_encoding::audience_text(&row.audience)) {
+                if value.value != Value::Text(row.audience.to_string()) {
                     return Err(invalid("row cells disagree with their audience"));
                 }
             }

@@ -587,3 +587,17 @@ async fn a_clock_before_1970_starts_at_zero_and_keeps_its_counter_after_reopen()
     assert_eq!((second.device(), third.device()), (first.device(), first.device()));
     db.close().await.unwrap();
 }
+
+/// §19.3: an audience column is read through `Audience`'s SQL form; text no
+/// audience is spelled as, or a value of another type, is damage.
+#[test]
+fn a_stored_audience_that_does_not_decode_is_damaged_database() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let read = |sql: &str| -> Result<Audience, DbError> {
+        Ok(db.query_row(sql, [], |r| super::audience(r, 0))?)
+    };
+    assert_eq!(read("SELECT 'store'").unwrap(), Audience::Store);
+    for broken in ["SELECT 'Store'", "SELECT 'Gifts'", "SELECT x'00'", "SELECT 1", "SELECT NULL"] {
+        assert!(matches!(read(broken), Err(DbError::DamagedDatabase)), "{broken}");
+    }
+}

@@ -31,7 +31,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM _coven_absent_snapshots WHERE audience=?1 AND device=?2 AND number=?3)",
-                params![crate::write_encoding::audience_text(&id.audience), id.device, id.number.to_be_bytes()], |row| row.get(0)))
+                params![&id.audience, id.device, id.number.to_be_bytes()], |row| row.get(0)))
         }).await
     }
 
@@ -45,7 +45,7 @@ impl Database {
         self.call(move |inner| inner.access.with_writer(|writer| writer.transaction(|db| {
             for (device, object) in files { insert_candidate(db, device, object)?; }
             db.internal_execute("INSERT INTO _coven_absent_snapshots(audience,device,number) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-                params![crate::write_encoding::audience_text(&id.audience), id.device, id.number.to_be_bytes()])?;
+                params![&id.audience, id.device, id.number.to_be_bytes()])?;
             Ok(())
         }))).await
     }

@@ -40,10 +40,7 @@ fn recorded(
                 &file.0.to_string(),
                 vec![
                     ("id", Value::Text(file.0.to_string())),
-                    (
-                        "audience",
-                        Value::Text(crate::write_encoding::audience_text(&Audience::Store)),
-                    ),
+                    ("audience", Value::Text(Audience::Store.to_string())),
                     ("size", Value::Integer(1)),
                     ("hash", hash.clone()),
                     ("coordinates", coordinates.clone()),

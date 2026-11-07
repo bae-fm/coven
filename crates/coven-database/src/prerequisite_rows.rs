@@ -85,7 +85,7 @@ impl PrerequisiteRows {
             }
             Self::Reload(audience) => vec![rows(
                 "_coven_data_reloads",
-                &[("audience", text(&crate::write_encoding::audience_text(audience)))],
+                &[("audience", text(&audience.to_string()))],
                 DATA_RELOADS,
             )],
             Self::ProviderAccess(account) => {

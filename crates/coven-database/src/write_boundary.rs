@@ -1,6 +1,6 @@
 //! Checked entry boundaries, their immutable coverage, and slot selection.
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience, audience_text, counter, damaged};
+use crate::write_encoding::{audience, counter, damaged};
 use crate::{DbError, StoreState, StoreVersion};
 use coven_format::{
     admin::SnapshotId, snapshot_rows::ChangeVerdict, value::Slot, write::WriteHeader,
@@ -104,7 +104,7 @@ pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Resu
             entry.0.to_be_bytes().as_slice(),
             kind,
             version,
-            audience_text(&snapshot.audience),
+            &snapshot.audience,
             snapshot.device,
             snapshot.number.to_be_bytes().as_slice()
         ],
@@ -189,7 +189,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
         [],
         |row| {
             let snapshot = SnapshotId {
-                audience: audience(&row.get::<_, String>(2)?)?,
+                audience: audience(row, 2)?,
                 device: row.get::<_, DeviceId>(3)?,
                 number: counter(row.get(4)?)?,
             };

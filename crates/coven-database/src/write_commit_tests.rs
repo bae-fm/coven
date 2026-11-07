@@ -826,7 +826,7 @@ pub(crate) fn restore_first_generation(
     row: &coven_merge::RowId,
     cells: &[(i64, i64)],
 ) -> Result<(), crate::DbError> {
-    let audience = crate::write_encoding::audience_text(&row.audience);
+    let audience = &row.audience;
     db.internal_execute(
         "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",
         crate::params![row.table, row.key, audience, 2u64.to_be_bytes().as_slice()],

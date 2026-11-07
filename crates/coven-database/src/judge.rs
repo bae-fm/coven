@@ -23,7 +23,6 @@
 
 use crate::judge_view::{Authoring, ChildView};
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::audience_text;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::loss::AuthorizationFailure;
@@ -532,7 +531,7 @@ pub(crate) fn stored(
             "SELECT admission FROM _coven_authored_admissions WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
             params![
                 merge_fields::encode_write_id(&header.position)?,
-                audience_text(&row.audience),
+                &row.audience,
                 row.table,
                 row.key
             ],

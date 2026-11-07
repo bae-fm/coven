@@ -104,7 +104,7 @@ pub(crate) fn load<P: crate::PendingValue>(
         for audience in &selected {
             database.internal_execute(
                 "DELETE FROM temp._coven_download_rows WHERE audience=?1",
-                [crate::write_encoding::audience_text(audience)],
+                [audience],
             )?;
         }
         crate::snapshot_state::drop_tables(database)?;

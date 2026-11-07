@@ -1,6 +1,6 @@
 //! Stage a write's merged values in SQLite before changing app-visible rows.
 use crate::merge_store::MergeStore;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::{decoded, encoded};
 use crate::write_rows::AppView;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
@@ -45,7 +45,7 @@ pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
 pub(crate) fn replace(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
     database.internal_execute(
         "INSERT INTO temp._coven_download_replaced(audience) VALUES(?1) ON CONFLICT DO NOTHING",
-        [audience_text(audience)],
+        [audience],
     )?;
     Ok(())
 }
@@ -57,7 +57,7 @@ pub(crate) fn replaced(
 ) -> Result<bool, DbError> {
     database.query_row(
         "SELECT EXISTS(SELECT 1 FROM temp._coven_download_replaced WHERE audience=?1)",
-        [audience_text(audience)],
+        [audience],
         |r| r.get(0),
     )
 }
@@ -69,7 +69,7 @@ pub(crate) fn values(
     schema: &crate::schema::Schema,
     row: &RowId,
 ) -> Result<Option<crate::write_rows::AppValues>, DbError> {
-    let audience = audience_text(&row.audience);
+    let audience = &row.audience;
     let (bytes, replaced): (Option<Vec<u8>>, bool) = database.query_row(
         "SELECT (SELECT columns FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3),
                 EXISTS(SELECT 1 FROM temp._coven_download_replaced WHERE audience=?3)",
@@ -169,7 +169,7 @@ pub(crate) fn stage(
                  AND (?3 IS NULL OR (table_name,key)>(?3,?4)) ORDER BY table_name,key LIMIT 1",
                 params![
                     write,
-                    audience_text(audience),
+                    audience,
                     last.as_ref().map(|(t, _)| t),
                     last.as_ref().map(|(_, k)| k)
                 ],
@@ -242,7 +242,7 @@ pub(crate) fn put_values(
 ) -> Result<(), DbError> {
     database.internal_execute(
         "DELETE FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
-        params![row.table, row.key, audience_text(&row.audience)],
+        params![row.table, row.key, &row.audience],
     )?;
     retain_values(database, row, state)
 }
@@ -261,7 +261,7 @@ pub(crate) fn retain_values(
     } else {
         None
     };
-    database.internal_execute("INSERT INTO temp._coven_download_rows(table_name,key,audience,columns) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![row.table,row.key,audience_text(&row.audience),columns])?;
+    database.internal_execute("INSERT INTO temp._coven_download_rows(table_name,key,audience,columns) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![row.table,row.key,&row.audience,columns])?;
     Ok(())
 }
 

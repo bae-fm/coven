@@ -12,7 +12,7 @@ use crate::removal::Deferral;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, sql_value, value};
+use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{key_columns, key_parameters, key_predicate, AppValues};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -29,7 +29,7 @@ pub(crate) fn materialize(
     for row in region {
         db.internal_execute(
             "INSERT INTO temp._coven_install_region(table_name,key,audience) VALUES(?1,?2,?3)",
-            params![row.table, row.key, audience_text(&row.audience)],
+            params![row.table, row.key, &row.audience],
         )?;
     }
     let layout = SnapshotLayout::new(schema);
