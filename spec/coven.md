@@ -9968,7 +9968,13 @@ What they don't cover:
   both Dropbox access levels, refresh their tokens, and check grants and
   revocations (storage-certification.md); coven's own side, refusing an
   App-folder share before any request and refreshing once then retrying once,
-  is tested in Rust.
+  is tested in Rust. Coven likewise takes as given the largest object a
+  provider takes in one request, which decides between one request and a
+  multipart upload (§17.9).
+- **Bytes on the device.** How file bytes are flushed to the drive on each
+  platform, and how a store's own files are saved whole (Appendix C.3), are
+  tested against the Rust. The storage models take a flush that returns as
+  durable.
 - **Costs.** The request counts and bounds of §21, the database writer never
   held across a network request and the interval between idle passes (§6.7)
   among them, are tested (§21.3), not proved.
