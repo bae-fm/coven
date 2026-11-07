@@ -200,6 +200,34 @@ impl History {
             .filter(|share| !share.ended && self.gone_for_good(share.device).is_none())
     }
 
+    /// The provider work that takes back what a lost owner device's shares
+    /// may have granted after this device's own revocations: every account
+    /// those shares named that nothing intends now (§20.9). Refused when
+    /// `member`'s devices don't change sharing here (S3, or another account
+    /// holds the store) or the device isn't gone for good.
+    pub(crate) fn cut_off_retakes(
+        &self,
+        member: MemberId,
+        device: DeviceId,
+    ) -> Result<Vec<coven_database::ProviderAccessChange>, SyncError> {
+        let provider_account =
+            matches!(self.store_access(), Some(MemberAccess::ProviderAccount(_)));
+        if !provider_account || !self.owns_storage(member) || self.gone_for_good(device).is_none() {
+            return Err(OperationRejection::NotAllowed.into());
+        }
+        let accounts: BTreeSet<String> = self
+            .invite_shares
+            .values()
+            .filter(|share| share.device == device)
+            .map(|share| MemberAccess::normalized_account(&share.account))
+            .filter(|account| !self.account_intended(account))
+            .collect();
+        accounts
+            .iter()
+            .map(|account| crate::sequence_sync::account_change(account, false, false))
+            .collect()
+    }
+
     /// Whether `account` is meant to be shared: an active member reaches
     /// storage through it, or an open invite share names it (§14.2).
     pub(crate) fn account_intended(&self, account: &str) -> bool {

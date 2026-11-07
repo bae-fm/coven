@@ -1,0 +1,116 @@
+use crate::sequence_sync::sequence_invites::shares::tests::{grants, household, row, CAROL};
+use crate::sequence_sync::tests::*;
+use crate::*;
+use coven_format::admin::{MemberRole, StoreChange};
+
+/// §20.9: Ana's phone has shared Carol's account with a grant still in
+/// flight when Ben removes the phone. Her laptop reads the removal, which
+/// ends the phone's share, and takes Carol's account back; then the phone's
+/// grant lands, and the phone stops. Nothing of Ana's is listed or running,
+/// yet Carol's account is shared with nobody to take it back. Once Ana signs
+/// the phone out at the provider and tells the laptop, the laptop takes it
+/// back.
+#[tokio::test]
+async fn confirming_a_lost_device_cut_off_takes_back_a_share_that_landed_late() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    phone.storage.hold_next_access(CAROL, true, entered, released).await;
+    let making = phone.sync.create_invite(
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteAccess::ProviderAccount { email: CAROL.into() },
+        InviteLifetime::Day,
+    );
+    let meanwhile = async {
+        entering.await.unwrap();
+        laptop.sync.pass().await.unwrap();
+        ben.sync.pass().await.unwrap();
+        ben.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
+        laptop.sync.pass().await.unwrap();
+        assert_eq!(row(&laptop, CAROL).await, Some((false, Some(false))));
+        release.send(()).unwrap();
+    };
+    let (made, ()) = tokio::time::timeout(coven_foundation::clock::HANG_GUARD, async {
+        tokio::join!(making, meanwhile)
+    })
+    .await
+    .expect("the held grant and the removal finish");
+    assert!(made.is_err(), "the phone stops reading its removal");
+    assert_eq!(grants(&laptop), 0);
+    assert!(group.storage.shared_with(CAROL).await, "the late grant landed");
+
+    laptop.sync.pass().await.unwrap();
+    assert!(group.storage.shared_with(CAROL).await, "no pass of the laptop takes it back");
+
+    laptop.sync.confirm_device_cut_off(phone.sync.device).await.unwrap();
+    assert_eq!(row(&laptop, CAROL).await.map(|(intended, _)| intended), Some(false));
+    laptop.sync.pass().await.unwrap();
+    assert!(!group.storage.shared_with(CAROL).await);
+    assert_eq!(row(&laptop, CAROL).await, Some((false, Some(false))));
+    assert!(laptop.database().operations().await.unwrap().is_empty());
+    assert!(laptop.database().pending::<PendingRecord>().await.unwrap().is_empty());
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// §20.9: an account another open invite of the laptop's names stays shared.
+#[tokio::test]
+async fn confirming_a_device_cut_off_leaves_an_account_something_still_uses() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    invite(&phone).await;
+    invite(&laptop).await;
+    ben.sync.pass().await.unwrap();
+    ben.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    laptop.sync.confirm_device_cut_off(phone.sync.device).await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    assert!(group.storage.shared_with(CAROL).await);
+    assert_eq!(row(&laptop, CAROL).await.map(|(intended, _)| intended), Some(true));
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// §20.9: a device that isn't gone for good, and a device of a member who
+/// doesn't hold the store's account, are refused.
+#[tokio::test]
+async fn confirming_is_refused_for_a_device_not_gone_and_by_a_device_not_the_owners() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    invite(&phone).await;
+    assert!(matches!(
+        laptop.sync.confirm_device_cut_off(phone.sync.device).await,
+        Err(SyncError::Rejected(OperationRejection::NotAllowed))
+    ));
+    ben.sync.pass().await.unwrap();
+    ben.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
+    assert!(matches!(
+        ben.sync.confirm_device_cut_off(phone.sync.device).await,
+        Err(SyncError::Rejected(OperationRejection::NotAllowed))
+    ));
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// §20.9: on S3 nothing is shared with an account, so there is nothing to
+/// take back.
+#[tokio::test]
+async fn confirming_is_refused_on_s3() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.administer(StoreChange::RemoveDevice { device: ben.sync.device }).await.unwrap();
+    assert!(matches!(
+        ana.sync.confirm_device_cut_off(ben.sync.device).await,
+        Err(SyncError::Rejected(OperationRejection::NotAllowed))
+    ));
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

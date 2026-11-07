@@ -75,4 +75,4 @@ impl SequenceSync {
 
 #[cfg(test)]
 #[path = "sequence_invite_shares_tests.rs"]
-mod tests;
+pub(crate) mod tests;

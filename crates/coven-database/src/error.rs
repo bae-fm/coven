@@ -39,6 +39,11 @@ pub enum DbError {
     /// No current claim exists for this operation.
     #[error("there is no current claim")]
     NoClaim,
+    /// A request to a provider account is between its target being fixed and
+    /// its reply, so a revocation queued now could precede the grants it
+    /// must follow (§20.9). The call is made again once the request ends.
+    #[error("a request to a provider account is running")]
+    ProviderRequestRunning,
     /// Uncertain publication cannot be abandoned or resealed; a landed writes
     /// batch cannot finish until its consumed state has committed.
     #[error("the current claim has not settled or its writes have not applied")]

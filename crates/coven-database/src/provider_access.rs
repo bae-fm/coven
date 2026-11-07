@@ -174,6 +174,44 @@ pub(crate) fn adopt<P: PendingValue>(
     Ok(())
 }
 
+/// Take back accounts whose confirmed grant can no longer be trusted: the
+/// person confirmed that a lost owner device, whose grants may have landed
+/// after this device's revocations, can land nothing more (§20.9). Each
+/// account forgets its confirmed grant and queues a request for its
+/// intention, so a revocation follows any grant that landed before the
+/// confirmation. An account with a request between its fixed target and its
+/// reply fails the call with `ProviderRequestRunning`, and nothing changes:
+/// that request's reply may precede the confirmation.
+pub(crate) fn retake<P: PendingValue>(
+    db: &DatabaseConnection,
+    changes: &[ProviderAccessChange],
+) -> Result<(), DbError> {
+    for change in changes {
+        if let Some(request) = read(db, &change.account)?.and_then(|state| state.request) {
+            let record =
+                crate::operation::find(db, request.operation)?.ok_or(DbError::DamagedDatabase)?;
+            if record.last_step == REQUEST_FIXED_STEP {
+                return Err(DbError::ProviderRequestRunning);
+            }
+            if record.last_step == REQUEST_FAILED_STEP {
+                // A reported failure waits for the app's retry; this
+                // request is that retry.
+                requeue(db, &change.account, request.operation)?;
+            }
+        }
+        db.internal_execute(
+            "INSERT INTO _coven_provider_access(account,intended) VALUES(?1,?2) \
+             ON CONFLICT(account) DO NOTHING",
+            (&change.account, change.intended),
+        )?;
+        db.internal_execute(
+            "UPDATE _coven_provider_access SET granted=NULL,invitation=NULL WHERE account=?1",
+            [&change.account],
+        )?;
+    }
+    adopt::<P>(db, changes)
+}
+
 #[cfg(test)]
 #[path = "provider_access_tests.rs"]
 pub(crate) mod tests;

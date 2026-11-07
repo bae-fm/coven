@@ -869,7 +869,7 @@ mod approval;
 mod reset;
 
 #[path = "sequence_invite_shares.rs"]
-mod shares;
+pub(crate) mod shares;
 
 #[path = "sequence_invite_steps.rs"]
 mod steps;

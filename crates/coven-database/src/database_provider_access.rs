@@ -1,5 +1,5 @@
 //! Atomic provider intentions and request confirmations.
-use crate::provider_access::{adopt, finish, read};
+use crate::provider_access::{adopt, finish, read, retake};
 use crate::{
     DbError, NewOperation, OperationId, PendingValue, ProviderAccess, ProviderAccessChange,
     ProviderAccessRequest,
@@ -52,6 +52,18 @@ impl crate::Database {
                     adopt::<P>(db, &changes)
                 })
             })
+        })
+        .await
+    }
+
+    /// Forget each account's confirmed grant and queue a request for its
+    /// intention, atomically (`provider_access::retake`).
+    pub async fn retake_provider_access<P: PendingValue>(
+        &self,
+        changes: Vec<ProviderAccessChange>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|db| db.transaction(|db| retake::<P>(db, &changes)))
         })
         .await
     }

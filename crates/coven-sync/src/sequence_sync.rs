@@ -710,6 +710,8 @@ mod sequence_claim;
 pub(crate) mod sequence_copies;
 #[path = "sequence_credentials.rs"]
 mod sequence_credentials;
+#[path = "sequence_cut_off.rs"]
+mod sequence_cut_off;
 #[path = "sequence_files.rs"]
 mod sequence_files;
 #[path = "sequence_gone_requests.rs"]

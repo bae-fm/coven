@@ -256,3 +256,37 @@ async fn grants_left_in_place_fail_the_revocation_only_while_it_is_intended() {
         db.close().await.unwrap();
     }
 }
+
+/// §20.9: retaking an idle, confirmed-unshared account forgets the
+/// confirmation and queues a revocation; one whose request is between its
+/// fixed target and its reply refuses, changing nothing.
+#[tokio::test]
+async fn retaking_an_account_queues_a_request_unless_one_is_running() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let account = "account@example.com";
+    let mut taken = change(false);
+    taken.initially_granted = false;
+    db.start_operation_with_access::<Record>(change(false).operation, vec![taken]).await.unwrap();
+    let state = db.provider_access(account.into()).await.unwrap().unwrap();
+    assert_eq!((state.intended, state.granted), (false, Some(false)));
+    assert!(state.request.is_none());
+
+    let mut again = change(false);
+    again.initially_granted = false;
+    db.retake_provider_access::<Record>(vec![again]).await.unwrap();
+    let state = db.provider_access(account.into()).await.unwrap().unwrap();
+    assert_eq!(state.granted, None);
+    let id = state.request.expect("a revocation is queued").operation;
+
+    db.start_provider_request::<Record>(account.into(), id).await.unwrap();
+    let mut running = change(false);
+    running.initially_granted = false;
+    assert!(matches!(
+        db.retake_provider_access::<Record>(vec![running]).await,
+        Err(DbError::ProviderRequestRunning)
+    ));
+    let state = db.provider_access(account.into()).await.unwrap().unwrap();
+    assert_eq!(state.request.map(|request| request.target), Some(Some(false)));
+    db.close().await.unwrap();
+}

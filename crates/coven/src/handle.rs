@@ -322,6 +322,20 @@ impl CovenHandle {
     ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
         self.write(move |write| write.remove_device(device)).await
     }
+    /// The person did the provider step for a lost device of the account
+    /// that holds the store (§14.2): signed it out, so nothing it sent can
+    /// land any more. This device takes back every account that device's
+    /// invite shares named which no member or open invite uses, with
+    /// requests like any other revocation, which run after this call
+    /// returns. Needs the connection (`NoStorage` without it), and is refused
+    /// with `Rejected(NotAllowed)` on a device that isn't of the account's
+    /// owner, for a device not gone for good, and on S3, where no account is
+    /// shared. While a request to one of those accounts runs it fails with
+    /// `DbError::ProviderRequestRunning` and changes nothing: call again
+    /// once it ends (§20.9).
+    pub async fn confirm_device_cut_off(&self, device: DeviceId) -> Result<(), SyncError> {
+        self.storage.confirm_device_cut_off(device).await
+    }
     /// Waits for an operation the app's writes journaled to end and returns
     /// its outcome, as `coven_operations` lists it (§11.4, E6); the outcome
     /// stays listed until a write acknowledges it. It waits for storage

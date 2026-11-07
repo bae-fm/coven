@@ -7,12 +7,12 @@ use coven_format::{
 use coven_foundation::clock::Clock;
 use coven_storage::test_utils::{Faults, MemoryRequest};
 
-const CAROL: &str = "carol@example.org";
+pub(crate) const CAROL: &str = "carol@example.org";
 
 /// Ana's phone makes Household on Dropbox and admits Ben, an admin with his
 /// own account; then
 /// Ana's laptop, holding the same account that holds the store, registers.
-async fn household(group: &Group) -> (Device, Device, Device) {
+pub(crate) async fn household(group: &Group) -> (Device, Device, Device) {
     let phone = group.device(1).await;
     let ben = group.device(2).await;
     group.create(&phone).await;
@@ -38,7 +38,7 @@ async fn household(group: &Group) -> (Device, Device, Device) {
 
 /// The account's row on `device`: whether it is meant to be shared, and
 /// whether a grant is confirmed.
-async fn row(device: &Device, account: &str) -> Option<(bool, Option<bool>)> {
+pub(crate) async fn row(device: &Device, account: &str) -> Option<(bool, Option<bool>)> {
     device
         .database()
         .provider_access(account.into())
@@ -47,7 +47,7 @@ async fn row(device: &Device, account: &str) -> Option<(bool, Option<bool>)> {
         .map(|access| (access.intended, access.granted))
 }
 
-fn grants(device: &Device) -> usize {
+pub(crate) fn grants(device: &Device) -> usize {
     device
         .storage
         .request_trace()

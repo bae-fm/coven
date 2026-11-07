@@ -52,6 +52,19 @@ impl StorageConnections {
         live.sync.clean_up_gone_devices_files().await
     }
 
+    /// The person did the provider step for a lost owner device (§14.2).
+    pub(crate) async fn confirm_device_cut_off(&self, device: DeviceId) -> Result<(), SyncError> {
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let ConnectionState::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.confirm_device_cut_off(device).await?;
+        // The requests it queued run in a pass.
+        self.sync_now();
+        Ok(())
+    }
+
     /// Install and record a replacement S3 key; it needs the connection.
     pub(crate) async fn replace_access_key(
         &self,
