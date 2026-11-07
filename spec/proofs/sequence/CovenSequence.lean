@@ -56,3 +56,4 @@ import CovenSequence.ClaimJournal
 import CovenSequence.SavedName
 import CovenSequence.SavedEntries
 import CovenSequence.WriteQueue
+import CovenSequence.PersonLeaves

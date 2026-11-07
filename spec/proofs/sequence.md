@@ -1055,6 +1055,26 @@ group, through the two operations that take several keychain steps (§13.1).
 The model has the keychain's steps and not the platform: that each step is
 atomic, and that the keychain lists the copies of every group, are assumed.
 
+## A member's removal and the saved code
+
+[`PersonLeaves`](sequence/CovenSequence/PersonLeaves.lean) models the pass that
+reaches the slot removing the device's member (§14.1). Before the slot's
+transaction it deletes the person's saved restore code and S3 key, and from the
+first attempt on the keychain refuses to write them again. A failed deletion
+fails the pass, which is retried over the same slot. A device saves the code
+only while the person has not left.
+
+- `removal_applies_only_after_deletion`: in every reachable world, once the
+  removal is applied the entries are deleted and the keychain refuses to write
+  them, however many passes failed before.
+- `removal_applies_after_follow`: a pass at the removal's slot that deletes the
+  entries then applies it.
+- `apply_first_leaves_code` is the counterexample: applying first and then
+  failing to delete leaves the code offered, and the deletion, which runs for
+  the slot that moves the member to removed, has no slot left to run for.
+
+The two entries are one step here; their order is `SavedEntries`.
+
 ## Invites and the app's operations
 
 [`InviteLifecycle`](sequence/CovenSequence/InviteLifecycle.lean) models one

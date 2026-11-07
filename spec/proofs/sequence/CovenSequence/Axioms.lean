@@ -506,3 +506,6 @@ import SequenceApply
 #print axioms CovenSequence.WriteQueue.leaves_only_landed
 #print axioms CovenSequence.WriteQueue.visible_exactly_once
 #print axioms CovenSequence.WriteQueue.unguarded_finish_loses
+#print axioms CovenSequence.PersonLeaves.removal_applies_only_after_deletion
+#print axioms CovenSequence.PersonLeaves.removal_applies_after_follow
+#print axioms CovenSequence.PersonLeaves.apply_first_leaves_code

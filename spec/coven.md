@@ -5115,7 +5115,9 @@ code and S3 key (§13.1), then applies the slot. On Apple the deletion reaches
 iCloud Keychain, and so all of Ben's devices: his laptop no longer offers
 Household. On Android each of his phones deletes its own as it applies slot
 52. The order matters: the removal never applies while the code is still
-offered. If the deletion fails, the pass fails with that
+offered
+([`removal_applies_only_after_deletion`](proofs/sequence/CovenSequence/PersonLeaves.lean)).
+If the deletion fails, the pass fails with that
 error and applies nothing. Sync tries the pass again on the shared schedule
 (§6.7), reads slot 52 again and repeats the deletion (§19.1). When Ben, as an
 admin, removes himself, his own phone's pass claims the removal and applies
@@ -12044,6 +12046,8 @@ Write-ups explain each model and state its assumptions:
 | A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
+| *Body.* A member's removal is applied only after the person's saved restore code and S3 key are deleted and the keychain refuses to write them again, whatever passes failed before; a pass at the removal's slot that deletes them then applies it | `removal_applies_only_after_deletion`, `removal_applies_after_follow` | `proofs/sequence/CovenSequence/PersonLeaves.lean` | §13.1, §14.1 |
+| *Body.* Applying the removal before deleting leaves the code offered with nothing left to delete it | `apply_first_leaves_code` | `proofs/sequence/CovenSequence/PersonLeaves.lean` | §14.1 |
 | Writes after a removal, a registration of another installation in the device's place, or a key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |
