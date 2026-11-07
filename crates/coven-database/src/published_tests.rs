@@ -514,6 +514,60 @@ async fn a_migration_write_reaches_the_counted_removal_it_replaces_with_none() {
     db.close().await.unwrap();
 }
 
+/// Ana and Ben rename the album `first` at once, and once both count, one
+/// title is a lost value. Ana, having seen it, retitles the album on this
+/// device, which replaces the lost value: the app shows none, and the kept
+/// album keeps it. Version 2 drops `title`. Freezing the kept state freezes
+/// the counted lost value; the app's album has none to freeze, so her
+/// migration write puts no lost value of it (§18.7). Ben's next slot sets
+/// the album's `year`, which puts the kept album back, and the queued writes
+/// that change it fold again: her retitle, which no longer sets a column
+/// the album has, and her migration write, which replaces the counted lost
+/// value with none.
+#[tokio::test]
+async fn a_slot_reaching_a_kept_row_folds_the_migration_write_that_replaces_its_lost_value() {
+    const SCHEMA: &str =
+        "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT, year INTEGER);
+         CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
+    let tables = || synced(&["albums", "notes"]);
+    let db = store.builder(tables(), initial()).open().await.unwrap();
+    sql(
+        &db,
+        "INSERT INTO albums VALUES('first','First',1990); INSERT INTO notes VALUES('n','Note')",
+    )
+    .await
+    .unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE albums SET title='Ana' WHERE id='first'").await.unwrap();
+    let rename = [("title", Value::Text("Ben".into()))];
+    crate::tests::remote_update_concurrent_with_queue(&db, "albums", "first", &rename).await;
+    count_own(&db).await;
+    assert_eq!(db.lost_values().await.unwrap().len(), 1);
+    sql(&db, "UPDATE albums SET title='Ana again' WHERE id='first'").await.unwrap();
+    assert_eq!(counted_losses(&db).len(), 1);
+    assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(
+        2,
+        "drop title",
+        "ALTER TABLE albums DROP COLUMN title",
+        OldWrites::Drop,
+    ));
+    let db = store.builder(tables(), migrations).open().await.unwrap();
+    let [counted] = &counted_losses(&db)[..] else { panic!("one counted lost value") };
+    assert!(counted.frozen);
+    assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
+    let year = [("year", Value::Integer(1991))];
+    crate::tests::remote_update_beside_queue(&db, "albums", "first", &year).await;
+    let [counted] = &counted_losses(&db)[..] else { panic!("one counted lost value") };
+    assert!(counted.frozen);
+    assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
+    db.close().await.unwrap();
+}
+
 /// Ana renames her counted album `first` on this device while Ben, who
 /// hasn't seen that, renames it too. Folding her unsent rename over Ben's
 /// leaves her title as a lost value the app shows, but the slots alone hold
