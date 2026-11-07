@@ -291,8 +291,9 @@ the key or unable to open it, never ends synced from there, however it steps,
 and shows waiting to sync on the slot, or failed, or update needed.
 `removal_reached` and `replacement_reached` prove that once a reader has applied
 its member's removal or a replacement of its keys, the device shows removed or
-device needs reset. A device's own removal, and a registration in its place, are
-not among them. The other states come from no store history: they are what a
+device needs reset, and `device_removal_reached` and
+`device_replacement_reached` the same for its own removal and a registration in
+its place. The other states come from no store history: they are what a
 provider or custody answers, what is recorded, or what is moving, and
 `every_state` reaches them from those facts.
 
