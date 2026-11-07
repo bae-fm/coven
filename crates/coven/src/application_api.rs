@@ -34,8 +34,8 @@ pub use coven_database::test_utils::{WorkCounter, WorkCounts};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{
-    named_params, params, prepare_user_file, types, unix_seconds_and_nanos, Binding,
-    BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CovenMigrationError, DbError,
+    named_params, params, prepare_user_file, sqlite_error_is_disk, types, unix_seconds_and_nanos,
+    Binding, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CovenMigrationError, DbError,
     Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource, FunctionArguments,
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, LoadStep,
     Lost, LostCell, LostValue, Migration, MigrationContext, MigrationError, Mode, MoveFile, MoveId,

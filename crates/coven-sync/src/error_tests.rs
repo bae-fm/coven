@@ -109,15 +109,23 @@ fn local_file_and_lock_failures_are_disk_failures_with_their_cause() {
         source: Box::new(std::io::Error::from(std::io::ErrorKind::StorageFull)),
     };
     let failures = [
-        SyncError::from(file()),
-        SyncError::from(coven_foundation::files::ObservationError::Missing(missing.clone())),
-        SyncError::from(coven_foundation::files::StoreLockError::AlreadyOpen(store)),
-        SyncError::disk(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+        (SyncError::from(file()), crate::LocalFailure::DiskFull),
+        (
+            SyncError::from(coven_foundation::files::ObservationError::Missing(missing.clone())),
+            crate::LocalFailure::DiskOther,
+        ),
+        (
+            SyncError::from(coven_foundation::files::StoreLockError::AlreadyOpen(store)),
+            crate::LocalFailure::DiskOther,
+        ),
+        (
+            SyncError::disk(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            crate::LocalFailure::DiskOther,
+        ),
     ];
-    for error in &failures {
-        let SyncError::Failed { failure: crate::LocalFailure::Disk, source } = error else {
-            panic!("{error:?}")
-        };
+    for (error, kind) in &failures {
+        let SyncError::Failed { failure, source } = error else { panic!("{error:?}") };
+        assert_eq!(failure, kind, "{error:?}");
         assert!(
             source.is::<coven_foundation::files::FileError>()
                 || source.is::<coven_foundation::files::ObservationError>()
@@ -126,6 +134,34 @@ fn local_file_and_lock_failures_are_disk_failures_with_their_cause() {
             "{source:?}"
         );
     }
+}
+
+/// A full disk, a refused file and anything else are three failures a person
+/// answers differently, so the operating system's error decides which one a
+/// disk failure is, wherever it sits in the chain of causes.
+#[test]
+fn a_full_disk_is_told_from_a_refused_file_and_from_any_other_disk_failure() {
+    use std::io::ErrorKind as K;
+    let file = |kind: K| coven_foundation::files::FileError::Io {
+        operation: "write",
+        path: std::path::PathBuf::from("snapshot.tmp"),
+        source: Box::new(std::io::Error::from(kind)),
+    };
+    for (kind, expected) in [
+        (K::StorageFull, crate::LocalFailure::DiskFull),
+        (K::QuotaExceeded, crate::LocalFailure::DiskFull),
+        (K::PermissionDenied, crate::LocalFailure::DiskDenied),
+        (K::ReadOnlyFilesystem, crate::LocalFailure::DiskDenied),
+        (K::NotFound, crate::LocalFailure::DiskOther),
+    ] {
+        assert_eq!(crate::LocalFailure::of_disk(&file(kind)), expected, "{kind:?}");
+    }
+    // The cause sits under a failed cleanup of the temporary file.
+    let cleaned = coven_foundation::files::FileError::Cleanup {
+        operation: Box::new(file(K::PermissionDenied)),
+        cleanup: Box::new(std::io::Error::from(K::StorageFull)),
+    };
+    assert_eq!(crate::LocalFailure::of_disk(&cleaned), crate::LocalFailure::DiskDenied);
 }
 
 #[test]
@@ -203,17 +239,17 @@ fn a_failing_operation_names_its_reason_and_cause() {
             id: crate::OperationId(4),
             kind: crate::OperationKind::RetainFiles,
         },
-        crate::PendingReason::Failed(crate::LocalFailure::Disk),
+        crate::PendingReason::Failed(crate::LocalFailure::DiskOther),
     );
     let failure = SyncFailure::Operation(Box::new(record.clone()));
     assert_eq!(
         failure.to_string(),
         "coven's own work failed its last attempt: \
-         Operation { id: OperationId(4), kind: RetainFiles }: Failed(Disk)"
+         Operation { id: OperationId(4), kind: RetainFiles }: Failed(DiskOther)"
     );
     record.cause = Some("disk full".into());
     let failure = SyncFailure::Operation(Box::new(record));
-    assert!(failure.to_string().ends_with(": Failed(Disk): disk full"), "{failure}");
+    assert!(failure.to_string().ends_with(": Failed(DiskOther): disk full"), "{failure}");
 }
 
 /// Storage's and custody's bugs are sync's own bug, not a storage or

@@ -184,7 +184,7 @@ pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]
 use download::{DownloadedPart, DownloadedWrite};
 pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuthorship};
-pub use error::{CovenMigrationError, DbError, MigrationError, OpenError};
+pub use error::{sqlite_error_is_disk, CovenMigrationError, DbError, MigrationError, OpenError};
 pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadCompletion, UploadProgress, UploadQueueState};
 pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream};

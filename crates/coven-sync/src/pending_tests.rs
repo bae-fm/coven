@@ -72,7 +72,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
     let storage =
         |failure| PendingReason::Storage { provider: CloudProvider::S3, failure, answered: true };
     for (reason, coven) in [
-        (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic),
+        (PendingReason::Failed(LocalFailure::DiskOther), Retry::Automatic),
         (PendingReason::Failed(LocalFailure::Database), Retry::Automatic),
         (PendingReason::Failed(LocalFailure::KeyCustody), Retry::Automatic),
         (PendingReason::Failed(LocalFailure::Operation), Retry::Never),
@@ -120,7 +120,9 @@ fn local_failures_retry_slots_and_passes_as_they_clear() {
     for subject in [PendingSubject::Slot(slot(4)), PendingSubject::Connection] {
         for (failure, retry) in [
             (LocalFailure::Database, Retry::Automatic),
-            (LocalFailure::Disk, Retry::Automatic),
+            (LocalFailure::DiskFull, Retry::Automatic),
+            (LocalFailure::DiskDenied, Retry::Automatic),
+            (LocalFailure::DiskOther, Retry::Automatic),
             (LocalFailure::KeyCustody, Retry::Automatic),
             (LocalFailure::Crypto, Retry::AppAction),
             (LocalFailure::Operation, Retry::AppAction),
@@ -147,7 +149,7 @@ fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
         (storage(StorageFailure::File), Retry::Automatic, Retry::AppAction),
         (storage(StorageFailure::Authentication), Retry::AppAction, Retry::AppAction),
         (storage(StorageFailure::Protocol), Retry::Never, Retry::Never),
-        (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic, Retry::AppAction),
+        (PendingReason::Failed(LocalFailure::DiskOther), Retry::Automatic, Retry::AppAction),
         (PendingReason::Waits(Prerequisite::SequenceCatchUp), Retry::Automatic, Retry::AppAction),
         (PendingReason::NoStorage, Retry::AppAction, Retry::AppAction),
         (
@@ -224,7 +226,7 @@ fn only_an_unanswered_network_failure_is_offline() {
     assert!(!storage(StorageFailure::Network, true).offline());
     assert!(!storage(StorageFailure::RateLimited, true).offline());
     assert!(!storage(StorageFailure::File, false).offline());
-    assert!(!PendingReason::Failed(LocalFailure::Disk).offline());
+    assert!(!PendingReason::Failed(LocalFailure::DiskOther).offline());
 }
 
 /// A refusal is a verdict on bytes that never change, so only coven's own

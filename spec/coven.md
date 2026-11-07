@@ -7016,7 +7016,7 @@ again.
 | a complete chunk fails authentication, and a second fetch returns the same bytes | `Refused(Decryption)` | the same bytes are never retried on their own; another build of coven rechecks them once (§19.1) |
 | a fetch's bytes fail their check, and a second fetch returns other bytes | the `Storage` category `Corrupted` | the next read or pin tries again (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
-| writing the local cache fails | `Failed(Disk)` | |
+| writing the local cache fails | `Failed(DiskFull)`, `Failed(DiskDenied)` or `Failed(DiskOther)`, by the operating system error behind it | |
 | the database fails | `Failed(Database)` | |
 
 No failed range is marked cached or pinned. A read of a file on this device
@@ -12241,7 +12241,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Keep` (a pending subject) | a pin coven keeps for a file kept here; its failures retry under the shared backoff | §17.7, §17.8 |
 | `Original { path, failure }` | a move's original is missing, and the move waits for it, or changed, and the move failed | §17.3 |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.7 |
-| `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.7 |
+| `Failed(DiskFull)`, `Failed(DiskDenied)`, `Failed(DiskOther)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.7 |
 | `Failed(LocalFailure::Database)` | a database failure, with its cause on the call: `DbError::DamagedDatabase` for a damaged database | §19.1 |
 | `Failed(LocalFailure::Shutdown)` | the runtime shut down and dropped the work, which the next process runs again | api.md E15 |
 | `Failed(LocalFailure::Bug)` | coven's own code broke its rule or panicked; the work retries under backoff and fails again until the bug is fixed | api.md E15 |

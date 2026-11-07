@@ -205,7 +205,7 @@ async fn a_disk_failure_retries_after_its_backoff() {
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert_eq!(
         f.upload_reason(&file).await,
-        Some(PendingReason::Failed(crate::LocalFailure::Disk))
+        Some(PendingReason::Failed(crate::LocalFailure::DiskOther))
     );
     assert_eq!(retry_in(&f), Some(Duration::from_secs(1)));
     std::fs::remove_file(&path).unwrap();

@@ -194,9 +194,8 @@ impl<M: FilesMode> FilesInner<M> {
             (_, FileReadError::UserFileChanged { .. }) => PendingReason::FileUnavailable(
                 FileMissingReason::Source(FileSourceFailure::Changed),
             ),
-            (_, FileReadError::Disk(_) | FileReadError::Lock(_)) => {
-                PendingReason::Failed(LocalFailure::Disk)
-            }
+            (_, FileReadError::Disk(error)) => PendingReason::Failed(LocalFailure::of_disk(error)),
+            (_, FileReadError::Lock(error)) => PendingReason::Failed(LocalFailure::of_disk(error)),
             (_, FileReadError::Bug(_)) => PendingReason::Failed(LocalFailure::Bug),
             // A file only on another device is refused before any work it
             // could record, so these name a local invariant failing, as does

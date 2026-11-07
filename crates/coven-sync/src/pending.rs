@@ -153,8 +153,16 @@ pub enum Prerequisite {
 pub enum LocalFailure {
     /// Database state or persistence failed.
     Database,
-    /// Local file access failed.
-    Disk,
+    /// Local file access failed because the disk is full or its quota is
+    /// spent.
+    DiskFull,
+    /// Local file access failed because the operating system refused this
+    /// process the file or folder, or the volume is read-only.
+    DiskDenied,
+    /// Local file access failed for a reason that is neither: the file is
+    /// gone, the device failed, or the cause names no operating system
+    /// error.
+    DiskOther,
     /// Key custody failed.
     KeyCustody,
     /// Cryptographic work failed.
@@ -168,6 +176,29 @@ pub enum LocalFailure {
     /// under backoff, as a database failure does, and fails again until the
     /// bug is fixed (E15).
     Bug,
+}
+
+impl LocalFailure {
+    /// The disk failure `error` is, read from the operating system error
+    /// first in its chain of causes: a full disk or spent quota, a refusal
+    /// of access or a read-only volume, or anything else.
+    pub(crate) fn of_disk(error: &(dyn std::error::Error + 'static)) -> Self {
+        let mut current = Some(error);
+        while let Some(cause) = current {
+            if let Some(os) = cause.downcast_ref::<std::io::Error>() {
+                return match os.kind() {
+                    std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => {
+                        Self::DiskFull
+                    }
+                    std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::ReadOnlyFilesystem => Self::DiskDenied,
+                    _ => Self::DiskOther,
+                };
+            }
+            current = cause.source();
+        }
+        Self::DiskOther
+    }
 }
 
 /// The provider's intended sharing change.
@@ -440,7 +471,9 @@ impl PendingReason {
         match self.retry_cause() {
             Self::Failed(
                 LocalFailure::Database
-                | LocalFailure::Disk
+                | LocalFailure::DiskFull
+                | LocalFailure::DiskDenied
+                | LocalFailure::DiskOther
                 | LocalFailure::KeyCustody
                 | LocalFailure::Shutdown
                 | LocalFailure::Bug,

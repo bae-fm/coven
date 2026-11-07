@@ -106,7 +106,9 @@ fn failure_name(failure: StorageFailure) -> &'static str {
 fn local_name(failure: LocalFailure) -> &'static str {
     match failure {
         LocalFailure::Database => "database",
-        LocalFailure::Disk => "disk",
+        LocalFailure::DiskFull => "diskFull",
+        LocalFailure::DiskDenied => "diskDenied",
+        LocalFailure::DiskOther => "diskOther",
         LocalFailure::KeyCustody => "keyCustody",
         LocalFailure::Crypto => "crypto",
         LocalFailure::Operation => "operation",
@@ -203,7 +205,7 @@ fn reasons() -> Vec<PendingReason> {
     reasons.extend(
         [
             LocalFailure::Database,
-            LocalFailure::Disk,
+            LocalFailure::DiskOther,
             LocalFailure::KeyCustody,
             LocalFailure::Crypto,
             LocalFailure::Operation,
@@ -216,7 +218,7 @@ fn reasons() -> Vec<PendingReason> {
         .iter()
         .step_by(5)
         .map(|cleanup| PendingReason::Cleanup {
-            operation: Box::new(PendingReason::Failed(LocalFailure::Disk)),
+            operation: Box::new(PendingReason::Failed(LocalFailure::DiskOther)),
             cleanup: Box::new(cleanup.clone()),
         })
         .collect();

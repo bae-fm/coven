@@ -274,7 +274,7 @@ impl SyncError {
 
     /// A local file, directory or store-lock failure, retaining its cause.
     pub(crate) fn disk(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::Failed { failure: crate::LocalFailure::Disk, source: Arc::new(error) }
+        Self::Failed { failure: crate::LocalFailure::of_disk(&error), source: Arc::new(error) }
     }
 
     /// The local category recorded for a failure that names no other condition.

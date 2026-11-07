@@ -267,7 +267,9 @@ impl PendingReason {
             Self::Failed(LocalFailure::Shutdown) => None,
             Self::Failed(
                 LocalFailure::Database
-                | LocalFailure::Disk
+                | LocalFailure::DiskFull
+                | LocalFailure::DiskDenied
+                | LocalFailure::DiskOther
                 | LocalFailure::KeyCustody
                 | LocalFailure::Crypto
                 | LocalFailure::Operation

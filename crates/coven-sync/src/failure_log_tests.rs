@@ -5,7 +5,7 @@ fn error(text: &str) -> std::io::Error {
     std::io::Error::other(text.to_owned())
 }
 
-const DISK: PendingReason = PendingReason::Failed(LocalFailure::Disk);
+const DISK: PendingReason = PendingReason::Failed(LocalFailure::DiskOther);
 const DATABASE: PendingReason = PendingReason::Failed(LocalFailure::Database);
 
 /// A failure logs when the subject's reason appears or changes; the same

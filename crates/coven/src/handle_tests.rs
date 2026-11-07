@@ -673,7 +673,13 @@ fn access_and_lasting_local_failures_require_app_action() {
     }
     // A pass that fails on a local failure that clears by itself, such as a
     // locked keychain, retries on its own: no app call asks for it again.
-    for failure in [LocalFailure::Database, LocalFailure::Disk, LocalFailure::KeyCustody] {
+    for failure in [
+        LocalFailure::Database,
+        LocalFailure::DiskFull,
+        LocalFailure::DiskDenied,
+        LocalFailure::DiskOther,
+        LocalFailure::KeyCustody,
+    ] {
         assert_eq!(retry(PendingReason::Failed(failure)), Retry::Automatic);
     }
     assert_eq!(retry(PendingReason::Removed), Retry::Never);

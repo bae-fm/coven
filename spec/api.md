@@ -1724,6 +1724,19 @@ pub enum DbError {
     CaptureChanged,
 }
 
+impl DbError {
+    /// Whether the disk under the store caused this failure: its files could
+    /// not be read or kept (`Disk`), or SQLite found the disk full, failing,
+    /// read-only or damaged, also under a failed rollback. Any other failure
+    /// is not the disk's.
+    pub fn is_disk(&self) -> bool;
+}
+
+/// Whether SQLite failed because of the disk under it, from its error code:
+/// full, failing, gone read-only, or damaged. `DbError::is_disk` answers it
+/// for a `DbError`; this answers it for the SQLite error an app holds.
+pub fn sqlite_error_is_disk(error: &rusqlite::Error) -> bool;
+
 /// Why snapshots or their gap writes could not be checked or loaded (§16.5, §19.2).
 pub enum SnapshotError {
     /// Reading or checking a selected snapshot's plaintext failed. `staged`
@@ -5196,7 +5209,8 @@ pub enum SyncError {
     Database(DbError),
     /// A local invariant or resource failed: the database refusing sync's
     /// own requests (`Database`), local files, directories or the store lock
-    /// (`Disk`), or the operation worker stopping on its journal
+    /// (`DiskFull`, `DiskDenied` or `DiskOther`, read from the operating
+    /// system error in the cause's chain), or the operation worker stopping on its journal
     /// (`Operation`). The public category is also recorded as
     /// PendingReason::Failed; the initiating call retains the native cause.
     /// Callers failed by one cause, such as a stopped worker's waiters, share it.
@@ -5372,7 +5386,14 @@ pub enum FileSourceFailure {
 /// Durable local categories; the failing call also retains its native typed cause.
 pub enum LocalFailure {
     Database,
-    Disk,
+    /// Local file access failed because the disk is full or its quota is spent.
+    DiskFull,
+    /// ...because the operating system refused this process the file or
+    /// folder, or the volume is read-only.
+    DiskDenied,
+    /// ...for any other reason, including a cause that names no operating
+    /// system error.
+    DiskOther,
     KeyCustody,
     Crypto,
     Operation,

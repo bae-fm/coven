@@ -702,6 +702,37 @@ pub enum DbError {
     },
 }
 
+impl DbError {
+    /// Whether the disk under the store caused this failure: its files
+    /// could not be read or kept, or SQLite found the disk full, failing,
+    /// read-only or damaged. A failure of any other kind, and one that
+    /// names no disk error, is not the disk's.
+    pub fn is_disk(&self) -> bool {
+        match self {
+            Self::Disk(_) => true,
+            Self::Sqlite(error) => sqlite_error_is_disk(error),
+            Self::Rollback { operation, .. } => operation.is_disk(),
+            _ => false,
+        }
+    }
+}
+
+/// Whether SQLite failed because of the disk under it: full, failing, gone
+/// read-only, or damaged.
+pub fn sqlite_error_is_disk(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(
+            rusqlite::ErrorCode::DiskFull
+                | rusqlite::ErrorCode::SystemIoFailure
+                | rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::ReadOnly
+                | rusqlite::ErrorCode::DatabaseCorrupt
+                | rusqlite::ErrorCode::NotADatabase
+        )
+    )
+}
+
 impl From<coven_foundation::task::TaskFailed> for DbError {
     fn from(failed: coven_foundation::task::TaskFailed) -> Self {
         failed.into_error()
