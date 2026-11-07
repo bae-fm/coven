@@ -106,6 +106,23 @@ fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
     });
 }
 
+/// A crash left a whole sealed copy of the keys beside the file. Forgetting
+/// them leaves no copy the passphrase could still open.
+#[test]
+fn forgetting_keys_leaves_no_sealed_copy() {
+    let (temp, file, id) = file();
+    let custody =
+        PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
+    let session = KeySession::open(Arc::new(custody)).unwrap();
+    let keys = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
+    session.persist(&keys).unwrap();
+    let copy = file.leave_temporary(&file.read_optional().unwrap().unwrap());
+    session.forget().unwrap();
+    assert!(!copy.exists());
+    assert!(file.read_optional().unwrap().is_none());
+    drop(temp);
+}
+
 /// The system refuses the salt of a new custody file: opening fails with
 /// nothing saved and the passphrase erased, and the app opens again with it.
 #[test]

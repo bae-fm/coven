@@ -145,7 +145,7 @@ pub(super) async fn publish_bootstrap(
     let handle = owners.into_handle(database, waits, true, false);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
-        .remove()
+        .remove_with_temporaries()
         .map_err(|error| BootstrapError::from(SyncError::from(error)));
     let result = match publication_error {
         Some(error) => combine(Err(error), cleanup),

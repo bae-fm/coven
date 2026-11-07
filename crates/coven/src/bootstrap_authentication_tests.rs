@@ -489,3 +489,33 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         owner.close().await;
     }
 }
+
+/// A crash during a save of the join left a sealed copy of its identity
+/// beside the file. Publishing the store leaves no copy of it (§12.4).
+#[tokio::test]
+async fn publishing_a_join_leaves_no_sealed_copy_of_its_identity() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = tokio::sync::watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let sealed = install.app.store_dir(&owner.directory.id()).owned_file(StoreFile::Bootstrap);
+    let mut copy = None;
+    let (result, _) = owner
+        .join_and_approve(joining, &control, |_| {
+            copy = Some(sealed.leave_temporary(b"sealed identity"));
+            async {}
+        })
+        .await;
+    let joined = result.unwrap().unwrap();
+    assert!(!copy.unwrap().exists());
+    joined.close().await.unwrap();
+    owner.close().await;
+}

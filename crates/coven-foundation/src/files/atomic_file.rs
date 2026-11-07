@@ -128,7 +128,7 @@ impl AtomicFile {
     /// lacks that API; unsupported systems return the OS error without falling
     /// back to a rename that can fail while readers hold old versions open.
     pub fn replace(&self, bytes: &[u8]) -> Result<(), FileError> {
-        replace(&self.path, bytes)
+        install(prepare(&self.path, bytes, &own_temporaries(&self.path))?, &self.path)
     }
 
     /// Write and sync complete bytes at this name, then flush its directory
@@ -244,6 +244,41 @@ impl AtomicFile {
     /// A missing parent is already absent and needs no durability barrier.
     pub fn remove(&self) -> Result<(), FileError> {
         remove(&self.path)
+    }
+
+    /// Remove the owned file and every temporary sibling a write of it left,
+    /// as a crash or a failed removal does: each holds a whole version of its
+    /// bytes. The caller holds what guards this file's writes, so none of
+    /// them is a write in flight.
+    pub fn remove_with_temporaries(&self) -> Result<(), FileError> {
+        let folder = parent(&self.path);
+        let prefix = own_temporaries(&self.path);
+        let entries = match fs::read_dir(folder) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::debug!(path = %self.path.display(), "file's parent is absent");
+                return Ok(());
+            }
+            Err(source) => return Err(FileError::at("list file's folder", folder, source)),
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|source| FileError::at("list file's folder", folder, source))?;
+            let name = entry.file_name();
+            let random = name.as_encoded_bytes().strip_prefix(prefix.as_bytes());
+            if random.is_some_and(|random| random.len() == TEMPORARY_RANDOM) {
+                remove(&entry.path())?;
+            }
+        }
+        remove(&self.path)
+    }
+
+    /// Leave a temporary sibling holding `bytes`, as a crash between writing
+    /// it and renaming it does, and say where.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn leave_temporary(&self, bytes: &[u8]) -> PathBuf {
+        let temp = prepare(&self.path, bytes, &own_temporaries(&self.path)).unwrap();
+        temp.keep().expect("a temporary file can be kept").1
     }
 }
 
@@ -501,7 +536,23 @@ fn open_reader(path: &Path) -> io::Result<fs::File> {
 /// reports that new bytes are visible but directory syncing failed.
 /// Windows requires the POSIX replacement support described by [`AtomicFile::replace`].
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
-    install(prepare(path, bytes)?, path)
+    install(prepare(path, bytes, TEMPORARY)?, path)
+}
+
+/// How every temporary sibling's name starts.
+const TEMPORARY: &str = ".coven-write-";
+
+/// The random letters ending a temporary sibling's name, so each writer
+/// has its own.
+const TEMPORARY_RANDOM: usize = 6;
+
+/// How the names of an owned file's temporary siblings start: they carry
+/// its name, so forgetting it finds them. An app's own path, written by
+/// [`replace`], may already fill the 255 bytes a name holds, so it carries
+/// none.
+fn own_temporaries(path: &Path) -> String {
+    let name = path.file_name().expect("an owned file has a name").to_string_lossy();
+    format!("{TEMPORARY}{name}-")
 }
 
 /// Replace `path` with the prepared temporary sibling `temp`, whose failure
@@ -536,8 +587,8 @@ fn install(temp: tempfile::NamedTempFile, path: &Path) -> Result<(), FileError> 
     }
 }
 
-fn prepare(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileError> {
-    let mut temp = temporary(path, ".coven-write-")?;
+fn prepare(path: &Path, bytes: &[u8], prefix: &str) -> Result<tempfile::NamedTempFile, FileError> {
+    let mut temp = temporary(path, prefix)?;
     if let Err(source) = temp.write_all(bytes).and_then(|()| temp.as_file().sync_all()) {
         return Err(cleanup(temp, FileError::at("write and sync temporary file", path, source)));
     }
@@ -550,7 +601,7 @@ fn temporary(path: &Path, prefix: &str) -> Result<tempfile::NamedTempFile, FileE
     let directory = fs::canonicalize(parent(path))
         .map_err(|source| FileError::at("resolve parent directory", path, source))?;
     let mut builder = tempfile::Builder::new();
-    builder.prefix(prefix);
+    builder.prefix(prefix).rand_bytes(TEMPORARY_RANDOM);
     #[cfg(unix)]
     let temp = builder.tempfile_in(directory);
     #[cfg(windows)]

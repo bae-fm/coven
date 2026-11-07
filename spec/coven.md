@@ -3953,6 +3953,15 @@ if custody had not saved it yet, no copy could have been sent. This keeps secret
 material out of both the operation journal and SQLite's database, WAL and rollback
 journal files.
 
+- A file custody keeps goes whole. Saving writes a temporary copy beside the
+  file and renames it into place, so a crash or a failed removal can leave
+  that copy, keys and all. Ana keeps her store keys in a passphrase file, and
+  her laptop dies during a save. Forgetting them removes the file only if no
+  copy her passphrase still opens is left, so forgetting keys removes the file
+  and every temporary copy of it, under the lock that guards the file's saves.
+  A join's sealed identity goes the same way as its store is published. Each
+  copy's name carries its file's, with a random end, so two saves never share
+  one.
 - Store creation sets up the member in custody before publishing the store.
 - A device keeps every earlier private sealing key it still needs to open old
   copies, or has those keys copied to its current sealing key instead.

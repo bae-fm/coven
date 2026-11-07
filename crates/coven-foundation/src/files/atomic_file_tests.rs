@@ -44,7 +44,7 @@ fn a_crash_after_writing_the_temporary_sibling_leaves_the_old_target() {
     let path = directory.path().join("settings");
     let file = AtomicFile::new(path.clone());
     file.replace(b"old").unwrap();
-    let stage = prepare(&path, b"new").unwrap();
+    let stage = prepare(&path, b"new", TEMPORARY).unwrap();
     assert_eq!(read_optional(stage.path()).unwrap().unwrap(), b"new");
     // Reopen without renaming or deleting the synced temporary sibling.
     assert_eq!(AtomicFile::new(path).read_optional().unwrap().unwrap(), b"old");
@@ -52,6 +52,27 @@ fn a_crash_after_writing_the_temporary_sibling_leaves_the_old_target() {
     file.replace(b"new").unwrap();
     assert_eq!(file.read_optional().unwrap().unwrap(), b"new");
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+/// A crash left two whole versions of `store-keys.sealed` beside it, and
+/// another file's beside that. Removing the file with its temporaries takes
+/// its own and leaves the other's, and an absent file with none is no error.
+#[test]
+fn removing_with_temporaries_takes_the_files_own_and_no_others() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = AtomicFile::new(directory.path().join("store-keys.sealed"));
+    let other = AtomicFile::new(directory.path().join("store-keys.sealed-2"));
+    file.replace(b"keys").unwrap();
+    other.replace(b"others").unwrap();
+    let first = file.leave_temporary(b"older keys");
+    assert_ne!(first, file.leave_temporary(b"oldest keys"), "each writer has its own name");
+    let theirs = other.leave_temporary(b"other keys");
+    file.remove_with_temporaries().unwrap();
+    let mut left: Vec<_> =
+        fs::read_dir(directory.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+    left.sort();
+    assert_eq!(left, [theirs.file_name().unwrap(), "store-keys.sealed-2".as_ref()]);
+    file.remove_with_temporaries().unwrap();
 }
 
 #[test]
@@ -128,7 +149,7 @@ fn a_failed_removal_of_the_temporary_file_keeps_both_causes_and_the_old_target()
     let path = directory.path().join("settings");
     let file = AtomicFile::new(path.clone());
     file.replace(b"old").unwrap();
-    let temp = prepare(&path, b"new").unwrap();
+    let temp = prepare(&path, b"new", TEMPORARY).unwrap();
     // Neither the rename nor removing the temporary file can change the folder.
     set_mode(directory.path(), 0o500);
     let error = install(temp, &path).unwrap_err();

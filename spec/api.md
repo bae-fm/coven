@@ -8606,7 +8606,8 @@ pub trait Custody<T: KeyMaterial>: Send + Sync {
     fn unlock(&self) -> Result<Option<T>, KeyError>;
     /// Keeps `material`, replacing what was kept.
     fn persist(&self, material: &T) -> Result<(), KeyError>;
-    /// Removes what was kept; succeeds if nothing was kept.
+    /// Removes what was kept, every copy of it included (§12.4); succeeds if
+    /// nothing was kept.
     fn forget(&self) -> Result<(), KeyError>;
     /// Erases held memory after users finish; performs no persistence or IO.
     /// Fallible saves complete through persist before dependent work starts.

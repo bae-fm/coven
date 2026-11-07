@@ -104,7 +104,7 @@ impl<T> PassphraseCustody<T> {
     pub(crate) fn remove(&self) -> Result<(), KeyError> {
         let protection = lock_unpoisoned(&self.protection);
         protection.as_ref().ok_or(KeyError::StoreClosed)?;
-        self.file.remove().map_err(KeyError::from)
+        self.file.remove_with_temporaries().map_err(KeyError::from)
     }
 
     pub(crate) fn release(&self) {
