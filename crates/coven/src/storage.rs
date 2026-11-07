@@ -750,6 +750,8 @@ mod control;
 
 #[path = "storage_folders.rs"]
 mod folders;
+#[cfg(test)]
+pub(crate) use folders::with_folder_label;
 
 #[path = "storage_s3.rs"]
 mod s3;

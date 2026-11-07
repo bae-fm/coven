@@ -91,3 +91,5 @@ impl StorageConnections {
 #[cfg(test)]
 #[path = "storage_folders_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::with_folder_label;

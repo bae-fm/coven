@@ -670,6 +670,18 @@ fn folder_address(location: &StorageConfig) -> url::Url {
     format!("https://storage.example.test/folders/{id}").parse().unwrap()
 }
 
+/// A code's `location` as a device connected to the memory provider's
+/// folder keeps it: with the folder's label, where it has a folder.
+pub(crate) fn with_folder_label(location: &StorageConfig) -> StorageConfig {
+    match location {
+        StorageConfig::Dropbox { account_label: Some(account), .. }
+        | StorageConfig::OneDrive { account_label: Some(account), .. } => {
+            recorded(location.clone(), account, "Household")
+        }
+        _ => location.clone(),
+    }
+}
+
 /// `location` as setup records it, with the account and folder it read.
 fn recorded(location: StorageConfig, account: &str, folder: &str) -> StorageConfig {
     let mut location = labelled(location, account);

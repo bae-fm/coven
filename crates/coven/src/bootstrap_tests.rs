@@ -202,7 +202,9 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             }
             _ => assert_eq!(location, owner.storage.config()),
         }
-        assert_eq!(handle.storage_config().await.unwrap(), Some(location.clone()));
+        // The device keeps the folder's label beside its location; no code holds it (§20.2).
+        let kept = crate::storage::with_folder_label(&location);
+        assert_eq!(handle.storage_config().await.unwrap(), Some(kept));
         assert_eq!(
             crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
                 [0]
