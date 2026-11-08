@@ -16,6 +16,38 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type AppKey = (String, Vec<u8>);
 pub(crate) type AppValues = BTreeMap<String, Value>;
+/// App rows read at one moment of a write: the rows as the connection's
+/// statements had left them when it had changed `changed` rows. Any later
+/// change to a row of the connection, by any statement, voids them.
+#[derive(Default)]
+pub(crate) struct RowsRead {
+    changed: u64,
+    rows: BTreeMap<AppKey, Option<AppValues>>,
+}
+
+impl RowsRead {
+    /// Note a row read while the connection had changed `changed` rows. Rows
+    /// noted at an earlier count are dropped.
+    pub(crate) fn note(&mut self, changed: u64, key: &AppKey, values: &Option<AppValues>) {
+        self.keep_for(changed);
+        self.rows.insert(key.clone(), values.clone());
+    }
+
+    /// The row `key` as noted, if the connection has changed no row since:
+    /// `changed` is its count now.
+    fn get(&mut self, changed: u64, key: &AppKey) -> Option<Option<AppValues>> {
+        self.keep_for(changed);
+        self.rows.get(key).cloned()
+    }
+
+    fn keep_for(&mut self, changed: u64) {
+        if self.changed != changed {
+            self.rows.clear();
+            self.changed = changed;
+        }
+    }
+}
+
 /// A foreign key's target table, its columns, and the referencing values' key.
 type ParentLookup = (String, Vec<String>, Vec<u8>);
 
@@ -32,6 +64,9 @@ pub(crate) struct AppView<'a> {
     overrides: BTreeMap<AppKey, Option<AppValues>>,
     lookup: BTreeMap<(String, Vec<String>, Vec<u8>), Vec<AppKey>>,
     rows: Option<RefCell<BTreeMap<AppKey, Option<AppRow>>>>,
+    /// Rows an earlier stretch of the write read, served in place of a read
+    /// while no row has changed since.
+    read: RefCell<RowsRead>,
     /// The parent rows foreign keys named during a stretch that writes no app
     /// row: a parent many rows name is read once. `None` outside one.
     parents: RefCell<Option<BTreeMap<ParentLookup, Option<AppValues>>>>,
@@ -46,6 +81,7 @@ impl<'a> AppView<'a> {
             overrides: BTreeMap::new(),
             lookup: BTreeMap::new(),
             rows: Some(RefCell::new(BTreeMap::new())),
+            read: RefCell::new(RowsRead::default()),
             parents: RefCell::new(None),
             migration: None,
         }
@@ -79,6 +115,13 @@ impl<'a> AppView<'a> {
         Ok(result)
     }
 
+    /// Serve `read`'s rows in place of reading them, for as long as no row
+    /// of the connection changes.
+    pub(crate) fn with_rows_read(self, read: RowsRead) -> Self {
+        *self.read.borrow_mut() = read;
+        self
+    }
+
     pub(crate) fn without_row_cache(mut self) -> Self {
         self.rows = None;
         self
@@ -104,7 +147,10 @@ impl<'a> AppView<'a> {
         let table = self.schema.table(&key.0);
         let values = match self.overrides.get(key) {
             Some(values) => values.clone(),
-            None => read_values(self.database, table, &key.1)?,
+            None => match self.noted(key) {
+                Some(values) => values,
+                None => read_values(self.database, table, &key.1)?,
+            },
         };
         let Some(values) = values else {
             return Ok(self.remember(key, None));
@@ -243,6 +289,12 @@ impl<'a> AppView<'a> {
         ParentsGuard(&self.parents)
     }
 
+    /// The row `key` as `with_rows_read`'s rows hold it, while no row has
+    /// changed since they were read.
+    fn noted(&self, key: &AppKey) -> Option<Option<AppValues>> {
+        self.read.borrow_mut().get(self.database.changed_rows(), key)
+    }
+
     /// The row a foreign key names, from what `remembering_parents` kept, or
     /// read.
     fn parent(
@@ -257,7 +309,17 @@ impl<'a> AppView<'a> {
                 return Ok(parent.clone());
             }
         }
-        let parent = self.find(target, columns, values)?.into_iter().next();
+        // A key naming the parent's whole primary key, in order, is the
+        // parent's own key bytes.
+        let primary = key_columns(target);
+        let by_key = columns.len() == primary.len()
+            && columns.iter().zip(&primary).all(|(c, p)| c.eq_ignore_ascii_case(&p.name));
+        let noted =
+            if by_key { self.noted(&(target.name.clone(), lookup.2.clone())) } else { None };
+        let parent = match noted {
+            Some(parent) => parent,
+            None => self.find(target, columns, values)?.into_iter().next(),
+        };
         if let Some(parents) = self.parents.borrow_mut().as_mut() {
             parents.insert(lookup, parent.clone());
         }

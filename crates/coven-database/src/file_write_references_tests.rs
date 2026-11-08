@@ -267,3 +267,50 @@ async fn a_write_moving_a_files_last_reference_to_another_row_keeps_its_record()
         db.close().await.unwrap();
     }
 }
+
+/// The reference check reads each row it checks and the record it names;
+/// the write's view of its rows takes those reads in place of its own, so a
+/// row is read once for the write, apart from the readers of the app phase.
+#[tokio::test]
+async fn a_row_the_reference_check_read_is_not_read_again() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let reads = |db: &Database, table: &str| {
+        let text = format!("FROM main.\"{table}\" WHERE \"id\"=?");
+        db.inspect_writer(|writer| {
+            writer.profiled_statements().iter().filter(|s| s.sql.contains(&text)).count()
+        })
+    };
+    stage(&db, b"photo".to_vec(), true).await.unwrap();
+    // The row is read to find its staged file's audience, and by the check;
+    // the file's record by the check and by the protection refresh of its
+    // new record.
+    assert_eq!(reads(&db, "files"), 2);
+    assert_eq!(reads(&db, "coven_files"), 2);
+    db.write(|sql| {
+        sql.execute(
+            "INSERT INTO files(id,file) SELECT 'a'||id, file FROM files WHERE id='7'
+             UNION ALL SELECT 'b'||id, file FROM files WHERE id='7'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(reads(&db, "files"), 2);
+    // An update naming a file again is read as the app left it.
+    db.write(|sql| {
+        sql.execute("UPDATE files SET title='t' WHERE id='a7'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(count_titles(&db), 1);
+    db.close().await.unwrap();
+}
+
+fn count_titles(db: &Database) -> i64 {
+    db.inspect_writer(|sql| {
+        sql.query_row("SELECT count(*) FROM files WHERE title='t'", [], |r| r.get(0)).unwrap()
+    })
+}

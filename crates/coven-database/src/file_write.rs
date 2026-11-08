@@ -199,6 +199,9 @@ pub(crate) struct WriteFiles<'a> {
     /// transaction applying other devices' writes.
     deleted: RefCell<Option<BTreeSet<FileId>>>,
     completion: RefCell<Option<uploads::Completion>>,
+    /// The rows the reference check read last in the app phase, which the
+    /// write's `after` view serves while no row changes in between.
+    rows_read: RefCell<crate::write_rows::RowsRead>,
     /// The moves this write recorded, whose uploads it queues.
     moving: RefCell<Vec<moves::Moving>>,
     /// The files this write makes device-only here, each with the copy that
@@ -254,6 +257,7 @@ impl<'a> WriteFiles<'a> {
             taken_out: RefCell::new(BTreeMap::new()),
             deleted: RefCell::new(None),
             completion: RefCell::new(None),
+            rows_read: RefCell::new(crate::write_rows::RowsRead::default()),
             moving: RefCell::new(Vec::new()),
             local: RefCell::new(Vec::new()),
             obsolete: RefCell::new(BTreeSet::new()),
@@ -289,6 +293,12 @@ impl<'a> FileWrite<'a> {
     /// Dismiss these lost values in this write (§8.4).
     pub(crate) fn dismiss(&self, values: &[crate::LostValue]) {
         self.files.dismissing.borrow_mut().extend_from_slice(values);
+    }
+
+    /// The rows the reference check read, for the view of the write's rows
+    /// after it.
+    pub(crate) fn take_rows_read(&self) -> crate::write_rows::RowsRead {
+        std::mem::take(&mut self.files.rows_read.borrow_mut())
     }
 
     /// The lost values this write dismisses.
@@ -552,13 +562,17 @@ impl<'a> FileWrite<'a> {
     }
 
     /// Each file reference the write's rows hold names a file of the row's
-    /// own audience (§17.2).
+    /// own audience (§17.2). This is the app phase's last step: no row
+    /// changes between its reads and the coven phase's, so the write's view
+    /// of its rows serves what it reads while the connection's count of
+    /// changed rows stays the same.
     fn check_references(
         &self,
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
         let db = self.database;
         let view = AppView::after(db, self.files.schema);
+        let files = self.files.schema.table(crate::internal_schema::FILES);
         // Coven's own moves rewrote their shown rows' references, so each
         // such row is among the write's rows.
         for key in captured.keys() {
@@ -567,7 +581,7 @@ impl<'a> FileWrite<'a> {
                 continue;
             }
             let table = self.files.schema.table(&key.0);
-            let Some(values) = crate::write_rows::read_values(db, table, &key.1)? else {
+            let Some(values) = self.read_noted(table, key)? else {
                 continue;
             };
             let audience = view.audience_of(table, &values)?;
@@ -576,7 +590,12 @@ impl<'a> FileWrite<'a> {
                     None | Some(Value::Null) => {}
                     Some(value) => {
                         let record = match file_table::id(value) {
-                            Some(file) => Record::read(db, file)?,
+                            Some(file) => {
+                                let key = (files.name.clone(), file_table::key(file)?);
+                                self.read_noted(files, &key)?
+                                    .map(|values| Record::decode(&values))
+                                    .transpose()?
+                            }
                             None => None,
                         };
                         if record.is_none_or(|record| record.audience != audience) {
@@ -587,6 +606,17 @@ impl<'a> FileWrite<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Read a row, noting it for the write's view of its rows.
+    fn read_noted(
+        &self,
+        table: &crate::schema::TableSchema,
+        key: &AppKey,
+    ) -> Result<Option<crate::write_rows::AppValues>, DbError> {
+        let values = crate::write_rows::read_values(self.database, table, &key.1)?;
+        self.files.rows_read.borrow_mut().note(self.database.changed_rows(), key, &values);
+        Ok(values)
     }
 
     /// Bring the protection of the rows a transaction touched up to date

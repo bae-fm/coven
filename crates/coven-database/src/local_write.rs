@@ -41,7 +41,8 @@ impl DatabaseConnection {
                     let files = &crate::file_write::FileWrite::new(database, files);
                     let captured = crate::write_capture::capture(schema, events)?;
                     let before = crate::write_rows::AppView::before(database, schema, &captured)?;
-                    let after = crate::write_rows::AppView::after(database, schema);
+                    let after = crate::write_rows::AppView::after(database, schema)
+                        .with_rows_read(files.take_rows_read());
                     let store = crate::merge_store::MergeStore::new(database, &before);
                     // Capturing and building the record write no app row: a
                     // parent many rows name is read once.

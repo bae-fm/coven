@@ -522,3 +522,19 @@ async fn a_parent_many_rows_name_is_read_once_per_write() {
     assert_eq!(count(&db, "_coven_rows"), 2 + 6 + 4);
     db.close().await.unwrap();
 }
+
+/// Rows noted at one count of changed rows are served while the count
+/// holds, and none after any row changes.
+#[test]
+fn noted_rows_are_served_only_while_no_row_changes() {
+    use coven_format::value::Value;
+    let key = ("notes".to_string(), vec![1]);
+    let values = Some(super::AppValues::from([("id".to_string(), Value::Integer(1))]));
+    let mut read = super::RowsRead::default();
+    read.note(5, &key, &values);
+    assert_eq!(read.get(5, &key), Some(values.clone()));
+    assert_eq!(read.get(6, &key), None, "a row changed since it was read");
+    assert_eq!(read.get(5, &key), None, "a count that went back doesn't bring them back");
+    read.note(6, &key, &None);
+    assert_eq!(read.get(6, &key), Some(None), "a row found missing is noted too");
+}
