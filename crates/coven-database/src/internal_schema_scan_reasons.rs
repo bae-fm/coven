@@ -17,6 +17,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::snapshot_install::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::write_commit::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::write_commit_store::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::merge_store::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_queue::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_moves::tests::scan_reason(file, template, sql, relation))

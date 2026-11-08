@@ -900,6 +900,7 @@ homes = [
     "crates/coven-database/src/snapshot_install.rs",
     "crates/coven-database/src/write_commit.rs",
     "crates/coven-database/src/write_commit_schema.rs",
+    "crates/coven-database/src/write_commit_store.rs",
 ]
 tables = [
     "_coven_cells",

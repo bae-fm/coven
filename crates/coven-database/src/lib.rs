@@ -152,6 +152,7 @@ mod write_batch;
 mod write_boundary;
 mod write_capture;
 mod write_commit;
+mod write_commit_store;
 mod write_encoding;
 mod write_failure;
 mod write_headers;

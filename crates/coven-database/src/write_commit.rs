@@ -169,8 +169,9 @@ pub(crate) fn persist(
         }
         olds.push(old);
     }
-    let mut generations = store_generations(database, &stores)?;
+    let mut generations = crate::write_commit_store::store_generations(database, &stores)?;
     let mut all_cells = Vec::new();
+    let mut all_references = Vec::new();
     for ((row, update), old) in updates.iter().zip(olds) {
         let audience = &row.audience;
         // The row's current generation, when this write stores it.
@@ -223,7 +224,7 @@ pub(crate) fn persist(
                         continue;
                     }
                     let key = crate::row_queries::foreign_key(database, &row.table, key)?;
-                    database.internal_execute("INSERT INTO _coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(row_id,column_id,foreign_key_id) DO UPDATE SET parent_table=excluded.parent_table,parent_key=excluded.parent_key,parent_audience=excluded.parent_audience,parent_generation=excluded.parent_generation",params![row_ordinal,column,key,parent.row.table,parent.row.key,&parent.row.audience,parent.generation.to_be_bytes().as_slice()])?;
+                    all_references.push((row_ordinal, column, key, parent));
                 }
             }
         }
@@ -240,53 +241,10 @@ pub(crate) fn persist(
             }
         }
     }
-    store_cells(database, &all_cells)?;
+    crate::write_commit_store::store_cells(database, &all_cells)?;
+    crate::write_commit_store::store_references(database, &all_references)?;
     Ok(present)
 }
-
-/// Store the generations `stores` names, each a row, its generation number
-/// and the ordinal of the write that started it, in one statement for each
-/// chunk. Returns each one's [`StoredGeneration`]: fresh when inserted, and
-/// otherwise found stored and given the new writer.
-fn store_generations<'a>(
-    database: &DatabaseConnection,
-    stores: &[(&'a RowId, u64, i64)],
-) -> Result<BTreeMap<(&'a RowId, u64), StoredGeneration>, DbError> {
-    let mut stored = BTreeMap::new();
-    for chunk in stores.chunks(GENERATION_CHUNK) {
-        let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
-        let parameters = chunk.iter().flat_map(|(row, generation, writer)| {
-            [
-                rusqlite::types::Value::Text(row.table.clone()),
-                rusqlite::types::Value::Blob(row.key.clone()),
-                rusqlite::types::Value::from(&row.audience),
-                rusqlite::types::Value::Blob(generation.to_be_bytes().to_vec()),
-                rusqlite::types::Value::Integer(*writer),
-            ]
-        });
-        let inserted: Vec<(RowId, Vec<u8>, i64)> = database.query(
-            &format!("INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES{values} ON CONFLICT(table_name,key,audience,generation) DO NOTHING RETURNING table_name,key,audience,generation,id"),
-            rusqlite::params_from_iter(parameters),
-            |r| Ok((crate::row_queries::read_identity(r)?, r.get(3)?, r.get(4)?)),
-        )?;
-        let inserted: BTreeMap<(RowId, Vec<u8>), i64> =
-            inserted.into_iter().map(|(row, generation, id)| ((row, generation), id)).collect();
-        for (row, generation, writer) in chunk {
-            let id = match inserted.get(&((*row).clone(), generation.to_be_bytes().to_vec())) {
-                Some(id) => StoredGeneration { ordinal: *id, fresh: true },
-                None => StoredGeneration {
-                    ordinal: database.query_row("UPDATE _coven_rows SET write_id=?5 WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 RETURNING id",params![row.table,row.key,&row.audience,generation.to_be_bytes().as_slice(),writer],|r| r.get(0))?,
-                    fresh: false,
-                },
-            };
-            stored.insert((*row, *generation), id);
-        }
-    }
-    Ok(stored)
-}
-
-/// How many generations one `store_generations` statement inserts.
-const GENERATION_CHUNK: usize = 500;
 
 /// Replace the unique-constraint claims of the stored generation `row`,
 /// which holds `audience`'s row, with `claims`, each a constraint's id and
@@ -497,20 +455,6 @@ pub(crate) fn plaintext(
     let mut bytes = vec![0; length];
     encoded(encoder.encode_plaintext(&mut bytes))?;
     Ok(bytes)
-}
-
-/// The cells the rows' writes set, each a column id, a row id and the write's
-/// ordinal, as one statement for each chunk. SQLite takes up to 32,766
-/// parameters a statement.
-fn store_cells(database: &DatabaseConnection, cells: &[(i64, i64, i64)]) -> Result<(), DbError> {
-    for chunk in cells.chunks(10_000) {
-        let values = vec!["(?,?,?)"; chunk.len()].join(",");
-        database.internal_execute(
-            &format!("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id"),
-            rusqlite::params_from_iter(chunk.iter().flat_map(|(column, row, write)| [*column, *row, *write])),
-        )?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
