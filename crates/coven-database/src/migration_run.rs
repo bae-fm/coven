@@ -312,9 +312,10 @@ fn finish(
         // original source evidence for writes authored after the migration.
         for part in &record.parts {
             crate::ownership::offer_part(database, &record.header, part)?;
-            for row in part.records() {
+            let frames = crate::write_sources::encode_records(&record.header, part)?;
+            for (row, bytes) in part.records().zip(&frames) {
                 crate::write_sources::validate(database, &record.header, row)?;
-                crate::write_sources::retain_authored(database, &record.header, row)?;
+                crate::write_sources::retain_authored(database, &record.header, row, bytes)?;
                 crate::write_sources::admit(
                     database,
                     &record.header,

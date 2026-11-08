@@ -264,24 +264,12 @@ pub(crate) fn validate(
     header: &WriteHeader,
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
-    let merge = |error| match error {
-        coven_format::Error::Merge(error) => {
-            DbError::InvalidWrite { write: header.position, error }
-        }
-        error => error.into(),
-    };
-    match record {
-        PartRecord::Change(row) => {
-            row.encode().map_err(merge)?;
-            validate_past(db, header, &row.sources)?;
-            let incarnation = row.change.incarnation().map_err(coven_format::Error::Merge)?;
-            roles(db, header, &row.row, row.change.generation, incarnation, &row.sources)?;
-            if let Some(creator) = &row.creator {
-                creation(db, header, &row.row, creator)?;
-            }
-        }
-        PartRecord::Execution(execution) => {
-            execution.encode().map_err(merge)?;
+    if let PartRecord::Change(row) = record {
+        validate_past(db, header, &row.sources)?;
+        let incarnation = row.change.incarnation().map_err(coven_format::Error::Merge)?;
+        roles(db, header, &row.row, row.change.generation, incarnation, &row.sources)?;
+        if let Some(creator) = &row.creator {
+            creation(db, header, &row.row, creator)?;
         }
     }
     let execution = record.execution();
@@ -307,6 +295,21 @@ pub(crate) fn had_read(
         earlier,
         crate::sequence::write_slot(db, earlier)?,
     ))
+}
+
+/// Each record of `part` encoded, which validates it: the bytes a record is
+/// retained and queued as, produced once for a write. A merge error is the
+/// write's own invalid change.
+pub(crate) fn encode_records(
+    header: &WriteHeader,
+    part: &coven_format::write::WritePart,
+) -> Result<Vec<Vec<u8>>, DbError> {
+    part.encode_records().map_err(|error| match error {
+        coven_format::Error::Merge(error) => {
+            DbError::InvalidWrite { write: header.position, error }
+        }
+        error => error.into(),
+    })
 }
 
 pub(crate) fn validate_past(
@@ -465,14 +468,11 @@ pub(crate) fn retain_authored(
     db: &DatabaseConnection,
     header: &WriteHeader,
     record: PartRecord<'_>,
+    bytes: &[u8],
 ) -> Result<(), DbError> {
     let row = record.row();
     part(db, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
-    let bytes = match record {
-        PartRecord::Change(change) => change.encode()?,
-        PartRecord::Execution(execution) => execution.encode()?,
-    };
     db.internal_execute(
         "INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5)",
         params![write, &row.audience, row.table, row.key, bytes],

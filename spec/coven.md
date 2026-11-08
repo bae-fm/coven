@@ -703,7 +703,7 @@ joins its table. Over 10,000 releases of 12 tracks, a write that credits
 artists on 1,000 tracks of other releases took 0.5 ms more with the album page
 open, about 0.5 µs a track. Ben's import writes 270 rows at a time. With four
 of an album's screens open, each joining tables the import writes, it ran
-about 50 lookups a write, and cost the same 107 µs a row as with none open.
+about 50 lookups a write, and cost the same 94 µs a row as with none open.
 
 A join narrows a table this way through an equality between one of its
 columns and a column, or an expression over the columns, of one other table in

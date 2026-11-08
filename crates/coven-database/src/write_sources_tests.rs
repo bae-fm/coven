@@ -679,3 +679,53 @@ pub(crate) fn scan_reason(
         _ => None,
     }
 }
+
+/// Each record of a local write is encoded once, and what is retained as its
+/// original and queued for upload is the bytes encoding the record gives: the
+/// original a row's frame, the queue the write's plaintext, byte for byte.
+#[tokio::test]
+async fn a_write_retains_and_queues_the_bytes_its_records_encode_to() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('a','first','x'),('b','first','y'),('c','first','z')")
+        .await
+        .unwrap();
+    sql(&db, "UPDATE notes SET title='second' WHERE id='b'; DELETE FROM notes WHERE id='c'")
+        .await
+        .unwrap();
+    // A row the SQL changes and puts back has operations and no net change.
+    sql(&db, "UPDATE notes SET title='third' WHERE id='a'; UPDATE notes SET title='first' WHERE id='a'; UPDATE notes SET body='q' WHERE id='b'")
+        .await
+        .unwrap();
+    let records = records(&db);
+    assert_eq!(records.len(), 3);
+    let queued: Vec<Vec<u8>> = db.inspect_writer(|db| {
+        db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| r.get(0)).unwrap()
+    });
+    for (record, queued) in records.iter().zip(&queued) {
+        assert_eq!(&coven_format::test_utils::write_plaintext(record).unwrap(), queued);
+        for part in &record.parts {
+            for row in part.records() {
+                let retained: Vec<u8> = db.inspect_writer(|db| {
+                    db.query_row(
+                        "SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+                        params![
+                            merge_fields::encode_write_id(&record.header.position).unwrap(),
+                            &row.row().audience,
+                            row.row().table,
+                            row.row().key
+                        ],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+                });
+                let expected = match row {
+                    PartRecord::Change(change) => change.encode().unwrap(),
+                    PartRecord::Execution(execution) => execution.encode().unwrap(),
+                };
+                assert_eq!(retained, expected);
+            }
+        }
+    }
+    assert!(records.iter().any(|r| r.parts.iter().any(|p| !p.executions.is_empty())));
+}

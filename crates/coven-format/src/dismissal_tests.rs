@@ -150,3 +150,49 @@ fn empty_rows_have_distinct_ordered_dismissals_and_their_own_write() {
     record.parts[0].dismissals = vec![empty.clone(), empty];
     assert!(WriteEncoder::new(&record).is_err());
 }
+
+/// A write whose records were encoded once emits the bytes the encoder gives
+/// when it encodes them itself, record frames and dismissal frames
+/// interleaved, in every chunk of every part.
+#[test]
+fn a_write_encoded_once_emits_the_same_bytes() {
+    let mut interleaved = changed_row();
+    interleaved.parts[0].dismissals = vec![dismissal("x"), dismissal("y")];
+    for record in [interleaved, test_utils::write(), test_utils::chunked_write()] {
+        let encoded: Vec<_> =
+            record.parts.iter().map(|part| part.encode_records().unwrap()).collect();
+        let own = WriteEncoder::new(&record).unwrap();
+        let given = WriteEncoder::with_records(&record, &encoded).unwrap();
+        assert_eq!(given.header(), own.header());
+        assert_eq!(given.header_frame(), own.header_frame());
+        assert_eq!(given.plaintext_length(), own.plaintext_length());
+        let length = usize::try_from(own.plaintext_length()).unwrap();
+        let (mut own_bytes, mut given_bytes) = (vec![0; length], vec![0; length]);
+        own.encode_plaintext(&mut own_bytes).unwrap();
+        given.encode_plaintext(&mut given_bytes).unwrap();
+        assert_eq!(given_bytes, own_bytes);
+        for part in 0..record.parts.len() {
+            let own_chunks: Vec<_> = own.part_chunks(part).unwrap().map(Result::unwrap).collect();
+            let given_chunks: Vec<_> =
+                given.part_chunks(part).unwrap().map(Result::unwrap).collect();
+            assert_eq!(given_chunks, own_chunks);
+        }
+    }
+}
+
+/// Records encoded for another write are refused, and so is a record that is
+/// invalid, as `new` refuses it.
+#[test]
+fn records_encoded_for_another_shape_are_refused() {
+    let mut record = changed_row();
+    record.parts[0].dismissals = vec![dismissal("x")];
+    let mut encoded: Vec<_> =
+        record.parts.iter().map(|part| part.encode_records().unwrap()).collect();
+    encoded[0].pop();
+    assert!(WriteEncoder::with_records(&record, &encoded).is_err());
+    assert!(WriteEncoder::with_records(&record, &[]).is_err());
+    record.parts[0].dismissals.push(dismissal("w"));
+    let encoded: Vec<_> = record.parts.iter().map(|part| part.encode_records().unwrap()).collect();
+    assert!(WriteEncoder::new(&record).is_err());
+    assert!(WriteEncoder::with_records(&record, &encoded).is_err());
+}

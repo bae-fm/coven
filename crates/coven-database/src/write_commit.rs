@@ -393,16 +393,21 @@ pub(crate) fn queue(
     schema: &crate::write_schema::WriteSchema,
     record: &WriteRecord,
 ) -> Result<(), DbError> {
+    let mut encoded = Vec::with_capacity(record.parts.len());
     for part in &record.parts {
         if crate::reload_gate::reloading(database, &part.audience)? {
             return Err(DbError::AudienceReloading(part.audience.clone()));
         }
         check_membership(database, record.header.position.device, &part.audience)?;
+        // Each record is encoded, and so validated, once for the write: its
+        // retained original and the queued plaintext are these bytes.
+        let frames = crate::write_sources::encode_records(&record.header, part)?;
         for row in part.records() {
             crate::write_sources::validate(database, &record.header, row)?;
         }
+        encoded.push(frames);
     }
-    retain_queue(database, record)?;
+    retain_queue(database, record, &encoded)?;
     for part in &record.parts {
         crate::ownership::offer_part(database, &record.header, part)?;
     }
@@ -457,14 +462,15 @@ pub(crate) fn check_membership(
 pub(crate) fn retain_queue(
     database: &DatabaseConnection,
     record: &WriteRecord,
+    frames: &[Vec<Vec<u8>>],
 ) -> Result<(), DbError> {
-    for part in &record.parts {
-        for row in part.records() {
-            crate::write_sources::retain_authored(database, &record.header, row)?;
+    for (part, frames) in record.parts.iter().zip(frames) {
+        for (row, bytes) in part.records().zip(frames) {
+            crate::write_sources::retain_authored(database, &record.header, row, bytes)?;
         }
         crate::write_sources::complete(database, &record.header, &part.audience)?;
     }
-    let encoder = encoded(WriteEncoder::new(record))?;
+    let encoder = encoded(WriteEncoder::with_records(record, frames))?;
     let bytes = plaintext(database, encoder)?;
     crate::upload::queue(
         database,

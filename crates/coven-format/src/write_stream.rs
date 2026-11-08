@@ -74,6 +74,8 @@ impl WriteHeaderFrame {
 /// emitting a part retains at most one record frame and one 64-KiB chunk.
 pub struct WriteEncoder<'a> {
     record: &'a WriteRecord,
+    /// Each part's record frames, when the caller encoded them.
+    encoded: Option<&'a [Vec<Vec<u8>>]>,
     header: WriteHeaderFrame,
     frame: Vec<u8>,
     length: u64,
@@ -82,10 +84,39 @@ impl<'a> WriteEncoder<'a> {
     /// Validate the complete in-memory write and measure each part's stream.
     pub fn new(record: &'a WriteRecord) -> Result<Self, Error> {
         record.validate()?;
+        Self::measured(record, None)
+    }
+
+    /// `new` for a write whose records the caller encoded already, a part's
+    /// `WritePart::encode_records` each, in the parts' order: they are
+    /// emitted as given, validated and encoded once, and the bytes are those
+    /// `new` produces.
+    pub fn with_records(
+        record: &'a WriteRecord,
+        encoded: &'a [Vec<Vec<u8>>],
+    ) -> Result<Self, Error> {
+        require(
+            encoded.len() == record.parts.len()
+                && record
+                    .parts
+                    .iter()
+                    .zip(encoded)
+                    .all(|(part, frames)| frames.len() == part.records().count()),
+            "write encoded records",
+            Rule::Required,
+        )?;
+        record.validate_encoded()?;
+        Self::measured(record, Some(encoded))
+    }
+
+    fn measured(
+        record: &'a WriteRecord,
+        encoded: Option<&'a [Vec<Vec<u8>>]>,
+    ) -> Result<Self, Error> {
         let mut parts = Vec::new();
-        for part in &record.parts {
+        for (index, part) in record.parts.iter().enumerate() {
             let mut length = 0u64;
-            for frame in part.frames() {
+            for frame in part_frames(part, encoded.map(|encoded| &encoded[index][..])) {
                 length = add_length(length, frame?.len() as u64)?;
             }
             parts.push(PartHeader {
@@ -101,7 +132,7 @@ impl<'a> WriteEncoder<'a> {
         for part in &header.parts {
             length = add_length(length, part.plaintext_length)?;
         }
-        Ok(Self { record, header, frame, length })
+        Ok(Self { record, encoded, header, frame, length })
     }
 
     /// Metadata that lets a receiver delimit each part without opening it.
@@ -152,7 +183,18 @@ impl<'a> WriteEncoder<'a> {
             .parts
             .get(index)
             .ok_or(Error::Invalid { field: "write part index", rule: Rule::Chunk })?;
-        Ok(PlaintextChunks::new(part.frames()))
+        Ok(PlaintextChunks::new(part_frames(part, self.encoded.map(|encoded| &encoded[index][..]))))
+    }
+}
+
+/// A part's frames: its records encoded now, or as `encoded` has them.
+fn part_frames<'a>(
+    part: &'a crate::write::WritePart,
+    encoded: Option<&'a [Vec<u8>]>,
+) -> Box<dyn Iterator<Item = Result<Vec<u8>, Error>> + 'a> {
+    match encoded {
+        Some(encoded) => Box::new(part.frames_from(encoded)),
+        None => Box::new(part.frames()),
     }
 }
 

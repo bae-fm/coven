@@ -438,6 +438,19 @@ pub struct WritePart {
 }
 impl WritePart {
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.validate_shape()?;
+        for change in &self.rows {
+            change.validate()?;
+        }
+        for execution in &self.executions {
+            execution.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Everything `validate` checks but each row's own validity: the part's
+    /// order, audiences and dismissals.
+    pub(crate) fn validate_shape(&self) -> Result<(), Error> {
         require(
             !self.rows.is_empty() || !self.executions.is_empty() || !self.dismissals.is_empty(),
             "write part rows",
@@ -463,11 +476,9 @@ impl WritePart {
             Rule::Order,
         )?;
         for change in &self.rows {
-            change.validate()?;
             require(change.row.audience == self.audience, "write part audience", Rule::Audience)?;
         }
         for execution in &self.executions {
-            execution.validate()?;
             require(
                 execution.row.audience == self.audience
                     && self.rows.binary_search_by(|change| change.row.cmp(&execution.row)).is_err(),
@@ -492,15 +503,39 @@ impl WritePart {
         })
     }
 
+    /// Each record's frame, in `records()` order, validated and encoded once.
+    /// `WriteEncoder::with_records` takes them in place of encoding the
+    /// records again.
+    pub fn encode_records(&self) -> Result<Vec<Vec<u8>>, Error> {
+        self.records().map(|record| record.encode()).collect()
+    }
+
     pub(crate) fn frames(&self) -> impl Iterator<Item = Result<Vec<u8>, Error>> + '_ {
-        let mut records = self.records().peekable();
+        self.frames_with(|_, record| record.encode())
+    }
+
+    /// The part's frames, the records' as `encoded` has them.
+    pub(crate) fn frames_from<'a>(
+        &'a self,
+        encoded: &'a [Vec<u8>],
+    ) -> impl Iterator<Item = Result<Vec<u8>, Error>> + 'a {
+        self.frames_with(|index, _| Ok(encoded[index].clone()))
+    }
+
+    /// The part's frames in stream order: each record's from `record`, given
+    /// its place among the part's records, and each dismissal encoded.
+    fn frames_with<'a>(
+        &'a self,
+        record: impl Fn(usize, PartRecord<'a>) -> Result<Vec<u8>, Error> + 'a,
+    ) -> impl Iterator<Item = Result<Vec<u8>, Error>> + 'a {
+        let mut records = self.records().enumerate().peekable();
         let mut dismissals = self.dismissals.iter().peekable();
         std::iter::from_fn(move || match (records.peek(), dismissals.peek()) {
-            (Some(record), Some(dismissal)) if record.row() <= &dismissal.row => {
-                records.next().map(|record| record.encode())
+            (Some((_, next)), Some(dismissal)) if next.row() <= &dismissal.row => {
+                records.next().map(|(index, next)| record(index, next))
             }
             (_, Some(_)) => dismissals.next().map(crate::dismissal::Dismissal::encode),
-            (Some(_), None) => records.next().map(|record| record.encode()),
+            (Some(_), None) => records.next().map(|(index, next)| record(index, next)),
             (None, None) => None,
         })
     }
@@ -552,6 +587,16 @@ impl WriteRecord {
         self.header.validate_parts(self.parts.iter().map(|part| &part.audience))?;
         for part in &self.parts {
             part.validate()?;
+        }
+        Ok(())
+    }
+
+    /// `validate` for a record whose rows `WritePart::encode_records` already
+    /// validated.
+    pub(crate) fn validate_encoded(&self) -> Result<(), Error> {
+        self.header.validate_parts(self.parts.iter().map(|part| &part.audience))?;
+        for part in &self.parts {
+            part.validate_shape()?;
         }
         Ok(())
     }
