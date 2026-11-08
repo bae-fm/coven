@@ -417,7 +417,7 @@ pub(crate) fn retain_queue(
 ) -> Result<(), DbError> {
     for part in &record.parts {
         for row in part.records() {
-            crate::write_sources::retain(database, &record.header, row)?;
+            crate::write_sources::retain_authored(database, &record.header, row)?;
         }
         crate::write_sources::complete(database, &record.header, &part.audience)?;
     }

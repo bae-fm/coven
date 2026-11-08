@@ -81,21 +81,10 @@ pub(crate) fn offer_change(
         .unwrap_or(ChangeId { write: header.position, row: change.row.clone() });
     // Counted state is installed before the queue. An established creation
     // therefore stays selected when later slots or local originals arrive.
-    if creation(db, &row)?.is_none() {
-        put(db, &row, &Creation { write: header.position, creator })?;
-    }
-    Ok(())
-}
-
-/// Record a creation as loaded or carried over unchanged.
-pub(crate) fn put(
-    db: &DatabaseConnection,
-    row: &RowId,
-    creation: &Creation,
-) -> Result<(), DbError> {
+    let creation = Creation { write: header.position, creator };
     db.internal_execute(
         "INSERT INTO _coven_creations(table_name,key,audience,write_id,creator) VALUES(?1,?2,?3,?4,?5)
-         ON CONFLICT(table_name,key,audience) DO UPDATE SET write_id=excluded.write_id,creator=excluded.creator",
+         ON CONFLICT(table_name,key,audience) DO NOTHING",
         params![
             row.table,
             row.key,

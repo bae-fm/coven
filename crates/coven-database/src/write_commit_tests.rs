@@ -821,6 +821,42 @@ async fn a_row_stores_its_cells_in_one_statement() {
     db.close().await.unwrap();
 }
 
+/// A local write's rows offer their creation in one statement that keeps an
+/// earlier creation, and retain their source records without reading for a
+/// repeat: the write's number is new, so none exists.
+#[tokio::test]
+async fn a_new_write_offers_creations_and_retains_sources_without_reading() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+        )
+        .await
+        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('a','one'),('b','one')").await.unwrap();
+    let creations = |db: &Database| {
+        db.inspect_writer(|writer| {
+            writer.query("SELECT key,write_id FROM _coven_creations ORDER BY key", [], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+        })
+        .unwrap()
+    };
+    let first = creations(&db);
+    assert_eq!(first.len(), 2);
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('c','two')").await.unwrap();
+    crate::write::tests::sql(&db, "UPDATE notes SET title='three'").await.unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
+    assert_eq!(runs("SELECT write_id,creator FROM _coven_creations"), 0);
+    assert_eq!(runs("SELECT (SELECT record FROM _coven_authored_changes"), 0);
+    let all = creations(&db);
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[..2], first[..], "an update leaves the earlier creations");
+    db.close().await.unwrap();
+}
+
 /// An app migration can't change the merge store's rows, or index or follow
 /// them with objects of its own.
 #[tokio::test]

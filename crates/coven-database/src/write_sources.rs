@@ -457,6 +457,29 @@ fn part(
     Ok(())
 }
 
+/// Retain the records of a write this device just allocated the number of,
+/// whose parts and changes nothing has retained yet: the guard `retain` reads
+/// to compare a repeated change has nothing to compare, and a row repeated
+/// within the write is refused by the table's key.
+pub(crate) fn retain_authored(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    record: PartRecord<'_>,
+) -> Result<(), DbError> {
+    let row = record.row();
+    part(db, header, &row.audience)?;
+    let write = merge_fields::encode_write_id(&header.position)?;
+    let bytes = match record {
+        PartRecord::Change(change) => change.encode()?,
+        PartRecord::Execution(execution) => execution.encode()?,
+    };
+    db.internal_execute(
+        "INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5)",
+        params![write, &row.audience, row.table, row.key, bytes],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn retain(
     db: &DatabaseConnection,
     header: &WriteHeader,
