@@ -554,3 +554,90 @@ async fn a_removed_devices_files_stay_on_it() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+/// Files one write stages for the cloud queue in statements across them, and
+/// each still gets its own upload, chunk hashes, copy and place in the write's
+/// one move: every row of the queue answers the bytes of the file it names.
+#[tokio::test]
+async fn files_queued_together_each_keep_their_own_upload() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    // Sizes around the chunk boundary, so files differ in their chunk counts.
+    let sizes = [1usize, 65_536, 65_537, 3, 140_000, 65_535];
+    let bytes: Vec<Vec<u8>> =
+        sizes.iter().enumerate().map(|(i, size)| vec![i as u8 + 1; *size]).collect();
+    let staged = {
+        let bytes = bytes.clone();
+        db.stage_files::<_, _, DbError>(move |batch| {
+            Ok(bytes
+                .into_iter()
+                .map(|bytes| batch.put_file("files", bytes, Place::Cloud).to_string())
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap()
+    };
+    db.write(move |sql| {
+        let files = sql.put_staged(staged)?;
+        for (i, file) in files.iter().enumerate() {
+            sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (i.to_string(), file))?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let hash = |bytes: &[u8]| {
+        let mut hasher = coven_crypto::ContentHasher::new();
+        hasher.update(bytes);
+        hasher.finish().as_bytes().to_vec()
+    };
+    let mut moves = std::collections::BTreeSet::<i64>::new();
+    for (i, bytes) in bytes.iter().enumerate() {
+        let (upload_hash, size, chunks, copy_hash, copy_chunks, upload_move, listed_move): (
+            Vec<u8>,
+            i64,
+            i64,
+            Vec<u8>,
+            i64,
+            i64,
+            i64,
+        ) = db.inspect_writer(|sql| {
+            sql.query_row(
+                "SELECT u.hash,u.size,
+                    (SELECT count(*) FROM _coven_file_chunks c WHERE c.device=u.device AND c.object=u.object),
+                    d.hash,
+                    (SELECT count(*) FROM _coven_copy_chunks k WHERE k.path=d.path),
+                    u.move,m.move
+                 FROM files f
+                 JOIN _coven_upload_files l ON l.file=f.file
+                 JOIN _coven_file_uploads u ON u.id=l.upload
+                 JOIN _coven_device_files d ON d.file=f.file
+                 JOIN _coven_move_files m ON m.file=f.file
+                 WHERE f.id=?1",
+                [i.to_string()],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .unwrap()
+        });
+        let expected_chunks = bytes.len().div_ceil(65_536) as i64;
+        assert_eq!(upload_hash, hash(bytes), "file {i}");
+        assert_eq!(copy_hash, hash(bytes), "file {i}");
+        assert_eq!(size, bytes.len() as i64, "file {i}");
+        assert_eq!((chunks, copy_chunks), (expected_chunks, expected_chunks), "file {i}");
+        assert_eq!(upload_move, listed_move, "file {i}");
+        moves.insert(upload_move);
+    }
+    assert_eq!(moves.len(), 1, "the write's trailing files are one move");
+    assert_eq!(local_count(&db, "_coven_file_uploads"), sizes.len() as i64);
+    db.close().await.unwrap();
+}

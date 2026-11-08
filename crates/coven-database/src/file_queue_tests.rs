@@ -41,3 +41,42 @@ pub(crate) fn queue_track_files(db: &crate::sqlite::DatabaseConnection) {
     )
     .unwrap();
 }
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+        (
+            "file_queue.rs",
+            "INSERT INTO _coven_file_uploads(location,device,object,size,hash,original,modified_at,copy,move,queued_at,holds) VALUES{values} RETURNING object,id",
+            "2-ROW",
+        ) => Some("the queued files' rows are the statement's own values"),
+        (
+            "file_queue.rs",
+            "INSERT INTO _coven_file_chunks(device,object,chunk,hash) VALUES{values}",
+            "2-ROW",
+        ) => Some("the queued files' rows are the statement's own values"),
+        (
+            "file_queue.rs",
+            "INSERT INTO _coven_upload_files(file,upload,keep) VALUES{values}",
+            "2-ROW",
+        ) => Some("the queued files' rows are the statement's own values"),
+        (
+            "file_queue.rs",
+            "INSERT INTO _coven_device_files(file,path,hash) VALUES{values}",
+            "2-ROW",
+        ) => Some("the queued files' rows are the statement's own values"),
+        (
+            "file_queue.rs",
+            "INSERT INTO _coven_copy_chunks(path,chunk,hash) VALUES{values}",
+            "2-ROW",
+        ) => Some("the queued files' rows are the statement's own values"),
+        _ => None,
+    }
+}

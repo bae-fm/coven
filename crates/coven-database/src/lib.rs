@@ -35,6 +35,7 @@ mod file_removals;
 mod file_table;
 mod file_write;
 mod from_item;
+mod insert_rows;
 mod internal_schema;
 mod interpretation;
 mod judge;

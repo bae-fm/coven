@@ -565,7 +565,9 @@ mod source {
         // a length only the row knows; two of each stand for any.
         // Rows of the statement's column list's length, two standing for any
         // number.
-        if matches!(file, "write_commit.rs" | "file_queue.rs") && sql.contains("{values}") {
+        if matches!(file, "write_commit.rs" | "file_queue.rs" | "file_moves.rs")
+            && sql.contains("{values}")
+        {
             let columns = sql.split_once('(').and_then(|(_, rest)| rest.split_once(')')).unwrap().0;
             let group = format!("({})", vec!["?"; columns.split(',').count()].join(","));
             return vec![sql.replace("{values}", &format!("{group},{group}"))];

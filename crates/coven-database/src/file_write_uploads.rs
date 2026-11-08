@@ -35,15 +35,26 @@ pub(super) fn keep_source(
     id: FileId,
     file: &StagedFile,
 ) -> Result<(), DbError> {
-    let hashes = &file.hashes;
-    match &file.source {
-        StagedSource::Copy(name) => {
-            crate::file_removals::keep(db, "files", name.as_str())?;
-            crate::file_queue::keep_copy(db, id, name.as_str(), hashes)?;
-        }
-        StagedSource::Original(original) => crate::user_file::record(db, id, original, hashes)?,
+    release_source(db, id, file)?;
+    if let StagedSource::Copy(name) = &file.source {
+        crate::file_queue::keep_copy(db, id, name.as_str(), &file.hashes)?;
     }
     Ok(())
+}
+
+/// The part of `keep_source` that must precede anything naming the copy:
+/// a copy's staging cleanup record goes, a user's original is recorded.
+pub(super) fn release_source(
+    db: &DatabaseConnection,
+    id: FileId,
+    file: &StagedFile,
+) -> Result<(), DbError> {
+    match &file.source {
+        StagedSource::Copy(name) => crate::file_removals::keep(db, "files", name.as_str()),
+        StagedSource::Original(original) => {
+            crate::user_file::record(db, id, original, &file.hashes)
+        }
+    }
 }
 
 /// A new file over `from`'s bytes, on this device only as `from` is, shares

@@ -699,3 +699,20 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 pub(crate) fn moving(db: &crate::sqlite::DatabaseConnection, id: i64) {
     db.internal_execute("INSERT INTO _coven_moves(id,state) VALUES(?1,'moving')", [id]).unwrap();
 }
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+        ("file_moves.rs", "INSERT INTO _coven_move_files(move,file) VALUES{values}", "2-ROW") => {
+            Some("the listed files' rows are the statement's own values")
+        }
+        _ => None,
+    }
+}

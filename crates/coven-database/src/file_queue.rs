@@ -1,6 +1,7 @@
 //! Durable file upload facts; provider session bytes remain opaque to SQLite.
 
 use crate::file_location::FileLocation;
+use crate::insert_rows::{insert_rows, value};
 use crate::internal_schema::FILE_NAMED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_crypto::{ContentHash, SecretBytes};
@@ -500,57 +501,99 @@ pub(crate) fn enqueue(
     location: &FileLocation,
     now: std::time::SystemTime,
 ) -> Result<(), DbError> {
-    let Queued { files, size, source, hashes, of, holds } = queued;
-    let header = FileHeader::new(size);
-    if hashes.chunks().len() as u64 != header.chunk_count() {
-        return Err(DbError::Invariant { what: "a staged file hashes every plaintext chunk" });
+    enqueue_all(db, &[(queued, location)], now)
+}
+
+/// `enqueue` for several uploads, each to its own location: their rows go in
+/// as one statement for each table and chunk of rows. An upload's id is
+/// matched to its row by its stored object, which is unique.
+pub(crate) fn enqueue_all(
+    db: &DatabaseConnection,
+    uploads: &[(Queued<'_>, &FileLocation)],
+    now: std::time::SystemTime,
+) -> Result<(), DbError> {
+    let mut queue = Vec::new();
+    let mut chunks = Vec::new();
+    for (queued, location) in uploads {
+        let Queued { size, source, hashes, of, holds, .. } = queued;
+        let header = FileHeader::new(*size);
+        if hashes.chunks().len() as u64 != header.chunk_count() {
+            return Err(DbError::Invariant { what: "a staged file hashes every plaintext chunk" });
+        }
+        // So every queued file has a whole encrypted size to send.
+        header.encrypted_size().map_err(|_overflow| DbError::Invariant {
+            what: "a queued file's encrypted layout fits in its offsets",
+        })?;
+        let size = crate::sqlite::integer("file size", *size)?;
+        let (original, modified_at, copy) = match source {
+            crate::file_write::StagedSource::Original(original) => (
+                Some(coven_foundation::files::path_bytes(&original.path)),
+                Some(crate::user_file::encode_time(original.modified_at)),
+                None,
+            ),
+            crate::file_write::StagedSource::Copy(name) => (None, None, Some(name.as_str())),
+        };
+        let (device, object) = (location.uploader(), location.object());
+        queue.push(vec![
+            value(&location.text())?,
+            value(&device)?,
+            value(&object)?,
+            value(&size)?,
+            value(&hashes.content.as_bytes().as_slice())?,
+            value(&original)?,
+            value(&modified_at)?,
+            value(&copy)?,
+            value(of)?,
+            value(&crate::user_file::encode_time(now))?,
+            value(&holds.map(u64::to_be_bytes))?,
+        ]);
+        for (index, hash) in hashes.chunks().iter().enumerate() {
+            chunks.push(vec![
+                value(&device)?,
+                value(&object)?,
+                value(&(index as i64))?,
+                value(&hash.as_bytes().as_slice())?,
+            ]);
+        }
     }
-    // So every queued file has a whole encrypted size to send.
-    header.encrypted_size().map_err(|_overflow| DbError::Invariant {
-        what: "a queued file's encrypted layout fits in its offsets",
-    })?;
-    let size = crate::sqlite::integer("file size", size)?;
-    let device = location.uploader();
-    let object = location.object();
-    let (original, modified_at, copy) = match source {
-        crate::file_write::StagedSource::Original(original) => (
-            Some(coven_foundation::files::path_bytes(&original.path)),
-            Some(crate::user_file::encode_time(original.modified_at)),
-            None,
-        ),
-        crate::file_write::StagedSource::Copy(name) => (None, None, Some(name.as_str())),
-    };
-    let upload = db.query_row(
-        "INSERT INTO _coven_file_uploads(location,device,object,size,hash,original,modified_at,copy,move,queued_at,holds)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) RETURNING id",
-        rusqlite::params![
-            location.text(),
-            device,
-            object,
-            size,
-            hashes.content.as_bytes().as_slice(),
-            original,
-            modified_at,
-            copy,
-            of,
-            crate::user_file::encode_time(now),
-            holds.map(u64::to_be_bytes)
-        ],
-        |r| r.get::<_, i64>(0),
+    let mut ids = std::collections::BTreeMap::new();
+    for (object, id) in insert_rows(
+        db,
+        11,
+        &queue,
+        |values| {
+            format!("INSERT INTO _coven_file_uploads(location,device,object,size,hash,original,modified_at,copy,move,queued_at,holds) VALUES{values} RETURNING object,id")
+        },
+        |r| Ok((r.get::<_, ObjectId>(0)?, r.get::<_, i64>(1)?)),
+    )? {
+        ids.insert(object, id);
+    }
+    insert_rows(
+        db,
+        4,
+        &chunks,
+        |values| format!("INSERT INTO _coven_file_chunks(device,object,chunk,hash) VALUES{values}"),
+        |_| Ok(()),
     )?;
-    for (index, hash) in hashes.chunks().iter().enumerate() {
-        db.internal_execute(
-            "INSERT INTO _coven_file_chunks(device,object,chunk,hash) VALUES(?1,?2,?3,?4)",
-            rusqlite::params![device, object, index as i64, hash.as_bytes().as_slice()],
-        )?;
+    let mut linked = Vec::new();
+    let mut listed = Vec::new();
+    for (queued, location) in uploads {
+        let upload = ids
+            .get(&location.object())
+            .ok_or(DbError::Invariant { what: "an enqueued upload returns its id" })?;
+        for (file, keep) in queued.files {
+            linked.push(vec![value(file)?, value(upload)?, value(keep)?]);
+            listed.push((queued.of, *file));
+        }
     }
-    for (file, keep) in files {
-        db.internal_execute(
-            "INSERT INTO _coven_upload_files(file,upload,keep) VALUES(?1,?2,?3)",
-            rusqlite::params![file, upload, keep],
-        )?;
-        crate::file_moves::list(db, of, *file)?;
-    }
+    insert_rows(
+        db,
+        3,
+        &linked,
+        |values| format!("INSERT INTO _coven_upload_files(file,upload,keep) VALUES{values}"),
+        |_| Ok(()),
+    )?;
+    crate::file_moves::list_all(db, &listed)?;
     Ok(())
 }
 
@@ -563,16 +606,41 @@ pub(crate) fn keep_copy(
     name: &str,
     hashes: &crate::file_hashes::FileHashes,
 ) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_device_files(file,path,hash) VALUES(?1,?2,?3)",
-        rusqlite::params![file, name, hashes.content.as_bytes().as_slice()],
-    )?;
-    for (index, hash) in hashes.chunks().iter().enumerate() {
-        db.internal_execute(
-            "INSERT INTO _coven_copy_chunks(path,chunk,hash) VALUES(?1,?2,?3)",
-            rusqlite::params![name, index as i64, hash.as_bytes().as_slice()],
-        )?;
+    keep_copies(db, &[(file, name, hashes)])
+}
+
+/// `keep_copy` for several files, as one statement for each table and chunk
+/// of rows.
+pub(crate) fn keep_copies(
+    db: &DatabaseConnection,
+    copies: &[(FileId, &str, &crate::file_hashes::FileHashes)],
+) -> Result<(), DbError> {
+    let mut files = Vec::new();
+    let mut chunks = Vec::new();
+    for (file, name, hashes) in copies {
+        files.push(vec![value(file)?, value(name)?, value(&hashes.content.as_bytes().as_slice())?]);
+        for (index, hash) in hashes.chunks().iter().enumerate() {
+            chunks.push(vec![
+                value(name)?,
+                value(&(index as i64))?,
+                value(&hash.as_bytes().as_slice())?,
+            ]);
+        }
     }
+    insert_rows(
+        db,
+        3,
+        &files,
+        |values| format!("INSERT INTO _coven_device_files(file,path,hash) VALUES{values}"),
+        |_| Ok(()),
+    )?;
+    insert_rows(
+        db,
+        3,
+        &chunks,
+        |values| format!("INSERT INTO _coven_copy_chunks(path,chunk,hash) VALUES{values}"),
+        |_| Ok(()),
+    )?;
     Ok(())
 }
 

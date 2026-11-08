@@ -100,12 +100,21 @@ pub(crate) fn of_file(db: &DatabaseConnection, file: FileId) -> Result<Option<Mo
     Ok(db.query("SELECT move FROM _coven_move_files WHERE file=?1", [file], |r| r.get(0))?.pop())
 }
 
-/// List `file` as one of move `id`'s files, as an upload of the move comes
-/// to store it (§17.3).
-pub(crate) fn list(db: &DatabaseConnection, id: MoveId, file: FileId) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_move_files(move,file) VALUES(?1,?2)",
-        rusqlite::params![id, file],
+/// List each file as one of its move's, as the uploads of the moves come to
+/// store them (§17.3), as one statement for each chunk.
+pub(crate) fn list_all(db: &DatabaseConnection, files: &[(MoveId, FileId)]) -> Result<(), DbError> {
+    let rows: Vec<_> = files
+        .iter()
+        .map(|(id, file)| {
+            Ok(vec![crate::insert_rows::value(id)?, crate::insert_rows::value(file)?])
+        })
+        .collect::<Result<_, DbError>>()?;
+    crate::insert_rows::insert_rows(
+        db,
+        2,
+        &rows,
+        |values| format!("INSERT INTO _coven_move_files(move,file) VALUES{values}"),
+        |_| Ok(()),
     )?;
     Ok(())
 }

@@ -36,6 +36,57 @@ fn held_here<'n, T: Ord + 'n>(
     Ok(())
 }
 
+/// A staged file queued to trail in its write's move, kept with the
+/// location its upload goes to.
+struct Trailing<'f> {
+    file: &'f StagedFile,
+    id: FileId,
+    of: crate::MoveId,
+    location: FileLocation,
+}
+
+/// Queue the `trailing` files, whose sources are already released: their
+/// copies, uploads, chunk hashes, links and moves as a statement for each
+/// table and chunk of rows (§17.3, §17.9). `trailing` is left empty.
+fn queue_trailing(
+    db: &DatabaseConnection,
+    trailing: &mut Vec<Trailing<'_>>,
+    now: std::time::SystemTime,
+) -> Result<(), DbError> {
+    let copies: Vec<_> = trailing
+        .iter()
+        .filter_map(|queued| match &queued.file.source {
+            StagedSource::Copy(name) => Some((queued.id, name.as_str(), &queued.file.hashes)),
+            StagedSource::Original(_) => None,
+        })
+        .collect();
+    crate::file_queue::keep_copies(db, &copies)?;
+    let files: Vec<[(FileId, bool); 1]> = trailing
+        .iter()
+        .map(|queued| [(queued.id, queued.file.place == crate::Place::CloudKeptHere)])
+        .collect();
+    let uploads: Vec<_> = trailing
+        .iter()
+        .zip(&files)
+        .map(|(queued, files)| {
+            (
+                crate::file_queue::Queued {
+                    files,
+                    size: queued.file.size,
+                    source: &queued.file.source,
+                    hashes: &queued.file.hashes,
+                    of: queued.of,
+                    holds: None,
+                },
+                &queued.location,
+            )
+        })
+        .collect();
+    crate::file_queue::enqueue_all(db, &uploads, now)?;
+    trailing.clear();
+    Ok(())
+}
+
 #[path = "file_write_references.rs"]
 mod references;
 
@@ -613,7 +664,9 @@ impl<'a> FileWrite<'a> {
     ) -> Result<(), DbError> {
         let db = self.database;
         let mut group = None;
-        for file in self.files.staged.borrow().iter() {
+        let mut batch = Vec::new();
+        let staged = self.files.staged.borrow();
+        for file in staged.iter() {
             if !self.files.made.borrow().contains(&file.id) {
                 continue;
             }
@@ -629,6 +682,25 @@ impl<'a> FileWrite<'a> {
             let Some((&first, others)) = holders.split_first() else {
                 continue;
             };
+            let held = self.files.held.borrow().contains(&file.id);
+            // A file over its own bytes alone, trailing in the write's one
+            // move, queues with the others in statements for the whole run.
+            if others.is_empty() && !held && file.place != crate::Place::DeviceOnly {
+                uploads::release_source(db, first, file)?;
+                let of = match group {
+                    Some(of) => of,
+                    None => *group.insert(crate::file_moves::create(db)?),
+                };
+                batch.push(Trailing {
+                    file,
+                    id: first,
+                    of,
+                    location: FileLocation::new(self.files.device, self.files.ids)?,
+                });
+                continue;
+            }
+            // What follows reads the uploads queued so far.
+            queue_trailing(db, &mut batch, now)?;
             uploads::keep_source(db, first, file)?;
             if file.place == crate::Place::DeviceOnly {
                 for other in others {
@@ -639,7 +711,7 @@ impl<'a> FileWrite<'a> {
             let hashes = &file.hashes;
             // The trailing files one write stages for the cloud are one
             // move; a bound file switches on its own, with its held write.
-            let holds = if self.files.held.borrow().contains(&file.id) {
+            let holds = if held {
                 let write = write.ok_or(DbError::Invariant {
                     what: "a write setting a bound reference is recorded",
                 })?;
@@ -670,6 +742,7 @@ impl<'a> FileWrite<'a> {
                 uploads::share(db, first, *other)?;
             }
         }
+        queue_trailing(db, &mut batch, now)?;
         self.queue_moves(now)?;
         self.keep_device_only()?;
         self.finish_completion()
