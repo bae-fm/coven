@@ -88,7 +88,11 @@ impl Upkeep for PlannerStatistics {
             let Some(writer) = self.writer.upgrade() else {
                 return Ok(());
             };
-            with_locked(&writer, |_writes| connection.gather_statistics_for_every_connection())?;
+            // The run moves the schema cookie without changing a table, so
+            // the writer keeps the shapes it read: the next write reads none.
+            with_locked(&writer, |writes| {
+                writes.keeping_table_shapes(|| connection.gather_statistics_for_every_connection())
+            })?;
             tracing::debug!("gathered the planner's statistics");
             #[cfg(test)]
             self.report();

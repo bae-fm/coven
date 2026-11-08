@@ -23,16 +23,14 @@ pub(crate) struct TableShape {
     pub(crate) parent: Option<String>,
 }
 
-/// Every table of the main schema but SQLite's own, as the schema was when
-/// SQLite's schema cookie held `cookie`.
+/// Every table of the main schema but SQLite's own.
 pub(crate) struct TableShapes {
-    cookie: i64,
     positions: HashMap<String, usize>,
     shapes: Vec<TableShape>,
 }
 
 impl TableShapes {
-    fn read(database: &DatabaseConnection, cookie: i64) -> Result<Self, DbError> {
+    fn read(database: &DatabaseConnection) -> Result<Self, DbError> {
         let tables = database.query(
             "SELECT name,type FROM pragma_table_list
              WHERE schema='main' AND type IN ('table','shadow','virtual') AND name NOT GLOB 'sqlite_*'",
@@ -80,7 +78,7 @@ impl TableShapes {
                 parent,
             });
         }
-        Ok(Self { cookie, positions, shapes })
+        Ok(Self { positions, shapes })
     }
 
     /// The position of `table`, as SQLite names it to a pre-update hook and
@@ -111,12 +109,29 @@ impl DatabaseConnection {
     /// names the schema they were read in, else read afresh.
     pub(crate) fn table_shapes(&self) -> Result<Arc<TableShapes>, DbError> {
         let cookie = self.app_schema_cookie()?;
-        if let Some(shapes) = self.shapes.borrow().as_ref().filter(|shapes| shapes.cookie == cookie)
-        {
-            return Ok(Arc::clone(shapes));
+        if let Some((read_in, shapes)) = self.shapes.borrow().as_ref() {
+            if *read_in == cookie {
+                return Ok(Arc::clone(shapes));
+            }
         }
-        let shapes = Arc::new(TableShapes::read(self, cookie)?);
-        self.shapes.replace(Some(Arc::clone(&shapes)));
+        let shapes = Arc::new(TableShapes::read(self)?);
+        self.shapes.replace(Some((cookie, Arc::clone(&shapes))));
         Ok(shapes)
+    }
+
+    /// Run `change`, which moves SQLite's schema cookie without changing any
+    /// table, so the shapes stay those of the schema it leaves: the next
+    /// capture reads no table again.
+    pub(crate) fn keeping_table_shapes<T>(
+        &mut self,
+        change: impl FnOnce() -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.table_shapes()?;
+        let changed = change()?;
+        let cookie = self.schema_cookie()?;
+        if let Some((read_in, _)) = self.shapes.borrow_mut().as_mut() {
+            *read_in = cookie;
+        }
+        Ok(changed)
     }
 }

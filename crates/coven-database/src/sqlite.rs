@@ -78,7 +78,7 @@ pub(crate) struct DatabaseConnection {
     observation: Option<WriterObservation>,
     /// The main schema's tables as last read, with the schema they were
     /// read in (table_shapes.rs).
-    shapes: std::cell::RefCell<Option<Arc<table_shapes::TableShapes>>>,
+    shapes: std::cell::RefCell<Option<(i64, Arc<table_shapes::TableShapes>)>>,
     /// The writer's checkpointer, woken after each commit (§4).
     checkpoints: Option<crate::upkeep::Wake>,
     /// The writer's keeper of the planner's statistics, woken as its

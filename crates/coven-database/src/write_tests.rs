@@ -665,6 +665,7 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     play(2).await.unwrap();
     play(3).await.unwrap();
     let alone = db.inspect_writer(|db| db.profiled_statements()).len();
+    let mut statistics = db.report_statistics_runs();
     // The play's track and person gain other children. Their removal cannot
     // change when the play's position does, so the write reads none of them.
     db.write(|context| {
@@ -679,6 +680,14 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     })
     .await
     .unwrap();
+    // Changing this many rows has the planner's statistics gathered, which
+    // moves the schema cookie and so has the first write after it prepare its
+    // statements once more. That is the statistics' doing, not the siblings':
+    // measure the writes that follow it.
+    tokio::time::timeout(coven_foundation::clock::HANG_GUARD, statistics.recv())
+        .await
+        .expect("the statistics are gathered")
+        .expect("the store stays open");
     play(4).await.unwrap();
     play(5).await.unwrap();
     assert_eq!(db.inspect_writer(|db| db.profiled_statements()).len(), alone);
