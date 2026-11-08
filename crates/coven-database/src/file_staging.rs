@@ -132,6 +132,7 @@ impl FileStaging {
                 .with_hook(coven_foundation::locks::lock_unpoisoned(&inner.flush_hook).clone());
             (bugs, batch)
         };
+        let mut folder = None;
         while let Some(source) = self.sources.pop_front() {
             let StagingSource { namespace, id, name, source, place } = source;
             // Creation owns the staging guard until it finishes. Cancellation
@@ -140,17 +141,22 @@ impl FileStaging {
             // The staging comes back with the writer, or with why it wasn't
             // made, so no error reaches the sink unread: a dropped caller's
             // staging releases its names as it drops.
+            let held = folder.take();
             let (next, writer) = coven_foundation::task::blocking_completing(
                 "create a staged copy",
                 bugs.clone(),
                 crate::commit_scope::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
-                        let slot = read_unpoisoned(&self.database);
-                        let inner = slot.as_ref().expect("staging holds close guard");
-                        Ok(inner
-                            .access
-                            .directory
-                            .create_writer(FileArea::AppProvided, &file_name)?)
+                        let held = match held {
+                            Some(held) => held,
+                            None => {
+                                let slot = read_unpoisoned(&self.database);
+                                let inner = slot.as_ref().expect("staging holds close guard");
+                                inner.access.directory.writer_folder(FileArea::AppProvided)?
+                            }
+                        };
+                        let writer = held.create(&file_name)?;
+                        Ok((held, writer))
                     })();
                     Ok::<_, std::convert::Infallible>((self, writer))
                 }),
@@ -159,7 +165,10 @@ impl FileStaging {
             .unwrap_or_else(|never| match never {});
             self = next;
             let writer = match writer {
-                Ok(writer) => writer,
+                Ok((held, writer)) => {
+                    folder = Some(held);
+                    writer
+                }
                 Err(error) => return Ok((self, Err(error))),
             };
             let mut hash = FileHasher::new();

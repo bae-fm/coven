@@ -55,7 +55,7 @@ pub(super) struct BatchFolder {
     path: PathBuf,
     handle: Arc<rustix::fd::OwnedFd>,
     stat: rustix::fs::Stat,
-    _lock: Option<StoreReadLock>,
+    _lock: Option<Arc<StoreReadLock>>,
 }
 
 #[cfg(unix)]
@@ -68,7 +68,7 @@ impl BatchFolder {
 #[cfg(unix)]
 impl BatchFolder {
     /// Open the folder at `path`, keeping `lock` until the batch's flush ends.
-    pub(super) fn open(path: PathBuf, lock: Option<StoreReadLock>) -> std::io::Result<Self> {
+    pub(super) fn open(path: PathBuf, lock: Option<Arc<StoreReadLock>>) -> std::io::Result<Self> {
         use rustix::fs::{Mode, OFlags};
         let handle = rustix::fs::open(
             &path,
@@ -82,7 +82,7 @@ impl BatchFolder {
     pub(super) fn held(
         path: PathBuf,
         handle: Arc<rustix::fd::OwnedFd>,
-        lock: Option<StoreReadLock>,
+        lock: Option<Arc<StoreReadLock>>,
     ) -> std::io::Result<Self> {
         let stat = rustix::fs::fstat(&*handle)?;
         Ok(Self { path, handle, stat, _lock: lock })

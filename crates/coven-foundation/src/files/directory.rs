@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::files::protection::Protection;
 use crate::files::{
     lock, settings, AtomicFile, CacheWriteLock, FileError, FileWriter, SettingsError,
-    StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings,
+    StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings, WriterFolder,
 };
 use crate::id_source::StoreId;
 use crate::task::BugSinkRef;
@@ -327,6 +327,10 @@ pub trait StoreDirAccess: Sized {
     /// under it. The caller records the name first and removes partial bytes
     /// after a failure.
     fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError>;
+    /// Hold `area`'s folder for a run of files made in it: the store's read
+    /// lock is taken and the folder resolved once, for every writer
+    /// [`WriterFolder::create`] makes, each as `create_writer`'s does.
+    fn writer_folder(&self, area: FileArea) -> Result<WriterFolder, WriterError>;
     /// Reopen a named file of `area` that an earlier writer left unfinished,
     /// for appending after its first `length` bytes, which the caller
     /// recorded as synced; anything past them is cut off. A file with fewer
@@ -440,8 +444,11 @@ impl StoreDirAccess for StoreDir {
         AtomicFile::new(self.path.join(area.name()).join(&name.0))
     }
     fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError> {
+        Ok(self.writer_folder(area)?.create(name)?)
+    }
+    fn writer_folder(&self, area: FileArea) -> Result<WriterFolder, WriterError> {
         let lock = self.lock_read_only()?;
-        Ok(FileWriter::create(&self.file(area, name), lock, self.bugs.clone())?)
+        Ok(WriterFolder::open(&self.path.join(area.name()), lock, self.bugs.clone())?)
     }
     fn resume_writer(
         &self,

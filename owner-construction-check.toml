@@ -49,6 +49,7 @@ capability_types = [
     "StoreDir",
     "AtomicFile",
     "FileWriter",
+    "WriterFolder",
     "FileReader",
     # The places outside coven's directories an app's call names (F.2): a
     # user's original, the folder the person picked for device-only copies
@@ -119,6 +120,7 @@ construction_only_capability_types = [
     "AssetFiles",
     "StoreDirectories",
     "FileReader",
+    "WriterFolder",
     "UserOriginal",
     "CopyFolder",
     "RecordedCopy",
@@ -1693,6 +1695,7 @@ tables = [
 "StoreDir::lock_for_open" = "StoreLock"
 "StoreDir::owned_file" = "AtomicFile"
 "StoreDir::file" = "AtomicFile"
+"StoreDir::writer_folder" = "WriterFolder"
 
 [[background_starts]]
 kind = "runtime construction"

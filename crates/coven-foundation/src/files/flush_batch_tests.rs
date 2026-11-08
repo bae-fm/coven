@@ -44,6 +44,30 @@ async fn a_batch_keeps_each_folder_once_and_the_store_until_it_is_flushed() {
     assert!(store.lock_for_deletion().unwrap().is_some());
 }
 
+/// The files of one held folder share its single read lock: with the folder
+/// let go, the store stays held until the batch they finished into flushes.
+#[cfg(unix)]
+#[tokio::test]
+async fn files_made_in_a_held_folder_keep_the_store_until_their_batch_flushes() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let folder = store.writer_folder(FileArea::AppProvided).unwrap();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
+    for name in ["one", "two", "three"] {
+        folder
+            .create(&FileName::new(name).unwrap())
+            .unwrap()
+            .write_from(&mut b"bytes".as_slice(), |_| {}, &mut batch)
+            .await
+            .unwrap();
+    }
+    drop(folder);
+    assert_eq!(batch.files, 3);
+    assert!(matches!(store.lock_for_deletion(), Err(crate::files::StoreLockError::AlreadyOpen(_))));
+    let _flushed = batch.flush().await.unwrap();
+    assert!(store.lock_for_deletion().unwrap().is_some());
+}
+
 /// A flush that fails fails the batch, so the commit that would record its
 /// files never gets the `Flushed` it takes. An empty batch flushes nothing.
 #[tokio::test]

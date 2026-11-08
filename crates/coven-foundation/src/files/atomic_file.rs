@@ -2,7 +2,7 @@
 
 #[cfg(unix)]
 use super::flush_batch::BatchFolder;
-use super::{FlushBatch, StoreReadLock};
+use super::{FileName, FlushBatch, StoreReadLock};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -282,27 +282,53 @@ struct LockedWriter {
     file: fs::File,
     // Close the handle before allowing the store directory to be deleted.
     // Finishing into a batch moves it to the batch, which outlives the handle.
-    lock: Option<StoreReadLock>,
+    lock: Option<Arc<StoreReadLock>>,
 }
 
-impl FileWriter {
-    /// Create `file` for asynchronous streaming without replacing anything,
-    /// holding `lock`, its store's read lock, until the handle and any
-    /// cancelled I/O finish, or a batch it finishes into flushes. A panic in
-    /// a write whose caller stopped waiting goes to `bugs` (E15).
-    pub(super) fn create(
-        file: &AtomicFile,
+/// One area's folder, held for a run of files made in it: the store's read
+/// lock, taken once, and the folder's resolved path, shared by every writer
+/// made here. The lock lasts until the last of those writers, and any batch
+/// one finished into, lets go of it.
+#[derive(Clone)]
+pub struct WriterFolder {
+    path: PathBuf,
+    lock: Arc<StoreReadLock>,
+    /// Where a panic in a write its caller stopped waiting for goes (E15).
+    bugs: crate::task::BugSinkRef,
+}
+
+impl WriterFolder {
+    /// Hold `lock`, the store's read lock, with the folder at `path`
+    /// resolved. A panic in a write whose caller stopped waiting goes to
+    /// `bugs` (E15).
+    pub(super) fn open(
+        path: &Path,
         lock: StoreReadLock,
         bugs: crate::task::BugSinkRef,
     ) -> Result<Self, FileError> {
-        let path = file.resolved()?;
+        let path = fs::canonicalize(path)
+            .map_err(|source| FileError::at("resolve parent directory", path, source))?;
+        Ok(Self { path, lock: Arc::new(lock), bugs })
+    }
+
+    /// Create `name` here for asynchronous streaming without replacing
+    /// anything.
+    pub fn create(&self, name: &FileName) -> Result<FileWriter, FileError> {
+        let path = self.path.join(name.as_str());
         let file = create_new(&path)
             .map_err(|source| FileError::at("create owned file", &path, source))?;
-        Ok(Self {
-            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
-            path,
-            bugs,
-        })
+        Ok(FileWriter::new(file, path, Some(self.lock.clone()), self.bugs.clone()))
+    }
+}
+
+impl FileWriter {
+    fn new(
+        file: fs::File,
+        path: PathBuf,
+        lock: Option<Arc<StoreReadLock>>,
+        bugs: crate::task::BugSinkRef,
+    ) -> Self {
+        Self { file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock })), path, bugs }
     }
 
     /// Reopen `file`, an unfinished file of a writer that stopped, for
@@ -332,11 +358,7 @@ impl FileWriter {
         file.set_len(length)
             .and_then(|()| file.seek(io::SeekFrom::Start(length)).map(|_| ()))
             .map_err(|source| FileError::at("reopen owned file", &path, source))?;
-        Ok(Self {
-            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
-            path,
-            bugs,
-        })
+        Ok(Self::new(file, path, Some(Arc::new(lock)), bugs))
     }
 
     /// Read once in 64 KiB chunks, reporting each chunk after its disk write,
