@@ -148,6 +148,44 @@ async fn keys_read_together_match_keys_read_one_by_one() {
     db.close().await.unwrap();
 }
 
+/// A write's keys are looked up one by one in the key index, however many
+/// keys the statement holds and however many rows the store has: the
+/// planner left to order the join scans every merge row instead.
+#[tokio::test]
+async fn reading_a_writes_keys_searches_the_key_index_and_scans_no_merge_rows() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT)",
+        )
+        .await
+        .unwrap();
+    db.write(|context| {
+        for n in 0..600 {
+            context.execute("INSERT INTO notes VALUES(?1,'t')", [format!("note-{n}")])?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let plan: Vec<String> = db
+        .inspect_writer_schema(|db, _| {
+            db.query(
+                &format!("EXPLAIN QUERY PLAN {}", super::key_rows_sql(super::KEY_CHUNK)),
+                rusqlite::params_from_iter(vec![
+                    rusqlite::types::Value::Null;
+                    2 * super::KEY_CHUNK
+                ]),
+                |r| r.get::<_, String>(3),
+            )
+        })
+        .unwrap();
+    assert!(plan.iter().any(|step| step.starts_with("SEARCH r USING COVERING INDEX")), "{plan:?}");
+    assert!(!plan.iter().any(|step| step.starts_with("SCAN r")), "{plan:?}");
+    db.close().await.unwrap();
+}
+
 /// The scans this module's statements may make, with their reasons, for the
 /// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
 /// written, `sql` as run.
@@ -160,7 +198,7 @@ pub(crate) fn scan_reason(
     match (file, template, relation) {
         (
             "merge_store.rs",
-            "WITH k(t,k) AS (VALUES {values}) SELECT DISTINCT r.table_name,r.key,r.audience FROM k JOIN _coven_rows r ON r.table_name=k.t AND r.key=k.k",
+            "WITH k(t,k) AS (VALUES {values}) SELECT DISTINCT r.table_name,r.key,r.audience FROM k CROSS JOIN _coven_rows r ON r.table_name=k.t AND r.key=k.k",
             "2" | "k",
         ) => Some("a write's keys are the statement's own values"),
         _ => None,

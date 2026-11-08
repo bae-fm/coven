@@ -137,6 +137,15 @@ impl Weight for Generations {
 /// How many keys one `load_key_rows` statement reads.
 const KEY_CHUNK: usize = 500;
 
+/// The statement reading the merge rows of `count` keys. The keys are the
+/// outer loop (`CROSS JOIN` fixes the order): left to choose, the planner
+/// scans all of `_coven_rows` once it expects more than a few keys, which
+/// costs a write time in proportion to the store's size.
+fn key_rows_sql(count: usize) -> String {
+    let values = vec!["(?,?)"; count].join(",");
+    format!("WITH k(t,k) AS (VALUES {values}) SELECT DISTINCT r.table_name,r.key,r.audience FROM k CROSS JOIN _coven_rows r ON r.table_name=k.t AND r.key=k.k")
+}
+
 /// The merge rows one app key has stored, one for each audience.
 #[derive(Clone)]
 pub(crate) struct KeyRows(pub(crate) BTreeSet<RowId>);
@@ -281,12 +290,14 @@ impl<'a> MergeStore<'a> {
             .collect();
         let wanted: Vec<_> = wanted.into_iter().collect();
         for chunk in wanted.chunks(KEY_CHUNK) {
-            let values = vec!["(?,?)"; chunk.len()].join(",");
             let mut found = BTreeMap::<(String, Vec<u8>), BTreeSet<RowId>>::new();
             for row in self.database.query(
-                &format!("WITH k(t,k) AS (VALUES {values}) SELECT DISTINCT r.table_name,r.key,r.audience FROM k JOIN _coven_rows r ON r.table_name=k.t AND r.key=k.k"),
+                &key_rows_sql(chunk.len()),
                 rusqlite::params_from_iter(chunk.iter().flat_map(|(table, key)| {
-                    [rusqlite::types::Value::Text(table.clone()), rusqlite::types::Value::Blob(key.clone())]
+                    [
+                        rusqlite::types::Value::Text(table.clone()),
+                        rusqlite::types::Value::Blob(key.clone()),
+                    ]
                 })),
                 crate::row_queries::read_identity,
             )? {
