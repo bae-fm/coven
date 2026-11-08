@@ -43,6 +43,9 @@ impl DatabaseConnection {
                     let before = crate::write_rows::AppView::before(database, schema, &captured)?;
                     let after = crate::write_rows::AppView::after(database, schema);
                     let store = crate::merge_store::MergeStore::new(database, &before);
+                    // Capturing and building the record write no app row: a
+                    // parent many rows name is read once.
+                    let parents = (before.remembering_parents(), after.remembering_parents());
                     let mut steps = crate::execution_capture::capture(
                         database, schema, &store, &before, &after, events,
                     )?;
@@ -58,6 +61,7 @@ impl DatabaseConnection {
                         &changed,
                         &files.taken_out_copies(),
                     )?;
+                    drop(parents);
                     // The write's dismissals follow the app's changes (§8.4).
                     let acknowledgements = crate::dismissal::merge(
                         database,

@@ -445,3 +445,80 @@ async fn a_migration_adding_a_deferred_key_over_a_dangling_row_fails_as_its_comm
     assert_eq!(db.schema_version().await.unwrap(), 1);
     db.close().await.unwrap();
 }
+
+/// The rows a write inserts name a parent through a foreign key; the parent
+/// is read once for the write however many rows name it, and a write after
+/// one that changed it reads it as it is.
+#[tokio::test]
+async fn a_parent_many_rows_name_is_read_once_per_write() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![
+                SyncedTable::new("parents", RowIdentity::SharedKey),
+                SyncedTable::new("kids", RowIdentity::SharedKey),
+            ],
+            vec![crate::Migration::addition(
+                1,
+                "kids",
+                "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL);
+                 CREATE TABLE kids(id TEXT NOT NULL PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES parents(id), name TEXT NOT NULL)",
+            )],
+        )
+        .open()
+        .await
+        .unwrap();
+    let parent_reads = |db: &crate::Database| {
+        db.inspect_writer(|writer| {
+            writer
+                .profiled_statements()
+                .iter()
+                .filter(|statement| statement.sql.contains("FROM main.\"parents\" WHERE"))
+                .count()
+        })
+    };
+    // A write inserting `parent` and `kids` that name it.
+    let add = |parent: &'static str, kids: &'static [&'static str]| {
+        let db = db.clone();
+        async move {
+            db.write(move |sql| {
+                sql.execute("INSERT INTO parents VALUES(?1, 'first')", [parent])?;
+                for kid in kids {
+                    sql.execute("INSERT INTO kids VALUES(?1, ?2, 'kid')", [kid, &parent])?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+            parent_reads(&db)
+        }
+    };
+    let add_to_existing = |db: &crate::Database, kids: &'static [&'static str]| {
+        let db = db.clone();
+        async move {
+            db.write(move |sql| {
+                for kid in kids {
+                    sql.execute("INSERT INTO kids VALUES(?1, 'p', 'kid')", [kid])?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+            parent_reads(&db)
+        }
+    };
+    let one = add("p", &["a"]).await;
+    let many = add("q", &["b", "c", "d", "e", "f"]).await;
+    assert_eq!(many, one);
+    // A parent changed by an earlier write is read again, not remembered.
+    db.write(|sql| {
+        sql.execute("UPDATE parents SET name='second' WHERE id='p'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let after_change = add_to_existing(&db, &["w"]).await;
+    assert_eq!(add_to_existing(&db, &["x", "y", "z"]).await, after_change);
+    assert_eq!(count(&db, "_coven_rows"), 2 + 6 + 4);
+    db.close().await.unwrap();
+}

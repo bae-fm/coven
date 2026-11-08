@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type AppKey = (String, Vec<u8>);
 pub(crate) type AppValues = BTreeMap<String, Value>;
+/// A foreign key's target table, its columns, and the referencing values' key.
+type ParentLookup = (String, Vec<String>, Vec<u8>);
 
 #[derive(Clone)]
 pub(crate) struct AppRow {
@@ -30,6 +32,9 @@ pub(crate) struct AppView<'a> {
     overrides: BTreeMap<AppKey, Option<AppValues>>,
     lookup: BTreeMap<(String, Vec<String>, Vec<u8>), Vec<AppKey>>,
     rows: Option<RefCell<BTreeMap<AppKey, Option<AppRow>>>>,
+    /// The parent rows foreign keys named during a stretch that writes no app
+    /// row: a parent many rows name is read once. `None` outside one.
+    parents: RefCell<Option<BTreeMap<ParentLookup, Option<AppValues>>>>,
     migration: Option<&'a crate::migration_snapshot::MigrationSnapshot<'a>>,
 }
 
@@ -41,6 +46,7 @@ impl<'a> AppView<'a> {
             overrides: BTreeMap::new(),
             lookup: BTreeMap::new(),
             rows: Some(RefCell::new(BTreeMap::new())),
+            parents: RefCell::new(None),
             migration: None,
         }
     }
@@ -115,7 +121,7 @@ impl<'a> AppView<'a> {
                 return Err(reference_error(table, &values, &foreign_key.columns[0]));
             }
             let columns = target_columns(target, foreign_key);
-            let parent = self.find(target, &columns, &parameters)?.into_iter().next();
+            let parent = self.parent(target, &columns, &parameters)?;
             // SQLite enforces every key but a file reference, which can name
             // a file whose record this device no longer shows: a write checks
             // its own references (§17.2), and merging takes out a row whose
@@ -230,6 +236,34 @@ impl<'a> AppView<'a> {
         Ok(changes)
     }
 
+    /// Remember the parents foreign keys name until the returned guard drops.
+    /// Only for a stretch that writes no app row.
+    pub(crate) fn remembering_parents(&self) -> ParentsGuard<'_> {
+        *self.parents.borrow_mut() = Some(BTreeMap::new());
+        ParentsGuard(&self.parents)
+    }
+
+    /// The row a foreign key names, from what `remembering_parents` kept, or
+    /// read.
+    fn parent(
+        &self,
+        target: &TableSchema,
+        columns: &[String],
+        values: &[Value],
+    ) -> Result<Option<AppValues>, DbError> {
+        let lookup = (target.name.clone(), columns.to_vec(), equality_key(values)?);
+        if let Some(parents) = self.parents.borrow().as_ref() {
+            if let Some(parent) = parents.get(&lookup) {
+                return Ok(parent.clone());
+            }
+        }
+        let parent = self.find(target, columns, values)?.into_iter().next();
+        if let Some(parents) = self.parents.borrow_mut().as_mut() {
+            parents.insert(lookup, parent.clone());
+        }
+        Ok(parent)
+    }
+
     pub(crate) fn find(
         &self,
         table: &TableSchema,
@@ -303,6 +337,15 @@ impl<'a> AppView<'a> {
             }
         }
         Ok(found.into_values().collect())
+    }
+}
+
+/// Ends the parents an `AppView` keeps.
+pub(crate) struct ParentsGuard<'a>(&'a RefCell<Option<BTreeMap<ParentLookup, Option<AppValues>>>>);
+
+impl Drop for ParentsGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.borrow_mut() = None;
     }
 }
 
