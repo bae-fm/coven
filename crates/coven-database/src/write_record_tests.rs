@@ -61,13 +61,22 @@ async fn an_inserted_row_is_read_once() {
         .filter(|s| s.sql.starts_with("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r"))
         .count();
     assert_eq!(generations, 21);
-    // And the audiences its key is stored in, once for the merge's views
-    // before and after the write.
+    // And the audiences its keys are stored in, once for every key the write
+    // changed together, for the merge's views before and after the write, and
+    // by no key's own statement.
     let audiences = statements
+        .iter()
+        .filter(|s| {
+            s.sql.starts_with("WITH k(t,k) AS (VALUES (?,?)")
+                && s.sql.contains("FROM k JOIN _coven_rows r")
+        })
+        .count();
+    assert_eq!(audiences, 1);
+    let one_key_at_a_time = statements
         .iter()
         .filter(|s| s.sql.starts_with("SELECT DISTINCT table_name,key,audience FROM _coven_rows"))
         .count();
-    assert_eq!(audiences, 21);
+    assert_eq!(one_key_at_a_time, 0);
     db.close().await.unwrap();
 }
 
