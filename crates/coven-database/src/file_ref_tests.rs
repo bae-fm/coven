@@ -111,7 +111,7 @@ async fn stored_paths_are_found_by_retention() {
                 [text],
             )?;
             let key = ("coven_files".into(), crate::file_table::key(file)?);
-            crate::file_protection::refresh(sql, schema, &key).map(drop)
+            crate::file_protection::refresh(sql, schema, &key, &Default::default()).map(drop)
         })
         .unwrap()
     });

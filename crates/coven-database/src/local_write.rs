@@ -85,7 +85,7 @@ impl DatabaseConnection {
                                 },
                             )
                         })?;
-                    let affected = crate::write_apply::WriteApply::new(
+                    let applied = crate::write_apply::WriteApply::new(
                     database,
                     schema,
                     &store,
@@ -93,7 +93,7 @@ impl DatabaseConnection {
                     &after,
                     &deleted_circles,
                 )
-                .apply(record.as_ref(), BTreeSet::new())
+                .apply_merged(record.as_ref(), BTreeSet::new())
                 .map_err(|error| match error {
                     // This device authored the record; rejecting it means our own
                     // authoring or removal machinery broke its invariants.
@@ -102,7 +102,7 @@ impl DatabaseConnection {
                     }
                     error => error,
                 })?;
-                    files.retain_rows(affected)?;
+                    files.retain_rows(applied.affected, &applied.merged)?;
                     if let Some(record) = &record {
                         // The write completing a bound upload frees the write it
                         // holds, which a self-replacement waits to send (§17.4).

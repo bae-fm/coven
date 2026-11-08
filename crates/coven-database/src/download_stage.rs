@@ -284,7 +284,10 @@ pub(crate) fn materialize(
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
     let region = rules(database, before, schema, deleted, touched)?;
-    files.retain_rows(region.into_iter().map(|row| (row.table, row.key)).collect())?;
+    files.retain_rows(
+        region.into_iter().map(|row| (row.table, row.key)).collect(),
+        &crate::file_protection::Merged::new(),
+    )?;
     finish(database)
 }
 

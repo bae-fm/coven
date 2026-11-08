@@ -12,7 +12,10 @@ use coven_format::{
 };
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use rusqlite::params;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The merged state a write gave the rows it changed.
+pub(crate) type Merged = BTreeMap<coven_merge::RowId, coven_merge::RowUpdate<Value>>;
 
 /// The column naming a stored path: a record's coordinates.
 /// Whether any row names `file`.
@@ -90,13 +93,11 @@ pub(crate) fn loss_files(
     }
 }
 
-/// The files one audience's merged state of an app row references through
-/// `columns`, its file columns: its cells, and, when `state` holds them, its
-/// live lost values.
-pub(crate) fn state_files(
+/// The files a merged state's cells reference through `columns`, a row's file
+/// columns.
+fn cell_files(
     columns: &[&str],
     state: &coven_merge::RowState<Value>,
-    kept: impl Fn(&str, coven_merge::WriteId) -> bool,
     files: &mut BTreeSet<(FileId, String)>,
 ) {
     for column in columns {
@@ -106,6 +107,18 @@ pub(crate) fn state_files(
             files.insert((file, (*column).to_owned()));
         }
     }
+}
+
+/// The files one audience's merged state of an app row references through
+/// `columns`, its file columns: its cells, and, when `state` holds them, its
+/// live lost values.
+pub(crate) fn state_files(
+    columns: &[&str],
+    state: &coven_merge::RowState<Value>,
+    kept: impl Fn(&str, coven_merge::WriteId) -> bool,
+    files: &mut BTreeSet<(FileId, String)>,
+) {
+    cell_files(columns, state, files);
     for (key, lost) in state.lost() {
         let Some(column) = columns.iter().find(|c| **c == key.column) else {
             continue;
@@ -144,11 +157,13 @@ pub(crate) fn retain_loss(
 /// stored paths and stored file, or an app row's file references. All its
 /// audiences and retained losses contribute; display removal alone releases
 /// nothing. Returns the files the row referenced before and no row
-/// references now.
+/// references now. A row `merged` holds, the state a write just gave it, is
+/// not read back from the store.
 pub(crate) fn refresh(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     key: &AppKey,
+    merged: &Merged,
 ) -> Result<BTreeSet<FileId>, DbError> {
     if file_table::is_files(&key.0) {
         refresh_record(db, schema, key)?;
@@ -163,7 +178,7 @@ pub(crate) fn refresh(
     {
         return Ok(BTreeSet::new());
     }
-    let files = row_files(db, schema, key)?;
+    let files = row_files(db, schema, key, merged)?;
     let previous: BTreeSet<(FileId, String)> = db
         .query(
             "SELECT file,column_name FROM _coven_file_references WHERE table_name=?1 AND key=?2",
@@ -203,7 +218,7 @@ pub(crate) fn refresh_received(
     schema: &WriteSchema,
     key: &AppKey,
 ) -> Result<(), DbError> {
-    await_own_write(db, refresh(db, schema, key)?)
+    await_own_write(db, refresh(db, schema, key, &Merged::new())?)
 }
 
 /// A file referenced again, or whose record is gone, no longer waits for
@@ -266,28 +281,40 @@ pub(crate) fn await_own_write(
 }
 
 /// The files an app row references through its file columns: each
-/// audience's merged cells, and every retained loss of the row.
+/// audience's merged cells, and every retained loss of the row. A row
+/// `merged` holds takes its cells from there, as the store would give them
+/// after the write; the others are read.
 pub(crate) fn row_files(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     key: &AppKey,
+    merged: &Merged,
 ) -> Result<BTreeSet<(FileId, String)>, DbError> {
     let mut files = BTreeSet::new();
     let columns = schema.file_columns(&key.0);
     if !columns.is_empty() {
-        let visible = crate::write_rows::AppView::after(db, schema).without_row_cache();
-        let store = crate::merge_store::MergeStore::new(db, &visible).without_row_cache();
+        let mut unmerged = Vec::new();
         db.for_each(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2",
             params![key.0, key.1],
             |r| {
                 let row = crate::row_queries::read_identity(r)?;
-                // Its live lost values are among the loss records below.
-                let state = store.row_without_losses(&row)?.state;
-                state_files(&columns, &state, |_, _| true, &mut files);
+                match merged.get(&row) {
+                    Some(update) => cell_files(&columns, &update.state, &mut files),
+                    None => unmerged.push(row),
+                }
                 Ok::<_, DbError>(())
             },
         )?;
+        if !unmerged.is_empty() {
+            let visible = crate::write_rows::AppView::after(db, schema).without_row_cache();
+            let store = crate::merge_store::MergeStore::new(db, &visible).without_row_cache();
+            for row in &unmerged {
+                // Its live lost values are among the loss records below.
+                let state = store.row_without_losses(row)?.state;
+                cell_files(&columns, &state, &mut files);
+            }
+        }
     }
     db.for_each(
         &format!("{} WHERE l.table_name=?1 AND l.key=?2", crate::loss_record::SELECT),
@@ -486,7 +513,7 @@ pub(crate) fn migrate(
     })?;
     let mut refreshed = BTreeSet::new();
     for key in keys {
-        released.extend(refresh(db, &schema, &key)?);
+        released.extend(refresh(db, &schema, &key, &Merged::new())?);
         refreshed.insert(key);
     }
     for declaration in tables.iter().filter(|table| !table.files.is_empty()) {
@@ -498,7 +525,7 @@ pub(crate) fn migrate(
         for key in keys {
             let key = (declaration.name.clone(), key);
             if refreshed.insert(key.clone()) {
-                released.extend(refresh(db, &schema, &key)?);
+                released.extend(refresh(db, &schema, &key, &Merged::new())?);
             }
         }
     }

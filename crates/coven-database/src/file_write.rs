@@ -544,7 +544,11 @@ impl<'a> FileWrite<'a> {
     /// Other devices' writes can leave a file with none, when two of them
     /// each removed one of its references; this device's next write of its
     /// own deletes that record.
-    pub(crate) fn retain_rows(&self, keys: BTreeSet<AppKey>) -> Result<(), DbError> {
+    pub(crate) fn retain_rows(
+        &self,
+        keys: BTreeSet<AppKey>,
+        merged: &crate::file_protection::Merged,
+    ) -> Result<(), DbError> {
         let db = self.database;
         let deleted = self.files.deleted.borrow();
         let Some(deleted) = deleted.as_ref() else {
@@ -558,7 +562,7 @@ impl<'a> FileWrite<'a> {
         // references say whether it removed a file's last one.
         let mut released = BTreeSet::new();
         for key in &keys {
-            released.extend(crate::file_protection::refresh(db, self.files.schema, key)?);
+            released.extend(crate::file_protection::refresh(db, self.files.schema, key, merged)?);
         }
         for file in released {
             if !crate::file_protection::referenced(db, file)? && Record::read(db, file)?.is_some() {

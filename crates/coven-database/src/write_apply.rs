@@ -10,6 +10,13 @@ use coven_foundation::id_source::CircleId;
 use coven_merge::RowId;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// What an applied record changed: the app rows it reached, and the merged
+/// state it gave each row it changes.
+pub(crate) struct Applied {
+    pub(crate) affected: BTreeSet<crate::write_rows::AppKey>,
+    pub(crate) merged: BTreeMap<RowId, coven_merge::RowUpdate<coven_format::value::Value>>,
+}
+
 pub(crate) struct WriteApply<'a> {
     database: &'a DatabaseConnection,
     schema: &'a WriteSchema,
@@ -45,8 +52,17 @@ impl<'a> WriteApply<'a> {
     pub(crate) fn apply(
         &self,
         record: Option<&WriteRecord>,
-        mut touched: BTreeSet<RowId>,
+        touched: BTreeSet<RowId>,
     ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+        self.apply_merged(record, touched).map(|applied| applied.affected)
+    }
+
+    /// `apply`, also giving the merge result of the record's rows.
+    pub(crate) fn apply_merged(
+        &self,
+        record: Option<&WriteRecord>,
+        mut touched: BTreeSet<RowId>,
+    ) -> Result<Applied, DbError> {
         if let Some(record) = record {
             crate::published::capture_rows(
                 self.database,
@@ -92,7 +108,7 @@ impl<'a> WriteApply<'a> {
         if let Some(record) = record {
             affected.extend(crate::dismissal::apply(self.database, record)?);
         }
-        Ok(affected)
+        Ok(Applied { affected, merged: updates })
     }
 
     /// Recompute and materialize the rows `touched` reaches, with no write

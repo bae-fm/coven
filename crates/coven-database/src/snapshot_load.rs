@@ -124,7 +124,10 @@ pub(crate) fn load<P: crate::PendingValue>(
         )?;
         let region = crate::download_stage::rules(database, before, schema, &deleted, touched)?;
         crate::snapshot_materialize::materialize(database, schema, &region, files)?;
-        files.retain_rows(region.into_iter().map(|row| (row.table, row.key)).collect())?;
+        files.retain_rows(
+            region.into_iter().map(|row| (row.table, row.key)).collect(),
+            &crate::file_protection::Merged::new(),
+        )?;
         crate::download_stage::finish(database)?;
         crate::snapshot_install::drop_tables(database, schema)?;
         crate::pending::clear_covered_slots(database)?;

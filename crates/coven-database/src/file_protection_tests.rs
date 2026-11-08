@@ -28,3 +28,53 @@ pub(crate) fn scan_reason(
         _ => None,
     }
 }
+
+fn references(db: &crate::Database) -> Vec<(coven_foundation::id_source::FileId, String)> {
+    db.inspect_writer(|sql| {
+        sql.query("SELECT file,column_name FROM _coven_file_references ORDER BY file", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+    })
+}
+
+/// A local write's references are those of the merged state it gave its
+/// rows, whichever way a file cell changes: unset to set, set to another
+/// file, set to NULL, and NULL and set again within the one write.
+#[tokio::test]
+async fn a_local_writes_references_follow_the_cells_it_merged() {
+    use crate::file_write::tests::{has_record, open, stage};
+    let store = crate::tests::TestStore::new();
+    let db = open(&store, crate::Provenance::AppProvided).await;
+    db.write(|sql| {
+        sql.execute("INSERT INTO files(id) VALUES('7')", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(references(&db), []);
+    let first = stage(&db, b"first".to_vec(), false).await.unwrap();
+    assert_eq!(references(&db), [(first, "file".into())]);
+    // Set to NULL and back to the same file within one write: still referenced.
+    db.write(move |sql| {
+        sql.execute("UPDATE files SET file=NULL WHERE id='7'", [])?;
+        sql.execute("UPDATE files SET file=?1 WHERE id='7'", [first])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(references(&db), [(first, "file".into())]);
+    assert!(has_record(&db, first));
+    let second = stage(&db, b"second".to_vec(), false).await.unwrap();
+    assert_eq!(references(&db), [(second, "file".into())]);
+    assert!(!has_record(&db, first));
+    db.write(|sql| {
+        sql.execute("UPDATE files SET file=NULL WHERE id='7'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(references(&db), []);
+    assert!(!has_record(&db, second));
+    db.close().await.unwrap();
+}
