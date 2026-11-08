@@ -121,7 +121,8 @@ impl<'a> WriteApply<'a> {
         new: &DatabaseRemovalView<'_>,
         touched: BTreeSet<RowId>,
         write: Option<coven_merge::WriteId>,
-        persist: impl FnOnce() -> Result<BTreeMap<RowId, i64>, DbError>,
+        persist: impl FnOnce()
+            -> Result<BTreeMap<RowId, crate::write_commit::StoredGeneration>, DbError>,
     ) -> Result<BTreeSet<RowId>, DbError> {
         old.prime(touched.iter().cloned())?;
         new.prime(touched.iter().cloned())?;

@@ -776,9 +776,11 @@ async fn a_row_with_unique_values_is_evaluated_once() {
 }
 
 /// A row's merge state is stored in a statement for each kind of record, not
-/// one for each column: its cells in one and its written values cleared in
-/// one. Its generation's id is never read back: storing the generation
-/// returns it, and recording its removal state uses that.
+/// one for each column: its cells in one, and the written values of a
+/// generation already stored cleared in one. A generation the write just
+/// inserted has none to clear, but one it updates may. Its generation's id is
+/// never read back: storing the generation returns it, and recording its
+/// removal state uses that.
 #[tokio::test]
 async fn a_row_stores_its_cells_in_one_statement() {
     let store = TestStore::new();
@@ -799,9 +801,23 @@ async fn a_row_stores_its_cells_in_one_statement() {
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("INSERT INTO _coven_cells"), 50);
-    assert_eq!(runs(crate::written_values::tests::CLEARED), 50);
+    assert_eq!(runs(crate::written_values::tests::CLEARED), 0);
+    assert_eq!(runs("SELECT constraint_id,value FROM _coven_claims"), 0);
     assert_eq!(runs("SELECT id FROM _coven_rows WHERE"), 0);
     assert_eq!(count(&db, "_coven_cells"), 150);
+    crate::write::tests::sql(&db, "UPDATE notes SET title='again' WHERE id<'note 2'")
+        .await
+        .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let updated = count(&db, "notes WHERE title='again'") as usize;
+    let cleared =
+        statements.iter().filter(|s| s.sql.contains(crate::written_values::tests::CLEARED)).count();
+    let claims = statements
+        .iter()
+        .filter(|s| s.sql.contains("SELECT constraint_id,value FROM _coven_claims"))
+        .count();
+    assert!(updated > 0);
+    assert_eq!((cleared, claims), (updated, updated));
     db.close().await.unwrap();
 }
 

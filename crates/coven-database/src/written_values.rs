@@ -23,9 +23,12 @@ pub(crate) fn load(database: &DatabaseConnection, row: i64) -> Result<AppValues,
         .collect())
 }
 
+/// Store the written values of the generation with id `row`. A `fresh`
+/// generation (see [`crate::write_commit::StoredGeneration`]) has none to clear.
 pub(crate) fn store(
     database: &DatabaseConnection,
     row: i64,
+    fresh: bool,
     state: &RowState<Value>,
     displayed: Option<&AppValues>,
 ) -> Result<(), DbError> {
@@ -44,6 +47,9 @@ pub(crate) fn store(
             )?;
             kept.push(column);
         }
+    }
+    if fresh {
+        return Ok(());
     }
     let others = vec!["?"; kept.len()].join(",");
     database.internal_execute(

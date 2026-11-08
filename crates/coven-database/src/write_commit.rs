@@ -9,14 +9,14 @@ use coven_merge::{Audience, LostChange, RowId, RowUpdate, WriteId};
 use rusqlite::params;
 use std::collections::BTreeMap;
 
-/// Store a write and the row updates merging it produced. Returns the id of
-/// each present row's current generation, as `persist` does.
+/// Store a write and the row updates merging it produced. Returns each
+/// present row's current generation, as `persist` does.
 pub(crate) fn commit(
     database: &DatabaseConnection,
     record: &WriteRecord,
     store: &MergeStore<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
-) -> Result<BTreeMap<RowId, i64>, DbError> {
+) -> Result<BTreeMap<RowId, StoredGeneration>, DbError> {
     let write_id = retain_original(database, &record.header, None)?;
     persist(
         database,
@@ -135,14 +135,26 @@ fn delete_children(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Resu
     Ok(())
 }
 
-/// Store each row's update over its prior record. Returns the id of each
-/// present row's current generation.
+/// A present row's current generation as `persist` stored it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StoredGeneration {
+    /// The generation's `_coven_rows` id.
+    pub(crate) ordinal: i64,
+    /// Whether `persist` inserted the generation's `_coven_rows` row, rather
+    /// than finding it already stored. Nothing deletes a `_coven_rows` row
+    /// without its cells, written values and claims (`forget`), so an inserted
+    /// row has none until the transaction stores them.
+    pub(crate) fresh: bool,
+}
+
+/// Store each row's update over its prior record. Returns each present row's
+/// current generation.
 pub(crate) fn persist(
     database: &DatabaseConnection,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
     prior: impl Fn(&RowId) -> Result<crate::merge_store::StoredRow, DbError>,
     ordinal: impl Fn(WriteId) -> Result<i64, DbError>,
-) -> Result<BTreeMap<RowId, i64>, DbError> {
+) -> Result<BTreeMap<RowId, StoredGeneration>, DbError> {
     let mut present = BTreeMap::new();
     for (row, update) in updates {
         let old = prior(row)?;
@@ -151,9 +163,17 @@ pub(crate) fn persist(
         let mut current = None;
         for (generation, writer) in update.state.generations() {
             if old.state.generations().get(generation) != Some(writer) {
-                let id: i64 = database.query_row("INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(table_name,key,audience,generation) DO UPDATE SET write_id=excluded.write_id RETURNING id",params![row.table,row.key,audience,generation.to_be_bytes().as_slice(),ordinal(*writer)?],|r| r.get(0))?;
+                let generation_bytes = generation.to_be_bytes();
+                let writer = ordinal(*writer)?;
+                let inserted: Option<i64> = database
+                    .query("INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(table_name,key,audience,generation) DO NOTHING RETURNING id",params![row.table,row.key,audience,generation_bytes.as_slice(),writer],|r| r.get(0))?
+                    .pop();
+                let (id, fresh) = match inserted {
+                    Some(id) => (id, true),
+                    None => (database.query_row("UPDATE _coven_rows SET write_id=?5 WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 RETURNING id",params![row.table,row.key,audience,generation_bytes.as_slice(),writer],|r| r.get(0))?, false),
+                };
                 if *generation == update.state.generation() {
-                    current = Some(id);
+                    current = Some(StoredGeneration { ordinal: id, fresh });
                 }
             }
         }
@@ -167,11 +187,15 @@ pub(crate) fn persist(
             }
         }
         if update.state.present() {
-            let row_ordinal: i64 = match current {
-                Some(id) => id,
-                None => database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",params![row.table,row.key,audience,update.state.generation().to_be_bytes().as_slice()],|r| r.get(0))?,
+            let stored = match current {
+                Some(stored) => stored,
+                None => StoredGeneration {
+                    ordinal: database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",params![row.table,row.key,audience,update.state.generation().to_be_bytes().as_slice()],|r| r.get(0))?,
+                    fresh: false,
+                },
             };
-            present.insert(row.clone(), row_ordinal);
+            let row_ordinal = stored.ordinal;
+            present.insert(row.clone(), stored);
             let mut cells = Vec::new();
             for (name, cell) in update.state.cells() {
                 if !advanced && old.state.cells().get(name) == Some(cell) {
@@ -223,19 +247,25 @@ pub(crate) fn persist(
 
 /// Replace the unique-constraint claims of the stored generation `row`,
 /// which holds `audience`'s row, with `claims`, each a constraint's id and
-/// the value the row claims. Unchanged claims are left alone.
+/// the value the row claims. Unchanged claims are left alone. A `fresh`
+/// generation (see [`StoredGeneration`]) has none to read.
 pub(crate) fn store_claims(
     database: &DatabaseConnection,
     row: i64,
+    fresh: bool,
     audience: &Audience,
     claims: &BTreeMap<i64, Vec<u8>>,
 ) -> Result<(), DbError> {
-    let previous: BTreeMap<i64, Vec<u8>> = database
-        .query("SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1", [row], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
-        .into_iter()
-        .collect();
+    let previous: BTreeMap<i64, Vec<u8>> = if fresh {
+        BTreeMap::new()
+    } else {
+        database
+            .query("SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1", [row], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .into_iter()
+            .collect()
+    };
     for constraint in previous.keys().filter(|c| !claims.contains_key(c)) {
         database.internal_execute(
             "DELETE FROM _coven_claims WHERE row_id=?1 AND constraint_id=?2",

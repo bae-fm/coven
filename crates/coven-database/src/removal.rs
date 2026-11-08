@@ -4,6 +4,7 @@ use crate::schema::TableSchema;
 use crate::sql::identifier;
 use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
+use crate::write_commit::StoredGeneration;
 use crate::write_encoding::sql_value;
 use crate::write_rows::{key_columns, AppValues, AppView};
 use crate::write_schema::WriteSchema;
@@ -20,7 +21,7 @@ pub(crate) fn materialize(
     visible: &AppView<'_>,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
-    stored: &BTreeMap<RowId, i64>,
+    stored: &BTreeMap<RowId, StoredGeneration>,
 ) -> Result<(), DbError> {
     let mut removed_visible = BTreeSet::new();
     for id in &result.region {
@@ -160,7 +161,7 @@ pub(crate) fn record(
     database: &DatabaseConnection,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
-    stored: &BTreeMap<RowId, i64>,
+    stored: &BTreeMap<RowId, StoredGeneration>,
 ) -> Result<(), DbError> {
     for id in &result.region {
         let row = view.evaluated(id)?;
@@ -172,10 +173,10 @@ pub(crate) fn record(
         let loss = old.loss.filter(|_| old.state.generation() == state.generation());
         let columns: BTreeMap<_, _> =
             state.cells().iter().map(|(name, cell)| (name.clone(), cell.value.clone())).collect();
-        let row_ordinal = match stored.get(id) {
-            Some(ordinal) => *ordinal,
+        let (row_ordinal, fresh) = match stored.get(id) {
+            Some(stored) => (stored.ordinal, stored.fresh),
             None if old.state.generation() == state.generation() => {
-                old.ordinal.ok_or(DbError::DamagedDatabase)?
+                (old.ordinal.ok_or(DbError::DamagedDatabase)?, false)
             }
             None => {
                 return Err(DbError::Invariant {
@@ -186,6 +187,7 @@ pub(crate) fn record(
         crate::written_values::store(
             database,
             row_ordinal,
+            fresh,
             &state,
             (!result.removed.contains_key(id)).then_some(&row.values),
         )?;
@@ -196,7 +198,7 @@ pub(crate) fn record(
                 claims.insert(constraint, claim.value.clone());
             }
         }
-        crate::write_commit::store_claims(database, row_ordinal, &id.audience, &claims)?;
+        crate::write_commit::store_claims(database, row_ordinal, fresh, &id.audience, &claims)?;
         if let Some(rules) = result.removed.get(id) {
             let setters = state.cells().iter().map(|(n, c)| (n.clone(), c.write)).collect();
             crate::loss_record::put_rules_loss(
