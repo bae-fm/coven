@@ -775,12 +775,10 @@ async fn a_row_with_unique_values_is_evaluated_once() {
     db.close().await.unwrap();
 }
 
-/// A row's merge state is stored in a statement for each kind of record, not
-/// one for each column: its cells in one, and the written values of a
-/// generation already stored cleared in one. A generation the write just
-/// inserted has none to clear, but one it updates may. Its generation's id is
-/// never read back: storing the generation returns it, and recording its
-/// removal state uses that.
+/// A write's merge state is stored in a statement for each kind of record,
+/// not one for each row or column. A generation just inserted has no written
+/// values to clear; one a write updates may. A generation's id is never read
+/// back: storing it returns the id, and recording its removal state uses that.
 #[tokio::test]
 async fn a_row_stores_its_cells_in_one_statement() {
     let store = TestStore::new();
@@ -800,7 +798,8 @@ async fn a_row_stores_its_cells_in_one_statement() {
     .unwrap();
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
-    assert_eq!(runs("INSERT INTO _coven_cells"), 50);
+    assert_eq!(runs("INSERT INTO _coven_cells"), 1);
+    assert_eq!(runs("INSERT INTO _coven_rows"), 1);
     assert_eq!(runs(crate::written_values::tests::CLEARED), 0);
     assert_eq!(runs("SELECT constraint_id,value FROM _coven_claims"), 0);
     assert_eq!(runs("SELECT DISTINCT table_name,key,audience FROM _coven_rows"), 0);
@@ -822,11 +821,11 @@ async fn a_row_stores_its_cells_in_one_statement() {
     db.close().await.unwrap();
 }
 
-/// A local write's rows offer their creation in one statement that keeps an
-/// earlier creation, and retain their source records without reading for a
-/// repeat: the write's number is new, so none exists.
+/// Generations stored together: a new one is fresh, one already stored is
+/// found, given the new writer and not fresh, and the others keep theirs.
 #[tokio::test]
-async fn a_new_write_offers_creations_and_retains_sources_without_reading() {
+async fn stored_generations_tell_inserted_from_found() {
+    use coven_merge::{Audience, RowId};
     let store = TestStore::new();
     let db = store
         .schema(
@@ -835,26 +834,48 @@ async fn a_new_write_offers_creations_and_retains_sources_without_reading() {
         )
         .await
         .unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('a','one'),('b','one')").await.unwrap();
-    let creations = |db: &Database| {
-        db.inspect_writer(|writer| {
-            writer.query("SELECT key,write_id FROM _coven_creations ORDER BY key", [], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+    let row = |n: u8| RowId { table: "notes".into(), key: vec![n], audience: Audience::Store };
+    let (one, two, three) = (row(1), row(2), row(3));
+    db.inspect_writer(|writer| {
+        writer
+            .transaction(|writer| {
+                let mut write = |n: u8| {
+                    writer.query_row(
+                        "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,zeroblob(8),NULL) RETURNING id",
+                        rusqlite::params![vec![n; 16], vec![0, 0, 0, 0, 0, 0, 0, n]],
+                        |r| r.get::<_, i64>(0),
+                    )
+                };
+                let (early, late) = (write(1)?, write(2)?);
+                let first = crate::write_commit::store_generations(writer, &[(&one, 1, early), (&two, 1, early)])?;
+                assert!(first.values().all(|stored| stored.fresh));
+                let second = crate::write_commit::store_generations(
+                    writer,
+                    &[(&one, 1, late), (&three, 1, late), (&one, 2, late)],
+                )?;
+                assert!(!second[&(&one, 1)].fresh);
+                assert_eq!(second[&(&one, 1)].ordinal, first[&(&one, 1)].ordinal);
+                assert!(second[&(&three, 1)].fresh);
+                assert!(second[&(&one, 2)].fresh);
+                let writers: Vec<(Vec<u8>, Vec<u8>, i64)> = writer.query(
+                    "SELECT key,generation,write_id FROM _coven_rows ORDER BY key,generation",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                let generation = |n: u64| n.to_be_bytes().to_vec();
+                assert_eq!(
+                    writers,
+                    [
+                        (vec![1], generation(1), late),
+                        (vec![1], generation(2), late),
+                        (vec![2], generation(1), early),
+                        (vec![3], generation(1), late),
+                    ]
+                );
+                Ok(())
             })
-        })
-        .unwrap()
-    };
-    let first = creations(&db);
-    assert_eq!(first.len(), 2);
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('c','two')").await.unwrap();
-    crate::write::tests::sql(&db, "UPDATE notes SET title='three'").await.unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
-    let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
-    assert_eq!(runs("SELECT write_id,creator FROM _coven_creations"), 0);
-    assert_eq!(runs("SELECT (SELECT record FROM _coven_authored_changes"), 0);
-    let all = creations(&db);
-    assert_eq!(all.len(), 3);
-    assert_eq!(all[..2], first[..], "an update leaves the earlier creations");
+            .unwrap();
+    });
     db.close().await.unwrap();
 }
 
