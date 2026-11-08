@@ -134,6 +134,9 @@ impl Weight for Generations {
     }
 }
 
+/// How many keys one `load_key_rows` statement reads.
+const KEY_CHUNK: usize = 500;
+
 /// The merge rows one app key has stored, one for each audience.
 #[derive(Clone)]
 pub(crate) struct KeyRows(pub(crate) BTreeSet<RowId>);
@@ -258,6 +261,43 @@ impl<'a> MergeStore<'a> {
             self.keys.insert(id, KeyRows(rows.clone()));
         }
         Ok(rows)
+    }
+
+    /// Read the merge rows of every key in `keys` that `key_rows` has not
+    /// kept, in one statement for each chunk of keys, and keep them as
+    /// `key_rows` would: a key with no rows keeps an empty set. Nothing is
+    /// read when the store keeps no rows.
+    pub(crate) fn load_key_rows<'k>(
+        &self,
+        keys: impl IntoIterator<Item = (&'k str, &'k [u8])>,
+    ) -> Result<(), DbError> {
+        if !self.keys.keeps() {
+            return Ok(());
+        }
+        let wanted: BTreeSet<(String, Vec<u8>)> = keys
+            .into_iter()
+            .map(|(table, key)| (table.to_owned(), key.to_vec()))
+            .filter(|id| self.keys.peek(id, |_| ()).is_none())
+            .collect();
+        let wanted: Vec<_> = wanted.into_iter().collect();
+        for chunk in wanted.chunks(KEY_CHUNK) {
+            let values = vec!["(?,?)"; chunk.len()].join(",");
+            let mut found = BTreeMap::<(String, Vec<u8>), BTreeSet<RowId>>::new();
+            for row in self.database.query(
+                &format!("WITH k(t,k) AS (VALUES {values}) SELECT DISTINCT r.table_name,r.key,r.audience FROM k JOIN _coven_rows r ON r.table_name=k.t AND r.key=k.k"),
+                rusqlite::params_from_iter(chunk.iter().flat_map(|(table, key)| {
+                    [rusqlite::types::Value::Text(table.clone()), rusqlite::types::Value::Blob(key.clone())]
+                })),
+                crate::row_queries::read_identity,
+            )? {
+                found.entry((row.table.clone(), row.key.clone())).or_default().insert(row);
+            }
+            for id in chunk {
+                let rows = found.remove(id).unwrap_or_default();
+                self.keys.insert(id.clone(), KeyRows(rows));
+            }
+        }
+        Ok(())
     }
 
     /// An empty cache of other rows derived from this store's, keeping what

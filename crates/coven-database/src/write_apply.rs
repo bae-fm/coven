@@ -126,6 +126,8 @@ impl<'a> WriteApply<'a> {
     ) -> Result<BTreeSet<RowId>, DbError> {
         old.prime(touched.iter().cloned())?;
         new.prime(touched.iter().cloned())?;
+        self.store
+            .load_key_rows(touched.iter().map(|row| (row.table.as_str(), row.key.as_slice())))?;
         let removal = coven_merge::recompute(old, new, touched.clone())
             .map_err(|error| error.into_db_error(write))?;
         self.store.retain_materialization_values(&removal.region)?;

@@ -803,6 +803,7 @@ async fn a_row_stores_its_cells_in_one_statement() {
     assert_eq!(runs("INSERT INTO _coven_cells"), 50);
     assert_eq!(runs(crate::written_values::tests::CLEARED), 0);
     assert_eq!(runs("SELECT constraint_id,value FROM _coven_claims"), 0);
+    assert_eq!(runs("SELECT DISTINCT table_name,key,audience FROM _coven_rows"), 0);
     assert_eq!(runs("SELECT id FROM _coven_rows WHERE"), 0);
     assert_eq!(count(&db, "_coven_cells"), 150);
     crate::write::tests::sql(&db, "UPDATE notes SET title='again' WHERE id<'note 2'")

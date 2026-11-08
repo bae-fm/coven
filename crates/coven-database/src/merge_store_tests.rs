@@ -85,3 +85,65 @@ async fn the_newest_write_read_is_found_from_the_newest_down() {
     assert_eq!(plan, ["SCAN _coven_writes USING INDEX sqlite_autoindex__coven_writes_1"]);
     db.close().await.unwrap();
 }
+
+/// Reading the merge rows of many keys at once keeps what reading each key
+/// would: every audience a key is held in, and an empty set for a key held
+/// by none.
+#[tokio::test]
+async fn keys_read_together_match_keys_read_one_by_one() {
+    use coven_merge::Audience;
+    const ANA: &str = "00000000-0000-4000-8000-00000000000a";
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")
+            ],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT)",
+        )
+        .await
+        .unwrap();
+    store.join_circle(
+        &db,
+        coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(ANA).unwrap()),
+    );
+    db.write(|context| {
+        context.execute(
+            "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'Circle')",
+            [ANA],
+        )?;
+        context.execute(
+            "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002',?1,'Circle')",
+            [ANA],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let mut other = records(&db)[0].parts[0].rows[0].clone();
+    other.row.audience = Audience::Store;
+    let Operation::Insert(columns) = &mut other.change.operation else { panic!("insert") };
+    columns.get_mut("audience").unwrap().value = Value::Text("store".into());
+    crate::tests::remote_write(&db, other).await;
+    db.inspect_writer_schema(|db, schema| {
+        let mut keys: Vec<(String, Vec<u8>)> =
+            db.query("SELECT DISTINCT table_name,key FROM _coven_rows", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        keys.push(("notes".into(), b"absent".to_vec()));
+        let app = crate::write_rows::AppView::after(db, schema);
+        let together = super::MergeStore::new(db, &app);
+        together.load_key_rows(keys.iter().map(|(t, k)| (t.as_str(), k.as_slice())))?;
+        let apart = super::MergeStore::new(db, &app);
+        let mut two = false;
+        for (table, key) in &keys {
+            let rows = together.key_rows(table, key)?;
+            two |= rows.len() == 2;
+            assert_eq!(rows, apart.key_rows(table, key)?);
+        }
+        assert!(two, "a key is held by two audiences");
+        Ok::<_, crate::DbError>(())
+    })
+    .unwrap();
+    db.close().await.unwrap();
+}
