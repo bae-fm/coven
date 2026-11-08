@@ -7,7 +7,7 @@ use crate::file_write::{StagedFile, StagedSource};
 use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed};
+use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed, WriterFolder};
 use coven_foundation::locks::read_unpoisoned;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
@@ -16,11 +16,39 @@ use tokio::sync::OwnedRwLockReadGuard;
 /// App bytes still to write to coven's copy of them, and where their file is
 /// to be.
 struct StagingSource {
+    copy: StagingCopy,
+    source: FileSource,
+}
+
+/// Where a staged copy is to be and what it is for, apart from its bytes.
+struct StagingCopy {
     namespace: String,
     id: coven_foundation::id_source::FileId,
     name: FileName,
-    source: FileSource,
     place: Place,
+}
+
+type StagingReader = std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>;
+
+/// Sources in the order the batch put them: the copies of bytes the app
+/// holds, then the stream that ends them, if the batch has one.
+struct Run {
+    bytes: Vec<(StagingCopy, Vec<u8>)>,
+    stream: Option<(StagingCopy, StagingReader)>,
+}
+
+impl StagingCopy {
+    /// The copy as staged, once its `size` bytes were written and hashed.
+    fn staged(self, size: u64, hash: FileHasher) -> StagedFile {
+        StagedFile {
+            id: self.id,
+            namespace: self.namespace,
+            size,
+            source: StagedSource::Copy(self.name),
+            hashes: hash.finish(),
+            place: self.place,
+        }
+    }
 }
 
 pub(super) struct FileStaging {
@@ -73,11 +101,8 @@ impl FileStaging {
                                     return Err(DbError::FileNameReused { name });
                                 }
                                 sources.push_back(StagingSource {
-                                    namespace,
-                                    id,
-                                    name,
+                                    copy: StagingCopy { namespace, id, name, place },
                                     source,
-                                    place,
                                 });
                             }
                             Ok((sources, value))
@@ -86,7 +111,7 @@ impl FileStaging {
                 });
                 match prepared {
                     Ok((sources, value)) => {
-                        inner.staging.reserve(sources.iter().map(|s| s.name.clone()));
+                        inner.staging.reserve(sources.iter().map(|s| s.copy.name.clone()));
                         Ok::<_, E>(Ok((sources, value)))
                     }
                     Err(error) => Ok(Err((error, super::released(writer, inner)))),
@@ -103,7 +128,7 @@ impl FileStaging {
                 reserved,
                 database,
                 lease: Some(lease),
-                names: sources.iter().map(|s| s.name.clone()).collect(),
+                names: sources.iter().map(|s| s.copy.name.clone()).collect(),
                 sources,
                 staged: Vec::new(),
             },
@@ -114,11 +139,14 @@ impl FileStaging {
     /// Write each app source to coven's copy of it, each synced with a plain
     /// sync, then flush the batch: the folder and the drive's cache, once,
     /// so every copy is on the drive before the commit that records it
-    /// (Appendix C.3). A failed flush fails the write. Only the creation of
-    /// a copy failing on the blocking pool ends the staging here: a panic in
-    /// it, or the pool dropping it unstarted as its runtime shuts down. The
-    /// staging went with it, and its drop released its names; their recorded
-    /// removals take any bytes written before (E15).
+    /// (Appendix C.3). A failed flush fails the write. The bytes the app
+    /// already holds are written in one blocking task per run of them; a
+    /// stream's copy is created on the blocking pool and then read and
+    /// written as the stream yields. Only the creation of a copy failing on
+    /// the blocking pool ends the staging here: a panic in it, or the pool
+    /// dropping it unstarted as its runtime shuts down. The staging went
+    /// with it, and its drop released its names; their recorded removals
+    /// take any bytes written before (E15).
     pub(super) async fn write(
         mut self,
     ) -> Result<(Self, Result<Flushed, DbError>), coven_foundation::task::TaskFailed> {
@@ -133,28 +161,56 @@ impl FileStaging {
             (bugs, batch)
         };
         let mut folder = None;
-        while let Some(source) = self.sources.pop_front() {
-            let StagingSource { namespace, id, name, source, place } = source;
+        loop {
+            let Run { bytes: run, stream } = self.next_run();
+            if !run.is_empty() {
+                // The staging guard goes with the task, so cancellation
+                // cannot remove a name before this call creates its bytes.
+                let held = folder.take();
+                let (next, written) = coven_foundation::task::blocking_completing(
+                    "stage copies",
+                    bugs.clone(),
+                    crate::commit_scope::bind(move || {
+                        let written = (|| -> Result<_, DbError> {
+                            let held = held_folder(&self.database, held)?;
+                            let mut staged = Vec::with_capacity(run.len());
+                            for (copy, bytes) in run {
+                                held.write_whole(&copy.name, &bytes, &mut batch)?;
+                                let mut hash = FileHasher::new();
+                                hash.update(&bytes);
+                                staged.push(copy.staged(bytes.len() as u64, hash));
+                            }
+                            Ok((held, batch, staged))
+                        })();
+                        Ok::<_, std::convert::Infallible>((self, written))
+                    }),
+                )
+                .await?
+                .unwrap_or_else(|never| match never {});
+                self = next;
+                match written {
+                    Ok((held, returned, staged)) => {
+                        folder = Some(held);
+                        batch = returned;
+                        self.staged.extend(staged);
+                    }
+                    Err(error) => return Ok((self, Err(error))),
+                }
+            }
+            let Some((copy, mut reader)) = stream else { break };
             // Creation owns the staging guard until it finishes. Cancellation
             // cannot remove a name before this blocking call creates its bytes.
-            let file_name = name.clone();
+            let file_name = copy.name.clone();
+            let held = folder.take();
             // The staging comes back with the writer, or with why it wasn't
             // made, so no error reaches the sink unread: a dropped caller's
             // staging releases its names as it drops.
-            let held = folder.take();
             let (next, writer) = coven_foundation::task::blocking_completing(
                 "create a staged copy",
                 bugs.clone(),
                 crate::commit_scope::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
-                        let held = match held {
-                            Some(held) => held,
-                            None => {
-                                let slot = read_unpoisoned(&self.database);
-                                let inner = slot.as_ref().expect("staging holds close guard");
-                                inner.access.directory.writer_folder(FileArea::AppProvided)?
-                            }
-                        };
+                        let held = held_folder(&self.database, held)?;
                         let writer = held.create(&file_name)?;
                         Ok((held, writer))
                     })();
@@ -177,28 +233,26 @@ impl FileStaging {
                 hash.update(bytes);
                 size += bytes.len() as u64;
             };
-            let result = match source {
-                FileSource::Bytes(bytes) => {
-                    writer.write_from(&mut bytes.as_slice(), written, &mut batch).await
-                }
-                FileSource::Stream(mut reader) => {
-                    writer.write_from(&mut reader, written, &mut batch).await
-                }
-            };
-            if let Err(error) = result {
+            if let Err(error) = writer.write_from(&mut reader, written, &mut batch).await {
                 return Ok((self, Err(error.into())));
             }
-            self.staged.push(StagedFile {
-                id,
-                namespace,
-                size,
-                source: StagedSource::Copy(name),
-                hashes: hash.finish(),
-                place,
-            });
+            self.staged.push(copy.staged(size, hash));
         }
         let flushed = batch.flush().await.map_err(DbError::from);
         Ok((self, flushed))
+    }
+
+    /// The sources up to the next stream, in order, as the bytes the app
+    /// already holds, and that stream with its reader.
+    fn next_run(&mut self) -> Run {
+        let mut bytes = Vec::new();
+        while let Some(StagingSource { copy, source }) = self.sources.pop_front() {
+            match source {
+                FileSource::Bytes(held) => bytes.push((copy, held)),
+                FileSource::Stream(reader) => return Run { bytes, stream: Some((copy, reader)) },
+            }
+        }
+        Run { bytes, stream: None }
     }
 
     /// Fail the staging with `error`: its names go free and the bytes it
@@ -235,6 +289,22 @@ impl FileStaging {
             names: std::mem::take(&mut self.names),
             files: std::mem::take(&mut self.staged),
             value: Some(value),
+        }
+    }
+}
+
+/// The folder staged copies are made in: `held` once the staging has it,
+/// else taken from the store `database` holds open.
+fn held_folder(
+    database: &RwLock<Option<DatabaseInner>>,
+    held: Option<WriterFolder>,
+) -> Result<WriterFolder, DbError> {
+    match held {
+        Some(held) => Ok(held),
+        None => {
+            let slot = read_unpoisoned(database);
+            let inner = slot.as_ref().expect("staging holds close guard");
+            Ok(inner.access.directory.writer_folder(FileArea::AppProvided)?)
         }
     }
 }

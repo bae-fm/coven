@@ -319,6 +319,32 @@ impl WriterFolder {
             .map_err(|source| FileError::at("create owned file", &path, source))?;
         Ok(FileWriter::new(file, path, Some(self.lock.clone()), self.bugs.clone()))
     }
+
+    /// Create `name` here holding all of `bytes` and count it in `batch`, as
+    /// [`FileWriter::write_from`] does for a source it reads, but in this one
+    /// call: it blocks on the file's I/O, so a caller on an async runtime
+    /// runs it on the blocking pool.
+    pub fn write_whole(
+        &self,
+        name: &FileName,
+        bytes: &[u8],
+        batch: &mut FlushBatch,
+    ) -> Result<(), FileError> {
+        let path = self.path.join(name.as_str());
+        let mut file = create_new(&path)
+            .map_err(|source| FileError::at("create owned file", &path, source))?;
+        file.write_all(bytes)
+            .map_err(|source| FileError::at("append owned file", &path, source))?;
+        sync_file(&file).map_err(|source| FileError::at("sync owned file", &path, source))?;
+        #[cfg(unix)]
+        batch.add(
+            BatchFolder::open(self.path.clone(), Some(self.lock.clone()))
+                .map_err(|source| FileError::at("sync owned file", &path, source))?,
+        );
+        #[cfg(windows)]
+        batch.add();
+        Ok(())
+    }
 }
 
 impl FileWriter {

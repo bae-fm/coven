@@ -68,6 +68,30 @@ async fn files_made_in_a_held_folder_keep_the_store_until_their_batch_flushes() 
     assert!(store.lock_for_deletion().unwrap().is_some());
 }
 
+/// A whole file made in one call is synced, counted in the batch, and never
+/// replaces a file already there.
+#[tokio::test]
+async fn a_whole_file_is_counted_in_the_batch_and_never_replaces_another() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let folder = store.writer_folder(FileArea::AppProvided).unwrap();
+    let name = FileName::new("whole").unwrap();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
+    folder.write_whole(&name, b"all of it", &mut batch).unwrap();
+    assert_eq!(batch.files, 1);
+    assert_eq!(
+        store.file(FileArea::AppProvided, &name).read_optional().unwrap().unwrap(),
+        b"all of it"
+    );
+    assert!(folder.write_whole(&name, b"other", &mut batch).is_err());
+    assert_eq!(batch.files, 1);
+    assert_eq!(
+        store.file(FileArea::AppProvided, &name).read_optional().unwrap().unwrap(),
+        b"all of it"
+    );
+    let _flushed = batch.flush().await.unwrap();
+}
+
 /// A flush that fails fails the batch, so the commit that would record its
 /// files never gets the `Flushed` it takes. An empty batch flushes nothing.
 #[tokio::test]

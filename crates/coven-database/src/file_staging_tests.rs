@@ -46,6 +46,51 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
     assert!(remaining.is_empty());
 }
 
+/// Bytes the app holds are written as a run and a stream in turn, and the
+/// staged files come back in the order the batch put them, each with its
+/// own size and bytes on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn bytes_and_streams_stage_in_the_order_the_batch_put_them() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let contents: [(&[u8], bool); 5] =
+        [(b"one", false), (b"", false), (b"streamed", true), (b"four", false), (b"five!", false)];
+    let (staging, ids) = super::FileStaging::new(
+        db.inner.clone(),
+        db.writer.file_tasks.clone().read_owned().await,
+        |batch| {
+            Ok::<_, DbError>(
+                contents
+                    .map(|(bytes, streamed)| {
+                        let source = if streamed {
+                            FileSource::Stream(Box::pin(std::io::Cursor::new(bytes.to_vec())))
+                        } else {
+                            FileSource::Bytes(bytes.to_vec())
+                        };
+                        batch.put_file("files", source, crate::Place::Cloud)
+                    })
+                    .to_vec(),
+            )
+        },
+    )
+    .unwrap();
+    let (staging, flushed) = staging.write().await.unwrap();
+    let _flushed = flushed.unwrap();
+    let (files, _names, ()) = staging.into_staged(()).take();
+    assert_eq!(files.iter().map(|file| file.id).collect::<Vec<_>>(), ids);
+    assert_eq!(
+        files.iter().map(|file| file.size).collect::<Vec<_>>(),
+        contents.map(|(bytes, _)| bytes.len() as u64)
+    );
+    let mut on_disk: Vec<_> =
+        owned_paths(&store).iter().map(|path| std::fs::read(path).unwrap()).collect();
+    on_disk.sort();
+    let mut expected: Vec<_> = contents.map(|(bytes, _)| bytes.to_vec()).to_vec();
+    expected.sort();
+    assert_eq!(on_disk, expected);
+    db.close().await.unwrap();
+}
+
 /// The rows of `files` another connection sees committed.
 fn committed_rows(store: &TestStore) -> i64 {
     rusqlite::Connection::open(store.database_path())
