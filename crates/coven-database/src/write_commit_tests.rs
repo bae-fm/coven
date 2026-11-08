@@ -968,6 +968,7 @@ pub(crate) fn scan_reason(
     relation: &str,
 ) -> Option<&'static str> {
     match (file, template, relation) {
+("write_commit.rs", "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES{values} ON CONFLICT(table_name,key,audience,generation) DO NOTHING RETURNING table_name,key,audience,generation,id", "2-ROW") => Some("a write's rows are the statement's own values"),
 ("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
     Some("a row's cells are the statement's own values"),
 ("write_commit.rs", "DELETE FROM _coven_cells WHERE column_id=?1"

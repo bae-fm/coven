@@ -511,4 +511,4 @@ impl<'a> MergeStore<'a> {
 
 #[cfg(test)]
 #[path = "merge_store_tests.rs"]
-mod tests;
+pub(crate) mod tests;

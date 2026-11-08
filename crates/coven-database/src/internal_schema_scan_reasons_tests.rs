@@ -563,8 +563,15 @@ mod source {
         }
         // A row's cells, and the written values it keeps, bound as lists of
         // a length only the row knows; two of each stand for any.
-        if file == "write_commit.rs" && sql.contains("{values}") {
-            return vec![sql.replace("{values}", "(?,?,?),(?,?,?)")];
+        // Rows of the statement's column list's length, two standing for any
+        // number.
+        if matches!(file, "write_commit.rs" | "file_queue.rs") && sql.contains("{values}") {
+            let columns = sql.split_once('(').and_then(|(_, rest)| rest.split_once(')')).unwrap().0;
+            let group = format!("({})", vec!["?"; columns.split(',').count()].join(","));
+            return vec![sql.replace("{values}", &format!("{group},{group}"))];
+        }
+        if file == "merge_store.rs" && sql.contains("{values}") {
+            return vec![sql.replace("{values}", "(?,?),(?,?)")];
         }
         if file == "written_values.rs" && sql.contains("{others}") {
             return vec![sql.replace("{others}", "?,?")];
