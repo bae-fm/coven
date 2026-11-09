@@ -48,8 +48,11 @@ pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
     };
     timerfd_settime(&timer, TimerfdTimerFlags::ABSTIME, &expiry)
         .map_err(|errno| WallTimerError::system("timerfd_settime", errno))?;
-    let timer =
-        AsyncFd::new(timer).map_err(|error| WallTimerError::system("register the timer", error))?;
+    // Safety: `timer` is an `OwnedFd`, open since `timerfd_create`, and the
+    // `AsyncFd` takes it: it closes only when the `AsyncFd` drops, and names
+    // the same descriptor until then.
+    let timer = unsafe { AsyncFd::register(timer) }
+        .map_err(|error| WallTimerError::system("register the timer", error))?;
     loop {
         let mut ready = timer
             .readable()
