@@ -2,6 +2,7 @@ use crate::sequence_sync::tests::*;
 use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_format::admin::StoreChange;
 use coven_merge::Audience;
+use coven_storage::Storage;
 
 /// §12.1: Ben's circle has Carol too. Ana, an admin outside it, replaces
 /// Ben's keys and can send him only the store key. Carol's next pass sends him
@@ -175,6 +176,165 @@ async fn a_new_device_finds_the_circle_key_of_a_floor_snapshot_above_the_floor()
         pins(phone.database()).await,
         [("00000000-0000-4000-8000-000000000001".into(), "scarf".into())]
     );
+    for device in [&ana, &ben, &carol, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// §6.1, §12.1, §16.4: Ben's new phone stops at Carol's Gifts write, whose
+/// key it has no copy of, and goes quiet. Carol's pass sends the copy, Carol
+/// snapshots Gifts and the store, and Ana's retention deletes the slot the
+/// phone waits at. The phone loads the floor past the deleted slot, opening
+/// the copy the floor's history holds, with no fresh restore.
+#[tokio::test]
+async fn a_device_stuck_on_a_circle_key_loads_the_floor_once_retention_deletes_its_slot() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
+    let gifts = carol.sync.create_circle("Gifts".into()).await.unwrap();
+    carol
+        .sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(carol.database(), "00000000-0000-4000-8000-000000000001", gifts, "scarf").await;
+    carol.sync.pass().await.unwrap();
+    let write = carol.sync.session.lock().await.through;
+    ana.sync.pass().await.unwrap();
+    let replacement = coven_crypto::MemberIdentity::new(
+        ben.identity.member(),
+        coven_format::test_utils::keys_from_seed(12),
+    );
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), replacement.keys().public_keys())
+        .await
+        .unwrap();
+    let phone = group.newcomer(replacement, group.storage.for_device()).await;
+    assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable { .. })));
+    assert_eq!(phone.database().applied_slot().await.unwrap(), write - 1);
+
+    carol.sync.pass().await.unwrap();
+    carol.sync.snapshot(Audience::Circle(gifts)).await.unwrap();
+    carol.sync.snapshot(Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    let stuck = coven_storage::ObjectPath::slot(group.store, write.try_into().unwrap());
+    assert!(group.storage.status(&stuck).await.unwrap().is_none(), "retention deleted the stop");
+
+    phone.sync.pass().await.unwrap();
+    assert_eq!(
+        pins(phone.database()).await,
+        [("00000000-0000-4000-8000-000000000001".into(), "scarf".into())]
+    );
+    assert!(phone.database().applied_slot().await.unwrap() > write);
+    assert!(phone
+        .database()
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.subject != PendingSubject::Slot(coven_merge::slot(write))));
+    for device in [&ana, &ben, &carol, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// §6.1, §12.1, §16.4: Carol snapshots Gifts and the store after her Gifts
+/// write. The floor write of Ana's pass that replaces Ben's keys is refused,
+/// so the floor names no snapshot covering Carol's write, and Ben's new phone
+/// reads up to that write and stops there. Ana's next
+/// pass, past grace, writes the floor and deletes that slot while Carol is
+/// away, so Carol's copy for Ben lands above the floor. The phone scans the
+/// kept slots for it and loads the floor.
+#[tokio::test]
+async fn a_device_stuck_on_a_circle_key_scans_above_the_floor_for_its_copy() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
+    let gifts = carol.sync.create_circle("Gifts".into()).await.unwrap();
+    carol
+        .sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(carol.database(), "00000000-0000-4000-8000-000000000001", gifts, "scarf").await;
+    carol.sync.pass().await.unwrap();
+    let write = carol.sync.session.lock().await.through;
+    ana.sync.pass().await.unwrap();
+    carol.sync.snapshot(Audience::Circle(gifts)).await.unwrap();
+    carol.sync.snapshot(Audience::Store).await.unwrap();
+    let floor = coven_storage::ObjectPath::floor(group.store);
+    let before = group.storage.status(&floor).await.unwrap();
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            drop_part: true,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let replacement = coven_crypto::MemberIdentity::new(
+        ben.identity.member(),
+        coven_format::test_utils::keys_from_seed(12),
+    );
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), replacement.keys().public_keys())
+        .await
+        .unwrap();
+    assert_eq!(group.storage.status(&floor).await.unwrap(), before, "the floor write failed");
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let phone = group.newcomer(replacement, group.storage.for_device()).await;
+    assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable { .. })));
+    assert_eq!(phone.database().applied_slot().await.unwrap(), write - 1);
+
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    // The first pass finishes the floor write the recovery's pass left
+    // journaled; the next one moves the floor's first kept slot.
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let stuck = coven_storage::ObjectPath::slot(group.store, write.try_into().unwrap());
+    assert!(group.storage.status(&stuck).await.unwrap().is_none(), "retention deleted the stop");
+    assert!(phone.sync.pass().await.is_err(), "no copy of the Gifts key has landed yet");
+    let deleting = group.storage.status(&floor).await.unwrap().unwrap();
+
+    // Carol's pass sends the copy; its own floor write is refused, so the
+    // floor's history stops below the copy.
+    carol
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            drop_part: true,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    carol.sync.pass().await.unwrap();
+    carol.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    assert!(group.storage.status(&floor).await.unwrap().is_some_and(|stored| stored == deleting));
+    phone.sync.pass().await.unwrap();
+    assert_eq!(
+        pins(phone.database()).await,
+        [("00000000-0000-4000-8000-000000000001".into(), "scarf".into())]
+    );
+    assert!(phone
+        .database()
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.subject != PendingSubject::Slot(coven_merge::slot(write))));
     for device in [&ana, &ben, &carol, &phone] {
         device.sync.database.close().await.unwrap();
     }

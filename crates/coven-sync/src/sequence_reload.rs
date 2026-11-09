@@ -9,7 +9,7 @@ use crate::{
     snapshot_authorship::SnapshotAuthorship,
     snapshot_object::{self, BodyFailure, SnapshotBody, SnapshotObject},
     write_object::database_failure,
-    PendingRecord, Refusal, SyncError,
+    PendingReason, PendingRecord, PendingSubject, Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
@@ -386,9 +386,29 @@ impl SequenceSync {
         member: &MemberIdentity,
         mut progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<(), SyncError> {
-        // An already blocked kept slot cannot be bypassed by a later floor.
-        if let Some(record) = &session.blocked {
-            return Err(SyncError::Pending(Box::new(record.clone())));
+        // A blocked slot can't be bypassed by a later floor, except one
+        // waiting for a circle key once retention has deleted it: the floor's
+        // snapshots cover it, and the key's copy is in the floor's history or
+        // in a kept slot, which reading in order never reaches (§6.1, §12.1).
+        let waiting = match &session.blocked {
+            None => None,
+            Some(PendingRecord {
+                subject: PendingSubject::Slot(slot),
+                reason: PendingReason::KeyUnavailable { audience: Audience::Circle(circle), key },
+                ..
+            }) => Some((*slot, *circle, *key)),
+            Some(record) => return Err(SyncError::Pending(Box::new(record.clone()))),
+        };
+        if let Some((_, circle, key)) = waiting {
+            if let Some(hash) = session.history.commitment(&Audience::Circle(circle), key) {
+                let start = floor.header.first;
+                if let Some(found) =
+                    self.scan_for_stuck_key(session, member, start, circle, key, &hash).await?
+                {
+                    found.insert(ring)?;
+                    self.keys.persist(ring)?;
+                }
+            }
         }
         loop {
             let mut tentative_ring = ring.clone();
@@ -451,6 +471,10 @@ impl SequenceSync {
                 }
                 None => {
                     *ring = tentative_ring;
+                    if let Some((slot, _, _)) = waiting {
+                        self.database.clear_pending(PendingSubject::Slot(slot)).await?;
+                        session.blocked = None;
+                    }
                     return Ok(());
                 }
             }

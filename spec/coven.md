@@ -1527,7 +1527,8 @@ app update to read a newer format, or have read damaged bytes. Until it can appl
 that slot it:
 
 - applies nothing after it;
-- reloads no audience from the floor;
+- reloads no audience from the floor, unless it waits for a circle key and
+  retention has deleted its slot (§12.1);
 - sends nothing derived from the sequence: no writes, no file parts, no
   operation retries, no provider changes.
 
@@ -1606,7 +1607,10 @@ until one is missing.
   slot is known to exist.
 - **On a miss, read the floor.** If the missing slot is below the first kept slot,
   the device *reloads*: it loads the floor's snapshots in place of the history it
-  missed, then applies the kept slots after them (§16.5).
+  missed, then applies the kept slots after them (§16.5). A device stopped at
+  that slot doesn't reload (§5.4), unless it waits there for a circle key: the
+  floor's snapshots cover the slot, and the key's copy is in the floor's history
+  or a kept slot (§12.1).
 - **A failed floor read proves nothing,** neither that the slot is absent nor that
   the device may skip it.
 - **No floor yet.** Then the sequence starts at 1, and a miss right after the
@@ -3873,6 +3877,16 @@ finds a copy of every key the stop needs
   failed read fails the pass, as any failed read does (§6.1).
 - **Only a circle key.** A store key's copy is always below the slot that needs
   it (below), so a stop for a store key has nothing to scan for.
+- **When retention deletes the stop.** Ben's phone stops at Carol's write at
+  slot 41 and goes quiet. A floor written later can pass 41, and retention then
+  deletes it. A floor never takes a stopped device past a slot it can't apply
+  (§5.4), but a stop for a circle key is not a judgement of the slot: the
+  floor's snapshots cover 41, and loading them leaves nothing unapplied. So the
+  phone scans the kept slots from the floor's first one for a copy of the key
+  sealed to its pair, checks it against the key's introduction, and loads the
+  floor. The copy may also be in the history the floor's store snapshot holds,
+  which loading opens. The phone's record for slot 41 ends once the floor
+  loads. A stop for any other reason still refuses the floor.
 - **At the floor.** A phone that starts from a floor can stop earlier, at the
   floor's Gifts snapshot, which it can't open without the key. It has loaded
   nothing, so it still holds no keys, and its next pass runs its first scan
@@ -5942,7 +5956,9 @@ One more case belongs here. Applying a schema raise sometimes means replaying
 slots. If the replay needs a slot below `first`, the device instead reloads that
 audience from the floor's snapshot. That snapshot was announced after the raise,
 so it covers the raise. A device behind a floor snapshot's coverage can reload
-unless it is stopped (§5.4).
+unless it is stopped (§5.4). A device stopped for want of a circle key is the
+exception once retention has deleted its slot: it scans the kept slots for the
+key's copy and loads the floor (§12.1).
 
 **A new device starts from the floor** whenever one exists, even while `first`
 is still 1. It opens its key copy, checks the historical entry that bound that

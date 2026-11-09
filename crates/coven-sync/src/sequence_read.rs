@@ -296,7 +296,14 @@ impl SequenceSync {
                 if let SyncError::KeyUnavailable { key, .. } = error {
                     if let Some((circle, hash)) = session.history.circle_commitment(key) {
                         if let Some(found) = self
-                            .scan_for_stuck_key(session, member, slot, circle, key, &hash)
+                            .scan_for_stuck_key(
+                                session,
+                                member,
+                                next_slot(slot.get())?,
+                                circle,
+                                key,
+                                &hash,
+                            )
                             .await?
                         {
                             found.insert(ring)?;

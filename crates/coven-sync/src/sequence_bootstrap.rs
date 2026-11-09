@@ -43,8 +43,9 @@ struct ScannedSlot {
 /// How far the scan for the circle key a stuck slot waits on got.
 #[derive(Clone, Copy)]
 pub(crate) struct StuckScan {
-    /// The slot reading stopped at.
-    stuck: Slot,
+    /// The first slot the scan read: the one after the stop, or the floor's
+    /// first kept slot once retention has deleted the stop.
+    start: Slot,
     /// The circle key it waits on.
     key: KeyId,
     /// The next slot the scan reads.
@@ -316,8 +317,10 @@ impl SequenceSync {
         read
     }
 
-    /// Scan the slots after `stuck`, where reading stopped for want of
-    /// `circle`'s key `key`, for a copy of it sealed to this member's pair.
+    /// Scan the slots from `start` for a copy of `circle`'s key `key`, sealed
+    /// to this member's pair, which a stuck slot waits on: from the slot
+    /// after the stop, or from the floor's first kept slot once retention has
+    /// deleted it.
     /// Reading in order never reaches a copy in a later slot, so this scan is
     /// what ends the wait. `hash` is the key's applied commitment: the copy's
     /// key is checked against it, so the key it gives is accepted at once
@@ -332,15 +335,15 @@ impl SequenceSync {
         &self,
         session: &mut Session,
         member: &MemberIdentity,
-        stuck: Slot,
+        start: Slot,
         circle: CircleId,
         key: KeyId,
         hash: &[u8; 32],
     ) -> Result<Option<RoutedKey>, SyncError> {
         let started = self.clock.elapsed();
         let from = match session.stuck_scan {
-            Some(scan) if scan.stuck == stuck && scan.key == key => scan.next,
-            _ => next_slot(stuck.get())?,
+            Some(scan) if scan.start == start && scan.key == key => scan.next,
+            _ => start,
         };
         let mut next = from;
         let mut reads = super::SlotReads::new(self, SlotRange::new(next, u64::MAX));
@@ -389,14 +392,14 @@ impl SequenceSync {
                     break None;
                 }
                 Err(error) => {
-                    session.stuck_scan = Some(StuckScan { stuck, key, next });
+                    session.stuck_scan = Some(StuckScan { start, key, next });
                     return Err(error);
                 }
             }
         };
-        session.stuck_scan = Some(StuckScan { stuck, key, next });
+        session.stuck_scan = Some(StuckScan { start, key, next });
         tracing::info!(
-            stuck = stuck.get(),
+            start = start.get(),
             found = found.is_some(),
             scanned_slots = next.get() - from.get(),
             time = ?(self.clock.elapsed() - started),
