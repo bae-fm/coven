@@ -7,10 +7,11 @@
 //! over. So the writer never checkpoints as it commits. Each commit only
 //! wakes a thread of the store's own, which reads how many frames the WAL
 //! holds past what was checkpointed and, past the threshold, checkpoints on a
-//! connection of its own: first copying what it can while writes go on, then,
-//! holding coven's writer so no write starts, copying the rest and waiting
-//! briefly for the readers to leave the WAL, so the next commit writes it
-//! from its start.
+//! connection of its own: first copying what it can while writes go on and
+//! syncing the copy, again for the frames committed meanwhile while each
+//! pass leaves fewer, then, holding coven's writer so no write starts,
+//! copying the rest, syncing it and waiting briefly for the readers to leave
+//! the WAL, so the next commit writes it from its start.
 //!
 //! The thread is one of the store's upkeep (upkeep.rs). A checkpoint
 //! SQLite couldn't start, reading nothing of the WAL, because another
@@ -49,6 +50,9 @@ pub(crate) struct Checkpoints {
     /// A test's fault, run as each checkpoint's last step begins.
     #[cfg(test)]
     fault: Mutex<Option<Fault>>,
+    /// A test's step, run as each pass's copy returns, before its sync.
+    #[cfg(test)]
+    copied: Mutex<Option<Box<dyn FnMut() + Send>>>,
     /// Where a test hears what each checkpoint's last step did, told while
     /// the checkpoint still holds the writer.
     #[cfg(test)]
@@ -87,6 +91,8 @@ impl UpkeepThread<Checkpoints> {
                 clock,
                 #[cfg(test)]
                 fault: Mutex::new(None),
+                #[cfg(test)]
+                copied: Mutex::new(None),
                 #[cfg(test)]
                 restarts: Mutex::new(None),
             },
@@ -132,19 +138,43 @@ impl Checkpoints {
                 return Ok(());
             };
             // A WAL SQLite couldn't read now is read again at the next wake.
-            let WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } =
-                connection.wal_checkpoint(CheckpointMode::Noop)?
-            else {
+            let Some(uncopied) = uncopied_frames(connection)? else {
                 return Ok(());
             };
-            if log_frames.saturating_sub(checkpointed_frames) < self.threshold.get() {
+            if uncopied < self.threshold.get() {
                 return Ok(());
             }
-            // Copy what no reader needs while coven's writes go on.
-            connection.wal_checkpoint(CheckpointMode::Passive)?;
+            // Copy what no reader needs while coven's writes go on, and sync
+            // it. SQLite syncs the database file only when a checkpoint
+            // copies the whole WAL, and a commit landing during the copy
+            // leaves it short; without a sync of its own, the checkpoint that
+            // holds the writer would sync every page copied here. The frames
+            // committed during a pass get a pass of their own while each pass
+            // leaves fewer, so the checkpoint holding the writer copies and
+            // syncs only the frames committed during the last pass and since,
+            // none when no commit landed.
+            let (mut passes, mut left) = (0, uncopied);
+            loop {
+                // A copy SQLite couldn't start now, as another connection was
+                // checkpointing the WAL or committing to it, is tried again at
+                // the next wake rather than made whole while writes wait.
+                if let WalCheckpoint::NotStarted =
+                    connection.wal_checkpoint(CheckpointMode::Passive)?
+                {
+                    return Ok(());
+                }
+                #[cfg(test)]
+                self.copied();
+                connection.sync_database_file()?;
+                passes += 1;
+                match uncopied_frames(connection)? {
+                    Some(now) if now > 0 && now < left => left = now,
+                    _ => break,
+                }
+            }
             // No write of coven's starts meanwhile, so the checkpoint takes
-            // SQLite's writer lock at once, copies the few frames committed
-            // since, and waits only for readers.
+            // SQLite's writer lock at once, copies and syncs the frames
+            // committed since the last pass, and waits only for readers.
             let (restarted, held) = with_locked(&writer, |_writes| {
                 let held = self.clock.elapsed();
                 #[cfg(test)]
@@ -154,7 +184,7 @@ impl Checkpoints {
                 self.report(restarted);
                 Ok::<_, DbError>((restarted, self.clock.elapsed() - held))
             })?;
-            tracing::debug!(frames = log_frames, ?restarted, ?held, "checkpointed the WAL");
+            tracing::debug!(frames = uncopied, passes, ?restarted, ?held, "checkpointed the WAL");
             Ok(())
         })
     }
@@ -163,6 +193,14 @@ impl Checkpoints {
     #[cfg(test)]
     fn fault(&self) -> Result<(), DbError> {
         lock_unpoisoned(&self.fault).as_mut().map_or(Ok(()), |f| f())
+    }
+
+    /// Run the step a test set, as a pass's copy returns.
+    #[cfg(test)]
+    fn copied(&self) {
+        if let Some(step) = lock_unpoisoned(&self.copied).as_mut() {
+            step();
+        }
     }
 
     /// Tell a test that asked what the checkpoint's last step did.
@@ -176,6 +214,18 @@ impl Checkpoints {
             let _ = restarts.send(restarted);
         }
     }
+}
+
+/// The frames the WAL holds that the database file doesn't, or None when
+/// SQLite couldn't read the WAL now: another connection was checkpointing it
+/// or committing to it.
+fn uncopied_frames(connection: &DatabaseConnection) -> Result<Option<u32>, DbError> {
+    Ok(match connection.wal_checkpoint(CheckpointMode::Noop)? {
+        WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } => {
+            Some(log_frames.saturating_sub(checkpointed_frames))
+        }
+        WalCheckpoint::NotStarted => None,
+    })
 }
 
 #[cfg(test)]

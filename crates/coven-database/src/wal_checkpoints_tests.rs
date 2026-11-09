@@ -24,6 +24,11 @@ impl super::WalCheckpointer {
         *self.upkeep().fault.lock().unwrap() = Some(Box::new(fault));
     }
 
+    /// Run `step` as each pass's copy returns, before its sync.
+    pub(crate) fn after_copy(&self, step: impl FnMut() + Send + 'static) {
+        *self.upkeep().copied.lock().unwrap() = Some(Box::new(step));
+    }
+
     /// What each checkpoint's last step does from now on, told while the
     /// checkpoint still holds the writer.
     pub(crate) fn report_restarts(&self) -> UnboundedReceiver<WalCheckpoint> {
@@ -81,6 +86,17 @@ async fn frames(db: &crate::Database) -> u32 {
     }
 }
 
+/// The frames the WAL holds not yet copied, read on the writer between
+/// writes.
+fn not_copied(writer: &crate::sqlite::DatabaseConnection) -> u32 {
+    let WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } =
+        writer.wal_checkpoint(CheckpointMode::Noop).unwrap()
+    else {
+        panic!("a NOOP checkpoint between writes reads the WAL");
+    };
+    log_frames - checkpointed_frames
+}
+
 /// The frames `checkpointed_at_100_pages` lets the WAL hold not yet copied
 /// before coven checkpoints it.
 const THRESHOLD: u32 = 100;
@@ -94,13 +110,9 @@ async fn checkpointed<T>(db: &crate::Database, told: &mut UnboundedReceiver<T>) 
     loop {
         add(db).await;
         let past = db.inspect_writer(|writer| {
-            let WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } =
-                writer.wal_checkpoint(CheckpointMode::Noop).unwrap()
-            else {
-                panic!("a NOOP checkpoint between writes reads the WAL");
-            };
+            let past = not_copied(writer) >= THRESHOLD;
             while told.try_recv().is_ok() {}
-            log_frames - checkpointed_frames >= THRESHOLD
+            past
         });
         if past {
             break;
@@ -150,6 +162,61 @@ async fn coven_checkpoints_the_wal_past_its_threshold() {
     .await
     .expect("the WAL starts over");
     reader.abort();
+    db.close().await.unwrap();
+}
+
+/// A commit that lands while the checkpoint copies the WAL is copied and
+/// synced too before the checkpoint holds the writer: holding it, the
+/// checkpoint finds every frame already copied, so coven's writes don't wait
+/// while it copies or syncs them (§4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_during_the_copy_is_copied_before_the_checkpoint_holds_the_writer() {
+    let store = TestStore::new();
+    let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
+    let (copied, mut copies) = unbounded_channel();
+    let (go, going) = std::sync::mpsc::channel::<()>();
+    let mut first = true;
+    db.after_checkpoint_copies(move || {
+        if std::mem::take(&mut first) {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a test that stopped listening lets the checkpoint go on"
+            )]
+            let _ = copied.send(()).map(|()| going.recv());
+        }
+    });
+    // A connection of the test's own reads the WAL's counts as the
+    // checkpoint takes the writer.
+    let wal = rusqlite::Connection::open(store.database_path()).unwrap();
+    let (uncopied, mut told) = unbounded_channel();
+    db.fault_checkpoints(move || {
+        let (log, copied): (i64, i64) = wal
+            .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| Ok((r.get(1)?, r.get(2)?)))
+            .unwrap();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a test that stopped listening has no use for it"
+        )]
+        let _ = uncopied.send(log - copied);
+        Ok(())
+    });
+    // Commit until the WAL holds the threshold's frames not yet copied, and
+    // no more, so the first pass copies them all.
+    loop {
+        add(&db).await;
+        if db.inspect_writer(|writer| not_copied(writer)) >= THRESHOLD {
+            break;
+        }
+    }
+    tokio::time::timeout(HANG_GUARD, copies.recv())
+        .await
+        .expect("the checkpointer copies a WAL past its threshold")
+        .unwrap();
+    // The first pass's copy has returned, and this commit lands after it.
+    add(&db).await;
+    go.send(()).unwrap();
+    let uncopied = tokio::time::timeout(HANG_GUARD, told.recv()).await.unwrap().unwrap();
+    assert_eq!(uncopied, 0, "holding the writer, the checkpoint finds every frame copied");
     db.close().await.unwrap();
 }
 

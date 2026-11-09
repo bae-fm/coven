@@ -141,6 +141,15 @@ impl Database {
         checkpointers[1].fault(fault);
     }
 
+    /// Run `step` as the copy of each pass a checkpoint of the store's
+    /// database makes while writes go on returns, before its sync (§4).
+    pub(crate) fn after_checkpoint_copies(&self, step: impl FnMut() + Send + 'static) {
+        let slot = self.inner.read().unwrap();
+        let checkpointers = &slot.as_ref().unwrap().checkpoints;
+        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
+        checkpointers[1].after_copy(step);
+    }
+
     /// What each checkpoint of the store's database does at its last step
     /// from now on, told while the checkpoint still holds the writer (§4).
     pub(crate) fn report_checkpoints(

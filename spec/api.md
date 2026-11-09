@@ -335,8 +335,10 @@ pub enum Audience {
   ([§4](coven.md#4-writing-locally)): the writer's own `wal_autocheckpoint` is
   always 0, and a thread of the store's own, with its own connection,
   checkpoints once the WAL holds `wal_autocheckpoint` pages not yet copied,
-  1,000 when unset. It waits up to 100 ms for readers, while coven's writes
-  wait. `WalAutocheckpoint::Off`
+  1,000 when unset. It copies and syncs what it can before it holds coven's
+  writer, so coven's writes wait only for what was committed during its last
+  copy and since, and for up to 100 ms of waiting for readers.
+  `WalAutocheckpoint::Off`
   leaves checkpoints to the app. A checkpoint that finds the database busy or
   locked, or that SQLite couldn't start because another connection was
   checkpointing or committing, is tried again at the next commit; any other

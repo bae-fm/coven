@@ -6,6 +6,8 @@ mod app_statements;
 mod app_triggers;
 #[path = "bulk_write.rs"]
 mod bulk_write;
+#[path = "database_file_sync.rs"]
+mod database_file_sync;
 #[path = "event_capture.rs"]
 mod event_capture;
 #[path = "live_judging.rs"]

@@ -833,7 +833,8 @@ live query running again after each one, while the WAL grew to 23 MB. So the
 writer never checkpoints as it commits. Each commit wakes a thread of the
 store's own instead, which checkpoints on a connection of its own once the WAL
 holds 1,000 pages, or the app's `wal_autocheckpoint`, not yet copied. It copies what
-it can while writes go on, then holds coven's writer and waits up to 100 ms for
+it can while writes go on and syncs the database file, then holds coven's
+writer, copies and syncs what was committed meanwhile, and waits up to 100 ms for
 the readers to leave the WAL, so the next commit writes it from its start. A
 reader that started before then finishes within that, and later ones read the
 database file alone. The same import took 0.42 s with the live query, and 0.47
@@ -845,6 +846,27 @@ it has grown by the same amount again. Closing the store still checkpoints the
 whole WAL and removes its file. Coven's own database beside the store's,
 `inputs.db`, which keeps what this device observed in storage apart from
 the app's writes, is checkpointed the same way.
+
+The sync before it holds the writer keeps coven's writes from waiting for it.
+SQLite syncs the database file only when a checkpoint copies the whole WAL, and
+while the app writes, a commit lands during nearly every copy and leaves it
+short. The checkpoint holding the writer would then sync every page copied
+while writes went on. So coven syncs that copy itself, the way SQLite syncs a
+checkpoint, `F_FULLFSYNC` included on macOS and iOS, through SQLite's own
+handle to the file: closing any other handle to it would drop every lock
+SQLite holds on it in the process. A commit that lands during the copy gets a
+copy and sync of its own, again while each leaves fewer frames behind, so the
+checkpoint holding the writer copies and syncs only what was committed during
+the last of them and since, and nothing when no commit landed. Ben's music app
+imported 2,000 writes of ten releases each, every track with its file, some
+1,860 pages of the WAL a write, on a busy machine. Without these syncs its
+writes waited a median 29 to 42 ms at each checkpoint, 36 to 61 s over the
+import; with them, 18 to 24 ms, and 11 to 17 s. The import took about as long
+either way: the drive writes the same pages, only not while coven's writes
+wait. These syncs come on top of the checkpoint's own, which still comes
+before the WAL starts over (§3). A copy SQLite can't start, because another
+connection is checkpointing the WAL or committing to it right then, is tried
+again at the next commit, without holding the writer.
 
 A checkpoint can fail. When SQLite finds the database busy or locked past its
 wait, coven tries again at the next commit. So it does when SQLite can't start
