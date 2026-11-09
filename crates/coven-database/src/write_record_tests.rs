@@ -68,7 +68,7 @@ async fn an_inserted_row_is_read_once() {
         .iter()
         .filter(|s| {
             s.sql.starts_with("WITH k(t,k) AS (VALUES (?,?)")
-                && s.sql.contains("FROM k JOIN _coven_rows r")
+                && s.sql.contains("FROM k CROSS JOIN _coven_rows r")
         })
         .count();
     assert_eq!(audiences, 1);
