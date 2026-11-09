@@ -377,6 +377,103 @@ async fn a_record_outlives_its_writes_entry() {
     db.close().await.unwrap();
 }
 
+/// Ben's and Cleo's writes, each with the slot it lands in: Cleo replaces
+/// Ben's edit, write 2, and then both land a write past it.
+fn history() -> Vec<(u64, WriteRecord)> {
+    vec![
+        (1, insert(id(BEN, 1), 1, 0, 1)),
+        (2, update(id(BEN, 2), 2, 1, id(BEN, 1), id(BEN, 1))),
+        (3, update(id(CLEO, 1), 3, 2, id(BEN, 1), id(BEN, 2))),
+        (4, insert(id(BEN, 3), 4, 3, 2)),
+        (5, insert(id(CLEO, 2), 5, 4, 3)),
+    ]
+}
+
+/// A reload that starts the store empty and stages `history` again.
+async fn reload_from_empty(db: &Database, history: Vec<(u64, WriteRecord)>) {
+    let target = history.last().unwrap().0;
+    let slots = history
+        .into_iter()
+        .map(|(slot, write)| {
+            let device = write.header.position.device;
+            IncomingSlot {
+                slot: coven_merge::slot(slot),
+                header: SlotHeader {
+                    device,
+                    claim: slot,
+                    author: crate::tests::member(if device == BEN { 2 } else { 3 }),
+                    after: slot - 1,
+                },
+                digest: [slot as u8; 32],
+                content: SlotContent::Writes {
+                    size: 1,
+                    writes: vec![crate::sequence::tests::stream(write.into())],
+                },
+            }
+        })
+        .collect();
+    let reload = SnapshotReload::<SnapshotStaging, _> {
+        snapshots: vec![SnapshotSource::Empty(Audience::Store)],
+        slots,
+        target,
+        state: db.store_state().await.unwrap(),
+        provider_access: Vec::new(),
+        cutoffs: vec![],
+        boundaries: vec![],
+        operation: None,
+        authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    };
+    db.load_snapshots::<crate::pending::tests::Record, _>(reload, None).await.unwrap();
+}
+
+/// Once Ben's write 2's entry is forgotten, a reload that starts the store
+/// empty stages its slot again. Ben's write 3 landed after it, in a later
+/// slot, so the reload's write 2 is no repeat: it lands again, with its
+/// entry and plaintext header, and leaves the rows as they were. The next
+/// slot forgets them again.
+#[tokio::test]
+async fn a_reload_stages_a_write_whose_entry_was_forgotten_again() {
+    let (_store, db) = store().await;
+    let writers = &[BEN, CLEO];
+    for (slot, write) in history() {
+        land(&db, slot, write, writers).await;
+    }
+    assert_eq!(entry(&db, id(BEN, 2)), (false, false));
+    let rows = crate::sequence::tests::data(&db, Audience::Store);
+
+    reload_from_empty(&db, history()).await;
+    assert_eq!(entry(&db, id(BEN, 2)), (true, true));
+    assert_eq!(crate::sequence::tests::data(&db, Audience::Store), rows);
+
+    land(&db, 6, insert(id(BEN, 4), 6, 5, 4), writers).await;
+    assert_eq!(entry(&db, id(BEN, 2)), (false, false));
+    db.close().await.unwrap();
+}
+
+/// This device edits row 1 twice in one claim. With no other device that
+/// can still write, the slot that lands them forgets the first edit's
+/// entry: the second replaced its cell and is the latest stamped write. The
+/// claim still finishes, since only a write still queued keeps its entry
+/// with no slot.
+#[tokio::test]
+async fn a_claim_finishes_when_a_write_it_landed_lost_its_entry() {
+    let (_store, db) = store().await;
+    let alone = || Writers::new(BTreeMap::new());
+    crate::write::tests::sql(&db, "INSERT INTO rows VALUES('1','a','b')").await.unwrap();
+    crate::sequence::tests::publish_with(&db, u64::MAX, alone()).await.unwrap();
+    crate::write::tests::sql(&db, "UPDATE rows SET b='c'").await.unwrap();
+    crate::write::tests::sql(&db, "UPDATE rows SET b='d'").await.unwrap();
+    let edits: Vec<WriteId> =
+        crate::write::tests::records(&db).iter().map(|record| record.header.position).collect();
+    assert_eq!(edits.len(), 2);
+
+    crate::sequence::tests::publish_with(&db, u64::MAX, alone()).await.unwrap();
+    assert_eq!(entry(&db, edits[0]), (false, false));
+    assert_eq!(entry(&db, edits[1]), (true, true));
+    assert!(db.current_claim().await.unwrap().is_none());
+    db.close().await.unwrap();
+}
+
 /// Fill the forgetting tables for the plan audit, inside its transaction
 /// (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {

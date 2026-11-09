@@ -67,6 +67,17 @@ pub(crate) async fn publish(db: &Database) -> Result<(), DbError> {
 }
 
 pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), DbError> {
+    publish_with(db, through, crate::test_utils::idle_writers()).await
+}
+
+/// Claim, land and finish this device's queued writes numbered through
+/// `through` as the next slot, with `writers` the other devices that can
+/// still write.
+pub(crate) async fn publish_with(
+    db: &Database,
+    through: u64,
+    writers: crate::Writers,
+) -> Result<(), DbError> {
     let records: Vec<_> = crate::write::tests::records(db)
         .into_iter()
         .filter(|r| r.header.position.number <= through)
@@ -121,7 +132,7 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
                     writes: records.into_iter().map(|r| stream(r.into())).collect(),
                 },
             },
-            crate::test_utils::idle_writers(),
+            writers,
             || Ok(()),
         )
         .await?;
