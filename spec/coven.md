@@ -1863,7 +1863,9 @@ state from synced.
   before its complete signature verifies.
 - **Snapshot prefixes.** Reading only the start of a snapshot takes at most two
   bounded range requests; reading the rest takes at most one more stream, read
-  once and kept nowhere whole (§16.2).
+  once and kept nowhere whole (§16.2). On a provider whose ranged read moves
+  whole parts, iCloud's, the start comes instead with the snapshot's first
+  part, in one stream that stops at its end (Appendix E.1).
 - **Writes come inside their slot,** with no request of their own. A stream a
   provider splits into several requests of its own still counts once (§21.1).
 - **A broken connection is a failed read.** It can never be taken as proof that
@@ -5892,6 +5894,15 @@ whole body has arrived and checks out: the announced hash, then the signature
 and the prefix. Without this, the laptop would hold the whole body, and then
 every decoded record, at once, and a body larger than the 64 MiB a device sets
 aside for bytes read from storage could never load.
+
+On iCloud, reading any byte of a part moves the whole 8 MiB part (Appendix
+E.1), so the prefix's two range requests and the body's stream would each move
+the snapshot's first part. There the prefix's read takes that first part in
+one stream that stops at its end, keeps the prefix as it would, and holds the
+rest of the part in memory; the body reads on from it, and its stream starts
+where the part ends. Every part then moves once. Ana's 100 MB store snapshot
+on iCloud would otherwise move up to 16 MiB more than its size, and a snapshot
+of up to 8 MiB, held whole in its record, up to three times its size.
 
 Each record is staged as the fields loading needs, so loading never decodes it
 again. A row's merge record becomes one row of a table for the row's table,
@@ -10034,7 +10045,7 @@ Each kind of work adds its own requests:
 | a reload | the floor's named snapshots, and the slots after them it needs |
 | deleting history | the floor upload's parts and one conditional publication, the next slot and the floor read back, its cleanup, the deletes, one listing of the sessions left at applied slots, and on a profile certified to date them, the floor's status and one listing of floor sessions (§17.10) |
 | files | their own reads, upload parts and deletes, outside the pass; a bound upload's requests are the same as a trailing one's, sent in its own lane (§17.4) |
-| reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream, read once (§6.5, §16.2) |
+| reading an object | one bounded stream; a snapshot's start takes at most two range requests, on iCloud one stream of its first part, and the rest one more stream, read once (§6.5, §16.2) |
 
 If Ana added one note, Ben's next pass makes three reads: the slot, the miss
 after it, and the floor.
@@ -10935,14 +10946,16 @@ skip unrelated parts.
 record's whole asset to a file before its completion runs, so reading any byte
 of a part moves the whole part, and reading any byte of an object held in its
 record moves the whole record. An open file therefore fetches each part once and reads the
-ranges inside it from that fetch (§17.7). CloudKit Web Services gives each
-asset a `downloadURL`, but [Apple's
+ranges inside it from that fetch (§17.7), and a snapshot's prefix comes with
+its first part, which its body then reads on from (§16.2). CloudKit Web
+Services gives each asset a `downloadURL`, but [Apple's
 reference](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html)
 says nothing of range requests on it, and an app reaches it only through a web
 token made from an API token the developer creates for the container; coven
 doesn't use it. A live check would show whether that URL answers a `Range`
 header with only the bytes asked for. If it does, a read through it would move
-only its range, and an open file would hold no parts on iCloud.
+only its range: an open file would hold no parts on iCloud, and a snapshot's
+prefix would come in range requests as on any other provider.
 
 CloudKit's atomic publication and asset-session guarantees still need live
 verification through a signed, entitled host.

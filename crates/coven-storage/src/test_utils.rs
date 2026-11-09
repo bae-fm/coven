@@ -377,8 +377,9 @@ impl MemoryStorage {
     pub async fn reads(&self) -> Vec<(ObjectPath, u64, u64)> {
         self.provider.state.lock().await.reads.clone()
     }
-    /// The bytes the reads of `path` moved: each read's range, or, on a
-    /// provider whose reads move whole parts, every part each read touched.
+    /// The bytes the reads of `path` moved as their bodies delivered them:
+    /// each byte, or, on a provider whose reads move whole parts, each part
+    /// whole once a body delivered a byte of it.
     pub async fn moved_bytes(&self, path: &ObjectPath) -> u64 {
         self.provider.state.lock().await.moved.get(path).copied().unwrap_or(0)
     }

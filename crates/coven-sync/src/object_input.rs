@@ -37,12 +37,15 @@ impl ObjectInput {
     pub(crate) async fn release(self) -> Result<(), SyncError> {
         Ok(self.retained.release_ranges().await?)
     }
+    /// Keep `response`, the first `requested` bytes of the object at `path`,
+    /// under the observation it describes.
     pub(crate) async fn receive_prefix(
         database: &Database,
         path: &ObjectPath,
         response: coven_storage::ObjectRead,
+        requested: u64,
     ) -> Result<Self, SyncError> {
-        if response.metadata.path != *path || response.bytes.len() != 64 {
+        if response.metadata.path != *path || response.bytes.len() as u64 != requested {
             return Err(StorageFailure::Protocol
                 .with_source("snapshot prefix response differs from its request")
                 .into());

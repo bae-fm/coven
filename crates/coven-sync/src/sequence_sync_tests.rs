@@ -62,6 +62,11 @@ pub(crate) enum Custody {
 }
 impl Group {
     pub(crate) fn new() -> Self {
+        Self::on(MemoryStorage::builder())
+    }
+    /// A group whose devices reach the deterministic provider `storage`
+    /// builds, on the group's clock.
+    pub(crate) fn on(storage: coven_storage::test_utils::MemoryStorageBuilder) -> Self {
         let ids = Arc::new(SequentialIds::new());
         let store = StoreId(ids.new_id());
         let ring = StoreKeyring::new(StoreKey::from_bytes(KeyId(ids.new_id()), [7; 32]));
@@ -70,7 +75,7 @@ impl Group {
             ids,
             store,
             ring,
-            storage: MemoryStorage::builder().clock(clock.clone()).build().unwrap(),
+            storage: storage.clock(clock.clone()).build().unwrap(),
             clock,
             version: 1.into(),
             raises: false.into(),

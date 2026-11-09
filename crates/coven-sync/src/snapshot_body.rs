@@ -93,8 +93,18 @@ impl SnapshotObject {
         let mut digest = DigestStream::new();
         digest.update(&self.prefix_bytes);
         digest.update(self.signature.as_bytes());
+        // What the prefix's read moved of the body is read from there, and
+        // the rest in one stream from where it ends (§16.2).
+        let held = self.head.get(start as usize..).unwrap_or_default();
+        let streamed = start + held.len() as u64;
+        let response = if streamed < size {
+            Some(self.input.stream_from(storage, streamed).await?)
+        } else {
+            None
+        };
         let mut body = HashedBody {
-            response: self.input.stream_from(storage, start).await?,
+            held,
+            response,
             digest,
             remaining: size - start - SIGNATURE_LEN as u64,
             path,
@@ -134,8 +144,10 @@ impl SnapshotObject {
         if let Some(progress) = progress {
             progress.done(size);
         }
-        if body.response.read(&mut [0]).await? != 0 {
-            return Err(StorageFailure::Protocol.with_source("stream has extra bytes").into());
+        if let Some(response) = &mut body.response {
+            if response.read(&mut [0]).await? != 0 {
+                return Err(StorageFailure::Protocol.with_source("stream has extra bytes").into());
+            }
         }
         let digest = body.digest.finish(signature);
         if digest.complete() != &announcement.digest {
@@ -175,7 +187,10 @@ impl SnapshotObject {
 /// The sealed bytes after the prefix, hashed as they arrive, up to the
 /// object's final signature.
 struct HashedBody<'a> {
-    response: ObjectStream<'a>,
+    /// The bytes the prefix's read moved, ahead of `response`.
+    held: &'a [u8],
+    /// The rest, from where `held` ends; `None` when `held` reaches the end.
+    response: Option<ObjectStream<'a>>,
     digest: DigestStream,
     /// Sealed bytes before the final signature still to arrive.
     remaining: u64,
@@ -192,7 +207,19 @@ impl HashedBody<'_> {
         let mut bytes = vec![0; length];
         let mut filled = 0;
         while filled < length {
-            match self.response.read(&mut bytes[filled..]).await? {
+            if !self.held.is_empty() {
+                let read = self.held.len().min(length - filled);
+                bytes[filled..filled + read].copy_from_slice(&self.held[..read]);
+                self.held = &self.held[read..];
+                filled += read;
+                continue;
+            }
+            let Some(response) = &mut self.response else {
+                return Err(StorageFailure::Protocol
+                    .with_source("stream ended before the object")
+                    .into());
+            };
+            match response.read(&mut bytes[filled..]).await? {
                 0 => {
                     return Err(StorageFailure::Protocol
                         .with_source("stream ended before the object")

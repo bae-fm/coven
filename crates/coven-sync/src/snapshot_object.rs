@@ -28,6 +28,10 @@ pub(crate) struct SnapshotObject {
     prefix: SnapshotObjectPrefix,
     signature: Signature,
     prefix_bytes: Vec<u8>,
+    /// The object's first bytes, from its start, that reading the prefix
+    /// moved and the body goes on from: on a provider whose ranged read
+    /// moves whole parts, the first part; otherwise none (§16.2).
+    head: Vec<u8>,
 }
 
 pub(crate) fn path(
@@ -68,18 +72,36 @@ impl SnapshotObject {
         self.input.clone().release().await
     }
     /// Read at most two bounded prefix ranges. The remaining body is streamed
-    /// only when its rows or settlement evidence are needed.
+    /// only when its rows or settlement evidence are needed. On a provider
+    /// whose ranged read moves whole parts, the prefix comes instead with
+    /// the object's first part, read once in one stream that stops at its
+    /// end and kept for the body to go on from (§16.2, Appendix E.1).
     pub(crate) async fn read_prefix(
         database: &Database,
         storage: &dyn Storage,
         path: &ObjectPath,
     ) -> Result<Self, SyncError> {
-        let input = match ObjectInput::retained(database, path).await? {
-            Some(input) => input,
-            None => {
-                let response = storage.read_object(path, Some(ByteRange::new(0, 64)?)).await?;
-                ObjectInput::receive_prefix(database, path, response).await?
-            }
+        let (input, head) = match ObjectInput::retained(database, path).await? {
+            Some(input) => (input, Vec::new()),
+            None => match storage.read_part_size() {
+                Some(part) => {
+                    let mut stream = storage.stream_object(path, None).await?;
+                    let metadata = stream.metadata().clone();
+                    let head = first_bytes(&mut stream, metadata.size.min(part.get())).await?;
+                    drop(stream);
+                    let kept = head.len().min(SnapshotObjectPrefix::MAX_SIGNED_PREFIX);
+                    let response =
+                        coven_storage::ObjectRead { metadata, bytes: head[..kept].to_vec() };
+                    (
+                        ObjectInput::receive_prefix(database, path, response, kept as u64).await?,
+                        head,
+                    )
+                }
+                None => {
+                    let response = storage.read_object(path, Some(ByteRange::new(0, 64)?)).await?;
+                    (ObjectInput::receive_prefix(database, path, response, 64).await?, Vec::new())
+                }
+            },
         };
         let decoded = async {
             let bytes = input
@@ -95,7 +117,7 @@ impl SnapshotObject {
         .await;
         match decoded {
             Ok((prefix, signature, prefix_bytes)) => {
-                Ok(Self { input, prefix, signature, prefix_bytes })
+                Ok(Self { input, prefix, signature, prefix_bytes, head })
             }
             Err(refused) => Err(confirm_prefix(&input, storage, refused).await),
         }
@@ -151,6 +173,26 @@ impl SnapshotObject {
         body.verify(&self.input.object().path, &signer, Some(announced))?;
         self.verify_prefix(history, id)
     }
+}
+
+/// The first `length` bytes `stream` delivers.
+async fn first_bytes(
+    stream: &mut coven_storage::ObjectStream<'_>,
+    length: u64,
+) -> Result<Vec<u8>, SyncError> {
+    let mut bytes = vec![0; length as usize];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match stream.read(&mut bytes[filled..]).await? {
+            0 => {
+                return Err(coven_storage::StorageFailure::Protocol
+                    .with_source("stream ended before the object")
+                    .into())
+            }
+            read => filled += read,
+        }
+    }
+    Ok(bytes)
 }
 
 /// A refusal judges the stored snapshot, not one read of it, and nothing

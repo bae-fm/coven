@@ -58,7 +58,33 @@ impl MemoryStorage {
     }
 }
 
+/// What one response body has moved, counted as it delivers bytes: each
+/// byte, or on a provider whose reads move whole parts, each part whole as
+/// the body delivers its first byte, as CloudKit fetches a part only once
+/// its stream reaches it.
+struct BodyMoves {
+    path: ObjectPath,
+    part: Option<u64>,
+    size: u64,
+    /// The first part this body has not moved.
+    next_part: u64,
+}
+
+impl BodyMoves {
+    /// The bytes delivering `length` bytes from `position` moves.
+    fn delivered(&mut self, position: u64, length: u64) -> u64 {
+        let Some(part) = self.part else {
+            return length;
+        };
+        let last = (position + length - 1) / part;
+        let first = self.next_part.max(position / part);
+        self.next_part = self.next_part.max(last + 1);
+        (first..=last).map(|index| (self.size - index * part).min(part)).sum()
+    }
+}
+
 struct MemoryBody {
+    moves: BodyMoves,
     bytes: Arc<[u8]>,
     start: usize,
     end: usize,
@@ -111,24 +137,18 @@ impl ObjectBody for MemoryBody {
         };
         let length = (end - self.position).min(output.len()).min(self.chunk_size);
         output[..length].copy_from_slice(&self.bytes[self.position..self.position + length]);
-        self.position += length;
         if length > 0 {
-            self.state.lock().await.received_buffers.push(length);
+            let moved = self.moves.delivered(self.position as u64, length as u64);
+            let mut state = self.state.lock().await;
+            state.received_buffers.push(length);
+            *state.moved.entry(self.moves.path.clone()).or_default() += moved;
         }
+        self.position += length;
         Ok(length)
     }
 }
 
 impl MemoryProvider {
-    /// What a read of `start..end` of an object of `size` bytes moves: its
-    /// range, or every part it touches whole.
-    fn moved(&self, size: u64, start: u64, end: u64) -> u64 {
-        if !self.whole_part_reads || start == end {
-            return end - start;
-        }
-        let part = self.part_size as u64;
-        (start / part..=(end - 1) / part).map(|index| (size - index * part).min(part)).sum()
-    }
     #[expect(
         clippy::map_err_ignore,
         reason = "a send fails only when the receiver is gone, which this names"
@@ -160,6 +180,12 @@ impl MemoryProvider {
                 garble.reads -= 1;
             }
             let body = MemoryBody {
+                moves: BodyMoves {
+                    path: path.clone(),
+                    part: self.whole_part_reads.then_some(self.part_size as u64),
+                    size: metadata.size,
+                    next_part: 0,
+                },
                 bytes,
                 start,
                 end,
@@ -182,8 +208,6 @@ impl MemoryProvider {
                 state.ranges.push(range);
             }
             state.reads.push((path.clone(), start as u64, (end - start) as u64));
-            let moved = self.moved(metadata.size, start as u64, end as u64);
-            *state.moved.entry(path.clone()).or_default() += moved;
             ObjectStream::new(metadata, range, body)
         })();
         let held = if state.held_read.as_ref().is_some_and(|held| held.path == *path) {

@@ -55,3 +55,68 @@ fn frame_reads_stop_at_the_declared_boundary() {
     assert_eq!(input.position(), first.len() as u64);
     assert_eq!(frame(&mut input, &object_path()).unwrap(), second);
 }
+
+/// Ana publishes Gifts' snapshot to the Household store on iCloud, where a
+/// read moves each part it reaches whole. When she adds Ben to Gifts, his
+/// device loads Gifts from that snapshot: reading its prefix, then its body,
+/// moves each part once.
+#[tokio::test]
+async fn loading_a_snapshot_moves_each_part_once() {
+    use crate::sequence_sync::tests::*;
+    use coven_format::admin::StoreChange;
+    use coven_storage::test_utils::MemoryStorage;
+    // A part far smaller than CloudKit's 8 MiB, so a small snapshot spans
+    // several.
+    const PART: usize = 1024;
+    let group = Group::on(
+        MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::CloudKit)
+            .transfer_limits(PART as u64, PART)
+            .reads_whole_parts(),
+    );
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    let wishes = 40;
+    ana.database()
+        .write(move |sql| {
+            for wish in 0..wishes {
+                let id = format!("00000000-0000-4000-8000-{wish:012}");
+                sql.execute(
+                    "INSERT INTO pins VALUES(?1,?2,?3)",
+                    (id, gifts.to_string(), format!("wish {wish} {}", "x".repeat(100))),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Circle(gifts)).await.unwrap();
+    let snapshot = group
+        .storage
+        .list(&coven_storage::ObjectPrefix::snapshots(group.store))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|object| object.path)
+        .find(|path| path.snapshot_id().is_some())
+        .expect("the snapshot is uploaded");
+    let size = group.storage.status(&snapshot).await.unwrap().expect("the snapshot").size;
+    assert!(size > 2 * PART as u64, "the snapshot spans several parts: {size}");
+    ben.sync.pass().await.unwrap();
+
+    let before = group.storage.moved_bytes(&snapshot).await;
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(pins(ben.database()).await.len(), wishes);
+    let moved = group.storage.moved_bytes(&snapshot).await - before;
+    assert_eq!(moved, size, "each of the snapshot's parts moved once");
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}

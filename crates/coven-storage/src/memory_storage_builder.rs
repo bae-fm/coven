@@ -60,9 +60,11 @@ impl MemoryStorageBuilder {
         self.independent_parts = true;
         self
     }
-    /// Move every part a read touches whole, as CloudKit's reads do
+    /// Move every part a read reaches whole, as CloudKit's reads do
     /// (Appendix E.1): an object of up to the part size is one part, a
-    /// larger one a part per part size from its start, the last shorter.
+    /// larger one a part per part size from its start, the last shorter. A
+    /// body moves each part once it delivers a byte of it, as CloudKit
+    /// fetches a part only once its stream reaches it.
     /// [`MemoryStorage::moved_bytes`] counts what each read moved.
     pub fn reads_whole_parts(mut self) -> Self {
         self.whole_part_reads = true;
