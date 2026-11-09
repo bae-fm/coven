@@ -479,19 +479,19 @@ async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
     let records: Vec<Vec<u8>> = db.inspect_writer(|db| {
         db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |row| row.get(0)).unwrap()
     });
-    // D5 frames: insert tag 0/new id+v/empty old; update tag 1/new+old v;
-    // delete tag 2/old id+v. A delete has no new-column count at all.
+    // D5 frames: insert tag 0/new id+v; update tag 1/new v; delete tag 2/old
+    // id+v. A delete has no new-column count at all, and an insert or update
+    // no old-value count (D5.5).
     // Each frame is kind 2, format 1, payload length, then its row change.
     let expected: &[&[u8]] = &[
         &[
-            2, 0, 1, 0, 0, 0, 65, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            2, 0, 1, 0, 0, 0, 61, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 105, 100, 3, 0, 0, 0, 1, 107, 0, 0, 0, 0, 0, 0, 0, 1,
-            118, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+            118, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
         ],
         &[
-            2, 0, 1, 0, 0, 0, 63, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 118, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0,
-            1, 0, 0, 0, 1, 118, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 0, 1, 0, 0, 0, 45, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 118, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0,
         ],
         &[
             2, 0, 1, 0, 0, 0, 53, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
