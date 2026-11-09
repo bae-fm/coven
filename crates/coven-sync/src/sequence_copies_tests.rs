@@ -122,6 +122,64 @@ async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
     }
 }
 
+/// §12.1, §16.4: Carol snapshots Gifts and the store, and the floor names
+/// both. Ana, outside Gifts, then replaces Ben's keys. Ben's new phone starts
+/// from the floor, and can't open its Gifts snapshot until Carol's copy lands
+/// above it; then it scans the slots above the floor, finds the copy and loads
+/// on, with no fresh restore.
+#[tokio::test]
+async fn a_new_device_finds_the_circle_key_of_a_floor_snapshot_above_the_floor() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
+    let gifts = carol.sync.create_circle("Gifts".into()).await.unwrap();
+    carol
+        .sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(carol.database(), "00000000-0000-4000-8000-000000000001", gifts, "scarf").await;
+    carol.sync.pass().await.unwrap();
+    carol.sync.snapshot(Audience::Circle(gifts)).await.unwrap();
+    carol.sync.snapshot(Audience::Store).await.unwrap();
+    carol.sync.pass().await.unwrap();
+    let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&carol).await;
+    assert_eq!(floor.header.snapshots.len(), 2, "the floor names Gifts' snapshot too");
+    ana.sync.pass().await.unwrap();
+    let replacement = coven_crypto::MemberIdentity::new(
+        ben.identity.member(),
+        coven_format::test_utils::keys_from_seed(12),
+    );
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), replacement.keys().public_keys())
+        .await
+        .unwrap();
+
+    let phone = group.newcomer(replacement, group.storage.for_device()).await;
+    assert!(matches!(
+        phone.sync.pass().await,
+        Err(SyncError::KeyUnavailable { audience: Audience::Circle(circle), .. }) if circle == gifts
+    ));
+    assert_eq!(phone.database().applied_slot().await.unwrap(), 0);
+    // Nothing loaded, so custody still holds no store key, and the next pass
+    // runs the key scan for this member's copies again, to the end.
+    assert!(phone.sync.keys.read().unwrap().is_none());
+
+    carol.sync.pass().await.unwrap();
+    phone.sync.pass().await.unwrap();
+    assert_eq!(
+        pins(phone.database()).await,
+        [("00000000-0000-4000-8000-000000000001".into(), "scarf".into())]
+    );
+    for device in [&ana, &ben, &carol, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// §12.1: a member no longer in the circle is sent nothing, whatever sealing
 /// key they now have.
 #[tokio::test]

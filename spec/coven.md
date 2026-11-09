@@ -3873,6 +3873,11 @@ finds a copy of every key the stop needs
   failed read fails the pass, as any failed read does (§6.1).
 - **Only a circle key.** A store key's copy is always below the slot that needs
   it (below), so a stop for a store key has nothing to scan for.
+- **At the floor.** A phone that starts from a floor can stop earlier, at the
+  floor's Gifts snapshot, which it can't open without the key. It has loaded
+  nothing, so it still holds no keys, and its next pass runs its first scan
+  again, through the end of the sequence. That scan finds Carol's copy once it
+  lands, and the phone loads on (§16.4).
 
 So a copy doesn't always come before the slot that needs it. A Gifts write can
 even land between the recovery and the copy: Carol's write lost its slot to the
@@ -5946,6 +5951,14 @@ kept slots after them (§13.1, §13.2). Without a floor, it starts at slot 1.
 Reading every kept slot instead would give the same state, but costs a request
 per slot; a returning device, which already holds its slots, reloads only when
 `first` has passed its next slot (§6.1).
+
+Its circle keys come from copies in the store snapshot's history and in the
+kept slots. Ben's new phone, recovered by Ana outside Gifts, can find the
+floor's Gifts snapshot before Carol has sent him the Gifts key. It reports
+`KeyUnavailable` for that key and loads nothing, so it still holds no keys. Each
+later pass scans for its copies again, as a device without keys does, through
+the end of the sequence, and once Carol's copy lands above the floor the phone
+opens it and loads the floor (§12.1).
 
 #### 16.5 Coming back after a long absence
 
