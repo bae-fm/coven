@@ -24,6 +24,7 @@ use crate::observation::{CommitObserver, HandleFailure};
 use crate::sqlite::DatabaseConnection;
 use crate::upkeep::{Upkeep, UpkeepThread};
 use crate::{CheckpointMode, DbError, WalCheckpoint};
+use coven_foundation::clock::ClockRef;
 use coven_foundation::locks::lock_unpoisoned;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, Weak};
@@ -43,6 +44,8 @@ pub(crate) struct Checkpoints {
     writer: Weak<Mutex<DatabaseConnection>>,
     /// The frames not yet checkpointed past which a wake checkpoints.
     threshold: NonZeroU32,
+    /// Times how long each checkpoint holds the writer.
+    clock: ClockRef,
     /// A test's fault, run as each checkpoint's last step begins.
     #[cfg(test)]
     fault: Mutex<Option<Fault>>,
@@ -70,6 +73,7 @@ impl UpkeepThread<Checkpoints> {
         connection: DatabaseConnection,
         writer: &Arc<Mutex<DatabaseConnection>>,
         threshold: NonZeroU32,
+        clock: ClockRef,
         handle: CommitObserver,
     ) -> Result<Self, DbError> {
         connection.batch(&format!("PRAGMA busy_timeout = {}", READER_WAIT.as_millis()))?;
@@ -80,6 +84,7 @@ impl UpkeepThread<Checkpoints> {
                 connection: Mutex::new(connection),
                 writer: Arc::downgrade(writer),
                 threshold,
+                clock,
                 #[cfg(test)]
                 fault: Mutex::new(None),
                 #[cfg(test)]
@@ -140,15 +145,16 @@ impl Checkpoints {
             // No write of coven's starts meanwhile, so the checkpoint takes
             // SQLite's writer lock at once, copies the few frames committed
             // since, and waits only for readers.
-            let restarted = with_locked(&writer, |_writes| {
+            let (restarted, held) = with_locked(&writer, |_writes| {
+                let held = self.clock.elapsed();
                 #[cfg(test)]
                 self.fault()?;
                 let restarted = connection.wal_checkpoint(CheckpointMode::Restart)?;
                 #[cfg(test)]
                 self.report(restarted);
-                Ok::<_, DbError>(restarted)
+                Ok::<_, DbError>((restarted, self.clock.elapsed() - held))
             })?;
-            tracing::debug!(frames = log_frames, ?restarted, "checkpointed the WAL");
+            tracing::debug!(frames = log_frames, ?restarted, ?held, "checkpointed the WAL");
             Ok(())
         })
     }

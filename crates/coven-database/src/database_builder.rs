@@ -272,6 +272,7 @@ impl DatabaseBuilder {
                     coven_only(&input_path, false)?,
                     &input_writer,
                     crate::sqlite_settings::CHECKPOINT_PAGES,
+                    clock.clone(),
                     observer.clone(),
                 )?];
                 let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
@@ -295,6 +296,7 @@ impl DatabaseBuilder {
                 checkpointing,
                 &writer,
                 pages,
+                clock.clone(),
                 observer.clone(),
             )?);
         }

@@ -14,6 +14,7 @@ use coven_foundation::{
     files::StoreDirectories,
     id_source::{IdSource, SequentialIds, StoreId},
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A scanned folder listed through a trigger that reads a view of six
@@ -113,12 +114,16 @@ fn uuid(kind: u32, n: usize) -> String {
 }
 
 async fn open_library(directory: &tempfile::TempDir) -> Database {
-    let ids = SequentialIds::new();
+    let ids = Arc::new(SequentialIds::new());
     let store =
         StoreDirectories::new(directory.path().into(), coven_foundation::task::HeardBugs::shared())
-            .create_store_dir(StoreId(ids.new_id()), &ids)
+            .create_store_dir(StoreId(ids.new_id()), ids.as_ref())
             .unwrap();
+    // Apps supply time-ordered ids (bae's are UUIDv7), and sequential ids give
+    // the store's indexes the same locality: 263 against 258 microseconds a
+    // row. The bench measures the shape apps run, not coven's random default.
     DatabaseBuilder::new(store)
+        .id_source(ids.clone())
         .synced_tables(vec![
             SyncedTable::new("albums", RowIdentity::SharedKey),
             SyncedTable::new("releases", RowIdentity::IndependentUuid),
