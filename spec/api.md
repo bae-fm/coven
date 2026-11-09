@@ -8997,6 +8997,9 @@ fn migrations() -> Vec<Migration> {
   stay valid, and then lists again. Something still in the bucket means a
   device kept writing there while it ran, and the call fails with
   `StorageFailure::Conflict`.
+- It takes the app's clock and id source, the ones the app gives
+  `CovenBuilder`, and builds neither: Ana's tool and her app share one
+  composition root (F.2).
 - The location is validated as setup validates it (E5). A location that is not
   S3, an empty key, or an uncatalogued endpoint with no profile is refused
   with `EmptyS3BucketError::Storage`. Listing, aborting and deleting failures
@@ -9042,11 +9045,15 @@ pub enum EmptyS3BucketError {
 /// (E14). A bucket whose root holds anything but stores' folders and the
 /// location marker is refused with `EmptyS3BucketError::OtherFiles` before
 /// anything is removed. The first failure stops it; calling again finishes.
-/// Retained versions in a versioned bucket stay.
+/// Retained versions in a versioned bucket stay. It uses the app's `clock`
+/// and `ids`, the ones given to `CovenBuilder::clock` and
+/// `CovenBuilder::id_source`, and makes none of its own.
 #[cfg(feature = "dev-tools")]
 pub async fn empty_s3_bucket(
     location: StorageConfig,
     credentials: S3Credentials,
+    clock: ClockRef,
+    ids: IdSourceRef,
 ) -> Result<EmptiedS3Bucket, EmptyS3BucketError>;
 ```
 

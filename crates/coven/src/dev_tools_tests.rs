@@ -1,10 +1,10 @@
 use super::*;
-use crate::{S3Profile, S3ProfileName, SecretText};
+use crate::{S3Profile, S3ProfileName, SecretText, SystemClock, UuidIds};
 use axum::{
     http::{Method, Uri},
     Router,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 fn location(endpoint: &str) -> (StorageConfig, S3Credentials) {
     (
@@ -77,7 +77,9 @@ async fn a_bucket_holding_only_stores_is_emptied_through_the_production_connecto
     let (endpoint, deleted) = serve(root, keys.clone()).await;
     let (location, credentials) = location(&endpoint);
 
-    let emptied = empty_s3_bucket(location, credentials).await.unwrap();
+    let emptied = empty_s3_bucket(location, credentials, Arc::new(SystemClock), Arc::new(UuidIds))
+        .await
+        .unwrap();
 
     assert_eq!(emptied, EmptiedS3Bucket { objects: 2, uploads: 0 });
     assert_eq!(*deleted.lock().unwrap(), keys);
@@ -90,7 +92,10 @@ async fn a_bucket_holding_other_files_is_refused_before_anything_is_removed() {
         let (endpoint, deleted) = serve(root.clone(), vec!["notes.txt".to_owned()]).await;
         let (location, credentials) = location(&endpoint);
 
-        let error = empty_s3_bucket(location, credentials).await.unwrap_err();
+        let error =
+            empty_s3_bucket(location, credentials, Arc::new(SystemClock), Arc::new(UuidIds))
+                .await
+                .unwrap_err();
 
         assert!(matches!(error, EmptyS3BucketError::OtherFiles), "{root:?}: {error:?}");
         assert!(deleted.lock().unwrap().is_empty(), "{root:?}");

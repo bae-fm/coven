@@ -1499,8 +1499,8 @@ tables = [
 ]
 "crates/coven-sync/src/sequence_keys.rs" = ["SequenceSync::rotate_key"]
 
-# The development tool's entry point builds the production connector with the
-# system clock and random ids, as the builder does (api.md E14).
+# The development tool's entry point builds the production connector from the
+# app's clock and id source (api.md E14).
 "crates/coven/src/dev_tools.rs" = ["empty_s3_bucket"]
 "crates/coven/src/bootstrap.rs" = [
     "bootstrap_device",

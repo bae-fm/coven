@@ -2,6 +2,7 @@ use super::*;
 use crate::authorization::SqlAuthorization;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
+use coven_foundation::id_source::{IdSource, UuidIds};
 use std::path::Path;
 
 /// A choice for every setting, each unlike SQLite's default and within what
@@ -278,7 +279,7 @@ fn wal_bytes(store: &TestStore) -> u64 {
 
 async fn write_notes(database: &crate::Database, round: &str, count: usize) {
     for n in 0..count {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = IdSource::new_id(&UuidIds).to_string();
         let title = format!("{round} {n}");
         database
             .write(move |sql| {

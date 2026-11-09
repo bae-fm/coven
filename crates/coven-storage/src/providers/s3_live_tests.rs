@@ -2,7 +2,7 @@
 //! Only fixed labels, behavior enums, timestamps and durations enter output.
 use super::*;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
-use coven_foundation::id_source::{DeviceId, StoreId};
+use coven_foundation::id_source::{DeviceId, IdSource, StoreId, UuidIds};
 use profile::*;
 use std::{
     future::Future,
@@ -278,7 +278,7 @@ where
     F: FnOnce(Arc<StorageConnection<S3Storage>>, StoreId) -> Fut,
     Fut: Future<Output = Result<T, StorageError>>,
 {
-    let store = StoreId(uuid::Uuid::new_v4());
+    let store = StoreId(IdSource::new_id(&UuidIds));
     let storage = Arc::new(settings.connect(Some(profile)));
     use futures_util::FutureExt;
     let result = std::panic::AssertUnwindSafe(work(storage.clone(), store)).catch_unwind().await;
