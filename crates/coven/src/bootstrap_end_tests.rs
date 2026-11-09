@@ -81,43 +81,72 @@ async fn an_approved_join_whose_member_is_removed_before_it_loads_ends() {
 }
 
 /// Whichever keychain operation of the ending fails, the next call finishes
-/// it without the sign-in the failed one may have deleted.
+/// it without the sign-in the failed one may have deleted. Ana's pass after
+/// the decline puts the marker in the request's place and then takes back the
+/// invite's share; the test holds that at the provider until the join is done,
+/// so the resumes' reads of storage see the marker, not the provider's refusal.
 #[tokio::test]
 async fn a_declined_join_finishes_after_a_failure_at_any_step_of_its_ending() {
-    for failing in 0..40 {
-        let owner = Owner::new(CloudProvider::Dropbox, false).await;
-        let invite = owner.invite().await;
-        let install = Installation::new();
-        let store = owner.directory.id();
-        waiting_join(&owner, &install, &invite).await;
-        let request = owner.next_join_request().await;
-        owner.handle.decline_join_request(&request).await.unwrap();
-        owner.pass_now().await;
-        let control = JoinControl::new();
-        install.keychain.fail_operations_after(&[failing]);
-        let ended =
-            install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
-        install.keychain.fail_operations_after(&[]);
-        let failed = ended.is_err();
-        if failed {
-            let again = install
+    // The whole test is bounded: an await that never finishes fails with the
+    // step it stopped at.
+    let progress = std::sync::Mutex::new(String::from("before the first round"));
+    let rounds = async {
+        for failing in 0..40 {
+            *progress.lock().unwrap() = format!("round {failing}: setting up");
+            let owner = Owner::new(CloudProvider::Dropbox, false).await;
+            let invite = owner.invite().await;
+            let install = Installation::new();
+            let store = owner.directory.id();
+            waiting_join(&owner, &install, &invite).await;
+            let request = owner.next_join_request().await;
+            let (revoking, revoked) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            owner.storage.hold_next_access("join@example.com", false, revoking, released).await;
+            *progress.lock().unwrap() = format!("round {failing}: declining");
+            owner.handle.decline_join_request(&request).await.unwrap();
+            // Ana's pass, or the background one the decline woke, puts the
+            // marker in place and then waits at the provider to take the
+            // access back: its end or that wait shows the marker is there.
+            let answer = owner.handle.retry_now().await.unwrap();
+            tokio::select! {
+                outcome = answer => assert!(matches!(outcome, RetryOutcome::Synced { .. })),
+                revoking = revoked => revoking.unwrap(),
+            }
+            let control = JoinControl::new();
+            install.keychain.fail_operations_after(&[failing]);
+            *progress.lock().unwrap() = format!("round {failing}: first resume");
+            let ended = install
                 .builder(&owner, owner.recipient())
                 .resume_join(store, |_| {}, &control)
                 .await;
-            // Once the code is gone nothing lists the join: the leftover
-            // installation is for the next invite to clear.
-            assert!(
-                matches!(again, Ok(None) | Err(BootstrapError::NoUnfinishedJoin(_))),
-                "failing after {failing}: {again:?}"
-            );
+            install.keychain.fail_operations_after(&[]);
+            let failed = ended.is_err();
+            if failed {
+                *progress.lock().unwrap() = format!("round {failing}: second resume");
+                let again = install
+                    .builder(&owner, owner.recipient())
+                    .resume_join(store, |_| {}, &control)
+                    .await;
+                // Once the code is gone nothing lists the join: the leftover
+                // installation is for the next invite to clear.
+                assert!(
+                    matches!(again, Ok(None) | Err(BootstrapError::NoUnfinishedJoin(_))),
+                    "failing after {failing}: {again:?}"
+                );
+            }
+            install.absent(store).await;
+            release.send(()).unwrap();
+            *progress.lock().unwrap() = format!("round {failing}: closing");
+            owner.close().await;
+            if !failed {
+                return;
+            }
         }
-        install.absent(store).await;
-        owner.close().await;
-        if !failed {
-            return;
-        }
+        panic!("the ending never completed without a failure");
+    };
+    if tokio::time::timeout(HANG_GUARD, rounds).await.is_err() {
+        panic!("hung past {HANG_GUARD:?} at {}", progress.lock().unwrap());
     }
-    panic!("the ending never completed without a failure");
 }
 
 /// Carol's first join ended and stopped after its code was deleted, before
