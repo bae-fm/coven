@@ -1,9 +1,11 @@
 //! What a value costs in a snapshot, section by section (D7), and the bytes
 //! this device keeps for it beside the store.
 //!
-//! `a_snapshot_holds_a_rows_value_once_and_a_fixed_record_per_write` runs with
-//! every test run and bounds a snapshot's size by the row's current value and
-//! a fixed record per write. The measurements run explicitly:
+//! `a_snapshot_holds_a_rows_current_value_and_no_edit_every_device_wrote_past`
+//! runs with every test run and bounds a snapshot's size by the row's
+//! current value and a fixed overhead, with no term per edit, for a lone
+//! device and for one whose second device writes past each batch of edits.
+//! The measurements run explicitly:
 //!
 //!   scripts/cargo.sh test -p coven --all-features --test snapshot_size -- \
 //!     --ignored --nocapture --test-threads 1
@@ -203,27 +205,74 @@ struct Case {
 /// device restores.
 const LISTED: usize = 5;
 
-/// The most one write of a row adds to a snapshot, whatever the size of the
-/// value it writes: its applied write's entry in section 0, its part's header
-/// and completeness, and its change's kept record in section 4, which holds
-/// the row, the generation, the operation, each column's name with a 32-byte
-/// digest of a value that is no reference, and its count of operations
-/// (D7.3). One write of `notes.body` measured 202 bytes.
-const PER_WRITE: u64 = 256;
-
-/// What a snapshot of the notes store holds besides its row's current value
-/// and the writes to it: the row's identity and generations, the synced
-/// column, the row's creation, the original admin, key-copy and announcement
-/// slots, and the last claim. Measured at about 2 KB.
+/// What a snapshot of the notes store holds besides its rows' current
+/// values and its snapshot announcements: the rows' identities and
+/// generations, the synced column, each row's creation, the records and
+/// entries of the writes still current and of each device's last write, the
+/// original admin and key-copy slots, and the last claims. Nothing in it
+/// grows with the number of edits. Measured at about 1.5 KB alone, and
+/// 2.3 KB with a second device, whose addition, row and writes the snapshot
+/// holds too.
 const OVERHEAD: u64 = 4096;
 
-/// A snapshot holds a row's current value once, and for each write to the row
-/// a record of fixed size: no value a write replaced, and no value of a
-/// column that is no reference, however often it was written (D7.3). A
-/// change that kept values in history again would add a value's size per
-/// write, which `PER_WRITE` leaves no room for at these sizes.
+/// The notes store restored on a second device of the same member, syncing.
+async fn second_device(
+    storage: &Arc<MemoryStorage>,
+    handle: &CovenHandle,
+    root: &std::path::Path,
+) -> CovenHandle {
+    let code = handle.restore_code_for_transfer().await.unwrap();
+    let (_cancelling, cancel) = tokio::sync::watch::channel(false);
+    let restored = coven::restore_from_code(
+        Coven::in_memory(root.into())
+            .builder()
+            .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+            .migrations(vec![Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, body TEXT NOT NULL);",
+            )])
+            .storage_connector(Arc::new(storage.for_device())),
+        &code,
+        None,
+        "Ana's phone",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    restored.start_sync().await.unwrap();
+    restored
+}
+
+/// The phone reads what the laptop landed, then lands a write past it: its
+/// own row's first value, or a new one after `written` of the laptop's
+/// edits.
+async fn write_past(phone: &CovenHandle, written: usize) {
+    pass(phone).await;
+    let value = written.to_string();
+    phone
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('phone', ?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                [value],
+            )?;
+            Ok::<_, coven::CovenError>(())
+        })
+        .await
+        .unwrap();
+    pass(phone).await;
+}
+
+/// A snapshot holds a row's current value once, and nothing of the edits
+/// that replaced it once every device that can still write has written past
+/// them (coven.md §16.7): no value a write replaced, no kept record, and no
+/// applied write's entry. A lone device writes past its own edits; with a
+/// second device, that device lands a write after each batch of edits. A
+/// snapshot that kept a fixed record per edit would grow by about 200 bytes
+/// an edit, which `OVERHEAD` leaves no room for at a hundred edits.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_snapshot_holds_a_rows_value_once_and_a_fixed_record_per_write() {
+async fn a_snapshot_holds_a_rows_current_value_and_no_edit_every_device_wrote_past() {
     let mut cases = Vec::new();
     for size in [1 << 10, 256 << 10] {
         for edits in [1, 10, 100] {
@@ -232,37 +281,72 @@ async fn a_snapshot_holds_a_rows_value_once_and_a_fixed_record_per_write() {
     }
     cases.push(Case { size: 256 << 10, edits: 10, delete: true });
     for case in cases {
-        let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-        let root = tempfile::tempdir().unwrap();
-        let handle = notes_store(&storage, root.path()).await;
-        write(&handle, "INSERT INTO notes VALUES('note', ?1)", case.size, b'a').await;
-        for edit in 0..case.edits {
-            let fill = b'b' + (edit % 24) as u8;
-            write(&handle, "UPDATE notes SET body = ?1 WHERE id = 'note'", case.size, fill).await;
+        for second in [false, true] {
+            let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+            let root = tempfile::tempdir().unwrap();
+            let phone_root = tempfile::tempdir().unwrap();
+            let handle = notes_store(&storage, root.path()).await;
+            write(&handle, "INSERT INTO notes VALUES('note', ?1)", case.size, b'a').await;
+            pass(&handle).await;
+            let phone = match second {
+                true => Some(second_device(&storage, &handle, phone_root.path()).await),
+                false => None,
+            };
+            let mut written = 0;
+            while written < case.edits {
+                let batch = (case.edits - written).min(10);
+                for edit in written..written + batch {
+                    let fill = b'b' + (edit % 24) as u8;
+                    write(&handle, "UPDATE notes SET body = ?1 WHERE id = 'note'", case.size, fill)
+                        .await;
+                }
+                written += batch;
+                pass(&handle).await;
+                if let Some(phone) = &phone {
+                    write_past(phone, written).await;
+                }
+            }
+            if case.delete {
+                handle
+                    .write(|sql| {
+                        sql.execute("DELETE FROM notes WHERE id = 'note'", [])?;
+                        Ok::<_, coven::CovenError>(())
+                    })
+                    .await
+                    .unwrap();
+                pass(&handle).await;
+                if let Some(phone) = &phone {
+                    write_past(phone, written + 1).await;
+                }
+            }
+            pass(&handle).await;
+            pass(&handle).await;
+            // Each snapshot the passes took adds its announcement slot, which
+            // retention deletes in time (§16.6): they follow the passes this
+            // test makes, not the edits.
+            let sections = handle.test_snapshot_section_bytes().await.unwrap();
+            let total: u64 = sections.iter().sum::<u64>() - sections[section::ANNOUNCEMENT];
+            handle.close().await.unwrap();
+            if let Some(phone) = phone {
+                phone.close().await.unwrap();
+            }
+            let current = if case.delete { 0 } else { case.size as u64 };
+            eprintln!(
+                "{:>7} {:>4} {:>5} {second:>5}: {:>7} beyond the value",
+                case.size,
+                case.edits,
+                case.delete,
+                total.saturating_sub(current)
+            );
+            let bound = current + OVERHEAD;
+            assert!(
+                total <= bound,
+                "a value of {} bytes, {} edits, deleted {}, a second device {second}: {total} snapshot bytes, bound {bound}",
+                case.size,
+                case.edits,
+                case.delete
+            );
         }
-        if case.delete {
-            handle
-                .write(|sql| {
-                    sql.execute("DELETE FROM notes WHERE id = 'note'", [])?;
-                    Ok::<_, coven::CovenError>(())
-                })
-                .await
-                .unwrap();
-        }
-        pass(&handle).await;
-        pass(&handle).await;
-        let total: u64 = handle.test_snapshot_section_bytes().await.unwrap().iter().sum();
-        handle.close().await.unwrap();
-        let current = if case.delete { 0 } else { case.size as u64 };
-        let writes = 1 + case.edits as u64 + u64::from(case.delete);
-        let bound = current + writes * PER_WRITE + OVERHEAD;
-        assert!(
-            total <= bound,
-            "a value of {} bytes, {} edits, deleted {}: {total} snapshot bytes, bound {bound}",
-            case.size,
-            case.edits,
-            case.delete
-        );
     }
 }
 
