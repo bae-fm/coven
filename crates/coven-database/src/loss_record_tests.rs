@@ -340,6 +340,16 @@ async fn a_second_rules_loss_for_one_row_is_damaged_database() {
     ));
 }
 
+/// Lose the record of every row removal rules took out, as a damaged
+/// database would: the merge row stays present with no values anywhere.
+pub(crate) fn lose_removed_rows(db: &crate::sqlite::DatabaseConnection) {
+    db.internal_execute(
+        "DELETE FROM _coven_lost WHERE column_id IS NULL AND replacement_kind='rules'",
+        [],
+    )
+    .unwrap();
+}
+
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {

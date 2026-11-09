@@ -407,6 +407,9 @@ impl<'a> MergeStore<'a> {
                 removed.columns.into_iter().map(|(n, v)| (n, v.value)).collect()
             } else {
                 match self.values {
+                    // A present row the app's tables don't show was taken out
+                    // by removal rules, whose record holds its values: with
+                    // neither, the store is damaged (§19.3).
                     RowValues::App(app) => {
                         let app = app
                             .row(&(id.table.clone(), id.key.clone()))?

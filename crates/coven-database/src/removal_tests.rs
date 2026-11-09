@@ -41,6 +41,32 @@ async fn readding_a_removed_shared_key_updates_every_column_and_clears_its_check
     db.close().await.unwrap();
 }
 
+/// A row removal rules took out keeps its values in its removal record. A
+/// store that lost that record is damaged: the write re-adding the row reads
+/// the row's pre-write state, finds no values for it, and fails with
+/// `DamagedDatabase`, committing nothing (§19.3).
+#[tokio::test]
+async fn readding_a_removed_row_without_its_removal_record_is_a_damaged_database() {
+    let store = TestStore::new();
+    let db = store.schema(vec![table("ranges")], "CREATE TABLE ranges(id TEXT NOT NULL PRIMARY KEY, start INT, end INT, CONSTRAINT ordered CHECK(start <= end))").await.unwrap();
+    sql(&db, "INSERT INTO ranges VALUES('urgent',5,12)").await.unwrap();
+    crate::tests::remote_update(
+        &db,
+        "ranges",
+        "urgent",
+        &[("start", Value::Integer(10)), ("end", Value::Integer(8))],
+    )
+    .await;
+    assert_eq!(count(&db, "ranges"), 0);
+    db.commit_writer(crate::loss_record::tests::lose_removed_rows);
+    let writes = records(&db).len();
+    let error = sql(&db, "INSERT INTO ranges VALUES('urgent',10,20)").await.unwrap_err();
+    assert!(matches!(error, crate::DbError::DamagedDatabase), "{error:?}");
+    assert_eq!(count(&db, "ranges"), 0);
+    assert_eq!(records(&db).len(), writes);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn deleting_groceries_winner_returns_note_46_and_its_link() {
     let store = TestStore::new();
