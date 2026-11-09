@@ -87,14 +87,19 @@ def run(coven=COVEN, format_md=FORMAT, claim=CLAIM, axioms=AXIOMS, writeup=WRITE
     with tempfile.TemporaryDirectory() as tmp:
         spec = Path(tmp) / "spec"
         (spec / "proofs" / "model" / "Model").mkdir(parents=True)
-        (spec / "proofs" / "model" / "Model" / "Claim.lean").write_text(claim)
-        (spec / "proofs" / "model" / "Model" / "Axioms.lean").write_text(axioms)
-        (spec / "proofs" / "model.md").write_text(writeup)
-        (spec / "coven.md").write_text(coven)
-        (spec / "format.md").write_text(format_md)
-        (spec / "api.md").write_text(API)
+        # The spec is UTF-8 on every platform, whatever the locale's encoding.
+        for path, text in [
+            (spec / "proofs" / "model" / "Model" / "Claim.lean", claim),
+            (spec / "proofs" / "model" / "Model" / "Axioms.lean", axioms),
+            (spec / "proofs" / "model.md", writeup),
+            (spec / "coven.md", coven),
+            (spec / "format.md", format_md),
+            (spec / "api.md", API),
+        ]:
+            path.write_text(text, encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), str(spec)], capture_output=True, text=True, check=False
+            [sys.executable, str(SCRIPT), str(spec)],
+            capture_output=True, encoding="utf-8", check=False,
         )
         return result.returncode, result.stdout
 

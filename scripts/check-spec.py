@@ -317,7 +317,7 @@ def check_audits(coven, writeups, packages, findings):
         for name in names:
             if name not in package.audited:
                 findings.append((document, line, f"cites `{name}`, which "
-                                 f"{package.axioms.relative_to(proofs.parent)} has no "
+                                 f"{package.axioms.relative_to(proofs.parent).as_posix()} has no "
                                  "`#print axioms` line for"))
 
     start = next((n for n, title in coven.headings if title.startswith("Appendix G.")), None)
@@ -341,7 +341,7 @@ def check_audits(coven, writeups, packages, findings):
             names = package.theorems(cited, files)
             if not names:
                 findings.append((coven, number + 1, f"cites `{cited}`, which "
-                                 + ", ".join(sorted(str(path.relative_to(proofs.parent))
+                                 + ", ".join(sorted(path.relative_to(proofs.parent).as_posix()
                                                     for path in files))
                                  + " declares no theorem of that name"))
             unaudited(coven, number + 1, package, names)
@@ -379,6 +379,9 @@ def check_layout(document, findings):
 
 
 def main(argv):
+    # Findings quote the spec, which is UTF-8, as the paths they name are
+    # written with `/`: alike on every platform.
+    sys.stdout.reconfigure(encoding="utf-8")
     if len(argv) > 2:
         print("usage: scripts/check-spec.py [spec directory]", file=sys.stderr)
         return 2
@@ -407,7 +410,7 @@ def main(argv):
                 for path in sorted((spec / "proofs").glob("*.md"))}
     check_audits(coven, writeups, proof_packages(spec), findings)
     for document, line, message in sorted(findings, key=lambda f: (str(f[0].path), f[1])):
-        print(f"{document.path.relative_to(spec.resolve().parent)}:{line}: {message}")
+        print(f"{document.path.relative_to(spec.resolve().parent).as_posix()}:{line}: {message}")
     return 1 if findings else 0
 
 
