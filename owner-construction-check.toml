@@ -216,6 +216,9 @@ task_types = [
     # App bytes one staging wrote, until the write that takes them
     # (§17.3).
     "StagedFiles",
+    # What one pin's download of a file has in hand, written and received,
+    # which its requests in flight tell as their bytes arrive (§17.8).
+    "WholeProgress",
     # Whole copies one pin prepared, until the write that keeps them
     # (§17.8), and what preparing found for each file.
     "PreparedPin",

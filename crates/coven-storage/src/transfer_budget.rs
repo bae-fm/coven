@@ -12,8 +12,9 @@ use tokio::sync::Notify;
 pub struct TransferLimits {
     /// Maximum file uploads running together.
     pub uploads: NonZeroUsize,
-    /// Maximum file downloads running together. The sequence's own reads
-    /// don't count against it.
+    /// Maximum requests for file bytes in flight together, each holding a
+    /// lease while its body is read; one file's pin takes as many as it can.
+    /// The sequence's own reads don't count against it.
     pub downloads: NonZeroUsize,
 }
 impl Default for TransferLimits {

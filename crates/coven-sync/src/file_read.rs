@@ -21,12 +21,15 @@ use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileName, StoreReadLock};
 use coven_foundation::locks::read_unpoisoned;
 use coven_storage::{ByteProgress, ByteRange, ObjectPath};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::file_error::TransferError;
 
 #[path = "file_read_partial.rs"]
 mod partial;
+#[path = "file_read_whole.rs"]
+mod whole;
 
 const REQUEST_BYTES: u64 = 1024 * 1024;
 /// An open file. A file never changes its bytes, so nothing later changes
@@ -112,8 +115,9 @@ struct RangeHere<'a> {
 enum ChunkDestination<'a> {
     /// The cache, for a read; `None` for one whose progress nothing shows.
     Cache(Option<RangeHere<'a>>),
-    /// A pin's whole file, whose download `meter` hears as its bytes arrive.
-    WholeFile(&'a TransferMeter),
+    /// A pin's whole file, whose download `progress` hears as its bytes
+    /// arrive; `fetched` counts the bytes this step's range received.
+    WholeFile { progress: &'a Arc<whole::WholeProgress>, fetched: &'a Arc<AtomicU64> },
 }
 impl<M: FilesMode> Files<M> {
     /// Open the file as its record now stands: its bytes here while it is on
@@ -533,7 +537,8 @@ impl<M: FilesMode> UploadedFile<M> {
         }
         Ok(result)
     }
-    // Reads of one file coalesce; independent files can fetch concurrently.
+    // Reads of one file coalesce; independent files can fetch concurrently,
+    // and so can a pin's ranges of one file, which put nothing in the cache.
     // The shared cache guard excludes eviction and store close during a fetch.
     #[expect(
         clippy::map_err_ignore,
@@ -546,7 +551,7 @@ impl<M: FilesMode> UploadedFile<M> {
         destination: ChunkDestination<'_>,
     ) -> Result<ChunkStep, FileReadError> {
         self.owner.check_open()?;
-        let _file = self.owner.lock_file(&self.file, &self.location).await;
+        let file_lock = self.owner.lock_file(&self.file, &self.location).await;
         let _guard = self.owner.cache.read().await;
         // A cached copy that fails its check changed on this device, which
         // says nothing about the stored file (§17.8): its bytes are fetched.
@@ -559,7 +564,7 @@ impl<M: FilesMode> UploadedFile<M> {
         let header = self.cached_header().await?;
         // A pin's download asks storage for nothing while a metered network
         // holds it; what is here already it still takes (§17.8).
-        if matches!(destination, ChunkDestination::WholeFile(_))
+        if matches!(destination, ChunkDestination::WholeFile { .. })
             && (!matches!(cached, Some(Ok(_))) || header != CachedHeader::Checked)
             && self.owner.downloads_held()
         {
@@ -610,6 +615,13 @@ impl<M: FilesMode> UploadedFile<M> {
         }
         let received = self.received(&destination, first, end_index, start)?;
         let request_start = if with_header { 0 } else { start };
+        // A pin's fetch puts nothing in the cache, so its file's other reads
+        // need not wait for it: the lock covered reading the cache and
+        // checking the header. A header that comes with chunk zero is
+        // published under it, and the reads after wait to find it checked.
+        if matches!(destination, ChunkDestination::WholeFile { .. }) && !with_header {
+            drop(file_lock);
+        }
         let fetched =
             fetch(&self.owner, &self.file, &self.path, request_start, end, &received).await?;
         // The header precedes chunk zero: one request carries both, and the
@@ -688,13 +700,14 @@ impl<M: FilesMode> UploadedFile<M> {
         start: u64,
     ) -> Result<ByteProgress, FileReadError> {
         match destination {
-            ChunkDestination::WholeFile(meter) => {
-                let meter = (*meter).clone();
-                let furthest = std::sync::atomic::AtomicU64::new(start);
+            ChunkDestination::WholeFile { progress, fetched } => {
+                let (progress, fetched) = ((*progress).clone(), (*fetched).clone());
+                let furthest = AtomicU64::new(start);
                 Ok(ByteProgress::new(move |reached| {
-                    let before = furthest.fetch_max(reached, std::sync::atomic::Ordering::Relaxed);
+                    let before = furthest.fetch_max(reached, Ordering::Relaxed);
                     if reached > before {
-                        meter.reached(reached);
+                        fetched.fetch_add(reached - before, Ordering::Relaxed);
+                        progress.arrived(reached - before);
                     }
                 }))
             }
@@ -765,84 +778,6 @@ impl<M: FilesMode> UploadedFile<M> {
     }
 }
 
-impl UploadedFile {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a size whose encrypted layout overflows is the disagreement Integrity names"
-    )]
-    /// Assemble this file's whole encrypted cache copy, from cached and
-    /// fetched chunks, check its content hash and sync it, under a reserved
-    /// name: the copy a pin's write publishes (§17.8). Nothing is kept until
-    /// then. `None` when a metered network the app keeps files off stops it
-    /// before its next request to storage; what it had goes.
-    pub(crate) async fn keep_whole(&self) -> Result<Option<CacheReservation>, TransferError> {
-        // In flight until it ends: finished, failed or held, as what the
-        // download came to says, or dropped with this call.
-        let downloading = self.owner.database.downloads_in_flight().start(
-            self.location.uploader(),
-            self.location.object(),
-            vec![self.file.id()],
-            coven_database::TransferProgress {
-                bytes_transferred: 0,
-                bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
-            },
-        );
-        let kept = self.assemble_whole(&downloading.meter()).await;
-        downloading.end(match &kept {
-            Ok(Some(_)) => TransferEnd::Finished,
-            Ok(None) => TransferEnd::Held,
-            Err(_) => TransferEnd::Failed,
-        });
-        kept
-    }
-
-    /// Write the whole copy `keep_whole` keeps, telling `meter` how far
-    /// through the encrypted object it has got, in order: cached chunks
-    /// count as they are copied in, fetched ones as their bytes arrive. It
-    /// continues the partial copy an earlier prepare left, once the bytes
-    /// kept check, and keeps what it has written, synced, after each
-    /// request, so a prepare that stops loses at most the request under
-    /// way (§17.8).
-    async fn assemble_whole(
-        &self,
-        meter: &TransferMeter,
-    ) -> Result<Option<CacheReservation>, TransferError> {
-        let (mut reservation, mut writer, mut hash, next, mut written) = self.begin_whole().await?;
-        let database = &self.owner.database;
-        meter.reached(written);
-        let mut index = next;
-        while index < self.header.chunk_count() {
-            // A metered network the app keeps files off stops the download
-            // before its next request to storage (§17.8).
-            let ChunkStep::Read(last, chunks) = self
-                .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(meter))
-                .await?
-            else {
-                return Ok(None);
-            };
-            for chunk in chunks {
-                hash.update(&chunk.plaintext);
-                writer.append(&chunk.ciphertext).await?;
-                written += chunk.ciphertext.len() as u64;
-                meter.reached(written);
-            }
-            writer.sync().await?;
-            database.keep_pin_download(&mut reservation, written).await?;
-            index = last + 1;
-        }
-        if hash.finish() != self.hash {
-            // Chunks that each authenticate but whole to another file: no
-            // part of the copy is to be trusted again.
-            drop(writer);
-            drop(reservation);
-            database.discard_pin_download(&self.file).await?;
-            return Err(TransferError::Refused(crate::Refusal::ContentHash));
-        }
-        writer.finish().await?;
-        database.keep_pin_download(&mut reservation, written).await?;
-        Ok(Some(reservation))
-    }
-}
 struct OpenedChunk {
     plaintext: Vec<u8>,
     ciphertext: Vec<u8>,

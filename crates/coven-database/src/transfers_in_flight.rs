@@ -18,11 +18,11 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 /// How far one transfer has got: the bytes of its encrypted object
-/// handed to the connection or received, in order from its start, out of the
+/// handed to the connection or received, in whatever order, out of the
 /// object's whole size. Known from the transfer's start; never stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransferProgress {
-    /// The object's bytes moved so far, from its start.
+    /// The object's bytes moved so far.
     pub bytes_transferred: u64,
     /// The object's whole encrypted size.
     pub bytes_total: u64,
@@ -349,7 +349,7 @@ pub struct TransferMeter {
 }
 
 impl TransferMeter {
-    /// The attempt has got `bytes` of the way through the file's object.
+    /// The attempt has moved `bytes` of the file's object.
     pub fn reached(&self, bytes: u64) {
         self.owner.reached(self.object, self.attempt, bytes);
     }

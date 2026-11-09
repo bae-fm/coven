@@ -4886,8 +4886,11 @@ pub struct TransferLimits {
     /// File uploads running at once. While uploads can run, the upload
     /// worker keeps this many in flight, starting the next as each ends.
     pub uploads: NonZeroUsize,
-    /// File downloads running at once, pins' and file ranges'. Reading the
-    /// sequence doesn't count against it: its 16 reads ahead bound it
+    /// Requests for file bytes in flight at once, pins' and file ranges'.
+    /// A pin sends as many of one file's requests at once as this lets go,
+    /// so one large file uses every one it allows
+    /// ([§17.8](coven.md#178-cache-and-pinning)). Reading the sequence
+    /// doesn't count against it: its 16 reads ahead bound it
     /// ([§21.1](coven.md#211-counting-the-requests-of-a-pass)).
     pub downloads: NonZeroUsize,
 }
@@ -6273,13 +6276,14 @@ impl CovenWrite<'_> {
 }
 
 /// How far one file's transfer has got: the bytes of its encrypted object
-/// handed to the connection or received, in order from its start, out of
-/// the object's whole size. Known from the transfer's start; never stored.
-/// A part counts from where it starts in the object; a resumed session
-/// starts where the provider confirmed it; a download counts the chunks it
-/// already had as it copies them in.
+/// handed to the connection or received, out of the object's whole size.
+/// Known from the transfer's start; never stored. A part counts from where
+/// it starts in the object; a resumed session starts where the provider
+/// confirmed it; a download counts the chunks it already had as it copies
+/// them in, and the bytes of its requests in flight as they arrive, in
+/// whatever order (coven.md §17.8).
 pub struct TransferProgress {
-    /// The object's bytes moved so far, from its start.
+    /// The object's bytes moved so far.
     pub bytes_transferred: u64,
     /// The object's whole encrypted size.
     pub bytes_total: u64,

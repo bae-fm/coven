@@ -619,6 +619,8 @@ mod upload_pool;
 mod upload_retry;
 #[path = "file_upload_tests.rs"]
 mod uploads;
+#[path = "file_read_whole_tests.rs"]
+mod whole_pin;
 
 #[tokio::test]
 async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks() {

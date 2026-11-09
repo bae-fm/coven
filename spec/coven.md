@@ -7264,15 +7264,27 @@ can't be a step itself.
   *A stopped prepare keeps its bytes*. An app that wants each track pinned
   when its download ends prepares and commits each track in turn; one prepared
   pin over the album pins all of it or none.
+- **One file's requests go together.** A whole file downloads in requests of
+  up to 1 MiB (§17.7), and a prepare sends as many of one file's requests at
+  once as the download limit lets go
+  ([api.md E5](api.md#e5-storage-and-sync)), counted with every other
+  download's. Ben pins a 300 MB video alone with the limit at 4: four of its
+  requests are in flight at a time, and he waits for a quarter of the round
+  trips. Without this, one large file would fetch its requests one after
+  another while the limit allowed four, and a prepare's last file would
+  always download alone. A first request that carries the file's header goes
+  alone, since no chunk is trusted before the header checks (§17.7).
 - **A stopped prepare keeps its bytes.** A prepare dropped partway, or ended by
   a crash, leaves each file's partial copy on disk, held apart from the cache:
   the budget neither counts nor evicts it. Ben pauses his album's download
   with track 4 half fetched; tracks 1 to 3 are whole copies and track 4 holds
   the bytes it had. Preparing the album again copies nothing it has, and
   fetches only track 4's rest and the tracks after it. A partial holds the
-  file's header and whole chunks, synced to disk, and coven keeps what it has
-  written after each request to storage, so a stop loses at most the request
-  under way. The next prepare of the file reads its partial back first,
+  file's header and whole chunks in order, synced to disk. Requests that go
+  together can come back in any order: coven writes each one's chunks once
+  those before them are written, and keeps what it has written after each,
+  so a stop loses at most the requests under way and those that came back
+  ahead of one. The next prepare of the file reads its partial back first,
   authenticating each chunk as it would a fetched one and feeding the content
   hash, then asks storage for the chunks after them with a range request, as
   every provider answers (§20.5). A partial that does not check, because its
@@ -7412,9 +7424,10 @@ apart from the cache, and its write publishes them whole, so Ben's 40 MB track
 counts nothing until it is kept. Which files a prepare is downloading now is in
 `coven_downloading`
 (§4), and how far each has got is on the download watch
-([api.md E8](api.md#e8-files-and-the-cache)): how far through the file's
-encrypted object its whole copy has got, out of the object's size, known
-before the first byte arrives. Chunks already cached count as they are copied
+([api.md E8](api.md#e8-files-and-the-cache)): how many of the file's encrypted
+object's bytes it has, those written to its whole copy and those its requests
+have received since, out of the object's size, known before the first byte
+arrives. Chunks already cached count as they are copied
 in, fetched ones as their bytes arrive (§6.7). On CloudKit a file past 8 MiB
 moves as each part's fetch reports its fraction; a smaller one is held in its
 record whole, which says only once fetched whether it holds the bytes, so it
