@@ -385,6 +385,7 @@ pub(crate) fn drop_operation(db: &DatabaseConnection, id: OperationId) -> Result
 /// claim is abandoned or retried; a landed batch removes its original queue rows.
 pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
+    let mut writes_landed = false;
     match claim.settlement {
         ClaimSettlement::Unknown | ClaimSettlement::Retry => return Err(DbError::ClaimUnsettled),
         ClaimSettlement::Landed if matches!(claim.work, ClaimWork::Writes(_)) => {
@@ -397,10 +398,14 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
                 return Err(DbError::ClaimUnsettled);
             }
             crate::upload::forget_claimed(db, claim.device, claim.number)?;
+            writes_landed = true;
         }
         _ => (),
     }
     db.internal_execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
+    if writes_landed {
+        db.give_back_free_pages()?;
+    }
     Ok(())
 }
 

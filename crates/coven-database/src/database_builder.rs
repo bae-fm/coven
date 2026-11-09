@@ -3,7 +3,7 @@
 use super::*;
 use coven_foundation::files::StoreDirAccess;
 
-use crate::{migration::MigrationOperation, NewOperation, OpenError, OpenStep};
+use crate::{migration::MigrationOperation, AutoVacuum, NewOperation, OpenError, OpenStep};
 use coven_foundation::progress::{ProgressChannel, ProgressReport, ProgressWatch};
 
 /// Choices needed to open the database part of a store.
@@ -517,7 +517,10 @@ fn coven_only(path: &std::path::Path, read_only: bool) -> Result<DatabaseConnect
         path,
         read_only,
         SqlAuthorization::new(&[]),
-        &crate::SqliteSettings::default(),
+        // The input database is a cache held to its byte budget (§21.1), and
+        // the next received range reuses its freed pages; giving them back
+        // would shrink and regrow the file.
+        &crate::SqliteSettings { auto_vacuum: Some(AutoVacuum::Off), ..Default::default() },
         &crate::SqlFunctions::default(),
     )
 }

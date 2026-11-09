@@ -879,7 +879,15 @@ path holds a name Windows reads as another file without the prefix: `.` or
 Coven applies the app's settings to every connection a handle opens to the
 store's database, as each one opens, so the writer and the readers agree. The
 page size and auto-vacuum mode belong to the database file instead: they apply
-when the database is created, and an existing store keeps its own.
+when the database is created, and an existing store keeps its own. Where the
+app sets no auto-vacuum mode, a new database is `Incremental`: a write's three
+copies in the outgoing queue are deleted when its claim lands, and a store that
+kept their pages grew to 160 MB holding 54 MB after a 256 KiB note was edited
+100 times. So each landed claim of writes, in the transaction that deletes the
+queue rows, gives back the free pages past 4 MiB, the same amount the WAL file
+keeps (`journal_size_limit`), so the next writes reuse those pages instead of
+growing the file. `inputs.db` is created with auto-vacuum off: it is held to
+its byte budget (§21.1), and the next received range reuses its freed pages.
 
 Each connection keeps the pages it read cached, up to its `cache_size`, so the
 next read needn't load them again. On a phone that memory counts against the

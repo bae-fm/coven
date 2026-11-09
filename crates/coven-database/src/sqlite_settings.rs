@@ -10,7 +10,8 @@ use crate::DbError;
 /// SQLite settings for every connection coven opens to the store's database:
 /// the writer and the readers of a writable handle, and every connection of a
 /// read-only one. A setting left `None` keeps SQLite's own default, except
-/// `checkpoint_fullfsync` on macOS and iOS, which coven turns on. Coven
+/// `checkpoint_fullfsync` on macOS and iOS, which coven turns on, and
+/// `auto_vacuum`, which is `Incremental`. Coven
 /// applies them as each connection opens, before any of its own statements.
 ///
 /// The settings coven's guarantees rest on have no field here: the journal
@@ -82,6 +83,8 @@ pub struct SqliteSettings {
     pub page_size: Option<PageSize>,
     /// The auto-vacuum mode a store's database is created with (`PRAGMA
     /// auto_vacuum`). Like the page size, an existing store keeps its own.
+    /// Unset is `Incremental`, and coven gives back free pages past 4 MiB
+    /// each time a claim lands (§4).
     pub auto_vacuum: Option<AutoVacuum>,
 }
 
@@ -320,6 +323,17 @@ const CHECKPOINT_FULLFSYNC: Option<bool> = None;
 /// keeping the largest size it ever grew to.
 const JOURNAL_SIZE_LIMIT: JournalSizeLimit = JournalSizeLimit::Bytes(4 << 20);
 
+/// Coven's auto-vacuum mode where the app leaves it unset, so coven can give
+/// back the pages its own queue frees.
+const AUTO_VACUUM: AutoVacuum = AutoVacuum::Incremental;
+
+/// The free pages coven leaves in the file for later writes to reuse, the
+/// same 4 MiB it lets the WAL file keep (`JOURNAL_SIZE_LIMIT`). A store's
+/// outgoing queue refills freed pages with its next writes, so vacuuming them
+/// at every landing would only move pages back and forth; the problem is the
+/// peak left behind.
+const KEPT_FREE_BYTES: u64 = 4 << 20;
+
 /// The WAL size at which coven checkpoints where the app leaves it unset:
 /// SQLite's own automatic checkpoint size.
 pub(crate) const CHECKPOINT_PAGES: NonZeroU32 = NonZeroU32::new(1000).expect("nonzero");
@@ -416,14 +430,12 @@ impl SqliteSettings {
         if let Some(size) = self.page_size {
             pragmas.push(format!("page_size = {}", size.bytes()));
         }
-        if let Some(vacuum) = self.auto_vacuum {
-            let vacuum = match vacuum {
-                AutoVacuum::Off => "NONE",
-                AutoVacuum::Full => "FULL",
-                AutoVacuum::Incremental => "INCREMENTAL",
-            };
-            pragmas.push(format!("auto_vacuum = {vacuum}"));
-        }
+        let vacuum = match self.auto_vacuum.unwrap_or(AUTO_VACUUM) {
+            AutoVacuum::Off => "NONE",
+            AutoVacuum::Full => "FULL",
+            AutoVacuum::Incremental => "INCREMENTAL",
+        };
+        pragmas.push(format!("auto_vacuum = {vacuum}"));
         pragmas
     }
 }
@@ -648,6 +660,26 @@ impl DatabaseConnection {
             ),
         };
         self.query(&sql, [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Give back the free pages of an incrementally vacuumed database past
+    /// [`KEPT_FREE_BYTES`]; any other auto-vacuum mode is the app's choice
+    /// and keeps its meaning.
+    pub(crate) fn give_back_free_pages(&self) -> Result<(), DbError> {
+        let pragma = |name: &str| -> Result<u64, DbError> {
+            let value: i64 = self.query_row(&format!("PRAGMA main.{name}"), [], |r| r.get(0))?;
+            unsigned(value)
+        };
+        if pragma("auto_vacuum")? != 2 {
+            return Ok(());
+        }
+        let free = pragma("freelist_count")?;
+        let page_size = pragma("page_size")?;
+        let surplus = free.saturating_sub(KEPT_FREE_BYTES / page_size);
+        if let Some(pages) = u32::try_from(surplus).ok().and_then(NonZeroU32::new) {
+            self.incremental_vacuum(IncrementalVacuum::Pages(pages))?;
+        }
         Ok(())
     }
 }

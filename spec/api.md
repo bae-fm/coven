@@ -364,8 +364,11 @@ pub enum Audience {
   from finishing within the busy timeout, the frames in the WAL, and the
   frames copied into the database. After a `Restart` that wasn't busy, the
   next write starts the WAL file over from its start, so the file stops
-  growing. A store created with `AutoVacuum::Incremental` gives back free
-  pages only through `incremental_vacuum`.
+  growing. A store created with `AutoVacuum::Incremental`, which is the mode
+  where the app sets none, gives back the free pages past 4 MiB each time a
+  claim of writes lands; `Off` and `Full` keep their SQLite meaning and coven
+  runs no vacuum on them. `incremental_vacuum` stays the app's call for the
+  rest.
 - `release_memory()` frees the cached pages no statement is using, as SQLite's
   `sqlite3_db_release_memory` does ([§4](coven.md#4-writing-locally)). A host calls it when the OS
   warns of low memory and when the app goes to the background: on Android from `onTrimMemory`, whose
@@ -394,7 +397,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `fullfsync` | app | on macOS and iOS, a commit also flushes the drive's own cache; unset keeps SQLite's default, off, so a power loss can take the latest commits |
 | `checkpoint_fullfsync` | app | on macOS and iOS, a checkpoint also flushes the drive's own cache; unset is on there, so a power loss can't damage the database file once the WAL starts over |
 | `page_size` | app, at creation | fixed once the file has its first page, and WAL mode never changes it |
-| `auto_vacuum` | app, at creation | turning it on or off later needs a `VACUUM`, which coven never runs |
+| `auto_vacuum` | app, at creation | unset is `Incremental`, and coven gives back free pages past 4 MiB after each landed claim of writes; turning the mode on or off later needs a `VACUUM`, which coven never runs |
 | `journal_mode` | coven: WAL | readers keep their snapshots while a write commits (§4) |
 | `synchronous` | coven: FULL | a committed write survives a power loss (§4) |
 | `locking_mode` | coven: NORMAL | an exclusive lock would shut out the readers and other processes |
@@ -2730,7 +2733,8 @@ pub struct SqliteSettings {
     pub analysis_limit: Option<AnalysisLimit>,
     /// Applies only when the database is created.
     pub page_size: Option<PageSize>,
-    /// Applies only when the database is created.
+    /// Applies only when the database is created. Unset is `Incremental`, and
+    /// coven gives back free pages past 4 MiB each time a claim lands.
     pub auto_vacuum: Option<AutoVacuum>,
 }
 

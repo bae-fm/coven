@@ -96,6 +96,31 @@ async fn landed(db: &Database, through: WriteId) {
 }
 
 #[tokio::test]
+async fn a_landed_claim_gives_back_free_pages_past_four_mebibytes() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(
+        &db,
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 48)
+         INSERT INTO notes SELECT i, 'title', zeroblob(262144) FROM n",
+    )
+    .await
+    .unwrap();
+    let first = records(&db)[0].header.position;
+    landed(&db, first).await;
+    db.finish_claim(None).await.unwrap();
+    let (vacuum, free_bytes): (i64, i64) = db.inspect_writer(|db| {
+        let pragma = |name: &str| -> i64 {
+            db.query_row(&format!("PRAGMA main.{name}"), [], |r| r.get(0)).unwrap()
+        };
+        (pragma("auto_vacuum"), pragma("freelist_count") * pragma("page_size"))
+    });
+    assert_eq!(vacuum, 2);
+    assert!(free_bytes <= 4 << 20, "{free_bytes} bytes of free pages remain");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn only_confirmed_claims_remove_their_batch_atomically() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
