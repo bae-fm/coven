@@ -615,12 +615,12 @@ impl FileDatabase {
                             [name.as_str()],
                             |r| r.get::<_, bool>(0),
                         )? {
-                            return Err(DbError::FileNameReused { name: name.clone() });
+                            return Err(DbError::FileNameReused { name: name.as_str().to_owned() });
                         }
                         crate::file_removals::record_cached(db, name.as_str())?;
                         Ok(())
                     })?;
-                    inner.staging.reserve([name.clone()]);
+                    inner.staging.reserve([crate::file_removals::OwnedFile::Cached(name.clone())]);
                     Ok::<_, DbError>(())
                 })?;
                 Ok(CacheReservation {
@@ -710,7 +710,7 @@ impl Drop for CacheReservation {
         let Some(_writing) = self.writing.take() else {
             return;
         };
-        self.reserved.release([&self.name]);
+        self.reserved.release([crate::file_removals::OwnedFile::Cached(self.name.clone())]);
     }
 }
 /// One upload's completion (§17.9): a local write that switches the files

@@ -49,11 +49,21 @@ pub(crate) async fn stage(db: &Database, bytes: Vec<u8>, insert: bool) -> Result
     .await
 }
 
+/// Every staged copy in the store's `files` folder, and every staging's
+/// folder that holds none, which nothing should leave behind.
 pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
-    std::fs::read_dir(store.database_path().parent().unwrap().join("files"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect()
+    let mut owned = Vec::new();
+    for folder in std::fs::read_dir(store.database_path().parent().unwrap().join("files")).unwrap()
+    {
+        let folder = folder.unwrap().path();
+        let copies: Vec<_> =
+            std::fs::read_dir(&folder).unwrap().map(|copy| copy.unwrap().path()).collect();
+        if copies.is_empty() {
+            owned.push(folder);
+        }
+        owned.extend(copies);
+    }
+    owned
 }
 
 /// Complete every queued upload as confirmed storage would: its files switch
@@ -108,8 +118,12 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
         ) -> Poll<std::io::Result<()>> {
             assert!(out.remaining() <= BUDGET, "the stream buffer exceeded its budget");
             let read = self.read.load(Ordering::SeqCst);
-            let paths =
-                std::fs::read_dir(&self.directory).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            let entries = |folder: &std::path::Path| {
+                std::fs::read_dir(folder).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+            };
+            let folders = entries(&self.directory);
+            assert_eq!(folders.len(), 1);
+            let paths = entries(&folders[0].path());
             assert_eq!(paths.len(), 1);
             // A directory entry's cached size lags an open file on Windows;
             // the path's own metadata reads the file.

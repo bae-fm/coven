@@ -206,7 +206,7 @@ pub(super) fn put<L>(
             if db.query_row(&format!("SELECT {CACHE_NAME_USED_SQL}"), [name.as_str()], |r| {
                 r.get::<_, bool>(0)
             })? {
-                return Err(DbError::FileNameReused { name: name.clone() });
+                return Err(DbError::FileNameReused { name: name.as_str().to_owned() });
             }
             // Stored entries never overlap: a range already covered in part
             // is not written at all.

@@ -1,10 +1,13 @@
 //! The paths and filesystem capabilities inside one store directory.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+#[cfg(unix)]
+use crate::files::flush_batch::BatchFolder;
 use crate::files::protection::Protection;
 use crate::files::{
-    lock, settings, AtomicFile, CacheWriteLock, FileError, FileWriter, SettingsError,
+    lock, settings, AtomicFile, CacheWriteLock, FileError, FileWriter, FlushBatch, SettingsError,
     StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings, WriterFolder,
 };
 use crate::id_source::StoreId;
@@ -64,7 +67,8 @@ impl StoreFile {
 /// The two places coven keeps file bytes inside a store (E1).
 #[derive(Clone, Copy, Debug)]
 pub enum FileArea {
-    /// Coven's own copies of app-provided files (§17.1).
+    /// Coven's own copies of app-provided files, each staging's in a folder
+    /// of its own, and captured snapshots at the top (§17.1, Appendix C.3).
     AppProvided,
     /// The cache of uploaded files and chunks (§17.8).
     Cache,
@@ -125,6 +129,58 @@ impl FileName {
         }
         Ok(Self(name))
     }
+}
+
+/// Where a staged copy lies among the store's app-provided files: in the
+/// folder its staging made, under its own name, recorded as
+/// `<folder>/<copy>` (Appendix C.3).
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StagedName(String);
+
+impl StagedName {
+    /// The copy `name` in the staging's folder `folder`.
+    pub fn new(folder: &FileName, name: &FileName) -> Self {
+        Self(format!("{}/{}", folder.0, name.0))
+    }
+
+    /// A recorded name read back, when it is two portable names joined by
+    /// `/`.
+    pub fn parse(recorded: &str) -> Option<Self> {
+        let (folder, name) = recorded.split_once('/')?;
+        Some(Self::new(&FileName::new(folder).ok()?, &FileName::new(name).ok()?))
+    }
+
+    /// The name as records hold it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The staging's folder.
+    pub fn folder(&self) -> FileName {
+        FileName(self.parts().0.to_owned())
+    }
+
+    /// The copy's own name in its staging's folder.
+    pub fn copy(&self) -> FileName {
+        FileName(self.parts().1.to_owned())
+    }
+
+    /// The staging's folder and the copy's name in it.
+    fn parts(&self) -> (&str, &str) {
+        self.0.split_once('/').expect("a staged name holds its folder")
+    }
+}
+
+/// Why a staging's folder could not be made.
+#[derive(Debug, thiserror::Error)]
+pub enum StagingFolderError {
+    /// A folder of that name is already there: the id source gave out the
+    /// name before.
+    #[error("staging folder {} is already there", .0.as_str())]
+    Taken(FileName),
+    /// The store could not be held, or the folder made.
+    #[error(transparent)]
+    Writer(#[from] WriterError),
 }
 
 /// One store's directory, owning the paths to its database, app-provided files,
@@ -331,6 +387,22 @@ pub trait StoreDirAccess: Sized {
     /// lock is taken and the folder resolved once, for every writer
     /// [`WriterFolder::create`] makes, each as `create_writer`'s does.
     fn writer_folder(&self, area: FileArea) -> Result<WriterFolder, WriterError>;
+    /// The capability for one staged copy, in its staging's folder.
+    fn staged_file(&self, name: &StagedName) -> AtomicFile;
+    /// Make `folder` among the app-provided files for one staging's copies,
+    /// refusing one already there, and hold it as `writer_folder` holds an
+    /// area's folder. The app-provided files' folder now holds the new
+    /// folder, so `batch`'s flush syncs it too (Appendix C.3). The caller
+    /// records the copies' names first, which name the folder.
+    fn staging_folder(
+        &self,
+        folder: &FileName,
+        batch: &mut FlushBatch,
+    ) -> Result<WriterFolder, StagingFolderError>;
+    /// Remove a staged copy, then its staging's folder once nothing is in
+    /// it, syncing the folder that held each (Appendix C.3). An absent copy
+    /// or folder is gone.
+    fn remove_staged(&self, name: &StagedName) -> Result<(), FileError>;
     /// Reopen a named file of `area` that an earlier writer left unfinished,
     /// for appending after its first `length` bytes, which the caller
     /// recorded as synced; anything past them is cut off. A file with fewer
@@ -448,7 +520,7 @@ impl StoreDirAccess for StoreDir {
     }
     fn writer_folder(&self, area: FileArea) -> Result<WriterFolder, WriterError> {
         let lock = self.lock_read_only()?;
-        Ok(WriterFolder::open(&self.path.join(area.name()), lock, self.bugs.clone())?)
+        Ok(WriterFolder::open(&self.path.join(area.name()), Arc::new(lock), self.bugs.clone())?)
     }
     fn resume_writer(
         &self,
@@ -458,6 +530,47 @@ impl StoreDirAccess for StoreDir {
     ) -> Result<FileWriter, WriterError> {
         let lock = self.lock_read_only()?;
         Ok(FileWriter::resume(&self.file(area, name), lock, self.bugs.clone(), length)?)
+    }
+    fn staged_file(&self, name: &StagedName) -> AtomicFile {
+        let (folder, copy) = name.parts();
+        AtomicFile::new(self.path.join(FileArea::AppProvided.name()).join(folder).join(copy))
+    }
+    fn staging_folder(
+        &self,
+        folder: &FileName,
+        batch: &mut FlushBatch,
+    ) -> Result<WriterFolder, StagingFolderError> {
+        let lock = Arc::new(self.lock_read_only().map_err(WriterError::from)?);
+        let files = self.path.join(FileArea::AppProvided.name());
+        let path = files.join(&folder.0);
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(StagingFolderError::Taken(folder.clone()));
+            }
+            Err(source) => {
+                let error = FileError::at("create staging folder", &path, source);
+                return Err(WriterError::from(error).into());
+            }
+        }
+        #[cfg(unix)]
+        batch.add_folder(
+            BatchFolder::open(files.clone(), Some(lock.clone())).map_err(|source| {
+                WriterError::from(FileError::at("open folder", &files, source))
+            })?,
+        );
+        // Windows syncs no folder: it writes a folder's entries through.
+        #[cfg(windows)]
+        let _ = batch;
+        Ok(WriterFolder::open(&path, lock, self.bugs.clone()).map_err(WriterError::from)?)
+    }
+    fn remove_staged(&self, name: &StagedName) -> Result<(), FileError> {
+        let copy = self.staged_file(name);
+        copy.remove()?;
+        let (folder, _) = name.parts();
+        super::atomic_file::remove_empty_folder(
+            &self.path.join(FileArea::AppProvided.name()).join(folder),
+        )
     }
 }
 

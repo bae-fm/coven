@@ -1697,6 +1697,8 @@ tables = [
 "StoreDir::owned_file" = "AtomicFile"
 "StoreDir::file" = "AtomicFile"
 "StoreDir::writer_folder" = "WriterFolder"
+"StoreDir::staged_file" = "AtomicFile"
+"StoreDir::staging_folder" = "WriterFolder"
 
 [[background_starts]]
 kind = "runtime construction"

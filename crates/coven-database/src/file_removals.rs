@@ -5,6 +5,8 @@
 //! so a stalled disk holds back no app write; then its record goes, under the
 //! writer (§21.2, Appendix C.3). A crash between them leaves the record, and the next
 //! open removes the bytes the same way, from that list rather than a scan.
+//! A staged copy's staging folder goes with its last copy, also before the
+//! record, so the next removal finds an empty one again.
 //! A cache range being written is recorded in `_coven_cache_writes` instead,
 //! which no removal here reads until opening finds it abandoned.
 //!
@@ -19,7 +21,7 @@ use std::collections::BTreeSet;
 
 use crate::internal_schema::FILE_NAMED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError};
-use coven_foundation::files::{FileArea, FileName, MadeFolder, RecordedCopy, StoreDir};
+use coven_foundation::files::{FileArea, FileName, MadeFolder, RecordedCopy, StagedName, StoreDir};
 
 /// The removals to perform, or the failure choosing them.
 pub(crate) type Chosen = Result<Vec<Released>, DbError>;
@@ -31,7 +33,7 @@ pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 /// is refused, so uncommitted records never name bytes to remove.
 pub(crate) fn choose(
     writer: &DatabaseConnection,
-    active: &BTreeSet<FileName>,
+    active: &BTreeSet<OwnedFile>,
     copying: &BTreeSet<String>,
 ) -> Chosen {
     writer.read_transaction(|| {
@@ -134,21 +136,50 @@ pub(crate) fn choose_cache(paths: &[String]) -> Chosen {
     paths
         .iter()
         .map(|path| {
-            Ok(Released::Owned {
-                name: FileName::new(path.clone()).map_err(|_| DbError::DamagedDatabase)?,
-                area: "cache".into(),
-            })
+            Ok(Released::Owned(OwnedFile::Cached(
+                FileName::new(path.clone()).map_err(|_| DbError::DamagedDatabase)?,
+            )))
         })
         .collect()
+}
+
+/// A file coven keeps in the store's directory: what a removal record
+/// names, and what a reservation holds back from removals.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OwnedFile {
+    /// A staged copy of app bytes, in its staging's folder in `files`.
+    Staged(StagedName),
+    /// A cache file, or a range or pin being written, in `cache`.
+    Cached(FileName),
+}
+
+impl OwnedFile {
+    /// The file a removal record names by `area` and `path`; anything else
+    /// is damage.
+    fn recorded(area: &str, path: &str) -> Result<Self, DbError> {
+        match area {
+            "files" => StagedName::parse(path).map(Self::Staged),
+            "cache" => FileName::new(path).ok().map(Self::Cached),
+            _ => None,
+        }
+        .ok_or(DbError::DamagedDatabase)
+    }
+
+    /// The area and path its removal record holds.
+    fn record(&self) -> (&'static str, &str) {
+        match self {
+            Self::Staged(name) => ("files", name.as_str()),
+            Self::Cached(name) => ("cache", name.as_str()),
+        }
+    }
 }
 
 /// A committed removal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Released {
-    /// Bytes in the store's directory: a file name and the area holding it.
-    /// No row names it: the schema refuses to record a named path, or to
-    /// name a recorded one.
-    Owned { name: FileName, area: String },
+    /// Bytes in the store's directory. No row names them: the schema
+    /// refuses to record a named path, or to name a recorded one.
+    Owned(OwnedFile),
     /// A copy coven wrote at `path` in a folder the person picked, in the
     /// state its record was chosen in.
     Copy { path: String, state: String, bytes: CopyBytes },
@@ -169,20 +200,16 @@ pub(crate) enum CopyBytes {
 /// cache assembly still holds; the caller holds the writer and the set
 /// `active` came from, so a reservation still holds its name or its
 /// publication has committed and removed the record.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
-fn pending(db: &DatabaseConnection, active: &BTreeSet<FileName>) -> Chosen {
+fn pending(db: &DatabaseConnection, active: &BTreeSet<OwnedFile>) -> Chosen {
     let rows =
         db.query("SELECT path,area FROM _coven_file_removals ORDER BY area,path", [], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
     let mut released = Vec::new();
-    for (name, area) in rows {
-        let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
-        if !active.contains(&name) {
-            released.push(Released::Owned { name, area });
+    for (path, area) in rows {
+        let file = OwnedFile::recorded(&area, &path)?;
+        if !active.contains(&file) {
+            released.push(Released::Owned(file));
         }
     }
     Ok(released)
@@ -199,16 +226,9 @@ pub(crate) fn remove_bytes(
     let mut failures = Vec::new();
     for file in released {
         let result = match &file {
-            Released::Owned { name, area } => {
-                let area = match area.as_str() {
-                    "files" => FileArea::AppProvided,
-                    "cache" => FileArea::Cache,
-                    _ => {
-                        failures.push(DbError::DamagedDatabase);
-                        continue;
-                    }
-                };
-                directory.file(area, name).remove()
+            Released::Owned(OwnedFile::Staged(name)) => directory.remove_staged(name),
+            Released::Owned(OwnedFile::Cached(name)) => {
+                directory.file(FileArea::Cache, name).remove()
             }
             Released::Copy { bytes: CopyBytes::Temporary(temporary), .. } => {
                 RecordedCopy::writing(temporary.clone()).remove()
@@ -274,7 +294,10 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
         #[cfg(any(test, feature = "test-utils"))]
         db.checkpoint(crate::test_utils::WriteCheckpoint::FileRemoved);
         match file {
-            Released::Owned { name, area } => keep(db, area, name.as_str())?,
+            Released::Owned(file) => {
+                let (area, path) = file.record();
+                keep(db, area, path)?;
+            }
             Released::Copy { path, state, .. } => {
                 crate::database::file_database::copies::forget(db, path, state)?;
             }

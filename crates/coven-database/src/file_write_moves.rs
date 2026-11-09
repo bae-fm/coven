@@ -10,7 +10,7 @@ use crate::{
     file_table::Record,
     DbError, MoveId, Provenance,
 };
-use coven_foundation::{files::FileName, id_source::FileId};
+use coven_foundation::{files::StagedName, id_source::FileId};
 use std::collections::BTreeSet;
 
 /// A file of this device, on it only, to move to the cloud (§17.3, E3).
@@ -208,14 +208,10 @@ fn same_bytes(a: &MoveUpload, b: &MoveUpload) -> bool {
 }
 
 /// Coven's copy of an app file, with the hashes its first read recorded.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 fn copy(
     db: &crate::sqlite::DatabaseConnection,
     file: FileId,
-) -> Result<Option<(FileName, FileHashes)>, DbError> {
+) -> Result<Option<(StagedName, FileHashes)>, DbError> {
     let Some((path, content)) = db
         .query("SELECT path,hash FROM _coven_device_files WHERE file=?1", [file], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
@@ -230,7 +226,7 @@ fn copy(
         |r| r.get::<_, Vec<u8>>(0),
     )?;
     Ok(Some((
-        FileName::new(path).map_err(|_| DbError::DamagedDatabase)?,
+        StagedName::parse(&path).ok_or(DbError::DamagedDatabase)?,
         FileHashes::stored(content, chunks)?,
     )))
 }

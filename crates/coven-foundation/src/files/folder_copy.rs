@@ -13,7 +13,7 @@
 
 #[cfg(windows)]
 use super::atomic_file::{create_new, rename_new};
-use super::atomic_file::{parent, remove, sync_file};
+use super::atomic_file::{remove, sync_file};
 #[cfg(unix)]
 use super::flush_batch::BatchFolder;
 use super::observed_file::observe_metadata;
@@ -554,39 +554,8 @@ impl MadeFolder {
     /// Remove the folder if nothing is in it: a folder holding anything,
     /// the person's files included, stays. An absent one is gone.
     pub fn remove(&self) -> Result<(), FileError> {
-        let path = self.path.as_path();
-        match fs::remove_dir(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                tracing::debug!(path = %path.display(), "folder is already absent");
-                return Ok(());
-            }
-            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
-                tracing::debug!(path = %path.display(), "leaving a folder that holds files");
-                return Ok(());
-            }
-            Err(source) => return Err(FileError::at("remove folder", path, source)),
-        }
-        match sync_parent(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => {
-                Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
-            }
-        }
+        super::atomic_file::remove_empty_folder(&self.path)
     }
-}
-
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
-    super::atomic_file::sync_directory(parent(path))
-}
-
-// Windows writes a folder's entries through with the file handle's flag.
-#[cfg(windows)]
-fn sync_parent(path: &Path) -> io::Result<()> {
-    let _ = parent(path);
-    Ok(())
 }
 
 /// Run `run`, file work named `operation`, on the blocking pool; a panic in

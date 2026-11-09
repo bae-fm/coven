@@ -5,7 +5,7 @@
 //! the cache, so its request downloads from storage.
 
 use crate::{sqlite::DatabaseConnection, DbError};
-use coven_foundation::{files::FileName, id_source::FileId};
+use coven_foundation::{files::StagedName, id_source::FileId};
 use rusqlite::params;
 
 /// One file this device keeps whole as a switch asked.
@@ -18,7 +18,7 @@ pub struct PinRequest {
     pub file: FileId,
     /// Coven's copy of an app file's bytes, while the cache copy is still to
     /// be made from it; `None` for a file the pin downloads from storage.
-    pub copy: Option<FileName>,
+    pub copy: Option<StagedName>,
     /// The persisted wait after a failed attempt, if one is armed (§6.7).
     pub retry: Option<crate::RetryWait>,
 }
@@ -85,10 +85,6 @@ pub(crate) fn drop_copy(db: &DatabaseConnection, id: i64) -> Result<(), DbError>
 }
 
 /// Every request, with its persisted wait.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<PinRequest>, DbError> {
     db.query("SELECT id,file,copy FROM _coven_pin_requests ORDER BY file", [], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, FileId>(1)?, r.get::<_, Option<String>>(2)?))
@@ -99,7 +95,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<PinRequest>, DbError> 
             id,
             file,
             copy: copy
-                .map(|copy| FileName::new(copy).map_err(|_| DbError::DamagedDatabase))
+                .map(|copy| StagedName::parse(&copy).ok_or(DbError::DamagedDatabase))
                 .transpose()?,
             retry: crate::retry::find(db, crate::RetrySubject::Pin(id))?,
         })

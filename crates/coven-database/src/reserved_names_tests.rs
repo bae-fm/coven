@@ -1,7 +1,7 @@
 use super::*;
 
-fn name(text: &str) -> FileName {
-    FileName::new(text).unwrap()
+fn name(text: &str) -> OwnedFile {
+    OwnedFile::Cached(coven_foundation::files::FileName::new(text).unwrap())
 }
 
 /// Releasing a name no holder reserves fails the store's handle with the

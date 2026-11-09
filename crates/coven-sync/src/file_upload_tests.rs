@@ -36,8 +36,12 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 }
             };
             let owned = f.directory.area_path(coven_foundation::files::FileArea::AppProvided);
-            let paths =
-                std::fs::read_dir(&owned).unwrap().map(|p| p.unwrap().path()).collect::<Vec<_>>();
+            // Each staging's folder, with the copies in it.
+            let paths = std::fs::read_dir(&owned)
+                .unwrap()
+                .flat_map(|folder| std::fs::read_dir(folder.unwrap().path()).unwrap())
+                .map(|p| p.unwrap().path())
+                .collect::<Vec<_>>();
             let path = match provenance {
                 Provenance::UserProvided => {
                     assert!(paths.is_empty());

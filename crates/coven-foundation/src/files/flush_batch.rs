@@ -114,6 +114,13 @@ impl FlushBatch {
     #[cfg(unix)]
     pub(super) fn add(&mut self, folder: BatchFolder) {
         self.files += 1;
+        self.add_folder(folder);
+    }
+
+    /// Sync `folder` with the batch: a folder whose entries the batch
+    /// changed, such as the one a staging's folder was made in.
+    #[cfg(unix)]
+    pub(super) fn add_folder(&mut self, folder: BatchFolder) {
         if !self.folders.iter().any(|known| known.is(&folder)) {
             self.folders.push(folder);
         }

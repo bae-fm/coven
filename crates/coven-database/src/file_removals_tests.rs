@@ -6,6 +6,13 @@ use crate::{
 };
 use coven_foundation::clock::HANG_GUARD;
 
+/// The name a staged copy at `path` is recorded by: its staging's folder
+/// and its own name.
+fn staged_name(path: &std::path::Path) -> String {
+    let name = |path: &std::path::Path| path.file_name().unwrap().to_str().unwrap().to_owned();
+    format!("{}/{}", name(path.parent().unwrap()), name(path))
+}
+
 /// A committed write returns its own result while a removal fails: the
 /// removal stays recorded, and an app that retries on `Err` would apply its
 /// change twice (§2.1, Appendix C.3). Opening reports the failure.
@@ -270,7 +277,7 @@ async fn a_reused_id_cannot_claim_or_delete_a_kept_file() {
     let db = reopen().open().await.unwrap();
     assert!(matches!(
         stage(&db, b"replacement".to_vec(), false).await,
-        Err(DbError::FileNameReused { name }) if name.as_str() == original.file_name().unwrap().to_str().unwrap()
+        Err(DbError::FileNameReused { name }) if name == staged_name(&original)
     ));
     assert_eq!(std::fs::read(original).unwrap(), b"original");
     assert_eq!(file_size(&db), 8);
@@ -415,7 +422,7 @@ async fn a_referenced_path_cannot_be_recorded_for_removal() {
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"original".to_vec(), true).await.unwrap();
     let path = owned_paths(&store).remove(0);
-    let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+    let name = staged_name(&path);
     let recorded = db.inspect_writer(|sql| {
         sql.transaction(|db| {
             db.internal_execute("INSERT INTO _coven_file_removals(path) VALUES(?1)", [&name])

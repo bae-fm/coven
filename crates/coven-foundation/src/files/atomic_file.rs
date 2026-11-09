@@ -303,12 +303,12 @@ impl WriterFolder {
     /// `bugs` (E15).
     pub(super) fn open(
         path: &Path,
-        lock: StoreReadLock,
+        lock: Arc<StoreReadLock>,
         bugs: crate::task::BugSinkRef,
     ) -> Result<Self, FileError> {
         let path = fs::canonicalize(path)
             .map_err(|source| FileError::at("resolve parent directory", path, source))?;
-        Ok(Self { path, lock: Arc::new(lock), bugs })
+        Ok(Self { path, lock, bugs })
     }
 
     /// Create `name` here for asynchronous streaming without replacing
@@ -553,6 +553,34 @@ pub(crate) fn remove(path: &Path) -> Result<(), FileError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             tracing::debug!(path = %path.display(), "file's parent is absent");
         }
+        Err(source) => {
+            return Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
+        }
+    }
+    Ok(())
+}
+
+/// Remove the folder at `path` if nothing is in it, then sync the folder
+/// that held it: a folder holding anything stays. An absent one is gone,
+/// and its parent is synced still, as for a retry after an earlier sync
+/// failed.
+pub(crate) fn remove_empty_folder(path: &Path) -> Result<(), FileError> {
+    match fs::remove_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "folder is already absent");
+        }
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+            tracing::debug!(path = %path.display(), "leaving a folder that holds files");
+            return Ok(());
+        }
+        Err(source) => return Err(FileError::at("remove folder", path, source)),
+    }
+    // Windows writes a folder's entries through with the file handle's flag.
+    #[cfg(unix)]
+    match sync_directory(parent(path)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => {
             return Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
         }

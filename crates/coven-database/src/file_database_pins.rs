@@ -3,7 +3,7 @@
 
 use super::{file_ref, FileDatabase};
 use crate::{DbError, FileRef};
-use coven_foundation::files::FileName;
+use coven_foundation::files::StagedName;
 
 impl FileDatabase {
     /// The files a switch to the cloud asked this device to keep whole, each
@@ -92,7 +92,7 @@ impl FileDatabase {
     )]
     pub async fn copy_chunk_hash(
         &self,
-        copy: &FileName,
+        copy: &StagedName,
         index: u64,
     ) -> Result<coven_crypto::ContentHash, DbError> {
         let copy = copy.as_str().to_owned();
@@ -116,7 +116,7 @@ impl FileDatabase {
     pub async fn open_pin_copy(
         &self,
         file: &FileRef,
-        copy: &FileName,
+        copy: &StagedName,
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
         let (id, size, copy) = (file.id().to_string(), file.size(), copy.clone());
         self.database

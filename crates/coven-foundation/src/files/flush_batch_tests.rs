@@ -44,6 +44,31 @@ async fn a_batch_keeps_each_folder_once_and_the_store_until_it_is_flushed() {
     assert!(store.lock_for_deletion().unwrap().is_some());
 }
 
+/// A staging's folder is new in the app-provided files' folder, so its
+/// batch syncs that folder too, with the staging's folder its copies are
+/// in (Appendix C.3). A folder already there is refused.
+#[tokio::test]
+async fn a_staging_folder_is_flushed_with_the_folder_holding_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let folder = FileName::new("staging").unwrap();
+    let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
+    let held = store.staging_folder(&folder, &mut batch).unwrap();
+    for name in ["one", "two"] {
+        held.write_whole(&FileName::new(name).unwrap(), b"bytes", &mut batch).unwrap();
+    }
+    assert_eq!(batch.files, 2);
+    #[cfg(unix)]
+    assert_eq!(batch.folders.len(), 2, "the staging's folder and the one holding it");
+    assert!(matches!(
+        store.staging_folder(&folder, &mut batch),
+        Err(crate::files::StagingFolderError::Taken(taken)) if taken == folder
+    ));
+    let _flushed = batch.flush().await.unwrap();
+    let copy = crate::files::StagedName::new(&folder, &FileName::new("one").unwrap());
+    assert_eq!(store.staged_file(&copy).read_optional().unwrap().unwrap(), b"bytes");
+}
+
 /// The files of one held folder share its single read lock: with the folder
 /// let go, the store stays held until the batch they finished into flushes.
 #[cfg(unix)]
@@ -129,7 +154,8 @@ mod staged_batch_cost {
     enum Layout {
         /// Every copy at the top of `files/`.
         Flat,
-        /// A new folder in `files/` for each batch's copies.
+        /// Each batch's copies in a folder of its own, made as a staging
+        /// makes it.
         FolderPerBatch,
         /// 256 folders in `files/`, a copy in the one its name's first two hex
         /// digits name.
@@ -194,14 +220,11 @@ mod staged_batch_cost {
     /// through the batch's own steps, timing each.
     fn sample(
         store: &crate::files::StoreDir,
-        area: &std::path::Path,
         layout: Layout,
         folders: &std::collections::BTreeMap<String, crate::files::WriterFolder>,
         bytes: &[u8],
     ) -> Sample {
-        use crate::files::WriterFolder;
-        let bugs = crate::task::HeardBugs::shared();
-        let mut batch = FlushBatch::new(bugs.clone());
+        let mut batch = FlushBatch::new(crate::task::HeardBugs::shared());
         let name = || FileName::new(uuid::Uuid::new_v4().to_string()).unwrap();
         let started = std::time::Instant::now();
         match layout {
@@ -211,16 +234,10 @@ mod staged_batch_cost {
                 }
             }
             Layout::FolderPerBatch => {
-                let path = area.join(uuid::Uuid::new_v4().to_string());
-                std::fs::create_dir(&path).unwrap();
-                let folder =
-                    WriterFolder::open(&path, store.lock_read_only().unwrap(), bugs).unwrap();
+                let folder = store.staging_folder(&name(), &mut batch).unwrap();
                 for _ in 0..COPIES {
                     folder.write_whole(&name(), bytes, &mut batch).unwrap();
                 }
-                // The batch's folder is a new entry in `files/`, which its
-                // flush syncs with the folder.
-                batch.folders.push(BatchFolder::open(area.to_owned(), None).unwrap());
             }
             Layout::Fanout => {
                 for _ in 0..COPIES {
@@ -268,7 +285,7 @@ mod staged_batch_cost {
                     std::fs::create_dir(area.join(&name)).unwrap();
                     let folder = crate::files::WriterFolder::open(
                         &area.join(&name),
-                        store.lock_read_only().unwrap(),
+                        std::sync::Arc::new(store.lock_read_only().unwrap()),
                         crate::task::HeardBugs::shared(),
                     )
                     .unwrap();
@@ -289,8 +306,7 @@ mod staged_batch_cost {
 
     impl Measured {
         fn sample(&self, bytes: &[u8]) -> Sample {
-            let area = self.store.area_path(FileArea::AppProvided);
-            sample(&self.store, &area, self.layout, &self.folders, bytes)
+            sample(&self.store, self.layout, &self.folders, bytes)
         }
 
         /// Print each step's median, and the batch's middle half.
@@ -321,7 +337,8 @@ mod staged_batch_cost {
     /// files' folder fills, and at 240,000 files in two other layouts: a folder
     /// per batch, and 256 folders chosen by the name's first two hex digits
     /// (the names are random, as hashing a name makes them). Each batch makes
-    /// its copies through the real writer, as staging does, and flushes them
+    /// its copies through the real writer, as staging does, a folder per
+    /// batch through the real staging folder, and flushes them
     /// through the batch's own steps, timing apart making, writing and syncing
     /// each copy, syncing the folders, and flushing the drive's cache. The
     /// stores take turns, a batch each, so a machine busy with other work

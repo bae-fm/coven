@@ -4,6 +4,7 @@ use crate::{
     *,
 };
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::id_source::FileId;
 use std::{
     pin::Pin,
     sync::{
@@ -114,6 +115,85 @@ async fn write_two(db: &Database, ran: Arc<AtomicBool>) -> Result<(), DbError> {
         },
     )
     .await
+}
+
+/// Stage `contents` on this device only, each referenced by a row of
+/// `files` whose id is the content, in one write, returning the files.
+async fn stage_rows(db: &Database, contents: [&'static str; 2]) -> [FileId; 2] {
+    db.staged_write::<_, _, _, _, DbError>(
+        move |batch| {
+            Ok(contents
+                .map(|bytes| batch.put_file("files", bytes.as_bytes().to_vec(), Place::DeviceOnly)))
+        },
+        move |sql, files| {
+            for (id, file) in contents.iter().zip(files) {
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+            }
+            Ok(files)
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// The folders in the store's `files` folder, each with the names of the
+/// files in it.
+fn staging_folders(store: &TestStore) -> Vec<Vec<String>> {
+    let files = store.database_path().parent().unwrap().join("files");
+    let mut folders: Vec<Vec<String>> = std::fs::read_dir(files)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_dir(), "{:?} is a folder", entry.path());
+            let mut names: Vec<String> = std::fs::read_dir(entry.path())
+                .unwrap()
+                .map(|copy| copy.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        })
+        .collect();
+    folders.sort();
+    folders
+}
+
+/// Each write's staging writes its copies into a folder of its own in the
+/// store's `files` folder, and each copy reads back by its record
+/// (Appendix C.3).
+#[tokio::test]
+async fn each_stagings_copies_land_in_a_folder_of_its_own() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let first = stage_rows(&db, ["one", "two"]).await;
+    let second = stage_rows(&db, ["three", "four"]).await;
+    let folders = staging_folders(&store);
+    assert_eq!(folders.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2], "{folders:?}");
+    for (file, bytes) in first.into_iter().chain(second).zip(["one", "two", "three", "four"]) {
+        let reference = db.file_ref(file).await.unwrap();
+        let stream = db.open_local_file(&reference).await.unwrap().expect("its bytes are here");
+        assert_eq!(stream.read_at(0, reference.size()).await.unwrap(), bytes.as_bytes());
+    }
+    db.close().await.unwrap();
+}
+
+/// A staging's folder stays while it holds a copy, and goes with its last
+/// copy (Appendix C.3).
+#[tokio::test]
+async fn a_stagings_folder_goes_with_its_last_copy() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage_rows(&db, ["one", "two"]).await;
+    assert_eq!(staging_folders(&store).iter().map(Vec::len).collect::<Vec<_>>(), [2]);
+    for (id, left) in [("one", vec![1]), ("two", vec![])] {
+        db.write(move |sql| {
+            sql.execute("DELETE FROM files WHERE id=?1", [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(staging_folders(&store).iter().map(Vec::len).collect::<Vec<_>>(), left);
+    }
+    db.close().await.unwrap();
 }
 
 /// A write's staged files reach the drive before the commit recording

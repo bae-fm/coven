@@ -13,7 +13,7 @@ use crate::{
 use coven_format::value::Value;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
-    files::FileName,
+    files::StagedName,
     id_source::{DeviceId, FileId, IdSource},
 };
 use coven_merge::Audience;
@@ -138,7 +138,7 @@ pub(crate) struct StagedFile {
 /// Where a staged file's bytes are until its upload: coven's copy of the
 /// app's bytes, or the user's original as coven records it.
 pub(crate) enum StagedSource {
-    Copy(FileName),
+    Copy(StagedName),
     Original(crate::UserFile),
 }
 
@@ -181,7 +181,7 @@ pub(crate) struct WriteFiles<'a> {
     existing: RefCell<Vec<crate::write_batch::ExistingFile>>,
     /// The reserved names `put_staged` and `pin` brought into this write, released
     /// once its transaction has decided.
-    brought: RefCell<Vec<FileName>>,
+    brought: RefCell<Vec<crate::file_removals::OwnedFile>>,
     /// The copies a prepared device-only switch brought into this write,
     /// released once its transaction has decided (§17.3).
     held_copies: RefCell<Vec<String>>,
@@ -207,7 +207,7 @@ pub(crate) struct WriteFiles<'a> {
     /// The files this write makes device-only here, each with the copy that
     /// becomes its original (§17.3).
     local: RefCell<Vec<DeviceOnlyCopy>>,
-    obsolete: RefCell<BTreeSet<FileName>>,
+    obsolete: RefCell<BTreeSet<StagedName>>,
     /// The lost values this write dismisses, which its record carries after
     /// the app's changes (§8.4).
     dismissing: RefCell<Vec<crate::LostValue>>,
@@ -274,7 +274,7 @@ impl<'a> WriteFiles<'a> {
 
     /// The reserved names this write brought in, which go free once its
     /// transaction has decided.
-    pub(crate) fn take_brought(&self) -> Vec<FileName> {
+    pub(crate) fn take_brought(&self) -> Vec<crate::file_removals::OwnedFile> {
         std::mem::take(&mut self.brought.borrow_mut())
     }
 

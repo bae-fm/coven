@@ -23,10 +23,13 @@ async fn restored_sources_upload_after_backoff() {
                 let file = f.attach("files", "photo", bytes.clone()).await;
                 let directory =
                     f.directory.area_path(coven_foundation::files::FileArea::AppProvided);
-                let paths: Vec<_> = std::fs::read_dir(directory)
-                    .unwrap()
-                    .map(|entry| entry.unwrap().path())
-                    .collect();
+                let entries = |folder: &std::path::Path| -> Vec<_> {
+                    std::fs::read_dir(folder).unwrap().map(|entry| entry.unwrap().path()).collect()
+                };
+                // The staging's own folder holds its one copy.
+                let folders = entries(&directory);
+                assert_eq!(folders.len(), 1);
+                let paths = entries(&folders[0]);
                 assert_eq!(paths.len(), 1);
                 (file, paths[0].clone())
             }

@@ -498,11 +498,13 @@ pub enum DbError {
         /// The kind the namespace was declared with.
         kind: crate::Provenance,
     },
-    /// The id source reused the physical name of a kept file.
+    /// The id source reused the physical name of a kept file: a cache
+    /// file's name, a staged copy's `<folder>/<copy>`, or a staging's folder
+    /// (Appendix C.3).
     #[error("file name {name:?} is already kept by this device")]
     FileNameReused {
-        /// The refused physical file name.
-        name: coven_foundation::files::FileName,
+        /// The refused physical name, as this device's records hold it.
+        name: String,
     },
     /// A file the write staged is referenced by none of its rows (§17.2).
     #[error("no row references staged file {file} in {namespace}")]
@@ -748,6 +750,17 @@ impl From<coven_foundation::files::WriterError> for DbError {
         match error {
             coven_foundation::files::WriterError::Lock(error) => error.into(),
             coven_foundation::files::WriterError::File(error) => error.into(),
+        }
+    }
+}
+
+impl From<coven_foundation::files::StagingFolderError> for DbError {
+    fn from(error: coven_foundation::files::StagingFolderError) -> Self {
+        match error {
+            coven_foundation::files::StagingFolderError::Taken(folder) => {
+                Self::FileNameReused { name: folder.as_str().to_owned() }
+            }
+            coven_foundation::files::StagingFolderError::Writer(error) => error.into(),
         }
     }
 }

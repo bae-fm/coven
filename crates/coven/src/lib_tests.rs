@@ -158,9 +158,9 @@ pub(crate) async fn circle(handle: &CovenHandle, name: &str) -> CircleId {
 #[test]
 fn file_name_error_fields_are_available_through_the_facade() {
     let name: FileName = FileName::new("attachment.data").unwrap();
-    let error = DbError::FileNameReused { name };
+    let error = DbError::FileNameReused { name: name.as_str().to_owned() };
     let DbError::FileNameReused { name } = error else { unreachable!() };
-    assert_eq!(name.as_str(), "attachment.data");
+    assert_eq!(name, "attachment.data");
     let invalid: FileNameError = FileName::new("../outside").unwrap_err();
     assert_eq!(invalid, FileNameError::Character);
 }

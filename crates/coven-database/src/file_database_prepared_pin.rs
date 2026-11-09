@@ -4,7 +4,7 @@
 //! nothing; the write's `pin` step does, for every file at once.
 
 use super::{CacheReservation, FileDatabase};
-use crate::{DbError, FileRef};
+use crate::{file_removals::OwnedFile, DbError, FileRef};
 use coven_foundation::files::FileName;
 use coven_foundation::locks::read_unpoisoned;
 use std::sync::Arc;
@@ -63,8 +63,8 @@ impl FileDatabase {
 
 impl PreparedPin {
     /// The names reserved for its copies.
-    pub(crate) fn names(&self) -> impl Iterator<Item = &FileName> {
-        self.copies.iter().map(|(_, name)| name)
+    pub(crate) fn names(&self) -> impl Iterator<Item = OwnedFile> + '_ {
+        self.copies.iter().map(|(_, name)| OwnedFile::Cached(name.clone()))
     }
 
     /// Its copies and kept files, for the write committing them; dropping
@@ -85,6 +85,6 @@ impl std::fmt::Debug for PreparedPin {
 
 impl Drop for PreparedPin {
     fn drop(&mut self) {
-        self.reserved.release(self.copies.iter().map(|(_, name)| name));
+        self.reserved.release(self.names());
     }
 }

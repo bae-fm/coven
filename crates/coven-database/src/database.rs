@@ -394,10 +394,7 @@ impl DatabaseInner {
     }
 
     // Their durable removal records remain for the next write or open.
-    fn release_file_reservations<'a>(
-        &self,
-        names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
-    ) {
+    fn release_file_reservations(&self, names: &[crate::file_removals::OwnedFile]) {
         self.staging.release(names);
     }
 
@@ -462,8 +459,6 @@ impl DatabaseInner {
     }
 }
 
-/// Let `names` go from the names a store reserves; their durable removal
-/// records remain for the next write or open (Appendix C.3).
 /// Let `paths` go from the copies a store keeps out of removals, once the
 /// write that brought them has decided (§17.3).
 pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {

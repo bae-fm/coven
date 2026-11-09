@@ -33,7 +33,7 @@ impl FileDatabase {
                         return Ok(None);
                     };
                     let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
-                    inner.staging.reserve([name.clone()]);
+                    inner.staging.reserve([crate::file_removals::OwnedFile::Cached(name.clone())]);
                     Ok::<_, DbError>(Some((
                         CacheReservation {
                             reserved: inner.staging.clone(),

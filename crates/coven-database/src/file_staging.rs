@@ -3,11 +3,12 @@
 
 use super::DatabaseInner;
 use crate::file_hashes::FileHasher;
+use crate::file_removals::OwnedFile;
 use crate::file_write::{StagedFile, StagedSource};
 use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed, WriterFolder};
+use coven_foundation::files::{FileName, FlushBatch, Flushed, StagedName, WriterFolder};
 use coven_foundation::locks::read_unpoisoned;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
@@ -24,7 +25,7 @@ struct StagingSource {
 struct StagingCopy {
     namespace: String,
     id: coven_foundation::id_source::FileId,
-    name: FileName,
+    name: StagedName,
     place: Place,
 }
 
@@ -57,7 +58,7 @@ pub(super) struct FileStaging {
     reserved: Arc<crate::reserved_names::ReservedNames>,
     // Close waits until publication or cancellation releases the reservation.
     lease: Option<OwnedRwLockReadGuard<()>>,
-    names: Vec<FileName>,
+    names: Vec<OwnedFile>,
     sources: VecDeque<StagingSource>,
     staged: Vec<StagedFile>,
 }
@@ -90,15 +91,22 @@ impl FileStaging {
                     writer
                         .transaction(|db| {
                             let mut sources = VecDeque::new();
+                            // The staging's own folder, which its copies'
+                            // names name (Appendix C.3).
+                            let folder = FileName::new(inner.ids.new_id().to_string())
+                                .expect("UUID is a portable filename");
                             for BatchFile { id, namespace, source, place } in files {
                                 inner
                                     .access
                                     .write_schema
                                     .namespace_of(&namespace, Provenance::AppProvided)?;
-                                let name = FileName::new(inner.ids.new_id().to_string())
+                                let copy = FileName::new(inner.ids.new_id().to_string())
                                     .expect("UUID is a portable filename");
+                                let name = StagedName::new(&folder, &copy);
                                 if !crate::file_removals::record_unnamed(db, name.as_str())? {
-                                    return Err(DbError::FileNameReused { name });
+                                    return Err(DbError::FileNameReused {
+                                        name: name.as_str().to_owned(),
+                                    });
                                 }
                                 sources.push_back(StagingSource {
                                     copy: StagingCopy { namespace, id, name, place },
@@ -111,7 +119,9 @@ impl FileStaging {
                 });
                 match prepared {
                     Ok((sources, value)) => {
-                        inner.staging.reserve(sources.iter().map(|s| s.copy.name.clone()));
+                        inner.staging.reserve(
+                            sources.iter().map(|s| OwnedFile::Staged(s.copy.name.clone())),
+                        );
                         Ok::<_, E>(Ok((sources, value)))
                     }
                     Err(error) => Ok(Err((error, super::released(writer, inner)))),
@@ -128,7 +138,7 @@ impl FileStaging {
                 reserved,
                 database,
                 lease: Some(lease),
-                names: sources.iter().map(|s| s.copy.name.clone()).collect(),
+                names: sources.iter().map(|s| OwnedFile::Staged(s.copy.name.clone())).collect(),
                 sources,
                 staged: Vec::new(),
             },
@@ -136,9 +146,10 @@ impl FileStaging {
         ))
     }
 
-    /// Write each app source to coven's copy of it, each synced with a plain
-    /// sync, then flush the batch: the folder and the drive's cache, once,
-    /// so every copy is on the drive before the commit that records it
+    /// Write each app source to coven's copy of it in the staging's own
+    /// folder, made with the first copy, each synced with a plain sync, then
+    /// flush the batch: the folders and the drive's cache, once, so every
+    /// copy is on the drive before the commit that records it
     /// (Appendix C.3). A failed flush fails the write. The bytes the app
     /// already holds are written in one blocking task per run of them; a
     /// stream's copy is created on the blocking pool and then read and
@@ -172,10 +183,11 @@ impl FileStaging {
                     bugs.clone(),
                     crate::commit_scope::bind(move || {
                         let written = (|| -> Result<_, DbError> {
-                            let held = held_folder(&self.database, held)?;
+                            let held =
+                                held_folder(&self.database, held, &run[0].0.name, &mut batch)?;
                             let mut staged = Vec::with_capacity(run.len());
                             for (copy, bytes) in run {
-                                held.write_whole(&copy.name, &bytes, &mut batch)?;
+                                held.write_whole(&copy.name.copy(), &bytes, &mut batch)?;
                                 let mut hash = FileHasher::new();
                                 hash.update(&bytes);
                                 staged.push(copy.staged(bytes.len() as u64, hash));
@@ -202,24 +214,26 @@ impl FileStaging {
             // cannot remove a name before this blocking call creates its bytes.
             let file_name = copy.name.clone();
             let held = folder.take();
+            let mut creating = batch;
             // The staging comes back with the writer, or with why it wasn't
             // made, so no error reaches the sink unread: a dropped caller's
             // staging releases its names as it drops.
-            let (next, writer) = coven_foundation::task::blocking_completing(
+            let (next, writer, returned) = coven_foundation::task::blocking_completing(
                 "create a staged copy",
                 bugs.clone(),
                 crate::commit_scope::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
-                        let held = held_folder(&self.database, held)?;
-                        let writer = held.create(&file_name)?;
+                        let held = held_folder(&self.database, held, &file_name, &mut creating)?;
+                        let writer = held.create(&file_name.copy())?;
                         Ok((held, writer))
                     })();
-                    Ok::<_, std::convert::Infallible>((self, writer))
+                    Ok::<_, std::convert::Infallible>((self, writer, creating))
                 }),
             )
             .await?
             .unwrap_or_else(|never| match never {});
             self = next;
+            batch = returned;
             let writer = match writer {
                 Ok((held, writer)) => {
                     folder = Some(held);
@@ -293,18 +307,21 @@ impl FileStaging {
     }
 }
 
-/// The folder staged copies are made in: `held` once the staging has it,
-/// else taken from the store `database` holds open.
+/// The staging's folder, which its copies are made in: `held` once the
+/// staging has it, else made for `first`, its first copy, in the store
+/// `database` holds open, for `batch` to flush with the copies.
 fn held_folder(
     database: &RwLock<Option<DatabaseInner>>,
     held: Option<WriterFolder>,
+    first: &StagedName,
+    batch: &mut FlushBatch,
 ) -> Result<WriterFolder, DbError> {
     match held {
         Some(held) => Ok(held),
         None => {
             let slot = read_unpoisoned(database);
             let inner = slot.as_ref().expect("staging holds close guard");
-            Ok(inner.access.directory.writer_folder(FileArea::AppProvided)?)
+            Ok(inner.access.directory.staging_folder(&first.folder(), batch)?)
         }
     }
 }
@@ -326,20 +343,20 @@ impl Drop for FileStaging {
 pub struct StagedFiles<T> {
     /// The names the store that staged these files reserves.
     reserved: Arc<crate::reserved_names::ReservedNames>,
-    names: Vec<FileName>,
+    names: Vec<OwnedFile>,
     files: Vec<StagedFile>,
     value: Option<T>,
 }
 
 impl<T> StagedFiles<T> {
     /// The names reserved for these files' copies.
-    pub(crate) fn names(&self) -> &[FileName] {
+    pub(crate) fn names(&self) -> &[OwnedFile] {
         &self.names
     }
 
     /// The files, their reserved names and the batch's value, for the write
     /// taking them; dropping what is left releases nothing.
-    pub(crate) fn take(mut self) -> (Vec<StagedFile>, Vec<FileName>, T) {
+    pub(crate) fn take(mut self) -> (Vec<StagedFile>, Vec<OwnedFile>, T) {
         let value = self.value.take().expect("staged files are taken once");
         (std::mem::take(&mut self.files), std::mem::take(&mut self.names), value)
     }

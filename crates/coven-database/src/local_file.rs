@@ -5,7 +5,7 @@ use coven_foundation::files::StoreDirAccess;
 use coven_foundation::task::{Bug, CarriesBug};
 use coven_foundation::{
     files::{
-        FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
+        FileError, FileReader, ObservationError, StagedName, StoreDir, StoreLockError,
         StoreReadLock, UserOriginal,
     },
     id_source::DeviceId,
@@ -224,15 +224,11 @@ pub(crate) fn device_only_source(
 /// recorded, or coven's own copy.
 pub(crate) enum LocalSource {
     Original { path: PathBuf, modified_at: std::time::SystemTime },
-    Copy(FileName),
+    Copy(StagedName),
 }
 
 /// The bytes this device keeps for `file`, while it is on this device only;
 /// `None` for any other file. Reads only the database.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 fn file_source(
     db: &DatabaseConnection,
     file: coven_foundation::id_source::FileId,
@@ -248,16 +244,12 @@ fn file_source(
     })?
     .into_iter()
     .next()
-    .map(|name| Ok(LocalSource::Copy(FileName::new(name).map_err(|_| DbError::DamagedDatabase)?)))
+    .map(|name| StagedName::parse(&name).map(LocalSource::Copy).ok_or(DbError::DamagedDatabase))
     .transpose()
 }
 
 /// The source an upload's entry fixed at staging; `None` once it is no
 /// longer queued. Reads only the database.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 pub(crate) fn queued_source(
     db: &DatabaseConnection,
     upload: i64,
@@ -282,7 +274,7 @@ pub(crate) fn queued_source(
             modified_at: crate::user_file::decode_time(&modified_at)?,
         })),
         (None, None, Some(name)) => {
-            Ok(Some(LocalSource::Copy(FileName::new(name).map_err(|_| DbError::DamagedDatabase)?)))
+            Ok(Some(LocalSource::Copy(StagedName::parse(&name).ok_or(DbError::DamagedDatabase)?)))
         }
         _ => Err(DbError::DamagedDatabase),
     }
@@ -309,7 +301,7 @@ pub(crate) fn open_source(
         ),
         LocalSource::Copy(name) => {
             let reader = directory
-                .file(FileArea::AppProvided, &name)
+                .staged_file(&name)
                 .open_reader()
                 .map_err(|error| observation(error, &id, false))?;
             // The stream's size is its open handle's, which must be the file's.

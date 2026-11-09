@@ -1,11 +1,12 @@
 //! The file names one open store reserves while their bytes wait for a
 //! write (Appendix C.3).
 
+use crate::file_removals::OwnedFile;
 use crate::observation::CommitObserver;
 use crate::DbError;
-use coven_foundation::files::FileName;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::Bug;
+use std::borrow::Borrow;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
@@ -13,7 +14,7 @@ use std::sync::Mutex;
 /// files and prepared pins. Removals skip them until the write that takes
 /// them decides or their holder drops.
 pub(crate) struct ReservedNames {
-    names: Mutex<BTreeSet<FileName>>,
+    names: Mutex<BTreeSet<OwnedFile>>,
     /// The handle a release that finds the set wrong fails.
     handle: CommitObserver,
 }
@@ -24,7 +25,7 @@ impl ReservedNames {
     }
 
     /// Reserve `names`.
-    pub(crate) fn reserve(&self, names: impl IntoIterator<Item = FileName>) {
+    pub(crate) fn reserve(&self, names: impl IntoIterator<Item = OwnedFile>) {
         lock_unpoisoned(&self.names).extend(names);
     }
 
@@ -35,10 +36,10 @@ impl ReservedNames {
     /// with the bug, which goes to the call releasing them or the bug sink
     /// (E15). Holders release as they drop, perhaps during an unwind, so
     /// this never panics.
-    pub(crate) fn release<'a>(&self, names: impl IntoIterator<Item = &'a FileName>) {
+    pub(crate) fn release<N: Borrow<OwnedFile>>(&self, names: impl IntoIterator<Item = N>) {
         let unreserved = {
             let mut reserved = lock_unpoisoned(&self.names);
-            names.into_iter().filter(|name| !reserved.remove(*name)).count()
+            names.into_iter().filter(|name| !reserved.remove(name.borrow())).count()
         };
         if unreserved > 0 {
             self.handle.fail_with_bug(Bug {
@@ -51,19 +52,19 @@ impl ReservedNames {
     /// Refuse prepared work unless this store still reserves each name it
     /// brings: work prepared by another open store, or by this one before
     /// it closed, isn't held here (`PreparedElsewhere`).
-    pub(crate) fn held_here<'a>(
+    pub(crate) fn held_here<N: Borrow<OwnedFile>>(
         &self,
-        names: impl IntoIterator<Item = &'a FileName>,
+        names: impl IntoIterator<Item = N>,
     ) -> Result<(), DbError> {
         let reserved = lock_unpoisoned(&self.names);
-        if names.into_iter().any(|name| !reserved.contains(name)) {
+        if names.into_iter().any(|name| !reserved.contains(name.borrow())) {
             return Err(DbError::PreparedElsewhere);
         }
         Ok(())
     }
 
     /// Run `read` over the reserved names, held for its run.
-    pub(crate) fn with_names<T>(&self, read: impl FnOnce(&BTreeSet<FileName>) -> T) -> T {
+    pub(crate) fn with_names<T>(&self, read: impl FnOnce(&BTreeSet<OwnedFile>) -> T) -> T {
         read(&lock_unpoisoned(&self.names))
     }
 }
