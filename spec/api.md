@@ -1399,7 +1399,8 @@ pub enum MergeError {
     DuplicateTimestamp(WriteId, WriteId),
     /// A timestamp is not larger than that of a write its author had read.
     CausalTimestamp(WriteId),
-    /// A write's recorded past omits a predecessor of a write it had read.
+    /// A write's recorded past omits a predecessor of a write it had read:
+    /// its `read_through` is below that of its device's last landed write.
     CausalClosure(WriteId),
     /// The timestamp's device is different from the write's device.
     TimestampDevice(WriteId),

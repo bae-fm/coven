@@ -563,3 +563,59 @@ async fn a_unique_claim_counted_beside_an_unreached_row_leaves_nothing_taken_out
     assert_eq!(taken_out, 0);
     db.close().await.unwrap();
 }
+
+/// Ben's write 2 lands having read slot 1; his write 3 then arrives claiming
+/// it read nothing, less than his own earlier write. No genuine device makes
+/// such a write, and forgetting kept records relies on reads never going
+/// back, so the slot is refused like any invalid write (§7.1).
+#[tokio::test]
+async fn a_write_reading_less_than_its_devices_last_landed_write_refuses_its_slot() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("rows", RowIdentity::SharedKey),
+                SyncedTable::new("owned", RowIdentity::SharedKey).owner_only(),
+            ],
+            SCHEMA,
+        )
+        .await
+        .unwrap();
+    let ben = DeviceId(900);
+    TestStore::register(&db, ben, 2);
+    let apply = |slot: u64, read_through: u64| {
+        let mut write = record(ben.0, slot, slot, slot as usize, slot as usize, 0);
+        write.parts[0].rows.retain(|row| row.row.table == "rows");
+        write.header.read_through = read_through;
+        db.apply_slot::<crate::pending::tests::Record, _, _>(
+            IncomingSlot {
+                slot: coven_merge::slot(slot),
+                header: SlotHeader {
+                    device: ben,
+                    claim: slot,
+                    author: crate::tests::member(2),
+                    after: slot - 1,
+                },
+                digest: [slot as u8; 32],
+                content: SlotContent::Writes {
+                    size: 1,
+                    writes: vec![crate::sequence::tests::stream(write.into())],
+                },
+            },
+            || Ok(()),
+        )
+    };
+    apply(1, 0).await.unwrap();
+    apply(2, 1).await.unwrap();
+    let error = apply(3, 0).await.unwrap_err();
+    let write = coven_merge::WriteId { device: ben, number: 3 };
+    assert!(
+        matches!(
+            &error,
+            DbError::InvalidWrite { write: refused, error: coven_merge::MergeError::CausalClosure(named) }
+                if *refused == write && *named == write
+        ),
+        "{error:?}"
+    );
+    db.close().await.unwrap();
+}

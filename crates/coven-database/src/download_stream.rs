@@ -149,7 +149,10 @@ pub(crate) fn stage_selected(
         .filter(|(part, stream)| selected(&part.audience) && stream.is_some())
         .map(|(part, _)| part.audience.clone())
         .collect();
+    // A write the cut-off consumes is never judged, so what it claims to
+    // have read decides nothing (§14.1).
     if !refused {
+        crate::write_commit::check_reads(database, &write.header.header)?;
         if let Some(wait) = crate::download::prerequisite(database, &write.header.header, &opened)?
         {
             return Err(crate::DbError::WriteWaiting(wait));

@@ -2,7 +2,6 @@
 
 use super::Database;
 use crate::file_protection::value as retain_value;
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::{
     DbError, DownloadedPartStream, DownloadedWriteStream, FileEvidence, Slot, UnprovenFiles,
 };
@@ -159,10 +158,8 @@ impl Database {
     }
 
     /// The slot count each of these devices had read through when it made its
-    /// last published write, for those that published one. A device's
-    /// writes are numbered as it commits them and its applied slot never
-    /// goes back, so its last published write read furthest, and every
-    /// write it made before is published too (§6.3, §17.10).
+    /// last published write, for those that published one. Every write it
+    /// made before is published too (§6.3, §17.10).
     pub async fn published_reads(
         &self,
         devices: BTreeSet<DeviceId>,
@@ -171,14 +168,7 @@ impl Database {
             inner.access.with_committed(|db| {
                 let mut reads = BTreeMap::new();
                 for device in devices {
-                    if let Some(read) = db
-                        .query(
-                            &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
-                            [device],
-                            |r| crate::write_encoding::counter(r.get(0)?),
-                        )?
-                        .pop()
-                    {
+                    if let Some(read) = crate::write_metadata::last_landed_read(db, device)? {
                         reads.insert(device, read);
                     }
                 }

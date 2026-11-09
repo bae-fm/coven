@@ -41,7 +41,8 @@ pub enum MergeError {
     /// A timestamp is not larger than that of a write its author had read.
     #[error("write {0:?} is not stamped after its past")]
     CausalTimestamp(WriteId),
-    /// A write's recorded past omits a predecessor of a write it had read.
+    /// A write's recorded past omits a predecessor of a write it had read:
+    /// its `read_through` is below that of its device's last landed write.
     #[error("write {0:?} has a past that is not causally closed")]
     CausalClosure(WriteId),
     /// The timestamp's device is different from the write's device.

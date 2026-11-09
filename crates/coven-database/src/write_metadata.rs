@@ -69,6 +69,23 @@ pub(crate) fn newest_number(
     Ok(newest.map(counter).transpose()?)
 }
 
+/// The `read_through` of `device`'s last landed write, if one landed. A
+/// device numbers its writes as it commits them and they land in that order,
+/// so its landed write with the greatest number landed last; its applied
+/// slot never goes back, so that write read furthest (§6.3, §7.1).
+pub(crate) fn last_landed_read(
+    db: &DatabaseConnection,
+    device: coven_foundation::id_source::DeviceId,
+) -> Result<Option<u64>, DbError> {
+    Ok(db
+        .query(
+            &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
+            [device],
+            |r| counter(r.get(0)?),
+        )?
+        .pop())
+}
+
 /// `id`'s row in `_coven_writes`, if coven has stored it.
 pub(crate) fn stored_write(
     db: &DatabaseConnection,

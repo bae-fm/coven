@@ -41,6 +41,27 @@ pub(crate) fn retain_original(
     retain(database, header.position, header.timestamp, header.read_through, slot)
 }
 
+/// Refuse a landing write that read less than its device's last landed
+/// write (§7.1): a genuine device's applied slot never goes back, and
+/// forgetting kept records relies on it (§16.7). A write already stored is
+/// this device's own, queued here, or one that landed before, checked then.
+pub(crate) fn check_reads(
+    database: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
+) -> Result<(), DbError> {
+    if crate::write_metadata::stored_write(database, header.position)?.is_some() {
+        return Ok(());
+    }
+    let last = crate::write_metadata::last_landed_read(database, header.position.device)?;
+    if last.is_some_and(|last| header.read_through < last) {
+        return Err(DbError::InvalidWrite {
+            write: header.position,
+            error: coven_merge::MergeError::CausalClosure(header.position),
+        });
+    }
+    Ok(())
+}
+
 fn retain(
     database: &DatabaseConnection,
     id: WriteId,
