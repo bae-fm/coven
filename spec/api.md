@@ -950,7 +950,7 @@ pub trait StorageConnector: Send + Sync {
     }
 }
 
-/// Test-injected ids; production uses OS randomness (Appendix F.2).
+/// The source of new ids, the app's or `UuidIds` by default (Appendix F.2).
 pub trait IdSource: Send + Sync {
     /// A fresh UUID; distinct calls must yield distinct ids.
     fn new_id(&self) -> Uuid;
@@ -2370,8 +2370,8 @@ impl CovenBuilder {
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
-    /// Replace OS-random ids in tests (Appendix F.2).
-    #[cfg(feature = "test-utils")]
+    /// The source of new ids: store, circle, member, key, invite and file ids,
+    /// and this install's device id (Appendix F.2). Defaults to `UuidIds`.
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
     /// Replace the platform's network with one the test drives (E5).
@@ -7437,8 +7437,8 @@ pub enum ProviderSignOut {
   returns the open `CovenHandle`. Restore also accepts the separately
   supplied S3 credentials. There is no second app-side open.
   - The builder supplies tables, migrations, custody, clock,
-    provider clients, sign-in presenter and file-transfer limits once. Production
-    ids use OS randomness; only tests replace their source (E1). The app
+    provider clients, sign-in presenter and file-transfer limits once. Ids
+    come from the app's id source, `UuidIds` by default (E1). The app
     calls `builder.authenticate(access)` first when `oauth_access` is present,
     except to resume a join, which asks for it only when needed (above);
     bootstrap uses that held sign-in and never opens UI. Session-only `InMemory`

@@ -11528,8 +11528,8 @@ One an owner holds by value and lets no one point at is that owner's private
 state. A method handing out a lock through a pointer or a reference hands out
 shared state.
 
-- The builder configures the clock, custody and OAuth. Ids use OS randomness;
-  only `test-utils` allows replacing their source (api.md E1).
+- The builder configures the clock, custody and OAuth. Ids come from
+  the app's id source, `UuidIds` by default (api.md E1).
 - A method never takes a raw capability as a parameter, such as a store directory
   or a database connection, whatever type it belongs to. An owner, or a task made
   for one operation, is built with the capability it uses; a plain value's work
