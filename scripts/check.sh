@@ -307,10 +307,12 @@ lean_proof() {
     proof_selected "${proof#spec/proofs/}" || return 0
     step "Lean proof of $what"
     # Path dependencies are checked separately; preserve their runner binaries.
+    # The build's report is shown as it runs and kept for the check below.
+    local built
     if [ "$part" = changed ]; then
-        (cd "$proof" && lake build "$@")
+        built=$(cd "$proof" && lake build "$@" 2>&1 | tee /dev/stderr)
     else
-        (cd "$proof" && lake clean "$package" && lake build "$@")
+        built=$(cd "$proof" && lake clean "$package" && lake build "$@" 2>&1 | tee /dev/stderr)
     fi
     local module
     for module in "$proof/$lib"/*.lean; do
@@ -320,7 +322,10 @@ lean_proof() {
             exit 1
         fi
     done
-    if grep -rnwE 'sorry|admit' "$proof/$lib" "$proof/$lib.lean"; then
+    # Lean warns of each declaration a `sorry` or `admit` leaves unfinished,
+    # and Lake repeats the warning for a module it didn't rebuild. A search of
+    # the source for the words would also find `admit` naming a constructor.
+    if grep -E 'declaration uses .sorry.' <<< "$built" >&2; then
         echo "the $what proof has an unfinished step" >&2
         exit 1
     fi
