@@ -71,7 +71,9 @@ impl SequenceSync {
         if included != required {
             return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
         }
-        floor.authenticate(history)
+        floor.authenticate(history)?;
+        self.database.forget_slot_inputs_below(floor.header.first).await?;
+        Ok(())
     }
 
     /// A snapshot's signed prefix, checked against its announcement.

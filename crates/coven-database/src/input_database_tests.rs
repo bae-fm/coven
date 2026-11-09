@@ -1,5 +1,6 @@
 use super::*;
 use crate::tests::TestStore;
+use coven_format::{path::ObjectPath, value::Slot};
 use coven_foundation::clock::HANG_GUARD;
 
 impl InputDatabase {
@@ -13,11 +14,20 @@ impl InputDatabase {
     }
 }
 
+/// A test's name for an object as a valid path in the test store; a path
+/// already is one.
+fn named(name: &str) -> String {
+    if ObjectPath::parse(name).is_ok() {
+        return name.to_owned();
+    }
+    let id = name.bytes().fold(0u128, |id, byte| id * 257 + u128::from(byte));
+    ObjectPath::file(crate::tests::store_id(), DeviceId(1), ObjectId(uuid::Uuid::from_u128(id)))
+        .as_str()
+        .to_owned()
+}
+
 async fn input(db: &Database, path: &str, version: u8, replaceable: bool) -> RetainedInput {
-    db.observe_input(path.to_owned(), vec![version], vec![version], replaceable)
-        .await
-        .unwrap()
-        .unwrap()
+    db.observe_input(named(path), vec![version], vec![version], replaceable).await.unwrap().unwrap()
 }
 
 #[tokio::test]
@@ -75,7 +85,7 @@ async fn replacement_invalidates_only_its_path_and_immutable_changes_preserve_ev
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let write = input(&db, "write", 1, false).await;
     write.keep_range(0, vec![1]).await.unwrap();
-    assert!(db.observe_input("write".into(), vec![2], vec![2], false).await.unwrap().is_none());
+    assert!(db.observe_input(named("write"), vec![2], vec![2], false).await.unwrap().is_none());
     let peer = input(&db, "peer", 1, true).await;
     peer.keep_range(0, vec![2]).await.unwrap();
     let peer = input(&db, "peer", 2, true).await;
@@ -279,4 +289,34 @@ async fn local_cursor_does_not_fill_a_missing_received_range() {
     saved.keep_range(2, vec![3, 4]).await.unwrap();
     let mut bytes = saved.local_bytes(4).await.unwrap();
     assert_eq!(bytes.read(&mut [0; 4]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[tokio::test]
+async fn a_floor_past_a_slot_forgets_its_record() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let slot = |number: u64| {
+        ObjectPath::slot(crate::tests::store_id(), std::num::NonZeroU64::new(number).unwrap())
+            .as_str()
+            .to_owned()
+    };
+    let mut held = None;
+    for number in 1..=3u64 {
+        let saved = input(&db, &slot(number), 1, false).await;
+        saved.keep_range(0, vec![number as u8; 2]).await.unwrap();
+        saved.release_ranges().await.unwrap();
+        if number == 1 {
+            held = Some(input(&db, &slot(1), 1, false).await);
+        }
+    }
+    assert_eq!(db.input_budget().await.unwrap().retained, 6);
+    db.forget_slot_inputs_below(Slot::new(3).unwrap()).await.unwrap();
+    assert_eq!(db.input_budget().await.unwrap().retained, 4);
+    assert!(db.retained_observation(slot(2)).await.unwrap().is_none());
+    assert!(db.retained_observation(slot(1)).await.unwrap().is_some());
+    assert!(db.retained_observation(slot(3)).await.unwrap().is_some());
+    drop(held);
+    db.forget_slot_inputs_below(Slot::new(3).unwrap()).await.unwrap();
+    assert_eq!(db.input_budget().await.unwrap().retained, 2);
+    assert!(db.retained_observation(slot(1)).await.unwrap().is_none());
 }

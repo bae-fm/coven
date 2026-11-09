@@ -2,6 +2,7 @@
 
 use super::{with_locked, Database};
 use crate::{sqlite::DatabaseConnection, DbError};
+use coven_format::path::{ObjectPath, PathError};
 use coven_foundation::id_source::{DeviceId, KeyId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
 use std::collections::{BTreeMap, BTreeSet};
@@ -339,7 +340,42 @@ fn evict(
     Ok(())
 }
 
+impl InputDatabase {
+    /// Delete the records of the objects `select` picks, except those a live
+    /// handle holds: a reader in flight keeps its rows. The cascades take each
+    /// record's ranges, file evidence and unread parts.
+    fn forget(&self, select: &str, params: impl rusqlite::Params) -> Result<(), DbError> {
+        self.write(|db| {
+            let active = lock_unpoisoned(&self.active);
+            for object in db.query(select, params, |r| r.get::<_, i64>(0))? {
+                if active.get(&object).is_some_and(|input| input.strong_count() > 0) {
+                    continue;
+                }
+                db.internal_execute("DELETE FROM _coven_input_objects WHERE id=?1", [object])?;
+            }
+            Ok(())
+        })
+    }
+
+    fn forget_slots_below(&self, first: u64) -> Result<(), DbError> {
+        self.forget("SELECT id FROM _coven_input_objects WHERE slot<?1", [sql_offset(first)?])
+    }
+
+    pub(crate) fn forget_path(&self, path: &str) -> Result<(), DbError> {
+        self.forget("SELECT id FROM _coven_input_objects WHERE path=?1", [path])
+    }
+}
+
 impl Database {
+    /// Forget the input records of the slots below a checked floor's `first`:
+    /// nothing reads them again (§16.4). A record a live read holds stays.
+    pub async fn forget_slot_inputs_below(
+        &self,
+        first: coven_format::value::Slot,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| inner.inputs.forget_slots_below(first.get())).await
+    }
+
     /// A seekable local input for applying the current claim without a provider
     /// reread after successful creation. One cache identity is reused across
     /// claims; the journal remains the authoritative copy until settlement.
@@ -388,6 +424,13 @@ impl Database {
         observation_bytes: Vec<u8>,
         replaceable: bool,
     ) -> Result<Option<RetainedInput>, DbError> {
+        let slot = ObjectPath::parse(&path)
+            .map_err(|PathError| DbError::Invariant {
+                what: "an observed input names a storage path",
+            })?
+            .slot_number()
+            .map(|slot| sql_offset(slot.get()))
+            .transpose()?;
         let id = self.call(move |inner| {
             let previous = inner.inputs.read(|db| observation(db, &path))?;
             match previous {
@@ -402,7 +445,7 @@ impl Database {
                     _ => (),
                 }
                 db.internal_execute("DELETE FROM _coven_input_objects WHERE path=?1", [&path])?;
-                db.query_row("INSERT INTO _coven_input_objects(path,identity,observation) VALUES(?1,?2,?3) RETURNING id", (&path, &identity, &observation_bytes), |r| r.get(0)).map(Some)
+                db.query_row("INSERT INTO _coven_input_objects(path,slot,identity,observation) VALUES(?1,?2,?3,?4) RETURNING id", (&path, slot, &identity, &observation_bytes), |r| r.get(0)).map(Some)
             })
         }).await?;
         match id {

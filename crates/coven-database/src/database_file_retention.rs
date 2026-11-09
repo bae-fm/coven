@@ -42,12 +42,22 @@ impl Database {
         id: coven_format::admin::SnapshotId,
         files: BTreeSet<(DeviceId, ObjectId)>,
     ) -> Result<(), DbError> {
-        self.call(move |inner| inner.access.with_writer(|writer| writer.transaction(|db| {
-            for (device, object) in files { insert_candidate(db, device, object)?; }
-            db.internal_execute("INSERT INTO _coven_absent_snapshots(audience,device,number) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-                params![&id.audience, id.device, id.number.to_be_bytes()])?;
-            Ok(())
-        }))).await
+        self.call(move |inner| {
+            let number = std::num::NonZeroU64::new(id.number).ok_or(DbError::DamagedDatabase)?;
+            let path = coven_format::path::ObjectPath::snapshot(
+                inner.access.directory.id(),
+                id.audience.clone(),
+                id.device,
+                number,
+            );
+            inner.access.with_writer(|writer| writer.transaction(|db| {
+                for (device, object) in files { insert_candidate(db, device, object)?; }
+                db.internal_execute("INSERT INTO _coven_absent_snapshots(audience,device,number) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
+                    params![&id.audience, id.device, id.number.to_be_bytes()])?;
+                Ok(())
+            }))?;
+            inner.inputs.forget_path(path.as_str())
+        }).await
     }
     /// Every fixed path local data protects, in one read transaction.
     #[cfg(test)]

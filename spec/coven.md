@@ -9898,6 +9898,10 @@ OneDrive's metadata fetches and rechecks (§20.5), a container-existence check.
 
 - **More history or files never make a quiet pass work harder.** A quiet pass
   decodes no history and commits no database transaction.
+- **`inputs.db` keeps one record per object it reads,** the object's path, its
+  identity and the provider's metadata. A slot's record goes once a checked
+  floor's `first` passes the slot, and a snapshot's once its absence is
+  recorded. A record a read in progress holds waits for the next floor.
 - **Custody is unlocked once per open handle.** Sync passes don't repeat
   passphrase derivation.
 - **The database writer is never held** across a network request, a custody

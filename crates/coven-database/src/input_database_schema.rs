@@ -9,6 +9,7 @@ macro_rules! coven_input_tables {
     CREATE TABLE _coven_input_objects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         path TEXT NOT NULL UNIQUE,
+        slot INTEGER CHECK(slot IS NULL OR slot>0),
         identity BLOB NOT NULL,
         observation BLOB NOT NULL,
         released INTEGER NOT NULL DEFAULT 0 CHECK(released IN (0,1)),
@@ -16,6 +17,7 @@ macro_rules! coven_input_tables {
         files_complete INTEGER CHECK(files_complete IN (0,1)),
         files_schema INTEGER CHECK(files_schema IS NULL OR files_complete=0)
     ) STRICT;
+    CREATE INDEX _coven_input_objects_by_slot ON _coven_input_objects(slot) WHERE slot IS NOT NULL;
         "
         );
         $visit!(
