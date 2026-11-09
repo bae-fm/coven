@@ -10479,10 +10479,21 @@ pins) consistent with its database across crashes.
   names them. Remove the row before deleting its bytes. A crash then can't leave
   a row naming missing bytes
   ([`early_commit_strands`](proofs/storage/CovenStorage/LocalBytes.lean)).
-- **The files one commit records are flushed together.** Ana imports an album
-  of 12 tracks in one write. Each track's copy is synced with a plain `fsync` as
-  it finishes. Before the write commits, coven syncs the folder holding the
-  copies, then on macOS and iOS flushes the drive's own cache once with
+- **Each staging writes its copies into a folder of its own.** Ana imports an
+  album of 12 tracks in one write. Its staging makes a new folder in the
+  store's `files` folder, named by a new id from the store's id source, and
+  writes the 12 copies there. In one folder that held every copy, each new
+  copy cost more as the folder filled: a batch of 12 took 10 to 12 ms beside
+  240,000 copies, and 6 ms in an empty folder. In a folder of its own it took
+  6 to 7 ms.
+- A copy's records name it by both names, `<folder>/<copy>`, so the folder
+  is recorded before it exists, with the copies. A folder already there fails
+  the staging with `FileNameReused`: the id source gave out an id it gave
+  before. A captured snapshot, written alone, stays at the top of `files`.
+- **The files one commit records are flushed together.** Each track's copy is
+  synced with a plain `fsync` as it finishes. Before the write commits, coven
+  syncs the staging's folder, which holds the copies, and `files`, which holds
+  that folder, then on macOS and iOS flushes the drive's own cache once with
   `F_FULLFSYNC`. A plain `fsync` there can leave the bytes in the drive's cache,
   in any order (§3), so without the flush the commit could reach the disk
   ahead of them, and a power loss would leave rows naming missing bytes. The
@@ -10492,7 +10503,7 @@ pins) consistent with its database across crashes.
 - If the flush fails, the staging fails: no write takes its files, and the
   copies are removed at once, like a failed write's.
 - Elsewhere on Unix, `fsync` already reaches the drive's permanent storage,
-  and the write's flush is the folder's `fsync`. Windows writes coven's files
+  and the write's flush is the folders' `fsync`. Windows writes coven's files
   through, with no folder to sync, and each file's `FlushFileBuffers` already
   flushes the drive's cache, so the flush adds nothing there.
 - Making files device-only flushes its copies the same way, once for the call,
@@ -10523,6 +10534,11 @@ pins) consistent with its database across crashes.
 - A transaction that releases owned bytes records their deletion before
   committing. Coven deletes the bytes after releasing the database writer, then
   removes the record.
+- **A staging's folder goes with its last copy.** Removing a copy also
+  removes its folder once nothing is left in it, and syncs `files`, before
+  the copy's record goes. A crash in between leaves the record, so the next
+  removal finds the folder again; without the order, an empty folder would
+  stay with nothing naming it. A folder still holding another copy stays.
 - A deletion is recorded only for bytes no row names, and no row names bytes
   recorded for deletion: the database refuses either, failing that
   transaction. A record naming bytes a row still uses would delete them, so

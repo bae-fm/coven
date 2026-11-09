@@ -1568,8 +1568,10 @@ pub enum DbError {
     /// user namespace, or a user's original into an app one (§17.1); or a
     /// bound reference names a user's file (§17.4).
     NamespaceKind { namespace: String, kind: Provenance },
-    /// The id source reused the physical name of a kept file.
-    FileNameReused { name: FileName },
+    /// The id source reused the physical name of a kept file: a cache
+    /// file's name, a staged copy's `<folder>/<copy>`, or a staging's folder
+    /// (Appendix C.3).
+    FileNameReused { name: String },
     /// A file the write staged is referenced by none of its rows (§17.2).
     FileUnreferenced { namespace: String, file: FileId },
     /// A reference names no file this device has a record of in its row's
