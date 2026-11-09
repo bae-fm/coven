@@ -216,6 +216,11 @@ task_types = [
     # App bytes one staging wrote, until the write that takes them
     # (§17.3).
     "StagedFiles",
+    # A connection one upload attempt took beside its own for a part it
+    # sends together, held until the part ends; and what that attempt's
+    # parts in flight have moved, which each tells as its bytes go (§17.9).
+    "SpareConnection",
+    "PartsMoving",
     # What one pin's download of a file has in hand, written and received,
     # which its requests in flight tell as their bytes arrive (§17.8).
     "WholeProgress",
@@ -1452,6 +1457,9 @@ tables = [
 "crates/coven-sync/src/files.rs" = ["Files::new", "Files::read_only", "FilesInner::new"]
 # The writer's copies of the upload settings, composed with its file owner.
 "crates/coven-sync/src/file_upload_settings.rs" = ["UploadSettings::new"]
+# Made once with the writer's upload settings: the connections its upload
+# runs' attempts use, lane by lane (§17.9).
+"crates/coven-sync/src/file_upload_connections.rs" = ["UploadConnections::new"]
 # The reason last logged for each subject's failure, which the store's retry
 # waits keep.
 "crates/coven-sync/src/failure_log.rs" = ["FailureLog::new"]

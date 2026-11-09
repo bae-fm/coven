@@ -20,6 +20,8 @@ mod file_status;
 mod file_upload;
 #[path = "file_upload_abandoned.rs"]
 mod file_upload_abandoned;
+#[path = "file_upload_connections.rs"]
+mod file_upload_connections;
 #[path = "file_upload_failure.rs"]
 mod file_upload_failure;
 #[path = "file_upload_pool.rs"]
@@ -40,6 +42,7 @@ pub use file_device_only::{DeviceOnlyError, DeviceOnlyStep};
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream, ReadProgress};
 pub use file_status::FileStatus;
+pub(crate) use file_upload_connections::SpareConnection;
 pub use file_upload_pool::DrainOutcome;
 pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};
 pub use file_upload_settings::UploadSettings;

@@ -10,7 +10,7 @@ use coven_database::TransferMeter;
 use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::file::{FileHeader, FILE_HEADER_LEN};
 use coven_foundation::locks::read_unpoisoned;
-use coven_storage::{ByteProgress, ObjectPath, UploadSession};
+use coven_storage::{ObjectPath, UploadSession};
 
 /// How an upload attempt ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,12 +93,8 @@ impl FilesInner {
                 DbError::Invariant { what: "a queued upload keeps the source fixed at staging" },
             ))?;
         let total = item.bytes_total;
-        let sent = {
-            let meter = meter.clone();
-            ByteProgress::new(move |bytes| meter.reached(bytes))
-        };
         let mut transfer =
-            FileTransfer { owner: self, item, source, key: &key, path: &path, total, meter, sent };
+            FileTransfer { owner: self, item, source, key: &key, path: &path, total, meter };
         let session = item
             .session
             .as_ref()
@@ -154,10 +150,8 @@ struct FileTransfer<'a> {
     key: &'a FileKey,
     path: &'a ObjectPath,
     total: u64,
-    /// This attempt's progress: how far each recorded session has got.
+    /// This attempt's progress: how many of the object's bytes it has moved.
     meter: TransferMeter,
-    /// Hears each request's bytes as they are handed over.
-    sent: ByteProgress,
 }
 impl FileTransfer<'_> {
     #[expect(
@@ -212,13 +206,14 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
             bytes_total: session.total_bytes(),
         };
         self.owner.database.record_session(self.item.id, session.encode()?, progress).await?;
-        // A resumed session is as far as the provider says; one started
-        // again is back at its start.
-        self.meter.reached(session.confirmed_bytes());
         Ok(())
     }
-    fn sent(&self) -> ByteProgress {
-        self.sent.clone()
+    fn hears(&self) -> Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>> {
+        let meter = self.meter.clone();
+        Some(std::sync::Arc::new(move |bytes| meter.reached(bytes)))
+    }
+    fn spare_connection(&self) -> Option<crate::files::SpareConnection> {
+        self.owner.spare_connection(super::file_upload_pool::Lane::of(self.item))
     }
     fn keep_going(&self) -> bool {
         (self.item.holds.is_some() || !self.owner.trailing_held())

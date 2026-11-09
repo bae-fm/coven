@@ -10,7 +10,8 @@ use tokio::sync::Notify;
 /// Limits shared by the open store's transfer consumers (E5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransferLimits {
-    /// Maximum file uploads running together.
+    /// Maximum file uploads running together in each lane, a part one
+    /// sends beside its first counting as one more.
     pub uploads: NonZeroUsize,
     /// Maximum requests for file bytes in flight together, each holding a
     /// lease while its body is read; one file's pin takes as many as it can.

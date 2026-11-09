@@ -63,6 +63,29 @@ impl Fixture {
         single_limit: u64,
         provider: coven_storage::CloudProvider,
     ) -> Self {
+        let storage = MemoryStorage::builder()
+            .provider(provider)
+            .clock(clock.clone())
+            .transfer_limits(single_limit, CHUNK);
+        Self::with_storage(provenance, clock, storage).await
+    }
+    /// The deterministic provider standing in for S3, keeping each session's
+    /// parts by index, so a file's parts go together (§17.9).
+    async fn with_parts_together(provenance: Provenance) -> Self {
+        let clock: ClockRef =
+            Arc::new(ClosureClock(|| SystemTime::UNIX_EPOCH + Duration::from_secs(100)));
+        let storage = MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::S3)
+            .clock(clock.clone())
+            .transfer_limits(CHUNK as u64, CHUNK)
+            .independent_parts();
+        Self::with_storage(provenance, clock, storage).await
+    }
+    async fn with_storage(
+        provenance: Provenance,
+        clock: ClockRef,
+        storage: coven_storage::test_utils::MemoryStorageBuilder,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
         let bugs = coven_foundation::task::HeardBugs::shared();
@@ -75,14 +98,7 @@ impl Fixture {
             Namespace::new("covers", Provenance::AppProvided, 1 << 30),
         ];
         let database = builder(&directory, &ids, &clock, &namespaces).open().await.unwrap();
-        let storage = Arc::new(
-            MemoryStorage::builder()
-                .provider(provider)
-                .clock(clock.clone())
-                .transfer_limits(single_limit, CHUNK)
-                .build()
-                .unwrap(),
-        );
+        let storage = Arc::new(storage.build().unwrap());
         let send = ready_state();
         let waits =
             Arc::new(crate::RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
@@ -613,6 +629,8 @@ mod partial_pin;
 mod read;
 #[path = "file_status_tests.rs"]
 mod status;
+#[path = "file_upload_connections_tests.rs"]
+mod upload_connections;
 #[path = "file_upload_pool_tests.rs"]
 mod upload_pool;
 #[path = "file_upload_retry_tests.rs"]

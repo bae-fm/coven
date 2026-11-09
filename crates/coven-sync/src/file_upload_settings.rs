@@ -1,10 +1,13 @@
 //! The writer's copies of the upload settings, which only its upload runs and
-//! the app's changes of a setting use (§12.3, §17.4, §17.9).
+//! the app's changes of a setting use (§12.3, §17.4, §17.9), and the
+//! connections its upload runs' attempts use.
 
+use super::file_upload_pool::Lane;
 use super::{FilesInner, TrailingHold};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// The writer's copies of the upload settings.
+/// The writer's copies of the upload settings, and the connections its
+/// upload runs' attempts use.
 pub struct UploadSettings {
     /// The persisted pause setting as of the last upload run or app change;
     /// parts check it between sends.
@@ -14,6 +17,8 @@ pub struct UploadSettings {
     writes_paused: AtomicBool,
     /// How many app retries have been asked.
     retries_asked: AtomicU64,
+    /// The connections the upload runs' attempts use, lane by lane.
+    connections: std::sync::Arc<super::file_upload_connections::UploadConnections>,
     /// Held by an app's change of either setting, and by an upload run from
     /// its read of the persisted settings until it has acted on them, so
     /// neither the copies here nor a retry's answer comes from a setting
@@ -37,6 +42,9 @@ impl UploadSettings {
             paused: AtomicBool::new(false),
             writes_paused: AtomicBool::new(false),
             retries_asked: AtomicU64::new(0),
+            connections: std::sync::Arc::new(
+                super::file_upload_connections::UploadConnections::new(),
+            ),
             hold_change: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             settings_read_gate: std::sync::Mutex::new(None),
@@ -116,6 +124,35 @@ impl UploadSettings {
 }
 
 impl FilesInner {
+    /// The connections `lane`'s attempts took beside their own, for parts
+    /// sent together (§17.9).
+    pub(super) fn connections_beside(&self, lane: Lane) -> usize {
+        self.uploads.connections.beside(lane)
+    }
+    /// The upload worker's count of `lane`'s attempts in flight.
+    pub(super) fn set_lane_attempts(&self, lane: Lane, attempts: usize) {
+        self.uploads.connections.set_attempts(lane, attempts);
+    }
+    /// Whether an upload of `lane` is ready and waits for a connection.
+    pub(super) fn set_lane_waiting(&self, lane: Lane, waiting: bool) {
+        self.uploads.connections.set_waiting(lane, waiting);
+    }
+    /// Another connection for a part an attempt in `lane` sends beside its
+    /// own, if the lane has one free under the upload limit and no upload of
+    /// it waits to start (§17.9).
+    pub(super) fn spare_connection(&self, lane: Lane) -> Option<super::SpareConnection> {
+        self.uploads.connections.spare(lane, self.transfers.limits().uploads.get())
+    }
+    /// Resolves once a connection taken beside an attempt has ended.
+    pub(super) async fn connection_freed(&self) {
+        self.uploads.connections.freed().await;
+    }
+    /// Whether the worker last found an upload of `lane` waiting for a
+    /// connection, for a test.
+    #[cfg(test)]
+    pub(super) fn lane_waiting(&self, lane: Lane) -> bool {
+        self.uploads.connections.waiting(lane)
+    }
     /// What holds trailing uploads now (§12.3, §17.4, §17.9): the app's
     /// pause, a self-replacement's pause of this device's writes, or a
     /// metered network while the app moves files only on unmetered ones.

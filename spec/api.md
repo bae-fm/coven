@@ -4885,6 +4885,9 @@ impl StorageConfig {
 pub struct TransferLimits {
     /// File uploads running at once. While uploads can run, the upload
     /// worker keeps this many in flight, starting the next as each ends.
+    /// A file on S3 sends its parts together on the connections this leaves
+    /// free, so one large file uses every one it allows
+    /// ([§17.9](coven.md#179-uploads)).
     pub uploads: NonZeroUsize,
     /// Requests for file bytes in flight at once, pins' and file ranges'.
     /// A pin sends as many of one file's requests at once as this lets go,

@@ -2,8 +2,12 @@
 //! request or through a recorded session, as storage decides.
 
 use coven_storage::{
-    ObjectPath, Storage, StorageError, StorageFailure, StoredObject, UploadSession, UploadTarget,
+    ByteProgress, ObjectPath, Storage, StorageError, StorageFailure, StoredObject, UploadSession,
+    UploadTarget,
 };
+
+#[path = "recorded_upload_together.rs"]
+mod together;
 
 /// Repeatable byte reads, durable session progress, and a caller's pause state.
 pub(crate) trait UploadSource: Send {
@@ -18,10 +22,34 @@ pub(crate) trait UploadSource: Send {
         session: UploadSession,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     fn keep_going(&self) -> bool;
-    /// Who hears each part's bytes as they are handed over; no one, unless
-    /// the source shows its upload as it goes.
-    fn sent(&self) -> coven_storage::ByteProgress {
-        coven_storage::ByteProgress::unread()
+    /// Who hears how many of the object's bytes the upload has moved, as
+    /// they are handed over or confirmed; no one, unless the source shows
+    /// its upload as it goes.
+    fn hears(&self) -> Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>> {
+        None
+    }
+    /// Another connection for one of the parts it sends together, if the
+    /// source's uploads have one to spare; none, unless it sends parts
+    /// together (§17.9).
+    fn spare_connection(&self) -> Option<crate::files::SpareConnection> {
+        None
+    }
+}
+
+/// What hears a part sent alone, told how far through the object its bytes
+/// handed over reach.
+fn sent<S: UploadSource>(source: &S) -> ByteProgress {
+    match source.hears() {
+        Some(hear) => ByteProgress::new(move |reached| hear(reached)),
+        None => ByteProgress::unread(),
+    }
+}
+
+/// The upload has moved what the provider confirmed: a resumed session is
+/// as far as the provider says, one started again back at its start.
+fn heard_confirmed<S: UploadSource>(source: &S, session: &UploadSession) {
+    if let Some(hear) = source.hears() {
+        hear(session.confirmed_bytes());
     }
 }
 
@@ -73,7 +101,7 @@ pub(crate) async fn create<S: UploadSource>(
         return upload(storage, &target, total, recorded, source).await;
     }
     let bytes = source.read(0, total as usize).await?;
-    match storage.create_reporting(path, &bytes, &source.sent()).await {
+    match storage.create_reporting(path, &bytes, &sent(source)).await {
         Ok(object) => Ok(Uploaded::Stored(object)),
         Err(error) if occupied(&target, &error) => {
             Ok(Uploaded::Occupied(crate::identity::digest(&bytes)))
@@ -82,7 +110,8 @@ pub(crate) async fn create<S: UploadSource>(
     }
 }
 
-/// Persist every confirmed session before continuing; read only its next part.
+/// Persist every confirmed session before continuing; read only the parts
+/// about to be sent.
 pub(crate) async fn upload<S: UploadSource>(
     storage: &dyn Storage,
     target: &UploadTarget,
@@ -122,6 +151,7 @@ pub(crate) async fn upload<S: UploadSource>(
         },
     };
     source.save(session.clone()).await?;
+    heard_confirmed(source, &session);
     if session.needs_initiation() {
         if let Err(error) = storage.resume_upload(&mut session).await {
             return Err(save_failure(source, session, error).await?.into());
@@ -132,6 +162,12 @@ pub(crate) async fn upload<S: UploadSource>(
         if !source.keep_going() {
             return Ok(Uploaded::Paused);
         }
+        // Parts the provider keeps apart go together; a session whose
+        // first part starts it sends that one alone first.
+        if session.parts_independent() {
+            together::send_together(storage, &mut session, source).await?;
+            continue;
+        }
         let part = source.read(next.start, (next.end - next.start) as usize).await?;
         // A refusal before any request leaves the recording as it was, a
         // plan unmarked. The mark admitting a plan's first part is saved
@@ -140,10 +176,11 @@ pub(crate) async fn upload<S: UploadSource>(
         if permit.marked() {
             source.save(session.clone()).await?;
         }
-        if let Err(error) = storage.send_part(permit, &mut session, &source.sent()).await {
+        if let Err(error) = storage.send_part(permit, &mut session, &sent(source)).await {
             return Err(save_failure(source, session, error).await?.into());
         }
         source.save(session.clone()).await?;
+        heard_confirmed(source, &session);
     }
     if !source.keep_going() {
         return Ok(Uploaded::Paused);

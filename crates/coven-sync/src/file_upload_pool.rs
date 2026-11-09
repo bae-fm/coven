@@ -119,16 +119,22 @@ impl WorkerEnd {
 /// The lane an upload runs in (§17.4): a bound upload's write and every
 /// later one wait for it, so neither the pause nor trailing uploads hold it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Lane {
+pub(super) enum Lane {
     Bound,
     Trailing,
 }
 
 impl Lane {
-    fn of(upload: &FileUpload) -> Self {
+    pub(super) fn of(upload: &FileUpload) -> Self {
         match upload.holds {
             Some(_) => Self::Bound,
             None => Self::Trailing,
+        }
+    }
+    pub(super) fn index(self) -> usize {
+        match self {
+            Self::Bound => 0,
+            Self::Trailing => 1,
         }
     }
 }
@@ -219,12 +225,18 @@ impl Run<'_> {
         self.lanes.values().filter(|of| **of == lane).count()
     }
 
+    /// The connections `lane` uses: one for each attempt in flight, and
+    /// those its attempts took beside their own for parts sent together.
+    fn used(&self, lane: Lane, owner: &FilesInner) -> usize {
+        self.in_flight(lane) + owner.connections_beside(lane)
+    }
+
     /// Whether an upload of some lane a hold leaves open could start: a
     /// lane with room, and for the bound lane, a bound upload the last read
     /// found or a commit since may have queued.
-    fn room(&self, limit: usize, held: bool) -> bool {
-        (self.in_flight(Lane::Bound) < limit && (self.committed || !self.bound.is_empty()))
-            || (!held && self.in_flight(Lane::Trailing) < limit)
+    fn room(&self, limit: usize, held: bool, owner: &FilesInner) -> bool {
+        (self.used(Lane::Bound, owner) < limit && (self.committed || !self.bound.is_empty()))
+            || (!held && self.used(Lane::Trailing, owner) < limit)
     }
 }
 
@@ -461,7 +473,7 @@ impl FilesInner {
             } else {
                 self.act_on_reports(&mut run).await;
                 let limit = self.transfers.limits().uploads.get();
-                if work.is_some() || (run.stale && run.room(limit, self.trailing_held())) {
+                if work.is_some() || (run.stale && run.room(limit, self.trailing_held(), self)) {
                     // The first read went stale if a report ended waits since.
                     let work = match work.take() {
                         Some(work) if !run.stale => work,
@@ -479,7 +491,7 @@ impl FilesInner {
                     // Held, the run ends once nothing it read is left to
                     // start and no bound upload could have been queued since.
                     let held = self.trailing_held();
-                    if held && (!run.stale || !run.room(limit, held)) {
+                    if held && (!run.stale || !run.room(limit, held, self)) {
                         #[cfg(test)]
                         self.pass_blocked_end_gate();
                         // As with the read above, a setting's change waits
@@ -519,13 +531,16 @@ impl FilesInner {
             // A due retry matters only while an upload could start; it
             // would wake at once for a wait an attempt in flight serves.
             let open = self.blocked().is_none()
-                && run.room(self.transfers.limits().uploads.get(), self.trailing_held());
+                && run.room(self.transfers.limits().uploads.get(), self.trailing_held(), self);
             let retry = if open { self.next_upload_retry(&run.bound) } else { None };
             tokio::select! {
                 Some((id, result)) = run.attempts.next(), if !run.attempts.is_empty() => {
                     self.finished(&mut run, id, result?);
                 }
                 () = self.upload_wake.notified() => run.stale = true,
+                // A connection a part took beside its attempt's ended: an
+                // upload waiting for one may start.
+                () = self.connection_freed() => {}
                 change = changes.next() => {
                     change?;
                     run.stale = true;
@@ -634,12 +649,13 @@ impl FilesInner {
             if lane == Lane::Trailing && held {
                 continue;
             }
-            if run.in_flight(lane) >= limit {
+            if run.used(lane, self) >= limit {
                 waiting.push_back(item);
                 continue;
             }
             let id = item.id;
             run.lanes.insert(id, lane);
+            self.set_lane_attempts(lane, run.in_flight(lane));
             run.started.insert(id, self.waits.network_reported());
             // A resumed session starts where the provider confirmed it.
             let progress = coven_database::TransferProgress {
@@ -662,6 +678,12 @@ impl FilesInner {
                 (id, attempted)
             }));
         }
+        // An upload waiting for a connection takes the next one freed,
+        // before a part beside an attempt does.
+        for lane in [Lane::Bound, Lane::Trailing] {
+            let waits = waiting.iter().any(|item| Lane::of(item) == lane);
+            self.set_lane_waiting(lane, waits);
+        }
         run.ready = waiting;
     }
 
@@ -670,7 +692,9 @@ impl FilesInner {
     /// that retired because no file waited for it any more stored none.
     fn finished(&self, run: &mut Run<'_>, id: i64, attempted: super::file_upload::Attempted) {
         use super::file_upload::Attempted;
-        run.lanes.remove(&id);
+        if let Some(lane) = run.lanes.remove(&id) {
+            self.set_lane_attempts(lane, run.in_flight(lane));
+        }
         let started = run.started.remove(&id);
         let stored = attempted == Attempted::Stored;
         match attempted {

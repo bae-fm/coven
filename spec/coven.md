@@ -7642,11 +7642,12 @@ condition in the session, because a retry must not overwrite a competing floor.
 - How far each file being sent has got is the app's to hear too, as it goes.
   Ana's phone sends a 20 MB photo in one request; until the provider answers,
   no session holds any confirmed bytes, so `coven_uploads` shows none. The
-  upload watch (api.md E7) tells her app, file by file, how far through the
-  encrypted object the bytes handed to the connection reach (§6.7), out of the
-  object's whole size, known before the attempt sends anything. A file in
-  parts counts each part from where it starts in the object, and a resumed or
-  restarted session from where the provider says it stands. On CloudKit the
+  upload watch (api.md E7) tells her app, file by file, how many of the
+  encrypted object's bytes have been handed to the connection (§6.7), out of
+  the object's whole size, known before the attempt sends anything. A file in
+  parts counts the bytes the provider confirmed and each part's bytes handed
+  over so far, whatever order its parts go in, and a resumed or restarted
+  session starts from what the provider says it holds. On CloudKit the
   bytes are the fraction of each asset its client reports sent (§6.7). As an
   attempt ends, the watch says how: stored, failed, held by the pause or a
   metered network, or dropped. The watch is memory only, like
@@ -7691,6 +7692,31 @@ condition in the session, because a retry must not overwrite a competing floor.
     session 7 days after it began.
 - A session the provider has expired starts over, reading and checking the
   source again, with the same id, key and chunk hashes.
+
+**A file's parts go together where the provider keeps them apart.** An S3
+multipart upload keeps each part by its number, whatever order the parts
+arrive in, and a part sent again takes the place of the one with its number.
+So once its first part has started the upload, a file's attempt sends as many
+of its parts at once as the upload limit leaves connections free
+([api.md E5](api.md#e5-storage-and-sync)), and records each part the provider
+confirms as its reply comes in. Ana uploads one 300 MB video to S3 with the
+limit at 4 and nothing else queued: four of its parts are in flight at a time.
+Without this, one large file would move over one connection while the limit
+allowed four.
+
+- Each part beside the attempt's first takes a connection of the attempt's
+  lane, counted against the limit as an upload is, and only while no upload
+  of the lane waits to start. Ana imports a photo while the video's parts go
+  up: it starts as soon as one of the video's parts ends, before the video
+  sends another.
+- A part's failure starts no more parts. Those in flight end, each one the
+  provider confirms is recorded, and the next attempt resumes from every part
+  the provider holds, a part whose reply was lost among them, which listing
+  the upload finds in any order (Appendix E.10). No part goes twice.
+- The other providers take a file's parts one after another. OneDrive refuses
+  fragments out of order; Dropbox documents no way to resume its concurrent
+  session after a lost reply (Appendix E.2); and CloudKit saves each part
+  with the session's confirmed boundary (Appendix E.1).
 
 **Completion** is one local transaction. It switches each file still waiting
 for the upload to the stored location, setting its content hash, as a write of
