@@ -88,8 +88,8 @@ async fn a_floor_naming_snapshots_out_of_order_or_below_its_first_kept_slot_is_d
 /// every admin slot through it, so an author that history doesn't hold there
 /// can't appear later: the snapshot is damaged, not waiting (format.md D9).
 /// Ben's store snapshot authenticates against Ana's history, and is refused
-/// against her history cut before the slot that added Ben's device, which
-/// still holds Ben's member.
+/// against her history cut before Ben's admission, the one slot that added
+/// his member and his device (§13.2).
 #[tokio::test]
 async fn a_snapshot_whose_author_its_history_lacks_at_its_coverage_is_damaged() {
     let group = Group::new();
@@ -124,7 +124,7 @@ async fn a_snapshot_whose_author_its_history_lacks_at_its_coverage_is_damaged() 
         .collect();
     let mut short_ring = ring.clone();
     let short = History::restore(&before, group.store, &mut short_ring, &ana.identity).unwrap();
-    assert!(short.belonged(&Audience::Store, &ben.identity.member(), added - 1));
+    assert!(!short.belonged(&Audience::Store, &ben.identity.member(), added - 1));
     let result = read.authenticate(&short);
     assert!(
         matches!(
