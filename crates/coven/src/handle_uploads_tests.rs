@@ -818,8 +818,11 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
 
     let ana = &network.devices[0];
     ana.storage.set_faults(Faults::none()).await;
+    // The retry answers once the upload's attempt has ended, whether it
+    // stored the file or the loop had already; the edit that waited for it
+    // is sent by the pass the test then runs.
     ana.handle.retry_uploads_now().await.unwrap();
-    settle(&network, 0, 0).await;
+    settle(&network, 0, 1).await;
     assert_eq!(queued_writes(&network, 0).await, 0);
     network.sync(1).await;
     assert!(network.devices[1].handle.applied_slot().await > marker_slot + 1);
