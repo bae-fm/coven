@@ -641,6 +641,9 @@ pub fn store_changes() -> Vec<StoreChange> {
             member: m,
             expected: member(),
             keys: replacement(),
+            access: Some(crate::MemberAccess::S3AccessKey {
+                access_key_id: "recovered-key".into(),
+            }),
             device: DeviceId(3),
             device_name: "D".into(),
         },

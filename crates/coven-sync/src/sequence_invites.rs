@@ -81,10 +81,6 @@ pub(crate) enum InviteState {
     /// This checked request is approved: `binding` is the operation that
     /// claims its admission, journaled with this state.
     Approving { code: SecretText, request: Vec<u8>, binding: OperationId },
-    /// A kept replacement records the invite's new S3 key for its member:
-    /// `set_access`, once journaled with this state, is the operation
-    /// claiming that record.
-    Recording { set_access: Option<OperationId> },
     /// The invite ended: put its marker in the request's place and settle
     /// its account's sharing. `share` is the share's record the invite was
     /// claiming when it ended, whose claim it settles without claiming again;
@@ -184,10 +180,17 @@ impl InviteWork {
                 device,
                 device_name,
             },
+            // A recovery on S3 records the invite's new key as the member's
+            // access in the same entry; on another provider the member keeps
+            // the account they reach storage with (§13.2, §14.3).
             InviteBinding::Replace { expected } => StoreChange::RecoverMember {
                 member: self.member,
                 expected,
                 keys,
+                access: match &self.access {
+                    InviteGrant::S3Key(_) => Some(self.access.member_access()),
+                    InviteGrant::Account { .. } => None,
+                },
                 device,
                 device_name,
             },
@@ -240,7 +243,7 @@ fn listed(data: &[u8], operation: OperationId) -> Result<Invite, SyncError> {
             request: work.present_request(request)?,
             binding: *binding,
         },
-        InviteState::Recording { .. } | InviteState::Settled { .. } => {
+        InviteState::Settled { .. } => {
             return Err(coven_database::DbError::Invariant {
                 what: "coven_invites lists invites that haven't ended",
             }
@@ -581,45 +584,13 @@ impl SequenceSync {
                         .into());
                     }
                     let outcome = self.run_administration(session, ring, member, binding).await?;
-                    work.state = match (&outcome, &work.binding, &work.access) {
-                        (
-                            OperationOutcome::Landed(_) | OperationOutcome::Satisfied,
-                            InviteBinding::Replace { .. },
-                            InviteGrant::S3Key(_),
-                        ) => InviteState::Recording { set_access: None },
-                        _ => InviteState::Settled { share: None, end: None },
-                    };
-                    // A refusal is the binding's outcome, which
-                    // `coven_operations` lists for the app that approved it;
-                    // the invite ends as a decline does.
+                    // Landed or refused, the invite ends. A refusal is the
+                    // binding's outcome, which `coven_operations` lists for the
+                    // app that approved it; the invite ends as a decline does.
+                    work.state = InviteState::Settled { share: None, end: None };
                     self.database
                         .finish_operation_advancing(binding, outcome, work.update(&record)?)
                         .await?;
-                }
-                InviteState::Recording { set_access: None } => {
-                    let change = StoreChange::SetAccess {
-                        member: work.member,
-                        access: work.access.member_access(),
-                    };
-                    let recording = InviteWork::naming(&record, |set_access| {
-                        InviteState::Recording { set_access: Some(set_access) }
-                    });
-                    match self.start_child(session, member, change, recording).await? {
-                        Child::Journaled(_) => continue,
-                        Child::Decided(outcome) => {
-                            refused_record(id, &outcome);
-                            work.state = InviteState::Settled { share: None, end: None };
-                            self.database.advance_operation(work.update(&record)?).await?;
-                        }
-                    }
-                }
-                InviteState::Recording { set_access: Some(child) } => {
-                    let child = *child;
-                    let outcome = self.run_administration(session, ring, member, child).await?;
-                    refused_record(id, &outcome);
-                    work.state = InviteState::Settled { share: None, end: None };
-                    let update = work.update(&record)?;
-                    self.database.finish_operation_advancing(child, outcome, update).await?;
                 }
                 InviteState::Settled { share, end } => {
                     let (share, end) = (*share, *end);
@@ -820,16 +791,6 @@ pub(crate) enum InviteProgress {
     Waiting(PendingReason),
     /// The invite's work is done.
     Finished,
-}
-
-/// Log a kept replacement's key record the caught-up history refused, as
-/// when the member was removed meanwhile. It would never be accepted, so the
-/// invite ends without it, as a refused binding ends it; the person deletes
-/// the key in the provider's console (§14.3).
-fn refused_record(id: OperationId, outcome: &OperationOutcome) {
-    if let OperationOutcome::Rejected(reason) = outcome {
-        tracing::warn!(?id, ?reason, "a kept replacement's key record was refused");
-    }
 }
 
 /// A time as whole seconds since the Unix epoch, as codes and markers carry

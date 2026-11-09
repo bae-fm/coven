@@ -100,10 +100,10 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
 
 /// Carol joins, then loses her only installation. Ana's recovery invite
 /// fixes Carol's id; Carol's new installation joins with fresh keys and
-/// keeps her id, role and old device id. The binding records no access: the
-/// invite's new S3 key is recorded for Carol by its own entry, which leaves
-/// her old key pending deletion. Carol's old installation and her old
-/// restore code report the replacement.
+/// keeps her id, role and old device id. The admission that recovers her
+/// also records the invite's new S3 key as her access, which leaves her old
+/// key pending deletion. Carol's old installation and her old restore code
+/// report the replacement.
 #[tokio::test]
 async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -153,6 +153,10 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let info = members.iter().find(|m| m.id == carol).unwrap();
     assert_eq!(info.keys, code.member_keys.public_keys());
     assert_eq!(info.role, MemberRole::Member);
+    assert_eq!(
+        info.access,
+        coven_format::MemberAccess::S3AccessKey { access_key_id: "recovery-key".into() }
+    );
     assert_eq!(info.devices.len(), 2);
     assert!(info.devices.iter().all(|d| d.state == DeviceState::Active));
     assert!(owner.handle.pending().await.unwrap().is_empty());

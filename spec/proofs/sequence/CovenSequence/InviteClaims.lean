@@ -3,9 +3,8 @@
 
 An invite on the device that made it claims entries of its own beyond its
 approval's binding (§13.2): the record of its share before the grant
-(`AddInviteShare`), the end of that share once the invite ends
-(`EndInviteShare`), and a kept S3 replacement's record of its member's new
-key (`SetAccess`). Each is an operation of its own, which claims its slot
+(`AddInviteShare`) and the end of that share once the invite ends
+(`EndInviteShare`). Each is an operation of its own, which claims its slot
 through the device's one claim journal (§5.1): while one claim is open, no
 other claim starts, so no write is sent and no admin operation lands.
 
@@ -37,8 +36,6 @@ inductive Stage where
   /-- The grant, the code shown, the request and the app's decision
   (`Grant`, `Waiting`, `Approving`), which `InviteLifecycle` follows. -/
   | granted
-  /-- A kept S3 replacement records its member's new key. -/
-  | recording
   | settled
   deriving DecidableEq, Repr
 
@@ -46,7 +43,6 @@ inductive Stage where
 inductive Kind where
   | share
   | ending
-  | record
   deriving DecidableEq, Repr
 
 /-- What storage did with the open claim's last attempt. -/
@@ -67,8 +63,6 @@ structure World where
   share : Option Bool
   /-- The operation ending the share. -/
   ending : Option Bool
-  /-- The operation recording the replacement's key. -/
-  record : Option Bool
   /-- The device's one open claim, the operation whose it is, and its last
   attempt. -/
   claim : Option (Kind × Attempt)
@@ -76,17 +70,10 @@ structure World where
   recorded : Bool
   /-- ... and its end. -/
   ended : Bool
-  /-- ... and the replacement's key. -/
-  accessed : Bool
   deriving DecidableEq, Repr
 
 /-- The invite just made by the app's write. -/
-def made : World := ⟨some .requested, none, none, none, none, false, false, false⟩
-
-/-- Whether approval goes on to record a kept replacement's S3 key. -/
-structure Config where
-  records : Bool
-  deriving DecidableEq, Repr
+def made : World := ⟨some .requested, none, none, none, false, false⟩
 
 structure Rules where
   /-- The invite's state names each operation it starts, and its settled
@@ -103,18 +90,15 @@ def Rules.unnamed : Rules := ⟨false⟩
 def child (w : World) : Kind → Option Bool
   | .share => w.share
   | .ending => w.ending
-  | .record => w.record
 
 def setChild (w : World) : Kind → Option Bool → World
   | .share, v => { w with share := v }
   | .ending, v => { w with ending := v }
-  | .record, v => { w with record := v }
 
 /-- Applying the entry `k` claims. -/
 def applyEntry (w : World) : Kind → World
   | .share => { w with recorded := true }
   | .ending => { w with ended := true }
-  | .record => { w with accessed := true }
 
 /-- History records the share and not its end. -/
 def shareOpen (w : World) : Bool := w.recorded && !w.ended
@@ -149,13 +133,12 @@ def settledStep (R : Rules) (w : World) : World :=
     match w.claim with
     | some (.share, _) => settleShare w
     | some (.ending, _) => run w .ending
-    | some (.record, _) => w
     | none =>
       if shareOpen w then
         match w.ending with
         | none => { w with ending := some false }
         | some _ => run w .ending
-      else { w with row := none, share := none, ending := none, record := none }
+      else { w with row := none, share := none, ending := none }
   else
     -- The share's end, once run, ends in a transaction of its own; the
     -- invite looks at history alone.
@@ -175,11 +158,6 @@ def pass (R : Rules) (w : World) : World :=
   | some .sharing =>
     if w.share = some true then { w with row := some .granted, share := none } else run w .share
   | some .granted => w
-  | some .recording =>
-    match w.record with
-    | none => { w with record := some false }
-    | some true => { w with row := some .settled, record := none }
-    | some false => run w .record
   | some .settled => settledStep R w
 
 inductive Act where
@@ -218,7 +196,7 @@ def enabled (w : World) : Act → Bool
   | .approve => w.row == some .granted
   | .cancel | .expire => ends w.row
 
-def act (R : Rules) (c : Config) (w : World) : Act → World
+def act (R : Rules) (w : World) : Act → World
   | .pass => pass R w
   | .land => match w.claim with
     | some (k, _) => { w with claim := some (k, .landed) }
@@ -229,25 +207,25 @@ def act (R : Rules) (c : Config) (w : World) : Act → World
   | .apply => match w.claim with
     | some (k, _) => applyEntry w k
     | none => w
-  | .approve => { w with row := some (if c.records then .recording else .settled) }
+  | .approve => { w with row := some .settled }
   | .cancel | .expire => { w with row := some .settled }
 
-inductive Step (R : Rules) (c : Config) : World → World → Prop
-  | step (w : World) (a : Act) (h : enabled w a = true) : Step R c w (act R c w a)
+inductive Step (R : Rules) : World → World → Prop
+  | step (w : World) (a : Act) (h : enabled w a = true) : Step R w (act R w a)
 
-inductive Steps (R : Rules) (c : Config) : World → World → Prop
-  | refl (w : World) : Steps R c w w
-  | step {w w' w'' : World} : Step R c w w' → Steps R c w' w'' → Steps R c w w''
+inductive Steps (R : Rules) : World → World → Prop
+  | refl (w : World) : Steps R w w
+  | step {w w' w'' : World} : Step R w w' → Steps R w' w'' → Steps R w w''
 
-def Reachable (R : Rules) (c : Config) (w : World) : Prop := Steps R c made w
+def Reachable (R : Rules) (w : World) : Prop := Steps R made w
 
 /-- Take each action in turn while it is enabled. -/
-def trace (R : Rules) (c : Config) : World → List Act → Option World
+def trace (R : Rules) : World → List Act → Option World
   | w, [] => some w
-  | w, a :: rest => if enabled w a then trace R c (act R c w a) rest else none
+  | w, a :: rest => if enabled w a then trace R (act R w a) rest else none
 
-theorem trace_steps (R : Rules) (c : Config) :
-    ∀ (acts : List Act) (w w' : World), trace R c w acts = some w' → Steps R c w w'
+theorem trace_steps (R : Rules) :
+    ∀ (acts : List Act) (w w' : World), trace R w acts = some w' → Steps R w w'
   | [], w, w', h => by
     simp only [trace, Option.some.injEq] at h
     subst h
@@ -255,28 +233,26 @@ theorem trace_steps (R : Rules) (c : Config) :
   | a :: rest, w, w', h => by
     simp only [trace] at h
     split at h
-    · exact .step (.step w a ‹_›) (trace_steps R c rest _ _ h)
+    · exact .step (.step w a ‹_›) (trace_steps R rest _ _ h)
     · cases h
 
-theorem Steps.trans {R : Rules} {c : Config} {a b d : World} :
-    Steps R c a b → Steps R c b d → Steps R c a d := by
+theorem Steps.trans {R : Rules} {a b d : World} :
+    Steps R a b → Steps R b d → Steps R a d := by
   intro h k
   induction h with
   | refl => exact k
   | step s _ ih => exact .step s (ih k)
 
 /-- A property every step keeps holds from then on. -/
-theorem stays {R : Rules} {c : Config} (P : World → Prop)
-    (keep : ∀ w a, P w → enabled w a = true → P (act R c w a)) :
-    ∀ {w w'}, Steps R c w w' → P w → P w' := by
+theorem stays {R : Rules} (P : World → Prop)
+    (keep : ∀ w a, P w → enabled w a = true → P (act R w a)) :
+    ∀ {w w'}, Steps R w w' → P w → P w' := by
   intro w w' h
   induction h with
   | refl => exact id
   | step s _ ih =>
     cases s with
     | step a e => exact fun p => ih (keep _ a p e)
-
-def plain : Config := ⟨false⟩
 
 /-! ## Counterexamples: the invite before it named its operations -/
 
@@ -285,8 +261,8 @@ claim. -/
 def StrandedEnd (w : World) : Prop :=
   w.row = none ∧ ∃ a, w.claim = some (.ending, a)
 
-theorem stranded_end_stays (c : Config) (w : World) (a : Act) (h : StrandedEnd w)
-    (_ : enabled w a = true) : StrandedEnd (act Rules.unnamed c w a) := by
+theorem stranded_end_stays (w : World) (a : Act) (h : StrandedEnd w)
+    (_ : enabled w a = true) : StrandedEnd (act Rules.unnamed w a) := by
   obtain ⟨row, x, claim⟩ := h
   cases a <;> simp_all [StrandedEnd, act, enabled, ends, applyEntry]
 
@@ -296,11 +272,11 @@ reads its own slot first: the share has ended, so the settled step ends the
 invite alone. The end's claim stays open on every path after, and the
 device claims no slot again. -/
 theorem ended_share_strands_claim :
-    ∃ w, trace Rules.unnamed plain made
+    ∃ w, trace Rules.unnamed made
         [.pass, .pass, .land, .pass, .pass, .cancel, .pass, .pass, .land, .apply, .pass] = some w ∧
-      ∀ w', Steps Rules.unnamed plain w w' → w'.claim.isSome := by
+      ∀ w', Steps Rules.unnamed w w' → w'.claim.isSome := by
   refine ⟨_, rfl, fun w' h => ?_⟩
-  obtain ⟨_, x, claim⟩ := stays _ (stranded_end_stays plain) h ⟨rfl, _, rfl⟩
+  obtain ⟨_, x, claim⟩ := stays _ stranded_end_stays h ⟨rfl, _, rfl⟩
   simp [claim]
 
 /-- A cancelled invite whose share's record holds the claim, its share open
@@ -309,8 +285,8 @@ def StrandedShare (w : World) : Prop :=
   w.row = some .settled ∧ w.claim = some (.share, .landed) ∧ w.recorded = true ∧
     w.ended = false ∧ w.ending ≠ some true
 
-theorem stranded_share_stays (c : Config) (w : World) (a : Act) (h : StrandedShare w)
-    (_ : enabled w a = true) : StrandedShare (act Rules.unnamed c w a) := by
+theorem stranded_share_stays (w : World) (a : Act) (h : StrandedShare w)
+    (_ : enabled w a = true) : StrandedShare (act Rules.unnamed w a) := by
   obtain ⟨row, claim, recorded, ended, ending⟩ := h
   cases a <;> simp_all [StrandedShare, act, pass, settledStep, Rules.unnamed, enabled, ends,
     applyEntry, attemptIs, shareOpen]
@@ -322,12 +298,12 @@ invite reads the share open in history and claims its end, which the open
 claim refuses. The share's claim stays open on every path after, and the
 invite never ends. -/
 theorem cancelled_share_strands_claim :
-    ∃ w, trace Rules.unnamed plain made [.pass, .pass, .cancel, .land, .apply, .pass, .pass] =
+    ∃ w, trace Rules.unnamed made [.pass, .pass, .cancel, .land, .apply, .pass, .pass] =
         some w ∧
-      ∀ w', Steps Rules.unnamed plain w w' → w'.claim.isSome ∧ w'.row.isSome := by
+      ∀ w', Steps Rules.unnamed w w' → w'.claim.isSome ∧ w'.row.isSome := by
   refine ⟨_, rfl, fun w' h => ?_⟩
   obtain ⟨row, claim, _⟩ :=
-    stays _ (stranded_share_stays plain) h ⟨rfl, rfl, rfl, rfl, by decide⟩
+    stays _ stranded_share_stays h ⟨rfl, rfl, rfl, rfl, by decide⟩
   simp [claim, row]
 
 /-! ## The properties, under the rules -/
@@ -335,16 +311,14 @@ theorem cancelled_share_strands_claim :
 /-- What every world reachable under `correct` satisfies. -/
 structure Inv (w : World) : Prop where
   /-- A finished invite left no operation it started, and no claim. -/
-  gone : w.row = none → w.share = none ∧ w.ending = none ∧ w.record = none ∧ w.claim = none
+  gone : w.row = none → w.share = none ∧ w.ending = none ∧ w.claim = none
   /-- Each operation is journaled only in the stages that name it. -/
   shareAt : w.share.isSome → w.row = some .sharing ∨ w.row = some .settled
   sharing : w.row = some .sharing → w.share.isSome
   endingAt : w.ending.isSome → w.row = some .settled
-  recordAt : w.record.isSome → w.row = some .recording
   /-- The open claim is a running operation's. -/
   claimShare : ∀ a, w.claim = some (.share, a) → w.share = some false
   claimEnding : ∀ a, w.claim = some (.ending, a) → w.ending = some false
-  claimRecord : ∀ a, w.claim = some (.record, a) → w.record = some false
   /-- The share's end at its applied step has applied. -/
   endingDone : w.ending = some true → w.ended = true
 
@@ -353,43 +327,39 @@ theorem inv_made : Inv made := by
 
 set_option maxHeartbeats 2000000 in
 theorem inv_pass (w : World) (inv : Inv w) : Inv (pass Rules.correct w) := by
-  obtain ⟨gone, shareAt, sharing, endingAt, recordAt, claimShare, claimEnding, claimRecord,
-    endingDone⟩ := inv
-  rcases hrow : w.row with _ | (_ | _ | _ | _ | _)
+  obtain ⟨gone, shareAt, sharing, endingAt, claimShare, claimEnding, endingDone⟩ := inv
+  rcases hrow : w.row with _ | (_ | _ | _ | _)
   · constructor <;> simp_all [pass]
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> constructor <;> simp_all [pass]
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> rcases hs : w.share with _ | (_ | _) <;> constructor <;>
+  · rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> constructor <;> simp_all [pass]
+  · rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> rcases hs : w.share with _ | (_ | _) <;> constructor <;>
       simp_all [pass, run, child, setChild, applyEntry]
   · constructor <;> simp_all [pass]
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> rcases hr : w.record with _ | (_ | _) <;> constructor <;>
-      simp_all [pass, run, child, setChild, applyEntry]
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> rcases he : w.ending with _ | (_ | _) <;> rcases hrec : w.recorded <;>
+  · rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> rcases he : w.ending with _ | (_ | _) <;> rcases hrec : w.recorded <;>
       rcases hend : w.ended <;> constructor <;>
       simp_all [pass, settledStep, Rules.correct, settleShare, run, child, setChild, applyEntry,
         shareOpen]
 
 set_option maxHeartbeats 2000000 in
-theorem inv_step (c : Config) (w : World) (a : Act) (inv : Inv w) (e : enabled w a = true) :
-    Inv (act Rules.correct c w a) := by
+theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled w a = true) :
+    Inv (act Rules.correct w a) := by
   cases a
   case pass => exact inv_pass w inv
   all_goals
-    obtain ⟨gone, shareAt, sharing, endingAt, recordAt, claimShare, claimEnding, claimRecord,
-      endingDone⟩ := inv
-  case land | lose | apply => rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> constructor <;> simp_all [act, applyEntry]
+    obtain ⟨gone, shareAt, sharing, endingAt, claimShare, claimEnding, endingDone⟩ := inv
+  case land | lose | apply => rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> constructor <;> simp_all [act, applyEntry]
   all_goals
-    rcases hrow : w.row with _ | (_ | _ | _ | _ | _) <;> (try rcases hrec : c.records) <;>
-      rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> constructor <;> simp_all [act, enabled, ends]
+    rcases hrow : w.row with _ | (_ | _ | _ | _) <;>
+      rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> constructor <;> simp_all [act, enabled, ends]
 
-theorem reachable_inv (c : Config) {w : World} (h : Reachable Rules.correct c w) : Inv w :=
-  stays Inv (inv_step c) h inv_made
+theorem reachable_inv {w : World} (h : Reachable Rules.correct w) : Inv w :=
+  stays Inv inv_step h inv_made
 
 /-- An invite ends together with every operation it started: once its row
 is gone, none of theirs is journaled and no claim is open. -/
-theorem children_end_with_invite (c : Config) {w : World} (h : Reachable Rules.correct c w)
+theorem children_end_with_invite {w : World} (h : Reachable Rules.correct w)
     (finished : w.row = none) :
-    w.share = none ∧ w.ending = none ∧ w.record = none ∧ w.claim = none :=
-  (reachable_inv c h).gone finished
+    w.share = none ∧ w.ending = none ∧ w.claim = none :=
+  (reachable_inv h).gone finished
 
 /-! ### Every invite ends, and its claims with it -/
 
@@ -399,25 +369,25 @@ def coven : Act → Bool
   | .pass | .land | .apply | .expire => true
   | _ => false
 
-inductive Moves (c : Config) : World → World → Prop
-  | refl (w : World) : Moves c w w
+inductive Moves : World → World → Prop
+  | refl (w : World) : Moves w w
   | step {w w' : World} (a : Act) (own : coven a = true) (e : enabled w a = true)
-      (rest : Moves c (act Rules.correct c w a) w') : Moves c w w'
+      (rest : Moves (act Rules.correct w a) w') : Moves w w'
 
-theorem Moves.steps {c : Config} {w w' : World} (h : Moves c w w') :
-    Steps Rules.correct c w w' := by
+theorem Moves.steps {w w' : World} (h : Moves w w') :
+    Steps Rules.correct w w' := by
   induction h with
   | refl => exact .refl _
   | step a _ e _ ih => exact .step (.step _ a e) ih
 
-theorem Moves.trans {c : Config} {a b d : World} (h : Moves c a b) (k : Moves c b d) :
-    Moves c a d := by
+theorem Moves.trans {a b d : World} (h : Moves a b) (k : Moves b d) :
+    Moves a d := by
   induction h with
   | refl => exact k
   | step x own e _ ih => exact .step x own e (ih k)
 
-theorem one {c : Config} {w : World} (a : Act) (own : coven a = true)
-    (e : enabled w a = true) : Moves c w (act Rules.correct c w a) :=
+theorem one {w : World} (a : Act) (own : coven a = true)
+    (e : enabled w a = true) : Moves w (act Rules.correct w a) :=
   .step a own e (.refl _)
 
 def attemptWork : Attempt → Nat
@@ -448,7 +418,6 @@ def measure (w : World) : Nat :=
   match w.row with
   | none => 0
   | some .settled => 100 + settledWork w
-  | some .recording => 200 + (if w.record = none then 5 else runWork w .record 4)
   | some .granted => 300
   | some .sharing => 400 + runWork w .share 4
   | some .requested => 500
@@ -460,29 +429,28 @@ def quiet (w : World) : Bool := w.row.isNone && w.claim.isNone
 /-- The settled step's work is bounded, so every earlier stage outweighs it. -/
 theorem settledWork_le (w : World) : settledWork w ≤ 30 := by
   simp only [settledWork]
-  rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> simp [attemptWork] <;>
+  rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> simp [attemptWork] <;>
     split <;> (try split) <;> omega
 
 set_option maxHeartbeats 4000000 in
 /-- From every reachable state that isn't quiet, coven alone makes
 progress: it sends a claim's attempt again until it lands, or the pass
 takes its next step, or the invite expires. -/
-theorem progress (c : Config) (w : World) (inv : Inv w) (busy : quiet w = false) :
-    ∃ w', Moves c w w' ∧ measure w' < measure w := by
-  obtain ⟨gone, shareAt, sharing, endingAt, recordAt, claimShare, claimEnding, claimRecord,
-    endingDone⟩ := inv
-  have passes : w.row.isSome → measure (act Rules.correct c w .pass) < measure w →
-      ∃ w', Moves c w w' ∧ measure w' < measure w :=
+theorem progress (w : World) (inv : Inv w) (busy : quiet w = false) :
+    ∃ w', Moves w w' ∧ measure w' < measure w := by
+  obtain ⟨gone, shareAt, sharing, endingAt, claimShare, claimEnding, endingDone⟩ := inv
+  have passes : w.row.isSome → measure (act Rules.correct w .pass) < measure w →
+      ∃ w', Moves w w' ∧ measure w' < measure w :=
     fun some less => ⟨_, one .pass rfl (by simpa [enabled] using some), less⟩
-  have lands : attemptIs w .sent = true → measure (act Rules.correct c w .land) < measure w →
-      ∃ w', Moves c w w' ∧ measure w' < measure w :=
+  have lands : attemptIs w .sent = true → measure (act Rules.correct w .land) < measure w →
+      ∃ w', Moves w w' ∧ measure w' < measure w :=
     fun sent less => ⟨_, one .land rfl (by simpa [enabled] using sent), less⟩
-  rcases hrow : w.row with _ | (_ | _ | _ | _ | _)
+  rcases hrow : w.row with _ | (_ | _ | _ | _)
   · have := gone hrow
     simp_all [quiet]
   · apply passes (by simp [hrow])
-    rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> simp_all [act, pass, measure, runWork, child]
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> rcases hs : w.share with _ | (_ | _)
+    rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> simp_all [act, pass, measure, runWork, child]
+  · rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> rcases hs : w.share with _ | (_ | _)
     all_goals first
       | (refine lands ?_ ?_
          · simp [attemptIs, hc]
@@ -493,18 +461,7 @@ theorem progress (c : Config) (w : World) (inv : Inv w) (busy : quiet w = false)
     have := settledWork_le { w with row := some .settled }
     simp only [act, measure, hrow] at this ⊢
     omega
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> rcases hr : w.record with _ | (_ | _)
-    all_goals first
-      | (refine lands ?_ ?_
-         · simp [attemptIs, hc]
-         · simp_all [act, measure, runWork, attemptWork])
-      | (apply passes (by simp [hrow])
-         have := settledWork_le { w with row := some .settled, record := none }
-         simp_all [act, pass, run, measure, runWork, child, setChild, applyEntry, attemptWork]
-         omega)
-      | (apply passes (by simp [hrow])
-         simp_all [act, pass, run, measure, runWork, child, setChild, applyEntry, attemptWork])
-  · rcases hc : w.claim with _ | ⟨(_ | _ | _), (_ | _ | _)⟩ <;> rcases he : w.ending with _ | (_ | _) <;> rcases hrec : w.recorded <;>
+  · rcases hc : w.claim with _ | ⟨(_ | _), (_ | _ | _)⟩ <;> rcases he : w.ending with _ | (_ | _) <;> rcases hrec : w.recorded <;>
       rcases hend : w.ended
     all_goals first
       | (refine lands ?_ ?_
@@ -520,14 +477,14 @@ where the invite has ended and the device's writes go out. That includes a
 crash between any two of its transactions, its own slots read before their
 claims settle, slots lost to other devices, and the app cancelling the
 invite while its share's record is being claimed. -/
-theorem settles (c : Config) {w : World} (h : Reachable Rules.correct c w) :
-    ∃ w', Moves c w w' ∧ quiet w' = true := by
+theorem settles {w : World} (h : Reachable Rules.correct w) :
+    ∃ w', Moves w w' ∧ quiet w' = true := by
   generalize hm : measure w = m
   induction m using Nat.strongRecOn generalizing w with
   | ind m ih =>
     by_cases q : quiet w = true
     · exact ⟨w, .refl w, q⟩
-    · obtain ⟨w', moves, less⟩ := progress c w (reachable_inv c h) (by simpa using q)
+    · obtain ⟨w', moves, less⟩ := progress w (reachable_inv h) (by simpa using q)
       obtain ⟨w'', more, quiet⟩ := ih (measure w') (hm ▸ less) (h.trans moves.steps) rfl
       exact ⟨w'', moves.trans more, quiet⟩
 

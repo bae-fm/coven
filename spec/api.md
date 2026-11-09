@@ -7433,9 +7433,9 @@ pub enum ProviderSignOut {
 - A replacement invite fixes an existing active id before the requester
   generates keys. Approval claims one admission that rebinds the id to the
   exact signed request's new pair and registers the request's device, its
-  prefix carrying copies of every store key and the held circle keys. On S3
-  an access entry recording the invite's new key for the member follows it.
-  The join requires that admission from its approving device. If the expected binding changed
+  prefix carrying copies of every store key and the held circle keys, and on
+  S3 records the invite's new key as the member's access. The join requires
+  that admission from its approving device. If the expected binding changed
   first, approval claims nothing and fails; available key bytes alone are
   not admission.
   Restore checks the supplied pair against the current binding and reports

@@ -4663,7 +4663,8 @@ exposed, its copy naming someone who wasn't a member, and replaced it
 
 The admission records how a new member reaches storage: their provider
 account, or the id of the S3 key made for them and who holds it. Any admin can
-then take it back later (§14.2, §14.3).
+then take it back later (§14.2, §14.3). A recovery records the new S3 key its
+invite carries in the same entry.
 
 **Making the invite** is a step of a write (§4), with or without storage. Ana's
 app makes Dan's invite and its own row about inviting him in one write. The
@@ -5010,21 +5011,21 @@ Dan is a member by then, or if one of its own invites names his account too
 provider's member list with history: that would take away a share the person
 made outside coven.
 
-Recovering an existing member keeps their role, access records, circles and
-device records. The admission rebinds their pair and registers the new
-installation's fresh device; the member's earlier devices are gone for good
-from that slot (§14.1). If provider access changes too, that is separate work
-with its own access entry (§14.3). Cleaning up a recovery invite takes back
-only what that invite newly granted, never the member's existing access, and
-the usual checks on shared accounts and other grants still apply (§14.2).
+Recovering an existing member keeps their role, circles and device records.
+The admission rebinds their pair and registers the new installation's fresh
+device; the member's earlier devices are gone for good from that slot
+(§14.1). Cleaning up a recovery invite takes back only what that invite newly
+granted, never the member's existing access, and the usual checks on shared
+accounts and other grants still apply (§14.2).
 
-A recovery invite on S3 carries the member's new key. Once the admission
-lands, Ana's phone claims the access entry recording that key for them. If the
-history it catches up with refuses the entry, because Ben removed the member
-meanwhile, the invite ends without it, as a refused approval does: nothing
-would ever accept the entry, and a record that never retries would otherwise
-keep the invite forever. Ana deletes the key in the provider's console
-(§14.3).
+A recovery invite on S3 carries the member's new key, and the admission
+records it as the member's access in the same entry. If Ben removed the
+member meanwhile, the caught-up history refuses the admission before it is
+claimed, and the invite ends as a refused approval does. Ana deletes the key
+in the provider's console (§14.3). An entry of its own after the admission
+would be a second claim, which a removal could refuse after the recovery had
+landed, leaving the recovered member's device on a key history never recorded
+for them.
 
 #### 13.3 Losing everything
 
@@ -12224,11 +12225,11 @@ Write-ups explain each model and state its assumptions:
 | A request is offered for approval, or approved, only once its keys are checked fresh, so history refuses an approval's binding only when the approving device may no longer approve, never for the request's keys | `offered_fresh`, `binding_fresh` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | A request that fails its checks ends the invite in the pass that finds it, as a decline does, with no pending record, and the pass goes on to put the marker in its place, without the app's retry or the invite's expiry | `refused_ends` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; an invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
-| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
+| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | *Body.* A request whose keys are checked only when its binding applies is offered for approval though a member holds its keys, and history refuses the binding only once the admin approves it | `unchecked_keys_approved` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | *Body.* An invite left waiting on a request that failed its checks offers the app a retry that comes back to the same state, and stays listed with its share standing until the app cancels it or it expires | `refused_request_retried` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | An approval whose binding history refuses ends the invite as a decline does, in the pass that ran the binding, and the next pass puts the marker in the request's place | `refused_approval_ends` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
-| An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
+| An invite ends together with every operation it started for its own entries, its share and the share's end, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots, the member's removal and the replacement of its keys included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
 | *Body.* A saved restore code's name, rewritten by each device only for a later slot than the entry's, ends at the latest slot any device saw and that slot's name, whatever order the devices write in, and a forgotten entry stays absent; the rewrite keeps the code the entry holds, in any order of rewrites; overwriting without the slot puts back a name a behind device still holds, and a rewrite that saves the device's own code puts back a code the person's other device has replaced | `saved_latest`, `never_back`, `absent_stays`, `rewrite_keeps_code`, `rewrites_keep_code`, `slotless_puts_back`, `overwrite_puts_back_code` | `proofs/sequence/CovenSequence/SavedName.lean` | §13.1 |

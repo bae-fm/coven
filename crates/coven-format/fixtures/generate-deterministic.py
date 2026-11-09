@@ -431,7 +431,8 @@ def changes(sodium):
         b"\x11" + text(b"N"),
         b"\x12" + bytes([0x55]) * 16 + text(b"dan@example.org"),
         b"\x13" + bytes([0x55]) * 16,
-        b"\x14" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34) + u64(3) + text(b"D"),
+        b"\x14" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34) + b"\x01" + b"\x01"
+        + text(b"recovered-key") + u64(3) + text(b"D"),
     ]
 
 

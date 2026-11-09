@@ -1171,8 +1171,6 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
   leaves one running forever.
 - `stop_strands_approval`: a stop that doesn't end the invites leaves an
   approval under way listed forever; it never expires.
-- `refused_record_strands`: a refused access record that doesn't end its
-  invite leaves a pending record no one can clear.
 - `split_binding_disagrees`: a binding ended in a transaction of its own shows,
   after a crash, its outcome beside an approval still under way.
 - `reclaim_binds_twice`: an approval that journals its binding again after a
@@ -1197,8 +1195,8 @@ it.
 
 [`InviteClaims`](sequence/CovenSequence/InviteClaims.lean) models what
 `InviteLifecycle` takes as landing in one step: the entries an invite claims
-through operations of its own, its share's record, the share's end and a kept
-S3 replacement's key record, and the device's one open claim they share
+through operations of its own, its share's record and the share's end, and
+the device's one open claim they share
 (§5.1, §13.2). Each attempt is sent, then lands or loses its slot to another
 device; a pass may read this device's own landed slot before it settles the
 claim, as one that restarts after a crash between the two does; the app
@@ -1910,8 +1908,7 @@ deleting slot or null).
 
 **`inviteLifecycle`** runs one invite's events through `InviteLifecycle`'s
 steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).
-`delivery` is `"sent"` or `"inPerson"`, `records` whether approving also
-records a kept replacement's S3 key, and `events` a list of `pass`, `send`
+`events` is a list of `pass`, `send`
 (the joiner writes its request), `sendUsed` (it writes one whose keys a member
 already holds), `approve`, `decline`, `cancel`, `retry`,
 `ack`, `ackOp`, `administer`, `expire`, `demote` and `remove` (another admin's
@@ -1926,12 +1923,10 @@ always answers. The answer has one entry for the
 invite just made and one after each event: `result` (`ok`, `refused` or
 `skipped`), `invite` as listed (`granting`, `waiting`, `requested`,
 `approving` or null), `binding` and `op` as `coven_operations` lists them
-(`running`, `landed`, `rejected` or null), `pending` (`auto`, `app`, `never`
-or null), `journal`, `request` (the request object is in storage), `shared`
-(the invite's account is shared), `held` (a pass failed with an error the
-connection's record never retries, so no later pass runs; the Rust's sync
-loop holds them, and its case runs none) and `accepted`, the app's steps a
-write accepts now.
+(`running`, `landed`, `rejected`, `stopped` or null), `pending` (`auto`,
+`app`, `never` or null), `journal`, `request` (the request object is in
+storage), `shared` (the invite's account is shared) and `accepted`, the app's
+steps a write accepts now.
 
 ## Rust comparisons
 

@@ -632,7 +632,7 @@ def keyCase (slots held current : List Json) : Json := json% {
 -- An invite's events, through the lifecycle model's steps under the Rust's rules.
 #eval do
   let case := fun (events : List String) =>
-    json% {"kind":"inviteLifecycle","records":false,"events":$(events)}
+    json% {"kind":"inviteLifecycle","events":$(events)}
   -- Shown, requested, approved, bound and acknowledged.
   let approved ← run (case ["send", "pass", "approve", "pass", "ack"])
   checkField approved ["2","invite"] (toJson "requested")

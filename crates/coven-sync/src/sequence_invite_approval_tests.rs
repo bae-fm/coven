@@ -1,9 +1,8 @@
 use crate::sequence_sync::sequence_invites::tests::{
     invite, join, no_request, request_path, requests,
 };
-use crate::sequence_sync::sequence_invites::{InviteState, InviteWork};
+use crate::sequence_sync::sequence_invites::InviteWork;
 use crate::sequence_sync::tests::*;
-use crate::sequence_sync::OperationState;
 use crate::*;
 use coven_database::operation_kind;
 use coven_database::DbError;
@@ -436,13 +435,14 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
     }
 }
 
-/// Ana's kept replacement of Carol's pair on S3 has bound the new pair, and
-/// the invite goes on to record Carol's new key. Ana removed Carol meanwhile,
-/// so the applied history refuses the record. The invite ends, as a refused
-/// binding ends it, instead of keeping a pending record that never retries,
-/// can't be cancelled and is never cleared (§13.2, §14.3).
+/// Ana's recovery invite for Carol on S3 carries Carol's new key. The one
+/// admission that recovers Carol on her new phone records that key as her
+/// access, and the invite ends with it: no entry of its own follows, which a
+/// removal in between could refuse after the recovery had landed (§13.2,
+/// §14.3).
 #[tokio::test]
-async fn a_refused_access_record_ends_its_invite() {
+async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
+    use coven_foundation::files::StoreDirAccess;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -461,7 +461,8 @@ async fn a_refused_access_record_ends_its_invite() {
         })
         .await
         .unwrap();
-    ana.sync
+    let invite = ana
+        .sync
         .create_invite(
             InviteTarget::ReplaceMemberKeys { member: carol.member() },
             InviteAccess::S3AccessKey {
@@ -472,19 +473,23 @@ async fn a_refused_access_record_ends_its_invite() {
         )
         .await
         .unwrap();
-    // The binding landed; recording Carol's new key comes next.
-    let record = ana.database().first_operation(operation_kind::INVITE).await.unwrap().unwrap();
-    let mut work = InviteWork::read(&record).unwrap();
-    work.state = InviteState::Recording { set_access: None };
-    ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();
-    ana.sync
-        .administer(coven_format::admin::StoreChange::RemoveMember { member: carol.member() })
-        .await
-        .unwrap();
+    let code = read_invite_code(invite.shown_code()).unwrap();
+    let (temp, directory) = group.directory();
+    let device = directory.settings().unwrap().device_id;
+    let mut request = JoiningIdentity::prepare(&directory, &code, device, "Carol's phone").unwrap();
+    let phone = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
+    assert!(phone.sync.submit_join(&request).await.unwrap());
     ana.sync.pass().await.unwrap();
-    assert!(ana.database().operations().await.unwrap().is_empty());
-    assert!(ana.database().operation_pending::<PendingRecord>(record.id).await.unwrap().is_none());
-    ana.database().close().await.unwrap();
+    let checked = requests(&ana).await;
+    ana.sync.approve_join_request(&checked[0]).await.unwrap();
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.members[&carol.member()].access, access("carol-new"));
+    assert_eq!(state.devices[&device].member, carol.member());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert_eq!(phone.sync.join_outcome(&mut request).await.unwrap(), JoinOutcome::Admitted);
+    for device in [&ana, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
 }
 
 /// Ana approves Carol's request, and the pass that runs the approval commits

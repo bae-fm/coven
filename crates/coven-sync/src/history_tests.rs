@@ -522,22 +522,30 @@ fn a_member_key_replacement_stops_only_her_other_devices_added_before_it() {
 }
 
 /// Ana's phone recovers Ben on a new phone, device 6: the admission rebinds
-/// his pair and registers the phone, so his old phone, added before and
-/// holding only the old pair, is gone for good, and the new one isn't
-/// (§13.2, §14.1).
+/// his pair, records his new S3 key and registers the phone, so his old
+/// phone, added before and holding only the old pair, is gone for good, and
+/// the new one isn't (§13.2, §14.1, §14.3).
 #[test]
 fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
     let mut household = Household::new();
     let (ana, ben) = (household.ana, household.ben);
     let expected = household.history.state.members[&ben].keys;
     let keys = coven_format::test_utils::keys_from_seed(6).public_keys();
+    let new_key = crate::sequence_sync::tests::access("ben-new");
     let recovery = StoreChange::RecoverMember {
         member: ben,
         expected,
         keys,
+        access: Some(new_key.clone()),
         device: DeviceId(6),
         device_name: "Ben's new phone".into(),
     };
+    // Access of the other kind than creation's is refused, as set-access's is.
+    let mut by_account = recovery.clone();
+    if let StoreChange::RecoverMember { access, .. } = &mut by_account {
+        *access = Some(account("ben@example.org"));
+    }
+    assert_eq!(household.check(1, ana, by_account).err(), Some(OperationRejection::NotAllowed));
     let at = household.entry(1, ana, recovery.clone());
     assert_eq!(
         household.history.gone_for_good(DeviceId(2)),
@@ -546,6 +554,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
     assert_eq!(household.history.gone_for_good(DeviceId(6)), None);
     assert_eq!(household.history.state.devices[&DeviceId(6)].member, ben);
     assert_eq!(household.history.state.members[&ben].keys, keys);
+    assert_eq!(household.history.state.members[&ben].access, new_key);
     // Repeating it is already done; another device or an old pair isn't.
     assert!(household.check(1, ana, recovery.clone()).unwrap().is_none());
     let StoreChange::RecoverMember { member, keys, .. } = recovery else { unreachable!() };
@@ -558,6 +567,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
                     member,
                     expected,
                     keys: coven_format::test_utils::keys_from_seed(7).public_keys(),
+                    access: None,
                     device: DeviceId(7),
                     device_name: "Ben's other phone".into(),
                 },
@@ -574,6 +584,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
                     member,
                     expected: keys,
                     keys: coven_format::test_utils::keys_from_seed(7).public_keys(),
+                    access: None,
                     device: DeviceId(3),
                     device_name: "Ana's laptop".into(),
                 },

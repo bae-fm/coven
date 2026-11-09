@@ -556,11 +556,7 @@ fn cases() -> Vec<Vec<&'static str>> {
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn invite_lifecycle_matches_lean() {
     for events in cases() {
-        let input = json!({
-            "kind": "inviteLifecycle",
-            "records": false,
-            "events": events,
-        });
+        let input = json!({ "kind": "inviteLifecycle", "events": events });
         let expected = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
         let mut case = Case::new().await;
         let mut actual = vec![case.observe("ok").await];

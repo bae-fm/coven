@@ -29,28 +29,28 @@ structure Run where
   sent : Bool
 
 /-- Take the step if it is enabled. -/
-def take (c : Config) (w : World) (a : Act) : World × Bool :=
-  if enabled Rules.rust c w a then (act Rules.rust c w a, true) else (w, false)
+def take (w : World) (a : Act) : World × Bool :=
+  if enabled Rules.rust w a then (act Rules.rust w a, true) else (w, false)
 
 /-- Advance the invite until the pass's attempt returns. `during` are steps
 other writers commit while the attempt reads the request: they run between
 that read and the write after it. Returns whether they ran. -/
-def attempt (c : Config) (during : List Act) : Nat → World → World × Bool
+def attempt (during : List Act) : Nat → World → World × Bool
   | 0, w => (w, false)
   | fuel + 1, w =>
-    if !enabled Rules.rust c w .read then (w, false) else
-    let w := act Rules.rust c w .read
+    if !enabled Rules.rust w .read then (w, false) else
+    let w := act Rules.rust w .read
     match w.read with
     | none => (w, false)
     | some r =>
-      if w.expired && expires r.stage then attempt c during fuel (take c w .lapse).1 else
+      if w.expired && expires r.stage then attempt during fuel (take w .lapse).1 else
       let reading := r.stage == .waiting false && !during.isEmpty
-      let w := if reading then during.foldl (fun w a => (take c w a).1) w else w
+      let w := if reading then during.foldl (fun w a => (take w a).1) w else w
       let w := match r.stage with
-        | .approving => (take c w .bind).1
+        | .approving => (take w .bind).1
         | _ => w
       let applies := atRead w r
-      let next := (take c w .commit).1
+      let next := (take w .commit).1
       let moved := next.row.map (·.step) != some r.step
       -- A refused request ends the invite, which the attempt goes on to
       -- settle; a checked one waits for the app.
@@ -59,23 +59,23 @@ def attempt (c : Config) (during : List Act) : Nat → World → World × Bool
         | .waiting false => next.row.map (·.stage) == some .settled
         | _ => true
       if goesOn then
-        let (w, ran) := attempt c (if reading then [] else during) fuel next
+        let (w, ran) := attempt (if reading then [] else during) fuel next
         (w, ran || reading)
       else (next, reading)
 
 /-- A pass, with other writers' steps committed while it reads the request,
 or after it when it reads none. -/
-def pass (c : Config) (run : Run) (during : List Act := []) : Run := Id.run do
-  let after := fun (w : World) => during.foldl (fun w a => (take c w a).1) w
+def pass (run : Run) (during : List Act := []) : Run := Id.run do
+  let after := fun (w : World) => during.foldl (fun w a => (take w a).1) w
   if run.world.stopped then return { run with world := after run.world }
   let mut w := run.world
   for slot in run.landed do
-    w := (take c w (match slot with | .demote => .demote | .stop => .stop)).1
+    w := (take w (match slot with | .demote => .demote | .stop => .stop)).1
   let run := { run with landed := [] }
   if w.stopped then return { run with world := after w }
-  w := (take c w .revoke).1
-  w := (take c w .runOp).1
-  let (next, ran) := attempt c during 16 w
+  w := (take w .revoke).1
+  w := (take w .runOp).1
+  let (next, ran) := attempt during 16 w
   w := if ran then next else after next
   let shown := run.shown || w.row.any fun r => match r.stage with
     | .waiting _ | .approving => true
@@ -83,14 +83,14 @@ def pass (c : Config) (run : Run) (during : List Act := []) : Run := Id.run do
   return { run with world := w, shown }
 
 /-- `ok`, `refused`, or `skipped` when the event doesn't apply. -/
-def event (c : Config) (run : Run) (name : String) : Except String (Run × String) := do
+def event (run : Run) (name : String) : Except String (Run × String) := do
   let app := fun (a : Act) =>
-    let (w, ok) := take c run.world a
+    let (w, ok) := take run.world a
     ({ run with world := w }, if ok then "ok" else "refused")
   match name with
-  | "pass" => return (pass c run, "ok")
-  | "raceCancel" => return (pass c run [.cancel], "ok")
-  | "raceExpire" => return (pass c run [.tick, .expiry], "ok")
+  | "pass" => return (pass run, "ok")
+  | "raceCancel" => return (pass run [.cancel], "ok")
+  | "raceExpire" => return (pass run [.tick, .expiry], "ok")
   | "approve" => return app .approve
   | "decline" => return app .decline
   | "cancel" => return app .cancel
@@ -101,11 +101,11 @@ def event (c : Config) (run : Run) (name : String) : Except String (Run × Strin
     if run.world.op.isSome then return (run, "skipped") else return app .administer
   | "send" | "sendUsed" =>
     if !run.shown || run.sent || run.world.row.isNone then return (run, "skipped")
-    let (w, _) := take c run.world (.send (name == "sendUsed"))
+    let (w, _) := take run.world (.send (name == "sendUsed"))
     return ({ run with world := w, sent := true }, "ok")
   | "expire" =>
-    let w := (take c run.world .tick).1
-    return ({ run with world := (take c w .expiry).1 }, "ok")
+    let w := (take run.world .tick).1
+    return ({ run with world := (take w .expiry).1 }, "ok")
   | "demote" =>
     if run.demoted then return (run, "skipped")
     return ({ run with landed := run.landed ++ [.demote], demoted := true }, "ok")
@@ -115,8 +115,8 @@ def event (c : Config) (run : Run) (name : String) : Except String (Run × Strin
     -- once, and the owner's other device, applying the removal, takes the
     -- recorded share back; this device applies the stop at its own next
     -- pass.
-    let (w, _) := take c run.world .gone
-    let (w, _) := take c w .revoke
+    let (w, _) := take run.world .gone
+    let (w, _) := take w .revoke
     return ({ run with world := w, landed := run.landed ++ [.stop], removed := true }, "ok")
   | _ => throw s!"unknown invite event {name}"
 
@@ -155,14 +155,13 @@ def observe (w : World) (result : String) : Json :=
         if accepted Rules.rust w a then some n else none))]
 
 def readCase (j : Json) : Except String Json := do
-  let c : Config := ⟨← j.getObjValAs? Bool "records"⟩
   let events ← j.getObjValAs? (List String) "events"
   let mut run : Run := ⟨made, [], false, false, false, false⟩
   -- The app's write made the invite; the pass after its commit shows it.
-  run := pass c run
+  run := pass run
   let mut out := #[observe run.world "ok"]
   for name in events do
-    let (next, result) ← event c run name
+    let (next, result) ← event run name
     run := next
     out := out.push (observe run.world result)
   return toJson out

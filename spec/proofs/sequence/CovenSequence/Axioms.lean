@@ -406,7 +406,6 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.offered_accepted
 #print axioms CovenSequence.InviteLifecycle.approval_runs_binding
 #print axioms CovenSequence.InviteLifecycle.stop_strands_approval
-#print axioms CovenSequence.InviteLifecycle.refused_record_strands
 #print axioms CovenSequence.InviteLifecycle.split_binding_disagrees
 #print axioms CovenSequence.InviteLifecycle.demoted_approval_offered
 #print axioms CovenSequence.InviteLifecycle.unguarded_finding_is_stale

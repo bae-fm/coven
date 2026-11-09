@@ -876,7 +876,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 17 | Rename store | `name:name` |
 | 18 | Add invite share | `invite:uuid \| account:text` |
 | 19 | End invite share | `invite:uuid` |
-| 20 | Recover member | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys \| device:DeviceId \| device_name:name`; only in an admission slot |
+| 20 | Recover member | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys \| access:Option<MemberAccess> \| device:DeviceId \| device_name:name`; only in an admission slot |
 
 - Tag 12 is unused.
 - A role is `0` admin or `1` member.
@@ -913,11 +913,12 @@ invite.
 - Admit-member: the member id has never been bound, and both keys have never
   been used. Recover-member: the member is active, its current binding equals
   `expected`, and both new keys have never been used; it rebinds the member
-  like replace-member-keys. A recovery keeps the member's role, access,
-  circles and existing device records; its earlier devices are gone for good
-  from this slot (§14.1).
-- `device` has never been registered. Admit-member's `access` is of the kind
-  creation's `access` has.
+  like replace-member-keys, and, when `access` is present, sets it as
+  set-access does. A recovery keeps the member's role, circles and existing
+  device records; its earlier devices are gone for good from this slot
+  (§14.1).
+- `device` has never been registered. `access` is of the kind creation's
+  `access` has.
 - The prefix's copies are all routed to the entry's `member` and
   `keys.sealing`, and name every store key introduced before the slot, each
   once. A circle key copy may follow, for a circle the member belongs to.
@@ -936,9 +937,10 @@ invite.
   overwrite (§10.4, §12.3).
 
 **Access.** Set-access changes its author's own access, or an admin's target
-member's S3 key. The named member must be active. Add-member and set-access
-name access of the kind creation's `access` has, a provider account or an S3
-key; the other kind is refused.
+member's S3 key. The named member must be active. Admit-member, a
+recover-member's present `access` and set-access name access of the kind
+creation's `access` has, a provider account or an S3 key; the other kind is
+refused.
 
 **The account that holds the store.** When creation's `access` is a provider
 account, that account holds the store, and the member reaching storage through

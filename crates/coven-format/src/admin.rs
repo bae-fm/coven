@@ -91,8 +91,9 @@ pub enum StoreChange {
         device_name: String,
     },
     /// Recover an active member on a new device: rebind their pair, as
-    /// replace-member-keys does, and register the device their request
-    /// names. Only an admission slot holds it (§13.2, D9).
+    /// replace-member-keys does, set their access when the invite carried a
+    /// new S3 key, and register the device their request names. Only an
+    /// admission slot holds it (§13.2, D9).
     RecoverMember {
         /// The recovered member.
         member: MemberId,
@@ -100,6 +101,9 @@ pub enum StoreChange {
         expected: MemberPublicKeys,
         /// The member's new public pair.
         keys: MemberPublicKeys,
+        /// The member's new storage access, as set-access records it: the
+        /// S3 key the recovery invite carries. `None` keeps their access.
+        access: Option<crate::MemberAccess>,
         /// The new installation, registered for the member. Never the writing
         /// device.
         device: DeviceId,
@@ -306,7 +310,7 @@ store_changes!(
     17 => RenameStore { name => crate::wire::get_name },
     18 => AddInviteShare { invite, account => get_account },
     19 => EndInviteShare { invite },
-    20 => RecoverMember { member, expected, keys, device, device_name => crate::wire::get_name },
+    20 => RecoverMember { member, expected, keys, access, device, device_name => crate::wire::get_name },
 );
 
 /// An invite share's provider account, bounded as member access bounds an

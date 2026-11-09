@@ -323,7 +323,10 @@ impl History {
         )?;
         match change {
             StoreChange::AdmitMember { member, access, .. }
-            | StoreChange::SetAccess { member, access } => self.access_allowed(*member, access)?,
+            | StoreChange::SetAccess { member, access }
+            | StoreChange::RecoverMember { member, access: Some(access), .. } => {
+                self.access_allowed(*member, access)?
+            }
             StoreChange::AddInviteShare { invite, account } => {
                 if let Some(share) = self.invite_shares.get(invite) {
                     // Its device recording the same open share again is

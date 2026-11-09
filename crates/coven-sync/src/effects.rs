@@ -225,9 +225,12 @@ pub(crate) fn checked_change(
                 StoreDevice { member: *id, name: device_name.clone(), state: DeviceState::Active },
             );
         }
-        RecoverMember { member: id, expected, keys, device, device_name } => {
+        RecoverMember { member: id, expected, keys, access, device, device_name } => {
             let target = state.active_member(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
-            if target.keys == *keys && registered_for(state, device, id) {
+            if target.keys == *keys
+                && registered_for(state, device, id)
+                && access.as_ref().is_none_or(|access| target.access.same_credential(access))
+            {
                 return Ok(None);
             }
             if target.keys != *expected {
@@ -239,7 +242,11 @@ pub(crate) fn checked_change(
             if state.devices.contains_key(device) {
                 return Err(TargetGone(EntryTarget::Device(*device)));
             }
-            next.members.get_mut(id).expect("checked target").keys = *keys;
+            let recovered = next.members.get_mut(id).expect("checked target");
+            recovered.keys = *keys;
+            if let Some(access) = access {
+                recovered.access = access.clone();
+            }
             next.bound_keys.insert(*keys);
             next.devices.insert(
                 *device,
