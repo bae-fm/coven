@@ -322,7 +322,7 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     let file = original_row(&db, prepared, crate::Place::DeviceOnly).await;
     let (bytes, text) = db
         .read(|sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT path,coven_path_text(path) FROM coven_user_files",
                 [],
                 |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),

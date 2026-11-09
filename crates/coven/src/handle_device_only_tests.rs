@@ -242,7 +242,7 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
         .write(move |sql| {
             let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
             sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (&name, file))?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
@@ -254,7 +254,7 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
         async move {
             handle
                 .read(|sql| {
-                    Ok(sql.query(
+                    Ok::<_, CovenError>(sql.query(
                         "SELECT u.path,coven_path_text(u.path) FROM tracks AS t
                          JOIN coven_user_files AS u ON u.file=t.file",
                         [],
@@ -271,7 +271,7 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     );
     let synced: String = carol
         .handle
-        .read(|sql| Ok(sql.query_row("SELECT id FROM tracks", [], |r| r.get(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query_row("SELECT id FROM tracks", [], |r| r.get(0))?))
         .await
         .unwrap();
     let music = tempfile::tempdir().unwrap();
