@@ -781,3 +781,136 @@ async fn dropped_at_first_poll<T: std::fmt::Debug>(call: impl std::future::Futur
         () = std::future::ready(()) => {}
     }
 }
+
+/// A closed store's sync status (E1, E5): read under the writer lock, it is
+/// the state opening shows before sync starts, with the last synced time and
+/// the unsent work, and an open handle refuses it.
+mod closed_sync_status {
+    use crate::tests::{stage, Device, Network};
+    use crate::*;
+
+    fn tables() -> Vec<SyncedTable> {
+        vec![
+            SyncedTable::new("photos", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
+            SyncedTable::new("notes", RowIdentity::SharedKey),
+        ]
+    }
+
+    const SCHEMA: &str = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY, file TEXT);
+        CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);";
+
+    /// Ana's Household store on Dropbox, open on her laptop and synced.
+    async fn household() -> Network {
+        Network::with_schema(
+            CloudProvider::Dropbox,
+            tables(),
+            vec![Migration::addition(1, "household", SCHEMA)],
+        )
+        .await
+    }
+
+    /// Close device 0's handle, change what `while_closed` changes, read the
+    /// closed store's status, then reopen it without starting sync: the closed
+    /// read and what that opening shows.
+    async fn closed_then_reopened(
+        network: &mut Network,
+        while_closed: impl FnOnce(&Device),
+    ) -> (ClosedSyncStatus, SyncStatus) {
+        let device = &network.devices[0];
+        device.handle.close().await.unwrap();
+        while_closed(device);
+        let closed =
+            device.app.closed_sync_status(&device.app.store_dir(&device.store)).await.unwrap();
+        let reopened = network.reopen(device).open(device.store, |_| ()).await.unwrap();
+        let opened = reopened.sync_status().await.unwrap();
+        network.devices[0].handle = reopened;
+        (closed, opened)
+    }
+
+    /// Ana's laptop synced the Household store and she closed it. Her store
+    /// list reads it closed: synced, at the time the open handle last showed,
+    /// with nothing unsent, as the store shows the moment it opens again.
+    #[tokio::test]
+    async fn a_synced_store_reads_closed_as_it_opens() {
+        let mut network = household().await;
+        let before = network.devices[0].handle.sync_status().await.unwrap();
+        assert_eq!(before.state, SyncState::Synced);
+        assert!(before.last_synced.is_some(), "setup and its passes synced");
+        let (closed, opened) = closed_then_reopened(&mut network, |_| ()).await;
+        assert_eq!(closed.sync, before);
+        assert_eq!(closed.sync, opened);
+        assert!(closed.unsent.is_empty(), "{:?}", closed.unsent);
+        network.close().await;
+    }
+
+    /// Ana stops sync, writes a note and takes a photo, and closes the store
+    /// before either goes out. Closed, it reads the unsent work the open handle
+    /// counted, and the photo waits with sync not running, as it does once the
+    /// store opens again.
+    #[tokio::test]
+    async fn a_closed_store_reads_its_unsent_work() {
+        let mut network = household().await;
+        let ana = &network.devices[0];
+        let synced = ana.handle.sync_status().await.unwrap().last_synced;
+        ana.stop_sync().await;
+        ana.handle
+            .write(|sql| {
+                sql.execute("INSERT INTO notes(id,title) VALUES('milk','Buy milk')", [])?;
+                Ok::<_, CovenError>(())
+            })
+            .await
+            .unwrap();
+        stage(ana, "photos", "beach", vec![7; 4096]).await;
+        let unsent = ana.handle.unsent_work().await.unwrap();
+        assert_eq!(unsent.files, 1, "{unsent:?}");
+        assert!(unsent.writes >= 1, "{unsent:?}");
+        let (closed, opened) = closed_then_reopened(&mut network, |_| ()).await;
+        assert_eq!(closed.unsent, unsent);
+        assert_eq!(
+            closed.sync,
+            SyncStatus {
+                state: SyncState::WaitingToSync(SyncWait::NotSyncing),
+                last_synced: synced
+            }
+        );
+        assert_eq!(closed.sync, opened);
+        network.close().await;
+    }
+
+    /// Ana's Dropbox sign-in leaves her laptop's keychain while the Household
+    /// store is closed. Read closed, it is signed out with no cause, as it is
+    /// the moment it opens again, and keeps its last synced time.
+    #[tokio::test]
+    async fn a_closed_store_without_credentials_reads_signed_out() {
+        let mut network = household().await;
+        let synced = network.devices[0].handle.sync_status().await.unwrap().last_synced;
+        let (closed, opened) = closed_then_reopened(&mut network, |device| {
+            device.app.lose_storage_credentials(device.store).unwrap();
+        })
+        .await;
+        assert_eq!(
+            closed.sync,
+            SyncStatus {
+                state: SyncState::SignedOut { provider: CloudProvider::Dropbox, cause: None },
+                last_synced: synced,
+            }
+        );
+        assert_eq!(closed.sync, opened);
+        network.close().await;
+    }
+
+    /// While a handle holds the Household store open, its writer lock shows a
+    /// sync the closed read can't see, so the read is refused and the app asks
+    /// that handle instead.
+    #[tokio::test]
+    async fn an_open_store_refuses_the_closed_read() {
+        let network = household().await;
+        let ana = &network.devices[0];
+        let refused = ana.app.closed_sync_status(&ana.app.store_dir(&ana.store)).await;
+        assert!(
+            matches!(refused, Err(CovenError::Lock(StoreLockError::AlreadyOpen(store))) if store == ana.store),
+            "{refused:?}"
+        );
+        network.close().await;
+    }
+}

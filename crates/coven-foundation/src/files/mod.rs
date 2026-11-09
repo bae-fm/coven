@@ -56,7 +56,8 @@ pub use layout::StoreDirectories;
 #[cfg(any(test, feature = "test-utils"))]
 pub use lock::{bootstrap_lock, cache_writes_lock, writer_lock};
 pub use lock::{
-    CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
+    CacheWriteLock, ClosedStoreLock, StoreClosingGuard, StoreDeletionLock, StoreLock,
+    StoreLockError, StoreReadLock,
 };
 pub use observed_file::{ObservationError, ObservedFile, UserOriginal};
 #[cfg(any(test, feature = "test-utils"))]

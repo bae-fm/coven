@@ -199,6 +199,23 @@ pub enum Audience {
   without keeping a second copy. Neither returns
   credentials or contacts storage. Before setup they return
   `None`; once set up, the location stays, and unreadable settings remain an error.
+- `Coven::closed_sync_status` reads a closed store's sync state, its last synced
+  time and its unsent work without opening it, so an app can list each store
+  with how it last stood, "Synced 2 hours ago" or "Unsent changes", before the
+  person picks one. It gives the `SyncStatus` that opening the store shows
+  before sync starts (E5), and the `UnsentWork` that `unsent_work()` counts.
+- It holds the store's writer lock while it reads. The row the state is
+  computed from describes the sync of the handle holding that lock (E5), so
+  only the lock shows that no handle runs sync for the store. It takes the lock
+  without waiting: an open handle, in this process or another, makes it fail
+  with `StoreLockError::AlreadyOpen`, and the app reads that handle's
+  `sync_status` instead. In this process the read is registered as an instance
+  that is closing, so an open of the store meanwhile waits for it rather than
+  failing.
+- A store whose replacement or deletion is unfinished is refused as opening
+  refuses it. The read uses a read-only connection to coven's own tables and
+  writes nothing to the database. It needs none of the app's declarations, and
+  refuses coven tables that need migrating, as a read-only open does.
 - Store lock files live beside each store directory: the writer, reader and
   bootstrap locks. Deletion holds all three. It first renames the directory to
   its deletion name, which hides the store and records the deletion, then
@@ -1985,8 +2002,8 @@ pub enum SettingsError {
 /// The requested writer, reader or deletion lock could not be taken (E1).
 pub enum StoreLockError {
     /// Another live instance in this process, or another process, holds the
-    /// lock: opening, bootstrapping or discarding returns this error
-    /// immediately. If this process's instance is closing, opening,
+    /// lock: opening, bootstrapping, discarding or reading a closed store's
+    /// sync status returns this error immediately. If this process's instance is closing, opening,
     /// bootstrapping or discarding the same store waits until its last
     /// blocking work finishes and its lock handles close, then tries to take
     /// the lock. Discarding waits so for a closing read-only handle too;
@@ -2333,6 +2350,18 @@ impl Coven {
 
     /// Read the recorded location without opening the store or its custody (E1).
     pub async fn storage_config(store_dir: &StoreDir) -> Result<Option<StorageConfig>, SyncError>;
+
+    /// A closed store's sync state, last synced time and unsent work, read
+    /// without opening it, under its writer lock taken without waiting: the
+    /// state opening shows before sync starts, with the location's
+    /// credentials looked up in the keychain as opening does (E1, E5). An open
+    /// handle fails it with `StoreLockError::AlreadyOpen`; an instance of the
+    /// store closing in this process is waited for first, and an open of it
+    /// meanwhile waits for this read.
+    pub async fn closed_sync_status(
+        &self,
+        store_dir: &StoreDir,
+    ) -> Result<ClosedSyncStatus, CovenError>;
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache
     /// folder, for every store this process opens. Called before the first
@@ -4470,6 +4499,16 @@ while let Some(Ok(values)) = lost.next().await {
   `StatementForbidden`; and `CovenReadHandle` has no `sync_status`. The
   app's trigger on them still lets a read-only handle open, since it never
   runs there.
+- A closed store's state is read under its writer lock, which shows that no
+  handle runs its sync (`Coven::closed_sync_status`, E1). It is the state
+  opening shows before sync starts, read from the same facts with what opening
+  writes over them: whether a location is recorded and this device holds its
+  credentials, read from the keychain; no pass moving, whatever a process that
+  ended mid-pass left; sync not running, so a queued file waits with
+  `SyncWait::NotSyncing`; and nothing sent or downloaded. The network, which
+  coven doesn't watch for a closed store, changes nothing then: what holds
+  every transfer comes before it. The last pass, the last synced time, the
+  queues and the pending records are read as stored.
 - An offline pass describes the last failed attempt, not the connection's
   history. A failed pass: storage refused the whole pass, or coven's own
   operation failed; one that never clears stops sync until a reset.
@@ -5722,6 +5761,15 @@ pub struct SyncStatus {
     /// When a pass last reached the end of the sequence, by the store's
     /// clock; kept across every state and never earlier than before.
     pub last_synced: Option<SystemTime>,
+}
+
+/// A closed store's sync status, as `Coven::closed_sync_status` reads it
+/// (E1): the state opening shows before sync starts, and what deleting the
+/// store would lose. A pass that ended synced leaves the state synced with a
+/// write queued since, so `unsent` is what says a write or a file waits.
+pub struct ClosedSyncStatus {
+    pub sync: SyncStatus,
+    pub unsent: UnsentWork,
 }
 
 /// The sync state (§19.1). With several candidates, the first of `Removed`,

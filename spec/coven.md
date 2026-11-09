@@ -8787,6 +8787,13 @@ the handle that holds the store's writer lock, so a read-only handle may not
 read it: that handle can't tell whether the writer that last wrote the row still
 runs, and a writer that ended mid-pass left the pass's move behind. The same
 holds for `coven_retry_effect`, what the person's retry would do (§6.7).
+A store that isn't open is read under its writer lock instead, which shows
+that no handle runs its sync. Ana's laptop lists the Household store before
+she opens it, with the state it would show the moment it opened, before sync
+starts, its last synced time, and whether writes or files wait to go out
+([api.md E1](api.md#e1-opening)). A store open anywhere refuses that read, and
+its handle answers instead: without the lock, a running pass would read as
+stopped.
 
 **Refusals and failures.** A *refusal* is permanent: coven downloaded an
 immutable object completely, or a complete independently authenticated file

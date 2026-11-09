@@ -61,7 +61,9 @@ mod call;
 mod retry;
 #[path = "database_sync.rs"]
 mod sync;
-pub use builder::{discarded_operations, discarded_store_name, read_store_name, DatabaseBuilder};
+pub use builder::{
+    closed_sync_facts, discarded_operations, discarded_store_name, read_store_name, DatabaseBuilder,
+};
 pub(crate) use call::{finish_blocking, process, start_call};
 
 /// Shared ownership of the database, as its writer or a read-only handle

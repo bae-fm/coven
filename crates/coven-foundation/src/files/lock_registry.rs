@@ -202,12 +202,21 @@ pub(super) fn acquire_reader(
 }
 
 fn reserve(registry: &mut Registry, store: StoreKey, kind: LockKind) -> LockRegistration {
+    reserve_in(registry, store, kind, LockPhase::Live)
+}
+
+fn reserve_in(
+    registry: &mut Registry,
+    store: StoreKey,
+    kind: LockKind,
+    phase: LockPhase,
+) -> LockRegistration {
     registry.reserved += 1;
     let entry = Arc::new(LockEntry {
         store: store.clone(),
         kind,
         instance: LockInstance(registry.reserved),
-        phase: watch::channel(LockPhase::Live).0,
+        phase: watch::channel(phase).0,
     });
     let key = (kind, entry.instance);
     assert!(registry.stores.entry(store).or_default().insert(key, entry.clone()).is_none());
@@ -243,6 +252,27 @@ pub(super) async fn acquire_registered(
     kind: LockKind,
     bugs: &BugSinkRef,
 ) -> Result<RegisteredLock, StoreLockError> {
+    acquire_registered_in(directory, id, kind, LockPhase::Live, bugs).await
+}
+
+/// Take the writer lock as `acquire_registered` does, registered as closing
+/// from the start: its holder only reads the closed store and lets go, so an
+/// open in this process waits for it rather than refusing.
+pub(super) async fn acquire_closing_writer(
+    directory: &Path,
+    id: StoreId,
+    bugs: &BugSinkRef,
+) -> Result<RegisteredLock, StoreLockError> {
+    acquire_registered_in(directory, id, LockKind::Writer, LockPhase::Closing, bugs).await
+}
+
+async fn acquire_registered_in(
+    directory: &Path,
+    id: StoreId,
+    kind: LockKind,
+    phase: LockPhase,
+    bugs: &BugSinkRef,
+) -> Result<RegisteredLock, StoreLockError> {
     let store = (directory.to_owned(), id);
     loop {
         let acquisition = {
@@ -263,7 +293,9 @@ pub(super) async fn acquire_registered(
                 })
             }) {
                 Some(entry) => Acquisition::Waiting(entry.kind, entry.phase.subscribe()),
-                None => Acquisition::Reserved(reserve(&mut registry, store.clone(), kind)),
+                None => {
+                    Acquisition::Reserved(reserve_in(&mut registry, store.clone(), kind, phase))
+                }
             }
         };
         let mut released = match acquisition {

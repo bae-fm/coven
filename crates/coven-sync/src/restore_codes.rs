@@ -589,8 +589,9 @@ pub fn read_connection(
 }
 
 /// Whether a storage location is recorded on this installation and custody
-/// holds credentials for it, as the sync state reads it (§19.1).
-pub(crate) fn read_location(
+/// holds credentials for it, as the sync state reads it (§19.1): as a store
+/// opens, and as its closed status is read (api.md E1).
+pub fn read_location(
     directory: &StoreDir,
     keychain: &StoreKeychain,
 ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {

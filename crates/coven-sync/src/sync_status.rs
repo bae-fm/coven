@@ -572,6 +572,21 @@ impl SyncStatus {
         let (facts, last_synced) = Facts::read(facts)?;
         Ok(Self { state: facts.state(), last_synced })
     }
+
+    /// A closed store's sync status (api.md E1, E5): the state opening shows
+    /// before sync starts, from the facts its database holds, with what
+    /// opening writes over them: `location`, read from the keychain as
+    /// opening reads it; no pass moving, whatever a process that ended
+    /// mid-pass left; and sync not running. The facts read with nothing sent
+    /// or downloaded, as nothing moves while the store is closed.
+    pub fn closed(
+        facts: coven_database::SyncFacts<PendingRecord>,
+        location: RecordedLocation<CloudProvider>,
+    ) -> Result<Self, DbError> {
+        let (facts, last_synced) = Facts::read(facts)?;
+        let facts = Facts { location, moving: false, sync: RetrySync::Stopped, ..facts };
+        Ok(Self { state: facts.state(), last_synced })
+    }
 }
 
 /// The sync state and when sync last finished, computed from what coven

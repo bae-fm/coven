@@ -6,7 +6,9 @@ pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_saved_code, BootstrapError, BootstrapStatus,
     JoinControl,
 };
-pub use crate::coven::{Coven, ListedStore, StoreInfo, StoreListError, Unfinished};
+pub use crate::coven::{
+    ClosedSyncStatus, Coven, ListedStore, StoreInfo, StoreListError, Unfinished,
+};
 pub use crate::coven_error::{CovenError, CovenResult};
 pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]

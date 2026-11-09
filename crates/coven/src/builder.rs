@@ -856,7 +856,10 @@ enum Opening {
 
 /// A store this device is deleting and leaving opens only to finish that
 /// (E1, §11.6).
-fn refuse_unfinished_deletion(directory: &impl StoreDirAccess, store: StoreId) -> CovenResult<()> {
+pub(crate) fn refuse_unfinished_deletion(
+    directory: &impl StoreDirAccess,
+    store: StoreId,
+) -> CovenResult<()> {
     match directory.unfinished_deletion().map_err(DbError::from)? {
         Some(_) => Err(StoreLockError::DeletionUnfinished(store).into()),
         None => Ok(()),

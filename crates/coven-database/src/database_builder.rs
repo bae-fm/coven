@@ -493,6 +493,36 @@ pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
     )
 }
 
+/// What a closed store's sync state is computed from, and its unsent work,
+/// in one committed snapshot of its database, read through a connection of
+/// its own while `lock`, the store's writer lock, shows that no handle has it
+/// open (api.md E1, E5). It reads only coven's tables, so the app's
+/// declarations aren't needed; coven's tables must be at this coven's
+/// version, as a read-only open requires. Nothing is sent or downloaded and
+/// no network is watched, as for a read-only handle. A caller that stops
+/// waiting leaves the read to finish, and its panic goes to the store's bug
+/// sink (E15).
+pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
+    directory: StoreDir,
+    lock: coven_foundation::files::ClosedStoreLock,
+) -> Result<(crate::SyncFacts<P>, crate::UnsentWork), OpenError> {
+    let bugs = directory.bugs().clone();
+    finish_blocking(
+        blocking_completing("read the closed store's sync status", bugs, move || {
+            let _lock = lock;
+            let settings = directory.settings()?;
+            let mut database = coven_only(&directory.database_path(), true)?;
+            database.prepare_internal_schema()?;
+            let observer = CommitObserver::new(directory.bugs().clone());
+            let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
+            let network = crate::network_facts::NetworkFacts::new(observer);
+            database.serve_views(settings.device_id, &transfers, &network)?;
+            database.read_snapshot(|sql| Ok::<_, OpenError>((sql.sync_facts()?, sql.unsent()?)))
+        })
+        .await,
+    )
+}
+
 /// The local creation name in a reset's discarded database. The reset owner
 /// holds its directory lease while reading this setting. Like
 /// `read_store_name`, it reads only `_coven_store_state` and needs none of

@@ -35,6 +35,18 @@ pub struct StoreInfo {
     pub unfinished: Option<Unfinished>,
 }
 
+/// A closed store's sync status, as `Coven::closed_sync_status` reads it
+/// (E1): the state opening shows before sync starts, and what deleting the
+/// store would lose. A pass that ended synced leaves the state synced with a
+/// write queued since, so `unsent` is what says a write or a file waits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosedSyncStatus {
+    /// The sync state and the last synced time.
+    pub sync: crate::SyncStatus,
+    /// The writes and files this device committed and has not uploaded.
+    pub unsent: crate::UnsentWork,
+}
+
 /// Work on a store that must finish before it opens (E1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unfinished {
@@ -152,6 +164,37 @@ impl Coven {
         })
         .await?
         .map_err(crate::SyncError::from)
+    }
+
+    /// A closed store's sync state, last synced time and unsent work, read
+    /// without opening it (E1, E5): the state opening shows before sync
+    /// starts. It holds the store's writer lock while it reads, since only
+    /// that lock shows that no handle runs the store's sync: an open handle,
+    /// here or in another process, refuses it with
+    /// `StoreLockError::AlreadyOpen` at once, and the app reads that handle.
+    /// An instance closing in this process is waited for first, and an open
+    /// of the store in this process meanwhile waits for this read. Whether
+    /// this device holds the location's credentials is read from the
+    /// keychain, as opening reads it. A store whose replacement or deletion
+    /// is unfinished is refused as opening refuses it.
+    pub async fn closed_sync_status(
+        &self,
+        store_dir: &StoreDir,
+    ) -> Result<ClosedSyncStatus, CovenError> {
+        let lock = store_dir.lock_closed().await?;
+        let location = {
+            let directory = store_dir.clone();
+            let keys = StoreKeychain::new(self.keychain.clone(), store_dir.id());
+            let bugs = store_dir.bugs().clone();
+            crate::task::blocking_completing("read the closed store's location", bugs, move || {
+                crate::builder::refuse_unfinished_deletion(&directory, directory.id())?;
+                coven_sync::read_location(&directory, &keys).map_err(CovenError::from)
+            })
+            .await??
+        };
+        let (facts, unsent) = coven_database::closed_sync_facts(store_dir.clone(), lock).await?;
+        let sync = coven_sync::SyncStatus::closed(facts, location)?;
+        Ok(ClosedSyncStatus { sync, unsent })
     }
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache

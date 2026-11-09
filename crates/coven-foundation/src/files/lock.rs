@@ -68,6 +68,15 @@ impl StoreReadLock {
     }
 }
 
+/// The writer lock, held while a closed store is read without opening it:
+/// holding it shows that no handle runs the store's sync. Registered in this
+/// process as closing from the start, so an open waits for its release.
+/// Dropping it unlocks.
+#[derive(Debug)]
+pub struct ClosedStoreLock {
+    _file: RegisteredLock,
+}
+
 /// A held lock on the cache's range writes: shared by a write in progress,
 /// exclusive while opening finds abandoned ones. Dropping it unlocks.
 #[derive(Debug)]
@@ -316,6 +325,18 @@ pub(crate) async fn acquire_for_open(
     let directory = resolve_directory(directory)?;
     let file = registry::acquire_registered(&directory, id, LockKind::Writer, bugs).await?;
     Ok(StoreLock { store: LockedStore { _file: file, directory, id } })
+}
+
+/// Take the writer lock of a closed store to read it, without waiting for
+/// another process or a live instance in this one; an instance closing in
+/// this process is waited for first.
+pub(crate) async fn acquire_closed(
+    directory: &Path,
+    id: StoreId,
+    bugs: &crate::task::BugSinkRef,
+) -> Result<ClosedStoreLock, StoreLockError> {
+    let directory = resolve_directory(directory)?;
+    Ok(ClosedStoreLock { _file: registry::acquire_closing_writer(&directory, id, bugs).await? })
 }
 
 /// Wait until no instance of the store at `directory` in this process is

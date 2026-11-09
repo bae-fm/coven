@@ -734,3 +734,50 @@ fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
         }
     }
 }
+
+/// A closed store's state is the one opening shows before sync starts: the
+/// move and the cooldown a process that ended mid-pass left in its rows
+/// show nothing, so its queued photo waits with sync not running, and the
+/// credentials the keychain holds now decide signed out (api.md E1, E5).
+#[test]
+fn a_closed_store_shows_what_opening_shows() {
+    let facts = coven_database::SyncFacts::<PendingRecord> {
+        row: coven_database::SyncStatusRow {
+            location: RecordedLocation::Connected("Dropbox".into()),
+            last_pass: Some(serde_json::to_vec(&LastPass::Synced).unwrap()),
+            moving: true,
+            last_synced: Some(UNIX_EPOCH + Duration::from_secs(30)),
+        },
+        retry: coven_database::RetryState {
+            sync: RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(90)) },
+            held: false,
+        },
+        unsent: true,
+        uploads: vec![coven_database::UploadFacts {
+            sending: false,
+            stored: false,
+            bound: false,
+            retry_at: None,
+            record: None,
+        }],
+        queued: true,
+        downloading: false,
+        records: Vec::new(),
+        paused: false,
+        unmetered_only: false,
+        metered: false,
+    };
+    assert_eq!(SyncStatus::computed(facts.clone()).unwrap().state, SyncState::Syncing);
+    let closed = |location| SyncStatus::closed(facts.clone(), location).unwrap();
+    assert_eq!(
+        closed(RecordedLocation::Connected(CloudProvider::Dropbox)),
+        SyncStatus {
+            state: SyncState::WaitingToSync(SyncWait::NotSyncing),
+            last_synced: Some(UNIX_EPOCH + Duration::from_secs(30)),
+        }
+    );
+    assert_eq!(
+        closed(RecordedLocation::SignedOut(CloudProvider::Dropbox)).state,
+        SyncState::SignedOut { provider: CloudProvider::Dropbox, cause: None }
+    );
+}

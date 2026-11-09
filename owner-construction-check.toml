@@ -64,6 +64,7 @@ capability_types = [
     "AssetFile",
     "StoreLock",
     "StoreReadLock",
+    "ClosedStoreLock",
     "StoreDeletionLock",
     "Keychain",
     "StoreKeychain",
@@ -129,6 +130,7 @@ construction_only_capability_types = [
     "StoreDir",
     "StoreLock",
     "StoreReadLock",
+    "ClosedStoreLock",
     "AtomicFile",
     "ClockRef",
     "IdSourceRef",
@@ -1229,8 +1231,12 @@ tables = [
     # Makes each lock's entry in the registry, which its closing guards share,
     # and the registration that keeps it until the lock's file closes.
     "reserve",
-    # Waits out a closing holder, then reserves the lock and takes its file.
+    "reserve_in",
+    # Waits out a closing holder, then reserves the lock and takes its file:
+    # live, or closing from the start for a read of a closed store.
     "acquire_registered",
+    "acquire_registered_in",
+    "acquire_closing_writer",
     # Takes a lock at once or refuses, for a test.
     "try_acquire",
     # Reserves a reader's lock and takes its file at once, beside the
@@ -1255,6 +1261,8 @@ tables = [
 "crates/coven-foundation/src/files/lock.rs" = [
     "acquire",
     "acquire_for_open",
+    # The writer lock a read of a closed store holds (api.md E1).
+    "acquire_closed",
     "acquire_reader",
     "acquire_bootstrap",
     # A deletion's locks, with the bootstrap lock it takes or a bootstrap's
@@ -1318,6 +1326,9 @@ tables = [
     # Name reads open temporary read-only connections at the database boundary.
     "read_store_name",
     "discarded_store_name",
+    # A closed store's sync facts, read through a temporary read-only
+    # connection under its writer lock (api.md E1).
+    "closed_sync_facts",
     # The one open of a connection to coven's own tables only, which the
     # input database and the discarded-database reads share.
     "coven_only",
@@ -1618,6 +1629,9 @@ tables = [
     "Coven::read_listed",
     "Coven::saved_restore_codes",
     "Coven::forget_saved_restore_code",
+    # Reads a closed store under its writer lock, with the store's own
+    # entries, its keychain work on the blocking pool (api.md E1).
+    "Coven::closed_sync_status",
     "finish_deletion",
 ]
 # Recovery discovery and forgetting scope the installation's keychain to each
@@ -1715,6 +1729,7 @@ tables = [
 "StoreDir::lock_read_only" = "StoreReadLock"
 "StoreDir::lock_exclusive" = "StoreLock"
 "StoreDir::lock_for_open" = "StoreLock"
+"StoreDir::lock_closed" = "ClosedStoreLock"
 "StoreDir::owned_file" = "AtomicFile"
 "StoreDir::file" = "AtomicFile"
 "StoreDir::writer_folder" = "WriterFolder"

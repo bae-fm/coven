@@ -7,8 +7,9 @@ use std::sync::Arc;
 use crate::files::flush_batch::BatchFolder;
 use crate::files::protection::Protection;
 use crate::files::{
-    lock, settings, AtomicFile, CacheWriteLock, FileError, FileWriter, FlushBatch, SettingsError,
-    StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings, WriterFolder,
+    lock, settings, AtomicFile, CacheWriteLock, ClosedStoreLock, FileError, FileWriter, FlushBatch,
+    SettingsError, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings,
+    WriterFolder,
 };
 use crate::id_source::StoreId;
 use crate::task::BugSinkRef;
@@ -347,6 +348,13 @@ pub trait StoreDirAccess: Sized {
     fn lock_for_open(
         &self,
     ) -> impl std::future::Future<Output = Result<StoreLock, StoreLockError>> + Send;
+    /// Take the writer lock to read a closed store without opening it: a live
+    /// instance or another process refuses immediately, and an instance
+    /// closing in this process is waited for. Registered as closing, so an
+    /// open in this process waits for its release (api.md E1).
+    fn lock_closed(
+        &self,
+    ) -> impl std::future::Future<Output = Result<ClosedStoreLock, StoreLockError>> + Send;
     /// Prevent deletion while reading, alongside other readers and the writer.
     /// The guard must outlive every open file and database connection it protects.
     fn lock_read_only(&self) -> Result<StoreReadLock, StoreLockError>;
@@ -475,6 +483,11 @@ impl StoreDirAccess for StoreDir {
     }
     async fn lock_for_open(&self) -> Result<StoreLock, StoreLockError> {
         let guard = lock::acquire_for_open(&self.path, self.id, &self.bugs).await?;
+        self.check_published()?;
+        Ok(guard)
+    }
+    async fn lock_closed(&self) -> Result<ClosedStoreLock, StoreLockError> {
+        let guard = lock::acquire_closed(&self.path, self.id, &self.bugs).await?;
         self.check_published()?;
         Ok(guard)
     }

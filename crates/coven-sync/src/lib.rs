@@ -79,7 +79,7 @@ pub use pending::{
 pub use refusal::Refusal;
 #[cfg(any(test, feature = "test-utils"))]
 pub use restore_codes::ReplaceStop;
-pub use restore_codes::{location_code, read_connection, RestoreCodes};
+pub use restore_codes::{location_code, read_connection, read_location, RestoreCodes};
 pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };
