@@ -360,3 +360,10 @@ open CovenMerge
 #print axioms CovenMerge.ForgetEntries.read_kept_iff
 #print axioms CovenMerge.ForgetEntries.stamped_after_kept
 #print axioms CovenMerge.ForgetEntries.reads_checked_kept
+#print axioms CovenMerge.ForgetEntries.tracks_reset
+#print axioms CovenMerge.ForgetEntries.passed_tracks
+#print axioms CovenMerge.ForgetEntries.tracks_land
+#print axioms CovenMerge.ForgetEntries.not_last_iff
+#print axioms CovenMerge.ForgetEntries.pass_retains
+#print axioms CovenMerge.ForgetEntries.retains_later
+#print axioms CovenMerge.ForgetEntries.land_retains

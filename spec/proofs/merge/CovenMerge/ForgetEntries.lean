@@ -23,6 +23,24 @@ same answer over the kept entries as over all of them:
 * `reads_checked_kept`: a landing write's `read_through` is at or above every
   earlier landed write's of its device exactly when it is at or above its
   device's last kept write's.
+
+Those take `Retains` as given. A device doesn't recompute it from every
+entry: each applied slot moves `T` on from where the last pass reached and
+forgets only what it looks at. The rest of the file proves that pass keeps
+what `Retains` asks:
+
+* `passed_tracks`: keeping the entry it kept as the latest stamped one at or
+  below the old `T`, unless the latest stamped entry between the old `T` and
+  the new one is stamped later, tracks the latest stamped entry at or below
+  the new `T`. `tracks_reset` starts it over when a loaded snapshot or a
+  migration makes the device look at every entry again.
+* `not_last_iff`: an entry is not its device's last landed write exactly
+  when its device keeps an entry numbered above it, which is how the pass
+  tells.
+* `pass_retains`: forgetting only entries at or below the new `T` that are
+  neither their device's last landed write nor the tracked latest stamped
+  one keeps what `Retains` asks, given what the last pass kept
+  (`retains_later`) and the writes landed since (`land_retains`).
 -/
 
 namespace CovenMerge.ForgetEntries
@@ -179,5 +197,168 @@ theorem reads_checked_kept {log : List (Entry D)} {T : Nat} {kept : Entry D → 
     have last : Last log l := fun x hx same => most x hx (same.trans ldev)
     exact Nat.le_trans (grow e mem l lmem (dev.trans ldev.symm) (most e mem dev))
       (lastRead l lmem (retains.last l lmem last) last ldev)
+
+/-! ## The pass that keeps them -/
+
+/-- What a device tracks as the latest stamped entry at or below slot `s`:
+`some k` for that entry, `none` when no entry is at or below `s`. -/
+def Tracks (log : List (Entry D)) (s : Nat) : Option (Entry D) → Prop
+  | some k => k ∈ log ∧ k.slot ≤ s ∧ ∀ e ∈ log, e.slot ≤ s → e.ts ≤ k.ts
+  | none => ∀ e ∈ log, s < e.slot
+
+/-- The latest stamped entry in the slots after `s` through `t`, `none` when
+no entry is there: what the pass reads from the applied writes. -/
+def LatestIn (log : List (Entry D)) (s t : Nat) : Option (Entry D) → Prop
+  | some l => l ∈ log ∧ s < l.slot ∧ l.slot ≤ t ∧
+      ∀ e ∈ log, s < e.slot → e.slot ≤ t → e.ts ≤ l.ts
+  | none => ∀ e ∈ log, s < e.slot → t < e.slot
+
+/-- The pass's choice of the latest stamped entry at or below the new `T`:
+the latest stamped one between the old `T` and the new one replaces the one
+kept when it is stamped later. -/
+def advance : Option (Entry D) → Option (Entry D) → Option (Entry D)
+  | none, latest => latest
+  | some kept, none => some kept
+  | some kept, some latest => if kept.ts < latest.ts then some latest else some kept
+
+/-- Looking at every entry again starts from slot 0, where no entry is, as
+every slot is at least 1. -/
+theorem tracks_reset {log : List (Entry D)} (positive : ∀ e ∈ log, 1 ≤ e.slot) :
+    Tracks log 0 none :=
+  fun e mem => positive e mem
+
+/-- **The pass tracks the latest stamped entry.** From the one tracked at or
+below `s` and the latest stamped one in the slots after `s` through `t`,
+`advance` gives the latest stamped one at or below `t`. -/
+theorem passed_tracks {log : List (Entry D)} {s t : Nat} {kept latest : Option (Entry D)}
+    (le : s ≤ t) (tracked : Tracks log s kept) (between : LatestIn log s t latest) :
+    Tracks log t (advance kept latest) := by
+  cases kept with
+  | none =>
+    cases latest with
+    | none =>
+      intro e mem
+      rcases Nat.lt_or_ge s e.slot with above | below
+      · exact between e mem above
+      · exact absurd (tracked e mem) (Nat.not_lt.mpr below)
+    | some l =>
+      obtain ⟨lmem, _, upTo, most⟩ := between
+      exact ⟨lmem, upTo, fun e emem eslot => most e emem (tracked e emem) eslot⟩
+  | some k =>
+    obtain ⟨kmem, kslot, kmost⟩ := tracked
+    cases latest with
+    | none =>
+      refine ⟨kmem, Nat.le_trans kslot le, fun e emem eslot => ?_⟩
+      rcases Nat.lt_or_ge s e.slot with above | below
+      · exact absurd eslot (Nat.not_le.mpr (between e emem above))
+      · exact kmost e emem below
+    | some l =>
+      obtain ⟨lmem, _, upTo, lmost⟩ := between
+      by_cases later : k.ts < l.ts
+      · have chosen : advance (some k) (some l) = some l := by simp [advance, later]
+        rw [chosen]
+        refine ⟨lmem, upTo, fun e emem eslot => ?_⟩
+        rcases Nat.lt_or_ge s e.slot with above | below
+        · exact lmost e emem above eslot
+        · exact Nat.le_trans (kmost e emem below) (Nat.le_of_lt later)
+      · have chosen : advance (some k) (some l) = some k := by simp [advance, later]
+        rw [chosen]
+        refine ⟨kmem, Nat.le_trans kslot le, fun e emem eslot => ?_⟩
+        rcases Nat.lt_or_ge s e.slot with above | below
+        · exact Nat.le_trans (lmost e emem above eslot) (Nat.le_of_not_lt later)
+        · exact kmost e emem below
+
+/-- **The pass tells a last landed write by number.** With every device's
+last landed write kept, an entry is not its device's last exactly when its
+device keeps an entry numbered above it, as the pass asks of the kept
+entries. -/
+theorem not_last_iff {log : List (Entry D)} {kept : Entry D → Prop}
+    (last : ∀ e ∈ log, Last log e → kept e) {e : Entry D} :
+    ¬ Last log e ↔ ∃ k ∈ log, kept k ∧ k.dev = e.dev ∧ e.num + 1 ≤ k.num := by
+  constructor
+  · intro notLast
+    have later : ∃ x ∈ log, x.dev = e.dev ∧ e.num < x.num :=
+      Classical.byContradiction fun none =>
+        notLast fun x hx dev =>
+          Nat.le_of_not_lt fun lt => none ⟨x, hx, dev, lt⟩
+    obtain ⟨x, xmem, xdev, lt⟩ := later
+    obtain ⟨l, lmem, ldev, most⟩ := exists_last log e.dev ⟨x, xmem, xdev⟩
+    have isLast : Last log l := fun y hy same => most y hy (same.trans ldev)
+    exact ⟨l, lmem, last l lmem isLast, ldev, Nat.le_trans lt (most x xmem xdev)⟩
+  · rintro ⟨k, kmem, _, dev, above⟩ isLast
+    have := isLast k kmem dev
+    omega
+
+/-- What a pass keeps: what the device kept, less the entries it forgets. -/
+def keeps (kept forgets : Entry D → Prop) (e : Entry D) : Prop := kept e ∧ ¬ forgets e
+
+/-- **A pass keeps what `Retains` asks.** Before it, the device keeps every
+entry above the new `T`, each device's last landed write, and the latest
+stamped entry at or below `T`, which it tracks. It forgets only entries at
+or below `T` that are neither their device's last landed write nor the
+tracked one. -/
+theorem pass_retains {log : List (Entry D)} {T : Nat} {kept forgets : Entry D → Prop}
+    {newest : Option (Entry D)}
+    (above : ∀ e ∈ log, T < e.slot → kept e)
+    (last : ∀ e ∈ log, Last log e → kept e)
+    (tracked : Tracks log T newest)
+    (newestKept : ∀ k, newest = some k → kept k)
+    (only : ∀ e ∈ log, forgets e → e.slot ≤ T ∧ ¬ Last log e ∧ newest ≠ some e) :
+    Retains log T (keeps kept forgets) where
+  above e mem gt :=
+    ⟨above e mem gt, fun gone => absurd gt (Nat.not_lt.mpr (only e mem gone).1)⟩
+  last e mem isLast := ⟨last e mem isLast, fun gone => (only e mem gone).2.1 isLast⟩
+  newest e mem le := by
+    cases newest with
+    | none => exact absurd le (Nat.not_le.mpr (tracked e mem))
+    | some k =>
+      obtain ⟨kmem, kslot, kmost⟩ := tracked
+      exact ⟨k, kmem, ⟨newestKept k rfl, fun gone => (only k kmem gone).2.2 rfl⟩, kslot,
+        kmost e mem le⟩
+
+/-- Entries landing above `s` leave the latest stamped entry at or below `s`
+as it was. -/
+theorem tracks_land {log new : List (Entry D)} {s : Nat} {newest : Option (Entry D)}
+    (tracked : Tracks log s newest) (landed : ∀ e ∈ new, s < e.slot) :
+    Tracks (log ++ new) s newest := by
+  cases newest with
+  | none =>
+    intro e mem
+    rcases List.mem_append.mp mem with old | fresh
+    · exact tracked e old
+    · exact landed e fresh
+  | some k =>
+    obtain ⟨kmem, kslot, kmost⟩ := tracked
+    refine ⟨List.mem_append_left new kmem, kslot, fun e mem le => ?_⟩
+    rcases List.mem_append.mp mem with old | fresh
+    · exact kmost e old le
+    · exact absurd le (Nat.not_le.mpr (landed e fresh))
+
+/-- What one pass kept at `T` it keeps above any later `T'`: the next pass's
+first premise. -/
+theorem retains_later {log : List (Entry D)} {T T' : Nat} {kept : Entry D → Prop}
+    (retains : Retains log T kept) (le : T ≤ T') :
+    ∀ e ∈ log, T' < e.slot → kept e :=
+  fun e mem gt => retains.above e mem (Nat.lt_of_le_of_lt le gt)
+
+/-- **Writes landing past `T` keep it.** Entries landing in slots above `T`
+are kept, and what was kept still meets `Retains`: an entry last among the
+longer log was last among the shorter one. -/
+theorem land_retains {log new : List (Entry D)} {T : Nat} {kept : Entry D → Prop}
+    (retains : Retains log T kept) (landed : ∀ e ∈ new, T < e.slot ∧ kept e) :
+    Retains (log ++ new) T kept where
+  above e mem gt := by
+    rcases List.mem_append.mp mem with old | fresh
+    · exact retains.above e old gt
+    · exact (landed e fresh).2
+  last e mem isLast := by
+    rcases List.mem_append.mp mem with old | fresh
+    · exact retains.last e old fun x hx same => isLast x (List.mem_append_left new hx) same
+    · exact (landed e fresh).2
+  newest e mem le := by
+    rcases List.mem_append.mp mem with old | fresh
+    · obtain ⟨k, kmem, kkept, kslot, later⟩ := retains.newest e old le
+      exact ⟨k, List.mem_append_left new kmem, kkept, kslot, later⟩
+    · exact absurd le (Nat.not_le.mpr (landed e fresh).1)
 
 end CovenMerge.ForgetEntries

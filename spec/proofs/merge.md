@@ -712,6 +712,19 @@ exactly. With reads growing by number (`ReadsGrow`, which `ReadsChecked`
 keeps), `reads_checked_kept` proves that checking a write's `read_through`
 against its device's last kept write is checking it against all.
 
+The same file models the pass each applied slot makes instead of taking
+`Retains` as given. `Tracks log s` names the latest stamped entry at or below
+slot `s`, `LatestIn log s t` the latest stamped one in the slots after `s`
+through `t`, and `advance` the pass's choice between them;
+`passed_tracks` proves the choice tracks the latest stamped entry at or below
+`t`, `tracks_land` that writes landing above `s` leave it, and `tracks_reset`
+that looking at every entry again starts from slot 0. `not_last_iff` proves
+the pass's test for a last landed write, a kept later entry of its device,
+is exact. `pass_retains` proves that forgetting only entries at or below `T`
+that are neither a last landed write nor the tracked one yields `Retains`,
+from what the last pass kept (`retains_later`) and the entries landed since
+(`land_retains`).
+
 ### B18 Owner tables and row authenticity
 
 Owner tables are a write permission. They do not promise that another member

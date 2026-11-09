@@ -6551,6 +6551,15 @@ entry takes the newest one's place. Loading a snapshot, and a migration that
 drops a table or column, change what names records and entries all at once,
 so the next slot looks at every one again.
 
+Each slot keeps the latest stamped entry from the one it kept before and the
+latest stamped entry in the slots it passed since, whichever is stamped
+later, and tells a device's last landed write by a kept later one of its
+device. Forgetting no more than those passes allow keeps what the checks
+above read
+([`passed_tracks`](proofs/merge/CovenMerge/ForgetEntries.lean),
+[`not_last_iff`](proofs/merge/CovenMerge/ForgetEntries.lean),
+[`pass_retains`](proofs/merge/CovenMerge/ForgetEntries.lean)).
+
 **Edge cases.**
 
 - **An idle device holds records back.** Ben's phone in a drawer holds back
@@ -12654,6 +12663,7 @@ Write-ups explain each model and state its assumptions:
 | Chosen snapshots have passed grace, and a qualifying snapshot cannot be hidden by newer announcements; immature replacements keep the old body | `chosen_mature`, `chosen_newest`, `choose_dominates`, `chosen_has_no_mature_replacement`, `immature_replacements_keep_body` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | *Body.* A change that stopped being current never becomes current again as other writes apply | `stopped_stays`, `stopped_stays_run` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §16.7 |
 | *Body.* Keeping every applied-write entry above the slot every write still to be judged has read past, each device's last landed write, and the latest stamped entry at or below that slot, every check such a write meets gives the same answer over the kept entries as over all: whether a write landed, by its device's kept entries' numbers; whether it is stamped after every write it read; whether it read a write, counting a forgotten one as read; and whether it read no less than its device's earlier landed writes | `landed_by_number`, `stamped_after_kept`, `forgotten_read`, `read_kept_iff`, `reads_checked_kept` | `proofs/merge/CovenMerge/ForgetEntries.lean` | §7.1, §9.5, §16.7 |
+| *Body.* Each applied slot keeps those entries without looking at every one: tracking the latest stamped entry from the one kept before and the latest stamped one in the slots passed since, telling a device's last landed write by a kept later one, and forgetting only entries at or below the new slot that are neither, keeps what the row above assumes, through writes landing and a device looking at every entry again | `tracks_reset`, `passed_tracks`, `tracks_land`, `not_last_iff`, `pass_retains`, `retains_later`, `land_retains` | `proofs/merge/CovenMerge/ForgetEntries.lean` | §16.7 |
 | Grace is measured by the deleting device's wall clock against the provider's time for the announcement plus that time's resolution: with a clock no faster than real time it never ends early, and a fast clock can end it at once | `age_never_early`, `fast_clock_ages_at_once` | `proofs/storage/CovenStorage/Clocks.lean` | §16.6, §20.5 |
 
 ### G.6 Files (§17)
