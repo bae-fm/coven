@@ -5,6 +5,7 @@ use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
 use coven_database::DbError;
 use coven_foundation::files::{FileError, ObservationError, StoreLockError};
 use coven_foundation::id_source::KeyId;
+use coven_merge::Audience;
 use coven_storage::{StorageError, StorageFailure};
 use std::sync::Arc;
 
@@ -99,8 +100,13 @@ pub enum SyncError {
     #[error(transparent)]
     Key(#[from] MaterialError),
     /// A required key's sealed copy has not arrived.
-    #[error("key {0} is not available yet")]
-    KeyUnavailable(KeyId),
+    #[error("key {key} is not available yet")]
+    KeyUnavailable {
+        /// The audience the key belongs to.
+        audience: Audience,
+        /// The missing key.
+        key: KeyId,
+    },
     /// The proposed change is already invalid in the author's applied view.
     #[error("administrative change rejected: {0:?}")]
     Rejected(OperationRejection),
@@ -252,7 +258,6 @@ impl SyncError {
     #[deny(clippy::wildcard_enum_match_arm)]
     pub fn pending_reason(&self, provider: coven_storage::CloudProvider) -> crate::PendingReason {
         use crate::PendingReason;
-        use coven_merge::Audience;
         let error = self;
         match error {
             SyncError::Pending(record) => record.reason.clone(),
@@ -267,8 +272,8 @@ impl SyncError {
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }
-            SyncError::KeyUnavailable(key) => {
-                PendingReason::KeyUnavailable { audience: Audience::Store, key: *key }
+            SyncError::KeyUnavailable { audience, key } => {
+                PendingReason::KeyUnavailable { audience: audience.clone(), key: *key }
             }
             SyncError::Rejected(reason) => PendingReason::Rejected(reason.clone()),
             SyncError::Cleanup { operation, cleanup } => PendingReason::Cleanup {
@@ -325,7 +330,7 @@ impl SyncError {
             | Self::SequenceExhausted
             | Self::Storage(_)
             | Self::Format(_)
-            | Self::KeyUnavailable(_)
+            | Self::KeyUnavailable { .. }
             | Self::Rejected(_)
             | Self::CutOffRefused(_)
             | Self::Damaged(_)

@@ -284,7 +284,7 @@ async fn a_writes_slots_device_claim_and_audiences_are_under_the_store_key() {
         [5; 32],
     ));
     let refused = open(input.local_bytes(size).await.unwrap(), &path, &other, &history, |_| true);
-    assert!(matches!(refused, Err(SyncError::KeyUnavailable(key)) if key == store_key));
+    assert!(matches!(refused, Err(SyncError::KeyUnavailable { key, .. }) if key == store_key));
     for device in [&ana, &reader] {
         device.database().close().await.unwrap();
     }

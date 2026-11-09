@@ -94,7 +94,9 @@ impl SequenceSync {
                 .await?
             {
                 Bootstrap::Keys(ring) => ring,
-                Bootstrap::Missing(key) => return Err(SyncError::KeyUnavailable(key)),
+                Bootstrap::Missing(key) => {
+                    return Err(SyncError::KeyUnavailable { audience: Audience::Store, key })
+                }
                 Bootstrap::Replaced => {
                     return Err(SyncError::MemberKeysReplaced { member: member.member() })
                 }

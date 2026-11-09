@@ -166,7 +166,10 @@ pub(crate) fn open(
     let plaintext_length =
         checked(path, coven_format::sealed_stream::plaintext_length(sealed_length))?;
     if !history.accepted(ring, &coven_merge::Audience::Store, prefix.key) {
-        return Err(SyncError::KeyUnavailable(prefix.key));
+        return Err(SyncError::KeyUnavailable {
+            audience: coven_merge::Audience::Store,
+            key: prefix.key,
+        });
     }
     let key = crate::write_seal::derive(ring, &coven_merge::Audience::Store, prefix.key)?;
     // The chunks are hashed for the signature as they are opened, so the
@@ -251,7 +254,12 @@ pub(crate) fn open_bounded(
                     damaged(path, Refusal::WrongIdentity { cause: Some(Arc::new(error)) })
                 })?;
             }
-            _ => return Err(SyncError::KeyUnavailable(object.prefix.key)),
+            _ => {
+                return Err(SyncError::KeyUnavailable {
+                    audience: coven_merge::Audience::Store,
+                    key: object.prefix.key,
+                })
+            }
         }
     }
     let signer = history.signer(&header, Some(&frame)).map_err(|failure| damaged(path, failure))?;
@@ -458,7 +466,10 @@ fn inner(
             let readable = readable(&part.audience);
             let opens = readable && history.accepted(ring, &part.audience, coordinate.key);
             if readable && !opens {
-                return Err(SyncError::KeyUnavailable(coordinate.key));
+                return Err(SyncError::KeyUnavailable {
+                    audience: part.audience.clone(),
+                    key: coordinate.key,
+                });
             }
             if opens {
                 let key =

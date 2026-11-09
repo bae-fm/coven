@@ -471,7 +471,9 @@ impl History {
             .map(|value| value.key)
             .ok_or_else(|| {
                 match self.introductions.iter().rev().find(|value| &value.audience == audience) {
-                    Some(value) => SyncError::KeyUnavailable(value.key),
+                    Some(value) => {
+                        SyncError::KeyUnavailable { audience: audience.clone(), key: value.key }
+                    }
                     None => SyncError::Rejected(OperationRejection::NotAllowed),
                 }
             })

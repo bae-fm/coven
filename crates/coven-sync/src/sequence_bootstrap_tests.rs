@@ -376,7 +376,7 @@ async fn a_newcomer_without_a_copy_reports_the_key_it_lacks() {
     let device = group.newcomer(stranger, group.storage.for_device()).await;
     let key = group.ring.store_key_ids().next().unwrap();
     assert!(
-        matches!(device.sync.pass().await, Err(SyncError::KeyUnavailable(missing)) if missing == key)
+        matches!(device.sync.pass().await, Err(SyncError::KeyUnavailable { key: missing, .. }) if missing == key)
     );
     assert_eq!(device.sync.database.applied_slot().await.unwrap(), 0);
     for device in [&ana, &device] {

@@ -1535,8 +1535,9 @@ Bootstrap join requests (§13) remain allowed: they precede the device's applied
 sequence and are how it asks to join.
 
 The device reports why: `KeyUnavailable`, `UpdateRequired`, the read failure, or a
-`Refused` reason. The app can still read its data and commit the local writes it
-is allowed to.
+`Refused` reason. `KeyUnavailable` names the missing key and its audience, so
+Ben's phone stopped at Carol's write reports a Gifts key, not a store key. The
+app can still read its data and commit the local writes it is allowed to.
 
 Stopping is deliberate. Skipping slot 80 could mean missing Ben's removal at 81
 while still sending writes Ben's removal should have cut off.
@@ -12347,7 +12348,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 
 | Name | Raised when | Section |
 |---|---|---|
-| `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet | §5.4, §6.2, §17.7 |
+| `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet; names the key and its audience | §5.4, §6.2, §17.7 |
 | `UpdateRequired` | a slot needs a newer schema or format | §5.4, §18.3, C.2 |
 | `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |

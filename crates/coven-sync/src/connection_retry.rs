@@ -99,7 +99,7 @@ impl ConnectionRetry {
             error,
             SyncError::Pending(_)
                 | SyncError::Damaged(_)
-                | SyncError::KeyUnavailable(_)
+                | SyncError::KeyUnavailable { .. }
                 | SyncError::UpdateRequired(_)
         );
         // Whether the save itself failed: its wait is then held for the app.

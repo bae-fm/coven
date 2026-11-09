@@ -110,7 +110,7 @@ async fn sequence_rotation_matches_lean() {
         assert!(session.history.exposed(&Audience::Store, key));
         assert!(matches!(
             session.history.sending_key(&ring, ana.identity.member(), &Audience::Store),
-            Err(SyncError::KeyUnavailable(_))
+            Err(SyncError::KeyUnavailable { .. })
         ));
     }
     // Another removal can be published while every store key is exposed.
@@ -371,7 +371,7 @@ async fn after_a_removal_the_next_write_and_snapshot_open_only_with_the_replacem
     };
     open(ring.clone()).await.expect("the replacement keys open the write");
     let refused = open(removed_ring.clone()).await;
-    assert!(matches!(refused, Err(SyncError::KeyUnavailable(_))), "{refused:?}");
+    assert!(matches!(refused, Err(SyncError::KeyUnavailable { .. })), "{refused:?}");
 
     let announced = history.announcements[&announcement].clone();
     let snapshot_path = crate::snapshot_object::path(group.store, &announced.snapshot).unwrap();
@@ -391,7 +391,7 @@ async fn after_a_removal_the_next_write_and_snapshot_open_only_with_the_replacem
         .read_body(ana.sync.storage.as_ref(), &removed_ring, &announced, None, None)
         .await
         .map(drop);
-    assert!(matches!(refused, Err(SyncError::KeyUnavailable(_))), "{refused:?}");
+    assert!(matches!(refused, Err(SyncError::KeyUnavailable { .. })), "{refused:?}");
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }

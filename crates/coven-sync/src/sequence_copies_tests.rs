@@ -62,9 +62,9 @@ async fn a_circle_member_sends_the_circle_key_to_a_member_an_outside_admin_recov
 
 /// §5.4, §12.1: Ana, an admin outside Gifts, replaces Ben's keys. Ben's new
 /// phone opens before Carol's Gifts copy lands and stops at Carol's Gifts
-/// write, whose key it has no copy of. Carol's pass sends the copy in a later
-/// slot; the stuck phone scans ahead for it and reads on, with no fresh
-/// restore.
+/// write, whose key it has no copy of, and its record names the Gifts key.
+/// Carol's pass sends the copy in a later slot; the stuck phone scans ahead
+/// for it and reads on, with no fresh restore.
 #[tokio::test]
 async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
     let group = Group::new();
@@ -94,12 +94,14 @@ async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
         .unwrap();
 
     let phone = group.newcomer(replacement, group.storage.for_device()).await;
-    assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable(_))));
+    assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable { .. })));
     assert_eq!(phone.database().applied_slot().await.unwrap(), write - 1);
     let stuck = coven_merge::slot(write);
     assert!(phone.database().pending::<PendingRecord>().await.unwrap().iter().any(|record| {
         record.subject == PendingSubject::Slot(stuck)
-            && matches!(record.reason, PendingReason::KeyUnavailable { .. })
+            && matches!(record.reason, PendingReason::KeyUnavailable {
+                audience: Audience::Circle(circle), ..
+            } if circle == gifts)
     }));
 
     carol.sync.pass().await.unwrap();

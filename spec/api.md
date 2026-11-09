@@ -5184,7 +5184,8 @@ pub enum SyncError {
     /// A required key is absent from custody, or its material conflicts.
     Key(coven_crypto::MaterialError),
     /// A required sealed key has not arrived; retry after acquiring it.
-    KeyUnavailable(KeyId),
+    /// `audience` is the store or the circle the key belongs to.
+    KeyUnavailable { audience: Audience, key: KeyId },
     /// The latest applied prefix no longer permits the operation; its journal
     /// undoes owned artifacts before completion (§11).
     Rejected(OperationRejection),

@@ -161,7 +161,10 @@ fn setup_and_unlock_name_a_removal_and_a_required_update() {
         StoreKeyUnlockError::Other(_)
     ));
     assert!(matches!(
-        setup_error(SyncError::KeyUnavailable(crate::KeyId(uuid::Uuid::nil()))),
+        setup_error(SyncError::KeyUnavailable {
+            audience: coven_merge::Audience::Store,
+            key: crate::KeyId(uuid::Uuid::nil()),
+        }),
         StorageSetupError::Internal(_)
     ));
 }

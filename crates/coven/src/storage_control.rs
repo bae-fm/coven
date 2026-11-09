@@ -18,7 +18,7 @@ impl StorageConnections {
     pub(super) async fn start_locked(self: &Arc<Self>) -> Result<(), SyncError> {
         let keys = self.with_keys(|keys| Ok(keys.clone()))?;
         if let Some(key) = SequenceSync::missing_store_key(&self.database, &keys).await? {
-            return Err(SyncError::KeyUnavailable(key));
+            return Err(SyncError::KeyUnavailable { audience: coven_merge::Audience::Store, key });
         }
         let previous = {
             let mut attempts = lock_unpoisoned(&self.attempts);

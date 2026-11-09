@@ -50,7 +50,9 @@ pub(crate) fn derive(
     audience: &Audience,
     key: KeyId,
 ) -> Result<DerivedKeys, SyncError> {
-    held(ring, audience, key).map(|held| held.derive()).ok_or(SyncError::KeyUnavailable(key))
+    held(ring, audience, key)
+        .map(|held| held.derive())
+        .ok_or_else(|| SyncError::KeyUnavailable { audience: audience.clone(), key })
 }
 
 pub(crate) fn seal(

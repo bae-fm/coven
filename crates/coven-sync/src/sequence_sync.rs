@@ -222,14 +222,7 @@ impl SequenceSync {
             });
             match self.send_writes(&mut session, &mut ring, &member, through).await {
                 Ok(()) => self.database.clear_pending(subject).await?,
-                Err(SyncError::KeyUnavailable(key)) => {
-                    let audience = session
-                        .history
-                        .introductions
-                        .iter()
-                        .find(|intro| intro.key == key)
-                        .map(|intro| intro.audience.clone())
-                        .unwrap_or(Audience::Store);
+                Err(SyncError::KeyUnavailable { audience, key }) => {
                     self.database
                         .record_pending(PendingRecord::new(
                             subject,

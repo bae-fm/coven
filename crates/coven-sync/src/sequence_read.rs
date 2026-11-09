@@ -293,7 +293,7 @@ impl SequenceSync {
                 // have one above: reading in order never gets there, so scan
                 // ahead for it. The key's introduction applied below the
                 // slot, so its commitment checks the copy (§5.4, §12.1).
-                if let SyncError::KeyUnavailable(key) = error {
+                if let SyncError::KeyUnavailable { key, .. } = error {
                     if let Some((circle, hash)) = session.history.circle_commitment(key) {
                         if let Some(found) = self
                             .scan_for_stuck_key(session, member, slot, circle, key, &hash)
