@@ -3697,6 +3697,7 @@ These calls, and the work passes do for them, follow the rule:
 | The app's admin changes and acknowledgements (§11.1) | the operation the app's write journals | its entry's claim |
 | Replacing one's own keys (`replace_member_keys`, §12.3) | its operation, with the candidate pair held first | the replacement's claim |
 | Rotating a key, a schema raise, a snapshot, resetting an audience (§11.5, §16, §18, §19.4) | its operation, step by step | the claim of its first copy or announcement |
+| Joining by invite (`join_with_invite`, `resume_join`, §13.2) | the saved request and the invite code on the device, kept before the request may be sent | the request's create: from then on the join ends only by approval, decline or expiry |
 | Restoring on a new device (`restore_from_code`, `restore_from_saved_code`, §13.1) | the restore's record on the device, then its registration's operation | the record, kept just before the registration's claim |
 | Replacing this device's installation (`reset_device`, `restore_device`, §19.3) | the replacement's record in the store's directory and its kept entry, then its registration's operation | the record, kept just before the registration's claim |
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
