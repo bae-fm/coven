@@ -248,9 +248,10 @@ async fn a_device_stuck_on_a_circle_key_loads_the_floor_once_retention_deletes_i
 }
 
 /// §6.1, §12.1, §16.4: Carol snapshots Gifts and the store after her Gifts
-/// write. The floor write of Ana's pass that replaces Ben's keys is refused,
-/// so the floor names no snapshot covering Carol's write, and Ben's new phone
-/// reads up to that write and stops there. Ana's next
+/// write. The floor write of Ana's pass that replaces Ben's keys loses an
+/// upload part and waits, journaled and listed in `coven_pending` with its
+/// cause, so the floor names no snapshot covering Carol's write, and Ben's
+/// new phone reads up to that write and stops there. Ana's next
 /// pass, past grace, writes the floor and deletes that slot while Carol is
 /// away, so Carol's copy for Ben lands above the floor. The phone scans the
 /// kept slots for it and loads the floor.
@@ -292,6 +293,34 @@ async fn a_device_stuck_on_a_circle_key_scans_above_the_floor_for_its_copy() {
         .await
         .unwrap();
     assert_eq!(group.storage.status(&floor).await.unwrap(), before, "the floor write failed");
+    // The app sees the waiting floor write as its operation's record, with
+    // the error behind it (§19.1).
+    let listed = ana
+        .database()
+        .read(|sql| {
+            Ok::<_, coven_database::DbError>(sql.query(
+                "SELECT record,cause FROM coven_pending",
+                [],
+                |row| Ok((row.get::<_, PendingRecord>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    let (record, cause) = listed
+        .iter()
+        .find(|(record, _)| {
+            matches!(
+                record.subject,
+                PendingSubject::Operation { kind: crate::OperationKind::RetainSequence, .. }
+            )
+        })
+        .expect("the floor write's record");
+    assert!(matches!(
+        record.reason,
+        PendingReason::Storage { failure: coven_storage::StorageFailure::Network, .. }
+    ));
+    let cause = cause.as_deref().expect("the record keeps its error's text");
+    assert!(cause.contains("Network"), "{cause}");
     ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     let phone = group.newcomer(replacement, group.storage.for_device()).await;
     assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable { .. })));
@@ -311,8 +340,8 @@ async fn a_device_stuck_on_a_circle_key_scans_above_the_floor_for_its_copy() {
     assert!(phone.sync.pass().await.is_err(), "no copy of the Gifts key has landed yet");
     let deleting = group.storage.status(&floor).await.unwrap().unwrap();
 
-    // Carol's pass sends the copy; its own floor write is refused, so the
-    // floor's history stops below the copy.
+    // Carol's pass sends the copy; its own floor write loses an upload part
+    // and waits, so the floor's history stops below the copy.
     carol
         .storage
         .set_faults(coven_storage::test_utils::Faults {
