@@ -277,6 +277,12 @@ besides the one deleting them has published a write that saw the last record
 naming them deleted or made device-only, so an idle device holds them until it
 writes or is removed (§17.10).
 
+The records of past changes are bounded the same way. A change's record goes
+once every active device has landed a write that read past the slot where the
+change stopped being current, so history holds about one record per current
+value, not one per edit; an idle device holds back the records of changes
+that stopped being current after its last write (§16.7).
+
 #### 2.8 Visible failures
 
 A blocked slot, operation, file or cleanup names its first unmet condition to the
@@ -2141,6 +2147,18 @@ Each write is checked against its author's view:
 - **The first device's offline writes.** Writes the first device made before
   setting up storage have `read_through` 0 and are checked against slot 1's
   record of the store's creation. No other device can write at zero.
+- **Reads never go back.** Ben's write 9 landed with `read_through` 21. If his
+  write 10 then arrives with `read_through` 18, it claims not to have seen what
+  his own earlier write saw. A genuine device never makes such a write: its
+  applied slot never goes back, and it numbers its writes as it makes them. So
+  a write whose `read_through` is below that of its device's last landed write
+  is invalid, and the slot is refused. Forgetting kept records depends on it
+  (§16.7): once a device has landed a write that read past a slot, every write
+  it lands after has read past that slot too
+  ([`later_reads_past`](proofs/merge/CovenMerge/ForgetEdits.lean)). A copy of
+  the device restored from a backup can make such a write, and is refused
+  like that copy's repeated write numbers (§19.3). The check is made when a
+  write first lands; a reload that stages its slot again doesn't repeat it.
 - **Cut-offs are separate.** Writes cut off by an earlier removal or member-key
   replacement are consumed by §14.1's rule, without their data showing up as
   lost values.
@@ -3162,11 +3180,35 @@ as written, and a later replacement of the cell doesn't clear it.
 - **Checking sources.** Sources are checked against the original authored
   history. Missing evidence waits; invalid evidence is refused. None of these
   establishes a source: a read position, an old value that happens to be equal,
-  or the write that currently holds the generation. A source in a migration
-  write whose raise lost to another device's is the one exception: no history
-  holds it, so it counts as dropped instead of waiting (§18.8). A device that
-  loaded a snapshot covering that write knows it only as a covered write, with
-  no part and no header, and treats it the same.
+  or the write that currently holds the generation.
+- **Sources no genuine write names.** A device forgets a change's record once
+  no write still to be judged can genuinely name it (§16.7), and devices
+  forget at different slots. A forged write can still name the change. Two
+  rules make every device judge it alike, whether it still holds the record
+  or not. Each counts the source as dropped:
+  - **A source that had stopped being current within the write's past.** A
+    kept record carries the slot at which its change stopped being current
+    (§16.7). A source that stopped at or below the write's `read_through`
+    counts as dropped: the write claims to build on a value its author had
+    already seen replaced.
+  - **A source whose write landed, but whose record this device doesn't
+    hold.** Whether the write landed comes from its device's last landed
+    write number, since a device's writes land in number order. Such a source
+    never waits and is never invalid. A migration write whose raise lost to
+    another device's is one case: no history holds its changes (§18.8). A
+    device that loaded a snapshot covering that write knows it only as a
+    covered write, with no part and no header, and treats it the same.
+
+  Neither rule reads the source's record further: not its role, timestamp or
+  values. A device that forgot the record couldn't, so one that holds it
+  doesn't either. A source's write that this device has forgotten entirely
+  was read: it is forgotten only once every write still to be judged has read
+  past its slot (§16.7). A genuine write names only
+  changes current in its author's state, so neither rule changes its verdict
+  ([`stopped_rule_spares_genuine`](proofs/merge/CovenMerge/ForgetEdits.lean)).
+  With the record gone, a write still to be judged gets the verdict it would
+  have had with the record kept
+  ([`forget_preserves_judgement`](proofs/merge/CovenMerge/ForgetEdits.lean)).
 - **Other drop rules.** Removal of a device or member and member-key replacement
   (§14.1), exclusion by a schema change (§18.6) and a reset (§19.4) each have
   their own rule for whether a write counts. A write refused directly by the
@@ -5731,7 +5773,8 @@ deleted slots.
 This section follows that story in order: what a snapshot holds (§16.1), how one
 is taken (§16.2), the extra rules schema raises and resets add (§16.3), the floor
 that names where to start and records what was deleted (§16.4), how a device
-reloads from it (§16.5), and deleting history (§16.6).
+reloads from it (§16.5), deleting history (§16.6), and forgetting the records
+of changes no write can name any more (§16.7).
 
 #### 16.1 What a snapshot holds
 
@@ -5745,10 +5788,12 @@ consumed without effect, such as refused writes. A snapshot holds:
   each row change's *source verdict*, the record of whether the data it built on
   was kept or dropped (§9.5), with its kept record: who made it, which row,
   generation and columns, the values of its reference columns and a digest of
-  every other value it wrote. Without them, an old edit arriving late could
-  bring a deleted generation back, or refused data could become an accepted
-  source. The values a change replaced, and the sources it named, are not kept:
-  only judging it read them.
+  every other value it wrote, and the slot at which it stopped being current.
+  Without them, an old edit arriving late could bring a deleted generation
+  back, or refused data could become an accepted source. The values a change
+  replaced, and the sources it named, are not kept: only judging it read them.
+  A record no write can still name is forgotten, and no snapshot holds it
+  (§16.7).
 
 A store snapshot also holds the signed admin entries, key copies and
 announcements needed to know who was a member when, which keys exist, and which
@@ -6366,6 +6411,117 @@ Ana's own would.
   files of devices gone for good does (§17.10), and deletes such a body. Until
   then it stays in storage, and no announcement can name it, so it never
   counts.
+
+#### 16.7 Forgetting kept records
+
+Every device keeps a record of each accepted change, and every snapshot
+carries them (§16.1), so that a late write naming the change as a source can
+still be judged (§9.5). Kept forever, they would make history grow with every
+edit: Ana's hundred edits of note 42's title would keep a hundred records of
+about 150 bytes each on every device. Most of them no write can ever name
+again. Once that is certain for a change, every device forgets its record.
+
+Ana retitles note 42 in her write 7, which lands in slot 30. Ben's phone
+retitles it again in write 3, landing in slot 31. Ana's value no longer shows
+anywhere: her change is no longer *current*. A write names as sources only
+changes current in its author's state (§9.5), so no write that read slot 31
+can name Ana's change. Ana's laptop then lands write 8 with `read_through`
+31, and Ben's phone lands write 4 with `read_through` 31. No device that can
+still write has a write left that read less, so every device forgets the
+record of Ana's change.
+
+**Current.** A change is current while it sets one of its row's present cells,
+or supplies its row's generation: a delete supplies it until the row is
+created again. A change stops being current at the slot whose writes replace
+its last present cell or move its row to a new generation: its *stop slot*. A
+change that never became current stops at its own slot: one that lost to a
+concurrent write on arrival, was refused, dropped or excluded, or had no net
+change. A change that stopped being current never becomes current again,
+since a cell only moves to a write applied later and each write applies once
+([`stopped_stays`](proofs/merge/CovenMerge/ForgetEdits.lean)). Every device
+applies the same slots in the same order, so every device finds the same stop
+slot. A kept record carries it once its change has one.
+
+A change whose last cell leaves some other way than by a later write, such as
+a migration dropping its column or a reset replacing its audience (§19.4),
+has no stop slot. Its record stays.
+
+**When a record goes.** A device forgets a change's record once the change
+has a stop slot, say 31, and:
+
+- every other device not gone for good (§14.1) has a landed write, applied
+  here, whose `read_through` is at least 31, or was added after slot 31. This
+  is the test §17.10 makes before deleting stored files;
+- every write in this device's own queue has `read_through` at least 31.
+  Stored files leave the device out, since its queued writes protect what they
+  name locally; here its queued writes will be judged on this device when
+  they land, so they count;
+- the change isn't another member's creation of a row that section 5 lists
+  ([format.md D7.4](format.md#d74-creations-section-5)): a snapshot proves
+  that member's authorship of an owned row from it
+  ([D7.5](format.md#d75-write-evidence-section-6)).
+
+The reason: a device's writes land in the order it numbered them, and reads
+never go back (§7.1). Once Ben's phone has landed a write that read through
+slot 31, each of its earlier writes has landed and been judged, and each
+later one reads past slot 31, where Ana's change is no longer current. A
+device added after slot 31 can write nothing that read less than the slot
+that added it (§7.1). A device gone for good has its later writes cut off.
+So every write still to be judged here either reads past the stop slot, and
+§9.5 drops a source that stopped within its past whether the record is held
+or not, or never names the change
+([`forget_preserves_judgement`](proofs/merge/CovenMerge/ForgetEdits.lean),
+[`genuine_names_no_stopped`](proofs/merge/CovenMerge/ForgetEdits.lean)).
+
+**What goes with it.** The change's verdict goes with its record. A write's
+part header goes once its last kept record in that audience has gone. A
+write's applied-write entry and plaintext header go once nothing names the
+write and the same test passes for the write's own slot: no merge row names
+it as a cell's setter or a generation's, no lost value or creation names it,
+and no record of it is kept. Two entries stay all the same:
+
+- each device's last landed write: its `read_through` is what the test reads,
+  and its number refuses a repeated write and tells whether a named write
+  landed (§9.5);
+- the entry with the latest timestamp among those at or below the slot every
+  device has written past. A landing write must be stamped after the newest
+  write it had read (§7.2). Every write still to be judged has read that
+  slot, so this entry is in its past and later than any entry forgotten;
+  the check finds the same newest write whether entries were forgotten or
+  not. Another member's write
+loses its signed header once no part of it is held.
+
+A part of another member's write that this device received whole keeps its
+leaf hashes, and a snapshot opens a leaf by its place among the part's
+records ([format.md D7.5](format.md#d75-write-evidence-section-6)). So that
+part's records go together, once every one of them
+can, and its leaf hashes with them.
+
+**Where it runs.** In the transaction that applies a slot, after its writes are
+judged. It deletes only what no write can still name, so no state is wrong
+before it runs: it only frees space. A snapshot holds what its writer keeps
+at its coverage, with each record's stop slot, so a device that loads it
+forgets what its writer forgot.
+
+**Edge cases.**
+
+- **An idle device holds records back.** Ben's phone in a drawer holds back
+  every record that stopped after its last landed write, as it holds stored
+  files (§17.10). Removing the phone lets them go.
+- **A device alone in the store** forgets a record once its own queued
+  writes have read past the stop slot.
+- **Devices forget at different slots.** Ana's laptop counts its own queue,
+  where Ben's phone counts the writes Ana's laptop landed. While one has
+  forgotten a record and another holds it, §9.5's two rules make them judge a
+  forged write naming it alike.
+- **Deleting history is separate.** `first` (§16.6) deletes slots snapshots
+  cover, so devices can start from a snapshot; forgetting deletes records no
+  write can name. A device that loads a snapshot judges only writes that land
+  after its coverage, and every device whose writes could still name a
+  record the snapshot's writer forgot held it back there.
+- **Reloading keeps what the device held.** A record this device holds and
+  the loaded snapshot doesn't stays until this device forgets it. Holding a
+  record longer changes no verdict.
 
 ### 17. Files
 
@@ -7836,7 +7992,8 @@ before reading slot 40, his copy among them, is published by then, and the
 evidence above sees it. A write he makes after reading slot 40 can name A's
 bytes only through a record still naming them, which keeps them anyway. Ben's
 next write after reading slot 40 lets Ana's laptop delete the bytes, if his
-copy no longer names them.
+copy no longer names them. Kept records of changes no longer current go by
+the same test (§16.7).
 
 - **Which slot.** A candidate counts from this device's applied slot when its
   path last lost its local protection. A path named again and then left
@@ -10320,10 +10477,10 @@ the app can't read or write them. §8 and §9 explain what each record is for.
 
 ### B.1 The tables
 
-- **`_coven_writes`:** one row per write the device has applied, naming the
-  write's timestamp (which includes its device), the write's number, the slot that
-  holds it, and its original `read_through`. The device's own earlier writes are
-  implicit reads.
+- **`_coven_writes`:** one row per applied write something still names, and
+  each device's last landed write (§16.7), naming the write's timestamp (which
+  includes its device), the write's number, the slot that holds it, and its
+  original `read_through`. The device's own earlier writes are implicit reads.
 - **`_coven_columns`:** one row per synced column, naming its table and column,
   and one per dropped column a frozen lost value still names, marked as no
   longer synced (§18.7).
@@ -10564,8 +10721,8 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
 | `_coven_queued_dismissals` | the rows each waiting write's dismissals name, recorded with the write, so a slot finds the rows each waiting write changes without reading its record (§6.2) |
 | `_coven_upload_claims` | the claim each waiting write was last sent in, whose landing removes it from `_coven_uploads` (§5.1) |
-| `_coven_authored_parts` | the header of each write part whose changes this device keeps, and whether it holds every change of the part (§9.5) |
-| `_coven_authored_changes` | each change's kept record: its row, generation, operation and columns, a reference column's value and parents in full and any other column's digest, its copy's creator and its count of operations ([format.md D7.3](format.md#d73-authored-changes-section-4)) |
+| `_coven_authored_parts` | the header of each write part whose changes this device keeps (§9.5) |
+| `_coven_authored_changes` | each change's kept record: its row, generation, operation and columns, a reference column's value and parents in full and any other column's digest, its copy's creator and its count of operations ([format.md D7.3](format.md#d73-authored-changes-section-4)); and the slot at which the change stopped being current, once it has (§16.7) |
 | `_coven_authored_admissions` | this device's verdict on each original change it keeps as source evidence, once it has judged it (§9.5) |
 | `_coven_write_evidence` | each write's signed header evidence, its cleartext prefix, sealed header chunk, part roots and header signature, for a write by a member other than this device's own: a snapshot this device writes proves another member's authorship with it ([format.md D7.5](format.md#d75-write-evidence-section-6)). Its own member's writes keep none. The narrowing is by member, not by `owner_only()` table: declaring one is a breaking change, whose raise snapshot carries evidence for rows another member created before it (§18.1) |
 | `_coven_part_leaves` | the leaf hashes of each part this device received whole, for the same writes, so a later snapshot opens the leaves it needs ([format.md D7.5](format.md#d75-write-evidence-section-6)) |
@@ -12241,6 +12398,7 @@ Write-ups explain each model and state its assumptions:
 | (same) | `dev_ok` | `proofs/sequence/CovenSequence/Device.lean` | §5 |
 | For one slot, in storage that only grows (no slot deleted), with every attempt's bytes unique to it: the claimant whose bytes fill the slot concludes it won, every other claimant that concludes anything concludes it lost, and both conclusions stay true | `conclude_correct`, `exactly_one_claimant` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* Without the byte comparison, a batch lands twice | `no_compare_lands_twice` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
+| *Body.* Refusing a write whose `read_through` is below that of an earlier landed write of its device keeps every landed order checked; in a checked order, a write a device lands after one that read past a slot read past it too | `receive_checked`, `later_reads_past` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §7.1, §16.7 |
 | *Body.* An operation that forgets its claim on restart lands twice | `forgetful_lands_twice` | `proofs/sequence/CovenSequence/Operation.lean` | §5.1, §11.1 |
 | *Body.* A device that numbers its claims of every kind with one counter, keeps one claim open at a time, and records each attempt before sending it has the single-copy facts settling needs, under any interleaving with other devices' slots and its own late creates: its open claim settles as landed exactly when its attempt's bytes fill the slot, and never as another copy | `journal_own`, `journal_settles` | `proofs/sequence/CovenSequence/ClaimJournal.lean` | §5.1, §5.3 |
 | *Body.* A counter per kind of slot, two claims open at once, or a create sent before it is recorded each make one copy of a device read as another copy using its id | `kind_counters_report_copy`, `two_open_claims_report_copy`, `unrecorded_create_looks_like_copy` | `proofs/sequence/CovenSequence/ClaimJournal.lean` | §5.1 |
@@ -12301,6 +12459,8 @@ Write-ups explain each model and state its assumptions:
 | A released value goes to the earliest live claimant, including an older loser; the first claim after the release wins only when none earlier remains | `deleted_releases`, `first_after_release`, `older_loser_returns` | `proofs/sequence/CovenSequence/LiveClaims.lean` | §9.2 |
 | A queued write's claim ranks after every published one, in write-number order: the order the device's claims will have once its queued writes land, so the row it selects for a value is the one selected after they land | `landing_agrees`, `queued_loss_stands`, `published_before_queued` | `proofs/sequence/CovenSequence/LiveClaims.lean` | §9.2 |
 | Within its row, a change is kept exactly when its write makes it, it passes its own checks, and the writes that supplied its generation and set the cells it replaced are all kept; a change whose foreign-key cause in the same write was dropped has no effect | `retained_iff`, `dropped_cause_no_effect` | `proofs/merge/CovenMerge/DataDependency.lean`; `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.5 |
+| *Body.* A genuine write, authored over the slots it read and its own queued writes, never names a change that stopped being current within those slots; so counting such a source as dropped gives every genuine write the verdict it had before, given stop slots kept faithfully | `genuine_names_no_stopped`, `stopped_rule_spares_genuine` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §9.5, §16.7 |
+| *Body.* With the two source rules, a write that lands after its device passed each forgotten change's stop slot, or that read past it itself, gets the same decision with the forgotten records removed as with them kept. The decision is modelled in the shape of `retained_iff`, as admission and every source counting, not wired into `DataDependency.retained` | `forget_preserves_judgement` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §9.5, §16.7 |
 | The data rule and value accounting: receive order, progress, and dropping by data | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | §9.5 |
 | The owner is the creation with the lowest slot, then the lower write number | `selected_creation`, `lower_write_number_wins` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | Later claims, updates, deletion, re-adding and audience moves keep the creator | `later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
@@ -12439,6 +12599,7 @@ Write-ups explain each model and state its assumptions:
 | For `first`, choosing the newest snapshot before checking grace starves under daily announcements; choosing the newest mature applicable snapshot advances on day seven | `fresh_head_starves`, `daily_announcements_starve`, `daily_announcements_advance` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | The floor's name for an audience, its newest applicable snapshot, covers at least as much as the newest one past grace; with `first` from the snapshots past grace and never moving back, the floor write meets the storage model's rules: `first` and every coverage only move forward, and every name covers `first - 1` | `newest_covers_chosen`, `floor_write_rules` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
 | Chosen snapshots have passed grace, and a qualifying snapshot cannot be hidden by newer announcements; immature replacements keep the old body | `chosen_mature`, `chosen_newest`, `choose_dominates`, `chosen_has_no_mature_replacement`, `immature_replacements_keep_body` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
+| *Body.* A change that stopped being current never becomes current again as other writes apply | `stopped_stays`, `stopped_stays_run` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §16.7 |
 | Grace is measured by the deleting device's wall clock against the provider's time for the announcement plus that time's resolution: with a clock no faster than real time it never ends early, and a fast clock can end it at once | `age_never_early`, `fast_clock_ages_at_once` | `proofs/storage/CovenStorage/Clocks.lean` | §16.6, §20.5 |
 
 ### G.6 Files (§17)

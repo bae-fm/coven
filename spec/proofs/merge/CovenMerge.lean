@@ -44,3 +44,4 @@ import CovenMerge.OwnerMoves
 import CovenMerge.OwnerSnapshotAuthors
 import CovenMerge.References
 import CovenMerge.ReferenceSetters
+import CovenMerge.ForgetEdits

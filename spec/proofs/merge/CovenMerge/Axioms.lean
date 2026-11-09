@@ -348,3 +348,10 @@ open CovenMerge
 #print axioms CovenMerge.ReferenceSetters.addition_fits
 #print axioms CovenMerge.ReferenceSetters.migration_keeps
 #print axioms CovenMerge.ReferenceSetters.drop_keeps
+#print axioms CovenMerge.ForgetEdits.stopped_stays
+#print axioms CovenMerge.ForgetEdits.stopped_stays_run
+#print axioms CovenMerge.ForgetEdits.genuine_names_no_stopped
+#print axioms CovenMerge.ForgetEdits.stopped_rule_spares_genuine
+#print axioms CovenMerge.ForgetEdits.receive_checked
+#print axioms CovenMerge.ForgetEdits.later_reads_past
+#print axioms CovenMerge.ForgetEdits.forget_preserves_judgement

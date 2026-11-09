@@ -671,6 +671,32 @@ sound snapshot. `receive_value_accounted` includes original setters removed
 before the merge. These are completed atomic results; SQLite transactions
 are outside the Lean model.
 
+`ForgetEdits.lean` proves that a device can forget the record of a change no
+write still to be judged can name (coven.md §16.7). A change is `Current`
+while it sets a present cell or supplies its row's generation.
+`stopped_stays` and `stopped_stays_run` prove that a change that stopped
+being current never becomes current again, using the invariant `GenBound`:
+no generation above a row's has a write. `genuine_names_no_stopped` proves
+that a write authored over the canonical state through its `read_through`
+and its own queued writes (`NamesCurrent`) never names a change that stopped
+by a slot it read (`StoppedBy`). The receipt check that reads never go back
+is a checked premise of the receive model, not an assumption:
+`receive_checked` proves that appending a write that passes it keeps the
+landed order checked (`ReadsChecked`), and `later_reads_past` that a write a
+device lands after one that read past a slot read past it too.
+
+The judgement is modelled in the shape of `DataDependency.retained_iff`: a
+change stands when it is admitted and every source it names counts
+(`decision`). It is not wired into `DataDependency.retained` itself. A source
+counts when its record is held, admitted, and not stopped at a slot the
+write read (`counts`); a landed source with no record held is dropped.
+`stopped_rule_spares_genuine` proves that, with stop slots kept faithfully
+(`Faithful`), this gives a genuine write the decision of the rule without
+stop slots (`countsBefore`). `forget_preserves_judgement` proves that, in a
+checked landing order, a write whose device passed each forgotten record's
+stop slot before it, or which read past that slot itself, gets the same
+decision with the forgotten records removed (`forget`) as with them kept.
+
 ### B18 Owner tables and row authenticity
 
 Owner tables are a write permission. They do not promise that another member

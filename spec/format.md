@@ -490,7 +490,9 @@ has at least one.
 
 **Read history.** The device's own earlier writes are implicit reads. The
 containing slot comes after `read_through`, and an earlier own write is in an
-earlier slot or in this batch.
+earlier slot or in this batch. `read_through` is never below that of the
+device's last landed write: a device's applied slot never goes back
+([coven.md §7.1](coven.md#71-causality)).
 
 ### D5.2 Schema versions: what the receiver decides
 
@@ -522,6 +524,10 @@ rewriting that object.
 - **Signature.** The original write is authenticated with its device owner's
   signing key at `read_through`. The exception is §7.1's creation binding: the
   first device's pre-setup writes at zero.
+- **Reads never go back.** A write whose `read_through` is below that of its
+  device's last landed write is invalid, and its slot is refused, as a
+  repeated write number is. Forgetting kept records relies on it
+  ([coven.md §16.7](coven.md#167-forgetting-kept-records)).
 - **History is kept.** Historical bindings and source evidence are retained.
   Claim retries, conversion and snapshot reload never alter this authored past.
 
@@ -659,17 +665,23 @@ authoring device (§9.5).
 
 - Validate that each source was read, precedes the change's timestamp, and
   establishes the stated generation or cell in that incarnation.
+- A source that doesn't count is not checked further: one that stopped being
+  current at or below the write's `read_through`, and one whose write landed
+  while this device holds no record of it (coven.md §9.5). A source's write
+  this device has forgotten entirely was read.
 - Unavailable evidence waits; invalid evidence is refused.
 - Nothing else stands in for the evidence: not numeric generations, old scalar
   values, read frontiers, or the current canonical generation winner.
 
 **What is kept.** A received change is held whole only while its write is
 judged and applied: the sources, a delete's old values and the operations
-serve that judgement. Then the device keeps its part's authenticated header, its kept
-record (D7.3) with the parents its reference columns named, and its own
-admission, independently of received interpretations and dismissible lost
-values. A later write's source check reads only those: the source's header,
-generation, operation, the columns it set and its incarnation.
+serve that judgement. Then the device keeps its part's authenticated header,
+its kept record (D7.3) with the parents its reference columns named, and its
+own admission, independently of received interpretations and dismissible
+lost values, until no write can still name it
+([coven.md §16.7](coven.md#167-forgetting-kept-records)). A later write's
+source check reads only those: the source's header, generation, operation,
+the columns it set and its incarnation.
 
 **Edge cases: frozen and dependent changes.** A change whose sources were
 dropped is kept as a frozen lost value. Its bytes must survive everything that
@@ -701,6 +713,11 @@ carries that.
   another audience. It names the copied row's original creation, at the same
   table and key in another audience, which the author must have read.
 - The copy's owner is that creation's author (§9.6).
+- A receiver checks the named creation against its kept record, unless the
+  creation stopped being current at or below the copy's `read_through`, or its
+  write landed while the receiver holds no record of it. Then, as for a source
+  that doesn't count ([coven.md §9.5](coven.md#95-dependent-changes)), it takes
+  the claim as written, as it does a creation in a part it couldn't open.
 - Every other change has no creator. A generation-zero insert's own write is its
   creation.
 
@@ -1018,7 +1035,7 @@ as shown. Empty sections emit nothing.
 | 1 | Synced column: `table:name \| column:name` | table, column |
 | 2 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
 | 3 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity, below |
-| 4 | Authored change: `header:WriteHeader \| complete:bool \| change:record \| verdict` | `ChangeId` |
+| 4 | Authored change: `header:WriteHeader \| change:record \| verdict \| stop:Option<Slot>` | `ChangeId` |
 | 5 | Creation: `row:RowId \| write:WriteId \| creator:ChangeId` | `RowId` |
 | 6 | Write evidence: `write:WriteId \| prefix:bytes \| header:bytes \| roots:[32 bytes] \| header_signature:64 bytes \| proof:Multiproof` | `WriteId` |
 | 7 | Original admin or admission slot: `slot:Slot \| object:bytes` | slot |
@@ -1050,9 +1067,13 @@ The sections:
 - **No generated columns.** No section names a generated column, as no write
   does (D5.5). A device loading the snapshot computes them, and refuses a
   snapshot that names one.
-- **Applied writes** (section 0) name every write applied. Their timestamps name
-  their devices. `read_through` is below the containing slot, with own earlier
-  writes implicit.
+- **Applied writes** (section 0) name every applied write something in the
+  snapshot still names: a merge row's cell or generation, a lost value, a
+  creation or a kept record. They also name each device's last write through
+  coverage, whose `read_through` and number later writes are checked against
+  ([coven.md §16.7](coven.md#167-forgetting-kept-records)). Their timestamps
+  name their devices. `read_through` is below the containing slot, with own
+  earlier writes implicit.
 - **Synced columns** (section 1) name each synced column.
 - **Merge rows** (section 2) hold each row's generations, with the write that
   moved it to each, and each cell's setting write and value.
@@ -1185,8 +1206,10 @@ schema, dependency or unauthorized lost value when present.
 ### D7.3 Authored changes (section 4)
 
 A late write can depend on a change the snapshot already judged (§9.5). So the
-snapshot keeps every accepted change's record and its verdict, separately from
-the lost values the app may dismiss.
+snapshot keeps the record and verdict of every change a write can still name,
+separately from the lost values the app may dismiss. A record no write can
+name any more is forgotten, and no snapshot holds it
+([coven.md §16.7](coven.md#167-forgetting-kept-records)).
 
 Once a change is judged, nothing reads the values a delete replaced, the
 sources it built on or its SQL operations again: those served judging it. Later writes
@@ -1204,20 +1227,23 @@ it replaced in its `old` map; a receiver checks it against the digest of the
 setter's value.
 
 **Layout.** Section 4 holds, for each write whose covered slot the snapshot
-includes and whose part in the audience this device holds, a *part record*
-with the write's header, followed by one record per kept change of that part,
-in `RowId` order. Parts are in write order. Each record starts with a tag: `0`
-for a part, `1` for a change.
+includes and of whose part in the audience this device keeps changes, a *part
+record* with the write's header, followed by one record per kept change of
+that part, in `RowId` order. Parts are in write order. Each record starts with
+a tag: `0` for a part, `1` for a change.
 
 | Part field | Meaning |
 | --- | --- |
 | `header` | its write's header fields, without `parts` (below) |
-| `complete` | a `bool`: whether every change of that part is known, so a named row's absence is proof |
 
 | Change field | Meaning |
 | --- | --- |
 | `record` | its kept record, below |
 | `verdict` | the author's verdict, below |
+| `stop` | the slot at which the change stopped being current, if it has, at or below the snapshot's coverage ([coven.md §16.7](coven.md#167-forgetting-kept-records)) |
+
+A part may hold fewer changes than its write made: the rest were forgotten. A
+row the part doesn't hold proves nothing about the write.
 
 A part record is followed by at least one change record. A change record
 belongs to the part record before it.
@@ -1265,19 +1291,18 @@ schema_version  u32           4 bytes
 disposition     u8            1 byte
 ```
 
-`complete` follows it directly.
-
 **Rules.**
 
-- Only unjudged, applied and derived changes survive as sources.
+- Only unjudged, applied and derived changes survive as sources, and only
+  for a write whose `read_through` is below their stop slot (coven.md §9.5).
 - A part's write, a copy's creator and every change a verdict names must be
   covered by the snapshot's consumed prefix.
 - Dismissing a lost value never changes a verdict.
 - A loader refuses a kept record that holds in full a column that was no
   reference under its write's schema, or digests one that was.
 - A loader keeps the same kept record for one identity, and adopts the
-  snapshot's verdicts with its data. A record it already keeps must equal the
-  snapshot's byte for byte.
+  snapshot's verdicts and stop slots with its data. A record it already keeps
+  must equal the snapshot's byte for byte.
 
 **Evidence that must survive.**
 
@@ -1291,8 +1316,9 @@ disposition     u8            1 byte
   role order, keeping repeated ids.
 - A later reader, conversion, lost-value dismissal or snapshot reload can't turn
   an excluded source into retained data.
-- Successor snapshots preserve kept records while they support source verdicts
-  or current authorship. Physical deletion follows §16.6.
+- Successor snapshots preserve kept records while a write can still name
+  them, or section 5 lists them (coven.md §16.7). Physical deletion of slots
+  follows §16.6.
 
 **Edge cases.**
 
