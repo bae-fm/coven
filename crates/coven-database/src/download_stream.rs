@@ -165,6 +165,7 @@ pub(crate) fn stage_selected(
     }
     crate::write_commit::retain_original(database, &write.header.header, Some(slot))?;
     let original_header = write.header.clone();
+    let form = crate::write_sources::KeptForm::new(schema, original_header.header.schema_version);
     let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
     let mut dismissed = Vec::new();
     read_authenticated(
@@ -179,7 +180,7 @@ pub(crate) fn stage_selected(
             }
             if refused {
                 if let Some(record) = frame.record() {
-                    crate::write_sources::retain(database, header, record)?;
+                    crate::write_sources::retain(database, &form, header, record)?;
                     crate::write_sources::admit(
                         database,
                         header,
@@ -195,7 +196,7 @@ pub(crate) fn stage_selected(
                 audience,
                 Some(slot),
             );
-            crate::download_stage::frame(database, header, ignored, frame)
+            crate::download_stage::frame(database, &form, header, ignored, frame)
         },
         |header, audience| {
             if selected(audience) {
@@ -222,7 +223,7 @@ pub(crate) fn stage_selected(
             |audience| Ok(selected(audience)),
         )?;
     }
-    Ok(())
+    crate::download_stage::release(database, &original_header.header)
 }
 
 /// Retain a prepared write's authenticated source evidence in the store's
@@ -230,19 +231,24 @@ pub(crate) fn stage_selected(
 #[cfg(test)]
 pub(crate) fn retain_sources(
     db: &crate::sqlite::DatabaseConnection,
+    schema: &crate::write_schema::WriteSchema,
     write: PreparedWrite<'_>,
 ) -> Result<(), crate::DbError> {
+    crate::download_stage::begin(db)?;
+    let header = write.header.header.clone();
+    let form = crate::write_sources::KeptForm::new(schema, header.schema_version);
     read_authenticated(
         db,
         write,
         |header, _, frame| {
             if let Some(record) = frame.record() {
-                crate::write_sources::retain(db, header, record)?;
+                crate::write_sources::retain(db, &form, header, record)?;
             }
             Ok(())
         },
         |header, audience| crate::write_sources::complete(db, header, audience),
-    )
+    )?;
+    crate::download_stage::release(db, &header)
 }
 
 /// Hand each opened part's prepared records to `consume`, then keep the

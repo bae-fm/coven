@@ -639,7 +639,11 @@ source and replaced-cell setters at that row. `Authored` requires those
 sources to exist, precede the change and match the generation, incarnation
 and cell they support. `dependencyDecision` implements that predicate;
 `depends_iff` proves its meaning. Missing or malformed evidence cannot become
-an independent change. SQL capture and snapshot encoding must preserve it.
+an independent change. SQL capture must preserve it. The receiver checks it
+when it judges the change; afterwards a device keeps the change's kept record
+(format.md D7.3) and its verdict, not its sources, so a snapshot carries what
+later checks read: the source's generation, operation, the columns it set and
+its incarnation.
 
 `effective` leaves causal metadata intact and removes non-retained changes.
 `dropped_stays_dropped`, `dependent_not_retained` and `independent_retained`
@@ -1064,7 +1068,13 @@ each derived change (`applied_derived_recorded`) and the failed sources of each
 dependent one (`dependencies`, `dropped_contributing_root_no_effect`).
 For a delete, `Effect.cells` carries D5.6's `old` map. The resolved reference
 supplies the replaced setters' authenticated written values, independently
-of that proposed map and of the displayed row. `delete_old_mismatch_refused`
+of that proposed map and of the displayed row. A receiver holds them in each
+setter's kept record (format.md D7.3): a reference column's value in full,
+and a digest of any other. The model's values stand for their setters, so it
+compares them by identity; comparing two values by their digests is equality
+under SHA-256's collision resistance, an assumption outside the model, as
+D11's authorship tree already makes. That the kept record holds in full every
+column the receiver reads in full is `ReferenceSetters`' rule, below. `delete_old_mismatch_refused`
 refuses any different map; `cascade_delete_keeps_written_values` and
 `changed_delete_old_refused` check unchanged values, omissions, additions
 and a displayed NULL substituted for a written reference.
@@ -1083,6 +1093,26 @@ named parents included. `held_follows_cause` is `follows_cause` for it.
 `judge_view::tests::classification_matches_the_model` requires the
 receiver's cause of every step of the same writes to be the model's. The
 replayed references stay inputs, as `Trace.refs` is.
+
+**A column read in full was a reference when its setter wrote it.**
+[`ReferenceSetters.lean`](merge/CovenMerge/ReferenceSetters.lean) states the
+rule over the merge model's state and schema versions: `Kept S version v st`
+says every cell of `st` in a column version `v` reads as a reference was set
+by a write that wrote it as one. `write_keeps` keeps it through `step` for a
+write that fits: each column it sets that `v` reads as a reference was one
+under its own version, as at its own version, after additions alone
+(`addition_fits`), or through a converter that keeps references (api.md E13).
+`addition_keeps` keeps it through an addition, which makes no column of an
+existing table a reference. `migration_keeps` keeps it through a breaking
+migration's write at the new version: the write updates every present row,
+setting each column whose reference status changes, deletes each hidden row,
+and is newer than every setter it read, so `step` leaves no older setter on
+such a cell. `drop_keeps` covers dropping tables and columns. The schema
+versions, columns as identities across renames, and the converter's check
+are inputs. `judge_tests::loaded_history_judges_as_applied_history` checks
+the Rust side: judging the receipt cases above against history loaded from a
+snapshot gives every verdict and lost value that judging against applied
+history does.
 The `place` mode runs the model's operations on one parent key from each kind
 of view, inserts, updates, deletes, moves, changes at no step in the view and
 beside it, and operations on other rows, and returns the steps they record,

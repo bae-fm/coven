@@ -25,6 +25,9 @@ pub(crate) struct Devices {
     /// A device of Carol's member that has received nothing.
     dan: Database,
     _stores: Vec<TestStore>,
+    ids: SequentialIds,
+    tables: Vec<SyncedTable>,
+    schema: &'static str,
 }
 
 /// Every table as Mallory's app declares it: the same, but none owner-only.
@@ -59,15 +62,31 @@ impl Devices {
         let ben = stores[1].schema(tables.clone(), schema).await.unwrap();
         let mallory = stores[2].schema(unchecked, schema).await.unwrap();
         let carol = stores[3].schema(tables.clone(), schema).await.unwrap();
-        let dan = stores[4].schema(tables, schema).await.unwrap();
-        for db in [&ana, &ben, &mallory, &carol, &dan] {
-            TestStore::register(db, stores[0].device(), ANA);
-            TestStore::register(db, stores[1].device(), BEN);
-            TestStore::register(db, stores[2].device(), BEN);
-            TestStore::register(db, stores[3].device(), CAROL);
-            TestStore::register(db, stores[4].device(), CAROL);
+        let dan = stores[4].schema(tables.clone(), schema).await.unwrap();
+        let devices = Self { ana, ben, mallory, carol, dan, _stores: stores, ids, tables, schema };
+        for db in [&devices.ana, &devices.ben, &devices.mallory, &devices.carol, &devices.dan] {
+            devices.register(db);
         }
-        Self { ana, ben, mallory, carol, dan, _stores: stores }
+        devices
+    }
+
+    /// Every device's member, registered on `db`.
+    fn register(&self, db: &Database) {
+        let stores = &self._stores;
+        TestStore::register(db, stores[0].device(), ANA);
+        TestStore::register(db, stores[1].device(), BEN);
+        TestStore::register(db, stores[2].device(), BEN);
+        TestStore::register(db, stores[3].device(), CAROL);
+        TestStore::register(db, stores[4].device(), CAROL);
+    }
+
+    /// A new device of Carol's member that has received nothing, and its store.
+    pub(crate) async fn fresh(&self) -> (TestStore, Database) {
+        let store = TestStore::with_ids(&self.ids);
+        let db = store.schema(self.tables.clone(), self.schema).await.unwrap();
+        self.register(&db);
+        TestStore::register(&db, store.device(), CAROL);
+        (store, db)
     }
 
     /// Ben's tracks, keys and album; Ana's reviews, comments, pin, labels and
@@ -661,7 +680,7 @@ pub(crate) fn album_kept(genuine: &WriteRecord) -> WriteRecord {
 /// steps exactly: Ben's device commits each write and a receiver records the
 /// note and track as derived, with SQLite computing the generated columns. A
 /// note whose net change differs from the action is still refused.
-async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
+async fn generated_actions(receipt: &mut impl Receipt) {
     for statement in ALBUM_GONE {
         let devices =
             Devices::with(generated_tables(true), generated_tables(false), GENERATED).await;
@@ -679,7 +698,7 @@ async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
         }
         sql(&devices.ben, statement).await.unwrap();
         let genuine = records(&devices.ben).pop().unwrap();
-        receive(&devices.carol, &genuine).await;
+        receipt.receive(&devices, &devices.carol, &genuine).await;
         let derived = ChangeVerdict::Derived(causes(&genuine, &[("albums", "a")]));
         for row in [store_row("notes", "n"), store_row("tracks", "t")] {
             assert_eq!(verdict(&devices.carol, &genuine, &row), derived, "{statement}");
@@ -689,22 +708,20 @@ async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
             Some("0loose".into()),
             "{statement}"
         );
-        observed(&devices.carol, &genuine);
         let forged = album_kept(&genuine);
-        receive(&devices.ana, &forged).await;
+        receipt.receive(&devices, &devices.ana, &forged).await;
         assert_eq!(
             verdict(&devices.ana, &forged, &store_row("notes", "n")),
             not_owner(ANA),
             "{statement}"
         );
-        observed(&devices.ana, &forged);
         devices.close().await;
     }
 }
 
 #[tokio::test]
 async fn actions_on_rows_with_generated_columns_match_exactly() {
-    generated_actions(|_, _| {}).await;
+    generated_actions(&mut Observed(|_: &Database, _: &WriteRecord| {})).await;
 }
 
 /// The receipts the model comparison checks (`judge_view::tests`), each
@@ -712,8 +729,29 @@ async fn actions_on_rows_with_generated_columns_match_exactly() {
 /// coalesced changes, triggers, unauthorized roots, a forged action payload,
 /// actions across affinities, by value alone and through shared columns, an
 /// action whose cause is refused, and actions on rows with generated columns.
-pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
-    generated_actions(&mut compare).await;
+pub(crate) async fn receipts(compare: impl FnMut(&Database, &WriteRecord)) {
+    received(&mut Observed(compare)).await;
+}
+
+/// How a receipt case delivers one write to `to`, one of `devices`, which
+/// holds the case's history.
+pub(crate) trait Receipt {
+    async fn receive(&mut self, devices: &Devices, to: &Database, record: &WriteRecord);
+}
+
+/// Receive the write, then hand the device and the write to `F`.
+pub(crate) struct Observed<F>(pub(crate) F);
+
+impl<F: FnMut(&Database, &WriteRecord)> Receipt for Observed<F> {
+    async fn receive(&mut self, _: &Devices, to: &Database, record: &WriteRecord) {
+        receive(to, record).await;
+        (self.0)(to, record);
+    }
+}
+
+/// The receipt cases of [`receipts`], each delivered through `receipt`.
+pub(crate) async fn received(receipt: &mut impl Receipt) {
+    generated_actions(receipt).await;
     for statement in [
         "DELETE FROM tracks WHERE id='t'",
         "UPDATE keys SET id='8' WHERE id='7'; UPDATE keys SET id='7' WHERE id='8'",
@@ -726,8 +764,7 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
         let devices = Devices::seeded().await;
         sql(&devices.mallory, statement).await.unwrap();
         let record = records(&devices.mallory).pop().unwrap();
-        receive(&devices.ana, &record).await;
-        compare(&devices.ana, &record);
+        receipt.receive(&devices, &devices.ana, &record).await;
         devices.close().await;
     }
     let devices = Devices::seeded().await;
@@ -737,8 +774,7 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
         forged.parts[0].rows.iter_mut().find(|row| row.row == store_row("labels", "l7")).unwrap();
     set(label, "slot", Value::Text("taken".into()));
     label.old.insert("slot".into(), Value::Text("free".into()));
-    receive(&devices.ana, &forged).await;
-    compare(&devices.ana, &forged);
+    receipt.receive(&devices, &devices.ana, &forged).await;
     devices.close().await;
     // A net change of Ben's own track its steps do not end at causes nothing,
     // so it applies (`checkSteps`).
@@ -747,9 +783,8 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
     let mut forged = records(&devices.mallory).pop().unwrap();
     let track = forged.parts[0].rows.iter_mut().next().unwrap();
     set_net(track, "title", Value::Text("elsewhere".into()));
-    receive(&devices.ana, &forged).await;
+    receipt.receive(&devices, &devices.ana, &forged).await;
     assert_eq!(verdict(&devices.ana, &forged, &store_row("tracks", "s")), ChangeVerdict::Applied);
-    compare(&devices.ana, &forged);
     devices.close().await;
     // Ana's tag holds code 7 as text; Mallory's last write inserts his own
     // tag before its code, so it names that code by value alone.
@@ -767,8 +802,7 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
         deliver(&devices.ana, &devices.carol).await;
         sql(&devices.mallory, statement).await.unwrap();
         let record = records(&devices.mallory).pop().unwrap();
-        receive(&devices.carol, &record).await;
-        compare(&devices.carol, &record);
+        receipt.receive(&devices, &devices.carol, &record).await;
         devices.close().await;
     }
     // Cascades into Ana's track whose columns its artist reference shares.
@@ -780,21 +814,58 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
         let devices = overlap_devices().await;
         sql(&devices.mallory, statement).await.unwrap();
         let record = records(&devices.mallory).pop().unwrap();
-        receive(&devices.carol, &record).await;
-        compare(&devices.carol, &record);
+        receipt.receive(&devices, &devices.carol, &record).await;
         devices.close().await;
     }
     let devices = two_parent_devices().await;
     sql(&devices.mallory, "DELETE FROM tracks").await.unwrap();
     let genuine = records(&devices.mallory).pop().unwrap();
-    receive(&devices.carol, &genuine).await;
-    compare(&devices.carol, &genuine);
+    receipt.receive(&devices, &devices.carol, &genuine).await;
     let forged = inconsistent_root(&genuine);
-    receive(&devices.ana, &forged).await;
+    receipt.receive(&devices, &devices.ana, &forged).await;
     assert!(matches!(
         verdict(&devices.ana, &forged, &store_row("notes", "n")),
         ChangeVerdict::Dependent(_)
     ));
-    compare(&devices.ana, &forged);
     devices.close().await;
+}
+
+/// Deliver each write to the device holding the case's history and to a
+/// device that loaded that history from a snapshot of it just before, which
+/// holds only kept records of its changes (D7.3): both reach the same
+/// verdict on every change and the same lost values.
+pub(crate) struct LoadedAlike {
+    pub(crate) compared: usize,
+}
+
+impl Receipt for LoadedAlike {
+    async fn receive(&mut self, devices: &Devices, to: &Database, record: &WriteRecord) {
+        let (_store, fresh) = devices.fresh().await;
+        let snapshot = crate::snapshot_write::tests::frames(to, Audience::Store).await;
+        let (id, prefix, input, _) = snapshot.input();
+        crate::snapshot_write::tests::load_one(&fresh, id, prefix, input).await.unwrap();
+        receive(to, record).await;
+        receive(&fresh, record).await;
+        for row in record.parts.iter().flat_map(|part| part.records()).map(|r| r.row().clone()) {
+            assert_eq!(verdict(&fresh, record, &row), verdict(to, record, &row), "{row:?}");
+            self.compared += 1;
+        }
+        let applied = to.lost_values().await.unwrap();
+        let loaded = fresh.lost_values().await.unwrap();
+        assert_eq!(loaded.len(), applied.len());
+        assert!(applied.iter().all(|lost| loaded.contains(lost)));
+        fresh.close().await.unwrap();
+    }
+}
+
+/// Judging a write against history loaded from a snapshot reaches what
+/// judging it against the same history kept from applying it does, in every
+/// receipt case the model comparison checks: the kept records the snapshot
+/// carries serve every source check, foreign-key action and delete's old
+/// values the full records did.
+#[tokio::test]
+async fn loaded_history_judges_as_applied_history() {
+    let mut alike = LoadedAlike { compared: 0 };
+    received(&mut alike).await;
+    assert!(alike.compared >= 30, "{} changes compared", alike.compared);
 }

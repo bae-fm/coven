@@ -211,6 +211,106 @@ pub fn change_leaves(change: &RowChange) -> Vec<Leaf> {
     leaves
 }
 
+/// One leaf of a kept record (D7.3, D11): known whole, a cell whose value
+/// the record holds only as a digest, or an operation, never opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeptLeaf {
+    /// A leaf the record holds whole: a creation, a deletion, or a cell kept
+    /// in full.
+    Known(Leaf),
+    /// A cell kept as a digest. It opens as the cell its value matches.
+    Digest {
+        /// The changed row.
+        row: RowId,
+        /// The generation before the change.
+        generation: u64,
+        /// Insert or update.
+        kind: CellKind,
+        /// The column.
+        column: String,
+        /// The value's digest.
+        digest: [u8; 32],
+    },
+    /// One of the record's operations.
+    Step,
+}
+
+impl KeptLeaf {
+    /// The leaf this one is when its cell holds `value`: a known leaf
+    /// stays as it is; a digest becomes the cell when `value` names no
+    /// parents and is the value it digests.
+    pub fn with_value(&self, value: &ColumnValue<Value>) -> Result<Option<Leaf>, Error> {
+        Ok(match self {
+            Self::Known(leaf) => Some(leaf.clone()),
+            Self::Digest { row, generation, kind, column, digest } => (value.parents.is_empty()
+                && crate::snapshot_rows::KeptValue::Digest(*digest).matches(&value.value)?)
+            .then(|| Leaf::Cell {
+                row: row.clone(),
+                generation: *generation,
+                kind: *kind,
+                column: column.clone(),
+                value: value.clone(),
+            }),
+            Self::Step => None,
+        })
+    }
+}
+
+/// A kept record's leaves, in the order its original record had them.
+pub fn kept_leaves(record: &crate::snapshot_rows::KeptRecord) -> Vec<KeptLeaf> {
+    use crate::snapshot_rows::{KeptRecord, KeptValue};
+    let (mut leaves, steps) = match record {
+        KeptRecord::Execution { steps, .. } => (Vec::new(), *steps),
+        KeptRecord::Change(change) => {
+            let row = &change.row;
+            let generation = change.change.generation;
+            let cells =
+                |kind, columns: &std::collections::BTreeMap<String, ColumnValue<KeptValue>>| {
+                    columns
+                        .iter()
+                        .map(|(column, cell)| match &cell.value {
+                            KeptValue::Value(value) => KeptLeaf::Known(Leaf::Cell {
+                                row: row.clone(),
+                                generation,
+                                kind,
+                                column: column.clone(),
+                                value: ColumnValue {
+                                    value: value.clone(),
+                                    parents: cell.parents.clone(),
+                                },
+                            }),
+                            KeptValue::Digest(digest) => KeptLeaf::Digest {
+                                row: row.clone(),
+                                generation,
+                                kind,
+                                column: column.clone(),
+                                digest: *digest,
+                            },
+                        })
+                        .collect::<Vec<_>>()
+                };
+            let mut leaves = Vec::new();
+            match &change.change.operation {
+                Operation::Insert(columns) => {
+                    leaves.push(KeptLeaf::Known(Leaf::Creation {
+                        row: row.clone(),
+                        generation,
+                        creator: change.creator.clone(),
+                    }));
+                    leaves.extend(cells(CellKind::Insert, columns));
+                }
+                Operation::Update(columns) => leaves.extend(cells(CellKind::Update, columns)),
+                Operation::Delete => {
+                    leaves.push(KeptLeaf::Known(Leaf::Deletion { row: row.clone(), generation }))
+                }
+            }
+            (leaves, change.steps)
+        }
+    };
+    leaves.extend((0..steps).map(|_| KeptLeaf::Step));
+    leaves
+}
+
 /// An execution-only row's leaves: one per operation.
 pub fn execution_leaves(execution: &RowExecution) -> Vec<Leaf> {
     step_leaves(&execution.row, &execution.execution.steps).collect()

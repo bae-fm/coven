@@ -1,5 +1,9 @@
 //! What a value costs in a snapshot, section by section (D7), and the bytes
-//! this device keeps for it beside the store. Run explicitly:
+//! this device keeps for it beside the store.
+//!
+//! `a_snapshot_holds_a_rows_value_once_and_a_fixed_record_per_write` runs with
+//! every test run and bounds a snapshot's size by the row's current value and
+//! a fixed record per write. The measurements run explicitly:
 //!
 //!   scripts/cargo.sh test -p coven --all-features --test snapshot_size -- \
 //!     --ignored --nocapture --test-threads 1
@@ -198,6 +202,69 @@ struct Case {
 /// The case whose store pages are listed by table, and which a second
 /// device restores.
 const LISTED: usize = 5;
+
+/// The most one write of a row adds to a snapshot, whatever the size of the
+/// value it writes: its applied write's entry in section 0, its part's header
+/// and completeness, and its change's kept record in section 4, which holds
+/// the row, the generation, the operation, each column's name with a 32-byte
+/// digest of a value that is no reference, and its count of operations
+/// (D7.3). One write of `notes.body` measured 202 bytes.
+const PER_WRITE: u64 = 256;
+
+/// What a snapshot of the notes store holds besides its row's current value
+/// and the writes to it: the row's identity and generations, the synced
+/// column, the row's creation, the original admin, key-copy and announcement
+/// slots, and the last claim. Measured at about 2 KB.
+const OVERHEAD: u64 = 4096;
+
+/// A snapshot holds a row's current value once, and for each write to the row
+/// a record of fixed size: no value a write replaced, and no value of a
+/// column that is no reference, however often it was written (D7.3). A
+/// change that kept values in history again would add a value's size per
+/// write, which `PER_WRITE` leaves no room for at these sizes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_holds_a_rows_value_once_and_a_fixed_record_per_write() {
+    let mut cases = Vec::new();
+    for size in [1 << 10, 256 << 10] {
+        for edits in [1, 10, 100] {
+            cases.push(Case { size, edits, delete: false });
+        }
+    }
+    cases.push(Case { size: 256 << 10, edits: 10, delete: true });
+    for case in cases {
+        let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let handle = notes_store(&storage, root.path()).await;
+        write(&handle, "INSERT INTO notes VALUES('note', ?1)", case.size, b'a').await;
+        for edit in 0..case.edits {
+            let fill = b'b' + (edit % 24) as u8;
+            write(&handle, "UPDATE notes SET body = ?1 WHERE id = 'note'", case.size, fill).await;
+        }
+        if case.delete {
+            handle
+                .write(|sql| {
+                    sql.execute("DELETE FROM notes WHERE id = 'note'", [])?;
+                    Ok::<_, coven::CovenError>(())
+                })
+                .await
+                .unwrap();
+        }
+        pass(&handle).await;
+        pass(&handle).await;
+        let total: u64 = handle.test_snapshot_section_bytes().await.unwrap().iter().sum();
+        handle.close().await.unwrap();
+        let current = if case.delete { 0 } else { case.size as u64 };
+        let writes = 1 + case.edits as u64 + u64::from(case.delete);
+        let bound = current + writes * PER_WRITE + OVERHEAD;
+        assert!(
+            total <= bound,
+            "a value of {} bytes, {} edits, deleted {}: {total} snapshot bytes, bound {bound}",
+            case.size,
+            case.edits,
+            case.delete
+        );
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one size measurement, run explicitly"]

@@ -8,7 +8,7 @@
 //! child still references that parent's old key in the authoring view, and
 //! the step's operation, columns, values and parents are exactly the action's.
 //! The authoring view is rebuilt from the write's own earlier steps and the
-//! authenticated original records of the cells the steps replaced, never from
+//! kept records of the changes that set the cells the steps replaced, never from
 //! the receiver's current rows. Every other step is direct, as a statement or
 //! a shared trigger is.
 //!
@@ -27,9 +27,8 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::loss::AuthorizationFailure;
 use coven_format::merge_fields;
-use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
-use coven_format::write::{Half, PartRecord, Step, WriteHeader, WriteRecord};
+use coven_format::write::{Half, OriginalRow, PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
@@ -195,10 +194,10 @@ struct Shape {
 
 /// Where a write's original records are read from.
 pub(crate) enum Originals<'a> {
-    /// `_coven_authored_changes`, which holds every record of the write's
+    /// The write's whole records staged for its receipt, every record of the
     /// parts this device opened: a received write, streamed, is never held
-    /// whole.
-    Retained { database: &'a DatabaseConnection, header: &'a WriteHeader },
+    /// whole in memory.
+    Staged { database: &'a DatabaseConnection, header: &'a WriteHeader },
     /// The author's own write, held whole as it is queued, its records
     /// retained from it a moment before.
     Held(&'a WriteRecord),
@@ -207,18 +206,18 @@ pub(crate) enum Originals<'a> {
 impl Originals<'_> {
     fn header(&self) -> &WriteHeader {
         match self {
-            Self::Retained { header, .. } => header,
+            Self::Staged { header, .. } => header,
             Self::Held(record) => &record.header,
         }
     }
 
     /// Visit each original record, in any order.
-    fn visit(
+    pub(crate) fn visit(
         &self,
         mut visit: impl FnMut(OriginalRow) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
         match self {
-            Self::Retained { database, header } => visit_write(database, header, visit),
+            Self::Staged { database, header } => visit_write(database, header, visit),
             Self::Held(record) => {
                 for record in record.parts.iter().flat_map(|part| part.records()) {
                     visit(match record {
@@ -414,14 +413,17 @@ pub(crate) fn consistent(record: &OriginalRow) -> bool {
     }
 }
 
-/// Visit the write's retained original records, part by part in row order.
+/// Visit the write's staged original records, part by part in row order.
 pub(crate) fn visit_write(
     db: &DatabaseConnection,
     header: &WriteHeader,
     mut visit: impl FnMut(OriginalRow) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
     db.for_each(
-        "SELECT record FROM _coven_authored_changes WHERE write_id=?1 ORDER BY audience,table_name,key",
+        &format!(
+            "SELECT record FROM {records} WHERE write_id=?1 ORDER BY audience,table_name,key",
+            records = crate::download_stage::records_table(header)
+        ),
         params![merge_fields::encode_write_id(&header.position)?],
         |r| visit(OriginalRow::decode(&r.get::<_, Vec<u8>>(0)?)?),
     )

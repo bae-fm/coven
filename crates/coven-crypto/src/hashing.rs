@@ -82,6 +82,15 @@ pub fn authorship_empty() -> [u8; 32] {
     Sha256::digest([2]).into()
 }
 
+/// The digest an accepted change's kept record holds in place of a value
+/// nothing reads in full (D7.3): SHA-256 over the context-framed label
+/// `coven/kept-value/v1` and the value's encoded bytes. Two values have equal
+/// digests exactly when their encodings are equal, under SHA-256's collision
+/// resistance.
+pub fn kept_value_digest(encoded: &[u8]) -> [u8; 32] {
+    Sha256::digest(crate::cipher::context(&[crate::derivation::KEPT_VALUE, encoded])).into()
+}
+
 impl std::fmt::Debug for AuthorshipHasher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AuthorshipHasher([REDACTED])")

@@ -343,3 +343,8 @@ open CovenMerge
 #print axioms CovenMerge.References.allowed_readable
 #print axioms CovenMerge.References.readable_allowed
 #print axioms CovenMerge.References.moved_refused_iff
+#print axioms CovenMerge.ReferenceSetters.write_keeps
+#print axioms CovenMerge.ReferenceSetters.addition_keeps
+#print axioms CovenMerge.ReferenceSetters.addition_fits
+#print axioms CovenMerge.ReferenceSetters.migration_keeps
+#print axioms CovenMerge.ReferenceSetters.drop_keeps

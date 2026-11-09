@@ -101,8 +101,9 @@ pub enum SnapshotRecord<E = crate::authorship::WriteEvidence> {
     Merge(MergeRow),
     /// A displaced cell, removed row or excluded write's row.
     Loss(Loss),
-    /// An original row change and its verdict, kept as source evidence.
-    Authored(AuthoredChange),
+    /// An accepted write part's shared details, or one of its kept changes
+    /// with its verdict, kept as source evidence.
+    Authored(AuthoredRecord),
     /// A row's selected original creation (§9.6).
     Creation(crate::authorship::Creation),
     /// Another member's write header, roots and openings in this audience.
@@ -221,7 +222,8 @@ impl SnapshotRecord {
             }
             Self::Merge(v) => v.validate(),
             Self::Loss(v) => v.validate(),
-            Self::Authored(v) => v.validate(),
+            Self::Authored(AuthoredRecord::Part(v)) => v.header.validate(),
+            Self::Authored(AuthoredRecord::Change(v)) => v.validate(),
             Self::Creation(v) => v.validate(),
             Self::Evidence(v) => v.validate(),
             Self::Admin(v) => v.validate_kind(0),
@@ -248,18 +250,27 @@ impl SnapshotRecord {
             Self::Claim(_) => section::CLAIM,
         }
     }
-    fn key(&self) -> RecordKey {
-        match self {
+    /// The record's place in its section's order. A kept change is ordered
+    /// within `part`, the part record before it.
+    fn key(&self, part: Option<&crate::write::WriteHeader>) -> Result<RecordKey, Error> {
+        Ok(match self {
             Self::Write(v) => RecordKey::Write(v.id),
             Self::Column(v) => RecordKey::Column(v.clone()),
             Self::Merge(v) => RecordKey::Row(v.state.row().clone()),
             Self::Loss(v) => RecordKey::Loss(v.key()),
-            Self::Authored(v) => RecordKey::Change(v.id()),
+            Self::Authored(AuthoredRecord::Part(v)) => RecordKey::Authored(v.header.position, None),
+            Self::Authored(AuthoredRecord::Change(v)) => {
+                let part = part.ok_or(Error::Invalid {
+                    field: "authored change part",
+                    rule: Rule::SnapshotSequence,
+                })?;
+                RecordKey::Authored(part.position, Some(v.record.row().clone()))
+            }
             Self::Creation(v) => RecordKey::Row(v.row.clone()),
             Self::Evidence(v) => RecordKey::Write(v.write),
             Self::Admin(v) | Self::KeyCopy(v) | Self::Announcement(v) => RecordKey::Slot(v.slot),
             Self::Claim(v) => RecordKey::Device(v.device),
-        }
+        })
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
         let audience =
@@ -285,13 +296,11 @@ impl SnapshotRecord {
             }
             Self::Merge(v) => audience(v.state.row()),
             Self::Creation(v) => audience(&v.row),
-            Self::Authored(v) => {
-                audience(v.change.row())?;
-                require(
-                    v.header.read_through <= h.covers,
-                    "authored read-through",
-                    Rule::Coverage,
-                )?;
+            Self::Authored(AuthoredRecord::Part(v)) => {
+                require(v.header.read_through <= h.covers, "authored read-through", Rule::Coverage)
+            }
+            Self::Authored(AuthoredRecord::Change(v)) => {
+                audience(v.record.row())?;
                 match &v.verdict {
                     ChangeVerdict::Excluded(version) => {
                         require(*version <= h.schema_version, "change verdict", Rule::Coverage)
@@ -342,17 +351,19 @@ impl SnapshotRecord {
                 .collect(),
             Self::Creation(v) => vec![v.write, v.creator.write],
             Self::Evidence(v) => vec![v.write],
-            Self::Authored(v) => {
+            Self::Authored(AuthoredRecord::Part(v)) => vec![v.header.position],
+            Self::Authored(AuthoredRecord::Change(v)) => {
                 let verdict = match &v.verdict {
                     ChangeVerdict::Dependent(sources) | ChangeVerdict::Derived(sources) => {
                         sources.as_slice()
                     }
                     _ => &[],
                 };
-                std::iter::once(v.header.position)
-                    .chain(v.change.sources().map(|source| source.write))
-                    .chain(verdict.iter().map(|source| source.write))
-                    .collect()
+                let creator = match &v.record {
+                    KeptRecord::Change(change) => change.creator.as_ref(),
+                    KeptRecord::Execution { .. } => None,
+                };
+                creator.into_iter().chain(verdict).map(|source| source.write).collect()
             }
         }
     }
@@ -364,7 +375,8 @@ enum RecordKey {
     Write(WriteId),
     Column(SyncedColumn),
     Loss((RowId, u64, LossIdentity, bool, u8, Option<WriteId>)),
-    Change(crate::write_sources::ChangeId),
+    /// A part by its write, then each of its changes by row.
+    Authored(WriteId, Option<RowId>),
     Slot(Slot),
     Device(coven_foundation::id_source::DeviceId),
 }
@@ -372,11 +384,21 @@ struct SnapshotStreamState {
     header: SnapshotHeader,
     remaining: [u64; SECTIONS],
     previous: Option<(usize, RecordKey)>,
+    /// Section 4's latest part, and whether a change of it has followed.
+    part: Option<(crate::write::WriteHeader, bool)>,
     ended: bool,
 }
 impl SnapshotStreamState {
     fn new(header: SnapshotHeader) -> Self {
-        Self { remaining: header.counts, header, previous: None, ended: false }
+        Self { remaining: header.counts, header, previous: None, part: None, ended: false }
+    }
+    /// Every part in section 4 is followed by at least one of its changes.
+    fn close_part(&self) -> Result<(), Error> {
+        require(
+            self.part.as_ref().is_none_or(|(_, changed)| *changed),
+            "authored part without changes",
+            Rule::SnapshotSequence,
+        )
     }
     fn accept(&mut self, record: &SnapshotRecord) -> Result<(), Error> {
         record.check_header(&self.header)?;
@@ -386,7 +408,17 @@ impl SnapshotStreamState {
             "snapshot section/count",
             Rule::SnapshotSequence,
         )?;
-        let key = record.key();
+        if let SnapshotRecord::Authored(AuthoredRecord::Change(change)) = record {
+            if let Some((header, _)) = &self.part {
+                change.validate_in(header)?;
+            }
+        }
+        if matches!(record, SnapshotRecord::Authored(AuthoredRecord::Part(_)))
+            || section != section::AUTHORED
+        {
+            self.close_part()?;
+        }
+        let key = record.key(self.part.as_ref().map(|(header, _)| header))?;
         if let Some((previous_section, previous_key)) = &self.previous {
             require(
                 *previous_section != section || *previous_key < key,
@@ -396,9 +428,21 @@ impl SnapshotStreamState {
         }
         self.remaining[section] -= 1;
         self.previous = Some((section, key));
+        match record {
+            SnapshotRecord::Authored(AuthoredRecord::Part(part)) => {
+                self.part = Some((part.header.clone(), false));
+            }
+            SnapshotRecord::Authored(AuthoredRecord::Change(_)) => {
+                if let Some((_, changed)) = &mut self.part {
+                    *changed = true;
+                }
+            }
+            _ => self.part = None,
+        }
         Ok(())
     }
     fn end(&mut self) -> Result<(), Error> {
+        self.close_part()?;
         require(
             !self.ended && self.remaining == [0; SECTIONS],
             "snapshot end",

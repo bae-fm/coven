@@ -15,7 +15,7 @@ use crate::write_rows::{column_name, key_columns, target_columns};
 use crate::write_schema::WriteSchema;
 use crate::Database;
 use coven_format::loss::AuthorizationFailure;
-use coven_format::snapshot_rows::ChangeVerdict;
+use coven_format::snapshot_rows::{ChangeVerdict, KeptValue};
 use coven_format::value::Value;
 use coven_format::write::WriteRecord;
 use coven_format::write::{Half, Step};
@@ -31,6 +31,7 @@ struct Ids {
     rows: BTreeMap<RowId, usize>,
     columns: BTreeMap<(String, String), usize>,
     values: Vec<Value>,
+    digests: Vec<[u8; 32]>,
     external: BTreeMap<ChangeId, usize>,
 }
 
@@ -54,6 +55,23 @@ impl Ids {
                 self.values.len() - 1
             }
         })
+    }
+    /// A kept value: in full as [`Ids::value`] numbers it, a digest
+    /// numbered apart, so equal digests share a number.
+    fn kept(&mut self, value: &KeptValue) -> Option<usize> {
+        match value {
+            KeptValue::Value(value) => self.value(value),
+            KeptValue::Digest(digest) => Some(
+                500_000
+                    + match self.digests.iter().position(|d| d == digest) {
+                        Some(index) => index,
+                        None => {
+                            self.digests.push(*digest);
+                            self.digests.len() - 1
+                        }
+                    },
+            ),
+        }
     }
     /// Other writes' changes are numbered apart from this write's rows.
     fn external(&mut self, source: &ChangeId) -> usize {
@@ -139,16 +157,33 @@ fn effect(
 
 /// The old map is compared in original column order, independently of the
 /// receiver's displayed substitutions and the proposed delete's values.
-fn old_cells(ids: &mut Ids, row: &RowId, values: &BTreeMap<String, Value>) -> Vec<Json> {
+fn old_cells(ids: &mut Ids, row: &RowId, values: &BTreeMap<String, KeptValue>) -> Vec<Json> {
     values.iter().map(|(column, value)| {
-        json!({"column": ids.column(&row.table, column), "value": ids.value(value)})
+        json!({"column": ids.column(&row.table, column), "value": ids.kept(value)})
     }).collect()
+}
+
+/// A delete's old values as its replaced setters' kept records hold theirs:
+/// a value its setter keeps as a digest is compared by its digest (D7.3).
+fn kept_old(
+    old: &BTreeMap<String, Value>,
+    setters: &BTreeMap<String, KeptValue>,
+) -> BTreeMap<String, KeptValue> {
+    old.iter()
+        .map(|(column, value)| {
+            let kept = match setters.get(column) {
+                Some(KeptValue::Digest(_)) => KeptValue::Digest(KeptValue::digest(value).unwrap()),
+                _ => KeptValue::Value(value.clone()),
+            };
+            (column.clone(), kept)
+        })
+        .collect()
 }
 
 fn setter_values(
     db: &DatabaseConnection,
     change: &coven_format::write::RowChange,
-) -> BTreeMap<String, Value> {
+) -> BTreeMap<String, KeptValue> {
     change
         .sources
         .setters
@@ -172,12 +207,7 @@ fn input(
     record: &WriteRecord,
     owners: &BTreeMap<coven_foundation::id_source::MemberId, u8>,
 ) -> (Json, Ids, Judgement) {
-    let judgement = judge(
-        db,
-        schema,
-        crate::judge::Originals::Retained { database: db, header: &record.header },
-    )
-    .unwrap();
+    let judgement = judge(db, schema, crate::judge::Originals::Held(record)).unwrap();
     let steps = steps(record);
     let step = |row: &RowId, sequence: u32| {
         steps[row].iter().find(|s| s.sequence == sequence).unwrap().clone()
@@ -190,13 +220,13 @@ fn input(
     let mut store = Vec::new();
     for (row, checked) in &judgement.rows {
         let net = record.parts.iter().flat_map(|part| &part.rows).find(|change| change.row == *row);
-        let written = match net {
+        let setters = match net {
             Some(change) if matches!(change.change.operation, coven_merge::Operation::Delete) => {
                 setter_values(db, change)
             }
             _ => BTreeMap::new(),
         };
-        let child_values = old_cells(&mut ids, row, &written);
+        let child_values = old_cells(&mut ids, row, &setters);
         let mut order: Vec<String> = Vec::new();
         let mut paths = Vec::new();
         for (sequence, chain) in &checked.actions {
@@ -275,7 +305,9 @@ fn input(
             continue;
         };
         let (kind, cells) = match &net.change.operation {
-            coven_merge::Operation::Delete => (2, old_cells(&mut ids, row, &net.old)),
+            coven_merge::Operation::Delete => {
+                (2, old_cells(&mut ids, row, &kept_old(&net.old, &setters)))
+            }
             coven_merge::Operation::Insert(columns) | coven_merge::Operation::Update(columns) => {
                 for name in columns.keys() {
                     if !order.contains(name) {
@@ -326,7 +358,7 @@ fn input(
             // A direct change's proposed payload is where its steps end
             // (`Capture`); a net change elsewhere is proposed as itself.
             if let coven_format::write::PartRecord::Change(change) = original {
-                let owned = coven_format::snapshot_rows::OriginalRow::Change(change.clone());
+                let owned = coven_format::write::OriginalRow::Change(change.clone());
                 if !consistent(&owned) {
                     let step =
                         Step { sequence: 0, change: change.change.clone(), half: Half::Whole };
@@ -472,16 +504,16 @@ async fn receipt_matches_the_model() {
 /// many of them are actions.
 fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (usize, usize) {
     use super::{key_names, key_values, Authoring, ChildView, HeldReference};
-    use crate::judge::{visit_write, StepIndex};
+    use crate::judge::{Originals, StepIndex};
+    // The received write's records, judged again as the receiver judged them.
+    let originals = Originals::Held(record);
     db.inspect_writer_schema(|c, schema| {
         let header = &record.header;
         let authoring = Authoring::new(c, schema, header.schema_version).unwrap();
-        let index =
-            StepIndex::of(&crate::judge::Originals::Retained { database: c, header }).unwrap();
-        let judgement =
-            judge(c, schema, crate::judge::Originals::Retained { database: c, header }).unwrap();
+        let index = StepIndex::of(&originals).unwrap();
+        let judgement = judge(c, schema, Originals::Held(record)).unwrap();
         let mut all: Vec<(RowId, Step, Vec<HeldReference>)> = Vec::new();
-        visit_write(c, header, |original| {
+        originals.visit(|original| {
             let row = original.row().clone();
             let mut view = ChildView::new(&authoring, &row, &original, header.schema_version);
             for step in &original.execution().steps {

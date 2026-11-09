@@ -12,6 +12,7 @@ pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
 pub(crate) const CONFIRMATION_NUMBER: &[u8] = b"coven/confirmation-number/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";
 pub(crate) const AUTHORSHIP: &[u8] = b"coven/row-authorship/v1";
+pub(crate) const KEPT_VALUE: &[u8] = b"coven/kept-value/v1";
 
 pub(crate) fn derive(key: &[u8; 32], context: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut output = Zeroizing::new([0; 32]);

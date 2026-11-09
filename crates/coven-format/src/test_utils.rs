@@ -331,7 +331,7 @@ pub fn snapshot_header() -> SnapshotHeader {
         id: SnapshotId { device: DeviceId(1), number: 1, audience: Audience::Store },
         schema_version: 2,
         covers: 9,
-        counts: [4, 1, 1, 4, 1, 1, 1, 1, 1, 1, 2],
+        counts: [4, 1, 1, 4, 5, 1, 1, 1, 1, 1, 2],
     }
 }
 /// The sealed prefix carrying a snapshot's coverage, with a fixed test key.
@@ -365,7 +365,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
             .chain([concurrent_loss(), excluded_loss()])
             .map(SnapshotRecord::Loss),
     );
-    records.push(SnapshotRecord::Authored(authored_change()));
+    records.extend(authored_records().into_iter().map(SnapshotRecord::Authored));
     records.push(SnapshotRecord::Creation(creation()));
     records.push(SnapshotRecord::Evidence(write_evidence()));
     records.push(SnapshotRecord::Admin(crate::floor::OriginalSlot {
@@ -436,15 +436,51 @@ pub fn write_evidence() -> crate::authorship::WriteEvidence {
         proof,
     }
 }
-/// The fixture write's row change as source evidence, applied by its author.
-pub fn authored_change() -> crate::snapshot_rows::AuthoredChange {
+/// The fixture's kept source evidence, each change applied by its author:
+/// the first write's insert of the row, its value kept as a digest, then the
+/// fixture write's store part, whose reference `x` is kept in full, and its
+/// execution-only row.
+pub fn authored_records() -> Vec<crate::snapshot_rows::AuthoredRecord> {
+    use crate::snapshot_rows::{
+        AuthoredChange, AuthoredPart, AuthoredRecord, ChangeVerdict, KeptChange, KeptRecord,
+        KeptValue,
+    };
+    let first = WriteId { device: DeviceId(1), number: 1 };
+    let created = KeptRecord::Change(KeptChange {
+        row: row(),
+        change: Change {
+            generation: 0,
+            operation: Operation::Insert(BTreeMap::from([(
+                "x".into(),
+                ColumnValue {
+                    value: KeptValue::Digest(KeptValue::digest(&Value::Integer(1)).unwrap()),
+                    parents: BTreeMap::new(),
+                },
+            )])),
+        },
+        creator: None,
+        steps: 1,
+    });
     let write = write();
-    crate::snapshot_rows::AuthoredChange {
-        header: write.header,
-        complete: true,
-        change: OriginalRow::Change(write.parts[0].rows[0].clone()),
-        verdict: crate::snapshot_rows::ChangeVerdict::Applied,
-    }
+    let part = &write.parts[0];
+    let applied =
+        |record| AuthoredRecord::Change(AuthoredChange { record, verdict: ChangeVerdict::Applied });
+    vec![
+        AuthoredRecord::Part(AuthoredPart {
+            header: WriteHeader {
+                position: first,
+                timestamp: Timestamp::new(1, 0, first.device).unwrap(),
+                read_through: 0,
+                schema_version: 1,
+                disposition: WriteDisposition::Apply,
+            },
+            complete: true,
+        }),
+        applied(created),
+        AuthoredRecord::Part(AuthoredPart { header: write.header.clone(), complete: true }),
+        applied(KeptRecord::keep(PartRecord::Change(&part.rows[0]), |_| true).unwrap()),
+        applied(KeptRecord::keep(PartRecord::Execution(&part.executions[0]), |_| true).unwrap()),
+    ]
 }
 /// A concurrent cell loss of the fixture row.
 pub fn concurrent_loss() -> crate::loss::Loss {

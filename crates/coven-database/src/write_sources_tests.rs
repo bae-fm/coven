@@ -8,6 +8,20 @@ use coven_format::write::WriteRecord;
 use serde_json::json;
 use std::collections::BTreeSet;
 
+/// The kept record this device keeps for `change`, a row of a write at
+/// schema `version` (D7.3).
+pub(crate) fn kept_change(
+    schema: &crate::write_schema::WriteSchema,
+    version: u32,
+    change: &RowChange,
+) -> KeptChange {
+    let form = KeptForm::new(schema, version);
+    match KeptRecord::decode(&form.keep(PartRecord::Change(change)).unwrap()).unwrap() {
+        KeptRecord::Change(change) => change,
+        KeptRecord::Execution { .. } => unreachable!("a net change keeps a net change"),
+    }
+}
+
 #[tokio::test]
 async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     let author_store = TestStore::new();
@@ -45,14 +59,16 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     let mut deletion = records[3].clone();
     deletion.parts[0].rows[0].old.clear();
     assert_eq!(receiver.receive(deletion.clone().into()).await.unwrap(), ApplyOutcome::Applied);
-    receiver.inspect_writer(|db| {
+    receiver.inspect_writer_schema(|db, schema| {
         let id = ChangeId {
             write: deletion.header.position,
             row: deletion.parts[0].rows[0].row.clone(),
         };
+        // An accepted delete keeps its identity and generation, not the
+        // values it replaced or the sources it named (D7.3).
         let retained = evidence(db, &id).unwrap();
-        assert!(retained.original.old.is_empty());
-        assert_eq!(retained.original.sources, delete.sources);
+        assert_eq!(retained.original, kept_change(schema, 1, &deletion.parts[0].rows[0]));
+        assert_eq!(retained.original.change.operation, Operation::Delete);
     });
     receiver.close().await.unwrap();
     db.close().await.unwrap();
@@ -94,7 +110,10 @@ async fn author_source_survives_a_different_canonical_generation_winner() {
         let state = MergeStore::new(db, &app).row(&source.row).unwrap().state;
         assert_eq!(state.generations()[&1], early.header.position);
         assert_eq!(state.cells()["title"].write, later[1].header.position);
-        assert_eq!(evidence(db, source).unwrap().original, later[0].parts[0].rows[0]);
+        assert_eq!(
+            evidence(db, source).unwrap().original,
+            kept_change(schema, 1, &later[0].parts[0].rows[0])
+        );
     });
     for db in [a, b, c] {
         db.close().await.unwrap();
@@ -221,8 +240,11 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     assert_eq!(setter.column, "title");
     assert_eq!(setter.change.write, original[1].header.position);
     assert_eq!(setter.change.row, original[1].parts[0].rows[0].row);
-    db.inspect_writer(|db| {
-        assert_eq!(evidence(db, &setter.change).unwrap().original, original[1].parts[0].rows[0]);
+    db.inspect_writer_schema(|db, schema| {
+        assert_eq!(
+            evidence(db, &setter.change).unwrap().original,
+            kept_change(schema, 1, &original[1].parts[0].rows[0])
+        );
         let uploads = db
             .query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
                 r.get::<_, Vec<u8>>(0)
@@ -357,8 +379,8 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
     target.dismiss_lost_values(&target.lost_values().await.unwrap()).await.unwrap();
     assert!(target.lost_values().await.unwrap().is_empty());
     assert_eq!(target.receive(write.clone().into()).await.unwrap(), ApplyOutcome::AlreadyApplied);
-    target.inspect_writer(|db| {
-        assert_eq!(evidence(db, &id).unwrap().original, *original);
+    target.inspect_writer_schema(|db, schema| {
+        assert_eq!(evidence(db, &id).unwrap().original, kept_change(schema, 1, original));
         assert_eq!(
             db.query(
                 "SELECT c.record,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) ORDER BY c.table_name,c.key",
@@ -587,19 +609,19 @@ async fn authored_sources_differential() {
             })
             .await
             .unwrap();
-            let mut record = records(db).pop().unwrap();
-            // Extract evidence from the committed original, rather than a second
-            // implementation of the source-capture algorithm in the generator.
-            db.inspect_writer(|db| {
-                for row in record.parts.iter_mut().flat_map(|p| &mut p.rows) {
+            // The committed original, as queued, names the sources its
+            // capture found; its kept record is what later writes are judged
+            // against.
+            let record = records(db).pop().unwrap();
+            db.inspect_writer_schema(|db, schema| {
+                for row in record.parts.iter().flat_map(|p| &p.rows) {
                     let retained = evidence(
                         db,
                         &ChangeId { write: record.header.position, row: row.row.clone() },
                     )
                     .unwrap();
                     assert_eq!(retained.header, record.header);
-                    assert_eq!(&retained.original, row);
-                    *row = retained.original;
+                    assert_eq!(retained.original, kept_change(schema, 1, row));
                 }
             });
             history.push(record);
@@ -680,11 +702,11 @@ pub(crate) fn scan_reason(
     }
 }
 
-/// Each record of a local write is encoded once, and what is retained as its
-/// original and queued for upload is the bytes encoding the record gives: the
-/// original a row's frame, the queue the write's plaintext, byte for byte.
+/// A local write queues for upload the bytes encoding its records gives, the
+/// write's plaintext byte for byte, and keeps each record's kept form, as a
+/// received copy of it would be kept (D7.3).
 #[tokio::test]
-async fn a_write_retains_and_queues_the_bytes_its_records_encode_to() {
+async fn a_write_keeps_its_records_and_queues_the_bytes_they_encode_to() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('a','first','x'),('b','first','y'),('c','first','z')")
@@ -719,10 +741,9 @@ async fn a_write_retains_and_queues_the_bytes_its_records_encode_to() {
                     )
                     .unwrap()
                 });
-                let expected = match row {
-                    PartRecord::Change(change) => change.encode().unwrap(),
-                    PartRecord::Execution(execution) => execution.encode().unwrap(),
-                };
+                let expected = db.inspect_writer_schema(|_, schema| {
+                    KeptForm::new(schema, record.header.schema_version).keep(row).unwrap()
+                });
                 assert_eq!(retained, expected);
             }
         }

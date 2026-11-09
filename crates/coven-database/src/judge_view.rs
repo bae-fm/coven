@@ -2,8 +2,10 @@
 //! action the write's schema derives on it (§9.1, §9.6, D5).
 //!
 //! A child's cell at a step is what an earlier step of the write set in the
-//! row's current incarnation, or else the value its replaced setter's
-//! authenticated original record wrote. A missing record waits, unless no
+//! row's current incarnation, or else the value its replaced setter's kept
+//! record holds: in full for a column that was a reference when the setter
+//! wrote it, which every column read here is, and as a digest otherwise
+//! (D7.3). A missing record waits, unless no
 //! history holds it, as for a migration write another raise replaced: then
 //! the cell has no known value, and the change is lost anyway. A reference
 //! names the row its values key where the write's earlier steps leave that
@@ -20,9 +22,9 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_rows::{column_name, key_columns, target_columns};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
-use coven_format::snapshot_rows::OriginalRow;
+use coven_format::snapshot_rows::KeptValue;
 use coven_format::value::Value;
-use coven_format::write::{Half, Step};
+use coven_format::write::{Half, OriginalRow, Step};
 use coven_merge::{Change, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::BTreeMap;
 
@@ -42,10 +44,8 @@ impl<'a> Authoring<'a> {
         schema: &'a WriteSchema,
         version: u32,
     ) -> Result<Self, DbError> {
-        if version < db.schema_version()? {
-            if let Some(before) = crate::migration_receive::authored(&schema.conversions, version) {
-                return Ok(Self { database: db, schema: before, current: None });
-            }
+        if let Some(before) = schema.retained_before(version) {
+            return Ok(Self { database: db, schema: before, current: None });
         }
         Ok(Self { database: db, schema: &schema.schema, current: Some(&schema.rules) })
     }
@@ -98,11 +98,15 @@ impl<'a> ChildView<'a> {
         }
     }
 
-    /// The cell's value at this moment, or none when it was never set.
-    fn value(&self, column: &str) -> Result<Option<ColumnValue<Value>>, DbError> {
+    /// The cell's value at this moment, as far as it is kept, or none when
+    /// it was never set.
+    fn value(&self, column: &str) -> Result<Option<ColumnValue<KeptValue>>, DbError> {
         let db = self.authoring.database;
         if let Some(cell) = self.cells.get(column) {
-            return Ok(Some(cell.clone()));
+            return Ok(Some(ColumnValue {
+                value: KeptValue::Value(cell.value.clone()),
+                parents: cell.parents.clone(),
+            }));
         }
         if self.fresh {
             return Ok(None);
@@ -145,6 +149,20 @@ impl<'a> ChildView<'a> {
         Ok(cell)
     }
 
+    /// The value of a reference's column at this moment, whole. Its setter
+    /// wrote it as a reference, so its kept record holds it in full (D7.3).
+    fn reference(&self, column: &str) -> Result<Option<ColumnValue<Value>>, DbError> {
+        match self.value(column)? {
+            None => Ok(None),
+            Some(ColumnValue { value: KeptValue::Value(value), parents }) => {
+                Ok(Some(ColumnValue { value, parents }))
+            }
+            Some(ColumnValue { value: KeptValue::Digest(_), .. }) => Err(DbError::Invariant {
+                what: "a column read as a reference was one when its setter wrote it",
+            }),
+        }
+    }
+
     /// Whether `old` holds exactly the cells this row held when the write
     /// began: every cell its replaced setters wrote, with the value each
     /// wrote (D5). Asked before any step applies.
@@ -157,7 +175,7 @@ impl<'a> ChildView<'a> {
         }
         for column in change.sources.setters.keys() {
             match (old.get(column), self.value(column)?) {
-                (Some(value), Some(cell)) if *value == cell.value => {}
+                (Some(value), Some(cell)) if cell.value.matches(value)? => {}
                 _ => return Ok(false),
             }
         }
@@ -223,7 +241,7 @@ impl<'a> ChildView<'a> {
             }
             let mut values = Vec::new();
             for column in &columns {
-                match self.value(column)? {
+                match self.reference(column)? {
                     Some(cell) if cell.value != Value::Null => values.push(cell),
                     _ => break,
                 }
@@ -305,7 +323,7 @@ impl<'a> ChildView<'a> {
         let names = crate::write_rows::recorded_columns(table, columns.iter().cloned());
         let mut current = BTreeMap::new();
         for name in &names {
-            current.insert(name.clone(), self.value(name)?);
+            current.insert(name.clone(), self.reference(name)?);
         }
         let carried: BTreeMap<String, Value> = current
             .iter()

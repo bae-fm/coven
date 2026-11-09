@@ -6,8 +6,7 @@ use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
     dismissal::WriteFrame,
     merge_fields,
-    snapshot_rows::OriginalRow,
-    write::{PartRecord, WriteHeader, WritePart, WriteRecord},
+    write::{OriginalRow, PartRecord, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_merge::{Audience, RowId};
 use rusqlite::params;
@@ -24,11 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE IF NOT EXISTS _coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
         CREATE TEMP TABLE IF NOT EXISTS _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);
-        CREATE TEMP TABLE IF NOT EXISTS _coven_download_replaced(audience TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;")?;
+        CREATE TEMP TABLE IF NOT EXISTS _coven_download_replaced(audience TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
+        CREATE TEMP TABLE IF NOT EXISTS _coven_received_records(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(write_id,audience,table_name,key)) WITHOUT ROWID;")?;
     let staged: bool = database.query_row(
         "SELECT EXISTS(SELECT 1 FROM temp._coven_download_rows)
              OR EXISTS(SELECT 1 FROM temp._coven_download_dismissals)
-             OR EXISTS(SELECT 1 FROM temp._coven_download_replaced)",
+             OR EXISTS(SELECT 1 FROM temp._coven_download_replaced)
+             OR EXISTS(SELECT 1 FROM temp._coven_received_records)",
         [],
         |r| r.get(0),
     )?;
@@ -107,6 +108,7 @@ pub(crate) fn ignored(
 
 pub(crate) fn frame(
     database: &DatabaseConnection,
+    form: &crate::write_sources::KeptForm<'_>,
     header: &WriteHeader,
     ignored: bool,
     frame: WriteFrame,
@@ -129,14 +131,56 @@ pub(crate) fn frame(
     if !ignored {
         crate::write_sources::validate(database, header, record)?;
     }
-    crate::write_sources::retain(database, header, record)
+    crate::write_sources::retain(database, form, header, record)
+}
+
+/// Stage one received record whole until its write is judged and applied:
+/// the history keeps only its kept form (D7.3).
+pub(crate) fn stage_record(
+    database: &DatabaseConnection,
+    header: &WriteHeader,
+    record: PartRecord<'_>,
+) -> Result<(), DbError> {
+    let row = record.row();
+    database.internal_execute(
+        "INSERT INTO temp._coven_received_records(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5)",
+        params![
+            merge_fields::encode_write_id(&header.position)?,
+            &row.audience,
+            row.table,
+            row.key,
+            record.encode()?
+        ],
+    )?;
+    Ok(())
+}
+
+/// Release a received write's staged records once it is applied or consumed.
+pub(crate) fn release(database: &DatabaseConnection, header: &WriteHeader) -> Result<(), DbError> {
+    database.internal_execute(
+        "DELETE FROM temp._coven_received_records WHERE write_id=?1",
+        [merge_fields::encode_write_id(&header.position)?],
+    )?;
+    Ok(())
+}
+
+/// Where a write's whole records are while it is judged and applied: a
+/// received write's in this slot's staging, and this device's migration
+/// write's in its own table, since its marker carries none (§18.4).
+pub(crate) fn records_table(header: &WriteHeader) -> &'static str {
+    match header.disposition {
+        WriteDisposition::Apply => "temp._coven_received_records",
+        WriteDisposition::Migration => "_coven_migration_records",
+    }
 }
 
 /// Judge the whole streamed write, then stage each opened part's admitted
-/// changes one record at a time, as they were retained. A write in the local
+/// changes one record at a time, as they were staged. A write in the local
 /// captured prefix also stages its captured parts, but only in audiences
 /// `selected` admits: a reload replays its slots only into the audiences it
-/// loads, and the others already hold the write.
+/// loads, and the others already hold the write. An ordinary write's parts
+/// come whole only from its slot, so each captured part it stages is one its
+/// slot opened; the migration write's come from its own records (§18.4).
 pub(crate) fn stage(
     database: &DatabaseConnection,
     schema: &WriteSchema,
@@ -147,6 +191,11 @@ pub(crate) fn stage(
     let mut captured = Vec::new();
     for audience in crate::captured_changes::audiences(database, header)? {
         if selected(&audience)? {
+            if header.disposition == WriteDisposition::Apply && !opened.contains(&audience) {
+                return Err(DbError::Invariant {
+                    what: "a captured write's selected part is opened from its slot",
+                });
+            }
             captured.push(audience);
         }
     }
@@ -163,10 +212,14 @@ pub(crate) fn stage(
     for audience in opened {
         // One record at a time, past the last: admitting it updates its row.
         let mut last: Option<(String, Vec<u8>)> = None;
+        let next = format!(
+            "SELECT table_name,key,record FROM {records} WHERE write_id=?1 AND audience=?2
+             AND (?3 IS NULL OR (table_name,key)>(?3,?4)) ORDER BY table_name,key LIMIT 1",
+            records = records_table(header)
+        );
         while let Some((table, key, bytes)) = database
             .query(
-                "SELECT table_name,key,record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2
-                 AND (?3 IS NULL OR (table_name,key)>(?3,?4)) ORDER BY table_name,key LIMIT 1",
+                &next,
                 params![
                     write,
                     audience,
@@ -191,10 +244,7 @@ pub(crate) fn stage(
             let Some(part) = interpreter.part(part)? else {
                 continue;
             };
-            let record = WriteRecord {
-                header: header.clone(),
-                parts: vec![part],
-            };
+            let record = WriteRecord { header: header.clone(), parts: vec![part] };
             let store = MergeStore::from_staged(database, &schema.schema);
             let updates = store.apply(&record)?;
             crate::write_commit::commit(database, &record, &store, &updates)?;

@@ -735,7 +735,7 @@ async fn a_derived_change_the_schema_doesnt_make_refuses_the_authors_write() {
 }
 
 /// The author judges its own write from the record it queues, not by
-/// reading back the records it retained from that record a moment before.
+/// reading back whole records staged from it: it keeps only their kept forms.
 #[tokio::test]
 async fn the_author_judges_its_write_without_reading_it_back() {
     let store = crate::tests::TestStore::new();
@@ -751,7 +751,7 @@ async fn the_author_judges_its_write_without_reading_it_back() {
         .iter()
         .filter(|s| {
             s.sql.starts_with(
-                "SELECT record FROM _coven_authored_changes WHERE write_id=?1 ORDER BY",
+                "SELECT record FROM temp._coven_received_records WHERE write_id=?1 ORDER BY",
             )
         })
         .count();

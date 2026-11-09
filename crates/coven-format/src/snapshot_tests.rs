@@ -482,7 +482,8 @@ fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
         while let Some(frame) = frames.next(&mut input).unwrap() {
             if let Some(record) = reader.frame(&frame, &test_utils::oracle()).unwrap() {
                 match &record {
-                    SnapshotRecord::Authored(change) => {
+                    SnapshotRecord::Authored(AuthoredRecord::Part(_)) => {}
+                    SnapshotRecord::Authored(AuthoredRecord::Change(change)) => {
                         assert_eq!(change.verdict, verdict);
                         authored += 1;
                     }
@@ -567,4 +568,34 @@ fn history_extraction_requires_counts_order_and_the_end_marker() {
         reader.history_frame(frame).unwrap();
     }
     assert!(reader.history_frame(frames.last().unwrap()).is_err());
+}
+
+/// A kept record holds a reference's value and parents in full and every
+/// other column as the digest of its value, names no parents for a digest,
+/// counts the record's operations, and reads back as kept (D7.3).
+#[test]
+fn a_kept_record_holds_references_in_full_and_digests_the_rest() {
+    let write = test_utils::write();
+    let mut change = write.parts[0].rows[0].clone();
+    let coven_merge::Operation::Update(columns) = &mut change.change.operation else {
+        panic!("the fixture write's change is an update")
+    };
+    columns.insert("body".into(), test_utils::column(Value::Text("a long body".into())));
+    let reference = |column: &str| column == "x";
+    let kept = KeptRecord::keep(crate::write::PartRecord::Change(&change), reference).unwrap();
+    let KeptRecord::Change(kept_change) = &kept else { panic!("a net change keeps a change") };
+    let coven_merge::Operation::Update(kept_columns) = &kept_change.change.operation else {
+        panic!("an update keeps an update")
+    };
+    assert_eq!(kept_columns["x"].value, KeptValue::Value(Value::Integer(2)));
+    assert!(!kept_columns["x"].parents.is_empty());
+    let digest = KeptValue::digest(&Value::Text("a long body".into())).unwrap();
+    assert_eq!(kept_columns["body"].value, KeptValue::Digest(digest));
+    assert!(kept_columns["body"].parents.is_empty());
+    assert!(kept_columns["body"].value.matches(&Value::Text("a long body".into())).unwrap());
+    assert!(!kept_columns["body"].value.matches(&Value::Text("another".into())).unwrap());
+    assert_eq!(kept_change.steps, 1);
+    assert!(kept.conforms(reference));
+    assert!(!kept.conforms(|_| true));
+    assert_eq!(KeptRecord::decode(&kept.encode().unwrap()).unwrap(), kept);
 }

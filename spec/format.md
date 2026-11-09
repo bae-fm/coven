@@ -651,9 +651,13 @@ authoring device (§9.5).
 - Nothing else stands in for the evidence: not numeric generations, old scalar
   values, read frontiers, or the current canonical generation winner.
 
-**What is kept.** The authenticated original header and row frame, including
-parent links, and the row's own admission are retained independently of
-received interpretations and dismissible lost values.
+**What is kept.** A received change is held whole only while its write is
+judged and applied: the sources, old values and operations serve that
+judgement. Then the device keeps its part's authenticated header, its kept
+record (D7.3) with the parents its reference columns named, and its own
+admission, independently of received interpretations and dismissible lost
+values. A later write's source check reads only those: the source's header,
+generation, operation, the columns it set and its incarnation.
 
 **Edge cases: frozen and dependent changes.** A change whose sources were
 dropped is kept as a frozen lost value. Its bytes must survive everything that
@@ -1141,18 +1145,61 @@ schema, dependency or unauthorized lost value when present.
 ### D7.3 Authored changes (section 4)
 
 A late write can depend on a change the snapshot already judged (§9.5). So the
-snapshot keeps every original change and its verdict, separately from the lost
-values the app may dismiss.
+snapshot keeps every accepted change's record and its verdict, separately from
+the lost values the app may dismiss.
 
-Section 4 holds every original row change of the audience whose write the
-snapshot's covered slot includes and which this device holds.
+Once a change is judged, nothing reads the values it replaced, the sources it
+built on or its SQL operations again: those served judging it. Later writes
+read only who made it, when, which row, generation and operation, which
+columns it set, the values of the columns that were references, and whether a
+later delete shows the same value as each other column. So a snapshot keeps
+each change as a *kept record* of fixed size, whatever the size of its values.
 
-| Field | Meaning |
+*Example.* Ana edits note 42's 16 KiB body a hundred times. The snapshot holds
+the body once, in the note's merge row (D7.1). Each of her hundred edits keeps
+a record of about 150 bytes: the note's row, its generation, "update", and
+`body` with a 32-byte digest of the value she wrote. The values each edit
+replaced are kept nowhere. Ben's later write deleting the note shows the body
+it replaced in its `old` map; a receiver checks it against the digest of the
+setter's value.
+
+**Layout.** Section 4 holds, for each write whose covered slot the snapshot
+includes and whose part in the audience this device holds, a *part record*
+with the write's header, followed by one record per kept change of that part,
+in `RowId` order. Parts are in write order. Each record starts with a tag: `0`
+for a part, `1` for a change.
+
+| Part field | Meaning |
 | --- | --- |
 | `header` | its write's header fields, without `parts` (below) |
 | `complete` | a `bool`: whether every change of that part is known, so a named row's absence is proof |
-| `change` | `0 \| row change` or `1 \| execution record`: the D5 frame body without its envelope, with its generation source and replaced setters. An execution record is source evidence too, and its steps can cause foreign-key actions (§9.6). |
+
+| Change field | Meaning |
+| --- | --- |
+| `record` | its kept record, below |
 | `verdict` | the author's verdict, below |
+
+A part record is followed by at least one change record. A change record
+belongs to the part record before it.
+
+**The kept record.** A net change keeps
+`0 | row | generation | operation | creator | steps`, and an execution record
+(D5.9) keeps `1 | row | steps`:
+
+| Field | Meaning |
+| --- | --- |
+| `row` | the change's `RowId` |
+| `generation`, `operation` | as in D5.5. An insert or update carries its columns, each `0 \| value \| parents` in full, or `1 \| digest`; a delete carries none. |
+| `creator` | as in D5.7 |
+| `steps` | a `u32`: how many operations the record listed (D5.8), the step leaves its part's authorship tree holds for it (D11). It is at least one for an execution record. |
+
+A column is kept in full exactly when it was a reference under the schema of
+the change's write (§9.6): its value and the parents it named, which a later
+write's foreign-key actions read. Every other column keeps a digest and names
+no parents: SHA-256 of the D11 context of the label `coven/kept-value/v1` and
+the value's D2 encoding. A device holds
+the schema of every version it keeps changes of, so every device keeps the same
+bytes for one change.
 
 | Verdict | Meaning |
 | --- | --- |
@@ -1165,8 +1212,8 @@ snapshot's covered slot includes and which this device holds.
 | `6 \| reason` | unauthorized, with lost-value cause 4's `reason` |
 | `7 \| causes:[ChangeId]` | applied as the exact foreign-key effect of those changes of its own write: each action's root, then its intermediate causes, in execution order (§9.6) |
 
-**The header.** Each change must name its write's identity, time, history and
-schema. It doesn't need the write's list of parts: its own part is its row's
+**The header.** A part record names its write's identity, time, history and
+schema. It doesn't need the write's list of parts: its own part is its rows'
 audience. So `header` is a `WriteHeader`: D5.1's header fields up to
 `disposition`, with no frame envelope and no `parts` list. It is always 45 bytes:
 
@@ -1183,26 +1230,41 @@ disposition     u8            1 byte
 **Rules.**
 
 - Only unjudged, applied and derived changes survive as sources.
-- A change's write, and every source it names, must be covered by its consumed
-  prefix.
+- A part's write, a copy's creator and every change a verdict names must be
+  covered by the snapshot's consumed prefix.
 - Dismissing a lost value never changes a verdict.
-- A loader keeps the same original bytes for one identity, and adopts the
-  snapshot's verdicts with its data.
+- A loader refuses a kept record that holds in full a column that was no
+  reference under its write's schema, or digests one that was.
+- A loader keeps the same kept record for one identity, and adopts the
+  snapshot's verdicts with its data. A record it already keeps must equal the
+  snapshot's byte for byte.
 
 **Evidence that must survive.**
 
-- Snapshot evidence preserves original change identities, actual generation and
-  setter sources, and their own admission facts, independently of dismissible
-  lost values and consumed slots.
+- Snapshot evidence preserves original change identities and their own
+  admission facts, independently of dismissible lost values and consumed slots.
 - Old-credential cut-offs feed the same per-change rule as schema and
   device-retirement exclusions (D5.3).
-- Dependent changes keep their original generation, operation, column names and
-  values, even an empty-valued delete. Their dependency cause names failed
-  sources in generation-then-setter role order, keeping repeated ids.
+- A dependent change's original generation, operation, column names and
+  values, even an empty-valued delete, are kept in its frozen lost value
+  (D7.2). Its dependency cause names failed sources in generation-then-setter
+  role order, keeping repeated ids.
 - A later reader, conversion, lost-value dismissal or snapshot reload can't turn
   an excluded source into retained data.
-- Successor snapshots preserve originals while they support source verdicts or
-  current authorship. Physical deletion follows §16.6.
+- Successor snapshots preserve kept records while they support source verdicts
+  or current authorship. Physical deletion follows §16.6.
+
+**Edge cases.**
+
+- A column read in full is always one its setter wrote as a reference. A
+  breaking migration that makes a column a reference, or changes its
+  references, sets it in every row it holds (§18.4), and a converter can make a
+  column a reference only from one that was (api.md E13). The merge model
+  proves every schema change keeps this (see What's proved).
+- Two values with the same digest compare equal. Coven relies on SHA-256's
+  collision resistance here, as D11 relies on it for authorship.
+- An opened cell leaf (D11) of a column kept as a digest is rebuilt from the
+  merge row's current value when that value matches the digest.
 
 Section 4 and lost-value cause 3 supply the evidence for the merge model's data
 rule (see What's proved).
@@ -1857,7 +1919,8 @@ with a label that says what it is for.
 A context encodes a list of byte strings as each one's `length:u64 | bytes`.
 
 - It is used as associated data, as HKDF's info, for nonce derivation, for
-  confirmation numbers, and for D9's `coven/object-signature/v1`, `coven/prefix-signature/v1` and
+  confirmation numbers, for kept-value digests (D7.3), and for D9's
+  `coven/object-signature/v1`, `coven/prefix-signature/v1` and
   `coven/write-header-signature/v1` messages.
 - A number in a context, such as a section or a chunk's index, is one string of
   its 8 bytes, as a `u64`.
@@ -1880,6 +1943,7 @@ the string's length, 8, then the number.
 | `coven/confirmation-number/v1` | a join request's confirmation number | below |
 | `coven/sealed-box/v1` | a sealed key's box | below |
 | `coven/file-chunk/v1` | a file chunk's associated data | D12 |
+| `coven/kept-value/v1` | a kept record's digest of a value | D7.3 |
 
 ### Derived keys
 
@@ -2374,4 +2438,5 @@ supports. coven.md Appendix G lists every other proof.
 | Ben's example: an untried upload stays untried with its original record through conversions, and two receptions of a write under the same conversion, schema view and history, each meeting the receipt's prerequisites, agree | `conversions_preserve_untried`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | D5.2 |
 | A step counts as a foreign-key action exactly when it equals the schema's consequence of an earlier step, through a reference its row holds at that moment; the classification reads only the steps, the replayed references and the schema, never a sender's label. In the model's construction of steps and their parents, a classified step names, in every reference it writes, the row and incarnation whose step caused it. A reference over columns another reference shares names the parent every author view consistent with the steps holds where they leave its key, a move's halves included, and a row change's reference the parent where the whole write's steps leave its key, in the write's net incarnations | `action_iff`, `follows_cause`, `Place.place_sound`, `Place.recorded_sound`, `Place.net_sound` | `proofs/merge/CovenMerge/ForeignKeyClassification.lean`, `proofs/merge/CovenMerge/ForeignKeyPlace.lean` | D5.8 |
 | The merge model's row is one table, key and audience, so equal keys must be one row; binary collation and D3 make equal keys equal bytes. The model abstracts keys, so B2 doesn't prove the byte order: Rust compares `RowId` keys as bytes, and `coven-format`'s key tests show D3's bytes sort as SQLite does | write-up B2 | [`proofs/merge.md`](proofs/merge.md#b2-terms) | D3 |
+| A kept record holds in full every column a later judgement reads in full: every schema change keeps each cell of a reference column set by a write that wrote it as a reference | `write_keeps`, `addition_keeps`, `migration_keeps`, `drop_keeps` | `proofs/merge/CovenMerge/ReferenceSetters.lean` | D7.3 |
 | The data rule: receive order, progress, and dropping a change by its data, whose evidence section 4 and lost-value cause 3 supply | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | D7.3 |

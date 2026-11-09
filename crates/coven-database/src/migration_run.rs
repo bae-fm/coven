@@ -310,12 +310,14 @@ fn finish(
         record.header.disposition = WriteDisposition::Migration;
         // Migration row changes belong to the published snapshot, but remain
         // original source evidence for writes authored after the migration.
+        let form = crate::write_sources::KeptForm::new(&schema, record.header.schema_version);
         for part in &record.parts {
             crate::ownership::offer_part(database, &record.header, part)?;
             let frames = crate::write_sources::encode_records(&record.header, part)?;
             for (row, bytes) in part.records().zip(&frames) {
                 crate::write_sources::validate(database, &record.header, row)?;
-                crate::write_sources::retain_authored(database, &record.header, row, bytes)?;
+                crate::write_sources::retain_authored(database, &form, &record.header, row)?;
+                retain_record(database, &record.header, row, bytes)?;
                 crate::write_sources::admit(
                     database,
                     &record.header,
@@ -380,6 +382,44 @@ pub(crate) fn forget_audience(
     for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
         db.internal_execute(&format!("DELETE FROM {table} WHERE audience=?1"), [audience])?;
     }
+    Ok(())
+}
+
+/// Keep this device's migration write's record whole, for its marker's slot
+/// to apply: the marker carries no row changes (§18.4).
+fn retain_record(
+    database: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
+    record: coven_format::write::PartRecord<'_>,
+    bytes: &[u8],
+) -> Result<(), DbError> {
+    let row = record.row();
+    database.internal_execute(
+        "INSERT INTO _coven_migration_records VALUES(?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            coven_format::merge_fields::encode_write_id(&header.position)?,
+            &row.audience,
+            row.table,
+            row.key,
+            bytes
+        ],
+    )?;
+    Ok(())
+}
+
+/// Forget one of this device's migration write's whole records, with its
+/// kept record, once a loaded snapshot replaced it (§18.5).
+pub(crate) fn forget_record(
+    database: &DatabaseConnection,
+    write: &[u8],
+    audience: &coven_merge::Audience,
+    table: &str,
+    key: &[u8],
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "DELETE FROM _coven_migration_records WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+        rusqlite::params![write, audience, table, key],
+    )?;
     Ok(())
 }
 

@@ -89,6 +89,7 @@ mod fixture {
      INSERT INTO _coven_install_before SELECT tab,key,audience,i%2 FROM fixture;
      INSERT INTO _coven_install_region SELECT tab,key,audience FROM fixture WHERE i%16=0;
      INSERT INTO _coven_download_replaced SELECT DISTINCT audience FROM fixture WHERE i<=4;
+     INSERT INTO _coven_received_records SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
 "
     ).unwrap();
         // Each domain fills its own tables from the same rows.
@@ -576,6 +577,14 @@ mod source {
         }
         if file == "merge_store.rs" && sql.contains("{values}") {
             return vec![sql.replace("{values}", "(?,?),(?,?)")];
+        }
+        // A write's whole records while it is judged and applied: a received
+        // write's staged in the slot, this device's migration write's kept.
+        if matches!(file, "download_stage.rs" | "judge.rs") && sql.contains("{records}") {
+            return ["temp._coven_received_records", "_coven_migration_records"]
+                .into_iter()
+                .map(|table| sql.replace("{records}", table))
+                .collect();
         }
         if file == "written_values.rs" && sql.contains("{others}") {
             return vec![sql.replace("{others}", "?,?")];

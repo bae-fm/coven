@@ -102,7 +102,8 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
                 );
                 input.finish().unwrap();
             }
-            SnapshotRecord::Authored(authored) => {
+            SnapshotRecord::Authored(crate::snapshot_rows::AuthoredRecord::Part(_)) => {}
+            SnapshotRecord::Authored(crate::snapshot_rows::AuthoredRecord::Change(authored)) => {
                 // The verdict is stored locally with the same bytes it ends with.
                 let verdict = encode_change_verdict(&authored.verdict).unwrap();
                 assert!(bytes.ends_with(&verdict));

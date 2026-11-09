@@ -566,7 +566,8 @@ impl<'a> PartRecord<'a> {
         }
     }
 
-    fn encode(&self) -> Result<Vec<u8>, Error> {
+    /// The record's own frame: kind 2 for a change, 13 for an execution.
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
         match self {
             Self::Change(change) => change.encode(),
             Self::Execution(execution) => execution.encode(),
@@ -599,6 +600,52 @@ impl WriteRecord {
             part.validate_shape()?;
         }
         Ok(())
+    }
+}
+
+/// One row's original record in a write part (D5): its net change, or the
+/// SQL operations that left it with none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginalRow {
+    /// A net change, with its operations.
+    Change(RowChange),
+    /// Operations with no net change.
+    Execution(RowExecution),
+}
+impl OriginalRow {
+    /// The changed row.
+    pub fn row(&self) -> &RowId {
+        match self {
+            Self::Change(change) => &change.row,
+            Self::Execution(execution) => &execution.row,
+        }
+    }
+
+    /// The record as a part record.
+    pub fn record(&self) -> PartRecord<'_> {
+        match self {
+            Self::Change(change) => PartRecord::Change(change),
+            Self::Execution(execution) => PartRecord::Execution(execution),
+        }
+    }
+
+    /// The row's operations and the sources they used.
+    pub fn execution(&self) -> &Execution {
+        match self {
+            Self::Change(change) => &change.execution,
+            Self::Execution(execution) => &execution.execution,
+        }
+    }
+
+    /// Decode either frame kind.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        match crate::dismissal::WriteFrame::decode(bytes)? {
+            crate::dismissal::WriteFrame::Change(change) => Ok(Self::Change(change)),
+            crate::dismissal::WriteFrame::Execution(execution) => Ok(Self::Execution(execution)),
+            crate::dismissal::WriteFrame::Dismissal(_) => {
+                Err(Error::UnknownTag { field: "original row kind", tag: 3 })
+            }
+        }
     }
 }
 

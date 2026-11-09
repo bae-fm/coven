@@ -24,3 +24,17 @@ fn incremental_content_hash_matches_sha256_known_answers() {
         "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
     );
 }
+
+/// A kept value's digest is SHA-256 over the labelled, length-framed value
+/// bytes (D7.3); these answers come from Python's hashlib.
+#[test]
+fn kept_value_digest_matches_known_answers() {
+    assert_eq!(
+        hex::encode(kept_value_digest(b"abc")),
+        "84586de44f427985ffb727218d430ad5566729693025a492e2e803d7d4a693bc"
+    );
+    assert_eq!(
+        hex::encode(kept_value_digest(b"")),
+        "d24710d26dc5e9bb39c78c57e7d9471885cbda047b5c03f2580fa4c911c1f4c4"
+    );
+}

@@ -667,14 +667,18 @@ def main():
                              plaintext[start:start + 65536], bytes([0x70 + index]) * 24)
     floor = signed(sodium, path, body)
     # Refused and reset-ignored parts still carry the device's included claim.
-    authored = next(piece for piece in frames[:write_at] if piece[0] == 6 and piece[7] == 4)
-    assert authored[-1] == 1  # Applied verdict in the source record.
+    # Section 4 holds each part's record, then its changes: the fixture
+    # write's part is the third record and its row change the fourth.
+    authored = [piece for piece in frames[:write_at] if piece[0] == 6 and piece[7] == 4]
+    part, change = authored[2], authored[3]
+    assert part[8] == 0 and change[8] == 1  # A part record, then a change record.
+    assert change[-1] == 1  # Applied verdict in the source record.
     claim_snapshots = []
     for number, verdict, stored in [(8, b"\x03", refused_slot), (9, b"\x05" + u64(2), reset_ignored_slot)]:
         counts = [0] * 11
-        counts[4], counts[10] = 1, 2
+        counts[4], counts[10] = 2, 2
         body = frame(5, snapshot_id(store_audience(), 1, number) + u32(2) + b"".join(u64(n) for n in counts))
-        body += frame(6, authored[7:-1] + verdict)
+        body += frame(6, part[7:]) + frame(6, change[7:-1] + verdict)
         body += last_claim(1, number, hashlib.sha256(stored).digest()) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
         claim_snapshots.append(body)
     (out / "snapshot-claims.hex").write_text("".join(body.hex() + "\n" for body in claim_snapshots))

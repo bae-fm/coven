@@ -3,7 +3,9 @@
 use crate::{merge_store::MergeStore, sqlite::DatabaseConnection, DbError};
 use coven_format::{
     merge_fields,
-    snapshot_rows::{AuthoredChange, ChangeVerdict, OriginalRow},
+    snapshot_rows::{
+        AuthoredChange, AuthoredPart, AuthoredRecord, ChangeVerdict, KeptChange, KeptRecord,
+    },
     value::Value,
     write::{PartRecord, RowChange, WriteDisposition, WriteHeader},
     write_sources::{CellSource, ChangeId, WriteSources},
@@ -14,13 +16,13 @@ use std::collections::BTreeMap;
 
 pub(crate) struct Evidence {
     pub(crate) header: WriteHeader,
-    pub(crate) original: RowChange,
+    pub(crate) original: KeptChange,
 }
 
-/// A retained original record, a net change or an execution alone.
+/// A kept record, a net change or an execution alone, and its part's header.
 pub(crate) struct Original {
     pub(crate) header: WriteHeader,
-    pub(crate) record: OriginalRow,
+    pub(crate) record: KeptRecord,
 }
 
 fn invalid(field: &'static str) -> DbError {
@@ -33,8 +35,8 @@ fn invalid(field: &'static str) -> DbError {
 pub(crate) fn evidence(db: &DatabaseConnection, source: &ChangeId) -> Result<Evidence, DbError> {
     let Original { header, record } = original(db, source)?;
     match record {
-        OriginalRow::Change(original) => Ok(Evidence { header, original }),
-        OriginalRow::Execution(_) => Err(invalid("source has no net change")),
+        KeptRecord::Change(original) => Ok(Evidence { header, original }),
+        KeptRecord::Execution { .. } => Err(invalid("source has no net change")),
     }
 }
 
@@ -56,7 +58,7 @@ pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Ori
     };
     Ok(Original {
         header: merge_fields::decode_write_header(&header)?,
-        record: OriginalRow::decode(&record)?,
+        record: KeptRecord::decode(&record)?,
     })
 }
 
@@ -342,7 +344,7 @@ fn creation(
         return Ok(());
     }
     let Original { header: original, record } = self::original(db, creator)?;
-    let OriginalRow::Change(change) = record else {
+    let KeptRecord::Change(change) = record else {
         return Err(invalid("copied creation"));
     };
     let table = crate::source_names::table(
@@ -460,28 +462,66 @@ fn part(
     Ok(())
 }
 
-/// Retain the records of a write this device just allocated the number of,
-/// whose parts and changes nothing has retained yet: the guard `retain` reads
-/// to compare a repeated change has nothing to compare, and a row repeated
+/// Which columns of a write's rows were references under the schema the
+/// write was made with: a kept record holds exactly those in full (D7.3).
+pub(crate) struct KeptForm<'a> {
+    schema: &'a crate::schema::Schema,
+}
+
+impl<'a> KeptForm<'a> {
+    /// The kept form of the rows of a write at schema `version`.
+    pub(crate) fn new(schema: &'a crate::write_schema::WriteSchema, version: u32) -> Self {
+        Self { schema: schema.retained_before(version).unwrap_or(&schema.schema) }
+    }
+
+    /// Whether `column` of `table` was a reference under the write's schema.
+    pub(crate) fn reference(&self, table: &str, column: &str) -> bool {
+        self.schema
+            .tables
+            .get(&table.to_ascii_lowercase())
+            .is_some_and(|table| table.foreign_keys_of(column).next().is_some())
+    }
+
+    /// The kept record of one of the write's rows, encoded.
+    pub(crate) fn keep(&self, record: PartRecord<'_>) -> Result<Vec<u8>, DbError> {
+        let table = &record.row().table;
+        Ok(KeptRecord::keep(record, |column| self.reference(table, column))?.encode()?)
+    }
+
+    /// Whether a kept record holds in full exactly the columns that were
+    /// references under the write's schema.
+    pub(crate) fn conforms(&self, record: &KeptRecord) -> bool {
+        let table = &record.row().table;
+        record.conforms(|column| self.reference(table, column))
+    }
+}
+
+/// Keep the record of a write this device just allocated the number of,
+/// whose parts and changes nothing has kept yet: the guard `retain` reads to
+/// compare a repeated change has nothing to compare, and a row repeated
 /// within the write is refused by the table's key.
 pub(crate) fn retain_authored(
     db: &DatabaseConnection,
+    form: &KeptForm<'_>,
     header: &WriteHeader,
     record: PartRecord<'_>,
-    bytes: &[u8],
 ) -> Result<(), DbError> {
     let row = record.row();
     part(db, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     db.internal_execute(
         "INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5)",
-        params![write, &row.audience, row.table, row.key, bytes],
+        params![write, &row.audience, row.table, row.key, form.keep(record)?],
     )?;
     Ok(())
 }
 
+/// Keep a received record: its kept form, which must equal any this device
+/// already keeps for the same change, and the whole record in the slot's
+/// staging, which judging the write and applying it read (D7.3).
 pub(crate) fn retain(
     db: &DatabaseConnection,
+    form: &KeptForm<'_>,
     header: &WriteHeader,
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
@@ -489,21 +529,18 @@ pub(crate) fn retain(
     part(db, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = &row.audience;
-    let bytes = match record {
-        PartRecord::Change(change) => change.encode()?,
-        PartRecord::Execution(execution) => execution.encode()?,
-    };
+    let kept = form.keep(record)?;
     let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.table,row.key],|r|r.get(0))?;
     let complete =
         db.authored_part(&write, audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?.1;
     if original.is_none() && complete {
         return Err(invalid("original source part changed"));
     }
-    if original.as_ref().is_some_and(|original| *original != bytes) {
+    if original.as_ref().is_some_and(|original| *original != kept) {
         return Err(invalid("original source change changed"));
     }
-    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,bytes])?;
-    Ok(())
+    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,kept])?;
+    crate::download_stage::stage_record(db, header, record)
 }
 
 pub(crate) fn complete(
@@ -645,36 +682,44 @@ fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
     })
 }
 
-/// Every original change of an audience whose containing slot is covered,
-/// with its part header and this device's verdict, in D7 section 5 order.
+/// Every kept change of an audience whose containing slot is covered, each
+/// part's header and completeness before its changes, with this device's
+/// verdict on each, in D7 section 4 order.
 pub(crate) fn visit_evidence<E: From<DbError>>(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
     covered: u64,
-    mut visit: impl FnMut(AuthoredChange) -> Result<(), E>,
+    mut visit: impl FnMut(AuthoredRecord) -> Result<(), E>,
 ) -> Result<(), E> {
+    let mut part: Option<Vec<u8>> = None;
     db.for_each(
-        "SELECT p.header,p.complete,c.record,a.admission FROM _coven_authored_changes c
+        "SELECT c.write_id,p.header,p.complete,c.record,a.admission FROM _coven_authored_changes c
          JOIN _coven_authored_parts p ON p.write_id=c.write_id AND p.audience=c.audience
          LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
          WHERE c.audience=?1 ORDER BY c.write_id,c.table_name,c.key",
         [audience],
         |r| {
+            let write: Vec<u8> = r.get(0).map_err(DbError::from)?;
             let header =
-                merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(0).map_err(DbError::from)?)
+                merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(1).map_err(DbError::from)?)
                     .map_err(DbError::from)?;
             if crate::sequence::write_slot(db, header.position)?.is_none_or(|slot| slot.get() > covered)
             {
                 return Ok(());
             }
-            let change = OriginalRow::decode(&r.get::<_, Vec<u8>>(2).map_err(DbError::from)?)
+            if part.as_ref() != Some(&write) {
+                visit(AuthoredRecord::Part(AuthoredPart {
+                    header,
+                    complete: r.get(2).map_err(DbError::from)?,
+                }))?;
+                part = Some(write);
+            }
+            let record = KeptRecord::decode(&r.get::<_, Vec<u8>>(3).map_err(DbError::from)?)
                 .map_err(DbError::from)?;
-            visit(AuthoredChange {
-                header,
-                complete: r.get(1).map_err(DbError::from)?,
-                change,
-                verdict: read_verdict(r.get(3).map_err(DbError::from)?)?,
-            })
+            visit(AuthoredRecord::Change(AuthoredChange {
+                record,
+                verdict: read_verdict(r.get(4).map_err(DbError::from)?)?,
+            }))
         },
     )
 }
@@ -721,6 +766,7 @@ pub(crate) fn forget_own_migration(
                     "DELETE FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
                     params![write_id, audience, table, key],
                 )?;
+                crate::migration_run::forget_record(db, &write_id, audience, &table, &key)?;
             }
         }
         db.internal_execute(

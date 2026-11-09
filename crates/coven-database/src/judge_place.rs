@@ -22,8 +22,8 @@
 //! added after the step (Lean `Place.net_sound`).
 
 use super::{Indexed, IndexedRow, StepIndex};
-use coven_format::snapshot_rows::OriginalRow;
 use coven_format::write::Half;
+use coven_format::write::OriginalRow;
 use coven_merge::{Audience, Parent, RowId};
 
 /// A key's row as the write's steps before one step leave it.

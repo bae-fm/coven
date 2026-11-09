@@ -1031,7 +1031,7 @@ tables = [
 ]
 
 [[database.domains]]
-name = "migration losses"
+name = "migration write"
 owner = "Database"
 homes = [
     "crates/coven-database/src/migration_run.rs",
@@ -1040,6 +1040,7 @@ homes = [
 tables = [
     "_coven_migration_counted_losses",
     "_coven_migration_losses",
+    "_coven_migration_records",
 ]
 
 [[database.domains]]

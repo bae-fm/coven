@@ -284,12 +284,15 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
     assert_eq!(header.covers, 7);
-    // The migration marker has no changes; five original changes retain verdicts.
-    assert_eq!(&header.counts[..5], &[6, 3, 1, 1, 5]);
+    // The migration marker has no changes; five original changes retain
+    // verdicts, each of its own write, so each follows its part's record.
+    assert_eq!(&header.counts[..5], &[6, 3, 1, 1, 10]);
     let verdicts: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
-            SnapshotRecord::Authored(authored) => Some(authored.verdict.clone()),
+            SnapshotRecord::Authored(coven_format::snapshot_rows::AuthoredRecord::Change(
+                authored,
+            )) => Some(authored.verdict.clone()),
             _ => None,
         })
         .collect();
@@ -343,17 +346,18 @@ fn occurrences(bytes: &[u8], needle: &[u8]) -> usize {
     bytes.windows(needle.len()).filter(|window| *window == needle).count()
 }
 
-/// A row's values are its merge row's, and its original change's: nothing
-/// else in the snapshot holds them again (D7.1).
+/// A row's values are its merge row's: the kept record of the change that
+/// wrote a value that is no reference holds only its digest, and nothing else
+/// in the snapshot holds it again (D7.1, D7.3).
 #[tokio::test]
-async fn a_snapshot_holds_a_rows_value_in_its_merge_row_and_its_original_change() {
+async fn a_snapshot_holds_a_rows_value_in_its_merge_row_alone() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
     sql(&database, "INSERT INTO notes VALUES('note','a title no other record holds','')")
         .await
         .unwrap();
     let snapshot = frames(&database, Audience::Store).await.concat();
-    assert_eq!(occurrences(&snapshot, b"a title no other record holds"), 2);
+    assert_eq!(occurrences(&snapshot, b"a title no other record holds"), 1);
     database.close().await.unwrap();
 }
 
@@ -475,9 +479,10 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
             }
             SnapshotRecord::Column(column) => assert_eq!(column.table, "notes"),
             SnapshotRecord::Write(_) | SnapshotRecord::Claim(_) => {}
-            SnapshotRecord::Authored(authored) => {
-                assert_eq!(authored.change.row().audience, circle)
-            }
+            SnapshotRecord::Authored(coven_format::snapshot_rows::AuthoredRecord::Part(_)) => {}
+            SnapshotRecord::Authored(coven_format::snapshot_rows::AuthoredRecord::Change(
+                authored,
+            )) => assert_eq!(authored.record.row().audience, circle),
             SnapshotRecord::Creation(creation) => assert_eq!(creation.row.audience, circle),
             other => panic!("unexpected record {other:?}"),
         }

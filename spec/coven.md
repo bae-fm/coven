@@ -3123,12 +3123,15 @@ as written, and a later replacement of the cell doesn't clear it.
 
 **Edge cases.**
 
-- **Sources outlive dismissal.** Coven keeps the source writes and each change's
-  verdict separately from the lost values the app can dismiss, through schema
-  conversion and snapshots. Dismissing a lost value can't change a source's
-  verdict. A snapshot's coverage records which slots were consumed; it can't turn
-  a dropped source into data that counts. The original cause survives later
-  schema raises.
+- **Sources outlive dismissal.** Coven keeps each change's verdict, and what
+  later changes read of it, separately from the lost values the app can
+  dismiss, through schema conversion and snapshots. The list of sources a
+  change named serves only its own judgement, so once it is judged coven
+  keeps its verdict and not the list
+  ([format.md D7.3](format.md#d73-authored-changes-section-4)). Dismissing a
+  lost value can't change a source's verdict. A snapshot's coverage records
+  which slots were consumed; it can't turn a dropped source into data that
+  counts. The original cause survives later schema raises.
 - **Checking sources.** Sources are checked against the original authored
   history. Missing evidence waits; invalid evidence is refused. None of these
   establishes a source: a read position, an old value that happens to be equal,
@@ -3267,8 +3270,12 @@ a row nobody owns, or the author's own, it is `InvalidForeignKeyEffect`.
 - **Exact match.** The recomputed action must match the exact row, generation,
   operation and every changed column and value, including all components of a
   composite key. An action's delete shows the values its replaced setters wrote
-  ([format.md D5](format.md#d5-writes)). Several actions on one row must match their full
-  combined effect in the original execution order; matching one part isn't enough.
+  ([format.md D5](format.md#d5-writes)). A receiver compares each with what the
+  setter's kept record holds: the value itself for a reference, its digest for
+  any other column
+  ([format.md D7.3](format.md#d73-authored-changes-section-4)). Several
+  actions on one row must match their full combined effect in the original
+  execution order; matching one part isn't enough.
 - **Generated columns don't take part.** Ana's notes have `album` with
   `ON DELETE SET NULL` and `pinned GENERATED ALWAYS AS (album IS NOT NULL)`.
   Ben deletes his album. The action's step sets her note's `album` NULL, and the
@@ -3280,12 +3287,25 @@ a row nobody owns, or the author's own, it is `InvalidForeignKeyEffect`.
   cycle with no direct cause proves nothing. A proposed change to another member's
   row without this exact derivation is an unauthorized lost value. Missing
   evidence waits; it never grants permission.
-- **What is kept.** Coven keeps the verified derivation, the full original row
-  change and all contributing causes, separately from lost values the app can
-  dismiss. A direct change and its sources are kept even when its own row ends
-  with no net change, because its foreign-key effects can remain. An accepted
-  cascade is recorded as a derived delete even when it knowingly replaced the old
-  values and the cell rules call for no lost value.
+- **What is kept.** Coven keeps the verified derivation and all contributing
+  causes, and the change's kept record, separately from lost values the app
+  can dismiss. A direct change's record is kept even when its own row ends with
+  no net change, because its foreign-key effects can remain. An accepted
+  cascade is recorded as a derived delete even when it knowingly replaced the
+  old values and the cell rules call for no lost value.
+- **A column read in full was a reference when its setter wrote it.** Judging
+  a write reads, through the setters of the cells it replaced, the values and
+  parents of the columns that are references under the write's schema, and
+  nothing else of them in full. So a kept record holds in full only the columns
+  that were references when its write was made, and a digest of every other
+  value. That is enough because every schema change keeps the rule: an addition
+  adds no reference to a column that exists; a breaking migration that makes a
+  column a reference, or changes its references, sets it in every row it holds
+  (§18.4); and a converter may make a column a reference only from one that
+  was ([api.md E13](api.md#e13-migrations)). Ana's migration adds a foreign
+  key from `notes.folder` to `folders`. Every note's `folder` is then set by
+  her migration write, as a reference, so a later cascade from a deleted
+  folder reads a full value, never a digest an older write kept.
 - **When a cause drops,** its derived row changes drop by §9.5's rule. The
   surviving changes are replayed: the row's earlier generation and values return,
   unless an independent surviving change or a removal rule keeps them out. A
@@ -5650,8 +5670,12 @@ consumed without effect, such as refused writes. A snapshot holds:
   and which rows show follows from them, so nothing holds them a second time;
 - the evidence old writes still need: each deleted row's generations (§8.3), and
   each row change's *source verdict*, the record of whether the data it built on
-  was kept or dropped (§9.5). Without them, an old edit arriving late could bring
-  a deleted generation back, or refused data could become an accepted source.
+  was kept or dropped (§9.5), with its kept record: who made it, which row,
+  generation and columns, the values of its reference columns and a digest of
+  every other value it wrote. Without them, an old edit arriving late could
+  bring a deleted generation back, or refused data could become an accepted
+  source. The values a change replaced, and the sources it named, are not kept:
+  only judging it read them.
 
 A store snapshot also holds the signed admin entries, key copies and
 announcements needed to know who was a member when, which keys exist, and which
@@ -10268,9 +10292,9 @@ in one section. Each record names:
   no old values.
 
 A taken-out row's record is not frozen: later edits to the row update its values.
-The original change, including its operation, sources and verdict (§9.5, §9.6),
-is kept separately. Dismissing the display record cannot erase that evidence or
-change a source's verdict.
+The original change's kept record and verdict (§9.5, §9.6) are kept
+separately. Dismissing the display record cannot erase that evidence or change
+a source's verdict.
 
 ### B.4 How lost-value records follow the writes
 
@@ -10359,8 +10383,9 @@ device consistent with the database.
 - What changes about a row after coven writes it lives in rows of its own
   beside it, never in the row: SQLite writes a row's whole record again on
   any update, so a verdict or key choice kept beside a write's plaintext
-  would write all of it again. A write's plaintext, its original changes and
-  its row are each written once.
+  would write all of it again. A write's plaintext, its changes' kept records
+  and its row are each written once. A received write's whole records are held
+  only in the transaction that judges and applies it.
 - Opening for writing always migrates coven's tables in place before running the
   app's migrations. Each internal migration is atomic.
 - A read-only open refuses tables that need migrating. Any open refuses an
@@ -10375,7 +10400,10 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
 | `_coven_queued_dismissals` | the rows each waiting write's dismissals name, recorded with the write, so a slot finds the rows each waiting write changes without reading its record (§6.2) |
 | `_coven_upload_claims` | the claim each waiting write was last sent in, whose landing removes it from `_coven_uploads` (§5.1) |
+| `_coven_authored_parts` | the header of each write part whose changes this device keeps, and whether it holds every change of the part (§9.5) |
+| `_coven_authored_changes` | each change's kept record: its row, generation, operation and columns, a reference column's value and parents in full and any other column's digest, its copy's creator and its count of operations ([format.md D7.3](format.md#d73-authored-changes-section-4)) |
 | `_coven_authored_admissions` | this device's verdict on each original change it keeps as source evidence, once it has judged it (§9.5) |
+| `_coven_migration_records` | this device's own migration write's row changes, whole, which its marker's slot applies, since the marker carries none (§18.4), until a loaded snapshot replaces them (§18.5) |
 | `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists all but the hash (§17.3) |
 | `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored; a move's upload checks against them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
@@ -12058,6 +12086,7 @@ Write-ups explain each model and state its assumptions:
 | A kept foreign-key effect on an owned row traces back to an authorized direct change in the same write | `derived_root_authorized` | `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.6 |
 | An accepted effect is one the schema actually implies | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | An action's delete carries exactly the values its replaced setters wrote: a delete with any other old values is refused | `delete_old_mismatch_refused` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
+| A column read in full was a reference when its setter wrote it: every cell of a state, in a column the state's schema reads as a reference, was set by a write that wrote it as one. Counting a write keeps this when each reference column it sets was one under its own version (its own version, additions since, or a converter that keeps references); an addition keeps it; a breaking migration's write keeps it at the new version, since it sets every column whose references change in every present row; dropping tables and columns keeps it | `write_keeps`, `addition_fits`, `addition_keeps`, `migration_keeps`, `drop_keeps` | `proofs/merge/CovenMerge/ReferenceSetters.lean` | §9.6, §18.4 |
 | Owner authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | Why a step that depends on rows of the author's view that no step carries must be refused: two author views with the same write make different steps, and a receiver reading only the write accepts at most one of them. An action that keeps the shared reference's values, or points it at a row an earlier step made, is classified from the write alone | `one_view_misjudged`, `Untouched.views_differ`, `Stale.views_differ`, `Overlap.kept_classified`, `Retargeted.retargeted_classified`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | A shared reference's parent is the row its values key where the write's earlier steps leave that key, a move's two steps included, whether the row's own update or an ancestor's move made them: every author view consistent with the steps holds it there, at that incarnation, or nowhere after a delete, so the parent the receiver records is the one the author's capture names. A row of the key the write changed at no step of its own leaves that parent standing unless it is the row the last step names, the setter's parent, or, where the reference would name none, a row the reference could name: a removed row a move carries beside the shown one leaves it placed. Where no step touched the key and the action changes the reference, or such a row could have moved the key where the reference looks, two such views capture different parents, and the receiver refuses | `Place.place_settles`, `Place.place_sound`, `Place.resolve_sound`, `Place.recorded_sound`, `Place.aside_placed`, `Place.untouched_views_differ`, `Place.unstepped_views_differ`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |

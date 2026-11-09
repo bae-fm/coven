@@ -14,9 +14,8 @@ use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_crypto::AuthorshipHasher;
-use coven_format::authorship::{CellKind, Leaf, Multiproof, WriteEvidence};
+use coven_format::authorship::{CellKind, KeptLeaf, Leaf, Multiproof, WriteEvidence};
 use coven_format::merge_fields;
-use coven_format::snapshot_rows::OriginalRow;
 use coven_format::write::WriteDisposition;
 use coven_format::write_stream::WriteHeaderFrame;
 use coven_foundation::id_source::{KeyId, MemberId};
@@ -310,8 +309,10 @@ pub(crate) fn evidence(
     Ok(evidence)
 }
 
-/// Open the needed leaves of one part: from its records and retained leaf
-/// hashes when held whole, or pruning a loaded snapshot's authenticated openings.
+/// Open the needed leaves of one part: from its kept records and retained
+/// leaf hashes when held whole, or pruning a loaded snapshot's authenticated
+/// openings. A cell kept as a digest opens as the needed cell whose value it
+/// digests (D7.3).
 fn open(
     db: &DatabaseConnection,
     write: WriteId,
@@ -334,8 +335,10 @@ fn open(
             "SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 ORDER BY table_name,key",
             params![id, audience],
             |r| {
-                let record = OriginalRow::decode(&r.get::<_, Vec<u8>>(0)?)?;
-                leaves.extend(coven_format::authorship::record_leaves(record.record()));
+                let record = coven_format::snapshot_rows::KeptRecord::decode(
+                    &r.get::<_, Vec<u8>>(0)?,
+                )?;
+                leaves.extend(coven_format::authorship::kept_leaves(&record));
                 Ok(())
             },
         )?;
@@ -344,11 +347,7 @@ fn open(
         }
         let mut opened = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
-            opened.push(if proves(db, version, current, leaf, needs, creators)? {
-                Some(leaf.encode()?)
-            } else {
-                None
-            });
+            opened.push(opening(db, version, current, leaf, needs, creators)?);
         }
         return Ok(Multiproof::from_hashes(&hashes, opened));
     }
@@ -368,6 +367,35 @@ fn open(
         .map(|leaf| proves(db, version, current, leaf, needs, creators))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(proof.retain_opened(&hashes, &keep))
+}
+
+/// The opening of one kept leaf, if it proves a need: a leaf kept whole as
+/// it is, a cell kept as a digest as each needed cell its value matches.
+fn opening(
+    db: &DatabaseConnection,
+    version: u32,
+    current: u32,
+    leaf: &KeptLeaf,
+    needs: &Needs,
+    creators: &BTreeMap<RowId, Option<coven_format::write_sources::ChangeId>>,
+) -> Result<Option<Vec<u8>>, DbError> {
+    let candidates = match leaf {
+        KeptLeaf::Known(leaf) => vec![leaf.clone()],
+        KeptLeaf::Digest { .. } => {
+            let mut candidates = Vec::new();
+            for (_, _, value, _) in &needs.cells {
+                candidates.extend(leaf.with_value(value)?);
+            }
+            candidates
+        }
+        KeptLeaf::Step => Vec::new(),
+    };
+    for candidate in candidates {
+        if proves(db, version, current, &candidate, needs, creators)? {
+            return Ok(Some(candidate.encode()?));
+        }
+    }
+    Ok(None)
 }
 
 /// Authenticate one write's evidence in a loaded snapshot of `audience`: its

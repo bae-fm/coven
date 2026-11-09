@@ -19,14 +19,14 @@ use coven_format::{
     merge_fields,
     sealed_snapshot::SnapshotObjectPrefix,
     snapshot::{section, SnapshotHeader, SnapshotRecord},
-    snapshot_rows::{AuthoredChange, MergeRow},
+    snapshot_rows::{AuthoredRecord, MergeRow},
     snapshot_stream::SnapshotChunkDecoder,
     value::Value,
     write::WriteHeader,
 };
 use coven_foundation::locks::read_unpoisoned;
 use rusqlite::{params, params_from_iter};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Created with the input connection, in its temporary storage, so staged
@@ -280,15 +280,24 @@ enum Phase {
 
 /// What staging keeps between batches beside its tables: the decoder, the
 /// statements that stage records, the records staged so far, the columns the
-/// snapshot names, each source part's header, and the first record the
-/// loader's checks refuse.
+/// snapshot names, the source part whose changes are arriving, and the first
+/// record the loader's checks refuse.
 struct StagingState {
     decoder: SnapshotChunkDecoder,
     inserts: Inserts,
     records: i64,
     columns: BTreeSet<(String, String)>,
-    parts: BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
+    part: Option<StagedPart>,
     refusal: Option<(usize, DbError)>,
+}
+
+/// The part of section 4 whose changes follow it (D7.3). Its row is staged
+/// with its first change, which names its audience.
+struct StagedPart {
+    write: Vec<u8>,
+    header: WriteHeader,
+    complete: bool,
+    staged: bool,
 }
 
 impl Drop for SnapshotStaging {
@@ -354,7 +363,7 @@ impl Database {
                 inserts,
                 records: 0,
                 columns: BTreeSet::new(),
-                parts: BTreeMap::new(),
+                part: None,
                 refusal: None,
             })),
             batches: 0,
@@ -580,7 +589,7 @@ fn stage(
         db.record_work(|work| work.snapshot_reads += 1);
     }
     let metadata = SnapshotMetadata::staged(db, staging);
-    let StagingState { decoder, inserts, records, columns, parts, refusal } = state;
+    let StagingState { decoder, inserts, records, columns, part, refusal } = state;
     loop {
         let headed = decoder.header().is_some();
         let record =
@@ -604,7 +613,7 @@ fn stage(
         }
         let staged = RecordStaging { db, schema, inserts };
         let section = record.section();
-        if let Err(refused) = staged.record(record, decoder.frame(), columns, parts)? {
+        if let Err(refused) = staged.record(record, decoder.frame(), columns, part)? {
             *refusal = Some((section, refused));
         }
     }
@@ -628,7 +637,7 @@ impl RecordStaging<'_> {
         record: SnapshotRecord,
         frame: &[u8],
         columns: &mut BTreeSet<(String, String)>,
-        parts: &mut BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
+        part: &mut Option<StagedPart>,
     ) -> Result<Checked, DbError> {
         match &record {
             SnapshotRecord::Write(_) => return Ok(Ok(())),
@@ -641,7 +650,7 @@ impl RecordStaging<'_> {
                 return Ok(Ok(()));
             }
             SnapshotRecord::Merge(row) => return self.merged(row, columns),
-            SnapshotRecord::Authored(authored) => return self.authored(authored, parts),
+            SnapshotRecord::Authored(authored) => return self.authored(authored, part),
             SnapshotRecord::Creation(creation) => {
                 if let Err(refused) = self.schema.row_table(&creation.row) {
                     return Ok(Err(refused));
@@ -724,47 +733,58 @@ impl RecordStaging<'_> {
         Ok(Ok(()))
     }
 
-    /// A source record and the part it belongs to. Every record of a part
-    /// carries the part's one header.
+    /// A source part, or a kept change of the part before it. A change
+    /// holds in full exactly the columns that were references under its
+    /// write's schema, as this device would keep it (D7.3).
     fn authored(
         &self,
-        authored: &AuthoredChange,
-        parts: &mut BTreeMap<(Vec<u8>, coven_merge::Audience), WriteHeader>,
+        authored: &AuthoredRecord,
+        part: &mut Option<StagedPart>,
     ) -> Result<Checked, DbError> {
-        let write = encoded(merge_fields::encode_write_id(&authored.header.position))?;
-        let row = authored.change.row();
+        let change = match authored {
+            AuthoredRecord::Part(new) => {
+                *part = Some(StagedPart {
+                    write: encoded(merge_fields::encode_write_id(&new.header.position))?,
+                    header: new.header.clone(),
+                    complete: new.complete,
+                    staged: false,
+                });
+                return Ok(Ok(()));
+            }
+            AuthoredRecord::Change(change) => change,
+        };
+        let part = part.as_mut().ok_or(DbError::Invariant {
+            what: "the snapshot decoder gives a kept change after its part",
+        })?;
+        let row = change.record.row();
         let audience = &row.audience;
-        // Equal headers encode to equal bytes, and decoding gives the value
-        // back, so comparing values compares the bytes the part keeps.
-        match parts.get(&(write.clone(), audience.clone())) {
-            Some(known) if *known != authored.header => {
-                return Ok(Err(invalid("original source header changed")));
+        if !part.staged {
+            self.db.internal_execute(
+                &self.inserts.parts,
+                params![
+                    part.write,
+                    audience,
+                    encoded(merge_fields::encode_write_header(&part.header))?
+                ],
+            )?;
+            if part.complete {
+                self.db.internal_execute(&self.inserts.complete, params![part.write, audience])?;
             }
-            Some(_) => {}
-            None => {
-                self.db.internal_execute(
-                    &self.inserts.parts,
-                    params![
-                        write,
-                        audience,
-                        encoded(merge_fields::encode_write_header(&authored.header))?
-                    ],
-                )?;
-                parts.insert((write.clone(), audience.clone()), authored.header.clone());
-            }
+            part.staged = true;
         }
-        if authored.complete {
-            self.db.internal_execute(&self.inserts.complete, params![write, audience])?;
+        let form = crate::write_sources::KeptForm::new(self.schema, part.header.schema_version);
+        if !form.conforms(&change.record) {
+            return Ok(Err(invalid("kept change holds its columns unlike its schema")));
         }
         self.db.internal_execute(
             &self.inserts.authored,
             params![
-                write,
+                part.write,
                 audience,
                 row.table,
                 row.key,
-                authored.change.encode()?,
-                crate::write_sources::stored_verdict(&authored.verdict)?
+                change.record.encode()?,
+                crate::write_sources::stored_verdict(&change.verdict)?
             ],
         )?;
         Ok(Ok(()))

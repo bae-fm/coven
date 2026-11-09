@@ -1,14 +1,14 @@
 //! The received interpretation of authenticated original changes: each
 //! part's direct admission by the selected boundaries and the slot cut-off, then every admitted change's permission and data sources (§9.5,
-//! §9.6, §14.1, §18.6, §19.4). Original bytes stay retained; only this
-//! interpretation reaches the merge.
+//! §9.6, §14.1, §18.6, §19.4). The original changes keep their kept
+//! records (format.md D7.3); only this interpretation reaches the merge.
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
     loss::LossCause,
-    snapshot_rows::{ChangeVerdict, OriginalRow},
-    write::{RowChange, WriteDisposition, WriteHeader, WritePart},
+    snapshot_rows::ChangeVerdict,
+    write::{OriginalRow, RowChange, WriteDisposition, WriteHeader, WritePart},
     write_sources::ChangeId,
 };
 use coven_merge::{Audience, ColumnValue, Operation, Provenance, RowId};
@@ -52,7 +52,7 @@ pub(crate) struct Interpreter<'a> {
 
 impl<'a> Interpreter<'a> {
     /// Judge every change of the write's parts in `audiences`, whose original
-    /// records the caller has retained. Changes in other parts this device
+    /// records the caller has staged. Changes in other parts this device
     /// holds keep the verdicts already recorded for them.
     pub(crate) fn new(
         database: &'a DatabaseConnection,
@@ -159,7 +159,7 @@ impl<'a> Interpreter<'a> {
         let judgement = crate::judge::judge(
             database,
             schema,
-            crate::judge::Originals::Retained { database, header },
+            crate::judge::Originals::Staged { database, header },
         )?;
         interpreter.verdicts = verdicts(database, header, &judgement, sources, &fixed)?;
         Ok(interpreter)

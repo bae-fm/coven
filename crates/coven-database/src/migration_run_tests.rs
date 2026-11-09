@@ -823,7 +823,8 @@ fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostV
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
-         INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;",
+         INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
+         INSERT INTO _coven_migration_records SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;",
     )
     .unwrap();
 }

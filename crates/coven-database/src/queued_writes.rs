@@ -30,6 +30,7 @@ pub(crate) fn stage(
             return Ok(());
         }
         let mut opened = Vec::new();
+        let form = crate::write_sources::KeptForm::new(schema, header.header.schema_version);
         for (part, mut bytes) in parts {
             if crate::reload_gate::reloading(db, &part.audience)? {
                 continue;
@@ -44,7 +45,7 @@ pub(crate) fn stage(
                     chunk.copy_from_slice(&bytes);
                     Ok(())
                 },
-                |frame| crate::download_stage::frame(db, &header.header, ignored, frame),
+                |frame| crate::download_stage::frame(db, &form, &header.header, ignored, frame),
             )?;
             opened.push(audience);
         }
@@ -58,7 +59,8 @@ pub(crate) fn stage(
         crate::published::capture_dropped(db, &rows.dropped)?;
         crate::download_stage::stage(db, schema, &header.header, &opened, |audience| {
             Ok(!crate::reload_gate::reloading(db, audience)?)
-        })
+        })?;
+        crate::download_stage::release(db, &header.header)
     })
 }
 

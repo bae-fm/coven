@@ -50,6 +50,18 @@ impl WriteSchema {
         Ok(result)
     }
 
+    /// The schema a write at `version` was made with, when it is not the
+    /// current one: the one a breaking migration since then retained (§18.6).
+    /// Without one, only additions separate `version` from the current
+    /// schema.
+    pub(crate) fn retained_before(&self, version: u32) -> Option<&Schema> {
+        if version < *self.versions.end() {
+            crate::migration_receive::authored(&self.conversions, version)
+        } else {
+            None
+        }
+    }
+
     /// The table's file reference columns, as the schema spells them.
     pub(crate) fn file_columns(&self, table: &str) -> Vec<&str> {
         self.declarations
