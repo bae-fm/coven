@@ -252,8 +252,9 @@ pub(crate) fn retain_sources(
 }
 
 /// Hand each opened part's prepared records to `consume`, then keep the
-/// part's leaf hashes and the write's header evidence in the store's
-/// connection.
+/// write's plaintext header, and, for another member's write, each part's
+/// leaf hashes and the header evidence in the store's connection
+/// (`authorship::keeps_evidence`).
 fn read_authenticated(
     database: &crate::sqlite::DatabaseConnection,
     write: PreparedWrite<'_>,
@@ -268,6 +269,7 @@ fn read_authenticated(
     ) -> Result<(), crate::DbError>,
 ) -> Result<(), crate::DbError> {
     let position = write.header.header.position;
+    let evidence = crate::authorship::keeps_evidence(database, position)?;
     for (header, part) in write.header.parts.iter().zip(write.parts) {
         let Some(part) = part else {
             continue;
@@ -275,11 +277,16 @@ fn read_authenticated(
         part.records.each(|bytes| {
             consume(&write.header.header, &header.audience, WriteFrame::decode(&bytes)?)
         })?;
-        crate::authorship::retain_leaves(database, position, &header.audience, &part.hashes)?;
+        if evidence {
+            crate::authorship::retain_leaves(database, position, &header.audience, &part.hashes)?;
+        }
         complete(&write.header.header, &header.audience)?;
     }
     crate::write_headers::retain(database, &write.header)?;
-    crate::authorship::retain_header(database, position, &write.evidence)
+    if evidence {
+        crate::authorship::retain_header(database, position, &write.evidence)?;
+    }
+    Ok(())
 }
 
 /// Decode and validate one part without collecting its row frames. Every

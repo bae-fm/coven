@@ -839,9 +839,17 @@ pub(crate) struct LoadedAlike {
 impl Receipt for LoadedAlike {
     async fn receive(&mut self, devices: &Devices, to: &Database, record: &WriteRecord) {
         let (_store, fresh) = devices.fresh().await;
-        let snapshot = crate::snapshot_write::tests::frames(to, Audience::Store).await;
+        // The device holding the history writes the snapshot as its own, as
+        // every device does: it keeps evidence only for other members' writes.
+        let device = to.local_device().unwrap();
+        let member = to
+            .inspect_writer(|db| crate::store_state_tables::device_member(db, device))
+            .unwrap()
+            .expect("the device holding the history is registered");
+        let id = coven_format::admin::SnapshotId { device, number: 1, audience: Audience::Store };
+        let snapshot = crate::snapshot_write::tests::frames_for(to, id).await;
         let (id, prefix, input, _) = snapshot.input();
-        crate::snapshot_write::tests::load_one(&fresh, id, prefix, input).await.unwrap();
+        crate::snapshot_write::tests::load_one_by(&fresh, id, prefix, input, member).await.unwrap();
         receive(to, record).await;
         receive(&fresh, record).await;
         for row in record.parts.iter().flat_map(|part| part.records()).map(|r| r.row().clone()) {

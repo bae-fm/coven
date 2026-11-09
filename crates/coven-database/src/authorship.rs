@@ -183,6 +183,22 @@ fn by_another_member(
             || crate::store_state_tables::device_member(db, write.device)? != author.member))
 }
 
+/// Whether this device keeps `write`'s header evidence, leaf hashes and
+/// openings: a snapshot it writes carries evidence only for another member's
+/// writes (D7.5), and its member never changes, so its own member's writes
+/// never need them here. While this device's member is unknown it keeps
+/// every other device's evidence, as [`by_another_member`] reads `None`.
+pub(crate) fn keeps_evidence(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
+    let device = db
+        .local_device()
+        .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
+    by_another_member(
+        db,
+        Author { device, member: crate::store_state_tables::device_member(db, device)? },
+        write,
+    )
+}
+
 /// Whether a leaf names this row, read through the write's schema version.
 fn same_row(
     db: &DatabaseConnection,
@@ -440,7 +456,9 @@ pub(crate) fn authenticate(
     Ok(AuthenticatedEvidence { opened, leaves, hashes, part: part.is_some() })
 }
 
-/// Retain already authenticated evidence for snapshots this device writes later.
+/// Retain already authenticated evidence for snapshots this device writes
+/// later: the plaintext header always, the header evidence and opening only
+/// for another member's write ([`keeps_evidence`]).
 pub(crate) fn load(
     db: &DatabaseConnection,
     audience: &Audience,
@@ -448,6 +466,9 @@ pub(crate) fn load(
     verified: &AuthenticatedEvidence,
 ) -> Result<(), DbError> {
     crate::write_headers::retain(db, &verified.opened)?;
+    if !keeps_evidence(db, evidence.write)? {
+        return Ok(());
+    }
     retain_header(
         db,
         evidence.write,

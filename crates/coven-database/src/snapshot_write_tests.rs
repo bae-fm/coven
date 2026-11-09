@@ -224,6 +224,17 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     plaintext: R,
 ) -> Result<(), crate::DbError> {
+    load_one_by(database, expected, prefix, plaintext, author()).await
+}
+
+/// [`load_one`] of a snapshot signed by member `author`.
+pub(crate) async fn load_one_by<R: std::io::Read + Send + 'static>(
+    database: &Database,
+    expected: SnapshotId,
+    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
+    plaintext: R,
+    author: coven_foundation::id_source::MemberId,
+) -> Result<(), crate::DbError> {
     let target = prefix.covers;
     let staged =
         crate::test_utils::stage_plaintext(database, expected.clone(), prefix, plaintext).await?;
@@ -234,7 +245,7 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
                 snapshots: vec![crate::SnapshotSource::Stored {
                     id: expected.clone(),
                     input: staged,
-                    author: author(),
+                    author,
                 }],
                 slots: vec![],
                 state: database.store_state().await.unwrap(),

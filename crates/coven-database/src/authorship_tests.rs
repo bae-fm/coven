@@ -1,13 +1,17 @@
 use super::*;
-use crate::snapshot_write::tests::{decode, frames, id, load_one, stream, SnapshotFrames};
+use crate::snapshot_write::tests::{
+    decode, frames, frames_for, id, load_one, load_one_by, stream, SnapshotFrames,
+};
 use crate::test_utils::tests::{insert, SCHEMA};
 use crate::test_utils::TestAuthorship;
 use crate::tests::TestStore;
 use crate::{Database, RowIdentity, SyncedTable};
+use coven_format::admin::SnapshotId;
 use coven_format::snapshot::{SnapshotEncoder, SnapshotRecord};
 use coven_format::value::Value;
 use coven_format::write::{RowChange, WriteRecord};
 use coven_format::write_sources::{CellSource, ChangeId, WriteSources};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::{Change, Operation};
 use std::io::Cursor;
 
@@ -120,6 +124,53 @@ async fn prepared_authorship_is_not_decoded_during_installation() {
         "snapshot evidence decoded while the application writer was held"
     );
     db.close().await.unwrap();
+}
+
+/// No snapshot this device writes carries evidence of its own member's
+/// writes, so it keeps none for them: device 100, this device's member's,
+/// leaves no header evidence or leaf hashes; device 101, another member's,
+/// leaves both. The snapshot this device writes carries device 101's
+/// evidence alone, and a device knowing the members loads it (D7.5).
+#[tokio::test]
+async fn a_write_by_this_devices_member_keeps_no_evidence() {
+    let store = TestStore::new();
+    let db = store.schema(owned(), SCHEMA).await.unwrap();
+    let register = |db: &Database| {
+        TestStore::register(db, store.device(), 1);
+        TestStore::register(db, DeviceId(100), 1);
+        TestStore::register(db, DeviceId(101), 2);
+    };
+    register(&db);
+    let (own, other) = (insert(0, 0), insert(1, 1));
+    for write in [&own, &other] {
+        db.receive_stream(stream(write), || Ok(())).await.unwrap();
+    }
+    let kept = |table: &str, write: &WriteRecord| {
+        db.inspect_writer(|sql| {
+            sql.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE write_id=?1"),
+                [merge_fields::encode_write_id(&write.header.position).unwrap()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        })
+    };
+    for table in ["_coven_write_evidence", "_coven_part_leaves"] {
+        assert_eq!(kept(table, &own), 0, "{table}");
+        assert_eq!(kept(table, &other), 1, "{table}");
+    }
+    let snapshot_id = SnapshotId { device: store.device(), number: 1, audience: Audience::Store };
+    let snapshot = frames_for(&db, snapshot_id.clone()).await;
+    let carried: Vec<_> = evidence(&snapshot).iter().map(|evidence| evidence.write).collect();
+    assert_eq!(carried, [other.header.position]);
+    let target_store = TestStore::new();
+    let target = target_store.schema(owned(), SCHEMA).await.unwrap();
+    register(&target);
+    let (_, prefix, input, _) = snapshot.input();
+    load_one_by(&target, snapshot_id, prefix, input, crate::tests::member(1)).await.unwrap();
+    for db in [db, target] {
+        db.close().await.unwrap();
+    }
 }
 
 /// The snapshot opens the creation marker and each surviving cell of

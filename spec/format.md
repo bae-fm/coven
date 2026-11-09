@@ -1345,8 +1345,19 @@ subtree over leaves 2 and 3.
 So a snapshot can't name another member as an owned row's creator or setter
 without their evidence.
 
-A loader keeps the openings. Its own later snapshot reuses them for the same
-writes, so it can carry evidence for parts it never held.
+**What a device keeps.** A device keeps the header evidence of each write by a
+member other than its own, received or loaded, with that write's leaf hashes
+for a part it held whole and its openings for a part a loaded snapshot proved.
+Its own later snapshot reuses the openings for the same writes, so it can carry
+evidence for parts it never held. A write by its own member needs none: every
+snapshot it writes is its member's, which carries no evidence for that
+member's writes, and a device's member never changes. While its member is
+unknown, it keeps every other device's.
+
+The narrowing is by member, not by table. Declaring a table `owner_only()`, or
+dropping the declaration, is a breaking change (coven.md §18.1). The raise
+snapshot after it carries evidence for every row of that table another member
+created under the old schema, whatever the table was then.
 
 ### D7.6 Original slots (sections 7 to 9)
 
