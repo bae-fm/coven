@@ -213,8 +213,14 @@ pub enum Audience {
   that is closing, so an open of the store meanwhile waits for it rather than
   failing.
 - A store whose replacement or deletion is unfinished is refused as opening
-  refuses it. The read uses a read-only connection to coven's own tables and
-  writes nothing to the database. It needs none of the app's declarations, and
+  refuses it. So is a copy whose keychain doesn't name its device, as after a
+  restore from a backup that keeps no device-only entries: it fails with
+  `CovenError::DeviceKeyMissing`, since it doesn't open and has no state to
+  show. The read doesn't open the member's custody, so where opening would
+  say `MemberKeysMissing`, for a connected store whose member keys are gone
+  too, it says `DeviceKeyMissing`.
+- The read uses a read-only connection to coven's own tables and writes
+  nothing to the database. It needs none of the app's declarations, and
   refuses coven tables that need migrating, as a read-only open does.
 - Store lock files live beside each store directory: the writer, reader and
   bootstrap locks. Deletion holds all three. It first renames the directory to
@@ -2354,7 +2360,9 @@ impl Coven {
     /// A closed store's sync state, last synced time and unsent work, read
     /// without opening it, under its writer lock taken without waiting: the
     /// state opening shows before sync starts, with the location's
-    /// credentials looked up in the keychain as opening does (E1, E5). An open
+    /// credentials looked up in the keychain as opening does (E1, E5). A copy
+    /// whose keychain doesn't name its device fails with `DeviceKeyMissing`,
+    /// and an unfinished replacement or deletion as opening fails. An open
     /// handle fails it with `StoreLockError::AlreadyOpen`; an instance of the
     /// store closing in this process is waited for first, and an open of it
     /// meanwhile waits for this read.

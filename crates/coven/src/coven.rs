@@ -176,7 +176,8 @@ impl Coven {
     /// of the store in this process meanwhile waits for this read. Whether
     /// this device holds the location's credentials is read from the
     /// keychain, as opening reads it. A store whose replacement or deletion
-    /// is unfinished is refused as opening refuses it.
+    /// is unfinished is refused as opening refuses it, and one whose device
+    /// entry the keychain doesn't hold fails with `DeviceKeyMissing`.
     pub async fn closed_sync_status(
         &self,
         store_dir: &StoreDir,
@@ -187,7 +188,13 @@ impl Coven {
             let keys = StoreKeychain::new(self.keychain.clone(), store_dir.id());
             let bugs = store_dir.bugs().clone();
             crate::task::blocking_completing("read the closed store's location", bugs, move || {
-                crate::builder::refuse_unfinished_deletion(&directory, directory.id())?;
+                let store = directory.id();
+                crate::builder::refuse_unfinished_deletion(&directory, store)?;
+                // A copy whose keychain no longer names its device doesn't
+                // open, so it has no state to show (§19.3).
+                if keys.device_id()? != Some(directory.settings()?.device_id) {
+                    return Err(CovenError::DeviceKeyMissing { store });
+                }
                 coven_sync::read_location(&directory, &keys).map_err(CovenError::from)
             })
             .await??

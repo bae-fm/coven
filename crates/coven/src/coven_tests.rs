@@ -899,6 +899,31 @@ mod closed_sync_status {
         network.close().await;
     }
 
+    /// Ana's laptop is restored from a backup, which keeps no device-only
+    /// keychain entries. Its copy of the Household store doesn't open, so
+    /// its closed read fails as opening does, with `DeviceKeyMissing`; the
+    /// laptop it was copied from still reads it, never synced (§19.3).
+    #[tokio::test]
+    async fn a_copy_without_its_device_entry_is_refused() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let app = Coven::in_memory(app_dir.path().into());
+        let store =
+            app.create_closed_store("Household", std::sync::Arc::new(UuidIds)).await.unwrap().id();
+        let read = app.closed_sync_status(&app.store_dir(&store)).await.unwrap();
+        assert_eq!(read.sync, SyncStatus { state: SyncState::NotSynced, last_synced: None });
+        let restored = Coven::in_memory(app_dir.path().into());
+        let refused = restored.closed_sync_status(&restored.store_dir(&store)).await;
+        assert!(
+            matches!(refused, Err(CovenError::DeviceKeyMissing { store: missing }) if missing == store),
+            "{refused:?}"
+        );
+        let opened = super::builder(&restored).open(store, |_| ()).await;
+        assert!(
+            matches!(opened, Err(CovenError::DeviceKeyMissing { store: missing }) if missing == store),
+            "{opened:?}"
+        );
+    }
+
     /// While a handle holds the Household store open, its writer lock shows a
     /// sync the closed read can't see, so the read is refused and the app asks
     /// that handle instead.
