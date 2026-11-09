@@ -136,7 +136,7 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
 }
 
 #[tokio::test]
-async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
+async fn unset_settings_keep_sqlites_defaults_except_covens_own() {
     let store = TestStore::new();
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let settings = database.sqlite_settings().await.unwrap();
@@ -164,7 +164,8 @@ async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
             checkpoint_fullfsync: cfg!(any(target_os = "macos", target_os = "ios")),
             analysis_limit: AnalysisLimit::Unlimited,
             page_size: PageSize::Bytes4096,
-            auto_vacuum: AutoVacuum::Off,
+            // Coven's own, so it can give back the pages its queue frees.
+            auto_vacuum: AutoVacuum::Incremental,
         }
     );
     database.inspect_writer(|writer| {
