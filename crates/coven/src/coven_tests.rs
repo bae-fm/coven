@@ -788,6 +788,8 @@ async fn dropped_at_first_poll<T: std::fmt::Debug>(call: impl std::future::Futur
 mod closed_sync_status {
     use crate::tests::{stage, Device, Network};
     use crate::*;
+    use coven_foundation::clock::HANG_GUARD;
+    use coven_foundation::files::StoreDirAccess;
 
     fn tables() -> Vec<SyncedTable> {
         vec![
@@ -937,5 +939,43 @@ mod closed_sync_status {
             "{refused:?}"
         );
         network.close().await;
+    }
+
+    /// Ana's store list reads the closed Household store as she opens it. The
+    /// read holds the writer lock, registered as closing, so her open waits
+    /// for it at that lock rather than failing, and opens once the read ends
+    /// (E1).
+    #[tokio::test]
+    async fn an_open_waits_for_a_closed_read() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let app = Coven::in_memory(app_dir.path().into());
+        let directory =
+            app.create_closed_store("Household", std::sync::Arc::new(UuidIds)).await.unwrap();
+        let store = directory.id();
+        let writer = coven_foundation::files::writer_lock(
+            directory.database_path().parent().unwrap(),
+            store,
+        );
+        // Its first poll registers the read's lock, before any await; the
+        // read then goes no further until it is polled again.
+        let store_dir = app.store_dir(&store);
+        let mut read = std::pin::pin!(app.closed_sync_status(&store_dir));
+        tokio::select! {
+            biased;
+            answer = &mut read => panic!("the read answered at its first poll: {answer:?}"),
+            () = std::future::ready(()) => {}
+        }
+        let waits = coven_foundation::files::when_reached(&writer);
+        let mut open = std::pin::pin!(super::builder(&app).open(store, |_| ()));
+        tokio::select! {
+            opened = &mut open => panic!("the open didn't wait for the read: {opened:?}"),
+            reached = tokio::time::timeout(HANG_GUARD, waits) => {
+                reached.expect("the open waits at the writer lock").unwrap()
+            }
+        }
+        let read = tokio::time::timeout(HANG_GUARD, read).await.unwrap().unwrap();
+        assert_eq!(read.sync, SyncStatus { state: SyncState::NotSynced, last_synced: None });
+        let handle = tokio::time::timeout(HANG_GUARD, open).await.unwrap().unwrap();
+        handle.close().await.unwrap();
     }
 }
