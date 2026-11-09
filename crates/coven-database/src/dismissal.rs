@@ -274,6 +274,7 @@ pub(crate) fn apply(
             if !dismisses(dismissal, &loss) {
                 continue;
             }
+            crate::forget_entries::dismissed(database, &loss)?;
             let keep = match (&dismissal.target, &mut loss.values) {
                 (DismissalTarget::Cell(column), LossValues::Row(cells)) => {
                     cells.remove(column);

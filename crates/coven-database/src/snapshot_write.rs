@@ -71,7 +71,7 @@ pub(crate) fn write<E>(
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
     counts[section::COLUMN] = columns.len() as u64;
-    crate::write_sources::visit_evidence(db, &audience, covers, |_| {
+    crate::write_sources::visit_evidence(db, &audience, |_| {
         counts[section::AUTHORED] += 1;
         Ok::<_, DbError>(())
     })?;
@@ -122,7 +122,7 @@ pub(crate) fn write<E>(
     crate::snapshot_view::losses(db, &removed, &audience, |loss| {
         record(SnapshotRecord::Loss(loss))
     })?;
-    crate::write_sources::visit_evidence(db, &audience, covers, |authored| {
+    crate::write_sources::visit_evidence(db, &audience, |authored| {
         record(SnapshotRecord::Authored(authored))
     })?;
     crate::snapshot_view::creations(db, &audience, |creation| {

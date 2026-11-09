@@ -166,6 +166,7 @@ pub(crate) fn stage_selected(
             },
         )?;
     }
+    crate::forget_entries::superseded(database, write.header.header.position)?;
     crate::write_commit::retain_original(database, &write.header.header, Some(slot))?;
     let original_header = write.header.clone();
     let form = crate::write_sources::KeptForm::new(schema, original_header.header.schema_version);

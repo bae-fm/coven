@@ -134,6 +134,10 @@ crate::wire::wire_struct!(LastClaim, device, number, digest);
 pub trait WriteSlots: WriteOracle {
     /// Containing slot, or absence when no authenticated metadata establishes it.
     fn slot(&self, write: WriteId) -> Result<Option<Slot>, Self::Error>;
+    /// Whether the metadata holds a write of `write`'s device numbered at or
+    /// above it. A device's writes land in the order it numbered them, so
+    /// `write` landed at or before that write's slot (coven.md §16.7).
+    fn landed(&self, write: WriteId) -> Result<bool, Self::Error>;
 }
 impl SnapshotRecord {
     /// Retain decoded records while replacing wire evidence with its checked form.
@@ -326,38 +330,53 @@ impl SnapshotRecord {
     }
 
     /// Check references against authenticated published-write locations. Callers
-    /// populate these from section 1; unknown evidence cannot establish coverage.
+    /// populate these from section 0; unknown evidence cannot establish coverage.
+    /// A write whose slot or timestamp a loader reads must have its own entry
+    /// at or below `covers`. A write named only as an identity must have
+    /// landed: section 0 holds each device's last write through coverage,
+    /// but not the entries no check reads (coven.md §16.7).
     pub fn validate_coverage<S: WriteSlots>(&self, covers: u64, slots: &S) -> Result<(), S::Error>
     where
         S::Error: From<Error>,
     {
-        for write in self.named_writes() {
+        let (timed, identities) = self.named_writes();
+        for write in timed {
             let covered = slots.slot(write)?.is_some_and(|slot| slot.get() <= covers);
             require(covered, "snapshot write coverage", Rule::Coverage)?;
+        }
+        for write in identities {
+            require(slots.landed(write)?, "snapshot write coverage", Rule::Coverage)?;
         }
         Ok(())
     }
 
-    /// The writes this record names, each of which the snapshot must cover.
-    fn named_writes(&self) -> Vec<WriteId> {
+    /// The writes this record names, each of which the snapshot must cover:
+    /// those whose timestamp or slot a loader and later merges read, and
+    /// those it names only as identities.
+    fn named_writes(&self) -> (Vec<WriteId>, Vec<WriteId>) {
         match self {
             Self::Column(_)
             | Self::Write(_)
             | Self::Admin(_)
             | Self::KeyCopy(_)
             | Self::Announcement(_)
-            | Self::Claim(_) => Vec::new(),
-            Self::Loss(v) => v.named_writes(),
-            Self::Merge(v) => v
-                .state
-                .generations()
-                .values()
-                .copied()
-                .chain(v.state.cells().values().map(|cell| cell.write))
-                .collect(),
-            Self::Creation(v) => vec![v.write, v.creator.write],
-            Self::Evidence(v) => vec![v.write],
-            Self::Authored(AuthoredRecord::Part(v)) => vec![v.header.position],
+            | Self::Claim(_) => (Vec::new(), Vec::new()),
+            // An active lost value follows merge, which reads its setter's
+            // and replacer's timestamps; a frozen one keeps them as names.
+            Self::Loss(v) if v.frozen => (Vec::new(), v.named_writes()),
+            Self::Loss(v) => (v.named_writes(), Vec::new()),
+            Self::Merge(v) => (
+                v.state
+                    .generations()
+                    .values()
+                    .copied()
+                    .chain(v.state.cells().values().map(|cell| cell.write))
+                    .collect(),
+                Vec::new(),
+            ),
+            Self::Creation(v) => (Vec::new(), vec![v.write, v.creator.write]),
+            Self::Evidence(v) => (Vec::new(), vec![v.write]),
+            Self::Authored(AuthoredRecord::Part(v)) => (Vec::new(), vec![v.header.position]),
             Self::Authored(AuthoredRecord::Change(v)) => {
                 let verdict = match &v.verdict {
                     ChangeVerdict::Dependent(sources) | ChangeVerdict::Derived(sources) => {
@@ -369,7 +388,10 @@ impl SnapshotRecord {
                     KeptRecord::Change(change) => change.creator.as_ref(),
                     KeptRecord::Execution { .. } => None,
                 };
-                creator.into_iter().chain(verdict).map(|source| source.write).collect()
+                (
+                    Vec::new(),
+                    creator.into_iter().chain(verdict).map(|source| source.write).collect(),
+                )
             }
         }
     }

@@ -273,6 +273,9 @@ impl crate::snapshot::WriteSlots for TestOracle {
     fn slot(&self, write: WriteId) -> Result<Option<Slot>, crate::Error> {
         Ok(self.writes.get(&write).map(|write| write.slot))
     }
+    fn landed(&self, write: WriteId) -> Result<bool, crate::Error> {
+        Ok(self.writes.keys().any(|id| id.device == write.device && id.number >= write.number))
+    }
 }
 /// Three applied writes, including two concurrent setters of the fixture row.
 pub fn oracle() -> TestOracle {

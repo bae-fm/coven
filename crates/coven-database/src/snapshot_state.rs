@@ -31,7 +31,9 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
         [&audience],
     )?;
     crate::write_commit::forget(database, &crate::write_commit::StoredRows::InAudience(audience))?;
-    crate::loss_record::forget_audience(database, audience)
+    crate::loss_record::forget_audience(database, audience)?;
+    // The deleted merge rows and lost values no longer name their writes.
+    crate::forget_records::look_again(database)
 }
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {

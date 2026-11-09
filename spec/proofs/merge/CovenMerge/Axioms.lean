@@ -355,3 +355,8 @@ open CovenMerge
 #print axioms CovenMerge.ForgetEdits.receive_checked
 #print axioms CovenMerge.ForgetEdits.later_reads_past
 #print axioms CovenMerge.ForgetEdits.forget_preserves_judgement
+#print axioms CovenMerge.ForgetEntries.landed_by_number
+#print axioms CovenMerge.ForgetEntries.forgotten_read
+#print axioms CovenMerge.ForgetEntries.read_kept_iff
+#print axioms CovenMerge.ForgetEntries.stamped_after_kept
+#print axioms CovenMerge.ForgetEntries.reads_checked_kept

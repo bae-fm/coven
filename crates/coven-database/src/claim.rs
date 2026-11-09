@@ -389,8 +389,10 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
     match claim.settlement {
         ClaimSettlement::Unknown | ClaimSettlement::Retry => return Err(DbError::ClaimUnsettled),
         ClaimSettlement::Landed if matches!(claim.work, ClaimWork::Writes(_)) => {
+            // A write still queued keeps its entry, with no slot; a landed
+            // one's entry may be forgotten (§16.7).
             let unconsumed: bool = db.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM _coven_upload_claims u LEFT JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)"),
+                &format!("SELECT EXISTS(SELECT 1 FROM _coven_upload_claims u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)"),
                 params![claim.device, claim.number.to_be_bytes()],
                 |r| r.get(0),
             )?;

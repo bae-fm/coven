@@ -697,6 +697,21 @@ checked landing order, a write whose device passed each forgotten record's
 stop slot before it, or which read past that slot itself, gets the same
 decision with the forgotten records removed (`forget`) as with them kept.
 
+`ForgetEntries.lean` proves that a device can forget applied-write entries no
+check reads (coven.md §16.7). An `Entry` holds a write's device, number,
+slot, timestamp and `read_through`. `Retains log T kept` says the kept
+entries include every one above `T`, each device's last landed write
+(`Last`), and, for each entry at or below `T`, a kept one at or below `T`
+stamped no earlier. With writes landing in number order with no omitted
+predecessor (`NumberOrder`), `landed_by_number` proves a write landed exactly
+when its device has a kept entry numbered at or above it. For a write that
+read past `T`, `stamped_after_kept` proves it is stamped after every write it
+read exactly when it is stamped after every kept one, and `forgotten_read`
+and `read_kept_iff` that counting a forgotten write as read gives its past
+exactly. With reads growing by number (`ReadsGrow`, which `ReadsChecked`
+keeps), `reads_checked_kept` proves that checking a write's `read_through`
+against its device's last kept write is checking it against all.
+
 ### B18 Owner tables and row authenticity
 
 Owner tables are a write permission. They do not promise that another member

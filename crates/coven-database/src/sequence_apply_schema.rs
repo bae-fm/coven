@@ -25,6 +25,19 @@ macro_rules! coven_sequence_application_tables {
             ) STRICT, WITHOUT ROWID;
         "
         );
+        // The audiences each applied writes slot carries a part for, from its
+        // writes' headers: snapshot requests count the slot toward each
+        // (§16.2). A write's header may be forgotten (§16.7); this stays.
+        $visit!(
+            _coven_write_slot_audiences,
+            "
+            CREATE TABLE _coven_write_slot_audiences (
+                audience TEXT NOT NULL,
+                slot BLOB NOT NULL CHECK(length(slot)=8),
+                PRIMARY KEY(audience,slot)
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
         $visit!(
             _coven_write_refusals,
             "

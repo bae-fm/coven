@@ -1,7 +1,6 @@
 //! Snapshot streams and atomic reload through the database owner.
 
 use super::Database;
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::DbError;
 use coven_foundation::progress::ProgressReport;
 
@@ -22,18 +21,13 @@ impl Database {
                 let too_large = || DbError::TooLarge {
                     field: "snapshot slot bytes", actual: u64::MAX, maximum: u64::MAX - 1,
                 };
-                // A slot holding several of the audience's writes counts once.
-                let mut slots = std::collections::BTreeMap::new();
-                db.for_each(&format!("SELECT w.slot,s.size,h.header FROM _coven_writes w JOIN _coven_write_slots s ON s.slot=w.slot JOIN _coven_write_headers h ON h.device={WRITE_DEVICE_SQL} AND h.number=w.number WHERE w.slot>?1"),
-                    [after.to_be_bytes()], |row| {
-                        let header = coven_format::write_stream::WriteHeaderFrame::decode(&row.get::<_, Vec<u8>>(2)?)?;
-                        if header.parts.iter().any(|part| part.audience == audience) {
-                            let size = u64::try_from(row.get::<_, i64>(1)?).map_err(|_negative| DbError::DamagedDatabase)?;
-                            slots.insert(row.get::<_, Vec<u8>>(0)?, size);
-                        }
+                let mut bytes = 0u64;
+                db.for_each("SELECT s.size FROM _coven_write_slot_audiences a JOIN _coven_write_slots s ON s.slot=a.slot WHERE a.audience=?1 AND a.slot>?2",
+                    rusqlite::params![audience, after.to_be_bytes()], |row| {
+                        let size = u64::try_from(row.get::<_, i64>(0)?).map_err(|_negative| DbError::DamagedDatabase)?;
+                        bytes = bytes.checked_add(size).ok_or_else(too_large)?;
                         Ok::<_, DbError>(())
                     })?;
-                let mut bytes = slots.into_values().try_fold(0u64, |sum, size| sum.checked_add(size)).ok_or_else(too_large)?;
                 if audience == coven_merge::Audience::Store {
                     let records: i64 = db.query_row("SELECT coalesce(sum(length(record)),0) FROM _coven_slot_records WHERE slot>?1",
                         [after.to_be_bytes()], |row| row.get(0))?;

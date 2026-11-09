@@ -39,6 +39,10 @@ pub(crate) fn carry(
     if !crate::published::exists(db)? {
         return Ok(frozen);
     }
+    // The kept rows and losses are put again under their new names, and
+    // name their writes again; a dropped table's row names none.
+    crate::forget_entries::unnamed_by_published(db, None)?;
+    db.batch("DELETE FROM _coven_published_writes")?;
     // Staging makes table-name swaps independent of update order.
     db.batch("CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows")?;
     let oracle = crate::write_metadata::DatabaseMetadata::new(db);

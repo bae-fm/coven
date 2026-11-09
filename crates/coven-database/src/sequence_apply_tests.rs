@@ -336,7 +336,8 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;
          INSERT INTO _coven_write_slots SELECT n,i+1 FROM fixture;
-         INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;",
+         INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;
+         INSERT INTO _coven_write_slot_audiences SELECT audience,n FROM fixture;",
     )
     .unwrap();
 }

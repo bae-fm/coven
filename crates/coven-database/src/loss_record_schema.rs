@@ -24,6 +24,8 @@ macro_rules! coven_losses_tables {
             CREATE UNIQUE INDEX _coven_lost_live_cell ON _coven_lost(table_name,key,audience,column_id,set_by) WHERE frozen=0 AND replacement_kind='write';
             CREATE INDEX _coven_lost_removed ON _coven_lost(table_name,key,audience) WHERE frozen=0 AND replacement_kind='rules';
             CREATE INDEX _coven_lost_column ON _coven_lost(column_id);
+            CREATE INDEX _coven_lost_active_setter ON _coven_lost(set_by) WHERE frozen=0 AND replacement_kind='write';
+            CREATE INDEX _coven_lost_active_replacer ON _coven_lost(replaced_by) WHERE frozen=0 AND replacement_kind='write';
         ");
     };
 }

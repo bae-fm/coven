@@ -64,10 +64,10 @@ pub(crate) fn stage(
     })
 }
 
-/// Whether the overlay folds the queued write `header` heads: one whose slot
-/// is applied is counted already, and a removed device's never applies.
+/// Whether the overlay folds the queued write `header` heads: one that
+/// landed is counted already, and a removed device's never applies.
 fn folded(db: &DatabaseConnection, header: &WriteHeader) -> Result<bool, DbError> {
-    if crate::sequence::write_slot(db, header.position)?.is_some() {
+    if crate::write_metadata::landed(db, header.position)? {
         return Ok(false);
     }
     let removed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_devices d JOIN _coven_members m ON m.member=d.member WHERE d.device=?1 AND (d.state<>'active' OR m.removed=1))",

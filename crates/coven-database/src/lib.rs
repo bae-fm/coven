@@ -248,6 +248,7 @@ pub use database_changes::DatabaseChanges;
 
 mod captured_changes;
 mod claim;
+mod forget_entries;
 mod forget_records;
 mod published;
 mod published_migration;

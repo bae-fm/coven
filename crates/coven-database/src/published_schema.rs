@@ -51,6 +51,19 @@ macro_rules! coven_published_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_published_file_refs_object ON _coven_published_file_refs(device,object);
         ");
+        // The applied writes each kept row's record and active lost values
+        // name, by the row: the counted state reads their entries when it is
+        // put back, so this device keeps them (§16.7).
+        $visit!(_coven_published_writes, "
+            CREATE TABLE _coven_published_writes (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                write_id INTEGER NOT NULL REFERENCES _coven_writes(id),
+                PRIMARY KEY(table_name,key,audience,write_id)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_published_writes_write ON _coven_published_writes(write_id);
+        ");
         $visit!(_coven_published_creations, "
             CREATE TABLE _coven_published_creations (
                 table_name TEXT NOT NULL,

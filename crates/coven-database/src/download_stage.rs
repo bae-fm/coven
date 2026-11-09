@@ -275,6 +275,7 @@ pub(crate) fn stage(
                         &update.state,
                         slot,
                     )?;
+                    crate::forget_entries::changed(database, &before, &update.state)?;
                 }
             }
             crate::write_commit::commit(database, &record, &store, &updates)?;

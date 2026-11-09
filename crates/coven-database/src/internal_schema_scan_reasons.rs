@@ -23,6 +23,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
         .or_else(|| crate::file_moves::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::row_queries::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::write_sources::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::forget_records::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_removals::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_protection::tests::scan_reason(file, template, sql, relation))
         .or_else(|| {

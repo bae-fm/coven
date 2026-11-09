@@ -103,6 +103,9 @@ mod file_removals_schema;
 #[path = "file_table_schema.rs"]
 mod file_table_schema;
 #[macro_use]
+#[path = "forget_records_schema.rs"]
+mod forget_records_schema;
+#[macro_use]
 #[path = "loss_record_schema.rs"]
 mod loss_record_schema;
 #[macro_use]
@@ -192,6 +195,7 @@ macro_rules! coven_tables {
         coven_merge_store_tables!($visit);
         coven_write_headers_tables!($visit);
         coven_authored_sources_tables!($visit);
+        coven_forgetting_tables!($visit);
         coven_ownership_tables!($visit);
         coven_published_tables!($visit);
         coven_sequence_tables!($visit);

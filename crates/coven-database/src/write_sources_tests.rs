@@ -723,7 +723,6 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00' FROM fixture;
          INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',CASE WHEN i%3=0 THEN n END FROM fixture;
-         INSERT INTO _coven_forgotten VALUES(1,counter(1));
          INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;",
     )
     .unwrap();

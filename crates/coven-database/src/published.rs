@@ -54,6 +54,11 @@ pub(crate) fn capture_rows<'a>(
 /// Keep a row's record in the counted state, under the row it names.
 pub(crate) fn put_row(db: &DatabaseConnection, state: RowState<Value>) -> Result<(), DbError> {
     let row = state.row().clone();
+    name_writes(
+        db,
+        &row,
+        state.generations().values().copied().chain(state.cells().values().map(|cell| cell.write)),
+    )?;
     db.internal_execute(
         "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
         params![
@@ -68,6 +73,7 @@ pub(crate) fn put_row(db: &DatabaseConnection, state: RowState<Value>) -> Result
 
 /// Keep a loss in the counted state, beside its row's record.
 pub(crate) fn put_loss(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
+    name_writes(db, &loss.row, crate::forget_entries::active_writes(loss))?;
     db.internal_execute(
         "INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
         params![
@@ -77,6 +83,22 @@ pub(crate) fn put_loss(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbErr
             encoded(merge_fields::encode_loss(loss))?
         ],
     )?;
+    Ok(())
+}
+
+/// Record that the counted state kept for `row` names `writes`, whose
+/// entries it reads when it is put back (§16.7).
+fn name_writes(
+    db: &DatabaseConnection,
+    row: &RowId,
+    writes: impl IntoIterator<Item = coven_merge::WriteId>,
+) -> Result<(), DbError> {
+    for write in writes {
+        db.internal_execute(
+            "INSERT INTO _coven_published_writes(table_name,key,audience,write_id) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",
+            params![row.table, row.key, &row.audience, crate::snapshot_state::ordinal(db, write)?],
+        )?;
+    }
     Ok(())
 }
 
@@ -240,7 +262,9 @@ pub(crate) fn removal_losses_before_migrating(
 }
 
 pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
+    crate::forget_entries::unnamed_by_published(db, None)?;
     for table in [
+        "_coven_published_writes",
         "_coven_published_rows",
         "_coven_published_losses",
         "_coven_published_creations",
@@ -300,7 +324,9 @@ pub(crate) fn restore_rows<'a>(
         if put_back(db, schema, row)? {
             touched.insert(row.clone());
         }
+        crate::forget_entries::unnamed_by_published(db, Some(row))?;
         for table in [
+            "_coven_published_writes",
             "_coven_published_rows",
             "_coven_published_losses",
             "_coven_published_creations",

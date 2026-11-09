@@ -151,9 +151,10 @@ pub(crate) fn none_current(
 /// Forget every kept record no write still to be judged here can name: those
 /// that stopped being current at or below the slot every other device that
 /// can still write has seen, and this device's queued writes have read
-/// (§16.7). Run in the transaction that applies a slot, after its writes are
-/// judged; it deletes only what nothing can name, so no state is wrong before
-/// it runs.
+/// (§16.7). Then forget the applied-write entries no check reads any more
+/// (`forget_entries`). Run in the transaction that applies a slot, after its
+/// writes are judged; it deletes only what nothing can name, so no state is
+/// wrong before it runs.
 pub(crate) fn forget(db: &DatabaseConnection, writers: &Writers) -> Result<(), DbError> {
     let mut reads = BTreeMap::new();
     for device in writers.devices() {
@@ -171,9 +172,9 @@ pub(crate) fn forget(db: &DatabaseConnection, writers: &Writers) -> Result<(), D
         Some(queued) => seen.min(queued),
         None => seen,
     };
-    let from = forgotten_through(db)?;
+    let (from, newest) = forgotten_through(db)?;
     if through <= from {
-        return Ok(());
+        return crate::forget_entries::forget(db, through, newest);
     }
     let candidates = db.query(
         "SELECT write_id,audience,table_name,key FROM _coven_authored_changes WHERE stop>?1 AND stop<=?2 ORDER BY write_id,audience",
@@ -194,12 +195,13 @@ pub(crate) fn forget(db: &DatabaseConnection, writers: &Writers) -> Result<(), D
     for ((write, audience), records) in parts {
         forget_in_part(db, &write, &audience, records, through)?;
     }
+    let newest = crate::forget_entries::passed(db, from, through, newest)?;
     db.internal_execute(
-        "INSERT INTO _coven_forgotten(singleton,through) VALUES(1,?1)
-         ON CONFLICT(singleton) DO UPDATE SET through=excluded.through",
-        [through.to_be_bytes().as_slice()],
+        "INSERT INTO _coven_forgotten(singleton,through,newest) VALUES(1,?1,?2)
+         ON CONFLICT(singleton) DO UPDATE SET through=excluded.through,newest=excluded.newest",
+        params![through.to_be_bytes().as_slice(), newest],
     )?;
-    Ok(())
+    crate::forget_entries::forget(db, through, newest)
 }
 
 /// Forget the `candidates` of one part that may go once every write still to
@@ -278,20 +280,23 @@ fn forget_in_part(
     Ok(())
 }
 
-/// The stop slot through which this device has forgotten every record it
-/// may: zero before it forgot any.
-fn forgotten_through(db: &DatabaseConnection) -> Result<u64, DbError> {
-    let through: Option<Vec<u8>> =
-        db.query_row("SELECT (SELECT through FROM _coven_forgotten WHERE singleton=1)", [], |r| {
-            r.get(0)
-        })?;
-    Ok(through.map(counter).transpose()?.unwrap_or(0))
+/// The slot through which this device has looked at every stopped record
+/// and every applied-write entry, zero before it looked at any, and the
+/// latest stamped entry at or below it.
+fn forgotten_through(db: &DatabaseConnection) -> Result<(u64, Option<i64>), DbError> {
+    let forgotten = db
+        .query("SELECT through,newest FROM _coven_forgotten WHERE singleton=1", [], |r| {
+            Ok((counter(r.get(0)?)?, r.get::<_, Option<i64>>(1)?))
+        })?
+        .pop();
+    Ok(forgotten.unwrap_or((0, None)))
 }
 
-/// Records that stopped at or below the slot forgotten through may have
-/// become forgettable, or come back: a loaded snapshot brings the records its
-/// writer still held, and a dropped table's creations no longer protect
-/// theirs. The next slot looks at every stopped record again.
+/// Records and entries at or below the slot looked at through may have
+/// become forgettable, or come back: a loaded snapshot brings the records and
+/// entries its writer still held, a dropped table's creations no longer
+/// protect their records, and merge rows a reload or a migration deletes no
+/// longer name their writes. The next slot looks at every one again.
 pub(crate) fn look_again(db: &DatabaseConnection) -> Result<(), DbError> {
     db.internal_execute("DELETE FROM _coven_forgotten", [])?;
     Ok(())
@@ -299,4 +304,4 @@ pub(crate) fn look_again(db: &DatabaseConnection) -> Result<(), DbError> {
 
 #[cfg(test)]
 #[path = "forget_records_tests.rs"]
-mod tests;
+pub(crate) mod tests;

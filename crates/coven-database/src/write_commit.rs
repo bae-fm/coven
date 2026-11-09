@@ -41,19 +41,15 @@ pub(crate) fn retain_original(
     retain(database, header.position, header.timestamp, header.read_through, slot)
 }
 
-/// Refuse a landing write that read less than its device's last landed
-/// write (§7.1): a genuine device's applied slot never goes back, and
-/// forgetting kept records relies on it (§16.7). A write already stored is
-/// this device's own, queued here, or one that landed before, checked then.
+/// Refuse a landing write that read less than its device's earlier landed
+/// writes (§7.1): a genuine device's applied slot never goes back, and
+/// forgetting kept records relies on it (§16.7).
 pub(crate) fn check_reads(
     database: &DatabaseConnection,
     header: &coven_format::write::WriteHeader,
 ) -> Result<(), DbError> {
-    if crate::write_metadata::stored_write(database, header.position)?.is_some() {
-        return Ok(());
-    }
-    let last = crate::write_metadata::last_landed_read(database, header.position.device)?;
-    if last.is_some_and(|last| header.read_through < last) {
+    let earlier = crate::write_metadata::landed_below(database, header.position)?;
+    if earlier.is_some_and(|earlier| header.read_through < earlier.read_through) {
         return Err(DbError::InvalidWrite {
             write: header.position,
             error: coven_merge::MergeError::CausalClosure(header.position),
@@ -88,10 +84,27 @@ fn retain(
         }
         return Ok(known.ordinal);
     }
+    // This device may have forgotten the write's entry: a later write of its
+    // device that landed before this slot shows it landed already (§16.7).
+    if let Some(slot) = slot {
+        if crate::write_metadata::later_landed_before(database, id, slot)? {
+            return Err(DbError::InvalidWrite {
+                write: id,
+                error: coven_merge::MergeError::DuplicateWrite(id),
+            });
+        }
+    }
     database.query_row(
         "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4) RETURNING id",
         params![stamp, id.number.to_be_bytes().as_slice(), read_through.to_be_bytes().as_slice(), slot.map(|s|s.get().to_be_bytes().to_vec())],
         |r| r.get(0))
+}
+
+/// Delete the applied-write entry `ordinal`, which no check reads any more
+/// (§16.7). A merge row naming it would refuse the delete.
+pub(crate) fn forget_entry(database: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
+    database.internal_execute("DELETE FROM _coven_writes WHERE id=?1", [ordinal])?;
+    Ok(())
 }
 
 /// Which stored rows [`forget`] deletes, with their cells, references and

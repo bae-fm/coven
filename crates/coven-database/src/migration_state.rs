@@ -109,6 +109,8 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
             .insert(column.clone(), target.map(|(_, column)| column.clone()));
         let Some((new_table, new_column)) = target else {
             crate::write_commit::forget_column(db, id)?;
+            // Its cells no longer name their writes.
+            crate::forget_records::look_again(db)?;
             // Its cell losses stay, frozen under the old name (§18.7).
             let losses = db.query(
                 "SELECT id FROM _coven_lost WHERE column_id=?1 AND frozen=0",

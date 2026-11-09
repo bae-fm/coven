@@ -98,6 +98,7 @@ mod fixture {
         crate::claim::tests::fill_for_plans(&db);
         crate::loss_record::tests::fill_for_plans(&db);
         crate::write_sources::tests::fill_for_plans(&db);
+        crate::forget_records::tests::fill_for_plans(&db);
         crate::ownership::tests::fill_for_plans(&db);
         crate::database::file_database::cache::tests::fill_for_plans(&db);
         crate::file_removals::tests::fill_for_plans(&db);
@@ -268,6 +269,7 @@ mod source {
                     | "store_state_schema.rs"
                     | "loss_record_schema.rs"
                     | "write_sources_schema.rs"
+                    | "forget_records_schema.rs"
                     | "ownership_schema.rs"
                     | "file_cache_schema.rs"
                     | "file_removals_schema.rs"

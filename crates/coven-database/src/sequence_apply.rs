@@ -207,6 +207,12 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
             ));
         }
         previous = Some(write.header().header.position.number);
+        for part in &write.header().parts {
+            db.internal_execute(
+                "INSERT INTO _coven_write_slot_audiences(audience,slot) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+                rusqlite::params![part.audience, slot.get().to_be_bytes()],
+            )?;
+        }
         let cutoff =
             crate::sequence::refusal(db, slot, header.device, header.author, write.signer())?;
         if let Some((cutoff, cause)) = cutoff {

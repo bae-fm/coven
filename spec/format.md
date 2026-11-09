@@ -528,6 +528,12 @@ rewriting that object.
   device's last landed write is invalid, and its slot is refused, as a
   repeated write number is. Forgetting kept records relies on it
   ([coven.md §16.7](coven.md#167-forgetting-kept-records)).
+- **Repeated write numbers.** A write its device already landed, or one
+  numbered below a write of its device that landed in an earlier slot, is a
+  repeat, and its slot is refused. A device tells by number: it may have
+  forgotten the earlier write's entry, but keeps its device's last landed
+  one, and a device's writes land in the order it numbered them
+  ([coven.md §16.7](coven.md#167-forgetting-kept-records)).
 - **History is kept.** Historical bindings and source evidence are retained.
   Claim retries, conversion and snapshot reload never alter this authored past.
 
@@ -1067,13 +1073,15 @@ The sections:
 - **No generated columns.** No section names a generated column, as no write
   does (D5.5). A device loading the snapshot computes them, and refuses a
   snapshot that names one.
-- **Applied writes** (section 0) name every applied write something in the
-  snapshot still names: a merge row's cell or generation, a lost value, a
-  creation or a kept record. They also name each device's last write through
-  coverage, whose `read_through` and number later writes are checked against
-  ([coven.md §16.7](coven.md#167-forgetting-kept-records)). Their timestamps
-  name their devices. `read_through` is below the containing slot, with own
-  earlier writes implicit.
+- **Applied writes** (section 0) name each applied write whose slot and
+  timestamp something in the snapshot reads: the setter of a merge row's
+  cell, the write that moved it to a generation, and an active lost value's
+  setter and replacer. They also name
+  each device's last write through coverage, whose `read_through` and number
+  later writes are checked against, and the latest stamped write its writer
+  keeps ([coven.md §16.7](coven.md#167-forgetting-kept-records)). Their
+  timestamps name their devices. `read_through` is below the containing slot,
+  with own earlier writes implicit.
 - **Synced columns** (section 1) name each synced column.
 - **Merge rows** (section 2) hold each row's generations, with the write that
   moved it to each, and each cell's setting write and value.
@@ -1083,6 +1091,13 @@ The sections:
 - Each applied write is in a slot from 1 to the snapshot's coverage, and is
   stamped after every write it had read: each in a slot up to its
   `read_through`, and its own device's earlier writes (§7.2).
+- A write a merge row or an active lost value names must be in section 0.
+  Any other named write, of a creation, a part, a copy's creator, a
+  verdict's source, write evidence or a frozen lost value, is named only as
+  an identity: it is covered when section 0 holds a write of its device
+  numbered at or above it, since a device's writes land in number order.
+  For example, Ana's write 7 that a dependent verdict names is covered by
+  her write 8 in section 0, though write 7's own entry was forgotten.
 - A merge row must have contiguous generations, valid transition and cell
   timestamps, no cells when deleted, and valid parent generations and audiences.
   Its references obey merge's written-parent checks.
@@ -1296,7 +1311,7 @@ disposition     u8            1 byte
 - Only unjudged, applied and derived changes survive as sources, and only
   for a write whose `read_through` is below their stop slot (coven.md §9.5).
 - A part's write, a copy's creator and every change a verdict names must be
-  covered by the snapshot's consumed prefix.
+  covered by the snapshot's consumed prefix, by number (D7.1).
 - Dismissing a lost value never changes a verdict.
 - A loader refuses a kept record that holds in full a column that was no
   reference under its write's schema, or digests one that was.
@@ -1451,7 +1466,8 @@ claims count is [§16.1's](coven.md#161-what-a-snapshot-holds).
 
 - Rows and the plaintext header have the prefix's audience.
 - Every named published write and source has a containing slot at or below
-  coverage.
+  coverage: its own entry in section 0, or a later write of its device there
+  (D7.1).
 - The consumed prefix includes cut-off and reset-ignored writes; their verdicts
   remain.
 - Reset eligibility uses `read_through`.

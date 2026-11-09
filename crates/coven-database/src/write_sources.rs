@@ -344,18 +344,20 @@ pub(crate) fn validate(
 
 /// Whether `earlier` is in the authored past of the write `header` heads:
 /// the slots through its `read_through`, and its device's earlier writes
-/// (§7.1).
+/// (§7.1). A landed write whose entry this device forgot was read: its
+/// entry goes only once every write still to be judged has read past its
+/// slot (§16.7).
 pub(crate) fn had_read(
     db: &DatabaseConnection,
     header: &WriteHeader,
     earlier: coven_merge::WriteId,
 ) -> Result<bool, DbError> {
-    Ok(coven_merge::had_read(
-        header.position,
-        header.read_through,
-        earlier,
-        crate::sequence::write_slot(db, earlier)?,
-    ))
+    let slot = match crate::write_metadata::stored_write(db, earlier)? {
+        Some(stored) => stored.slot,
+        None if crate::write_metadata::landed(db, earlier)? => return Ok(true),
+        None => None,
+    };
+    Ok(coven_merge::had_read(header.position, header.read_through, earlier, slot))
 }
 
 /// Each record of `part` encoded, which validates it: the bytes a record is
@@ -713,13 +715,14 @@ fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
     })
 }
 
-/// Every kept change of an audience whose containing slot is covered, each
-/// part's header before its changes, with this device's verdict on each and
-/// the slot at which it stopped being current, in D7 section 4 order.
+/// Every kept change of an audience whose write landed, each part's header
+/// before its changes, with this device's verdict on each and the slot at
+/// which it stopped being current, in D7 section 4 order. A snapshot covers
+/// the slots this device applied, so every landed write; this device's own
+/// queued writes are left out.
 pub(crate) fn visit_evidence<E: From<DbError>>(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
-    covered: u64,
     mut visit: impl FnMut(AuthoredRecord) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut part: Option<Vec<u8>> = None;
@@ -734,8 +737,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
             let header =
                 merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(1).map_err(DbError::from)?)
                     .map_err(DbError::from)?;
-            if crate::sequence::write_slot(db, header.position)?.is_none_or(|slot| slot.get() > covered)
-            {
+            if !crate::write_metadata::landed(db, header.position)? {
                 return Ok(());
             }
             if part.as_ref() != Some(&write) {
@@ -765,11 +767,13 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
 /// their evidence goes with the data they described. A loaded snapshot at
 /// the marker's version or later, covering it or not, comes from the raise
 /// that established that version: the marker's own results are replaced and
-/// it changes nothing anywhere.
+/// it changes nothing anywhere. `covers` tells whether the loaded snapshot
+/// covers a write: it lists its device's writes through its coverage by
+/// number, whatever this device has forgotten of them (§16.7).
 pub(crate) fn forget_own_migration(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
-    covered: u64,
+    covers: impl Fn(WriteId) -> Result<bool, DbError>,
     version: u32,
     carried: impl Fn(&[u8], &coven_merge::Audience, &str, &[u8]) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
@@ -785,9 +789,7 @@ pub(crate) fn forget_own_migration(
     )? {
         let header = merge_fields::decode_write_header(&header)?;
         if header.disposition != coven_format::write::WriteDisposition::Migration
-            || (header.schema_version > version
-                && crate::sequence::write_slot(db, header.position)?
-                    .is_none_or(|slot| slot.get() > covered))
+            || (header.schema_version > version && !covers(header.position)?)
         {
             continue;
         }

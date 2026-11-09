@@ -90,6 +90,17 @@ fn delete(write: WriteId, tick: u64, read: u64, created: WriteId, setter: WriteI
 }
 
 async fn land(db: &Database, slot: u64, write: WriteRecord, writers: &[DeviceId]) {
+    try_land(db, slot, write, writers).await.unwrap();
+}
+
+/// Apply `write` alone in `slot`, with `writers` the other devices that can
+/// still write.
+async fn try_land(
+    db: &Database,
+    slot: u64,
+    write: WriteRecord,
+    writers: &[DeviceId],
+) -> Result<ApplyOutcome, DbError> {
     let device = write.header.position.device;
     let seed = if device == BEN { 2 } else { 3 };
     db.apply_slot::<crate::pending::tests::Record, _, _>(
@@ -111,7 +122,6 @@ async fn land(db: &Database, slot: u64, write: WriteRecord, writers: &[DeviceId]
         || Ok(()),
     )
     .await
-    .unwrap();
 }
 
 /// What this device keeps of `write`'s part in the store: its kept records,
@@ -139,10 +149,9 @@ fn kept(db: &Database, write: WriteId) -> [i64; 5] {
 /// The writes whose kept changes a snapshot of the store carries.
 fn snapshot_changes(db: &Database) -> Vec<WriteId> {
     db.inspect_writer(|c| {
-        let covered = crate::sequence::applied(c).unwrap();
         let mut writes = Vec::new();
         let mut part = None;
-        crate::write_sources::visit_evidence::<DbError>(c, &Audience::Store, covered, |record| {
+        crate::write_sources::visit_evidence::<DbError>(c, &Audience::Store, |record| {
             match record {
                 AuthoredRecord::Part(header) => part = Some(header.header.position),
                 AuthoredRecord::Change(_) => writes.push(part.unwrap()),
@@ -198,18 +207,21 @@ fn verdict(db: &Database, write: WriteId) -> ChangeVerdict {
     })
 }
 
-/// A forged write of Ben's, reading through slot 5, names his edit that
-/// stopped being current in slot 3. A device that still holds the edit's
-/// record, since Dan's idle phone holds it back, drops the source as one
-/// that stopped within the write's past; a device that forgot it drops it as
-/// a landed source it holds no record of. Both give the forged change the
-/// same verdict: as an update it depends on the dropped source, and as a
-/// delete it didn't begin with the cells it claims to replace.
+/// A forged write of Ben's or Cleo's, reading through slot 5, names Ben's
+/// edit that stopped being current in slot 3. A device that still holds the
+/// edit's record, since Dan's idle phone holds it back, drops the source as
+/// one that stopped within the write's past; a device that forgot it, and
+/// its write's entry, drops it as a landed source it holds no record of,
+/// which the forged write read. Both give the forged change the same
+/// verdict: as an update it depends on the dropped source, and as a delete
+/// it didn't begin with the cells it claims to replace.
 #[tokio::test]
 async fn a_forged_write_naming_a_forgotten_edit_is_judged_alike() {
     for forged in [
         update(id(BEN, 4), 6, 5, id(BEN, 1), id(BEN, 2)),
         delete(id(BEN, 4), 6, 5, id(BEN, 1), id(BEN, 2)),
+        update(id(CLEO, 3), 6, 5, id(BEN, 1), id(BEN, 2)),
+        delete(id(CLEO, 3), 6, 5, id(BEN, 1), id(BEN, 2)),
     ] {
         let mut verdicts = Vec::new();
         for writers in [&[BEN, CLEO, DAN][..], &[BEN, CLEO]] {
@@ -218,7 +230,7 @@ async fn a_forged_write_naming_a_forgotten_edit_is_judged_alike() {
             land(&db, 5, insert(id(CLEO, 2), 5, 4, 3), writers).await;
             assert_eq!(kept(&db, id(BEN, 2))[0], i64::from(writers.contains(&DAN)));
             land(&db, 6, forged.clone(), writers).await;
-            let verdict = verdict(&db, id(BEN, 4));
+            let verdict = verdict(&db, forged.header.position);
             assert!(!verdict.retained(), "{verdict:?}");
             verdicts.push(verdict);
         }
@@ -240,4 +252,163 @@ async fn with_no_other_writer_each_slot_forgets_what_stopped_in_it() {
     land(&db, 4, update(id(CLEO, 2), 4, 3, id(BEN, 1), id(CLEO, 1)), &[]).await;
     assert_eq!(kept(&db, id(CLEO, 1)), [0; 5]);
     assert_eq!(kept(&db, id(BEN, 1))[0], 1);
+}
+
+/// Whether this device keeps `write`'s applied-write entry, and its
+/// plaintext header.
+fn entry(db: &Database, write: WriteId) -> (bool, bool) {
+    db.inspect_writer(|c| {
+        (
+            crate::write_metadata::stored_write(c, write).unwrap().is_some(),
+            crate::write_headers::read(c, write).unwrap().is_some(),
+        )
+    })
+}
+
+/// The writes section 0 of a snapshot of the store names.
+async fn snapshot_writes(db: &Database) -> Vec<WriteId> {
+    let snapshot = crate::snapshot_write::tests::capture(
+        db,
+        crate::snapshot_write::tests::id(Audience::Store),
+    )
+    .await;
+    crate::snapshot_write::tests::decode(&snapshot)
+        .1
+        .into_iter()
+        .filter_map(|record| match record {
+            coven_format::snapshot::SnapshotRecord::Write(write) => Some(write.id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Once its record is forgotten, nothing names Ben's write 2 by its entry:
+/// no merge row, lost value or kept counted state. Ben's write 3 is his last
+/// landed write, and Cleo's write 1 in slot 3 is the latest stamped one at or
+/// below the slot both have read past. So Ben's write 2's applied-write entry
+/// and plaintext header go, and a snapshot no longer names it. The writes
+/// still named stay, and every writes slot still counts toward a snapshot
+/// request. With Dan's idle phone holding everything back, it stays.
+#[tokio::test]
+async fn an_applied_write_nothing_names_is_forgotten() {
+    for writers in [&[BEN, CLEO][..], &[BEN, CLEO, DAN]] {
+        let (_store, db) = store().await;
+        overwritten(&db, writers).await;
+        land(&db, 5, insert(id(CLEO, 2), 5, 4, 3), writers).await;
+        let idle = writers.contains(&DAN);
+        assert_eq!(entry(&db, id(BEN, 2)), (idle, idle));
+        assert_eq!(snapshot_writes(&db).await.contains(&id(BEN, 2)), idle);
+        for write in [id(BEN, 1), id(CLEO, 1), id(BEN, 3), id(CLEO, 2)] {
+            assert_eq!(entry(&db, write), (true, true), "{write:?}");
+        }
+        assert_eq!(db.snapshot_slot_bytes(Audience::Store, 0).await.unwrap(), 5);
+        db.close().await.unwrap();
+    }
+}
+
+/// Ben's forged write 4 names his write 2's edit once this device forgot
+/// write 2's entry. The forged change's verdict names write 2, which section
+/// 0 no longer holds: a loader finds it landed from Ben's later writes there,
+/// and the snapshot loads. Write 2 landing again in a later slot is still
+/// refused as a repeated write.
+#[tokio::test]
+async fn a_forgotten_write_is_still_known_by_number() {
+    let (_store, db) = store().await;
+    overwritten(&db, &[BEN, CLEO]).await;
+    land(&db, 5, insert(id(CLEO, 2), 5, 4, 3), &[BEN, CLEO]).await;
+    land(&db, 6, update(id(BEN, 4), 6, 5, id(BEN, 1), id(BEN, 2)), &[BEN, CLEO]).await;
+    assert_eq!(entry(&db, id(BEN, 2)), (false, false));
+    let named = verdict(&db, id(BEN, 4));
+    assert!(
+        matches!(&named, ChangeVerdict::Dependent(sources) if sources.iter().any(|source| source.write == id(BEN, 2))),
+        "{named:?}"
+    );
+    let snapshot = crate::snapshot_write::tests::capture(
+        &db,
+        crate::snapshot_write::tests::id(Audience::Store),
+    )
+    .await;
+    let (_target_store, target) = store().await;
+    let (expected, prefix, plaintext, _) = snapshot.input();
+    crate::snapshot_write::tests::load_one(&target, expected, prefix, plaintext).await.unwrap();
+    target.close().await.unwrap();
+
+    let repeated = try_land(&db, 7, update(id(BEN, 2), 2, 1, id(BEN, 1), id(BEN, 1)), &[BEN, CLEO])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            repeated,
+            DbError::InvalidWrite { error: coven_merge::MergeError::DuplicateWrite(write), .. }
+                if write == id(BEN, 2)
+        ),
+        "{repeated:?}"
+    );
+    db.close().await.unwrap();
+}
+
+/// Ben's edit, write 2, stops being current in slot 5, when only slot 3 has
+/// been read past by every writer: its record stays, but nothing names write
+/// 2 by its entry any more, and Ben's write 3 is his last. The entry goes
+/// and the record stays: a snapshot still carries the record, with its stop
+/// slot, under its part's header, and loads.
+#[tokio::test]
+async fn a_record_outlives_its_writes_entry() {
+    let (_store, db) = store().await;
+    let writers = &[BEN, CLEO];
+    land(&db, 1, insert(id(BEN, 1), 1, 0, 1), writers).await;
+    land(&db, 2, update(id(BEN, 2), 2, 1, id(BEN, 1), id(BEN, 1)), writers).await;
+    land(&db, 3, insert(id(CLEO, 1), 3, 2, 2), writers).await;
+    land(&db, 4, insert(id(BEN, 3), 4, 3, 3), writers).await;
+    land(&db, 5, update(id(CLEO, 2), 5, 4, id(BEN, 1), id(BEN, 2)), writers).await;
+    assert_eq!(entry(&db, id(BEN, 2)), (false, false));
+    assert_eq!(kept(&db, id(BEN, 2))[0], 1);
+    assert!(snapshot_changes(&db).contains(&id(BEN, 2)));
+    let snapshot = crate::snapshot_write::tests::capture(
+        &db,
+        crate::snapshot_write::tests::id(Audience::Store),
+    )
+    .await;
+    let (_target_store, target) = store().await;
+    let (expected, prefix, plaintext, _) = snapshot.input();
+    crate::snapshot_write::tests::load_one(&target, expected, prefix, plaintext).await.unwrap();
+    assert_eq!(kept(&target, id(BEN, 2))[0], 1);
+    target.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Fill the forgetting tables for the plan audit, inside its transaction
+/// (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_forgotten VALUES(1,counter(1),1);
+         INSERT INTO _coven_unnamed_writes SELECT i FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// The full scans the forgetting statements' plans may contain, each with
+/// its reason, as the plan audit asks (`internal_schema_scan_reasons.rs`).
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+        (_, _, "_coven_forgotten") => Some("the table holds at most one row"),
+        (
+            "forget_entries.rs",
+            "SELECT write_id FROM _coven_unnamed_writes" | "DELETE FROM _coven_unnamed_writes",
+            "_coven_unnamed_writes",
+        ) => Some(
+            "each applied slot looks once at every write something stopped naming since the last",
+        ),
+        ("forget_entries.rs", template, "_coven_published_writes")
+            if template.contains("FROM _coven_published_writes WHERE true") =>
+        {
+            Some("letting the whole counted state go looks again at every write it named")
+        }
+        _ => None,
+    }
 }

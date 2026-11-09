@@ -11,7 +11,8 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
          INSERT INTO _coven_published_losses SELECT i,tab,key,audience,x'00' FROM fixture;
          INSERT INTO _coven_published_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
          INSERT INTO _coven_published_dropped SELECT tab,key,audience FROM fixture;
-         INSERT INTO _coven_published_file_refs SELECT tab,key,audience,device,substr(key,17,16) FROM fixture;",
+         INSERT INTO _coven_published_file_refs SELECT tab,key,audience,device,substr(key,17,16) FROM fixture;
+         INSERT INTO _coven_published_writes SELECT tab,key,audience,i FROM fixture;",
     )
     .unwrap();
 }
@@ -39,6 +40,8 @@ pub(crate) fn scan_reason(
     Some("once per migration while rows are kept: discover every synced table to read its rules"),
 ("published_migration.rs", "CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows", "_coven_published_rows") =>
     Some("a migration carries every preserved row through schema changes"),
+("published_migration.rs", "DELETE FROM _coven_published_writes", "_coven_published_writes") =>
+    Some("a migration puts every kept row and loss again, naming their writes again"),
 _ => None,
     }
 }

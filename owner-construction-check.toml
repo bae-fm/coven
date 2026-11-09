@@ -601,6 +601,7 @@ table_macros = [
     "coven_cache_tables",
     "coven_creations_tables",
     "coven_authored_sources_tables",
+    "coven_forgetting_tables",
     "coven_losses_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
@@ -659,6 +660,7 @@ tables = [
     "_coven_published_file_refs",
     "_coven_published_losses",
     "_coven_published_rows",
+    "_coven_published_writes",
 ]
 
 [[database.domains]]
@@ -701,6 +703,7 @@ homes = [
 tables = [
     "_coven_slot_records",
     "_coven_write_refusals",
+    "_coven_write_slot_audiences",
     "_coven_write_slots",
 ]
 
@@ -1121,7 +1124,19 @@ tables = [
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
+]
+
+[[database.domains]]
+name = "forgetting"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/forget_entries.rs",
+    "crates/coven-database/src/forget_records.rs",
+    "crates/coven-database/src/forget_records_schema.rs",
+]
+tables = [
     "_coven_forgotten",
+    "_coven_unnamed_writes",
 ]
 
 [[database.domains]]

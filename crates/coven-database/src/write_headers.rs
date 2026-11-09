@@ -25,6 +25,15 @@ pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Resu
     Ok(())
 }
 
+/// Delete `id`'s plaintext header, with its applied-write entry (§16.7).
+pub(crate) fn forget(db: &DatabaseConnection, id: WriteId) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_write_headers WHERE device=?1 AND number=?2",
+        params![id.device, id.number.to_be_bytes()],
+    )?;
+    Ok(())
+}
+
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"

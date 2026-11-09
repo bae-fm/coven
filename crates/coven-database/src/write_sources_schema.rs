@@ -26,15 +26,6 @@ macro_rules! coven_authored_sources_tables {
             CREATE INDEX _coven_authored_changes_audience ON _coven_authored_changes(audience,write_id,table_name,key);
             CREATE INDEX _coven_authored_changes_stop ON _coven_authored_changes(stop) WHERE stop IS NOT NULL;
         ");
-        // The stop slot through which this device has forgotten every kept
-        // record it may (§16.7): each slot looks only at records that
-        // stopped after it.
-        $visit!(_coven_forgotten, "
-            CREATE TABLE _coven_forgotten (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                through BLOB NOT NULL CHECK(length(through)=8)
-            ) STRICT;
-        ");
         // This device's verdict on an original change, beside its record for
         // the reason `_coven_upload_keys` is beside an upload's.
         $visit!(_coven_authored_admissions, "

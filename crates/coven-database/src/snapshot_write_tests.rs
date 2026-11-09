@@ -30,6 +30,9 @@ impl coven_format::snapshot::WriteSlots for Oracle {
     fn slot(&self, id: WriteId) -> Result<Option<coven_merge::Slot>, coven_format::Error> {
         Ok(self.0.get(&id).map(|w| w.slot))
     }
+    fn landed(&self, write: WriteId) -> Result<bool, coven_format::Error> {
+        Ok(self.0.keys().any(|id| id.device == write.device && id.number >= write.number))
+    }
 }
 
 /// Change a merge row's cells with `edit`, as a damaged or dishonest body
@@ -130,7 +133,7 @@ pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotF
 }
 
 /// The snapshot of the database as it stands, without applying its queue.
-async fn capture(database: &Database, id: SnapshotId) -> SnapshotFrames {
+pub(crate) async fn capture(database: &Database, id: SnapshotId) -> SnapshotFrames {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let output = frames.clone();

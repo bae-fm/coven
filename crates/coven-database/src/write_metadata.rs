@@ -69,6 +69,20 @@ pub(crate) fn newest_number(
     Ok(newest.map(counter).transpose()?)
 }
 
+/// Whether `write` landed: a write of its device numbered at or above it
+/// landed. A device's writes land in the order it numbered them, and this
+/// device keeps each device's last landed write's entry, whatever else it
+/// forgot (§16.7).
+pub(crate) fn landed(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
+    db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>=?2 AND slot IS NOT NULL)"
+        ),
+        params![write.device, write.number.to_be_bytes().as_slice()],
+        |r| r.get(0),
+    )
+}
+
 /// Whether `write` landed before `landing`, the write being judged: a write
 /// of its device numbered at or above it landed, other than `landing`. A
 /// device's writes land in the order it numbered them, so its later writes'
@@ -87,6 +101,45 @@ pub(crate) fn landed_before(
             write.number.to_be_bytes().as_slice(),
             landing.device,
             landing.number.to_be_bytes().as_slice()
+        ],
+        |r| r.get(0),
+    )
+}
+
+/// The last write of `write`'s device that landed numbered below it, if one
+/// did. Its device's writes land in number order and its last landed
+/// write's entry stays (§16.7), so for a write landing for the first time
+/// this is that last write; for one a reload stages again, the nearest
+/// earlier write this device keeps.
+pub(crate) fn landed_below(
+    db: &DatabaseConnection,
+    write: WriteId,
+) -> Result<Option<StoredWrite>, DbError> {
+    Ok(db
+        .query(
+            &format!("SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number<?2 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
+            params![write.device, write.number.to_be_bytes().as_slice()],
+            stored,
+        )?
+        .pop())
+}
+
+/// Whether a write of `write`'s device numbered above it landed before
+/// `slot`: then `write` landed before `slot` too, since a device's writes
+/// land in number order, and `slot` repeats it (§16.7).
+pub(crate) fn later_landed_before(
+    db: &DatabaseConnection,
+    write: WriteId,
+    slot: coven_merge::Slot,
+) -> Result<bool, DbError> {
+    db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>?2 AND slot<?3)"
+        ),
+        params![
+            write.device,
+            write.number.to_be_bytes().as_slice(),
+            slot.get().to_be_bytes().as_slice()
         ],
         |r| r.get(0),
     )
@@ -133,18 +186,19 @@ pub(crate) fn stored_write(
             "SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"
         ),
         params![id.device, id.number.to_be_bytes().as_slice()],
-        |r| {
-            Ok(StoredWrite {
-                ordinal: r.get(0)?,
-                timestamp: decoded(coven_format::merge_fields::decode_timestamp(
-                    &r.get::<_, Vec<u8>>(1)?,
-                ))?,
-                read_through: counter(r.get(2)?)?,
-                slot: r.get::<_, Option<Vec<u8>>>(3)?.map(slot_counter).transpose()?,
-            })
-        },
+        stored,
     )?;
     Ok(rows.pop())
+}
+
+/// An entry selected as `id,timestamp,read_through,slot`.
+fn stored(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredWrite> {
+    Ok(StoredWrite {
+        ordinal: r.get(0)?,
+        timestamp: decoded(coven_format::merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(1)?))?,
+        read_through: counter(r.get(2)?)?,
+        slot: r.get::<_, Option<Vec<u8>>>(3)?.map(slot_counter).transpose()?,
+    })
 }
 
 /// The metadata of the writes coven applied, read from `_coven_writes`.

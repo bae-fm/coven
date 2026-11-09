@@ -246,7 +246,7 @@ pub(crate) fn read(
     crate::write_sources::forget_own_migration(
         database,
         audience,
-        header.covers,
+        |write| metadata.covers(write),
         header.schema_version,
         |write, audience, table, key| {
             crate::snapshot_install::carried(database, write, audience, table, key)
