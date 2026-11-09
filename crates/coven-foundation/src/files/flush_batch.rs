@@ -138,24 +138,10 @@ impl FlushBatch {
 
     fn flush_now(self) -> Result<Flushed, FileError> {
         #[cfg(unix)]
-        {
-            for folder in &self.folders {
-                rustix::fs::fsync(&*folder.handle)
-                    .map_err(|errno| FileError::at("sync folder", &folder.path, errno.into()))?;
-            }
-            // After every folder's `fsync`, so the flush covers them all.
-            #[cfg(target_vendor = "apple")]
-            {
-                let mut devices = std::collections::BTreeSet::new();
-                for folder in &self.folders {
-                    if devices.insert(folder.stat.st_dev) {
-                        rustix::fs::fcntl_fullfsync(&*folder.handle).map_err(|errno| {
-                            FileError::at("flush drive cache", &folder.path, errno.into())
-                        })?;
-                    }
-                }
-            }
-        }
+        self.sync_folders()?;
+        // After every folder's `fsync`, so the flush covers them all.
+        #[cfg(target_vendor = "apple")]
+        self.flush_devices()?;
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(hook) = &self.hook {
             hook().map_err(|source| {
@@ -164,6 +150,30 @@ impl FlushBatch {
         }
         tracing::debug!(files = self.files, "flushed a batch of files");
         Ok(Flushed(()))
+    }
+
+    /// `fsync` each folder a file was made in.
+    #[cfg(unix)]
+    fn sync_folders(&self) -> Result<(), FileError> {
+        for folder in &self.folders {
+            rustix::fs::fsync(&*folder.handle)
+                .map_err(|errno| FileError::at("sync folder", &folder.path, errno.into()))?;
+        }
+        Ok(())
+    }
+
+    /// Flush the drive's cache once for each device a folder is on.
+    #[cfg(target_vendor = "apple")]
+    fn flush_devices(&self) -> Result<(), FileError> {
+        let mut devices = std::collections::BTreeSet::new();
+        for folder in &self.folders {
+            if devices.insert(folder.stat.st_dev) {
+                rustix::fs::fcntl_fullfsync(&*folder.handle).map_err(|errno| {
+                    FileError::at("flush drive cache", &folder.path, errno.into())
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
