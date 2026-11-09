@@ -859,3 +859,45 @@ async fn a_floor_write_ends_the_floor_sessions_it_superseded() {
     assert!(group.storage.unfinished_uploads().await.is_empty());
     ana.database().close().await.unwrap();
 }
+
+/// §16.6: a floor write journaled while Ana's older snapshot was the newest
+/// lands only after her newer one has passed grace. The floor it publishes
+/// names the older body, so the pass that lands it keeps that body: a new
+/// device starts from every body the stored floor names.
+#[tokio::test]
+async fn a_floor_landing_after_a_newer_snapshot_passed_grace_keeps_the_bodies_it_names() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let floor = ObjectPath::floor(group.store);
+    insert(ana.database(), "older", "in the snapshot the floor names").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.storage.set_faults(Faults { drop_part: true, ..Faults::none() }).await;
+    ana.sync.pass().await.unwrap();
+    ana.storage.set_faults(Faults::none()).await;
+    assert!(group.storage.status(&floor).await.unwrap().is_none(), "the floor write waits");
+
+    insert(ana.database(), "newer", "in the snapshot that replaces it").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    assert!(group.storage.status(&floor).await.unwrap().is_none(), "the floor write waits");
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+
+    let named = stored_floor(&ana).await.header.snapshots;
+    assert!(!named.is_empty());
+    let history = ana.sync.session.lock().await.history.clone();
+    for slot in named {
+        let path =
+            crate::snapshot_object::path(group.store, &history.announcements[&slot].snapshot)
+                .unwrap();
+        assert!(group.storage.status(&path).await.unwrap().is_some(), "the floor names {path:?}");
+    }
+    ana.database().close().await.unwrap();
+}

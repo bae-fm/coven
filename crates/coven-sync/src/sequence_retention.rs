@@ -375,7 +375,12 @@ impl SequenceSync {
                 match result {
                     Ok(()) => {
                         confirmed = Some(first);
-                        session.floor = None;
+                        // The rest of the pass deletes by the floor storage
+                        // now holds: the bodies it names stay, and the slots
+                        // below its `first` are gone (§16.6). Reading forward
+                        // checks it, and reloads from another device's floor
+                        // that has already replaced it past the next slot.
+                        self.read_forward(session, ring, member).await?;
                     }
                     Err(error)
                         if matches!(&error, SyncError::Storage(storage) if matches!(

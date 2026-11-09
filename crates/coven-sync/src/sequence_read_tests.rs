@@ -253,7 +253,7 @@ async fn a_slot_damaged_in_its_last_byte_commits_nothing() {
 /// The requests a pass adds for each kind of work: a claim is its create and
 /// a floor read after it lands; losing a race adds the occupied slot's read
 /// and a further attempt; a snapshot is its upload, its announcement claim,
-/// the floor write naming it and the next pass's one read of that floor;
+/// the floor write naming it and the writing pass's one read of it back;
 /// deleting history is the floor's upload and one delete per slot below its
 /// new `first` (§21.1).
 #[tokio::test]
@@ -333,15 +333,20 @@ async fn each_kind_of_work_adds_the_requests_the_cost_table_names() {
     assert_eq!(creates.len(), 2);
     assert!(creates[0].snapshot_id().is_some() && creates[1].slot_number().is_some());
 
-    // The floor write naming it, and the writer's next pass reading that
-    // floor's bytes once.
+    // The floor write naming it, and the pass that wrote it reading that
+    // floor back once, beside the quiet pass's floor read.
     let traced = ana.storage.request_trace().len();
     ana.sync.pass().await.unwrap();
     let trace = since(traced);
     let count = |wanted: &Request| trace.iter().filter(|request| *request == wanted).count();
-    assert_eq!(count(&Request::Read(floor.clone(), None)), 1, "{trace:?}");
+    assert_eq!(count(&Request::Read(floor.clone(), None)), 2, "{trace:?}");
     assert_eq!(count(&Request::Other("begin_upload")), 1, "{trace:?}");
     assert_eq!(count(&Request::Other("finish_upload")), 1, "{trace:?}");
+    let published = trace.iter().position(|request| *request == Request::Other("finish_upload"));
+    assert!(
+        trace[published.unwrap()..].contains(&Request::Read(floor.clone(), None)),
+        "the floor is read back after it lands: {trace:?}"
+    );
 
     // Deleting history: once the snapshot passes grace, the floor upload and
     // one delete per slot below its new `first`.

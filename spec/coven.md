@@ -6162,6 +6162,18 @@ session, sends its parts, and publishes them as one floor under the revision she
 first observed. Parts alone authorize no deletion. Recording even a floor that
 fits one part keeps ownership of provider cleanup if its reply is lost (§20.6).
 
+**Reading back the floor it wrote.** A floor write keeps the names it
+journaled, and it can land long after it was journaled. Ana's floor names her
+store snapshot announced at slot 120, and its upload loses a part. The same
+day she announces a newer store snapshot at slot 160, and then her laptop
+stays closed for eight days. When the floor lands it still names the body
+from slot 120, now replaced by one past grace. So once its floor lands, the
+pass reads forward again, reading the floor back and checking it (§16.4),
+before it goes on. The snapshot bodies and files it deletes next follow that
+floor: what it names stays, and the slots below its `first` are not read.
+Without that read, the same pass would delete the body from slot 120, and
+Dan's new phone, starting from the floor, would find that body gone.
+
 **The grace period** is usually seven days from each snapshot's announcement.
 The deleting device compares its own clock with the provider's publication time
 for the announcement, including that time's resolution (§20.5). An old provider
@@ -9892,9 +9904,9 @@ Each kind of work adds its own requests:
 | a claim | its create, and a floor read after it lands |
 | losing a race | the occupied slot's read, and each further attempt; there is no bound on how often a device can lose |
 | admin preparation | its actual requests: key copies, access changes, snapshot uploads |
-| a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the writer's next pass reading that floor's bytes once |
+| a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the pass that wrote that floor reading forward once more: the next slot, and the floor's bytes |
 | a reload | the floor's named snapshots, and the slots after them it needs |
-| deleting history | the floor upload's parts and one conditional publication, its cleanup, the deletes, one listing of the sessions left at applied slots, and on a profile certified to date them, the floor's status and one listing of floor sessions (§17.10) |
+| deleting history | the floor upload's parts and one conditional publication, the next slot and the floor read back, its cleanup, the deletes, one listing of the sessions left at applied slots, and on a profile certified to date them, the floor's status and one listing of floor sessions (§17.10) |
 | files | their own reads, upload parts and deletes, outside the pass; a bound upload's requests are the same as a trailing one's, sent in its own lane (§17.4) |
 | reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream, read once (§6.5, §16.2) |
 
