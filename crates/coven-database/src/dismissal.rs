@@ -162,7 +162,6 @@ pub(crate) fn deletion(
         store,
         state.row().clone(),
         Change { generation: state.generation(), operation: Operation::Delete },
-        state.cells().iter().map(|(name, cell)| (name.clone(), cell.value.value.clone())).collect(),
     )
 }
 

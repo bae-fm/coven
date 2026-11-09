@@ -130,7 +130,8 @@ async fn equal_scalars_keep_distinct_setters() {
     sql(&db, "UPDATE notes SET title='next',body='next'").await.unwrap();
     let history = records(&db);
     let row = &history[3].parts[0].rows[0];
-    assert_eq!(row.old["title"], row.old["body"]);
+    // The update replaced two equal values, and carries neither.
+    assert!(row.old.is_empty());
     assert_eq!(row.sources.setters["title"].change.write, history[2].header.position);
     assert_eq!(row.sources.setters["body"].change.write, history[0].header.position);
     db.close().await.unwrap();

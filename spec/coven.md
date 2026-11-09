@@ -406,7 +406,8 @@ When a write commits, coven records, in the same transaction:
 
 - the rows as they now stand;
 - a *write record* for upload, in coven's `_coven_uploads` table: each row change
-  with which columns it touched and their old and new values, the write's device
+  with which columns it touched and their new values, or for a delete the
+  values it removed, the write's device
   and number, its timestamp, the schema version it was made with, and how far
   this device had read (`read_through`, §7.1);
 - the facts later owner checks need (§9.6): who originally created each owned row,
@@ -7655,9 +7656,11 @@ would leave a record naming a file that's gone for good.
   the bytes stay while that write waits. Publishing it makes them a deletion
   candidate.
 - **So does a switch off them.** The write making a file device-only (§17.3)
-  carries the record's old coordinates as its old values, so the bytes stay
-  while it waits. Once it is published, they are a deletion candidate, as a
-  deleted record's are, unless another record names them.
+  carries only the record's new coordinates, so its device protects the
+  coordinates it replaced, read from the record before the write, until the
+  write is published: the bytes stay while it waits. Once it is published,
+  they are a deletion candidate, as a deleted record's are, unless another
+  record names them.
 - **Records over the same bytes.** A file over another file's bytes (§17.2)
   names the same stored location, so the bytes stay while either record names
   them. Deleting the store's photo A leaves them for Gifts' file over it, and
@@ -7970,7 +7973,12 @@ no safe default:
 
 - `OldWrites::Convert(f)`: `f` is a *converter*. It turns an eligible row change
   of a late old-version write received from another device into the new shape,
-  for example "note 43, title: X" into "note 43, name: X".
+  for example "note 43, title: X" into "note 43, name: X". It sees the values
+  an insert or update writes and the cells a delete removes, never the value an
+  update replaced: no write carries that (format D5.5). A conversion that would
+  need it, such as one telling apart two old values that convert to the same
+  new one, or a new trigger copying the replaced value, can't be written as a
+  converter.
 - `OldWrites::Drop`: such changes are kept as frozen lost values in their old
   shape (§18.6).
 

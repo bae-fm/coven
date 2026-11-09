@@ -34,7 +34,7 @@ async fn readding_a_removed_shared_key_updates_every_column_and_clears_its_check
     let change = &record.parts[0].rows[0];
     assert_eq!(change.change.generation, 1);
     assert!(matches!(&change.change.operation, Operation::Update(columns) if columns.len() == 3));
-    assert_eq!(change.old["end"], Value::Integer(8));
+    assert!(change.old.is_empty());
     assert_eq!(count(&db, "_coven_lost"), 0);
     assert_eq!(count(&db, "ranges"), 1);
     assert_eq!(count(&db, "_coven_rows"), 1);
@@ -144,7 +144,8 @@ async fn local_parent_deletion_records_cascade_and_null_as_ordinary_changes() {
     assert_eq!(columns.len(), 1);
     assert_eq!(columns["note_id"].value, Value::Null);
     assert!(columns["note_id"].parents.is_empty());
-    assert_eq!(link.old["note_id"], Value::Text("43".into()));
+    assert!(link.old.is_empty());
+    assert!(link.sources.setters.contains_key("note_id"));
     assert!(db.lost_values().await.unwrap().is_empty());
     db.close().await.unwrap();
 }

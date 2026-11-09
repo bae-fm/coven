@@ -258,7 +258,12 @@ async fn references_use_the_parents_affinity_before_and_after_cascade() {
     sql(&db, "UPDATE parents SET code=2 WHERE id='p'").await.unwrap();
     let writes = records(&db);
     let child = writes[1].parts[0].rows.iter().find(|r| r.row.table == "children").unwrap();
-    assert_eq!(child.old["parent"], coven_format::value::Value::Text("1".into()));
+    let coven_merge::Operation::Update(columns) = &child.change.operation else {
+        panic!("the cascade updates the child")
+    };
+    assert_eq!(columns["parent"].value, coven_format::value::Value::Text("2".into()));
+    assert_eq!(columns["parent"].parents.len(), 1);
+    assert!(child.old.is_empty());
     db.close().await.unwrap();
 }
 

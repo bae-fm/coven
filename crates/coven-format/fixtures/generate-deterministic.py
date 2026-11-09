@@ -322,9 +322,11 @@ def record_leaves(kind, payload):
         start = r.at
         generation, operation, columns = parse_change(r)
         own = r.data[start:r.at]
-        for _ in range(r.int(4)):
-            r.blob()
-            parse_value(r)
+        # Only a delete carries the cells it replaced (D5.5).
+        if operation == 2:
+            for _ in range(r.int(4)):
+                r.blob()
+                parse_value(r)
         parse_sources(r)
         creator = r.span(lambda r: parse_option(r, parse_change_id))
         if operation == 0:

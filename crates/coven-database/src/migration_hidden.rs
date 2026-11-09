@@ -67,17 +67,11 @@ impl<'c> Hidden<'c> {
         if !state.present() {
             return Ok(None);
         }
-        let old = state
-            .cells()
-            .iter()
-            .map(|(column, cell)| (column.clone(), cell.value.value.clone()))
-            .collect();
         crate::write_sources::authored(
             self.database,
             store,
             row.clone(),
             Change { generation, operation: Operation::Delete },
-            old,
         )
         .map(Some)
     }

@@ -127,7 +127,8 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     let rows = &write.parts[0].rows;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].change.generation, 1);
-    assert_eq!(rows[0].old, [("title".into(), Value::Text("Grocry list".into()))].into());
+    // An update carries no value it replaced.
+    assert!(rows[0].old.is_empty());
     let Operation::Update(columns) = &rows[0].change.operation else { panic!("title update") };
     assert_eq!(columns.len(), 1);
     assert_eq!(columns["title"].value, Value::Text("Grocery list".into()));
@@ -273,7 +274,8 @@ async fn renaming_urgent_to_important_records_sqlites_on_update_cascade() {
     let Operation::Update(columns) = &change.change.operation else {
         panic!("ordinary SET NULL change")
     };
-    assert_eq!(change.old["tag"], Value::Text("urgent".into()));
+    assert!(change.old.is_empty());
+    assert!(change.sources.setters.contains_key("tag"));
     assert_eq!(columns["tag"].value, Value::Null);
     assert!(columns["tag"].parents.is_empty());
     database.close().await.unwrap();
@@ -300,7 +302,7 @@ async fn body_edit_records_shared_edited_at_but_keeps_the_search_index_local() {
         ["body", "edited_at", "title"]
     );
     assert_eq!(columns["edited_at"].value, Value::Text("2026-10-02 15:00".into()));
-    assert_eq!(rows[0].old["edited_at"], Value::Null);
+    assert!(rows[0].old.is_empty());
     database.inspect_writer(|db| {
         assert_eq!(
             db.query_row("SELECT title FROM title_index", [], |r| r.get::<_, String>(0)).unwrap(),

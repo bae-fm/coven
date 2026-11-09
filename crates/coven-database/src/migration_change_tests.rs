@@ -154,25 +154,18 @@ async fn changing_or_adding_a_reference_fails_the_receipt() {
                         added.name = "added".into();
                         row.columns.push(added);
                     } else if variant == 2 {
-                        row.columns.push(ColumnChange::new(
-                            "added",
-                            None,
-                            Some(types::Value::Null),
-                        ));
+                        row.columns.push(ColumnChange::new("added", types::Value::Null));
                     } else if variant == 3 {
                         row.columns.retain(|c| c.name != "parent");
-                        row.columns.push(ColumnChange::new(
-                            "parent",
-                            None,
-                            Some(types::Value::Text("p".into())),
-                        ));
+                        row.columns
+                            .push(ColumnChange::new("parent", types::Value::Text("p".into())));
                     } else {
                         let parent = row.columns.iter_mut().find(|c| c.name == "parent").unwrap();
-                        parent.new = Some(if variant == 0 {
+                        parent.value = if variant == 0 {
                             types::Value::Text("q".into())
                         } else {
                             types::Value::Null
-                        });
+                        };
                     }
                 }
                 Ok(())
@@ -207,7 +200,7 @@ async fn a_null_reference_is_still_a_reference_when_converting() {
             "CREATE INDEX refs ON children(parent)",
             crate::OldWrites::Convert(std::sync::Arc::new(|row| {
                 if let Some(column) = row.columns.iter_mut().find(|c| c.name == "parent") {
-                    column.new = Some(types::Value::Text("p".into()));
+                    column.value = types::Value::Text("p".into());
                 }
                 Ok(())
             })),
@@ -361,12 +354,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
                 4 => row.table = "missing".into(),
                 5 => row.table = "no_key".into(),
                 6 => row.key = RowKey(vec!["different".to_owned().into()]),
-                7 => {
-                    row.op = ChangeOp::Delete;
-                    for column in &mut row.columns {
-                        column.old = column.new.take();
-                    }
-                }
+                7 => row.op = ChangeOp::Delete,
                 8 => row.table = "other".into(),
                 _ => unreachable!(),
             }
@@ -381,9 +369,6 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
             0 => assert!(
                 matches!(error, DbError::MigrationDuplicateColumn { ref table, ref column } if table == "notes" && column == "title")
             ),
-            1 => assert!(
-                matches!(error, DbError::MigrationColumnOperation { ref table, op: ChangeOp::Update, has_old: false, has_new: true, .. } if table == "notes")
-            ),
             2 => assert!(
                 matches!(error, DbError::MigrationColumnMissing { ref table, ref column } if table == "notes" && column == "absent")
             ),
@@ -396,7 +381,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
             5 => assert!(
                 matches!(error, DbError::MigrationPrimaryKeyMissing { ref table } if table == "no_key")
             ),
-            6..=8 => assert!(matches!(
+            1 | 6..=8 => assert!(matches!(
                 error,
                 DbError::WriteFormat(coven_format::Error::Invalid {
                     field: "converted row identity or operation",

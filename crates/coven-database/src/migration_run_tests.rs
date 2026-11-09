@@ -340,7 +340,7 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
                         .into(),
                     ),
                 },
-                old: [("title".into(), Value::Text("good".into()))].into(),
+                old: BTreeMap::new(),
                 sources: coven_format::write_sources::WriteSources {
                     generation: Some(coven_format::write_sources::ChangeId {
                         write: original.header.position,
@@ -663,12 +663,8 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
     db.receive(original.clone().into()).await.unwrap();
     sql(&db, "UPDATE notes SET title='concurrent' WHERE id='removed'").await.unwrap();
     let latest = records(&db).pop().unwrap();
-    let remote = downloaded_update(
-        original,
-        "removed",
-        latest.header.timestamp,
-        &[("title", "good", "bad")],
-    );
+    let remote =
+        downloaded_update(original, "removed", latest.header.timestamp, &[("title", "bad")]);
     db.receive(remote.into()).await.unwrap();
     let lost = db.lost_values().await.unwrap();
     assert_eq!(lost.len(), 2);
@@ -707,12 +703,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     let original = records(&db).remove(0);
     db.receive(original.clone().into()).await.unwrap();
     let timestamp = original.header.timestamp;
-    let remote = downloaded_update(
-        original,
-        "b",
-        timestamp,
-        &[("x", "other-x", "x"), ("y", "other-y", "y")],
-    );
+    let remote = downloaded_update(original, "b", timestamp, &[("x", "x"), ("y", "y")]);
     db.receive(remote.into()).await.unwrap();
     assert_eq!(count(&db, "_coven_constraints"), 2);
     let original = db.inspect_writer(|db| {
@@ -756,7 +747,7 @@ fn downloaded_update(
     mut original: coven_format::write::WriteRecord,
     key: &str,
     after: coven_merge::Timestamp,
-    columns: &[(&str, &str, &str)],
+    columns: &[(&str, &str)],
 ) -> coven_format::write::WriteRecord {
     use coven_format::value::Value;
     use coven_foundation::id_source::DeviceId;
@@ -775,7 +766,7 @@ fn downloaded_update(
         operation: Operation::Update(
             columns
                 .iter()
-                .map(|(name, _, value)| {
+                .map(|(name, value)| {
                     (
                         (*name).into(),
                         ColumnValue {
@@ -787,15 +778,12 @@ fn downloaded_update(
                 .collect(),
         ),
     };
-    row.old = columns
-        .iter()
-        .map(|(name, value, _)| ((*name).into(), Value::Text((*value).into())))
-        .collect();
+    row.old.clear();
     row.sources.generation =
         Some(coven_format::write_sources::ChangeId { write: past, row: row.row.clone() });
     row.sources.setters = columns
         .iter()
-        .map(|(column, _, _)| {
+        .map(|(column, _)| {
             (
                 (*column).into(),
                 coven_format::write_sources::CellSource {

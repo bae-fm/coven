@@ -796,7 +796,6 @@ async fn a_record_naming_a_generated_column_is_refused() {
                 panic!("the note's set-NULL")
             };
             columns.insert("shown".into(), cell("forged"));
-            note.old.insert("shown".into(), Value::Text("a".into()));
         }),
         ("DELETE FROM albums", "delete's old values", |record| {
             let album = row(record, "albums");

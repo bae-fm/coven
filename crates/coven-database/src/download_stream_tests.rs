@@ -105,7 +105,6 @@ async fn a_received_insert_without_its_audience_or_reference_cell_is_refused_and
         let row = record.parts[0].rows.iter_mut().find(|row| row.row.table == table).unwrap();
         let Operation::Insert(columns) = &mut row.change.operation else { panic!("an insert") };
         assert!(columns.remove(column).is_some(), "{table} supplies {column}");
-        row.old.remove(column);
         row.sources.setters.remove(column);
         rejects_schema_violation(record, circle_tables(), CIRCLE_SCHEMA).await;
     }
@@ -746,7 +745,6 @@ async fn incomplete_or_inconsistent_composite_references_are_refused() {
             match broken {
                 0 => {
                     columns.remove("b");
-                    change.old.remove("b");
                     change.sources.setters.remove("b");
                 }
                 1 => {
@@ -812,7 +810,7 @@ async fn overlapping_composite_references_capture_the_connected_columns() {
     let change = &write.parts[0].rows[0];
     let Operation::Update(columns) = &change.change.operation else { panic!("update") };
     assert_eq!(columns.keys().map(String::as_str).collect::<Vec<_>>(), ["a", "b", "c"]);
-    assert_eq!(change.old.keys().collect::<Vec<_>>(), columns.keys().collect::<Vec<_>>());
+    assert!(change.old.is_empty());
     assert_eq!(columns["b"].parents.len(), 2);
     db.close().await.unwrap();
 }

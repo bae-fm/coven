@@ -542,13 +542,38 @@ fn potential_reference(value: &Value, references: &mut BTreeSet<(DeviceId, Objec
     }
 }
 
-/// Queue creation and interpretation changes retain paths in the same transaction.
-/// Original paths survive schema changes until publication removes the queue row.
+/// The stored paths a local write's record updates move off: the coordinates
+/// each updated record held before the write, read from `store`, the
+/// pre-write merge state. An update carries no value it replaced (D5.5), so
+/// these come from the device's own state, before the write applies.
+pub(crate) fn replaced(
+    store: &crate::merge_store::MergeStore<'_>,
+    record: &coven_format::write::WriteRecord,
+) -> Result<BTreeSet<(DeviceId, ObjectId)>, DbError> {
+    let mut references = BTreeSet::new();
+    for row in record.parts.iter().flat_map(|part| &part.rows) {
+        if !file_table::is_files(&row.row.table)
+            || !matches!(row.change.operation, coven_merge::Operation::Update(_))
+        {
+            continue;
+        }
+        if let Some(cell) = store.row(&row.row)?.state.cells().get(COORDINATES) {
+            value(&cell.value.value, &mut references)?;
+        }
+    }
+    Ok(references)
+}
+
+/// Queue creation retains, in the same transaction, the paths the write names
+/// and the paths it moves its records off (`replaced`), so the bytes stay
+/// while the write waits (§17.10). Original paths survive schema changes
+/// until publication removes the queue row.
 pub(crate) fn queued(
     db: &DatabaseConnection,
     record: &coven_format::write::WriteRecord,
+    replaced: BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {
-    let mut references = BTreeSet::new();
+    let mut references = replaced;
     for row in record.parts.iter().flat_map(|part| &part.rows) {
         if let coven_merge::Operation::Insert(columns) | coven_merge::Operation::Update(columns) =
             &row.change.operation

@@ -448,7 +448,6 @@ Then the part's stream: two row-change frames, in `RowId` order (`notes` before
 | `generation` | 1, the row's generation before the change |
 | `operation` | 1, update |
 | `columns` | `title` → `"Grocery list"`, with no parents (`title` is no reference) |
-| `old` | `title` → `"Grocry list"` |
 | `generation_source` | present: Ana's write 1 at note 42, which created the row |
 | `replaced_setters` | `title` → Ana's write 1 at note 42, column `title` |
 | `creator` | absent |
@@ -456,7 +455,9 @@ Then the part's stream: two row-change frames, in `RowId` order (`notes` before
 
 The second deletes `tags` row `"errands"`, whose key is
 `20 65 72 72 61 6E 64 73 00 00` (D3). A delete has no `columns` field; its `old`
-map holds each of the tag's cells with the value its setter wrote.
+map holds each of the tag's cells with the value its setter wrote. The update
+of note 42 has no `old` field: the misspelled title it replaced is in no
+record.
 
 ### D5.1 The write header
 
@@ -543,7 +544,7 @@ row         RowId
 generation  u64                    the row's generation before the change
 operation   u8                     0 insert · 1 update · 2 delete
 columns     map<name, ColumnValue> new values; insert and update only, nonempty
-old         map<name, Value>       insert none; update the same columns; delete each replaced cell
+old         map<name, Value>       each replaced cell; delete only
 generation_source option<ChangeId> absent exactly at generation zero
 replaced_setters  map<name, CellSource>
 creator     Option<ChangeId>       an audience copy's original creation
@@ -562,7 +563,7 @@ Step       = sequence:u32 | change | half:u8
 | `generation` | `u64` | the row's generation before the change (§8.3) |
 | `operation` | `u8` | `0` insert, `1` update, `2` delete |
 | `columns` | `map<name, ColumnValue>` | new values. Insert and update only, nonempty. A delete omits the field completely. |
-| `old` | `map<name, Value>` | an insert's is empty; an update's has the same columns; a delete's has each replaced cell. Every operation carries the map's count, including an insert's zero. |
+| `old` | `map<name, Value>` | each cell a delete replaced, with the value its setter wrote. Delete only: an insert or update omits the field completely, and carries no value it replaced. |
 | `generation_source` | `Option<ChangeId>` | the change that supplied the row's generation. Absent exactly at generation zero. |
 | `replaced_setters` | `map<name, CellSource>` | the change that set each cell this change replaced |
 | `creator` | `Option<ChangeId>` | present only on an audience copy (D5.7) |
@@ -575,14 +576,21 @@ change and one of its columns.
 without overflow, and parent-generation and audience checks (§8, §9.1).
 
 **References of several columns.** Setting any component of a multi-column
-foreign key supplies all its components in `columns`, and in `old` for an update,
-even unchanged ones, with the same recorded parent on every component.
+foreign key supplies all its components in `columns`, even unchanged ones, with
+the same recorded parent on every component.
 
 - A tuple containing NULL records no parent for that key.
 - Overlapping keys expand together (§9.1).
 - Incomplete tuples are refused.
 
 **One change per row.** A row has at most one change in a write.
+
+**Replaced values.** Only a delete carries the values it replaced: a receiver
+checks a foreign-key action's delete against them (§9.6), and a delete that
+can't count keeps them as its frozen lost value. Nothing reads the value an
+update replaced: its `replaced_setters` name the changes it built on (D5.6),
+and a converter sees only the values it writes (api.md E13). So an update
+carries none, and the record of a 4 MiB note's edit holds the new value once.
 
 **No generated columns.** No name in a row change is a generated column of the
 write's schema: not in `columns`, `old` or `replaced_setters`, and not in a
@@ -652,8 +660,8 @@ authoring device (§9.5).
   values, read frontiers, or the current canonical generation winner.
 
 **What is kept.** A received change is held whole only while its write is
-judged and applied: the sources, old values and operations serve that
-judgement. Then the device keeps its part's authenticated header, its kept
+judged and applied: the sources, a delete's old values and the operations
+serve that judgement. Then the device keeps its part's authenticated header, its kept
 record (D7.3) with the parents its reference columns named, and its own
 admission, independently of received interpretations and dismissible lost
 values. A later write's source check reads only those: the source's header,
@@ -1148,8 +1156,8 @@ A late write can depend on a change the snapshot already judged (§9.5). So the
 snapshot keeps every accepted change's record and its verdict, separately from
 the lost values the app may dismiss.
 
-Once a change is judged, nothing reads the values it replaced, the sources it
-built on or its SQL operations again: those served judging it. Later writes
+Once a change is judged, nothing reads the values a delete replaced, the
+sources it built on or its SQL operations again: those served judging it. Later writes
 read only who made it, when, which row, generation and operation, which
 columns it set, the values of the columns that were references, and whether a
 later delete shows the same value as each other column. So a snapshot keeps

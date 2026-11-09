@@ -280,7 +280,6 @@ async fn forged_action_payloads_are_direct_changes() {
         // An additional column beside the action's.
         &|row| {
             set(row, "slot", Value::Text("taken".into()));
-            row.old.insert("slot".into(), Value::Text("free".into()));
         },
         // The net change differs from the action that produced it.
         &|row| {
@@ -463,7 +462,7 @@ fn inconsistent_root(genuine: &WriteRecord) -> WriteRecord {
         )]
         .into(),
     );
-    y.old = [("title".to_owned(), Value::Text("Y".into()))].into();
+    y.old.clear();
     y.sources.setters = [("title".to_owned(), title)].into();
     forged
 }
@@ -773,7 +772,6 @@ pub(crate) async fn received(receipt: &mut impl Receipt) {
     let label =
         forged.parts[0].rows.iter_mut().find(|row| row.row == store_row("labels", "l7")).unwrap();
     set(label, "slot", Value::Text("taken".into()));
-    label.old.insert("slot".into(), Value::Text("free".into()));
     receipt.receive(&devices, &devices.ana, &forged).await;
     devices.close().await;
     // A net change of Ben's own track its steps do not end at causes nothing,

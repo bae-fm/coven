@@ -33,12 +33,10 @@ fn migrations(version: u32, converters: [bool; 2], calls: &Arc<Mutex<Vec<u32>>>)
                     calls.lock().unwrap().push(number);
                     for column in &mut row.columns {
                         if column.name == "value" {
-                            for value in column.old.iter_mut().chain(&mut column.new) {
-                                let crate::types::Value::Integer(value) = value else {
-                                    panic!("integer fixture value")
-                                };
-                                *value = *value * 10 + i64::from(number);
-                            }
+                            let crate::types::Value::Integer(value) = &mut column.value else {
+                                panic!("integer fixture value")
+                            };
+                            *value = *value * 10 + i64::from(number);
                         }
                     }
                     Ok(())

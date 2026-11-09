@@ -415,20 +415,6 @@ pub enum DbError {
         /// The repeated column.
         column: String,
     },
-    /// A converted column has old/new values incompatible with its operation.
-    #[error("migration conversion of {table}.{column} does not fit {op:?}")]
-    MigrationColumnOperation {
-        /// The converted table.
-        table: String,
-        /// The converted column.
-        column: String,
-        /// The requested operation.
-        op: crate::ChangeOp,
-        /// Whether an old value was supplied.
-        has_old: bool,
-        /// Whether a new value was supplied.
-        has_new: bool,
-    },
     /// A converted column is absent from the target schema.
     #[error("converted column {table}.{column} is absent from the schema")]
     MigrationColumnMissing {

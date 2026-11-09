@@ -51,7 +51,6 @@ fn one_row_still_must_fit_a_bounded_frame() {
     let row = &mut record.parts[0].rows[0];
     let Operation::Update(columns) = &mut row.change.operation else { unreachable!() };
     columns.insert("y".into(), test_utils::column(Value::Blob(vec![1; 8 * 1024 * 1024])));
-    row.old.insert("y".into(), Value::Null);
     assert!(matches!(WriteEncoder::new(&record), Err(Error::Limit { .. })));
 }
 

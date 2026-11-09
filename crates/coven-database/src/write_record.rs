@@ -141,16 +141,6 @@ pub(crate) fn changes(
                 // The row's stored state, which its change reads anyway.
                 let generation = stored.row(&row)?.state.generation();
                 assert_eq!(generation % 2, 1, "visible row has no present generation");
-                // A delete's old values are the cells it replaces, as their
-                // setters wrote them: what receivers can check (D5), not a
-                // display substitution such as a stale reference's NULL.
-                let cells = stored
-                    .row(&row)?
-                    .state
-                    .cells()
-                    .iter()
-                    .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
-                    .collect();
                 changes.insert(
                     row.clone(),
                     crate::write_sources::authored(
@@ -158,7 +148,6 @@ pub(crate) fn changes(
                         stored,
                         row,
                         Change { generation, operation: Operation::Delete },
-                        cells,
                     )?,
                 );
             }
@@ -172,7 +161,7 @@ pub(crate) fn changes(
             // Every device's SQLite computes the generated columns, so no
             // record carries them (D5).
             let synced = synced(schema.table(&key.0), &new.values);
-            let (operation, old_values) = if let Some(old) = old.filter(|_| !moving) {
+            let operation = if old.is_some() && !moving {
                 let mut new_values: AppValues = synced
                     .iter()
                     .filter(|(c, _)| changed[key].contains(*c))
@@ -209,27 +198,11 @@ pub(crate) fn changes(
                         break;
                     }
                 }
-                let state = stored.row(&row)?.state;
-                let old_values = new_values
-                    .keys()
-                    .map(|c| {
-                        (
-                            c.clone(),
-                            match (state.cells().get(c), old.values.get(c)) {
-                                (Some(cell), _) => cell.value.value.clone(),
-                                (None, Some(value)) => value.clone(),
-                                // A column introduced by this migration has no
-                                // old cell; the update's old-value field is NULL.
-                                (None, None) => Value::Null,
-                            },
-                        )
-                    })
-                    .collect();
-                (Operation::Update(columns(&new_values)), old_values)
+                Operation::Update(columns(&new_values))
             } else if coven_merge::generation_present(generation) {
-                (Operation::Update(columns(&synced)), removed_values(database, &row, generation)?)
+                Operation::Update(columns(&synced))
             } else {
-                (Operation::Insert(columns(&synced)), BTreeMap::new())
+                Operation::Insert(columns(&synced))
             };
             changes.insert(
                 row.clone(),
@@ -238,7 +211,6 @@ pub(crate) fn changes(
                     stored,
                     row,
                     Change { generation, operation },
-                    old_values,
                 )?,
             );
         }
@@ -255,12 +227,6 @@ pub(crate) fn changes(
                 stored,
                 old.clone(),
                 Change { generation: state.state.generation(), operation: Operation::Delete },
-                state
-                    .state
-                    .cells()
-                    .iter()
-                    .map(|(n, c)| (n.clone(), c.value.value.clone()))
-                    .collect(),
             )?,
         );
         let generation = stored.generation(new)?;
@@ -272,10 +238,10 @@ pub(crate) fn changes(
                 (n.clone(), copied(schema, &old.table, n, &new.audience, c.value.clone(), copies))
             })
             .collect();
-        let (operation, old_values) = if coven_merge::generation_present(generation) {
-            (Operation::Update(values), removed_values(database, new, generation)?)
+        let operation = if coven_merge::generation_present(generation) {
+            Operation::Update(values)
         } else {
-            (Operation::Insert(values), BTreeMap::new())
+            Operation::Insert(values)
         };
         if let std::collections::btree_map::Entry::Vacant(entry) = changes.entry(new.clone()) {
             entry.insert(crate::write_sources::authored(
@@ -283,7 +249,6 @@ pub(crate) fn changes(
                 stored,
                 new.clone(),
                 Change { generation, operation },
-                old_values,
             )?);
         }
     }
@@ -496,19 +461,6 @@ fn unordered(
             })
             .collect(),
     })
-}
-
-fn removed_values(
-    database: &DatabaseConnection,
-    row: &RowId,
-    generation: u64,
-) -> Result<AppValues, DbError> {
-    // Each caller reaches a present merge row the app's tables didn't show,
-    // which removal rules took out: an active loss holds its values, and one
-    // without is a damaged store (§19.3).
-    let removed =
-        crate::loss_record::removed(database, row, generation)?.ok_or(DbError::DamagedDatabase)?;
-    Ok(removed.columns.into_iter().map(|(column, value)| (column, value.value)).collect())
 }
 
 /// A moved row's cell, naming the new file the move made in the row's new

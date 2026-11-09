@@ -1,4 +1,4 @@
-//! A write's old values and merge-owned changes, split into audience parts (§4, §15.6).
+//! A write's merge-owned changes, split into audience parts (§4, §15.6).
 //!
 //! `WriteRecord` and `WritePart` are in-memory values, not additional encodings.
 //! `write_stream::WriteEncoder` emits the header and per-audience frame streams.
@@ -112,7 +112,7 @@ impl Wire for Operation<Value> {
 }
 wire_struct!(Change<Value>, generation, operation);
 
-/// Merge's change to one row, together with SQLite's old column values (§4),
+/// Merge's change to one row, together with the cells a delete replaced (§4),
 /// the original creation it copies and the SQL operations that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowChange {
@@ -120,8 +120,8 @@ pub struct RowChange {
     pub row: RowId,
     /// The pre-change generation and merge operation, including parent metadata.
     pub change: Change<Value>,
-    /// Previous values: empty on insert, matching updated columns on update,
-    /// and on delete every replaced cell with the value its setter wrote. SQL
+    /// A delete's replaced cells, each with the value its setter wrote; empty
+    /// for an insert or an update, which carry no replaced value (D5.5). SQL
     /// NULL is a value, not absence.
     pub old: BTreeMap<String, Value>,
     /// Authenticated original generation and cell sources, independent of scalars.
@@ -139,15 +139,20 @@ impl Wire for RowChange {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.row.put(out)?;
         self.change.put(out)?;
-        self.old.put(out)?;
+        if matches!(self.change.operation, Operation::Delete) {
+            self.old.put(out)?;
+        }
         self.sources.put(out)?;
         self.creator.put(out)?;
         self.execution.put_against(out, Some(&self.change))
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         let row = Wire::get(input)?;
-        let change = Wire::get(input)?;
-        let old = crate::wire::get_name_map(input)?;
+        let change: Change<Value> = Wire::get(input)?;
+        let old = match change.operation {
+            Operation::Delete => crate::wire::get_name_map(input)?,
+            Operation::Insert(_) | Operation::Update(_) => BTreeMap::new(),
+        };
         let sources = Wire::get(input)?;
         let creator = Wire::get(input)?;
         let execution = Execution::get_against(input, Some(&change))?;
@@ -176,12 +181,7 @@ impl RowChange {
             Operation::Insert(values) | Operation::Update(values) => {
                 require(!values.is_empty(), "changed columns", Rule::Required)?;
                 crate::merge_wire::columns(values)?;
-                let valid = if matches!(self.change.operation, Operation::Insert(_)) {
-                    self.old.is_empty()
-                } else {
-                    self.old.keys().eq(values.keys())
-                };
-                require(valid, "old columns", Rule::ColumnOperation)?;
+                require(self.old.is_empty(), "old columns", Rule::ColumnOperation)?;
             }
             Operation::Delete => {}
         }

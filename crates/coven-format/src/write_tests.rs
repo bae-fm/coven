@@ -50,11 +50,11 @@ fn values() -> BTreeMap<String, ColumnValue<Value>> {
     BTreeMap::from([("x".into(), test_utils::column(Value::Integer(2)))])
 }
 #[test]
-fn merge_operations_own_generation_checks_and_preserve_old_values() {
+fn merge_operations_own_generation_checks_and_preserve_a_deletes_old_values() {
     for (operation, generation, old) in [
         (Operation::Insert(values()), 0, BTreeMap::new()),
         (Operation::Insert(values()), 2, BTreeMap::new()),
-        (Operation::Update(values()), 1, BTreeMap::from([("x".into(), Value::Null)])),
+        (Operation::Update(values()), 1, BTreeMap::new()),
         (Operation::Delete, 1, BTreeMap::from([("x".into(), Value::Integer(1))])),
         (Operation::Delete, 1, BTreeMap::new()),
     ] {
@@ -75,9 +75,14 @@ fn merge_operations_own_generation_checks_and_preserve_old_values() {
         write.parts[0].rows[0].change.generation += 1;
         refuses(write, Error::Merge(MergeError::GenerationParity(generation + 1)));
     }
+    // An update carries no replaced value: the wire has no field for one, and
+    // encoding refuses a record that holds one.
     let mut write = test_utils::write();
-    write.parts[0].rows[0].old.clear();
-    refuses(write, Error::Invalid { field: "old columns", rule: Rule::ColumnOperation });
+    write.parts[0].rows[0].old.insert("x".into(), Value::Integer(1));
+    assert_eq!(
+        test_utils::write_plaintext(&write).map(|_| ()),
+        Err(Error::Invalid { field: "old columns", rule: Rule::ColumnOperation })
+    );
     let mut write = test_utils::write();
     write.parts[0].rows[0].change = Change { generation: u64::MAX, operation: Operation::Delete };
     refuses(write, Error::Merge(MergeError::GenerationExhausted));
@@ -349,7 +354,6 @@ fn a_step_equal_to_its_row_change_is_written_once() {
     let mut full = Encoder::new();
     change.row.put(&mut full).unwrap();
     change.change.put(&mut full).unwrap();
-    change.old.put(&mut full).unwrap();
     change.sources.put(&mut full).unwrap();
     change.creator.put(&mut full).unwrap();
     1u32.put(&mut full).unwrap();

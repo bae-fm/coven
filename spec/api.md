@@ -1543,8 +1543,6 @@ pub enum DbError {
     MigrationReference { table: String, column: String },
     /// A converted row names the same column twice.
     MigrationDuplicateColumn { table: String, column: String },
-    /// A converted column has old/new values incompatible with its operation.
-    MigrationColumnOperation { table: String, column: String, op: ChangeOp, has_old: bool, has_new: bool },
     /// A converted column is absent from the target schema.
     MigrationColumnMissing { table: String, column: String },
     /// A converted table has no primary index.
@@ -8868,6 +8866,10 @@ pub struct CircleMemberInfo {
   `DbError::MigrationKindMismatch { version }` and rolls back the whole batch;
   local-only changes accept `addition`. Reopening checks historical declarations
   against committed classifications before running new migrations.
+- A converter sees only the values a change writes, or for a delete the cells
+  it removes: an update carries no value it replaced (format D5.5), so a column
+  a conversion adds to an update needs only the value it writes. A conversion
+  that depends on a replaced value can't be written.
 - A converted change keeps the references its columns carried, renamed
   with them. Changing a reference's value, or adding a column that is a
   reference, fails conversion and leaves application pending without a
@@ -8934,18 +8936,19 @@ impl RowChange {
     pub fn rename_column(&mut self, from: &str, to: &str);
 }
 
-/// One column of a row change. A column that holds a reference also keeps,
-/// privately, which generation of its parent the write named (§9.1).
+/// One column of a row change: the value an insert or update writes, or the
+/// cell a delete removes. An update shows no value it replaced (format D5.5).
+/// A column that holds a reference also keeps, privately, which generation of
+/// its parent the write named (§9.1).
 pub struct ColumnChange {
     pub name: String,
-    pub old: Option<rusqlite::types::Value>,
-    pub new: Option<rusqlite::types::Value>,
+    pub value: rusqlite::types::Value,
     /* private: written references and original setter-source identity */
 }
 
 impl ColumnChange {
     /// A column the conversion adds; it carries no references.
-    pub fn new(name: impl Into<String>, old: Option<rusqlite::types::Value>, new: Option<rusqlite::types::Value>) -> Self;
+    pub fn new(name: impl Into<String>, value: rusqlite::types::Value) -> Self;
 }
 
 pub enum MigrationError {

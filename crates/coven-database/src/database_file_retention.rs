@@ -369,6 +369,10 @@ pub(crate) fn snapshot_references(
     Ok(references)
 }
 
+/// The stored paths a published change names: the coordinates a file record's
+/// insert or update writes, and those its delete removes. An update names no
+/// coordinates it replaced (D5.5): its author protected them only until the
+/// write was published (§17.10).
 fn retain_change(
     row: &RowChange,
     references: &mut BTreeSet<(DeviceId, ObjectId)>,

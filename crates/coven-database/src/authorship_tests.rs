@@ -36,7 +36,7 @@ fn overwrite() -> WriteRecord {
             generation: 1,
             operation: Operation::Update(BTreeMap::from([("a".into(), value)])),
         },
-        old: BTreeMap::from([("a".into(), columns["a"].value.clone())]),
+        old: BTreeMap::new(),
         sources: WriteSources {
             generation: Some(creation.clone()),
             setters: BTreeMap::from([(
@@ -239,7 +239,6 @@ async fn a_reloaded_snapshot_hides_cells_overwritten_after_loading() {
     let mut cell = columns.remove("a").unwrap();
     cell.value = Value::Text("9".into());
     columns.insert("b".into(), cell);
-    change.old = BTreeMap::from([("b".into(), Value::Text("8".into()))]);
     let mut setter = change.sources.setters.remove("a").unwrap();
     setter.column = "b".into();
     change.sources.setters.insert("b".into(), setter);

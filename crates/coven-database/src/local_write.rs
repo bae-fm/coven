@@ -90,6 +90,12 @@ impl DatabaseConnection {
                                 },
                             )
                         })?;
+                    // The paths its record updates move off, read before
+                    // the write applies.
+                    let replaced = match &record {
+                        Some(record) => crate::file_protection::replaced(&store, record)?,
+                        None => BTreeSet::new(),
+                    };
                     let applied = crate::write_apply::WriteApply::new(
                     database,
                     schema,
@@ -114,7 +120,7 @@ impl DatabaseConnection {
                         if !files.completes_bound() {
                             crate::operation::check_write_pause(database)?;
                         }
-                        crate::write_commit::queue(database, schema, record)?;
+                        crate::write_commit::queue(database, schema, record, replaced)?;
                     }
                     files.queue_uploads(now, record.map(|record| record.header.position.number))?;
                     files.before_commit()?;

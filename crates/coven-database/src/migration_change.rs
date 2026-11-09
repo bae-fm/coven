@@ -4,6 +4,7 @@ use crate::migration_names::MigrationMatch;
 use crate::schema::{Schema, TableSchema};
 use crate::write_encoding::{sql_value, value};
 use crate::{DbError, RowKey};
+use coven_format::value::Value as WireValue;
 use coven_format::write::RowChange as WrittenRow;
 use coven_merge::{ColumnValue, ForeignKey, Operation, Parent};
 use rusqlite::types::Value;
@@ -18,7 +19,7 @@ pub struct RowChange {
     pub key: RowKey,
     /// The row operation.
     pub op: ChangeOp,
-    /// The changed columns, including old and new values.
+    /// The columns an insert or update writes, or the cells a delete removes.
     pub columns: Vec<ColumnChange>,
     original: WrittenRow,
 }
@@ -43,32 +44,29 @@ impl RowChange {
 
     pub(crate) fn read(row: &WrittenRow, schema: &Schema) -> Result<Self, DbError> {
         let table = table(schema, &row.row.table)?;
-        let (op, new) = match &row.change.operation {
-            Operation::Insert(columns) => (ChangeOp::Insert, Some(columns)),
-            Operation::Update(columns) => (ChangeOp::Update, Some(columns)),
-            Operation::Delete => (ChangeOp::Delete, None),
+        // An insert or update shows the values it writes; a delete, the
+        // cells it removes. An update carries no value it replaced (D5.5).
+        let (op, values) = match &row.change.operation {
+            Operation::Insert(columns) => (ChangeOp::Insert, written(columns)),
+            Operation::Update(columns) => (ChangeOp::Update, written(columns)),
+            Operation::Delete => (
+                ChangeOp::Delete,
+                row.old.iter().map(|(name, value)| (name, value, None)).collect(),
+            ),
         };
-        let names = match new {
-            Some(columns) => columns.keys().collect::<Vec<_>>(),
-            None => row.old.keys().collect(),
-        };
-        let columns = names
+        let columns = values
             .into_iter()
-            .map(|name| {
-                let old = row.old.get(name).map(sql_value);
-                let written = new.and_then(|columns| columns.get(name));
-                let new = written.map(|column| sql_value(&column.value));
+            .map(|(name, value, parents)| {
+                let value = sql_value(value);
                 let constraints = references(table, name, schema)?;
                 let reference = (!constraints.is_empty()).then(|| ReferenceColumn {
                     constraints,
-                    old: old.clone(),
-                    new: new.clone(),
-                    parents: written.map(|column| column.parents.clone()).unwrap_or_default(),
+                    value: value.clone(),
+                    parents: parents.cloned().unwrap_or_default(),
                 });
                 Ok(ColumnChange {
                     name: name.clone(),
-                    old,
-                    new,
+                    value,
                     source: Some(ColumnSource {
                         name: name.clone(),
                         reference,
@@ -105,20 +103,6 @@ impl RowChange {
                     column: column.name.clone(),
                 });
             }
-            let valid = match self.op {
-                ChangeOp::Insert => column.old.is_none() && column.new.is_some(),
-                ChangeOp::Update => column.old.is_some() && column.new.is_some(),
-                ChangeOp::Delete => column.old.is_some() && column.new.is_none(),
-            };
-            if !valid {
-                return Err(DbError::MigrationColumnOperation {
-                    table: self.table.clone(),
-                    column: column.name.clone(),
-                    op: self.op,
-                    has_old: column.old.is_some(),
-                    has_new: column.new.is_some(),
-                });
-            }
             if !table.columns.iter().any(|c| c.name == column.name) {
                 return Err(DbError::MigrationColumnMissing {
                     table: self.table.clone(),
@@ -127,7 +111,7 @@ impl RowChange {
             }
             let reference = column.source.as_ref().and_then(|source| source.reference.as_ref());
             let constraints = references(table, &column.name, schema)?;
-            if reference.is_some_and(|r| r.old != column.old || r.new != column.new)
+            if reference.is_some_and(|r| r.value != column.value)
                 || (!constraints.is_empty() && reference.is_none())
             {
                 return Err(reference_error(&self.table, &column.name));
@@ -146,10 +130,10 @@ impl RowChange {
                     return Err(reference_error(&self.table, &column.name));
                 }
             }
-            if let Some(v) = &column.old {
-                old.insert(column.name.clone(), value(v.into())?);
-            }
-            if let Some(v) = &column.new {
+            let written = value((&column.value).into())?;
+            if self.op == ChangeOp::Delete {
+                old.insert(column.name.clone(), written);
+            } else {
                 let parents = match reference {
                     Some(reference) => rename_parents(
                         &reference.parents,
@@ -160,7 +144,7 @@ impl RowChange {
                     )?,
                     None => BTreeMap::new(),
                 };
-                new.insert(column.name.clone(), ColumnValue { value: value(v.into())?, parents });
+                new.insert(column.name.clone(), ColumnValue { value: written, parents });
             }
         }
         let key: Vec<_> =
@@ -266,10 +250,9 @@ pub enum ChangeOp {
 pub struct ColumnChange {
     /// The column name.
     pub name: String,
-    /// Absent on insert; `Some(Value::Null)` is SQL NULL.
-    pub old: Option<Value>,
-    /// Absent on delete; `Some(Value::Null)` is SQL NULL.
-    pub new: Option<Value>,
+    /// The value an insert or update writes, or the cell a delete removes.
+    /// `Value::Null` is SQL NULL. An update shows no value it replaced.
+    pub value: Value,
     source: Option<ColumnSource>,
 }
 
@@ -283,16 +266,22 @@ struct ColumnSource {
 #[derive(Clone, Debug, PartialEq)]
 struct ReferenceColumn {
     constraints: Vec<ForeignKey>,
-    old: Option<Value>,
-    new: Option<Value>,
+    value: Value,
     parents: BTreeMap<ForeignKey, Parent>,
 }
 
 impl ColumnChange {
-    /// Add a column with no reference metadata.
-    pub fn new(name: impl Into<String>, old: Option<Value>, new: Option<Value>) -> Self {
-        Self { name: name.into(), old, new, source: None }
+    /// A column the conversion adds; it carries no references.
+    pub fn new(name: impl Into<String>, value: Value) -> Self {
+        Self { name: name.into(), value, source: None }
     }
+}
+
+/// Each column an insert or update writes, with its value and parents.
+type Written<'a> = Vec<(&'a String, &'a WireValue, Option<&'a BTreeMap<ForeignKey, Parent>>)>;
+
+fn written(columns: &BTreeMap<String, ColumnValue<WireValue>>) -> Written<'_> {
+    columns.iter().map(|(name, column)| (name, &column.value, Some(&column.parents))).collect()
 }
 
 fn table<'a>(schema: &'a Schema, name: &str) -> Result<&'a TableSchema, DbError> {

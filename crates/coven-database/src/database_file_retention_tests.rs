@@ -5,32 +5,29 @@ use coven_foundation::id_source::FileId;
 use coven_merge::slot;
 
 #[tokio::test]
-async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
+async fn written_and_deleted_coordinates_protect_their_stored_files() {
     let store = TestStore::new();
     let db = store.schema(vec![files_table()], FILES).await.unwrap();
     let file = ObjectId(uuid::Uuid::from_u128(7));
+    let coordinates = Value::Text(format!("file 1 {file} {}", "ab".repeat(32)));
     for operation in [
         Operation::Update(BTreeMap::from([
-            (
-                "coordinates".into(),
-                coven_format::test_utils::column(Value::Text("device 1".into())),
-            ),
-            ("hash".into(), coven_format::test_utils::column(Value::Null)),
+            ("coordinates".into(), coven_format::test_utils::column(coordinates.clone())),
+            ("hash".into(), coven_format::test_utils::column(Value::Blob(vec![3; 32]))),
         ])),
         Operation::Delete,
     ] {
         let mut write = coven_format::test_utils::write();
         let change = &mut write.parts[0].rows[0];
         change.row.table = "coven_files".into();
-        let update = matches!(operation, Operation::Update(_));
+        let delete = matches!(operation, Operation::Delete);
         change.change.operation = operation;
-        change.old = BTreeMap::from([(
-            "coordinates".into(),
-            Value::Text(format!("file 1 {file} {}", "ab".repeat(32))),
-        )]);
-        if update {
-            change.old.insert("hash".into(), Value::Blob(vec![3; 32]));
-        }
+        // An update names the coordinates it writes; a delete, those it
+        // removes.
+        change.old = match delete {
+            true => BTreeMap::from([("coordinates".into(), coordinates.clone())]),
+            false => BTreeMap::new(),
+        };
         change.sources.setters.clear();
         let encoder = coven_format::write_stream::WriteEncoder::new(&write).unwrap();
         let header =

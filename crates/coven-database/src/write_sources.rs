@@ -173,15 +173,17 @@ impl<'a> PreWrite<'a> {
     }
 }
 
-/// Capture the actual setters in the author's pre-write merge state.
+/// Capture the actual setters in the author's pre-write merge state. A
+/// delete carries the cells it replaces, as their setters wrote them: what
+/// receivers check (D5.6), never a displayed substitution such as a stale
+/// reference's NULL. An insert or update carries no replaced value.
 pub(crate) fn authored(
     db: &DatabaseConnection,
     store: &MergeStore<'_>,
     row: RowId,
     change: Change<Value>,
-    old: BTreeMap<String, Value>,
 ) -> Result<RowChange, DbError> {
-    authored_over(db, store.row(&row)?.state, change, old)
+    authored_over(db, store.row(&row)?.state, change)
 }
 
 /// [`authored`] over the pre-write merge state `state`, of its own row.
@@ -189,9 +191,16 @@ pub(crate) fn authored_over(
     db: &DatabaseConnection,
     state: coven_merge::RowState<Value>,
     change: Change<Value>,
-    old: BTreeMap<String, Value>,
 ) -> Result<RowChange, DbError> {
     let row = state.row().clone();
+    let old = match change.operation {
+        Operation::Delete => state
+            .cells()
+            .iter()
+            .map(|(column, cell)| (column.clone(), cell.value.value.clone()))
+            .collect(),
+        Operation::Insert(_) | Operation::Update(_) => BTreeMap::new(),
+    };
     let pre = PreWrite::over(db, state)?;
     let mut setters = BTreeMap::new();
     for column in pre.cells() {

@@ -208,14 +208,8 @@ async fn a_new_file_over_a_file_this_device_has_no_record_of_fails() {
     db.close().await.unwrap();
 }
 
-/// Ana makes the store's track device-only on her laptop. Gifts' file over
-/// the same bytes is its own record: it stays stored at the same location,
-/// and once her switch is published the stored bytes are still no deletion
-/// candidate, since Gifts' record names them.
-#[tokio::test]
-async fn making_the_store_file_device_only_leaves_the_circles_stored() {
-    let store = TestStore::new();
-    let db = open(&store, Provenance::UserProvided).await;
+/// A user track stored in a store `photos` row `1`, and where it is stored.
+async fn stored_track(db: &crate::Database) -> (FileId, crate::FileLocation) {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"track").unwrap();
@@ -228,12 +222,17 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
         })
         .await
         .unwrap();
-    complete_uploads(&db).await;
-    let copy = share_into(&db, 2, CIRCLE, track).await;
-    crate::tests::publish(&db).await.unwrap();
-    let crate::file_location::Place::Cloud(location) = record(&db, track).place else {
+    complete_uploads(db).await;
+    let crate::file_location::Place::Cloud(location) = record(db, track).place else {
         panic!("the track is stored");
     };
+    (track, location)
+}
+
+/// Make `track`, stored at `location`, device-only on this device: write a
+/// copy of its bytes and switch the file to it, in a write not yet
+/// published.
+async fn make_device_only(db: &crate::Database, track: FileId, location: crate::FileLocation) {
     let owner = crate::FileDatabase::new(db.clone());
     let music = tempfile::tempdir().unwrap();
     let path = music.path().join("track.flac");
@@ -271,16 +270,25 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     let prepared = owner
         .prepared_device_only(
             reservation,
-            vec![crate::DeviceOnlyCopy {
-                file: track,
-                location: location.clone(),
-                path,
-                hashes: hashes.finish(),
-            }],
+            vec![crate::DeviceOnlyCopy { file: track, location, path, hashes: hashes.finish() }],
             flushed,
         )
         .unwrap();
     db.write(move |sql| sql.make_device_only(prepared)).await.unwrap();
+}
+
+/// Ana makes the store's track device-only on her laptop. Gifts' file over
+/// the same bytes is its own record: it stays stored at the same location,
+/// and once her switch is published the stored bytes are still no deletion
+/// candidate, since Gifts' record names them.
+#[tokio::test]
+async fn making_the_store_file_device_only_leaves_the_circles_stored() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let (track, location) = stored_track(&db).await;
+    let copy = share_into(&db, 2, CIRCLE, track).await;
+    crate::tests::publish(&db).await.unwrap();
+    make_device_only(&db, track, location.clone()).await;
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(record(&db, track).place, crate::file_location::Place::DeviceOnly(store.device()));
     // The copy is the original now, with the hashes of the bytes written to
@@ -293,6 +301,25 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     );
     assert_eq!(record(&db, copy).place, crate::file_location::Place::Cloud(location.clone()));
     assert!(!unprotected(&db, store.device()).await.contains(&location.object()));
+    db.close().await.unwrap();
+}
+
+/// Ana makes her stored track device-only. Her switch carries no
+/// coordinates it replaced, yet until it is published the stored bytes
+/// stay: other devices still name them. Publishing it makes them a deletion
+/// candidate (§17.10).
+#[tokio::test]
+async fn a_switch_off_stored_bytes_keeps_them_until_it_is_published() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let (track, location) = stored_track(&db).await;
+    crate::tests::publish(&db).await.unwrap();
+    make_device_only(&db, track, location.clone()).await;
+    let switch = records(&db).pop().unwrap();
+    assert!(switch.parts[0].rows.iter().all(|row| row.old.is_empty()));
+    assert!(!unprotected(&db, store.device()).await.contains(&location.object()));
+    crate::tests::publish(&db).await.unwrap();
+    assert!(unprotected(&db, store.device()).await.contains(&location.object()));
     db.close().await.unwrap();
 }
 

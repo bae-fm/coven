@@ -85,7 +85,7 @@ pub fn other_member_id() -> MemberId {
 pub fn other_member() -> MemberPublicKeys {
     keys_from_seed(0x35).public_keys()
 }
-/// A write with old/new values and named foreign-key metadata on its new value.
+/// A write updating one cell, with named foreign-key metadata on its new value.
 pub fn write() -> WriteRecord {
     let mut new = column(Value::Integer(2));
     new.parents.insert(
@@ -132,7 +132,7 @@ pub fn write() -> WriteRecord {
                     generation: 1,
                     operation: Operation::Update(BTreeMap::from([("x".into(), new)])),
                 },
-                old: BTreeMap::from([("x".into(), Value::Integer(1))]),
+                old: BTreeMap::new(),
                 sources: crate::write_sources::WriteSources {
                     generation: Some(crate::write_sources::ChangeId {
                         write: WriteId { device: DeviceId(1), number: 1 },

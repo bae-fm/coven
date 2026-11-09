@@ -328,7 +328,6 @@ fn change_from(
                 Operation::Delete => None,
             })
             .expect("authored column");
-        row.old.insert((*name).into(), previous.value.clone());
         let mut column = previous.clone();
         column.value = value.clone();
         columns.insert((*name).into(), column);
@@ -367,7 +366,7 @@ async fn try_remote_write(
     let row = database.inspect_writer_schema(|db, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
         let store = crate::merge_store::MergeStore::new(db, &app);
-        crate::write_sources::authored(db, &store, row.row, row.change, row.old).unwrap()
+        crate::write_sources::authored(db, &store, row.row, row.change).unwrap()
     });
     deliver(database, row, schema_version, count_queue).await
 }
@@ -398,7 +397,7 @@ pub(crate) async fn remote_update_concurrent_with_queue(
                 crate::merge_store::MergeStore::new(db, &app).row(&row.row).unwrap().state
             }
         };
-        crate::write_sources::authored_over(db, state, row.change, row.old).unwrap()
+        crate::write_sources::authored_over(db, state, row.change).unwrap()
     });
     assert_eq!(deliver(database, row, None, false).await.unwrap(), crate::ApplyOutcome::Applied);
 }

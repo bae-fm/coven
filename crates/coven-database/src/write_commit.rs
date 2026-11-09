@@ -4,10 +4,10 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::encoded;
 use crate::DbError;
 use coven_format::{merge_fields, value::Value, write::WriteRecord, write_stream::WriteEncoder};
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_merge::{Audience, LostChange, RowId, RowUpdate, WriteId};
 use rusqlite::params;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Store a write and the row updates merging it produced. Returns each
 /// present row's current generation, as `persist` does.
@@ -346,10 +346,12 @@ pub(crate) fn forget_constraint(database: &DatabaseConnection, id: i64) -> Resul
 /// Queue a new write only after authorizing every circle part and every row
 /// change. The caller's write transaction holds the writer lock through these
 /// checks and commit, so a membership change cannot race the authorization.
+/// `replaced` is [`retain_queue`]'s.
 pub(crate) fn queue(
     database: &DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
     record: &WriteRecord,
+    replaced: BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {
     let mut encoded = Vec::with_capacity(record.parts.len());
     for part in &record.parts {
@@ -365,7 +367,7 @@ pub(crate) fn queue(
         }
         encoded.push(frames);
     }
-    retain_queue(database, schema, record, &encoded)?;
+    retain_queue(database, schema, record, &encoded, replaced)?;
     for part in &record.parts {
         crate::ownership::offer_part(database, &record.header, part)?;
     }
@@ -416,12 +418,15 @@ pub(crate) fn check_membership(
 
 /// Retain already committed work even after its author leaves a circle (§15.8).
 /// The header is followed by its parts' plaintext frame streams; sync records
-/// sealing keys before the first upload attempt.
+/// sealing keys before the first upload attempt. `replaced` holds the stored
+/// paths the write moves its file records off, which it protects until it
+/// is published (§17.10).
 pub(crate) fn retain_queue(
     database: &DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
     record: &WriteRecord,
     frames: &[Vec<Vec<u8>>],
+    replaced: BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {
     let form = crate::write_sources::KeptForm::new(schema, record.header.schema_version);
     for part in &record.parts {
@@ -438,7 +443,7 @@ pub(crate) fn retain_queue(
         &bytes,
         record.parts.iter().flat_map(|part| part.dismissals.iter().map(|d| &d.row)),
     )?;
-    crate::file_protection::queued(database, record)
+    crate::file_protection::queued(database, record, replaced)
 }
 
 /// Check the encoder's exact plaintext length against SQLite's connection limit

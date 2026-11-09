@@ -328,7 +328,7 @@ fn finish(
             crate::write_sources::complete(database, &record.header, &part.audience)?;
         }
         record.parts.clear();
-        crate::write_commit::queue(database, &schema, &record)?;
+        crate::write_commit::queue(database, &schema, &record, Default::default())?;
         crate::migration_state::refresh(database, &schema, &refresh)?;
         crate::captured_changes::capture(
             database,

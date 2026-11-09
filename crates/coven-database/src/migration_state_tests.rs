@@ -544,7 +544,7 @@ mod queued {
                             .into(),
                         ),
                     },
-                    old: [("name".into(), WireValue::Text("title".into()))].into(),
+                    old: BTreeMap::new(),
                     sources: coven_format::write_sources::WriteSources {
                         generation: Some(coven_format::write_sources::ChangeId {
                             write: original[0].header.position,
