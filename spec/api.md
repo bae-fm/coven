@@ -4892,7 +4892,9 @@ pub struct TransferLimits {
     /// Requests for file bytes in flight at once, pins' and file ranges'.
     /// A pin sends as many of one file's requests at once as this lets go,
     /// so one large file uses every one it allows
-    /// ([§17.8](coven.md#178-cache-and-pinning)). Reading the sequence
+    /// ([§17.8](coven.md#178-cache-and-pinning)). On iCloud the requests
+    /// inside one part wait for that part's one fetch, which takes one
+    /// place ([§17.7](coven.md#177-reading-a-file)). Reading the sequence
     /// doesn't count against it: its 16 reads ahead bound it
     /// ([§21.1](coven.md#211-counting-the-requests-of-a-pass)).
     pub downloads: NonZeroUsize,

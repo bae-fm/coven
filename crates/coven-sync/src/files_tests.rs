@@ -627,6 +627,8 @@ mod keep;
 mod partial_pin;
 #[path = "file_read_tests.rs"]
 mod read;
+#[path = "file_read_parts_tests.rs"]
+mod read_parts;
 #[path = "file_status_tests.rs"]
 mod status;
 #[path = "file_upload_connections_tests.rs"]

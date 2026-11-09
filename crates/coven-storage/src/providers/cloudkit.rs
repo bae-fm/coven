@@ -208,6 +208,11 @@ impl ProviderOps for CloudKitStorage {
     fn single_request_limit(&self) -> u64 {
         PART_SIZE as u64
     }
+    /// A fetch downloads a record's whole asset: one part, or an object held
+    /// in its record whole, which is no larger than a part (Appendix E.1).
+    fn read_part_size(&self) -> Option<std::num::NonZeroU64> {
+        std::num::NonZeroU64::new(PART_SIZE as u64)
+    }
     async fn account(&self) -> Result<String, StorageError> {
         self.account_identity().await
     }

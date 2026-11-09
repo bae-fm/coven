@@ -224,6 +224,11 @@ task_types = [
     # What one pin's download of a file has in hand, written and received,
     # which its requests in flight tell as their bytes arrive (§17.8).
     "WholeProgress",
+    # The parts one open file holds on a provider whose ranged read moves
+    # whole parts, each with the requests waiting for its fetch (§17.7).
+    "HeldParts",
+    "HeldPart",
+    "PartWaiters",
     # Whole copies one pin prepared, until the write that keeps them
     # (§17.8), and what preparing found for each file.
     "PreparedPin",

@@ -28,6 +28,8 @@ use super::file_error::TransferError;
 
 #[path = "file_read_partial.rs"]
 mod partial;
+#[path = "file_read_parts.rs"]
+mod parts;
 #[path = "file_read_whole.rs"]
 mod whole;
 
@@ -80,6 +82,10 @@ pub(crate) struct UploadedFile<M: FilesMode = Writer> {
     header_checked: std::sync::atomic::AtomicBool,
     key: FileKey,
     path: ObjectPath,
+    /// The parts of its object it holds, on a provider whose ranged read
+    /// moves whole parts; `None` on one whose range moves only its bytes.
+    /// Settled at its first fetch, from the provider's part size (§17.7).
+    parts: std::sync::OnceLock<Option<parts::HeldParts>>,
     _lock: StoreReadLock,
 }
 /// Where a read that fetches from storage tells how much of its range is
@@ -379,6 +385,7 @@ impl<M: FilesMode> UploadedFile<M> {
             hash,
             key,
             path,
+            parts: std::sync::OnceLock::new(),
             _lock: lock,
         };
         if opened.header.chunk_count() == 0 {
@@ -409,15 +416,7 @@ impl<M: FilesMode> UploadedFile<M> {
     /// Read the header alone and check it, then cache it, or write it back
     /// over the cached copy that failed its check.
     async fn fetch_header(&self, cached: CachedHeader) -> Result<(), FileReadError> {
-        let bytes = fetch(
-            &self.owner,
-            &self.file,
-            &self.path,
-            0,
-            FILE_HEADER_LEN as u64,
-            &ByteProgress::unread(),
-        )
-        .await?;
+        let bytes = self.fetch(0, FILE_HEADER_LEN as u64, &ByteProgress::unread()).await?;
         if let Err(refused) = self.accept_header(&bytes) {
             return Err(self.confirm(0, &bytes, refused).await);
         }
@@ -438,8 +437,12 @@ impl<M: FilesMode> UploadedFile<M> {
             return refused;
         }
         let end = start + first.len() as u64;
-        let unread = ByteProgress::unread();
-        match fetch(&self.owner, &self.file, &self.path, start, end, &unread).await {
+        // The second fetch asks storage, never the parts this open file
+        // holds, which would hand back the same bytes (§17.7).
+        if let Some(Some(parts)) = self.parts.get() {
+            parts.forget(start, end);
+        }
+        match self.fetch(start, end, &ByteProgress::unread()).await {
             Ok(again) if again == first => refused,
             Ok(_) => coven_storage::StorageFailure::Corrupted
                 .with_source("a second fetch of the file returned other bytes")
@@ -622,8 +625,7 @@ impl<M: FilesMode> UploadedFile<M> {
         if matches!(destination, ChunkDestination::WholeFile { .. }) && !with_header {
             drop(file_lock);
         }
-        let fetched =
-            fetch(&self.owner, &self.file, &self.path, request_start, end, &received).await?;
+        let fetched = self.fetch(request_start, end, &received).await?;
         // The header precedes chunk zero: one request carries both, and the
         // header is cached once it checks, whatever the chunks turn out.
         let chunks_start = if with_header {
@@ -672,9 +674,7 @@ impl<M: FilesMode> UploadedFile<M> {
     ) -> Result<OpenedChunk, FileReadError> {
         let chunk = self.header.chunk(index).map_err(|_| self.integrity())?;
         let received = self.received(destination, index, index, chunk.offset)?;
-        let fetched =
-            fetch(&self.owner, &self.file, &self.path, chunk.offset, chunk.end(), &received)
-                .await?;
+        let fetched = self.fetch(chunk.offset, chunk.end(), &received).await?;
         let opened = match self.open_chunk(index, fetched.clone()) {
             Ok(opened) => opened,
             Err(refused) => return Err(self.confirm(chunk.offset, &fetched, refused).await),
@@ -813,19 +813,57 @@ async fn cache<M: FilesMode>(
     owner.database.cache_range(file, first, chunks, name, bytes).await?;
     Ok(())
 }
-/// Fetch `start..end` of the file's object, telling `received` how far
-/// through the object the bytes received reach: storage tells it as the
-/// stream is read, and CloudKit also as each part's fetch goes, ahead of the
-/// read.
+impl<M: FilesMode> UploadedFile<M> {
+    /// Fetch `start..end` of the file's object, telling `received` how far
+    /// through the object the bytes received reach. On a provider whose
+    /// ranged read moves whole parts, the bytes come from the parts this open
+    /// file holds, each fetched once (§17.7).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a size whose encrypted layout overflows is the disagreement Integrity names"
+    )]
+    async fn fetch(
+        &self,
+        start: u64,
+        end: u64,
+        received: &ByteProgress,
+    ) -> Result<Vec<u8>, FileReadError> {
+        let storage =
+            read_unpoisoned(&self.owner.storage).clone().ok_or(FileReadError::NoStorage)?;
+        let size = self.header.encrypted_size().map_err(|_| self.integrity())?;
+        let parts = self
+            .parts
+            .get_or_init(|| storage.read_part_size().map(|part| parts::HeldParts::new(part, size)));
+        let (owner, file, path) = (&self.owner, &self.file, &self.path);
+        match parts {
+            None => fetch(owner, file, path, storage.as_ref(), start, end, received).await,
+            Some(parts) => {
+                parts
+                    .read(start, end, received, |from, to, heard| {
+                        let storage = storage.clone();
+                        async move {
+                            fetch(owner, file, path, storage.as_ref(), from, to, &heard).await
+                        }
+                    })
+                    .await
+            }
+        }
+    }
+}
+
+/// Fetch `start..end` of the file's object from `storage`, telling
+/// `received` how far through the object the bytes received reach: storage
+/// tells it as the stream is read, and CloudKit also as each part's fetch
+/// goes, ahead of the read.
 async fn fetch<M: FilesMode>(
     owner: &FilesInner<M>,
     file: &FileRef,
     path: &ObjectPath,
+    storage: &dyn coven_storage::Storage,
     start: u64,
     end: u64,
     received: &ByteProgress,
 ) -> Result<Vec<u8>, FileReadError> {
-    let storage = read_unpoisoned(&owner.storage).clone().ok_or(FileReadError::NoStorage)?;
     // A stored file's record names it only once it is stored (§17.2):
     // confirmed absence means storage lost it, never a provider failure or
     // an upload to wait for.

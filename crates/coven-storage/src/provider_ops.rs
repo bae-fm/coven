@@ -12,6 +12,12 @@ pub trait ProviderOps: Send + Sync {
     fn config(&self) -> StorageConfig;
     /// Largest complete body accepted by `create` or `replace`.
     fn single_request_limit(&self) -> u64;
+    /// The size of the parts a ranged read moves whole
+    /// ([`crate::Storage::read_part_size`]); `None` when a range moves only
+    /// its own bytes.
+    fn read_part_size(&self) -> Option<std::num::NonZeroU64> {
+        None
+    }
     /// Create D10's location marker at the location's root with the
     /// provider's create-once request. Only first setup at a location that
     /// holds one store calls this operation. Anything it stages sits in

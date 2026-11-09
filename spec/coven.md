@@ -7160,6 +7160,22 @@ seeking within it are reads of different ranges.
     missing and the range starts at zero, it comes with the first chunks; seeking
     elsewhere may need a separate header request.
   - Neighbouring chunks are fetched together, up to 1 MiB per request.
+  - **On a provider whose ranged read moves whole parts,** iCloud's (Appendix
+    E.1), the open file fetches each part it needs once and reads the ranges
+    inside it from that fetch. Ben's phone pins a 20 MiB video from iCloud in
+    1 MiB requests. Each request, fetched on its own, would move the whole
+    8 MiB part around it, and the pin would move about 172 MiB.
+    - Requests that need a part while its fetch is under way wait for that
+      fetch, and each hears it arrive as its own range does. A part's fetch
+      takes its place under the download limit as any request does; a request
+      the open file already holds the bytes for asks storage for nothing.
+    - The open file keeps the two parts it used last: a read in order is in
+      one, and a request that reached across a part's end began the next. So
+      what it holds stays at two parts besides those its requests are reading,
+      and goes when the file closes.
+    - A fetch whose bytes fail their check is fetched again from storage, not
+      from the part the file holds, so the second fetch §19.1 compares is a
+      real one, and the part it brings replaces the held one.
   - Each chunk is checked as it arrives; a failed check fails the read.
   - Fetched chunks go into the cache, so reading a range again costs nothing.
   - A read the app asks to report tells it how many of the range's bytes are
@@ -7273,7 +7289,8 @@ can't be a step itself.
   trips. Without this, one large file would fetch its requests one after
   another while the limit allowed four, and a prepare's last file would
   always download alone. A first request that carries the file's header goes
-  alone, since no chunk is trusted before the header checks (§17.7).
+  alone, since no chunk is trusted before the header checks (§17.7). On
+  iCloud the requests inside one part share its one fetch (§17.7).
 - **A stopped prepare keeps its bytes.** A prepare dropped partway, or ended by
   a crash, leaves each file's partial copy on disk, held apart from the cache:
   the budget neither counts nor evicts it. Ben pauses his album's download
@@ -10891,6 +10908,19 @@ skip unrelated parts.
   parts with it. A published root stays: it belongs to its object.
 - Native atomic saves need no conditional server-side copy to hide partial
   uploads.
+
+**Reading parts.** Within a part there is no ranged read. A fetch downloads a
+record's whole asset to a file before its completion runs, so reading any byte
+of a part moves the whole part, and reading any byte of an object held in its
+record moves the whole record. An open file therefore fetches each part once and reads the
+ranges inside it from that fetch (§17.7). CloudKit Web Services gives each
+asset a `downloadURL`, but [Apple's
+reference](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html)
+says nothing of range requests on it, and an app reaches it only through a web
+token made from an API token the developer creates for the container; coven
+doesn't use it. A live check would show whether that URL answers a `Range`
+header with only the bytes asked for. If it does, a read through it would move
+only its range, and an open file would hold no parts on iCloud.
 
 CloudKit's atomic publication and asset-session guarantees still need live
 verification through a signed, entitled host.

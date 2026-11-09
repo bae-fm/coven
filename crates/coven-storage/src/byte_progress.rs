@@ -44,7 +44,7 @@ impl ByteProgress {
 
     /// `moved` bytes of this request's have gone: handed to the connection,
     /// or received.
-    pub(crate) fn moved(&self, moved: u64) {
+    pub fn moved(&self, moved: u64) {
         if let Some(report) = &self.report {
             report(self.start + moved);
         }

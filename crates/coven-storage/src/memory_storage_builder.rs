@@ -9,6 +9,7 @@ pub struct MemoryStorageBuilder {
     single_limit: u64,
     part_size: usize,
     independent_parts: bool,
+    whole_part_reads: bool,
     listing_page: usize,
 }
 
@@ -21,6 +22,7 @@ impl MemoryStorageBuilder {
             single_limit: 4 * 1024 * 1024,
             part_size: 64 * 1024,
             independent_parts: false,
+            whole_part_reads: false,
             listing_page: usize::MAX,
         }
     }
@@ -58,6 +60,14 @@ impl MemoryStorageBuilder {
         self.independent_parts = true;
         self
     }
+    /// Move every part a read touches whole, as CloudKit's reads do
+    /// (Appendix E.1): an object of up to the part size is one part, a
+    /// larger one a part per part size from its start, the last shorter.
+    /// [`MemoryStorage::moved_bytes`] counts what each read moved.
+    pub fn reads_whole_parts(mut self) -> Self {
+        self.whole_part_reads = true;
+        self
+    }
     /// Return listings in native pages of this many entries, each page its own
     /// request in the trace, as a provider's continuation requests are (§21.1).
     pub fn listing_page(mut self, entries: std::num::NonZeroUsize) -> Self {
@@ -73,6 +83,7 @@ impl MemoryStorageBuilder {
             single_limit,
             part_size,
             independent_parts,
+            whole_part_reads,
             listing_page,
         } = self;
         config.validate()?;
@@ -88,6 +99,7 @@ impl MemoryStorageBuilder {
             single_limit,
             part_size,
             independent_parts,
+            whole_part_reads,
             listing_page,
             requests: Arc::new(tokio::sync::watch::channel(0).0),
             request_trace: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -113,6 +125,7 @@ impl MemoryStorageBuilder {
                 read_gate: None,
                 ranges: Vec::new(),
                 reads: Vec::new(),
+                moved: BTreeMap::new(),
                 received_buffers: Vec::new(),
                 sent_bytes: 0,
                 largest_part: 0,

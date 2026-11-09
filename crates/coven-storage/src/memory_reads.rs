@@ -120,6 +120,15 @@ impl ObjectBody for MemoryBody {
 }
 
 impl MemoryProvider {
+    /// What a read of `start..end` of an object of `size` bytes moves: its
+    /// range, or every part it touches whole.
+    fn moved(&self, size: u64, start: u64, end: u64) -> u64 {
+        if !self.whole_part_reads || start == end {
+            return end - start;
+        }
+        let part = self.part_size as u64;
+        (start / part..=(end - 1) / part).map(|index| (size - index * part).min(part)).sum()
+    }
     #[expect(
         clippy::map_err_ignore,
         reason = "a send fails only when the receiver is gone, which this names"
@@ -173,6 +182,8 @@ impl MemoryProvider {
                 state.ranges.push(range);
             }
             state.reads.push((path.clone(), start as u64, (end - start) as u64));
+            let moved = self.moved(metadata.size, start as u64, end as u64);
+            *state.moved.entry(path.clone()).or_default() += moved;
             ObjectStream::new(metadata, range, body)
         })();
         let held = if state.held_read.as_ref().is_some_and(|held| held.path == *path) {

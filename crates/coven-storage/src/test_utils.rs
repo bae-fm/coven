@@ -85,6 +85,8 @@ struct MemoryState {
     read_gate: Option<Arc<tokio::sync::Semaphore>>,
     ranges: Vec<ByteRange>,
     reads: Vec<(ObjectPath, u64, u64)>,
+    /// The bytes reads of each object moved (`MemoryStorage::moved_bytes`).
+    moved: BTreeMap<ObjectPath, u64>,
     received_buffers: Vec<usize>,
     sent_bytes: u64,
     largest_part: usize,
@@ -191,6 +193,8 @@ pub struct MemoryProvider {
     /// Whether its sessions' parts are independent, as an S3 multipart
     /// upload's are, rather than taken in order.
     independent_parts: bool,
+    /// Whether a read moves every part it touches whole, as CloudKit's do.
+    whole_part_reads: bool,
     listing_page: usize,
     requests: Arc<tokio::sync::watch::Sender<u64>>,
     request_trace: Arc<std::sync::Mutex<Vec<MemoryRequest>>>,
@@ -280,6 +284,7 @@ impl MemoryStorage {
             single_limit: owner.provider.single_limit,
             part_size: owner.provider.part_size,
             independent_parts: owner.provider.independent_parts,
+            whole_part_reads: owner.provider.whole_part_reads,
             listing_page: owner.provider.listing_page,
             requests: owner.provider.requests.clone(),
             request_trace: owner.provider.request_trace.clone(),
@@ -371,6 +376,11 @@ impl MemoryStorage {
     /// Opened responses as (path, offset, declared byte count), including whole objects.
     pub async fn reads(&self) -> Vec<(ObjectPath, u64, u64)> {
         self.provider.state.lock().await.reads.clone()
+    }
+    /// The bytes the reads of `path` moved: each read's range, or, on a
+    /// provider whose reads move whole parts, every part each read touched.
+    pub async fn moved_bytes(&self, path: &ObjectPath) -> u64 {
+        self.provider.state.lock().await.moved.get(path).copied().unwrap_or(0)
     }
     /// Part bytes with successful replies and their largest buffer, across sessions.
     pub async fn transferred(&self) -> (u64, usize) {
@@ -571,6 +581,9 @@ impl ProviderOps for MemoryProvider {
     }
     fn single_request_limit(&self) -> u64 {
         self.single_limit
+    }
+    fn read_part_size(&self) -> Option<std::num::NonZeroU64> {
+        std::num::NonZeroU64::new(self.part_size as u64).filter(|_| self.whole_part_reads)
     }
     #[expect(
         clippy::map_err_ignore,

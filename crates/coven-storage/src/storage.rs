@@ -168,6 +168,13 @@ pub trait Storage: Send + Sync {
     /// S3 uses 5 GiB, Dropbox 150 MiB and OneDrive 250,000,000 bytes.
     /// CloudKit uses bounded 8 MiB assets.
     fn single_request_limit(&self) -> u64;
+    /// The size of the parts a ranged read moves whole, counted from the
+    /// object's start, the last shorter: a range moves every part it
+    /// touches, as iCloud's reads do (Appendix E.1). `None` when a range
+    /// moves only its own bytes.
+    fn read_part_size(&self) -> Option<std::num::NonZeroU64> {
+        None
+    }
     /// Install replacement OAuth tokens after the owner commits them to key custody.
     /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
     async fn set_oauth_tokens(&self, _tokens: crate::OAuthTokens) -> Result<(), StorageError> {
