@@ -128,14 +128,11 @@ pub(crate) async fn upload<S: UploadSource>(
         }
         source.save(session.clone()).await?;
     }
-    while !session.is_complete() && session.confirmed_bytes() < total {
+    while let Some(next) = session.parts_to_send().first().cloned() {
         if !source.keep_going() {
             return Ok(Uploaded::Paused);
         }
-        let offset = session.confirmed_bytes();
-        let length = (session.part_size() as u64 - offset % session.part_size() as u64)
-            .min(total - offset) as usize;
-        let part = source.read(offset, length).await?;
+        let part = source.read(next.start, (next.end - next.start) as usize).await?;
         // A refusal before any request leaves the recording as it was, a
         // plan unmarked. The mark admitting a plan's first part is saved
         // before the part can start the upload (Appendix E.10).

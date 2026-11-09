@@ -202,3 +202,47 @@ async fn floor_sessions_begun_before_the_floor_are_ended() {
     storage.end_superseded_floor_sessions(STORE_ID).await.unwrap();
     assert_eq!(storage.unfinished_uploads().await.len(), 1);
 }
+
+/// The deterministic provider standing in for S3 keeps a session's parts
+/// by index: a later part confirmed first is recorded, a part whose reply
+/// was lost is found again by resuming, and publishing hands the parts over
+/// in order (§17.9).
+#[tokio::test]
+async fn independent_parts_go_in_any_order_and_resume_after_a_lost_reply() {
+    let storage =
+        MemoryStorage::builder().transfer_limits(4, 4).independent_parts().build().unwrap();
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let bytes = b"aaaabbbbccccd";
+    let mut session = storage.begin_upload(&path, bytes.len() as u64).await.unwrap();
+    assert!(!session.parts_independent(), "the first part starts the session alone");
+    storage.upload_part(&mut session, &bytes[..4]).await.unwrap();
+    assert!(session.parts_independent());
+    let send = |session: &UploadSession, offset: usize, length: usize| {
+        let session = session.clone();
+        let storage = storage.clone();
+        async move {
+            storage
+                .send_independent_part(
+                    &session,
+                    offset as u64,
+                    &bytes[offset..offset + length],
+                    &ByteProgress::unread(),
+                )
+                .await
+        }
+    };
+    let last = send(&session, 12, 1).await.unwrap();
+    session.confirm(last).unwrap();
+    let recorded = session.encode().unwrap();
+    storage.set_faults(Faults { lose_part_reply: true, ..Faults::none() }).await;
+    send(&session, 8, 4).await.unwrap_err();
+    let mut session = UploadSession::decode(recorded.as_bytes()).unwrap();
+    assert_eq!(session.parts_to_send(), [4..8, 8..12]);
+    storage.resume_upload(&mut session).await.unwrap();
+    assert_eq!(session.parts_to_send(), std::slice::from_ref(&(4..8)));
+    assert_eq!(session.confirmed_bytes(), 9);
+    let second = send(&session, 4, 4).await.unwrap();
+    session.confirm(second).unwrap();
+    storage.finish_upload(&mut session).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), bytes);
+}

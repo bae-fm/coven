@@ -177,7 +177,7 @@ fn s3_recording_parts_agree_with_progress_and_provider_limits() {
         let SessionState::S3 { parts, .. } = &mut invalid.state else { unreachable!() };
         match mutation {
             0 => invalid.confirmed += 1,
-            1 => parts[0].number = 2,
+            1 => parts[0].number = 4,
             2 => parts[0].size -= 1,
             3 => parts[0].size += 1,
             4 => parts[0].etag.clear(),
@@ -194,6 +194,37 @@ fn s3_recording_parts_agree_with_progress_and_provider_limits() {
         parts.push(S3Part { number: 2, size: 1, etag: "tail".into() });
     }
     UploadSession::decode(valid.encode().unwrap().as_bytes()).unwrap();
+}
+
+/// An S3 upload's parts arrive in any order: a recording keeps the ones
+/// confirmed by number, whichever came first, and sends only the rest. Each
+/// part is kept once, in number order, at its part's own size.
+#[test]
+fn s3_recording_keeps_parts_confirmed_out_of_order() {
+    let mut valid = s3_recording();
+    let part = valid.part_size as u64;
+    valid.confirmed = part + 1;
+    if let SessionState::S3 { parts, .. } = &mut valid.state {
+        parts.push(S3Part { number: 1, size: part, etag: "first".into() });
+        parts.push(S3Part { number: 3, size: 1, etag: "tail".into() });
+    }
+    let recorded = UploadSession::decode(valid.encode().unwrap().as_bytes()).unwrap();
+    assert!(recorded.parts_independent());
+    assert_eq!(recorded.parts_to_send(), std::slice::from_ref(&(part..2 * part)));
+    for mutation in 0..3 {
+        let mut invalid = valid.clone();
+        let SessionState::S3 { parts, .. } = &mut invalid.state else { unreachable!() };
+        match mutation {
+            0 => parts.swap(0, 1),
+            1 => {
+                parts[1] = parts[0].clone();
+                invalid.confirmed = 2 * part;
+            }
+            2 => parts[1].size = part,
+            _ => unreachable!(),
+        }
+        assert_invalid_recording(&invalid);
+    }
 }
 
 #[test]

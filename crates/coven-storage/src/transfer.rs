@@ -36,14 +36,15 @@ pub(crate) async fn upload_bytes(
         .begin_upload_checked(&crate::UploadTarget::Create(path.clone()), bytes.len() as u64)
         .await?;
     let upload = async {
-        while session.confirmed_bytes() < session.total_bytes() {
-            let start = usize::try_from(session.confirmed_bytes())
+        while let Some(part) = session.parts_to_send().first().cloned() {
+            let confirmed = session.confirmed_bytes();
+            let span = usize::try_from(part.start)
+                .and_then(|start| Ok(start..usize::try_from(part.end)?))
                 .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
-            let remaining = bytes.get(start..).ok_or(StorageFailure::InvalidPart)?;
-            let length = remaining.len().min(session.part_size());
-            let permit = storage.part_permit(&mut session, &remaining[..length])?;
+            let part_bytes = bytes.get(span).ok_or(StorageFailure::InvalidPart)?;
+            let permit = storage.part_permit(&mut session, part_bytes)?;
             storage.send_permitted(permit, &mut session, sent).await?;
-            if session.confirmed_bytes() <= start as u64 {
+            if session.confirmed_bytes() <= confirmed {
                 return Err(StorageFailure::Protocol.with_source("upload did not advance"));
             }
         }

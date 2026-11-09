@@ -188,6 +188,9 @@ pub struct MemoryProvider {
     online: Arc<std::sync::atomic::AtomicBool>,
     single_limit: u64,
     part_size: usize,
+    /// Whether its sessions' parts are independent, as an S3 multipart
+    /// upload's are, rather than taken in order.
+    independent_parts: bool,
     listing_page: usize,
     requests: Arc<tokio::sync::watch::Sender<u64>>,
     request_trace: Arc<std::sync::Mutex<Vec<MemoryRequest>>>,
@@ -238,10 +241,10 @@ pub fn admitted_part<'a>(
     session: &mut UploadSession,
     bytes: &'a [u8],
 ) -> Result<PartPermit<'a>, StorageError> {
-    let end = session.end_of_part(bytes.len())?;
+    let part = session.next_part(bytes.len())?;
     let publication =
         PublicationRequest::new(Arc::new(UnrestrictedPublications), session.path().clone());
-    Ok(PartPermit::admit(session, bytes, end, publication))
+    Ok(PartPermit::admit(session, bytes, part, publication))
 }
 
 impl MemoryStorage {
@@ -276,6 +279,7 @@ impl MemoryStorage {
             online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit: owner.provider.single_limit,
             part_size: owner.provider.part_size,
+            independent_parts: owner.provider.independent_parts,
             listing_page: owner.provider.listing_page,
             requests: owner.provider.requests.clone(),
             request_trace: owner.provider.request_trace.clone(),
@@ -487,7 +491,7 @@ impl MemoryProvider {
     }
     fn session_id(&self, session: &UploadSession) -> Result<u64, StorageError> {
         match session.state {
-            SessionState::Memory { id, .. } => Ok(id),
+            SessionState::Memory { id, .. } | SessionState::MemoryParts { id, .. } => Ok(id),
             _ => Err(StorageFailure::SessionMismatch.into()),
         }
     }
@@ -893,6 +897,16 @@ impl ProviderOps for MemoryProvider {
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         self.memory_upload_part(publication, session, bytes, end, sent).await
+    }
+    async fn send_independent_part(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+        offset: u64,
+        bytes: &[u8],
+        sent: &ByteProgress,
+    ) -> Result<crate::ConfirmedPart, StorageError> {
+        self.memory_send_part(publication, session, offset, bytes, sent).await
     }
     async fn finish_upload(
         &self,

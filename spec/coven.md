@@ -10832,6 +10832,9 @@ skip unrelated parts.
 - Each asset part and its confirmed boundary are saved together in the custom
   zone, using [atomic
   modification](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/isatomic).
+  So parts go one after another: each save changes the session's root under
+  the change tag it fetched, and each part names the one before it as its
+  owner.
 - Resuming fetches the session by id, including after a lost reply, and keeps
   every confirmed part (§17.9).
 - The destination record is created only once every part exists, atomically
@@ -11015,6 +11018,16 @@ place is distinct from every coven path.
   temporary in it (§17.10). A native session still receiving parts has no item:
   only the upload URL its device holds reaches it, and OneDrive discards it, with
   its fragments, once its `expirationDateTime` passes without a fragment
+  ([createUploadSession](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)).
+- A Dropbox upload session takes its appends in order: each names the offset
+  it starts at, and a lost reply's append is found again from the
+  `incorrect_offset` answer, which names the offset Dropbox holds up to.
+  Dropbox also offers a concurrent session, whose appends go in any order in
+  multiples of 4 MiB, but documents neither how to learn which appends it
+  holds after a lost reply or a crash nor what sending one again does
+  ([files.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/files.stone)),
+  so coven keeps the sequential session. OneDrive requires an upload
+  session's fragments in order
   ([createUploadSession](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)).
 - A Dropbox upload session has no path either, and no route lists or ends one;
   only its id, which the device that began it holds, names it. Dropbox stops
@@ -11429,6 +11442,16 @@ names none.
 - Retrying or resuming a record derives the same name, including after multipart
   completion or a lost copy reply. A floor replacement also retains its original
   observed revision; a replacement session never acquires a newer one.
+
+**Parts in any order.** The parts after the first go in any order, several at
+once (§17.9). The record keeps each part the provider confirmed by its number,
+with its size and tag, in number order whichever arrived first, and completion
+lists them so. Resuming lists the upload's parts and keeps every one, so a part
+whose reply was lost counts as confirmed once the listing shows it. A part sent
+again before then replaces the one with its number, since S3 keeps one part
+per number
+([UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html)),
+so the object holds each part once.
 
 **Copy publication.** The assembled temporary is sent with one server-side
 `CopyObject` to the destination, carrying the profile's destination condition

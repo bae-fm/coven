@@ -149,6 +149,23 @@ pub trait ProviderOps: Send + Sync {
         end: u64,
         sent: &ByteProgress,
     ) -> Result<(), StorageError>;
+    /// Send part `offset..` of a session whose parts are independent
+    /// ([`UploadSession::parts_independent`]), leaving the session as it
+    /// is: the provider's confirmation of the part comes back, for the
+    /// caller to add. Several may be in flight at once. The connection
+    /// checks the part is a whole one the session lacks; `sent` already
+    /// counts from the part's start in the object. A provider whose parts
+    /// go in order has none to send this way.
+    async fn send_independent_part(
+        &self,
+        _publication: &PublicationRequest,
+        _session: &UploadSession,
+        _offset: u64,
+        _bytes: &[u8],
+        _sent: &ByteProgress,
+    ) -> Result<ConfirmedPart, StorageError> {
+        Err(StorageFailure::InvalidPart.into())
+    }
     /// Publish an incomplete session, checking native progress where required.
     async fn finish_upload(
         &self,

@@ -62,21 +62,23 @@ impl ByteRange {
 #[must_use = "a part goes to the provider only through its permit"]
 pub struct PartPermit<'a> {
     pub(crate) bytes: &'a [u8],
-    pub(crate) end: u64,
+    /// Where the part starts and ends in the object.
+    pub(crate) part: std::ops::Range<u64>,
     pub(crate) publication: PublicationRequest,
     marked: bool,
 }
 
 impl<'a> PartPermit<'a> {
-    /// Admit `bytes` ending at `end`, marking a planned session's plan.
+    /// Admit `bytes` as the part `part` covers, marking a planned session's
+    /// plan.
     pub(crate) fn admit(
         session: &mut UploadSession,
         bytes: &'a [u8],
-        end: u64,
+        part: std::ops::Range<u64>,
         publication: PublicationRequest,
     ) -> Self {
         let marked = session.mark_start();
-        Self { bytes, end, publication, marked }
+        Self { bytes, part, publication, marked }
     }
     /// Whether admitting the part marked the session's plan, changing what
     /// the caller records: save the session before sending the part, so a
@@ -369,7 +371,8 @@ pub trait Storage: Send + Sync {
     /// Refresh a recorded session from the provider after interruption.
     /// Persist the returned state even on failure, as with `finish_upload`.
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
-    /// Admit `bytes` as the session's next part, sending nothing. Refused
+    /// Admit `bytes` as the session's next part, the first it has still to
+    /// send ([`UploadSession::parts_to_send`]), sending nothing. Refused
     /// while a provider cooldown is live, for a session naming another
     /// location, for a part that doesn't fit the session, and while its
     /// destination can't be published (§17.9). Admitting a planned
@@ -392,6 +395,22 @@ pub trait Storage: Send + Sync {
         session: &mut UploadSession,
         sent: &ByteProgress,
     ) -> Result<(), StorageError>;
+    /// Send part `offset..` of a session whose parts are independent
+    /// ([`UploadSession::parts_independent`]), leaving the session as it is:
+    /// the provider's confirmation comes back, for the caller to add with
+    /// [`UploadSession::confirm`] and then record. Several parts may be in
+    /// flight at once and come back in any order (§17.9). Refused, sending
+    /// nothing, while a provider cooldown is live, for a session naming
+    /// another location or whose parts go in order, for a part that isn't a
+    /// whole one the session lacks, and while its destination can't be
+    /// published. `sent` hears the part's bytes as [`Self::send_part`]'s do.
+    async fn send_independent_part(
+        &self,
+        session: &UploadSession,
+        offset: u64,
+        bytes: &[u8],
+        sent: &ByteProgress,
+    ) -> Result<crate::ConfirmedPart, StorageError>;
     /// Admit and send the next part, for a caller that records the session
     /// only after the part: one that never resumes a planned session from a
     /// recording.

@@ -92,6 +92,15 @@ impl Storage for PlannedStorage {
         assert_eq!(bytes, b"data");
         coven_storage::test_utils::admitted_part(session, bytes)
     }
+    async fn send_independent_part(
+        &self,
+        _: &UploadSession,
+        _: u64,
+        _: &[u8],
+        _: &coven_storage::ByteProgress,
+    ) -> Result<coven_storage::ConfirmedPart, StorageError> {
+        unreachable!("a OneDrive session's parts go in order")
+    }
     async fn send_part(
         &self,
         _: coven_storage::PartPermit<'_>,

@@ -8,6 +8,7 @@ pub struct MemoryStorageBuilder {
     time_resolution: Duration,
     single_limit: u64,
     part_size: usize,
+    independent_parts: bool,
     listing_page: usize,
 }
 
@@ -19,6 +20,7 @@ impl MemoryStorageBuilder {
             time_resolution: Duration::from_nanos(1),
             single_limit: 4 * 1024 * 1024,
             part_size: 64 * 1024,
+            independent_parts: false,
             listing_page: usize::MAX,
         }
     }
@@ -49,6 +51,13 @@ impl MemoryStorageBuilder {
         self.part_size = part_size;
         self
     }
+    /// Keep each session's parts by index, whatever order they arrive in,
+    /// as an S3 multipart upload does, so they may go together (§17.9);
+    /// otherwise the provider takes them in order.
+    pub fn independent_parts(mut self) -> Self {
+        self.independent_parts = true;
+        self
+    }
     /// Return listings in native pages of this many entries, each page its own
     /// request in the trace, as a provider's continuation requests are (§21.1).
     pub fn listing_page(mut self, entries: std::num::NonZeroUsize) -> Self {
@@ -57,7 +66,15 @@ impl MemoryStorageBuilder {
     }
     /// Validate the choices and construct an isolated storage backend.
     pub fn build(self) -> Result<MemoryStorage, StorageError> {
-        let Self { config, clock, time_resolution, single_limit, part_size, listing_page } = self;
+        let Self {
+            config,
+            clock,
+            time_resolution,
+            single_limit,
+            part_size,
+            independent_parts,
+            listing_page,
+        } = self;
         config.validate()?;
         if time_resolution.is_zero() {
             return Err(StorageFailure::InvalidConfiguration.with_source("zero provider time unit"));
@@ -70,6 +87,7 @@ impl MemoryStorageBuilder {
             online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit,
             part_size,
+            independent_parts,
             listing_page,
             requests: Arc::new(tokio::sync::watch::channel(0).0),
             request_trace: Arc::new(std::sync::Mutex::new(Vec::new())),

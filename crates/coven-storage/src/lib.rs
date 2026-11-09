@@ -67,7 +67,7 @@ pub use credentials::*;
 pub use error::*;
 pub use invitation::StorageInvitation;
 pub use path::*;
-pub use session::{UploadSession, UploadTarget};
+pub use session::{ConfirmedPart, UploadSession, UploadTarget};
 pub use storage::*;
 
 #[cfg(any(test, feature = "test-utils"))]

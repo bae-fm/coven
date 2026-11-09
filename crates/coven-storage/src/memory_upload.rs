@@ -1,6 +1,6 @@
 //! Atomic conditional publication in the deterministic provider.
 use super::*;
-use crate::session::{PlanStart, StartSent};
+use crate::session::{part_span, Confirmation, PlanStart, StartSent};
 
 /// A planned session's start as it goes out: past any hold, the publication
 /// gate is checked again, as S3 checks it as the request goes out, and a start
@@ -25,6 +25,9 @@ pub(super) struct Pending {
     target: UploadTarget,
     total: u64,
     pub(super) bytes: Vec<u8>,
+    /// An independent session's parts, by index from zero: each kept once,
+    /// a part sent again taking its own place.
+    parts: BTreeMap<u64, Vec<u8>>,
     part_size: usize,
 }
 impl Pending {
@@ -35,12 +38,33 @@ impl Pending {
         {
             return Err(StorageFailure::SessionMismatch.into());
         }
-        if (self.bytes.len() as u64) < session.confirmed || self.bytes.len() as u64 > self.total {
+        let lost = match &session.state {
+            SessionState::MemoryParts { parts, .. } => {
+                parts.iter().any(|index| !self.parts.contains_key(index))
+            }
+            _ => {
+                (self.bytes.len() as u64) < session.confirmed
+                    || self.bytes.len() as u64 > self.total
+            }
+        };
+        if lost {
             return Err(
                 StorageFailure::Protocol.with_source("memory provider lost confirmed progress")
             );
         }
         Ok(())
+    }
+    /// The bytes publishing hands over: an independent session's parts in
+    /// order, which must be every one; another's bytes as they arrived.
+    fn assembled(self) -> Result<Vec<u8>, StorageError> {
+        if self.parts.is_empty() {
+            return Ok(self.bytes);
+        }
+        let count = self.total.div_ceil(self.part_size as u64);
+        if self.parts.len() as u64 != count {
+            return Err(StorageFailure::InvalidPart.into());
+        }
+        Ok(self.parts.into_values().flatten().collect())
     }
 }
 fn confirm_published(
@@ -103,7 +127,7 @@ impl MemoryStorage {
     /// plan names none until its first part starts it.
     pub async fn holds(&self, session: &UploadSession) -> bool {
         match session.state {
-            SessionState::Memory { id, .. } => {
+            SessionState::Memory { id, .. } | SessionState::MemoryParts { id, .. } => {
                 self.provider.state.lock().await.uploads.contains_key(&id)
             }
             _ => false,
@@ -243,7 +267,19 @@ impl MemoryProvider {
         match state.uploads.get(&id) {
             Some(pending) => {
                 pending.check(session)?;
-                session.confirmed = pending.bytes.len() as u64;
+                match &mut session.state {
+                    // Every part the provider holds, whichever arrived first.
+                    SessionState::MemoryParts { parts, .. } => {
+                        *parts = pending.parts.keys().copied().collect();
+                        session.confirmed = pending
+                            .parts
+                            .keys()
+                            .filter_map(|index| part_span(pending.total, pending.part_size, *index))
+                            .map(|span| span.end - span.start)
+                            .sum();
+                    }
+                    _ => session.confirmed = pending.bytes.len() as u64,
+                }
             }
             None => confirm_published(&state, session, id)?,
         }
@@ -270,6 +306,11 @@ impl MemoryProvider {
                 session.start_failed(&start);
                 return Err(error);
             }
+        }
+        if matches!(session.state, SessionState::MemoryParts { .. }) {
+            let offset = end - bytes.len() as u64;
+            let part = self.memory_send_part(publication, session, offset, bytes, sent).await?;
+            return session.confirm(part);
         }
         publication.check()?;
         // The whole part is taken as the call starts, as for a create.
@@ -306,6 +347,57 @@ impl MemoryProvider {
         session.confirmed = end;
         Ok(())
     }
+    /// Send part `offset..` of an independent session, as S3 takes a
+    /// multipart upload's part: kept by its index, replacing one sent
+    /// before, and confirmed for the caller to add to its session.
+    pub(super) async fn memory_send_part(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+        offset: u64,
+        bytes: &[u8],
+        sent: &ByteProgress,
+    ) -> Result<crate::ConfirmedPart, StorageError> {
+        let SessionState::MemoryParts { id, .. } = session.state else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        publication.check()?;
+        // The whole part is taken as the call starts, as for a create.
+        sent.moved(bytes.len() as u64);
+        self.before(MemoryRequest::Other("upload_part")).await?;
+        let gate = self.state.lock().await.part_gate.clone();
+        if let Some(gate) = gate {
+            gate.acquire()
+                .await
+                .map_err(|closed| StorageFailure::Protocol.with_source(closed))?
+                .forget();
+        }
+        let index = offset / session.part_size as u64;
+        let mut state = self.state.lock().await;
+        let pending = state.uploads.get(&id).ok_or(StorageFailure::SessionExpired)?;
+        pending.check(session)?;
+        if !offset.is_multiple_of(session.part_size as u64)
+            || part_span(session.total, session.part_size, index)
+                .is_none_or(|span| span.end - span.start != bytes.len() as u64)
+        {
+            return Err(StorageFailure::InvalidPart.into());
+        }
+        if std::mem::replace(&mut state.faults.drop_part, false) {
+            return Err(StorageFailure::Network.into());
+        }
+        state
+            .uploads
+            .get_mut(&id)
+            .ok_or(StorageFailure::SessionExpired)?
+            .parts
+            .insert(index, bytes.to_vec());
+        if std::mem::replace(&mut state.faults.lose_part_reply, false) {
+            return Err(StorageFailure::Network.into());
+        }
+        state.sent_bytes += bytes.len() as u64;
+        state.largest_part = state.largest_part.max(bytes.len());
+        Ok(crate::ConfirmedPart(Confirmation::Memory { index }))
+    }
     /// Start a planned session's upload, as its first part does on S3,
     /// telling `sent` once the start goes out.
     async fn initiate(
@@ -326,13 +418,18 @@ impl MemoryProvider {
                 target: session.target.clone(),
                 total: session.total,
                 bytes: Vec::new(),
+                parts: BTreeMap::new(),
                 part_size: session.part_size,
             },
         );
         if std::mem::replace(&mut state.faults.lose_initiation_reply, false) {
             return Err(StorageFailure::Network.into());
         }
-        session.state = SessionState::Memory { id, complete: false };
+        session.state = if self.independent_parts {
+            SessionState::MemoryParts { id, parts: Vec::new(), complete: false }
+        } else {
+            SessionState::Memory { id, complete: false }
+        };
         Ok(())
     }
     pub(super) async fn memory_finish_upload(
@@ -352,7 +449,13 @@ impl MemoryProvider {
             return confirm_published(&state, session, id);
         };
         pending.check(session)?;
-        if pending.bytes.len() as u64 != session.total || session.confirmed != session.total {
+        let whole = match &session.state {
+            SessionState::MemoryParts { .. } => {
+                pending.parts.len() as u64 == session.total.div_ceil(session.part_size as u64)
+            }
+            _ => pending.bytes.len() as u64 == session.total,
+        };
+        if !whole || session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
         check_target(&state, session.target())?;
@@ -364,11 +467,12 @@ impl MemoryProvider {
         }
         let revision = state.next_id()?;
         let pending = state.uploads.remove(&id).ok_or(StorageFailure::SessionExpired)?;
+        let path = pending.target.path().clone();
         state.objects.insert(
-            pending.target.path().clone(),
+            path,
             Object {
                 revision,
-                bytes: pending.bytes.into(),
+                bytes: pending.assembled()?.into(),
                 stored_at: self.storage_time()?,
                 upload_id: Some(id),
             },

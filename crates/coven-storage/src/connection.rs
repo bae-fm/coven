@@ -335,19 +335,19 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     ) -> Result<PartPermit<'a>, StorageError> {
         let config = self.config();
         // Preserve native refusal order for a wrong location and an invalid part.
-        let end = match config.provider() {
+        let part = match config.provider() {
             CloudProvider::S3 | CloudProvider::CloudKit => {
-                let end = session.end_of_part(bytes.len())?;
+                let part = session.next_part(bytes.len())?;
                 session.check(&config)?;
-                end
+                part
             }
             CloudProvider::Dropbox | CloudProvider::OneDrive => {
                 session.check(&config)?;
-                session.end_of_part(bytes.len())?
+                session.next_part(bytes.len())?
             }
         };
         let publication = self.publication(session.path())?;
-        Ok(PartPermit::admit(session, bytes, end, publication))
+        Ok(PartPermit::admit(session, bytes, part, publication))
     }
     pub(crate) async fn send_permitted(
         &self,
@@ -355,14 +355,14 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         session: &mut UploadSession,
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
+        let PartPermit { bytes, part, publication, .. } = permit;
         // The part's bytes are heard from where it starts in the object.
-        let sent = sent.starting_at(session.confirmed_bytes());
-        let PartPermit { bytes, end, publication, .. } = permit;
+        let sent = sent.starting_at(part.start);
         let result = self
             .send(
                 RequestKind::Upload,
                 bytes.len() as u64,
-                self.provider.upload_part(&publication, session, bytes, end, &sent),
+                self.provider.upload_part(&publication, session, bytes, part.end, &sent),
             )
             .await;
         result.map_err(|error| session.target.error(error))
@@ -640,6 +640,33 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         self.observed(self.send_permitted(permit, session, sent).await).await
+    }
+    async fn send_independent_part(
+        &self,
+        session: &UploadSession,
+        offset: u64,
+        bytes: &[u8],
+        sent: &ByteProgress,
+    ) -> Result<ConfirmedPart, StorageError> {
+        self.cooling()?;
+        if !session.parts_independent() {
+            return Err(StorageFailure::InvalidPart.into());
+        }
+        // An S3 part is refused for its size before its location, as an
+        // admitted part is.
+        session.part_end(offset, bytes.len())?;
+        session.check(&self.config())?;
+        let publication = self.publication(session.path())?;
+        // The part's bytes are heard from where it starts in the object.
+        let sent = sent.starting_at(offset);
+        let result = self
+            .send(
+                RequestKind::Upload,
+                bytes.len() as u64,
+                self.provider.send_independent_part(&publication, session, offset, bytes, &sent),
+            )
+            .await;
+        self.observed(result.map_err(|error| session.target.error(error))).await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.cooling()?;

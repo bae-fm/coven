@@ -417,6 +417,17 @@ impl coven_storage::Storage for StepStorage {
         }
         self.record("part", time, result)
     }
+    async fn send_independent_part(
+        &self,
+        session: &coven_storage::UploadSession,
+        offset: u64,
+        bytes: &[u8],
+        sent: &coven_storage::ByteProgress,
+    ) -> Result<coven_storage::ConfirmedPart, coven_storage::StorageError> {
+        let time = self.tick();
+        let result = self.storage.send_independent_part(session, offset, bytes, sent).await;
+        self.record("part", time, result)
+    }
     async fn finish_upload(
         &self,
         session: &mut coven_storage::UploadSession,

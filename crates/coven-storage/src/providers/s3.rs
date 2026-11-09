@@ -51,6 +51,8 @@ mod left_uploads;
 mod listing;
 #[path = "s3_metadata.rs"]
 mod metadata;
+#[path = "s3_parts.rs"]
+mod parts;
 #[path = "s3_planned_upload.rs"]
 mod planned_upload;
 #[path = "s3_read.rs"]
@@ -607,6 +609,8 @@ impl ProviderOps for S3Storage {
                 }
                 Err(error) => return Err(s3_error(error)),
             };
+            // The parts the upload holds, whichever arrived first, which S3
+            // lists by number, each once.
             for part in response.parts() {
                 let number = part
                     .part_number()
@@ -616,11 +620,13 @@ impl ProviderOps for S3Storage {
                     .and_then(|n| u64::try_from(n).ok())
                     .ok_or(StorageFailure::Protocol.with_source("S3 omitted part size"))?;
                 let etag = metadata::required(part.e_tag(), "S3 omitted part ETag")?.to_owned();
-                confirmed = confirmed.checked_add(size).ok_or(StorageFailure::InvalidPart)?;
                 let part = S3Part { number, size, etag };
-                if !part.follows(parts.len(), confirmed, session.total, session.part_size) {
+                if !part.fits(session.total, session.part_size)
+                    || parts.last().is_some_and(|last: &S3Part| last.number >= number)
+                {
                     return Err(StorageFailure::Protocol.with_source("S3 upload has invalid parts"));
                 }
+                confirmed += part.size;
                 parts.push(part);
             }
             if !response
@@ -635,11 +641,13 @@ impl ProviderOps for S3Storage {
             seen.check(&next)?;
             marker = Some(next);
         }
-        if confirmed < session.confirmed {
-            return Err(StorageFailure::Protocol.with_source("S3 lost confirmed parts"));
-        }
-        if let SessionState::S3 { parts: stored, .. } = &mut session.state {
-            *stored = parts;
+        // Every part the session records stays listed: a part the upload
+        // holds that the session doesn't record is one whose reply was lost.
+        if let SessionState::S3 { parts: recorded, .. } = &mut session.state {
+            if recorded.iter().any(|kept| parts.iter().all(|part| part.number != kept.number)) {
+                return Err(StorageFailure::Protocol.with_source("S3 lost confirmed parts"));
+            }
+            *recorded = parts;
         }
         session.confirmed = confirmed;
         Ok(())
@@ -677,38 +685,19 @@ impl ProviderOps for S3Storage {
                 }
             }
         }
-        let id = self.upload_id(session)?;
-        let SessionState::S3 { parts, .. } = &session.state else {
-            return Err(StorageFailure::SessionMismatch.into());
-        };
-        if parts.len() >= crate::session::S3_MAX_PARTS {
-            return Err(StorageFailure::InvalidPart.into());
-        }
-        let number = i32::try_from(parts.len() + 1)
-            .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
-        let response = self
-            .client
-            .upload_part()
-            .bucket(&self.bucket)
-            .key(self.session_key(session)?)
-            .upload_id(id)
-            .part_number(number)
-            .body(ByteStream::from(bytes.to_vec()))
-            .customize()
-            .interceptor(publication.clone())
-            .mutate_request({
-                let sent = sent.clone();
-                move |request| request.add_extension(sent.clone())
-            })
-            .send()
-            .await
-            .map_err(s3_error)?;
-        let etag = metadata::required(response.e_tag(), "S3 omitted uploaded ETag")?.to_owned();
-        if let SessionState::S3 { parts, .. } = &mut session.state {
-            parts.push(S3Part { number, size: bytes.len() as u64, etag });
-        }
-        session.confirmed = end;
-        Ok(())
+        let part =
+            self.send_part(publication, session, end - bytes.len() as u64, bytes, sent).await?;
+        session.confirm(part)
+    }
+    async fn send_independent_part(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+        offset: u64,
+        bytes: &[u8],
+        sent: &ByteProgress,
+    ) -> Result<crate::ConfirmedPart, StorageError> {
+        self.send_part(publication, session, offset, bytes, sent).await
     }
     async fn finish_upload(
         &self,
