@@ -368,6 +368,38 @@ async fn app_tests_count_the_steps_a_read_runs() {
     handle.close().await.unwrap();
 }
 
+/// An app's test states how many statements a read ran: each `query` and
+/// `query_row` counts one, whatever rows it returns.
+#[tokio::test]
+async fn app_tests_count_each_read_statement_once() {
+    use crate::{Coven, Migration, RowIdentity, SyncedTable, WorkCounter};
+    let root = tempfile::tempdir().unwrap();
+    let handle = Coven::in_memory(root.path().into())
+        .builder()
+        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+        .migrations(vec![Migration::addition(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
+        )])
+        .create_store("Statements")
+        .await
+        .unwrap();
+    let counter = WorkCounter::new();
+    handle.test_track_work(counter.clone()).await.unwrap();
+    handle
+        .read(|db| {
+            db.query("SELECT id FROM notes", [], |r| r.get::<_, String>(0))?;
+            db.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?;
+            db.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?;
+            Ok::<_, crate::CovenError>(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(counter.take().app_read_statements, 3);
+    handle.close().await.unwrap();
+}
+
 /// An app's test measures a write's cost through its handle: an INSERT run
 /// with `execute` counts steps as writes, not reads, and a trigger on the
 /// table doing more work makes the same INSERT count more.

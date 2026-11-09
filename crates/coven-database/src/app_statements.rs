@@ -125,7 +125,10 @@ impl DatabaseConnection {
             let ran = statement.get_status(rusqlite::StatementStatus::VmStep).wrapping_sub(before)
                 as u32 as usize;
             self.record_work(|work| match steps {
-                StepsOf::AppRead => work.app_read_steps += ran,
+                StepsOf::AppRead => {
+                    work.app_read_steps += ran;
+                    work.app_read_statements += 1;
+                }
                 StepsOf::AppWrite => work.app_write_steps += ran,
                 StepsOf::Lookup => work.lookup_steps += ran,
             });

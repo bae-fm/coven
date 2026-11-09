@@ -3989,6 +3989,9 @@ pub struct WorkCounts {
     /// SQLite steps the app's statements ran in `query` and `query_row`, in
     /// reads, live queries' runs, writes and migrations.
     pub app_read_steps: usize,
+    /// The app's statements that return rows, run in `query` and
+    /// `query_row`, one per run.
+    pub app_read_statements: usize,
     /// SQLite steps the app's statements ran in `execute` and
     /// `execute_batch`, triggers' included, in writes and migrations.
     pub app_write_steps: usize,
