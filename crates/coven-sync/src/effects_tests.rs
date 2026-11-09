@@ -59,7 +59,7 @@ fn admit(n: u8, role: MemberRole, device: u64) -> StoreChange {
         device_name: format!("device {device}"),
     }
 }
-fn apply(
+pub(crate) fn apply(
     state: &StoreState,
     author: u64,
     change: StoreChange,
@@ -466,6 +466,7 @@ mod sequence_differential {
                     digest: *digest.finish().as_bytes(),
                     content: SlotContent::Admin { original: OriginalSlot { slot, object }, effect },
                 },
+                coven_database::test_utils::idle_writers(),
                 || Ok(())
             )
             .await
@@ -710,7 +711,7 @@ fn apply_from(
     checked_change(state, &header(device, author, 3), slot(4), &change, &BTreeMap::new(), &[])
 }
 
-fn gifts() -> CircleId {
+pub(crate) fn gifts() -> CircleId {
     CircleId(uuid::Uuid::from_u128(12))
 }
 
@@ -809,27 +810,6 @@ fn only_its_member_replaces_a_device_id_and_several_may_replace_one() {
         assert_eq!(both.devices[&new].state, DeviceState::Active);
         assert_eq!(both.devices[&new].member, id(1));
     }
-}
-
-/// Removing a circle's last member deletes the circle at the removal's slot;
-/// a circle someone else remains in survives (§14.1).
-#[test]
-fn removing_a_circles_last_member_deletes_it_at_that_slot() {
-    let shared = CircleId(uuid::Uuid::from_u128(13));
-    let mut state = household();
-    for change in [
-        create_circle(gifts(), "Gifts"),
-        create_circle(shared, "Shared"),
-        StoreChange::AddCircleMember { circle: shared, member: id(1) },
-    ] {
-        state = apply(&state, 2, change).unwrap().unwrap().state;
-    }
-    let removed =
-        apply(&state, 1, StoreChange::RemoveMember { member: id(2) }).unwrap().unwrap().state;
-    assert_eq!(removed.circle_deletions.get(&gifts()), Some(&slot(4)));
-    assert!(removed.circles[&gifts()].members.is_empty());
-    assert_eq!(removed.circle_deletions.get(&shared), None);
-    assert_eq!(removed.circles[&shared].members, [id(1)].into());
 }
 
 /// Replacing a member's keys changes the keys alone: the member's access,

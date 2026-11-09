@@ -200,24 +200,10 @@ impl SequenceSync {
     /// count (§14.1), and this device's own unpublished writes protect what
     /// they name locally.
     async fn seen_by_all(&self, session: &Session) -> Result<impl Fn(Slot) -> bool, SyncError> {
-        let history = &session.history;
-        let others: Vec<_> = history
-            .state
-            .devices
-            .keys()
-            .filter(|device| **device != self.device && history.gone_for_good(**device).is_none())
-            .map(|device| (*device, history.added(*device)))
-            .collect();
-        let reads = self
-            .database
-            .published_reads(others.iter().map(|(device, _)| *device).collect())
-            .await?;
-        Ok(move |since: Slot| {
-            others.iter().all(|(device, added)| {
-                added.is_some_and(|added| added > since.get())
-                    || reads.get(device).is_some_and(|read| *read >= since.get())
-            })
-        })
+        let writers = session.history.writers(self.device);
+        let reads = self.database.published_reads(writers.devices().collect()).await?;
+        let through = writers.through(&reads);
+        Ok(move |since: Slot| since.get() <= through)
     }
 
     /// List the given folders, then delete each candidate that every other

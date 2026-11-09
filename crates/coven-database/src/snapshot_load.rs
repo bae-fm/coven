@@ -243,7 +243,6 @@ pub(crate) fn read(
         }
         Ok(())
     })?;
-    crate::write_sources::complete_installed(database, audience)?;
     crate::write_sources::forget_own_migration(
         database,
         audience,

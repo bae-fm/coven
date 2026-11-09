@@ -104,9 +104,14 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
             }
             SnapshotRecord::Authored(crate::snapshot_rows::AuthoredRecord::Part(_)) => {}
             SnapshotRecord::Authored(crate::snapshot_rows::AuthoredRecord::Change(authored)) => {
-                // The verdict is stored locally with the same bytes it ends with.
+                // The verdict is stored locally with the same bytes it holds
+                // before the stop slot it ends with.
                 let verdict = encode_change_verdict(&authored.verdict).unwrap();
-                assert!(bytes.ends_with(&verdict));
+                let stop = match authored.stop {
+                    None => vec![0],
+                    Some(stop) => [&[1][..], &stop.get().to_be_bytes()].concat(),
+                };
+                assert!(bytes.ends_with(&[verdict.as_slice(), &stop].concat()));
                 assert_eq!(decode_change_verdict(&verdict).unwrap(), authored.verdict);
             }
             SnapshotRecord::Column(_)

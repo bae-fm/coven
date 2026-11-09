@@ -454,7 +454,6 @@ pub(crate) fn retain_queue(
         for row in part.records() {
             crate::write_sources::retain_authored(database, &form, &record.header, row)?;
         }
-        crate::write_sources::complete(database, &record.header, &part.audience)?;
     }
     let encoder = encoded(WriteEncoder::with_records(record, frames))?;
     let bytes = plaintext(database, encoder)?;

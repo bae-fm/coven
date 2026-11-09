@@ -57,7 +57,7 @@ pub(crate) fn stage(
             &rows.present,
         )?;
         crate::published::capture_dropped(db, &rows.dropped)?;
-        crate::download_stage::stage(db, schema, &header.header, &opened, |audience| {
+        crate::download_stage::stage(db, schema, &header.header, &opened, None, |audience| {
             Ok(!crate::reload_gate::reloading(db, audience)?)
         })?;
         crate::download_stage::release(db, &header.header)

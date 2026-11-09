@@ -35,6 +35,7 @@ pub(crate) fn carry(
                 &crate::write_commit::StoredRows::InTable(&table.name),
             )?;
             crate::ownership::forget_table(db, &table.name)?;
+            crate::forget_records::look_again(db)?;
             // A dropped table's losses stay, frozen under its old names (§18.7).
             let losses = db.query(
                 "SELECT id FROM _coven_lost WHERE table_name=?1 AND frozen=0",

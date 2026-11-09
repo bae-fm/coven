@@ -347,7 +347,10 @@ fn verdicts(
         }
         for source in provenance.sources() {
             if source.write != header.position && !retained.contains_key(source) {
-                retained.insert(source.clone(), crate::write_sources::retained(database, source)?);
+                retained.insert(
+                    source.clone(),
+                    crate::write_sources::retained(database, header, source)?,
+                );
             }
         }
     }

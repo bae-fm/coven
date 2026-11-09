@@ -121,6 +121,7 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
                     writes: records.into_iter().map(|r| stream(r.into())).collect(),
                 },
             },
+            crate::test_utils::idle_writers(),
             || Ok(()),
         )
         .await?;
@@ -167,6 +168,7 @@ impl Database {
                 },
                 content: crate::SlotContent::Writes { size: 1, writes: vec![write] },
             },
+            crate::test_utils::idle_writers(),
             authenticate,
         )
         .await
@@ -210,6 +212,7 @@ impl Database {
                     }),
                 },
             },
+            crate::test_utils::idle_writers(),
             || Ok(()),
         )
         .await

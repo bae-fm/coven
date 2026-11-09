@@ -177,6 +177,21 @@ impl History {
         self.devices.get(&device)?.keys().next().copied()
     }
 
+    /// The other devices that can still write: every device besides `me`
+    /// not gone for good, each with the slot that added it. Deleting stored
+    /// files (§17.10) and forgetting kept records (§16.7) wait for each to
+    /// write past what they free.
+    pub(crate) fn writers(&self, me: DeviceId) -> coven_database::Writers {
+        coven_database::Writers::new(
+            self.state
+                .devices
+                .keys()
+                .filter(|device| **device != me && self.gone_for_good(**device).is_none())
+                .map(|device| (*device, self.added(*device)))
+                .collect(),
+        )
+    }
+
     /// The first counted entry that stopped `device` for good, and how
     /// (§14.1): its removal or its member's, a reset registering another
     /// installation in its place, or its member's keys replaced or the

@@ -84,8 +84,8 @@ mod fixture {
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
      INSERT INTO _coven_install_fixture SELECT key,audience,counter(1),device,n,1,x'00',device,n,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
-     INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;
-     INSERT INTO _coven_install_authored SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
+     INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00' FROM fixture;
+     INSERT INTO _coven_install_authored SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL,NULL FROM fixture;
      INSERT INTO _coven_install_before SELECT tab,key,audience,i%2 FROM fixture;
      INSERT INTO _coven_install_region SELECT tab,key,audience FROM fixture WHERE i%16=0;
      INSERT INTO _coven_download_replaced SELECT DISTINCT audience FROM fixture WHERE i<=4;
@@ -152,6 +152,7 @@ mod fixture {
                 | "_coven_published"
                 | "_coven_migration_prefix"
                 | "_coven_sequence"
+                | "_coven_forgotten"
                 | "_coven_snapshot_reservation"
                 | "_coven_snapshot_schema"
                 | "_coven_device_reset"

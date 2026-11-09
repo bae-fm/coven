@@ -443,14 +443,20 @@ impl SequenceSync {
             if !effect.reload.is_empty() {
                 let required = effect.reload.clone();
                 // Persist the audience gates before reading any replacement body.
-                self.database.apply_slot::<PendingRecord, _, _>(incoming, || Ok(())).await?;
+                self.database
+                    .apply_slot::<PendingRecord, _, _>(
+                        incoming,
+                        history.writers(self.device),
+                        || Ok(()),
+                    )
+                    .await?;
                 return self.reload_activation(session, at, &required, history, ring, member).await;
             }
         }
         self.keys.persist(ring)?;
         let result = self
             .database
-            .apply_slot::<PendingRecord, _, _>(incoming, || Ok(()))
+            .apply_slot::<PendingRecord, _, _>(incoming, history.writers(self.device), || Ok(()))
             .await
             .map_err(|error| crate::write_object::database_failure(&self.path(at), error))?;
         match result {

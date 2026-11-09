@@ -248,6 +248,7 @@ pub use database_changes::DatabaseChanges;
 
 mod captured_changes;
 mod claim;
+mod forget_records;
 mod published;
 mod published_migration;
 mod queued_writes;
@@ -261,6 +262,7 @@ mod write_metadata;
 pub use claim::{
     Claim, ClaimAttempt, ClaimBytes, ClaimRead, ClaimSettlement, ClaimUpload, ClaimWork,
 };
+pub use forget_records::Writers;
 pub use sequence::WriteCutoff;
 pub use sequence_apply::{AdminEffect, IncomingSlot, SlotContent};
 pub use store_state::{

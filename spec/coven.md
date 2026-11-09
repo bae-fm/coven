@@ -3192,9 +3192,11 @@ as written, and a later replacement of the cell doesn't clear it.
     counts as dropped: the write claims to build on a value its author had
     already seen replaced.
   - **A source whose write landed, but whose record this device doesn't
-    hold.** Whether the write landed comes from its device's last landed
-    write number, since a device's writes land in number order. Such a source
-    never waits and is never invalid. A migration write whose raise lost to
+    hold.** A device's writes land in number order, so the source's write
+    landed before the write being judged when another write of its device
+    numbered at or above it has landed. Such a source never waits and is
+    never invalid. One whose write hasn't landed, which only a device's own
+    predecessor of the judged write can be, waits for it. A migration write whose raise lost to
     another device's is one case: no history holds its changes (§18.8). A
     device that loaded a snapshot covering that write knows it only as a
     covered write, with no part and no header, and treats it the same.
@@ -10724,6 +10726,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_authored_parts` | the header of each write part whose changes this device keeps (§9.5) |
 | `_coven_authored_changes` | each change's kept record: its row, generation, operation and columns, a reference column's value and parents in full and any other column's digest, its copy's creator and its count of operations ([format.md D7.3](format.md#d73-authored-changes-section-4)); and the slot at which the change stopped being current, once it has (§16.7) |
 | `_coven_authored_admissions` | this device's verdict on each original change it keeps as source evidence, once it has judged it (§9.5) |
+| `_coven_forgotten` | the stop slot through which this device has forgotten every kept record it may, so each slot looks only at records that stopped after it; a reload or a dropped table clears it, since records it passed can come back or lose their creation's protection (§16.7) |
 | `_coven_write_evidence` | each write's signed header evidence, its cleartext prefix, sealed header chunk, part roots and header signature, for a write by a member other than this device's own: a snapshot this device writes proves another member's authorship with it ([format.md D7.5](format.md#d75-write-evidence-section-6)). Its own member's writes keep none. The narrowing is by member, not by `owner_only()` table: declaring one is a breaking change, whose raise snapshot carries evidence for rows another member created before it (§18.1) |
 | `_coven_part_leaves` | the leaf hashes of each part this device received whole, for the same writes, so a later snapshot opens the leaves it needs ([format.md D7.5](format.md#d75-write-evidence-section-6)) |
 | `_coven_part_proofs` | each opening a loaded snapshot proved for the same writes, with its leaf hashes, which this device's own later snapshot prunes and carries on ([format.md D7.5](format.md#d75-write-evidence-section-6)) |

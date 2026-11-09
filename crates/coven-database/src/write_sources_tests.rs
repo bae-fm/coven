@@ -8,6 +8,24 @@ use coven_format::write::WriteRecord;
 use serde_json::json;
 use std::collections::BTreeSet;
 
+/// The kept net change `id` names, as a write that read nothing yet would
+/// find it: held, and counting as its source.
+fn evidence(db: &DatabaseConnection, id: &ChangeId) -> Result<Evidence, DbError> {
+    let reader = WriteHeader {
+        position: WriteId { device: coven_foundation::id_source::DeviceId(u64::MAX), number: 1 },
+        timestamp: coven_merge::Timestamp::new(
+            1 << 40,
+            0,
+            coven_foundation::id_source::DeviceId(u64::MAX),
+        )
+        .unwrap(),
+        read_through: 0,
+        schema_version: 1,
+        disposition: WriteDisposition::Apply,
+    };
+    Ok(counting(db, &reader, id)?.expect("a held source counts for a write that read nothing"))
+}
+
 /// The kept record this device keeps for `change`, a row of a write at
 /// schema `version` (D7.3).
 pub(crate) fn kept_change(
@@ -137,8 +155,26 @@ async fn equal_scalars_keep_distinct_setters() {
     db.close().await.unwrap();
 }
 
+/// The verdict `db` gave the change of `write` at `row`.
+fn verdict(db: &crate::Database, write: WriteId, row: &coven_merge::RowId) -> ChangeVerdict {
+    db.inspect_writer(|c| {
+        let admission: Vec<u8> = c
+            .query_row(
+                "SELECT admission FROM _coven_authored_admissions WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+                params![merge_fields::encode_write_id(&write).unwrap(), &row.audience, row.table, row.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        merge_fields::decode_change_verdict(&admission).unwrap()
+    })
+}
+
+/// The receiver couldn't open the insert's part, so holds no record of it,
+/// and its write landed: the update built on it counts the insert as a
+/// dropped source, as a device that forgot the insert's record would, and is
+/// lost instead of waiting (§9.5).
 #[tokio::test]
-async fn missing_originals_wait_even_when_the_position_was_consumed() {
+async fn a_landed_source_with_no_record_held_counts_as_dropped() {
     let author_store = TestStore::new();
     let receiver_store = TestStore::new();
     let author = author_store.schema(notes(), NOTES).await.unwrap();
@@ -153,17 +189,15 @@ async fn missing_originals_wait_even_when_the_position_was_consumed() {
         })
         .await
         .unwrap();
-    let before = crate::tests::contents(&receiver);
     let outcome = receiver.receive(history[1].clone().into()).await.unwrap();
+    assert_eq!(outcome, ApplyOutcome::Applied);
+    // The insert is the update's generation source and its title's setter.
+    let row = &history[1].parts[0].rows[0];
+    let insert = row.sources.generation.clone().unwrap();
     assert_eq!(
-        outcome,
-        ApplyOutcome::Waiting(crate::WriteWait::Sources(vec![history[1].parts[0].rows[0]
-            .sources
-            .generation
-            .clone()
-            .unwrap()]))
+        verdict(&receiver, history[1].header.position, &row.row),
+        ChangeVerdict::Dependent(vec![insert.clone(), insert])
     );
-    assert_eq!(crate::tests::contents(&receiver), before);
     for db in [author, receiver] {
         db.close().await.unwrap();
     }
@@ -177,7 +211,21 @@ async fn forged_roles_refuse_without_consumption_or_partial_rows() {
     sql(&author, "UPDATE notes SET title='two'").await.unwrap();
     sql(&author, "UPDATE notes SET title='three'").await.unwrap();
     let history = records(&author);
-    for forgery in 0..6 {
+    // A source naming a row the receiver holds no record of, in a write that
+    // landed, doesn't count instead of proving the write invalid: the change
+    // is lost (§9.5).
+    let store = TestStore::new();
+    let receiver = store.schema(notes(), NOTES).await.unwrap();
+    for record in &history[..2] {
+        receiver.receive(record.clone().into()).await.unwrap();
+    }
+    let mut record = history[2].clone();
+    record.parts[0].rows[0].sources.generation.as_mut().unwrap().row.table = "absent".into();
+    assert_eq!(receiver.receive(record.clone().into()).await.unwrap(), ApplyOutcome::Applied);
+    let row = &record.parts[0].rows[0].row;
+    assert!(!verdict(&receiver, record.header.position, row).retained());
+    receiver.close().await.unwrap();
+    for forgery in [0, 1, 2, 4, 5] {
         let store = TestStore::new();
         let receiver = store.schema(notes(), NOTES).await.unwrap();
         for record in &history[..2] {
@@ -189,7 +237,6 @@ async fn forged_roles_refuse_without_consumption_or_partial_rows() {
             0 => row.sources.generation = None,
             1 => row.sources.generation.as_mut().unwrap().write = history[1].header.position,
             2 => row.sources.setters.get_mut("title").unwrap().column = "body".into(),
-            3 => row.sources.generation.as_mut().unwrap().row.table = "absent".into(),
             4 => {
                 row.sources.setters.get_mut("title").unwrap().change.write = record.header.position
             }
@@ -421,12 +468,6 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     let stream = || crate::snapshot_write::tests::stream(&writes[0]);
     assert!(target.retain_write_sources(stream(), || Err(DbError::DamagedDatabase)).await.is_err());
     assert_eq!(crate::tests::contents(&target), before);
-    let update = || crate::snapshot_write::tests::stream(&writes[1]);
-    assert!(matches!(
-        target.receive_stream(update(), || Ok(())).await.unwrap(),
-        ApplyOutcome::Waiting(crate::WriteWait::Sources(_))
-    ));
-    assert_eq!(crate::tests::contents(&target), before);
     assert_eq!(target.retain_write_sources(stream(), || Ok(())).await.unwrap(), ());
     assert_eq!(crate::write::tests::count(&target, "notes"), 0);
     target.inspect_writer(|db| {
@@ -440,7 +481,10 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
         assert_eq!(unknown, 2);
     });
     let retained = crate::tests::contents(&target);
-    for damage in 0..3 {
+    // A copy naming another row of the part is kept as a further record: a
+    // part may hold fewer records than its write made, so a held part proves
+    // no row absent, and a copy's rows answer to its part's signed root.
+    for damage in [0, 2] {
         let mut record = writes[0].clone();
         match damage {
             0 => {
@@ -451,7 +495,6 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
                 )
                 .unwrap()
             }
-            1 => record.parts[0].rows[0].row.key = crate::tests::text_key("0"),
             2 => {
                 let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation
                 else {
@@ -678,8 +721,9 @@ async fn authored_sources_differential() {
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
-         INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
+        "INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00' FROM fixture;
+         INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',CASE WHEN i%3=0 THEN n END FROM fixture;
+         INSERT INTO _coven_forgotten VALUES(1,counter(1));
          INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;",
     )
     .unwrap();

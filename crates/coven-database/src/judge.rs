@@ -247,7 +247,7 @@ pub(crate) fn judge(
     originals.visit(|record| {
         let row = record.row().clone();
         let execution = record.execution();
-        let mut view = ChildView::new(&authoring, &row, &record, header.schema_version);
+        let mut view = ChildView::new(&authoring, &row, &record, header);
         // A delete's old values are the cells it replaced (D5).
         let began = match &record {
             OriginalRow::Change(change) if change.change.operation == Operation::Delete => {

@@ -181,11 +181,17 @@ pub(crate) fn records_table(header: &WriteHeader) -> &'static str {
 /// loads, and the others already hold the write. An ordinary write's parts
 /// come whole only from its slot, so each captured part it stages is one its
 /// slot opened; the migration write's come from its own records (§18.4).
+///
+/// A write landing in `slot` marks where each change it replaces stopped
+/// being current, and where each of its own that never became current
+/// stopped (§16.7). A queued write folded over the counted state has no slot
+/// and marks nothing: what it replaces is current still in the counted state.
 pub(crate) fn stage(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
     opened: &[Audience],
+    slot: Option<coven_merge::Slot>,
     selected: impl Fn(&Audience) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
     let mut captured = Vec::new();
@@ -230,7 +236,7 @@ pub(crate) fn stage(
             )?
             .pop()
         {
-            last = Some((table, key));
+            let (table, key) = &*last.insert((table, key));
             let mut part = WritePart {
                 audience: audience.clone(),
                 rows: Vec::new(),
@@ -241,13 +247,52 @@ pub(crate) fn stage(
                 OriginalRow::Change(row) => part.rows.push(row),
                 OriginalRow::Execution(execution) => part.executions.push(execution),
             }
+            // A change of a write landing in a slot that isn't current once
+            // staged never became current: it stops at its own slot.
             let Some(part) = interpreter.part(part)? else {
+                if let Some(slot) = slot {
+                    crate::forget_records::stopped_at(
+                        database,
+                        header.position,
+                        audience,
+                        table,
+                        key,
+                        slot,
+                    )?;
+                }
                 continue;
             };
             let record = WriteRecord { header: header.clone(), parts: vec![part] };
             let store = MergeStore::from_staged(database, &schema.schema);
             let updates = store.apply(&record)?;
+            if let Some(slot) = slot {
+                for (row, update) in &updates {
+                    let before = store.row(row)?.state;
+                    crate::forget_records::stopped(
+                        database,
+                        header.position,
+                        &before,
+                        &update.state,
+                        slot,
+                    )?;
+                }
+            }
             crate::write_commit::commit(database, &record, &store, &updates)?;
+            if let Some(slot) = slot {
+                if !crate::forget_records::applied(
+                    header.position,
+                    updates.values().map(|update| &update.state),
+                ) {
+                    crate::forget_records::stopped_at(
+                        database,
+                        header.position,
+                        audience,
+                        table,
+                        key,
+                        slot,
+                    )?;
+                }
+            }
             for (row, update) in updates {
                 put_values(database, &row, &update.state)?;
             }

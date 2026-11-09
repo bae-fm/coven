@@ -69,6 +69,29 @@ pub(crate) fn newest_number(
     Ok(newest.map(counter).transpose()?)
 }
 
+/// Whether `write` landed before `landing`, the write being judged: a write
+/// of its device numbered at or above it landed, other than `landing`. A
+/// device's writes land in the order it numbered them, so its later writes'
+/// landing shows its own (§6.3, §9.5).
+pub(crate) fn landed_before(
+    db: &DatabaseConnection,
+    write: WriteId,
+    landing: WriteId,
+) -> Result<bool, DbError> {
+    db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>=?2 AND slot IS NOT NULL AND NOT ({WRITE_DEVICE_SQL}=?3 AND number=?4))"
+        ),
+        params![
+            write.device,
+            write.number.to_be_bytes().as_slice(),
+            landing.device,
+            landing.number.to_be_bytes().as_slice()
+        ],
+        |r| r.get(0),
+    )
+}
+
 /// The `read_through` of `device`'s last landed write, if one landed. A
 /// device numbers its writes as it commits them and they land in that order,
 /// so its landed write with the greatest number landed last; its applied
@@ -84,6 +107,20 @@ pub(crate) fn last_landed_read(
             |r| counter(r.get(0)?),
         )?
         .pop())
+}
+
+/// The least `read_through` among `device`'s writes still queued, if it has
+/// any: this device's own writes waiting for a slot (§6.2).
+pub(crate) fn queued_read(
+    db: &DatabaseConnection,
+    device: coven_foundation::id_source::DeviceId,
+) -> Result<Option<u64>, DbError> {
+    let least: Option<Vec<u8>> = db.query_row(
+        &format!("SELECT min(read_through) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NULL"),
+        [device],
+        |r| r.get(0),
+    )?;
+    Ok(least.map(counter).transpose()?)
 }
 
 /// `id`'s row in `_coven_writes`, if coven has stored it.

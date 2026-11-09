@@ -70,6 +70,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     before: &DatabaseConnection,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
+    writers: &crate::Writers,
     files: &crate::file_write::WriteFiles<'_>,
     raises: Option<&crate::migration::MigrationOperation>,
     authenticate: impl FnOnce() -> Result<(), DbError>,
@@ -153,6 +154,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         authenticate()?;
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         crate::sequence::set_applied(db, incoming.slot.get())?;
+        crate::forget_records::forget(db, writers)?;
         let refold = if whole {
             crate::queued_writes::Refold::Whole
         } else {

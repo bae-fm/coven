@@ -1,5 +1,6 @@
-//! Each original change this device holds, the part header it came in, and this
-//! device's verdict on it (§9.5, D7).
+//! Each original change this device holds, the part header it came in, the
+//! slot at which it stopped being current, and this device's verdict on it
+//! (§9.5, §16.7, D7).
 
 macro_rules! coven_authored_sources_tables {
     ($visit:ident) => {
@@ -8,7 +9,6 @@ macro_rules! coven_authored_sources_tables {
                 write_id BLOB NOT NULL CHECK(length(write_id)=16),
                 audience TEXT NOT NULL,
                 header BLOB NOT NULL,
-                complete INTEGER NOT NULL CHECK(complete IN (0,1)),
                 PRIMARY KEY(write_id,audience)
             ) STRICT, WITHOUT ROWID;
         ");
@@ -19,10 +19,21 @@ macro_rules! coven_authored_sources_tables {
                 table_name TEXT NOT NULL,
                 key BLOB NOT NULL,
                 record BLOB NOT NULL,
+                stop BLOB CHECK(stop IS NULL OR length(stop)=8),
                 PRIMARY KEY(write_id,audience,table_name,key),
                 FOREIGN KEY(write_id,audience) REFERENCES _coven_authored_parts(write_id,audience)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_authored_changes_audience ON _coven_authored_changes(audience,write_id,table_name,key);
+            CREATE INDEX _coven_authored_changes_stop ON _coven_authored_changes(stop) WHERE stop IS NOT NULL;
+        ");
+        // The stop slot through which this device has forgotten every kept
+        // record it may (§16.7): each slot looks only at records that
+        // stopped after it.
+        $visit!(_coven_forgotten, "
+            CREATE TABLE _coven_forgotten (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                through BLOB NOT NULL CHECK(length(through)=8)
+            ) STRICT;
         ");
         // This device's verdict on an original change, beside its record for
         // the reason `_coven_upload_keys` is beside an upload's.

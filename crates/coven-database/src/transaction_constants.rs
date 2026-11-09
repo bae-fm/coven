@@ -25,8 +25,8 @@ pub(super) struct TransactionConstants {
 /// An authored part's write id, as coven stores it, and audience.
 type PartKey = (Vec<u8>, Audience);
 
-/// An authored part's header and whether it is complete.
-pub(crate) type AuthoredPart = (Vec<u8>, bool);
+/// An authored part's encoded header.
+pub(crate) type AuthoredPart = Vec<u8>;
 
 /// Holds the constants for one transaction; they go when it ends.
 pub(crate) struct ConstantScope<'a>(&'a TransactionConstants);
@@ -151,9 +151,9 @@ impl DatabaseConnection {
         }
         let part = self
             .query(
-                "SELECT header,complete FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
+                "SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
                 rusqlite::params![write, audience],
-                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?)),
+                |r| r.get::<_, Vec<u8>>(0),
             )?
             .pop();
         if self.constants.active.get() {

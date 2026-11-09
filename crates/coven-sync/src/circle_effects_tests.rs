@@ -4,7 +4,9 @@
 //! the same verdicts, names, members, deletion slots and member standing
 //! (§15.5, §15.8, §15.9).
 use crate::effects::checked_change;
-use crate::effects::tests::{create_circle, header, household, id, with_a_plain_member};
+use crate::effects::tests::{
+    apply, create_circle, gifts, header, household, id, with_a_plain_member,
+};
 use crate::{EntryTarget, OperationRejection};
 use coven_database::{AdminEffect, StoreState};
 use coven_format::admin::StoreChange;
@@ -220,4 +222,25 @@ fn circle_lifecycle_matches_lean() {
         "circle lifecycle: {pairs} pairs after a fixed start + {} seeded histories; {seen:?}",
         histories.len() - pairs
     );
+}
+
+/// Removing a circle's last member deletes the circle at the removal's slot;
+/// a circle someone else remains in survives (§14.1).
+#[test]
+fn removing_a_circles_last_member_deletes_it_at_that_slot() {
+    let shared = CircleId(uuid::Uuid::from_u128(13));
+    let mut state = household();
+    for change in [
+        create_circle(gifts(), "Gifts"),
+        create_circle(shared, "Shared"),
+        StoreChange::AddCircleMember { circle: shared, member: id(1) },
+    ] {
+        state = apply(&state, 2, change).unwrap().unwrap().state;
+    }
+    let removed =
+        apply(&state, 1, StoreChange::RemoveMember { member: id(2) }).unwrap().unwrap().state;
+    assert_eq!(removed.circle_deletions.get(&gifts()), Some(&slot(4)));
+    assert!(removed.circles[&gifts()].members.is_empty());
+    assert_eq!(removed.circle_deletions.get(&shared), None);
+    assert_eq!(removed.circles[&shared].members, [id(1)].into());
 }

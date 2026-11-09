@@ -1113,6 +1113,7 @@ tables = [
 name = "authored sources"
 owner = "Database"
 homes = [
+    "crates/coven-database/src/forget_records.rs",
     "crates/coven-database/src/write_sources.rs",
     "crates/coven-database/src/write_sources_schema.rs",
 ]
@@ -1120,6 +1121,7 @@ tables = [
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
+    "_coven_forgotten",
 ]
 
 [[database.domains]]

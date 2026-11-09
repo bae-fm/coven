@@ -182,6 +182,7 @@ fn kept_old(
 
 fn setter_values(
     db: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
     change: &coven_format::write::RowChange,
 ) -> BTreeMap<String, KeptValue> {
     change
@@ -189,7 +190,8 @@ fn setter_values(
         .setters
         .iter()
         .map(|(column, setter)| {
-            let source = crate::write_sources::evidence(db, &setter.change).unwrap();
+            let source =
+                crate::write_sources::counting(db, header, &setter.change).unwrap().unwrap();
             let columns = match &source.original.change.operation {
                 coven_merge::Operation::Insert(columns)
                 | coven_merge::Operation::Update(columns) => columns,
@@ -222,7 +224,7 @@ fn input(
         let net = record.parts.iter().flat_map(|part| &part.rows).find(|change| change.row == *row);
         let setters = match net {
             Some(change) if matches!(change.change.operation, coven_merge::Operation::Delete) => {
-                setter_values(db, change)
+                setter_values(db, &record.header, change)
             }
             _ => BTreeMap::new(),
         };
@@ -372,7 +374,7 @@ fn input(
             sources.extend(original.execution().sources.changes().cloned());
             let numbered: Vec<usize> = sources.iter().map(|s| ids.external(s)).collect();
             for (source, id) in sources.iter().zip(&numbered) {
-                if !crate::write_sources::retained(db, source).unwrap() {
+                if !crate::write_sources::retained(db, &record.header, source).unwrap() {
                     dropped.push(*id);
                 }
             }
@@ -515,7 +517,7 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
         let mut all: Vec<(RowId, Step, Vec<HeldReference>)> = Vec::new();
         originals.visit(|original| {
             let row = original.row().clone();
-            let mut view = ChildView::new(&authoring, &row, &original, header.schema_version);
+            let mut view = ChildView::new(&authoring, &row, &original, header);
             for step in &original.execution().steps {
                 all.push((row.clone(), step.clone(), view.held(&index, step)?));
                 view.apply(step);

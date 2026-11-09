@@ -150,6 +150,7 @@ async fn compare(
                 digest: [at as u8; 32],
                 content: SlotContent::Writes { size: 1, writes },
             },
+            crate::test_utils::idle_writers(),
             || Ok(()),
         )
         .await
@@ -410,6 +411,7 @@ async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
                             .collect(),
                     },
                 },
+                crate::test_utils::idle_writers(),
                 || Ok(()),
             )
             .await
@@ -491,6 +493,7 @@ async fn applying_a_slot_leaves_the_temporary_tables_as_they_were() {
                     writes: vec![crate::sequence::tests::stream(write.into())],
                 },
             },
+            crate::test_utils::idle_writers(),
             || Ok(()),
         )
         .await
@@ -602,6 +605,7 @@ async fn a_write_reading_less_than_its_devices_last_landed_write_refuses_its_slo
                     writes: vec![crate::sequence::tests::stream(write.into())],
                 },
             },
+            crate::test_utils::idle_writers(),
             || Ok(()),
         )
     };

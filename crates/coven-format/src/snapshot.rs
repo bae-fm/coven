@@ -302,6 +302,11 @@ impl SnapshotRecord {
             }
             Self::Authored(AuthoredRecord::Change(v)) => {
                 audience(v.record.row())?;
+                require(
+                    v.stop.is_none_or(|stop| stop.get() <= h.covers),
+                    "authored stop slot",
+                    Rule::Coverage,
+                )?;
                 match &v.verdict {
                     ChangeVerdict::Excluded(version) => {
                         require(*version <= h.schema_version, "change verdict", Rule::Coverage)

@@ -130,6 +130,42 @@ pub(crate) fn retain_leaves(
     Ok(())
 }
 
+/// Whether this device keeps the leaf hashes of `write`'s part in
+/// `audience`, having received it whole.
+pub(crate) fn holds_leaves(
+    db: &DatabaseConnection,
+    write: WriteId,
+    audience: &Audience,
+) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_part_leaves WHERE write_id=?1 AND audience=?2)",
+        params![encoded(merge_fields::encode_write_id(&write))?, audience],
+        |r| r.get(0),
+    )
+}
+
+/// The kept records of `write`'s part in `audience` are forgotten (§16.7):
+/// its leaf hashes go, and the write's header evidence once no part of it
+/// keeps leaves or an opening.
+pub(crate) fn forget_part(
+    db: &DatabaseConnection,
+    write: WriteId,
+    audience: &Audience,
+) -> Result<(), DbError> {
+    let id = encoded(merge_fields::encode_write_id(&write))?;
+    db.internal_execute(
+        "DELETE FROM _coven_part_leaves WHERE write_id=?1 AND audience=?2",
+        params![id, audience],
+    )?;
+    db.internal_execute(
+        "DELETE FROM _coven_write_evidence WHERE write_id=?1
+         AND NOT EXISTS(SELECT 1 FROM _coven_part_leaves WHERE write_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM _coven_part_proofs WHERE write_id=?1)",
+        [id],
+    )?;
+    Ok(())
+}
+
 /// What the snapshot audience's rows need opened in one write.
 #[derive(Default)]
 struct Needs {

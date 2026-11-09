@@ -1,6 +1,8 @@
 //! Original authored changes and their admission, independent of dismissible losses.
 
-use crate::{merge_store::MergeStore, sqlite::DatabaseConnection, DbError};
+use crate::{
+    merge_store::MergeStore, sqlite::DatabaseConnection, write_encoding::counter, DbError,
+};
 use coven_format::{
     merge_fields,
     snapshot_rows::{
@@ -29,69 +31,127 @@ fn invalid(field: &'static str) -> DbError {
     coven_format::Error::Invalid { field, rule: coven_format::error::Rule::Coverage }.into()
 }
 
-/// Read the named original net change, never a current winner or an equal
-/// scalar. A row with operations but no net change set no generation or cell,
-/// so it is never a source.
-pub(crate) fn evidence(db: &DatabaseConnection, source: &ChangeId) -> Result<Evidence, DbError> {
-    let Original { header, record } = original(db, source)?;
-    match record {
-        KeptRecord::Change(original) => Ok(Evidence { header, original }),
-        KeptRecord::Execution { .. } => Err(invalid("source has no net change")),
+/// What this device holds of a source a write names, as far as it decides
+/// whether the source counts for that write (§9.5).
+pub(crate) enum Standing<T> {
+    /// Its record is held, and the source counts.
+    Counts(T),
+    /// It doesn't count: it stopped being current at or below the write's
+    /// `read_through`, or its write landed while this device holds no record
+    /// of it. Nothing more of it is read: a device that forgot the record
+    /// couldn't, so one that holds it doesn't either.
+    Dropped,
+    /// This device holds no record of it and its write hasn't landed: the
+    /// evidence is still unavailable.
+    Unknown,
+}
+
+/// The standing of `source` for the write `header` heads, from `held`: its
+/// record's stop slot and what the caller read beside it, when held.
+///
+/// A held source that stopped being current within the write's past counts
+/// as dropped: the write claims to build on a value its author had already
+/// seen replaced, which no genuine write does. One whose write landed but
+/// whose record this device doesn't hold counts as dropped too: devices
+/// forget records at different slots, and a holder drops the same source by
+/// the first rule (§16.7). A migration write whose raise lost to another
+/// device's is such a write: no history holds its changes (§18.8), the
+/// migrating device's own marker among them while it still waits in its
+/// queue.
+fn standing<T>(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    source: &ChangeId,
+    held: Option<(Option<u64>, T)>,
+) -> Result<Standing<T>, DbError> {
+    match held {
+        Some((stop, _)) if stop.is_some_and(|stop| stop <= header.read_through) => {
+            Ok(Standing::Dropped)
+        }
+        Some((_, held)) => Ok(Standing::Counts(held)),
+        None if crate::write_metadata::landed_before(db, source.write, header.position)? => {
+            Ok(Standing::Dropped)
+        }
+        None if crate::upload::queued(db, source.write)?
+            .is_some_and(|frame| frame.header.disposition == WriteDisposition::Migration) =>
+        {
+            Ok(Standing::Dropped)
+        }
+        None => Ok(Standing::Unknown),
     }
 }
 
-/// Read the named original record. A known complete part can prove absence;
-/// otherwise the evidence is still unavailable.
-pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Original, DbError> {
+/// The named original record and its part's header, for the write `header`
+/// heads: never a current winner or an equal scalar.
+pub(crate) fn source(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    source: &ChangeId,
+) -> Result<Standing<Original>, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
     let audience = &source.row.audience;
-    let Some((header, complete)) = db.authored_part(&write, audience)? else {
-        return Err(DbError::MissingWriteSources(vec![source.clone()]));
-    };
-    let row = db.query("SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",params![write,audience,source.row.table,source.row.key],|r| r.get::<_,Vec<u8>>(0))?.pop();
-    let Some(record) = row else {
-        return Err(if complete {
-            invalid("source row")
-        } else {
-            DbError::MissingWriteSources(vec![source.clone()])
-        });
-    };
-    Ok(Original {
-        header: merge_fields::decode_write_header(&header)?,
-        record: KeptRecord::decode(&record)?,
+    let held = db
+        .query(
+            "SELECT stop,record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+            params![write, audience, source.row.table, source.row.key],
+            |r| {
+                Ok((
+                    r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()?,
+                    r.get::<_, Vec<u8>>(1)?,
+                ))
+            },
+        )?
+        .pop();
+    Ok(match standing(db, header, source, held)? {
+        Standing::Counts(record) => {
+            let part = db.authored_part(&write, audience)?.ok_or(DbError::DamagedDatabase)?;
+            Standing::Counts(Original {
+                header: merge_fields::decode_write_header(&part)?,
+                record: KeptRecord::decode(&record)?,
+            })
+        }
+        Standing::Dropped => Standing::Dropped,
+        Standing::Unknown => Standing::Unknown,
     })
 }
 
-/// Whether `source` names a change of a migration write that no history
-/// holds. A migration write's changes reach other devices only in its own
-/// raise's snapshot (§18.4), and a write built on them goes out only after a
-/// raise to its version is established. So when a device judges that write
-/// without holding the migration write's part, another device's raise was
-/// established instead: the migrating device forgot those changes on
-/// loading it, and no other device ever had them. Such a source was dropped
-/// (§9.5), so the change built on it is lost on every device instead of
-/// waiting forever.
-///
-/// A device that loaded a snapshot covering the migration write's slot has
-/// neither its part nor its header: the snapshot carries every change of a
-/// covered write its author held, and no device held these. That write is
-/// known only as a covered one, by its slot. Any write with a part holding
-/// the change would have brought it along, so its absence is the proof.
-pub(crate) fn uncarried(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
-    let write = merge_fields::encode_write_id(&source.write)?;
-    if db.authored_part(&write, &source.row.audience)?.is_some() {
-        return Ok(false);
+/// The named original net change, for the write `header` heads, or none when
+/// the source doesn't count; an unknown one waits. A row with operations but
+/// no net change set no generation or cell, so it is never a source.
+pub(crate) fn counting(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    named: &ChangeId,
+) -> Result<Option<Evidence>, DbError> {
+    match source(db, header, named)? {
+        Standing::Counts(Original { header, record: KeptRecord::Change(original) }) => {
+            Ok(Some(Evidence { header, original }))
+        }
+        Standing::Counts(Original { record: KeptRecord::Execution { .. }, .. }) => {
+            Err(invalid("source has no net change"))
+        }
+        Standing::Dropped => Ok(None),
+        Standing::Unknown => Err(DbError::MissingWriteSources(vec![named.clone()])),
     }
-    // A received marker keeps its header; the migrating device's own marker
-    // may still wait in its queue.
-    let header = match crate::write_headers::read(db, source.write)? {
-        Some(frame) => Some(frame.header),
-        None => crate::upload::queued(db, source.write)?.map(|frame| frame.header),
+}
+
+/// The part header of `write`'s change at `row`, which names its table as
+/// it is now, with that table's name as the write named it, when this device
+/// holds the part. Renames resolve through the recorded schema identities.
+pub(crate) fn kept_part(
+    db: &DatabaseConnection,
+    write: WriteId,
+    row: &RowId,
+) -> Result<Option<(WriteHeader, String)>, DbError> {
+    let Some(bytes) = db.authored_part(&merge_fields::encode_write_id(&write)?, &row.audience)?
+    else {
+        return Ok(None);
     };
-    match header {
-        Some(header) => Ok(header.disposition == WriteDisposition::Migration),
-        None => Ok(crate::sequence::write_slot(db, source.write)?.is_some()),
-    }
+    let header = merge_fields::decode_write_header(&bytes)?;
+    let table =
+        crate::source_names::table(db, db.schema_version()?, &row.table, header.schema_version)?
+            .ok_or(DbError::DamagedDatabase)?;
+    Ok(Some((header, table)))
 }
 
 /// The author's pre-write generation and cell setters of one row, named as
@@ -122,22 +182,12 @@ impl<'a> PreWrite<'a> {
     }
 
     fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
-        let part =
-            self.db.authored_part(&merge_fields::encode_write_id(&write)?, &self.row.audience)?;
-        let Some((bytes, _)) = part else {
+        let Some((header, table)) = kept_part(self.db, write, &self.row)? else {
             return Err(DbError::MissingWriteSources(vec![ChangeId {
                 write,
                 row: self.row.clone(),
             }]));
         };
-        let header = merge_fields::decode_write_header(&bytes)?;
-        let table = crate::source_names::table(
-            self.db,
-            self.version,
-            &self.row.table,
-            header.schema_version,
-        )?
-        .ok_or(DbError::DamagedDatabase)?;
         Ok((ChangeId { write, row: RowId { table, ..self.row.clone() } }, header.schema_version))
     }
 
@@ -336,23 +386,19 @@ pub(crate) fn validate_past(
     Ok(())
 }
 /// A copy names an original generation-zero creation of the same row in
-/// another audience (§9.6). A part this device opened proves or refutes it;
-/// a part it could not read leaves the authenticated claim as written.
+/// another audience (§9.6, D5.7). A kept record of it proves or refutes it.
+/// A creation that doesn't count as a source would, and one in a part this
+/// device could not read, leave the authenticated claim as written.
 fn creation(
     db: &DatabaseConnection,
     header: &WriteHeader,
     row: &RowId,
     creator: &ChangeId,
 ) -> Result<(), DbError> {
-    let opened: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
-        params![merge_fields::encode_write_id(&creator.write)?, &creator.row.audience],
-        |r| r.get(0),
-    )?;
-    if !opened {
+    let Standing::Counts(Original { header: original, record }) = source(db, header, creator)?
+    else {
         return Ok(());
-    }
-    let Original { header: original, record } = self::original(db, creator)?;
+    };
     let KeptRecord::Change(change) = record else {
         return Err(invalid("copied creation"));
     };
@@ -383,16 +429,15 @@ fn roles(
     incarnation: u64,
     sources: &WriteSources,
 ) -> Result<(), DbError> {
-    // A source no history holds has no original to check its role against:
-    // it was dropped, and the change built on it is lost (§9.5).
+    // A source that doesn't count has no original to check its role
+    // against: it was dropped, and the change built on it is lost (§9.5).
     let check = |source: &ChangeId| -> Result<Option<Evidence>, DbError> {
         if source.row.key != row.key || source.row.audience != row.audience {
             return Err(invalid("source row identity"));
         }
-        if uncarried(db, source)? {
+        let Some(evidence) = counting(db, header, source)? else {
             return Ok(None);
-        }
-        let evidence = evidence(db, source)?;
+        };
         if evidence.header.timestamp >= header.timestamp {
             return Err(DbError::InvalidWrite {
                 write: header.position,
@@ -457,16 +502,16 @@ fn part(
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let bytes = merge_fields::encode_write_header(header)?;
-    if let Some((original, _)) = db.authored_part(&write, audience)? {
+    if let Some(original) = db.authored_part(&write, audience)? {
         if original != bytes {
             return Err(invalid("original source header changed"));
         }
     } else {
         db.internal_execute(
-            "INSERT INTO _coven_authored_parts VALUES(?1,?2,?3,0)",
+            "INSERT INTO _coven_authored_parts VALUES(?1,?2,?3)",
             params![write, audience, bytes],
         )?;
-        db.authored_part_changed(&write, audience, Some((bytes, false)));
+        db.authored_part_changed(&write, audience, Some(bytes));
     }
     Ok(())
 }
@@ -519,7 +564,7 @@ pub(crate) fn retain_authored(
     part(db, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     db.internal_execute(
-        "INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5)",
+        "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5)",
         params![write, &row.audience, row.table, row.key, form.keep(record)?],
     )?;
     Ok(())
@@ -527,7 +572,8 @@ pub(crate) fn retain_authored(
 
 /// Keep a received record: its kept form, which must equal any this device
 /// already keeps for the same change, and the whole record in the slot's
-/// staging, which judging the write and applying it read (D7.3).
+/// staging, which judging the write and applying it read (D7.3). A reload
+/// that stages a slot again keeps again a record this device forgot.
 pub(crate) fn retain(
     db: &DatabaseConnection,
     form: &KeptForm<'_>,
@@ -540,54 +586,34 @@ pub(crate) fn retain(
     let audience = &row.audience;
     let kept = form.keep(record)?;
     let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.table,row.key],|r|r.get(0))?;
-    let complete =
-        db.authored_part(&write, audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?.1;
-    if original.is_none() && complete {
-        return Err(invalid("original source part changed"));
-    }
     if original.as_ref().is_some_and(|original| *original != kept) {
         return Err(invalid("original source change changed"));
     }
-    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,kept])?;
+    db.internal_execute("INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,kept])?;
     crate::download_stage::stage_record(db, header, record)
-}
-
-pub(crate) fn complete(
-    db: &DatabaseConnection,
-    header: &WriteHeader,
-    audience: &coven_merge::Audience,
-) -> Result<(), DbError> {
-    part(db, header, audience)?;
-    let write = merge_fields::encode_write_id(&header.position)?;
-    db.internal_execute("UPDATE _coven_authored_parts SET complete=1 WHERE write_id=?1 AND audience=?2 AND complete=0",params![write,audience])?;
-    db.authored_part_changed(
-        &write,
-        audience,
-        Some((merge_fields::encode_write_header(header)?, true)),
-    );
-    Ok(())
 }
 
 /// Install a snapshot's source records for `audience` from the copies its
 /// install staged in `temp._coven_install_parts` and
 /// `temp._coven_install_authored`, once they are checked against this
-/// device's: a part the device lacks starts incomplete, an original the
-/// device holds stays, and the snapshot's verdict replaces the device's, an
-/// unjudged one too.
+/// device's: an original the device holds stays, with the snapshot's stop
+/// slot, and the snapshot's verdict replaces the device's, an unjudged one
+/// too. A record the device holds and the snapshot doesn't stays until the
+/// device forgets it (§16.7).
 pub(crate) fn install(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     db.internal_execute(
-        "INSERT INTO _coven_authored_parts(write_id,audience,header,complete)
-         SELECT write_id,audience,header,0 FROM temp._coven_install_parts s WHERE s.audience=?1
+        "INSERT INTO _coven_authored_parts(write_id,audience,header)
+         SELECT write_id,audience,header FROM temp._coven_install_parts s WHERE s.audience=?1
          AND NOT EXISTS(SELECT 1 FROM _coven_authored_parts p WHERE p.write_id=s.write_id AND p.audience=s.audience)",
         params![audience],
     )?;
     db.internal_execute(
-        "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record)
-         SELECT write_id,audience,table_name,key,record FROM temp._coven_install_authored WHERE audience=?1
-         ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",
+        "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record,stop)
+         SELECT write_id,audience,table_name,key,record,stop FROM temp._coven_install_authored WHERE audience=?1
+         ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET stop=excluded.stop",
         params![audience],
     )?;
     db.internal_execute(
@@ -601,21 +627,7 @@ pub(crate) fn install(
          ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET admission=excluded.admission",
         params![audience],
     )?;
-    Ok(())
-}
-
-/// Mark the parts the installed snapshot holds whole, once all their changes
-/// are in.
-pub(crate) fn complete_installed(
-    db: &DatabaseConnection,
-    audience: &coven_merge::Audience,
-) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_authored_parts SET complete=1 WHERE complete=0 AND (write_id,audience) IN (
-           SELECT write_id,audience FROM temp._coven_install_parts WHERE audience=?1 AND complete=1)",
-        params![audience],
-    )?;
-    Ok(())
+    crate::forget_records::look_again(db)
 }
 
 /// Record this device's current interpretation under the original identity,
@@ -629,7 +641,7 @@ pub(crate) fn admit(
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = &row.audience;
-    let (original, _) =
+    let original =
         db.authored_part(&write, audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let original = merge_fields::decode_write_header(&original)?;
     let table =
@@ -649,12 +661,17 @@ pub(crate) fn admit(
     Ok(())
 }
 
-/// Whether an original change survives as data for later changes: applied
-/// here, or never judged here because a loaded snapshot carries its effects.
-pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
-    let admission: Option<Option<Vec<u8>>> = db
+/// Whether an original change survives as data for the write `header`
+/// heads: it counts as a source for it, and was applied here, or never
+/// judged here because a loaded snapshot carries its effects.
+pub(crate) fn retained(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    source: &ChangeId,
+) -> Result<bool, DbError> {
+    let held = db
         .query(
-            "SELECT a.admission FROM _coven_authored_changes c
+            "SELECT c.stop,a.admission FROM _coven_authored_changes c
              LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
              WHERE c.write_id=?1 AND c.audience=?2 AND c.table_name=?3 AND c.key=?4",
             params![
@@ -663,13 +680,18 @@ pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<boo
                 source.row.table,
                 source.row.key
             ],
-            |r| r.get(0),
+            |r| {
+                Ok((
+                    r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()?,
+                    r.get::<_, Option<Vec<u8>>>(1)?,
+                ))
+            },
         )?
         .pop();
-    match admission {
-        None if uncarried(db, source)? => Ok(false),
-        None => Err(DbError::MissingWriteSources(vec![source.clone()])),
-        Some(admission) => Ok(read_verdict(admission)?.retained()),
+    match standing(db, header, source, held)? {
+        Standing::Counts(admission) => Ok(read_verdict(admission)?.retained()),
+        Standing::Dropped => Ok(false),
+        Standing::Unknown => Err(DbError::MissingWriteSources(vec![source.clone()])),
     }
 }
 
@@ -692,8 +714,8 @@ fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
 }
 
 /// Every kept change of an audience whose containing slot is covered, each
-/// part's header and completeness before its changes, with this device's
-/// verdict on each, in D7 section 4 order.
+/// part's header before its changes, with this device's verdict on each and
+/// the slot at which it stopped being current, in D7 section 4 order.
 pub(crate) fn visit_evidence<E: From<DbError>>(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
@@ -702,7 +724,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
 ) -> Result<(), E> {
     let mut part: Option<Vec<u8>> = None;
     db.for_each(
-        "SELECT c.write_id,p.header,p.complete,c.record,a.admission FROM _coven_authored_changes c
+        "SELECT c.write_id,p.header,c.stop,c.record,a.admission FROM _coven_authored_changes c
          JOIN _coven_authored_parts p ON p.write_id=c.write_id AND p.audience=c.audience
          LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
          WHERE c.audience=?1 ORDER BY c.write_id,c.table_name,c.key",
@@ -717,17 +739,21 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
                 return Ok(());
             }
             if part.as_ref() != Some(&write) {
-                visit(AuthoredRecord::Part(AuthoredPart {
-                    header,
-                    complete: r.get(2).map_err(DbError::from)?,
-                }))?;
+                visit(AuthoredRecord::Part(AuthoredPart { header }))?;
                 part = Some(write);
             }
             let record = KeptRecord::decode(&r.get::<_, Vec<u8>>(3).map_err(DbError::from)?)
                 .map_err(DbError::from)?;
+            let stop = r
+                .get::<_, Option<Vec<u8>>>(2)
+                .map_err(DbError::from)?
+                .map(crate::write_encoding::slot_counter)
+                .transpose()
+                .map_err(DbError::from)?;
             visit(AuthoredRecord::Change(AuthoredChange {
                 record,
                 verdict: read_verdict(r.get(4).map_err(DbError::from)?)?,
+                stop,
             }))
         },
     )

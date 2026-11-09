@@ -325,7 +325,6 @@ fn finish(
                     &coven_format::snapshot_rows::ChangeVerdict::Applied,
                 )?;
             }
-            crate::write_sources::complete(database, &record.header, &part.audience)?;
         }
         record.parts.clear();
         crate::write_commit::queue(database, &schema, &record, Default::default())?;

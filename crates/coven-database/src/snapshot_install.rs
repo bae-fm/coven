@@ -33,8 +33,8 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
     }
     db.batch(
         "CREATE TEMP TABLE _coven_install_generations(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,generation BLOB NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL);
-         CREATE TEMP TABLE _coven_install_parts(write_id BLOB NOT NULL,audience TEXT NOT NULL,header BLOB NOT NULL,complete INTEGER NOT NULL,PRIMARY KEY(write_id,audience)) WITHOUT ROWID;
-         CREATE TEMP TABLE _coven_install_authored(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,admission BLOB,PRIMARY KEY(write_id,audience,table_name,key)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_parts(write_id BLOB NOT NULL,audience TEXT NOT NULL,header BLOB NOT NULL,PRIMARY KEY(write_id,audience)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_authored(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,admission BLOB,stop BLOB,PRIMARY KEY(write_id,audience,table_name,key)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_before(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,shown INTEGER NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_conflicts(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_region(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
@@ -257,9 +257,8 @@ pub(crate) fn finish(
 }
 
 /// Install the snapshot's source records (D7): each part's header must be
-/// the one the device holds, an original the device holds must be the same
-/// bytes, and a part the device holds whole gains no change. The snapshot's
-/// verdicts replace the device's.
+/// the one the device holds, and an original the device holds must be the
+/// same bytes. The snapshot's verdicts and stop slots replace the device's.
 pub(crate) fn sources(
     db: &DatabaseConnection,
     prepared: &PreparedSnapshot<'_>,
@@ -269,19 +268,19 @@ pub(crate) fn sources(
         db,
         prepared,
         &format!(
-            "SELECT write_id,audience,header,complete FROM {} ORDER BY write_id,audience",
+            "SELECT write_id,audience,header FROM {} ORDER BY write_id,audience",
             prepared.table("parts")
         ),
-        "INSERT INTO temp._coven_install_parts(write_id,audience,header,complete) VALUES(?1,?2,?3,?4)",
+        "INSERT INTO temp._coven_install_parts(write_id,audience,header) VALUES(?1,?2,?3)",
     )?;
     copy(
         db,
         prepared,
         &format!(
-            "SELECT write_id,audience,table_name,key,record,admission FROM {} ORDER BY rowid",
+            "SELECT write_id,audience,table_name,key,record,admission,stop FROM {} ORDER BY rowid",
             prepared.table("authored")
         ),
-        "INSERT INTO temp._coven_install_authored(write_id,audience,table_name,key,record,admission) VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO temp._coven_install_authored(write_id,audience,table_name,key,record,admission,stop) VALUES(?1,?2,?3,?4,?5,?6,?7)",
     )?;
     if exists(
         db,
@@ -290,15 +289,6 @@ pub(crate) fn sources(
         params![audience],
     )? {
         return Err(invalid("original source header changed"));
-    }
-    if exists(
-        db,
-        "SELECT EXISTS(SELECT 1 FROM temp._coven_install_authored s WHERE s.audience=?1
-         AND EXISTS(SELECT 1 FROM _coven_authored_parts p WHERE p.write_id=s.write_id AND p.audience=s.audience AND p.complete=1)
-         AND NOT EXISTS(SELECT 1 FROM _coven_authored_changes c WHERE c.write_id=s.write_id AND c.audience=s.audience AND c.table_name=s.table_name AND c.key=s.key))",
-        params![audience],
-    )? {
-        return Err(invalid("original source part changed"));
     }
     if exists(
         db,

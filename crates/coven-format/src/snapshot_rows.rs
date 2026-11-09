@@ -447,41 +447,29 @@ impl KeptRecord {
 }
 
 /// One accepted write part's shared details in a snapshot's section 4 (D7.3),
-/// before its changes: the authored header, and whether every change of the
-/// part is known, so absence of a named row is proof rather than a wait.
+/// before its changes: the authored header. A part may hold fewer changes
+/// than its write made, the rest forgotten, so a row it doesn't hold proves
+/// nothing about the write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoredPart {
     /// The original write header, before any conversion.
     pub header: crate::write::WriteHeader,
-    /// Whether the part arrived whole.
-    pub complete: bool,
 }
-impl Wire for AuthoredPart {
-    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        self.header.put(out)?;
-        u8::from(self.complete).put(out)
-    }
-    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        let header = Wire::get(input)?;
-        let complete = match u8::get(input)? {
-            0 => false,
-            1 => true,
-            tag => return Err(Error::UnknownTag { field: "authored part completeness", tag }),
-        };
-        Ok(Self { header, complete })
-    }
-}
+wire_struct!(AuthoredPart, header);
 
-/// One kept change of the part before it in section 4, and its verdict by
-/// the snapshot's author (D7.3).
+/// One kept change of the part before it in section 4, its verdict by the
+/// snapshot's author, and the slot at which it stopped being current (D7.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoredChange {
     /// The change's kept record.
     pub record: KeptRecord,
     /// Its interpretation by the snapshot's author.
     pub verdict: ChangeVerdict,
+    /// The slot at which it stopped being current, once it has, at or below
+    /// the snapshot's coverage (coven.md §16.7).
+    pub stop: Option<Slot>,
 }
-wire_struct!(AuthoredChange, record, verdict);
+wire_struct!(AuthoredChange, record, verdict, stop);
 impl AuthoredChange {
     /// The change's identity in the part `header` heads.
     pub fn id(&self, header: &crate::write::WriteHeader) -> crate::write_sources::ChangeId {

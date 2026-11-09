@@ -5,9 +5,9 @@
 //! row's current incarnation, or else the value its replaced setter's kept
 //! record holds: in full for a column that was a reference when the setter
 //! wrote it, which every column read here is, and as a digest otherwise
-//! (D7.3). A missing record waits, unless no
-//! history holds it, as for a migration write another raise replaced: then
-//! the cell has no known value, and the change is lost anyway. A reference
+//! (D7.3). A missing record waits, unless the setter doesn't count as a
+//! source for the write (§9.5): then the cell has no known value, and the
+//! change is lost anyway. A reference
 //! names the row its values key where the write's earlier steps leave that
 //! key, moves included, or, when no step touched it, the parent its setter
 //! recorded ([`StepIndex::place`]). The references a step's row holds
@@ -24,7 +24,7 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::snapshot_rows::KeptValue;
 use coven_format::value::Value;
-use coven_format::write::{Half, OriginalRow, Step};
+use coven_format::write::{Half, OriginalRow, Step, WriteHeader};
 use coven_merge::{Change, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::BTreeMap;
 
@@ -78,8 +78,8 @@ pub(crate) struct ChildView<'a> {
     cells: BTreeMap<String, ColumnValue<Value>>,
     /// An earlier step began or ended an incarnation: no pre-write cell is current.
     fresh: bool,
-    /// The write's schema version.
-    version: u32,
+    /// The write's header: its schema version, and what it read.
+    header: &'a WriteHeader,
 }
 
 impl<'a> ChildView<'a> {
@@ -87,9 +87,9 @@ impl<'a> ChildView<'a> {
         authoring: &'a Authoring<'a>,
         row: &'a RowId,
         record: &'a OriginalRow,
-        version: u32,
+        header: &'a WriteHeader,
     ) -> Self {
-        Self { authoring, row, record, cells: BTreeMap::new(), fresh: false, version }
+        Self { authoring, row, record, cells: BTreeMap::new(), fresh: false, header }
     }
 
     pub(crate) fn apply(&mut self, step: &Step) {
@@ -119,12 +119,13 @@ impl<'a> ChildView<'a> {
         let Some(setter) = net.or_else(|| execution.sources.setters.get(column)) else {
             return Ok(None);
         };
-        // A setter no history holds wrote a value no device can know; the
-        // change replacing it is lost with that setter (§9.5).
-        if crate::write_sources::uncarried(db, &setter.change)? {
+        // A setter that doesn't count for this write has no value this
+        // device may read; the change replacing it is lost with that setter
+        // on every device alike (§9.5).
+        let Some(evidence) = crate::write_sources::counting(db, self.header, &setter.change)?
+        else {
             return Ok(None);
-        }
-        let evidence = crate::write_sources::evidence(db, &setter.change)?;
+        };
         let mut cell = match &evidence.original.change.operation {
             Operation::Insert(columns) | Operation::Update(columns) => {
                 columns.get(&setter.column).cloned()
@@ -133,13 +134,13 @@ impl<'a> ChildView<'a> {
         };
         // A setter authored before a rename names its parents as it saw them.
         if let Some(cell) = &mut cell {
-            if evidence.header.schema_version != self.version {
+            if evidence.header.schema_version != self.header.schema_version {
                 for parent in cell.parents.values_mut() {
                     if let Some(table) = crate::source_names::table(
                         db,
                         evidence.header.schema_version,
                         &parent.row.table,
-                        self.version,
+                        self.header.schema_version,
                     )? {
                         parent.row.table = table;
                     }

@@ -171,43 +171,29 @@ pub(crate) fn stage_selected(
     let form = crate::write_sources::KeptForm::new(schema, original_header.header.schema_version);
     let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
     let mut dismissed = Vec::new();
-    read_authenticated(
-        database,
-        write,
-        |header, audience, frame| {
-            if !selected(audience) {
-                return Ok(());
+    read_authenticated(database, write, |header, audience, frame| {
+        if !selected(audience) {
+            return Ok(());
+        }
+        if let WriteFrame::Dismissal(dismissal) = &frame {
+            dismissed.push(dismissal.row.clone());
+        }
+        if refused {
+            if let Some(record) = frame.record() {
+                crate::write_sources::retain(database, &form, header, record)?;
+                crate::write_sources::admit(
+                    database,
+                    header,
+                    record.row(),
+                    &coven_format::snapshot_rows::ChangeVerdict::Refused,
+                )?;
             }
-            if let WriteFrame::Dismissal(dismissal) = &frame {
-                dismissed.push(dismissal.row.clone());
-            }
-            if refused {
-                if let Some(record) = frame.record() {
-                    crate::write_sources::retain(database, &form, header, record)?;
-                    crate::write_sources::admit(
-                        database,
-                        header,
-                        record.row(),
-                        &coven_format::snapshot_rows::ChangeVerdict::Refused,
-                    )?;
-                }
-                return Ok(());
-            }
-            let ignored = crate::write_boundary::WriteBoundary::ignore(
-                &boundaries,
-                header,
-                audience,
-                Some(slot),
-            );
-            crate::download_stage::frame(database, &form, header, ignored, frame)
-        },
-        |header, audience| {
-            if selected(audience) {
-                crate::write_sources::complete(database, header, audience)?;
-            }
-            Ok(())
-        },
-    )?;
+            return Ok(());
+        }
+        let ignored =
+            crate::write_boundary::WriteBoundary::ignore(&boundaries, header, audience, Some(slot));
+        crate::download_stage::frame(database, &form, header, ignored, frame)
+    })?;
     if let Some(reach) = reach {
         crate::queued_writes::put_back(
             database,
@@ -217,12 +203,20 @@ pub(crate) fn stage_selected(
             dismissed,
         )?;
     }
-    if !refused {
+    if refused {
+        crate::forget_records::none_current(
+            database,
+            original_header.header.position,
+            &opened,
+            slot,
+        )?;
+    } else {
         crate::download_stage::stage(
             database,
             schema,
             &original_header.header,
             &opened,
+            Some(slot),
             |audience| Ok(selected(audience)),
         )?;
     }
@@ -240,17 +234,12 @@ pub(crate) fn retain_sources(
     crate::download_stage::begin(db)?;
     let header = write.header.header.clone();
     let form = crate::write_sources::KeptForm::new(schema, header.schema_version);
-    read_authenticated(
-        db,
-        write,
-        |header, _, frame| {
-            if let Some(record) = frame.record() {
-                crate::write_sources::retain(db, &form, header, record)?;
-            }
-            Ok(())
-        },
-        |header, audience| crate::write_sources::complete(db, header, audience),
-    )?;
+    read_authenticated(db, write, |header, _, frame| {
+        if let Some(record) = frame.record() {
+            crate::write_sources::retain(db, &form, header, record)?;
+        }
+        Ok(())
+    })?;
     crate::download_stage::release(db, &header)
 }
 
@@ -266,10 +255,6 @@ fn read_authenticated(
         &coven_merge::Audience,
         WriteFrame,
     ) -> Result<(), crate::DbError>,
-    mut complete: impl FnMut(
-        &coven_format::write::WriteHeader,
-        &coven_merge::Audience,
-    ) -> Result<(), crate::DbError>,
 ) -> Result<(), crate::DbError> {
     let position = write.header.header.position;
     let evidence = crate::authorship::keeps_evidence(database, position)?;
@@ -283,7 +268,6 @@ fn read_authenticated(
         if evidence {
             crate::authorship::retain_leaves(database, position, &header.audience, &part.hashes)?;
         }
-        complete(&write.header.header, &header.audience)?;
     }
     crate::write_headers::retain(database, &write.header)?;
     if evidence {

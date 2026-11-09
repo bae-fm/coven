@@ -99,10 +99,13 @@ impl Database {
     }
 
     /// Commit one complete slot, its claim number and every readable effect.
-    /// Authentication failure rolls back the slot and leaves its predecessor applied.
+    /// Authentication failure rolls back the slot and leaves its predecessor
+    /// applied. `writers` are the other devices that can still write once
+    /// the slot is applied, which kept records wait for (§16.7).
     pub async fn apply_slot<P, R, F>(
         &self,
         incoming: crate::IncomingSlot<crate::DownloadedWriteStream<R>>,
+        writers: crate::Writers,
         authenticate: F,
     ) -> Result<crate::ApplyOutcome, DbError>
     where
@@ -135,6 +138,7 @@ impl Database {
                                 reader,
                                 &inner.access.write_schema,
                                 incoming,
+                                &writers,
                                 files,
                                 inner.raise_operation.as_deref(),
                                 authenticate,

@@ -92,6 +92,16 @@ where
     }
 }
 
+/// Writers for a test not about forgetting kept records: one other device
+/// that can still write but never lands a write, so every kept record stays
+/// (§16.7).
+pub fn idle_writers() -> crate::Writers {
+    crate::Writers::new(std::collections::BTreeMap::from([(
+        coven_foundation::id_source::DeviceId(u64::MAX),
+        None,
+    )]))
+}
+
 /// Fixed member key used to authenticate fixture writes.
 pub fn signer() -> coven_crypto::SigningKey {
     coven_format::test_utils::keys_from_seed(0xA5).public_keys().signing

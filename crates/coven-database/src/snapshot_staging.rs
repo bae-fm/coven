@@ -71,8 +71,8 @@ fn create_staged(
     db.batch(&format!(
         "CREATE TEMP TABLE {}(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,generation BLOB NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL);
          CREATE TEMP TABLE {}(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;
-         CREATE TEMP TABLE {}(write_id BLOB NOT NULL,audience TEXT NOT NULL,header BLOB NOT NULL,complete INTEGER NOT NULL,PRIMARY KEY(write_id,audience)) WITHOUT ROWID;
-         CREATE TEMP TABLE {}(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,admission BLOB);
+         CREATE TEMP TABLE {}(write_id BLOB NOT NULL,audience TEXT NOT NULL,header BLOB NOT NULL,PRIMARY KEY(write_id,audience)) WITHOUT ROWID;
+         CREATE TEMP TABLE {}(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,admission BLOB,stop BLOB);
          CREATE TEMP TABLE {}(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,write_id BLOB NOT NULL,creator BLOB NOT NULL);
          CREATE TEMP TABLE {}(section INTEGER NOT NULL,evidence INTEGER NOT NULL CHECK(evidence IN (0,1)),record BLOB NOT NULL);",
         name("generations"),
@@ -114,7 +114,6 @@ struct Inserts {
     generations: String,
     columns: String,
     parts: String,
-    complete: String,
     authored: String,
     creations: String,
     records: String,
@@ -147,15 +146,8 @@ impl Inserts {
             rows,
             generations: insert("generations", "table_name,key,audience,generation,device,number"),
             columns: insert("columns", "table_name,column_name"),
-            parts: format!(
-                "INSERT INTO {}(write_id,audience,header,complete) VALUES(?1,?2,?3,0)",
-                table(staging, "parts")
-            ),
-            complete: format!(
-                "UPDATE {} SET complete=1 WHERE write_id=?1 AND audience=?2",
-                table(staging, "parts")
-            ),
-            authored: insert("authored", "write_id,audience,table_name,key,record,admission"),
+            parts: insert("parts", "write_id,audience,header"),
+            authored: insert("authored", "write_id,audience,table_name,key,record,admission,stop"),
             creations: insert("creations", "table_name,key,audience,write_id,creator"),
             records: insert("records", "section,evidence,record"),
         }
@@ -296,7 +288,6 @@ struct StagingState {
 struct StagedPart {
     write: Vec<u8>,
     header: WriteHeader,
-    complete: bool,
     staged: bool,
 }
 
@@ -746,7 +737,6 @@ impl RecordStaging<'_> {
                 *part = Some(StagedPart {
                     write: encoded(merge_fields::encode_write_id(&new.header.position))?,
                     header: new.header.clone(),
-                    complete: new.complete,
                     staged: false,
                 });
                 return Ok(Ok(()));
@@ -767,9 +757,6 @@ impl RecordStaging<'_> {
                     encoded(merge_fields::encode_write_header(&part.header))?
                 ],
             )?;
-            if part.complete {
-                self.db.internal_execute(&self.inserts.complete, params![part.write, audience])?;
-            }
             part.staged = true;
         }
         let form = crate::write_sources::KeptForm::new(self.schema, part.header.schema_version);
@@ -784,7 +771,8 @@ impl RecordStaging<'_> {
                 row.table,
                 row.key,
                 change.record.encode()?,
-                crate::write_sources::stored_verdict(&change.verdict)?
+                crate::write_sources::stored_verdict(&change.verdict)?,
+                change.stop.map(|stop| stop.get().to_be_bytes().to_vec())
             ],
         )?;
         Ok(Ok(()))

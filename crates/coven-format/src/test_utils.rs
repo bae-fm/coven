@@ -463,8 +463,9 @@ pub fn authored_records() -> Vec<crate::snapshot_rows::AuthoredRecord> {
     });
     let write = write();
     let part = &write.parts[0];
-    let applied =
-        |record| AuthoredRecord::Change(AuthoredChange { record, verdict: ChangeVerdict::Applied });
+    let applied = |record, stop| {
+        AuthoredRecord::Change(AuthoredChange { record, verdict: ChangeVerdict::Applied, stop })
+    };
     vec![
         AuthoredRecord::Part(AuthoredPart {
             header: WriteHeader {
@@ -474,12 +475,15 @@ pub fn authored_records() -> Vec<crate::snapshot_rows::AuthoredRecord> {
                 schema_version: 1,
                 disposition: WriteDisposition::Apply,
             },
-            complete: true,
         }),
-        applied(created),
-        AuthoredRecord::Part(AuthoredPart { header: write.header.clone(), complete: true }),
-        applied(KeptRecord::keep(PartRecord::Change(&part.rows[0]), |_| true).unwrap()),
-        applied(KeptRecord::keep(PartRecord::Execution(&part.executions[0]), |_| true).unwrap()),
+        applied(created, None),
+        AuthoredRecord::Part(AuthoredPart { header: write.header.clone() }),
+        applied(KeptRecord::keep(PartRecord::Change(&part.rows[0]), |_| true).unwrap(), None),
+        // An execution never becomes current: it stops at its own slot.
+        applied(
+            KeptRecord::keep(PartRecord::Execution(&part.executions[0]), |_| true).unwrap(),
+            Some(slot(6)),
+        ),
     ]
 }
 /// A concurrent cell loss of the fixture row.

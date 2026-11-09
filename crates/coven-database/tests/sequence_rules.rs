@@ -208,6 +208,7 @@ async fn apply_claim(
                 writes: writes.into_iter().map(stream).collect(),
             },
         },
+        coven_database::test_utils::idle_writers(),
         || Ok(()),
     )
     .await
@@ -266,7 +267,9 @@ async fn applied_slot_and_all_effects_commit_together() {
         },
     };
     assert!(db
-        .apply_slot::<Pending, _, _>(incoming, || Err(DbError::TransactionEnded))
+        .apply_slot::<Pending, _, _>(incoming, coven_database::test_utils::idle_writers(), || Err(
+            DbError::TransactionEnded
+        ))
         .await
         .is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
@@ -364,6 +367,7 @@ async fn admin(
                 }),
             },
         },
+        coven_database::test_utils::idle_writers(),
         || Ok(()),
     )
     .await
@@ -429,6 +433,7 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
                     },
                     content: SlotContent::Writes { size: 1, writes: vec![write] },
                 },
+                coven_database::test_utils::idle_writers(),
                 || Ok(()),
             )
             .await
@@ -691,7 +696,13 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         },
     };
     assert_eq!(
-        db.apply_slot::<Pending, _, _>(incoming(), || Ok(())).await.unwrap(),
+        db.apply_slot::<Pending, _, _>(
+            incoming(),
+            coven_database::test_utils::idle_writers(),
+            || Ok(())
+        )
+        .await
+        .unwrap(),
         ApplyOutcome::Waiting(WriteWait::Reload(Audience::Store))
     );
     assert_eq!(db.applied_slot().await.unwrap(), 0);
@@ -750,6 +761,7 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
                     },
                     content: SlotContent::Writes { size: 1, writes: vec![write] },
                 },
+                coven_database::test_utils::idle_writers(),
                 || Ok(()),
             )
             .await
@@ -799,9 +811,11 @@ async fn a_failed_slot_apply_shows_no_lost_values_or_refusals() {
         content: SlotContent::Writes { size: 1, writes: writes.into_iter().map(stream).collect() },
     };
     assert!(db
-        .apply_slot::<Pending, _, _>(incoming(vec![losing.clone()]), || Err(
-            DbError::TransactionEnded
-        ))
+        .apply_slot::<Pending, _, _>(
+            incoming(vec![losing.clone()]),
+            coven_database::test_utils::idle_writers(),
+            || Err(DbError::TransactionEnded)
+        )
         .await
         .is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 1);
