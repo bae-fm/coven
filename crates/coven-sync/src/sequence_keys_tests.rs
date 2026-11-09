@@ -53,12 +53,10 @@ async fn compare_rotation(
         assert_eq!(bounded.prefix.key, outer, "rotation never needs an unheld outer key");
     }
     for saved in after.copies.iter().filter(|c| c.path.slot_number().unwrap().get() > through) {
-        let SlotKind::KeyCopy(copy) = &saved.prefix.kind else {
-            panic!("copy");
-        };
+        let copy = &saved.copy;
         let recipient = recipients.iter().find(|m| m.member() == copy.routing.member).unwrap();
         let context =
-            SlotObjectPrefix::copy_context(saved.prefix.format, saved.prefix.key, &copy.routing)
+            SlotObjectPrefix::copy_context(saved.format, saved.key, saved.place, &copy.routing)
                 .unwrap();
         let hash = match audience {
             Audience::Store => {
@@ -317,8 +315,7 @@ async fn a_device_with_no_usable_key_rotates_before_sending() {
         introduced.slot
     );
     assert!(session.history.copies.iter().all(|copy| {
-        let SlotKind::KeyCopy(copy) = &copy.prefix.kind else { panic!("copy") };
-        copy.routing.key != sealed_with || copy.routing.member != ben.identity.member()
+        copy.route().key != sealed_with || copy.route().member != ben.identity.member()
     }));
     assert!(!session.history.exposed(&Audience::Store, sealed_with));
     drop(session);
@@ -397,9 +394,10 @@ async fn after_a_removal_the_next_write_and_snapshot_open_only_with_the_replacem
     }
 }
 
-/// Carol joins after the store key was rotated: she is sent a copy of the
-/// older key too, so she reads what was written under it. A retried
-/// operation sends no copy that is already in the sequence (§12.1).
+/// Carol is admitted after the store key was rotated: her admission carries a
+/// copy of the older key too, so she reads what was written under it. An
+/// admission whose claim failed posts its copies once, with the admission
+/// that lands (§12.1, §13.2).
 #[tokio::test]
 async fn a_member_lacking_an_older_key_gets_a_copy_once() {
     let group = Group::new();
@@ -427,21 +425,19 @@ async fn a_member_lacking_an_older_key_gets_a_copy_once() {
         .collect();
     assert_eq!(keys.len(), 2);
 
-    // The admission's claim fails once, after its copies landed.
+    // The admission's claim fails once.
     let first = ana.database().applied_slot().await.unwrap() + 1;
-    let claim = coven_storage::ObjectPath::slot(group.store, (first + 2).try_into().unwrap());
+    let claim = coven_storage::ObjectPath::slot(group.store, first.try_into().unwrap());
     ana.storage
         .set_faults(coven_storage::test_utils::Faults {
             create_failures: [(claim, (coven_storage::StorageFailure::Network, 500))].into(),
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    let admission = StoreChange::AddMember {
-        member: carol.member(),
-        keys: carol.keys().public_keys(),
-        role: coven_format::admin::MemberRole::Member,
-        access: group.access("carol"),
-    };
+    // Carol's phone holds no key but what the copies sent to her give it.
+    let phone = group.newcomer(carol.clone(), group.storage.for_device()).await;
+    let admission =
+        admission(&phone, coven_format::admin::MemberRole::Member, group.access("carol"), "Carol");
     assert!(ana.sync.administer(admission).await.is_err());
     ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
@@ -454,26 +450,14 @@ async fn a_member_lacking_an_older_key_gets_a_copy_once() {
             .history
             .copies
             .iter()
-            .filter_map(|copy| match &copy.prefix.kind {
-                SlotKind::KeyCopy(copy) if copy.routing.member == carol.member() => {
-                    Some(copy.routing.key)
-                }
-                _ => None,
-            })
+            .filter(|copy| copy.route().member == carol.member())
+            .map(|copy| copy.route().key)
             .collect();
         sent.sort();
         let mut expected = keys.clone();
         expected.sort();
         assert_eq!(sent, expected, "one copy of each store key");
     }
-    // Carol's phone holds no key but what the copies sent to her give it.
-    let phone = group.newcomer(carol, group.storage.for_device()).await;
-    phone.sync.pass().await.unwrap();
-    phone
-        .sync
-        .administer(StoreChange::AddDevice { name: "Carol".into(), replaces: None })
-        .await
-        .unwrap();
     phone.sync.pass().await.unwrap();
     assert_eq!(
         rows(phone.database()).await,

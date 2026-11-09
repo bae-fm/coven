@@ -34,8 +34,10 @@ def Phase.rank : Phase → Nat
   | .loading => 1
   | .done => 2
 
-/-- What one check finds: its keys open, the approving entry binds the
-request's pair, the request is still in storage. -/
+/-- What one check finds: its keys open, the approving admission binds the
+request's pair and registers its device, the request is still in storage.
+Keys open only from that admission's slot, so a check whose keys open decides
+the join (`JoinScan.opened_decides`). -/
 abbrev Check := Bool × Bool × Bool
 
 /-- What happens to a join, in order. -/
@@ -123,13 +125,12 @@ theorem phases_forward : ∀ (opened : Bool) (events : List Event),
         | (constructor <;> intro p mem <;> cases p <;> simp_all [Phase.rank])
         | skip
 
-/-- Kept only in the call: the resumed call reports waiting after the call
-before it loaded. -/
+/-- Kept only in the call: the call stops while it loads, and the resumed
+call reports waiting after the call before it loaded. -/
 theorem resumed_waits_again :
-    run ⟨false, false⟩ false [.check (true, false, true), .stop, .check (true, false, true)] =
-        [.waiting, .loading, .waiting, .loading] ∧
-      ¬ (run ⟨false, false⟩ false
-          [.check (true, false, true), .stop, .check (true, false, true)]).Pairwise
+    run ⟨false, false⟩ false [.stopLoading, .check (true, true, false)] =
+        [.waiting, .loading, .waiting, .loading, .done] ∧
+      ¬ (run ⟨false, false⟩ false [.stopLoading, .check (true, true, false)]).Pairwise
         (fun a b => a.rank ≤ b.rank) := by
   decide
 

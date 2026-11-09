@@ -212,7 +212,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 -- A removed member id cannot return, even through a fresh device.
 #eval do
   let result ← run (applyCase [admin 0 1 (json% {"kind":"removeMember","member":1}),
-    admin 0 2 (json% {"kind":"addMember","member":1,"role":"member"}),
+    admin 0 2 (json% {"kind":"admitMember","member":1,"role":"member","device":2}),
     admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     writes 1 1 0 [part 0 1 [7] [] [] []],
     writes 2 2 0 [part 0 1 [7] [] [] []]])
@@ -222,18 +222,29 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","refused"] (json% [4,5])
   checkField result ["audiences","0","unique_claims"] (json% [])
 
--- Re-inviting a removed person uses a member id with no prior membership.
+-- Re-inviting a removed person uses a member id with no prior membership;
+-- the admission registers their device.
 #eval do
   let result ← run (applyCase [
     admin 0 1 (json% {"kind":"removeMember","member":1}),
-    admin 0 2 (json% {"kind":"addMember","member":2,"role":"member"}),
-    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2,"replaces":null}),
-    writes 2 2 0 [part 0 1 [7] [] [] []]])
+    admin 0 2 (json% {"kind":"admitMember","member":2,"role":"member","device":2}),
+    writes 2 1 0 [part 0 1 [7] [] [] []]])
   checkField result ["ledger","members"] (json% [[0,"admin"],[2,"member"]])
   checkField result ["ledger","retired"] (json% [1])
   checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,2]])
   checkField result ["ledger","refused"] (json% [])
-  checkField result ["audiences","0","unique_claims"] (json% [[7,4]])
+  checkField result ["audiences","0","unique_claims"] (json% [[7,3]])
+
+-- An admission registers only a fresh device, never its own author, and not
+-- for a current member.
+#eval do
+  let result ← run (applyCase [
+    admin 0 1 (json% {"kind":"admitMember","member":2,"role":"member","device":1}),
+    admin 0 2 (json% {"kind":"admitMember","member":2,"role":"member","device":0}),
+    admin 0 3 (json% {"kind":"admitMember","member":1,"role":"member","device":2}),
+    admin 0 4 (json% {"kind":"admitMember","member":2,"role":"member","device":2})])
+  checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,2]])
+  checkField result ["ledger","refused"] (json% [1,2,3])
 
 -- A member whose last device was removed registers from the fresh device.
 #eval do
@@ -253,11 +264,10 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   let result ← run (applyCase [
     admin 0 1 (json% {"kind":"removeDevice","device":0}),
     admin 1 1 (json% {"kind":"removeDevice","device":1}),
-    admin 0 2 (json% {"kind":"addMember","member":2,"role":"member"}),
+    admin 0 2 (json% {"kind":"admitMember","member":2,"role":"member","device":5}),
     admin 2 1 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     admin 3 1 (json% {"kind":"addDevice","device":3,"member":0,"replaces":null}),
-    admin 3 2 (json% {"kind":"addMember","member":2,"role":"member"}),
-    admin 4 1 (json% {"kind":"addDevice","device":4,"member":2,"replaces":null})])
+    admin 3 2 (json% {"kind":"admitMember","member":2,"role":"member","device":4})])
   checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1],[3,0],[4,2]])
   checkField result ["ledger","removed"] (json% [0,1])
   checkField result ["ledger","refused"] (json% [3])
@@ -296,7 +306,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     admin 2 2 (json% {"kind":"addDevice","device":2,"member":1,"replaces":null}),
     admin 2 3 (json% {"kind":"replaceKey","member":0}),
     admin 2 4 (json% {"kind":"removeDevice","device":0}),
-    admin 2 5 (json% {"kind":"addMember","member":2,"role":"admin"})])
+    admin 2 5 (json% {"kind":"admitMember","member":2,"role":"admin","device":3})])
   checkField result ["ledger","devices"] (json% [[0,0],[1,1]])
   checkField result ["ledger","removed"] (json% [1])
   checkField result ["ledger","refused"] (json% [1,3,4,5,6])
@@ -327,7 +337,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   let result ← run (applyCase [
     admin 1 1 (json% {"kind":"removeDevice","device":0}),
     admin 1 2 (json% {"kind":"replaceKey","member":0}),
-    admin 1 3 (json% {"kind":"addMember","member":2,"role":"member"}),
+    admin 1 3 (json% {"kind":"admitMember","member":2,"role":"member","device":5}),
     admin 1 4 (json% {"kind":"removeMember","member":1}),
     admin 1 5 (json% {"kind":"changeRole","member":1,"role":"admin"}),
     admin 0 1 (json% {"kind":"removeDevice","device":1}),
@@ -343,7 +353,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   let result ← run (applyCase [admin 0 1 (json% {"kind":"removeMember","member":0}),
     admin 0 2 (json% {"kind":"removeMember","member":0}),
     admin 0 3 (json% {"kind":"changeRole","member":0,"role":"member"}),
-    admin 1 1 (json% {"kind":"addMember","member":2,"role":"admin"}),
+    admin 1 1 (json% {"kind":"admitMember","member":2,"role":"admin","device":5}),
     admin 0 4 (json% {"kind":"changeRole","member":1,"role":"admin"}),
     admin 0 5 (json% {"kind":"removeMember","member":0})])
   checkField result ["ledger","refused"] (json% [1,2,3,4])
@@ -351,10 +361,11 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["ledger","last_claims"] (json% [[0,5,"0:5"],[1,1,"1:1"]])
   checkField result ["slots","1","ledger","last_claims"] (json% [[0,2,"0:2"]])
 
--- admin_state_cannot_settle: the added member is absent after removal, but
--- the ledger still records which device's claim landed.
+-- An admitted member is absent after removal, but the ledger still records
+-- which device's claim landed, as in `admin_state_cannot_settle`.
 #eval do
-  let result ← run (applyCase [admin 0 1 (json% {"kind":"addMember","member":2,"role":"member"}),
+  let result ← run (applyCase [
+    admin 0 1 (json% {"kind":"admitMember","member":2,"role":"member","device":2}),
     admin 0 2 (json% {"kind":"removeMember","member":2})])
   checkField result ["ledger","members"] (json% [[0,"admin"],[1,"member"]])
   checkField result ["ledger","last_claims"] (json% [[0,2,"0:2"]])

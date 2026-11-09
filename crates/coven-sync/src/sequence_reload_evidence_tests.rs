@@ -449,10 +449,11 @@ async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
         .into_iter()
         .map(|original| original.slot.get())
         .collect();
+    // Ana's copy is a key-copy slot, Carol's her admission (§13.2).
     let routes = |copy: &coven_format::floor::OriginalSlot| {
         let object = coven_format::sealed_slot::BoundedSlot::decode(&copy.object).unwrap();
-        let coven_format::sealed_slot::SlotKind::KeyCopy(copy) = object.prefix.kind else {
-            panic!("a key copy");
+        let [(_, copy)] = object.prefix.kind.boxes().collect::<Vec<_>>()[..] else {
+            panic!("one box");
         };
         copy.routing.member
     };

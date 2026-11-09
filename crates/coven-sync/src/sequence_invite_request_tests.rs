@@ -30,6 +30,7 @@ async fn a_request_naming_another_member_than_its_invite_is_refused() {
         invite: code.invite,
         member,
         keys: keys.public_keys(),
+        device: coven_foundation::id_source::DeviceId(70),
         device_name: "Carol's phone".into(),
     };
     let sealed = |request: &coven_format::objects::JoinRequest| {
@@ -68,6 +69,7 @@ async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
         invite: code.invite,
         member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(99)),
         keys: named.public_keys(),
+        device: coven_foundation::id_source::DeviceId(70),
         device_name: "forged".into(),
     };
     let bytes = sealed_join_request(&code.secret, &code.request_path(), &forged, &signer).unwrap();

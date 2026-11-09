@@ -15,7 +15,7 @@ def isAdmin (L : Ledger S) (d : S.Dev) : Bool :=
   | some m => !L.removed d && L.member m && decide (L.role m = .admin)
 
 def requiresAdmin : Entry S → Bool
-  | .addMember .. | .removeMember .. | .changeRole .. | .renameStore .. => true
+  | .admit .. | .recover .. | .removeMember .. | .changeRole .. | .renameStore .. => true
   | _ => false
 
 def allowed (R : Rules S) (L : Ledger S) (d : S.Dev) (e : Entry S)

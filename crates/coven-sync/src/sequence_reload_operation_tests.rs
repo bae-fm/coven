@@ -835,3 +835,55 @@ async fn publishing_waits_for_a_retained_reload() {
         device.database().close().await.unwrap();
     }
 }
+
+/// §15.6: applied membership controls reading even when a retained key opens
+/// a retry authored before departure; rejoining reloads the skipped history.
+#[tokio::test]
+async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).count(), 1);
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "before departure").await;
+    insert(ana.database(), "store", "readable").await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let leave = async {
+        observed.await.unwrap();
+        ben.sync
+            .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+    };
+    let (sent, ()) = tokio::join!(ana.sync.pass(), leave);
+    sent.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(ben.database()).await, [("store".into(), "readable".into())]);
+    assert!(
+        pins(ben.database()).await.is_empty(),
+        "retaining a key does not retain reading permission"
+    );
+    assert!(ben.database().pending::<crate::PendingRecord>().await.unwrap().is_empty());
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(pins(ben.database()).await.len(), 1);
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

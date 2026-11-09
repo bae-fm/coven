@@ -1,7 +1,7 @@
 use super::*;
 use coven_crypto::{CircleKey, SealingKey, StoreKey};
 use coven_database::{StoreCircle, StoreMember};
-use coven_format::{admin::MemberRole, sealed_key::CopyBox, sealed_slot::SlotKind};
+use coven_format::{admin::MemberRole, sealed_key::CopyBox};
 use coven_foundation::id_source::StoreId;
 use coven_merge::slot;
 use serde_json::{json, Value};
@@ -32,13 +32,11 @@ impl Projection {
         let mut credentials: BTreeSet<_> =
             history.state.members.values().map(|m| m.keys.sealing).collect();
         for copy in &history.copies {
-            let SlotKind::KeyCopy(copy) = &copy.prefix.kind else {
-                panic!("key routing");
-            };
-            audiences.insert(copy.routing.audience.clone());
-            keys.insert((copy.routing.audience.clone(), copy.routing.key));
-            members.insert(copy.routing.member);
-            credentials.insert(copy.routing.sealing);
+            let route = copy.route();
+            audiences.insert(route.audience.clone());
+            keys.insert((route.audience.clone(), route.key));
+            members.insert(route.member);
+            credentials.insert(route.sealing);
         }
         for audience in &audiences {
             let ids: Vec<_> = match audience {
@@ -87,10 +85,7 @@ impl Projection {
             slots[usize::try_from(i.slot.get() - 1).unwrap()] = self.introduction(i);
         }
         for copy in &history.copies {
-            let SlotKind::KeyCopy(copy_box) = &copy.prefix.kind else {
-                panic!("key routing");
-            };
-            let r = &copy_box.routing;
+            let r = copy.route();
             let slot = copy.path.slot_number().unwrap().get();
             let index = usize::try_from(slot - 1).unwrap();
             assert_eq!(slots[index], json!({"kind":"other"}));
@@ -180,7 +175,8 @@ fn copy(history: &mut History, ring: &StoreKeyring, slot: u64, routing: KeyCopyP
     );
     let outer = key(90);
     let format = coven_format::FormatVersion::CURRENT;
-    let context = SlotObjectPrefix::copy_context(format, outer, &routing).unwrap();
+    let context =
+        SlotObjectPrefix::copy_context(format, outer, BoxPlace::KeyCopy, &routing).unwrap();
     let sealed = match routing.audience {
         Audience::Store => coven_crypto::seal_store_key(
             ring.store_key(routing.key).unwrap(),
@@ -199,11 +195,10 @@ fn copy(history: &mut History, ring: &StoreKeyring, slot: u64, routing: KeyCopyP
     };
     history.copies.push(KeyCopy {
         path,
-        prefix: SlotObjectPrefix {
-            format,
-            key: outer,
-            kind: SlotKind::KeyCopy(CopyBox { routing, sealed }),
-        },
+        format,
+        key: outer,
+        place: BoxPlace::KeyCopy,
+        copy: CopyBox { routing, sealed },
     });
 }
 
@@ -304,11 +299,8 @@ fn sequence_key_selection_matches_lean() {
                 sealing: ana.sealing,
             },
         );
-        let duplicate = history.copies[1].clone();
-        let SlotKind::KeyCopy(duplicate) = duplicate.prefix.kind else {
-            panic!("copy");
-        };
-        copy(&mut history, &material, 10, duplicate.routing);
+        let duplicate = history.copies[1].route().clone();
+        copy(&mut history, &material, 10, duplicate);
         if matches!(mode, 6 | 7) {
             let mut repeated = history.introductions[0].clone();
             repeated.slot = slot(11);
@@ -364,8 +356,8 @@ fn sequence_key_selection_matches_lean() {
     }
 }
 
-/// Ana's phone (device 1) makes Household and adds Ben as an admin; Ben's
-/// phone (device 2) and Ana's laptop (device 3) register. Each entry goes
+/// Ana's phone (device 1) makes Household and admits Ben as an admin with
+/// his phone (device 2); Ana's laptop (device 3) registers. Each entry goes
 /// through the checks a slot's does, so only what they accept counts.
 struct Household {
     history: History,
@@ -411,17 +403,14 @@ impl Household {
         household.entry(
             1,
             ana,
-            StoreChange::AddMember {
+            StoreChange::AdmitMember {
                 member: ben,
                 keys: coven_format::test_utils::keys_from_seed(2).public_keys(),
                 role: MemberRole::Admin,
                 access: ben_access,
+                device: DeviceId(2),
+                device_name: "Ben's phone".into(),
             },
-        );
-        household.entry(
-            2,
-            ben,
-            StoreChange::AddDevice { name: "Ben's phone".into(), replaces: None },
         );
         household.entry(
             3,
@@ -532,6 +521,68 @@ fn a_member_key_replacement_stops_only_her_other_devices_added_before_it() {
     assert_eq!(household.history.gone_for_good(DeviceId(5)), None);
 }
 
+/// Ana's phone recovers Ben on a new phone, device 6: the admission rebinds
+/// his pair and registers the phone, so his old phone, added before and
+/// holding only the old pair, is gone for good, and the new one isn't
+/// (§13.2, §14.1).
+#[test]
+fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
+    let mut household = Household::new();
+    let (ana, ben) = (household.ana, household.ben);
+    let expected = household.history.state.members[&ben].keys;
+    let keys = coven_format::test_utils::keys_from_seed(6).public_keys();
+    let recovery = StoreChange::RecoverMember {
+        member: ben,
+        expected,
+        keys,
+        device: DeviceId(6),
+        device_name: "Ben's new phone".into(),
+    };
+    let at = household.entry(1, ana, recovery.clone());
+    assert_eq!(
+        household.history.gone_for_good(DeviceId(2)),
+        Some((at, DeviceStop::MemberKeysReplaced))
+    );
+    assert_eq!(household.history.gone_for_good(DeviceId(6)), None);
+    assert_eq!(household.history.state.devices[&DeviceId(6)].member, ben);
+    assert_eq!(household.history.state.members[&ben].keys, keys);
+    // Repeating it is already done; another device or an old pair isn't.
+    assert!(household.check(1, ana, recovery.clone()).unwrap().is_none());
+    let StoreChange::RecoverMember { member, keys, .. } = recovery else { unreachable!() };
+    assert_eq!(
+        household
+            .check(
+                1,
+                ana,
+                StoreChange::RecoverMember {
+                    member,
+                    expected,
+                    keys: coven_format::test_utils::keys_from_seed(7).public_keys(),
+                    device: DeviceId(7),
+                    device_name: "Ben's other phone".into(),
+                },
+            )
+            .err(),
+        Some(OperationRejection::MemberKeysChanged(ben))
+    );
+    assert_eq!(
+        household
+            .check(
+                1,
+                ana,
+                StoreChange::RecoverMember {
+                    member,
+                    expected: keys,
+                    keys: coven_format::test_utils::keys_from_seed(7).public_keys(),
+                    device: DeviceId(3),
+                    device_name: "Ana's laptop".into(),
+                },
+            )
+            .err(),
+        Some(OperationRejection::TargetGone(coven_database::EntryTarget::Device(DeviceId(3))))
+    );
+}
+
 fn account(email: &str) -> coven_format::MemberAccess {
     coven_format::MemberAccess::ProviderAccount(email.into())
 }
@@ -577,11 +628,13 @@ fn an_s3_store_creator_replaces_her_key() {
 #[test]
 fn a_member_reaches_the_store_with_the_access_kind_it_was_created_with() {
     let carol = member(3);
-    let add = |access| StoreChange::AddMember {
+    let add = |access| StoreChange::AdmitMember {
         member: carol,
         keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
         role: MemberRole::Admin,
         access,
+        device: DeviceId(4),
+        device_name: "Carol's phone".into(),
     };
     let s3 = crate::sequence_sync::tests::access;
     let shared = Household::shared();
@@ -623,17 +676,14 @@ fn set_access_names_an_active_member_and_only_an_admin_sets_anothers_key() {
     household.entry(
         1,
         ana,
-        StoreChange::AddMember {
+        StoreChange::AdmitMember {
             member: carol,
             keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
             role: MemberRole::Member,
             access: key("carol"),
+            device: DeviceId(4),
+            device_name: "Carol's phone".into(),
         },
-    );
-    household.entry(
-        4,
-        carol,
-        StoreChange::AddDevice { name: "Carol's phone".into(), replaces: None },
     );
     let set = |member, name: &str| StoreChange::SetAccess { member, access: key(name) };
 

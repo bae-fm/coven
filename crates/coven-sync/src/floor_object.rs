@@ -67,8 +67,9 @@ pub(crate) async fn routed_keys(
         let length = checked(path, decoder.copy_length(&bytes))?;
         bytes.extend(read_exact(&mut raw, length - bytes.len(), path)?);
         let original = checked(path, decoder.copy(&bytes))?;
-        keys.extend(snapshot_object::routed_key(&original, path.store(), member)?);
-        routed_past |= snapshot_object::routed_past(&original, path.store(), member)?;
+        let (opened, past) = snapshot_object::routed(&original, path.store(), member)?;
+        keys.extend(opened);
+        routed_past |= past;
     }
     checked(path, decoder.finish())?;
     Ok(Some(FloorRouting { key, first, keys, routed_past }))

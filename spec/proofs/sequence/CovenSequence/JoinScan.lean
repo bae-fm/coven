@@ -5,10 +5,14 @@ import CovenSequence.Retention
 
 The scan projects copies of one usable store key for the request's exact
 credential. Signature, box opening and membership are checked by the ordinary
-reader after finding that key. A floor captures the copies for its sealing key
-through `at`, which covers every selected snapshot. Key rotation supplies its
-own copies before introducing the replacement key; this projection fixes a key.
-Removal or replacement of the joining credential is outside an admission promise.
+reader after finding that key. A joiner's copies sit in the slot of the
+admission that admits it, so the slot a copy is found in is that admission
+(coven.md §13.2). A floor captures the slots carrying copies for its sealing
+key through `at`, which covers every selected snapshot. Key rotation supplies
+its own copies before introducing the replacement key; this projection fixes
+a key. A removal of the admitted member after the admission stops the device
+it registered (`Admission.removal_stops_admitted_device`); that is outside an
+admission promise.
 
 A scan round reads the current floor prefix, then the next kept slot. Retention
 may change between rounds without any grace. A missing slot after a stale floor
@@ -341,18 +345,18 @@ theorem deleted_damage_recovers :
 
 inductive Outcome where
   | waiting
-  /-- The copies opened and the request remains, but the approving entry
-  has not applied: approval has begun, and its entry follows the copies. -/
-  | approving
   | admitted
   | declined
   deriving DecidableEq
 
 /-- Finding a key grants no authority. `binding` is the ordinary reader's
-verified entry from the invite's approving device for this exact pair. -/
+verified admission from the invite's approving device for this exact pair
+and device. The key opens only from that admission's own slot, which the
+reader has applied when it reports: a key without a counting admission is an
+admission the history refused, and the join is declined. -/
 def outcome (key binding pending : Bool) : Outcome :=
-  if key && binding then .admitted
-  else if pending then (if key then .approving else .waiting)
+  if key then (if binding then .admitted else .declined)
+  else if pending then .waiting
   else .declined
 
 /-- A join whose copies opened never goes back to waiting for them. -/
@@ -364,14 +368,20 @@ theorem approved_never_declined (pending : Bool) : outcome true true pending = .
   simp [outcome]
 
 theorem real_decline (key : Bool) : outcome key false false = .declined := by
-  simp [outcome]
+  cases key <;> simp [outcome]
 
-/-- An applied approval admits its member; retention cannot undo it. Only a
+/-- A join whose copies opened is admitted or declined: no outcome waits for
+an entry that follows its copies. -/
+theorem opened_decides (binding pending : Bool) :
+    outcome true binding pending = .admitted ∨ outcome true binding pending = .declined := by
+  cases binding <;> simp [outcome]
+
+/-- An applied admission admits its member; retention cannot undo it. Only a
 later explicit removal can change this membership fact. -/
 theorem approval_keeps_membership {S : Sig} (R : Rules S) (seq : Nat → Slot S)
-    (member : S.Mem) (author : S.Dev) (role : Role) (approval head : Nat)
+    (member : S.Mem) (author device : S.Dev) (role : Role) (approval head : Nat)
     (positive : 0 < approval) (claimed : approval ≤ head)
-    (entry : seq approval = .admin author (.addMember member role))
+    (entry : seq approval = .admin author (.admit member role device))
     (applied : Applied R seq approval)
     (notRemoved : ∀ k, approval < k → k ≤ head → ∀ d,
       seq k ≠ .admin d (.removeMember member)) :
@@ -399,20 +409,21 @@ theorem approval_keeps_membership {S : Sig} (R : Rules S) (seq : Nat → Slot S)
               subst target
               exact notRemoved (head + 1) (by omega) (by omega) d hs
             simpa [ledgerEffect, applyEntry, different] using previous
-          | addMember target role =>
+          | admit target role device =>
             simp [ledgerEffect, applyEntry, previous]
           | _ => simpa [ledgerEffect, applyEntry] using previous
         | _ => simpa [ledgerEffect] using previous
       · exact previous
 
 /-- Compose the scan with the existing authenticated floor/suffix reader.
-The admission remains current at the head; later removal is not an invitation
-rejection. Reader cryptography and the exact approver check are its boundary. -/
+The admission remains current at the head, with the device it registered;
+later removal is not an invitation rejection. Reader cryptography and the
+exact approver check are its boundary. -/
 theorem approved_eventually_admitted {S : Sig} (R : Rules S)
     {st : Store S} {seq : Nat → Slot S} (good : Good R st seq) (audience : S.Aud)
-    (member : S.Mem) (author : S.Dev) (role : Role) (binding : Nat)
+    (member : S.Mem) (author device : S.Dev) (role : Role) (binding : Nat)
     (bindingPositive : 0 < binding) (bindingClaimed : binding ≤ st.head)
-    (entry : seq binding = .admin author (.addMember member role))
+    (entry : seq binding = .admin author (.admit member role device))
     (applied : Applied R seq binding)
     (notRemoved : ∀ k, binding < k → k ≤ st.head → ∀ d,
       seq k ≠ .admin d (.removeMember member))
@@ -426,13 +437,19 @@ theorem approved_eventually_admitted {S : Sig} (R : Rules S)
     ∃ reader, ReadSteps R audience true st
       ⟨st.floor.covers audience, ledgerAt R seq (st.floor.covers audience),
         audAt R seq audience (st.floor.covers audience), rowsAt R seq audience (st.floor.covers audience),
-        fun _ => none⟩ reader ∧ reader.pos = st.head ∧ reader.ledger.member member = true := by
+        fun _ => none⟩ reader ∧ reader.pos = st.head ∧ reader.ledger.member member = true ∧
+      reader.ledger.deviceOf device = some member := by
   refine ⟨approved_eventually_key copy first head capturedAt approval positive yes claimed covered 0 scan unread, ?_⟩
   obtain ⟨reader, steps, position, state⟩ := joiner_reaches_head R good audience
   have ledger : reader.ledger = ledgerAt R seq st.head := congrArg Prod.fst state
+  have registered : (ledgerAt R seq binding).deviceOf device = some member := by
+    rw [applied_ledger R seq bindingPositive applied, entry]
+    simp [ledgerEffect, applyEntry]
   exact ⟨reader, steps, position, by
     rw [ledger]
-    exact approval_keeps_membership R seq member author role binding st.head
-      bindingPositive bindingClaimed entry applied notRemoved⟩
+    exact approval_keeps_membership R seq member author device role binding st.head
+      bindingPositive bindingClaimed entry applied notRemoved, by
+    rw [ledger]
+    exact deviceOf_stays R seq binding registered st.head bindingClaimed⟩
 
 end CovenSequence.JoinScan

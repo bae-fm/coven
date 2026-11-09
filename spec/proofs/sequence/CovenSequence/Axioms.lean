@@ -282,6 +282,7 @@ import SequenceApply
 #print axioms CovenSequence.self_registration_valid
 #print axioms CovenSequence.self_registration_applied
 #print axioms CovenSequence.registration_self_authored
+#print axioms CovenSequence.admission_registers
 #print axioms CovenSequence.registered_device_refused
 #print axioms CovenSequence.initial_registration_never_repeated
 #print axioms CovenSequence.registration_never_repeated
@@ -381,6 +382,7 @@ import SequenceApply
 #print axioms CovenSequence.JoinScan.miss_requires_refresh
 #print axioms CovenSequence.JoinScan.approved_never_declined
 #print axioms CovenSequence.JoinScan.real_decline
+#print axioms CovenSequence.JoinScan.opened_decides
 #print axioms CovenSequence.JoinScan.approved_eventually_admitted
 #print axioms CovenSequence.JoinScanExamples.missing_below_existing_is_deleted
 #print axioms CovenSequence.JoinScanExamples.retained_good
@@ -474,6 +476,12 @@ import SequenceApply
 #print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
 #print axioms CovenSequence.JoinStatus.scan_shown_as_loading
+
+#print axioms CovenSequence.Admission.admission_never_exposes
+#print axioms CovenSequence.Admission.member_has_device
+#print axioms CovenSequence.Admission.removal_stops_admitted_device
+#print axioms CovenSequence.Admission.split_approval_exposes
+#print axioms CovenSequence.Admission.removal_strands_admitted_join
 #print axioms CovenSequence.ReadPass.gap_report_wins
 #print axioms CovenSequence.ReadPass.floor_blamed_only_when_held
 #print axioms CovenSequence.ReadPass.pass_eq_checkFirst

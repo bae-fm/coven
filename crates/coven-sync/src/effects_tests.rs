@@ -24,7 +24,7 @@ pub(crate) fn household() -> StoreState {
         key: KeyId(uuid::Uuid::from_u128(11)),
         key_hash: [1; 32],
     };
-    let mut state = checked_change(
+    let state = checked_change(
         &StoreState::default(),
         &header(1, 1, 0),
         slot(1),
@@ -35,33 +35,29 @@ pub(crate) fn household() -> StoreState {
     .unwrap()
     .unwrap()
     .state;
-    state = checked_change(
+    checked_change(
         &state,
         &header(1, 1, 1),
         slot(2),
-        &StoreChange::AddMember {
-            member: id(2),
-            keys: keys(2),
-            role: MemberRole::Admin,
-            access: access(2),
-        },
-        &BTreeMap::new(),
-        &[],
-    )
-    .unwrap()
-    .unwrap()
-    .state;
-    checked_change(
-        &state,
-        &header(2, 2, 2),
-        slot(3),
-        &StoreChange::AddDevice { name: "Ben".into(), replaces: None },
+        &admit(2, MemberRole::Admin, 2),
         &BTreeMap::new(),
         &[],
     )
     .unwrap()
     .unwrap()
     .state
+}
+/// Admit member `n` with seed `n`'s keys and access and `role`, registering
+/// device `device` for them (§13.2).
+fn admit(n: u8, role: MemberRole, device: u64) -> StoreChange {
+    StoreChange::AdmitMember {
+        member: id(n.into()),
+        keys: keys(n),
+        role,
+        access: access(n),
+        device: DeviceId(device),
+        device_name: format!("device {device}"),
+    }
 }
 fn apply(
     state: &StoreState,
@@ -83,9 +79,15 @@ fn repeating_an_active_member_requires_the_exact_binding() {
     for recorded in [access(2), MemberAccess::ProviderAccount("Ben@example.com".into())] {
         let mut state = household();
         state.members.get_mut(&id(2)).unwrap().access = recorded.clone();
-        let request =
-            |keys, role, access| StoreChange::AddMember { member: id(2), keys, role, access };
-        assert!(apply(&state, 1, request(keys(2), MemberRole::Admin, recorded.clone()))
+        let request = |keys, role, access, device| StoreChange::AdmitMember {
+            member: id(2),
+            keys,
+            role,
+            access,
+            device: DeviceId(device),
+            device_name: "Ben".into(),
+        };
+        assert!(apply(&state, 1, request(keys(2), MemberRole::Admin, recorded.clone(), 2))
             .unwrap()
             .is_none());
         let different_access = match &recorded {
@@ -97,9 +99,10 @@ fn repeating_an_active_member_requires_the_exact_binding() {
             }
         };
         for change in [
-            request(keys(3), MemberRole::Admin, recorded.clone()),
-            request(keys(2), MemberRole::Member, recorded),
-            request(keys(2), MemberRole::Admin, different_access),
+            request(keys(3), MemberRole::Admin, recorded.clone(), 2),
+            request(keys(2), MemberRole::Member, recorded.clone(), 2),
+            request(keys(2), MemberRole::Admin, different_access, 2),
+            request(keys(2), MemberRole::Admin, recorded, 9),
         ] {
             assert!(matches!(
                 apply(&state, 1, change),
@@ -134,11 +137,13 @@ fn an_admin_cannot_remove_the_last_admin_and_a_removed_id_cannot_return() {
         apply(
             &next,
             1,
-            StoreChange::AddMember {
+            StoreChange::AdmitMember {
                 member: id(2),
                 keys: keys(3),
                 role: MemberRole::Member,
-                access: access(3)
+                access: access(3),
+                device: DeviceId(3),
+                device_name: "Ben's new phone".into(),
             }
         ),
         Err(OperationRejection::TargetGone(EntryTarget::Member(_)))
@@ -331,21 +336,7 @@ fn a_reset_covering_less_than_a_preceding_raise_slot_is_refused() {
 /// (§19.4).
 #[test]
 fn only_an_admin_resets_the_store_and_only_a_circle_member_resets_its_circle() {
-    let mut state = household();
-    for (author, change) in [
-        (
-            1,
-            StoreChange::AddMember {
-                member: id(3),
-                keys: keys(3),
-                role: MemberRole::Member,
-                access: access(3),
-            },
-        ),
-        (3, StoreChange::AddDevice { name: "Cara".into(), replaces: None }),
-    ] {
-        state = apply(&state, author, change).unwrap().unwrap().state;
-    }
+    let mut state = apply(&household(), 1, admit(3, MemberRole::Member, 3)).unwrap().unwrap().state;
     let circle = CircleId(uuid::Uuid::from_u128(20));
     state
         .circles
@@ -383,7 +374,7 @@ mod sequence_differential {
     #[derive(Clone, Debug)]
     enum Action {
         Rename(&'static str),
-        Add(u128, MemberRole),
+        Admit(u128, MemberRole, u64),
         Remove(u128),
         Role(u128, MemberRole),
         Register(u64, u128),
@@ -400,7 +391,9 @@ mod sequence_differential {
         fn json(&self) -> Value {
             match self {
                 Self::Rename(name) => json!({"kind":"renameStore","name":name}),
-                Self::Add(m, r) => json!({"kind":"addMember","member":m,"role":role(*r)}),
+                Self::Admit(m, r, d) => {
+                    json!({"kind":"admitMember","member":m,"role":role(*r),"device":d})
+                }
                 Self::Remove(m) => json!({"kind":"removeMember","member":m}),
                 Self::Role(m, r) => json!({"kind":"changeRole","member":m,"role":role(*r)}),
                 Self::Register(d, m) => {
@@ -413,11 +406,13 @@ mod sequence_differential {
         fn change(&self, state: &StoreState, seed: u8) -> StoreChange {
             match self {
                 Self::Rename(name) => StoreChange::RenameStore { name: (*name).into() },
-                Self::Add(m, r) => StoreChange::AddMember {
+                Self::Admit(m, r, d) => StoreChange::AdmitMember {
                     member: id(*m),
                     keys: keys(seed),
                     role: *r,
                     access: access(seed),
+                    device: DeviceId(*d),
+                    device_name: "admitted".into(),
                 },
                 Self::Remove(m) => StoreChange::RemoveMember { member: id(*m) },
                 Self::Role(m, r) => StoreChange::ChangeRole { member: id(*m), role: *r },
@@ -488,7 +483,7 @@ mod sequence_differential {
         let group = Group::new();
         let observer = group.device(9).await;
         let db = observer.database();
-        // The model starts after these creation, membership and registration slots.
+        // The model starts after these creation and admission slots.
         let key = group.ring.store_key_ids().next().unwrap();
         let initial = [
             (
@@ -504,17 +499,7 @@ mod sequence_differential {
                 },
                 1,
             ),
-            (
-                header(1, 1, 1),
-                StoreChange::AddMember {
-                    member: id(2),
-                    keys: keys(2),
-                    role: MemberRole::Admin,
-                    access: access(2),
-                },
-                1,
-            ),
-            (header(2, 2, 2), StoreChange::AddDevice { name: "Ben".into(), replaces: None }, 2),
+            (header(1, 1, 1), admit(2, MemberRole::Admin, 2), 1),
         ];
         for (header, change, seed) in initial {
             let state = db.store_state().await.unwrap();
@@ -540,8 +525,8 @@ mod sequence_differential {
                 Action::Register(_, m) => *m,
                 _ => before.devices.get(&DeviceId(*author)).map_or(2, |d| d.member.0.as_u128()),
             };
-            let hdr = header(*author, member, i as u64 + 3);
-            let at = slot(i as u64 + 4);
+            let hdr = header(*author, member, i as u64 + 2);
+            let at = slot(i as u64 + 3);
             let change = action.change(&before, (i + 10) as u8);
             let checked = checked_change(&before, &hdr, at, &change, &BTreeMap::new(), &[]);
             // addDevice has no independently supplied target in the Rust format:
@@ -557,7 +542,9 @@ mod sequence_differential {
             let signer = seeds[member as usize];
             if had_effect {
                 match action {
-                    Action::Add(m, _) | Action::Replace(m) => seeds[*m as usize] = (i + 10) as u8,
+                    Action::Admit(m, ..) | Action::Replace(m) => {
+                        seeds[*m as usize] = (i + 10) as u8
+                    }
                     _ => (),
                 }
             }
@@ -629,8 +616,8 @@ mod sequence_differential {
             (1, Role(1, MemberRole::Member)),
             (2, Role(2, MemberRole::Member)),
             (1, Remove(2)),
-            (1, Add(2, MemberRole::Member)),
-            (1, Add(3, MemberRole::Member)),
+            (1, Admit(2, MemberRole::Member, 5)),
+            (1, Admit(3, MemberRole::Member, 6)),
             (1, Role(2, MemberRole::Member)),
             (2, Remove(1)),
             (2, Role(1, MemberRole::Member)),
@@ -665,7 +652,7 @@ mod sequence_differential {
                 (2, Rename("Final")),
             ],
             vec![(1, Role(2, MemberRole::Member)), (3, Register(3, 2)), (2, RemoveDevice(3))],
-            vec![(1, Remove(2)), (1, Add(3, MemberRole::Member)), (3, Register(3, 3))],
+            vec![(1, Remove(2)), (1, Admit(3, MemberRole::Member, 6)), (3, Register(3, 3))],
         ] {
             prefixes += compare(&history).await;
             histories += 1;
@@ -871,23 +858,7 @@ fn replacing_a_members_keys_keeps_access_role_circles_and_devices() {
 
 /// Adds member 3, a plain member with a device, to `household()`.
 pub(crate) fn with_a_plain_member(state: &StoreState) -> StoreState {
-    let state = apply(
-        state,
-        1,
-        StoreChange::AddMember {
-            member: id(3),
-            keys: keys(3),
-            role: MemberRole::Member,
-            access: access(3),
-        },
-    )
-    .unwrap()
-    .unwrap()
-    .state;
-    apply(&state, 3, StoreChange::AddDevice { name: "Cy".into(), replaces: None })
-        .unwrap()
-        .unwrap()
-        .state
+    apply(state, 1, admit(3, MemberRole::Member, 3)).unwrap().unwrap().state
 }
 
 fn circle_made_by_the_plain_member() -> StoreState {

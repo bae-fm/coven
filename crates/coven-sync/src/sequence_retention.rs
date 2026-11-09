@@ -289,9 +289,16 @@ impl SequenceSync {
         }
 
         let key = session.history.metadata_key(ring)?;
-        let copies = session.history.copies.iter().filter(|copy|
-            matches!(&copy.prefix.kind, coven_format::sealed_slot::SlotKind::KeyCopy(copy) if copy.routing.audience == Audience::Store && copy.routing.key == key))
-            .map(|copy| copy.path.slot_number().expect("copy slot")).collect();
+        // The slots carrying copies of the floor's key: key-copy slots and
+        // admissions, each once (D9).
+        let copies: BTreeSet<Slot> = session
+            .history
+            .copies
+            .iter()
+            .filter(|copy| copy.route().audience == Audience::Store && copy.route().key == key)
+            .map(|copy| copy.path.slot_number().expect("copy slot"))
+            .collect();
+        let copies = copies.into_iter().collect();
         Ok(Some(Retention::Capture(FloorCapture {
             previous: session.floor.as_ref().map(|floor| floor.object().clone()),
             previous_first,

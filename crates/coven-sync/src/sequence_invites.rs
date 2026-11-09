@@ -79,7 +79,7 @@ pub(crate) enum InviteState {
         request: Option<Vec<u8>>,
     },
     /// This checked request is approved: `binding` is the operation that
-    /// claims its copies and binds its pair, journaled with this state.
+    /// claims its admission, journaled with this state.
     Approving { code: SecretText, request: Vec<u8>, binding: OperationId },
     /// A kept replacement records the invite's new S3 key for its member:
     /// `set_access`, once journaled with this state, is the operation
@@ -169,20 +169,28 @@ impl InviteWork {
         }
     }
 
-    /// The entry approving `request` claims: adding the invite's member
-    /// with the request's pair, or replacing the member's pair with it.
+    /// The admission approving `request` claims: admitting the invite's
+    /// member with the request's pair, or recovering the member with it, and
+    /// registering the device the request names (§13.2).
     fn binding_change(&self, request: &[u8]) -> Result<StoreChange, SyncError> {
-        let keys = decode_request(request)?.keys;
+        let request = decode_request(request)?;
+        let (keys, device, device_name) = (request.keys, request.device, request.device_name);
         Ok(match self.binding {
-            InviteBinding::Add { role } => StoreChange::AddMember {
+            InviteBinding::Add { role } => StoreChange::AdmitMember {
                 member: self.member,
                 keys,
                 role,
                 access: self.access.member_access(),
+                device,
+                device_name,
             },
-            InviteBinding::Replace { expected } => {
-                StoreChange::ReplaceMemberKeys { member: self.member, expected, keys }
-            }
+            InviteBinding::Replace { expected } => StoreChange::RecoverMember {
+                member: self.member,
+                expected,
+                keys,
+                device,
+                device_name,
+            },
         })
     }
 

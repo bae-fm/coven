@@ -93,11 +93,13 @@ async fn reset_preserves_an_active_members_account() {
     group.create(&ana).await;
     let target = MemberId(group.ids.new_id());
     ana.sync
-        .administer(StoreChange::AddMember {
+        .administer(StoreChange::AdmitMember {
             member: target,
             keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
             role: MemberRole::Member,
             access: MemberAccess::ProviderAccount("carol@example.org".into()),
+            device: coven_foundation::id_source::DeviceId(60),
+            device_name: "Carol's old phone".into(),
         })
         .await
         .unwrap();
@@ -159,6 +161,7 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
             invite: invite.id,
             member: invite.member,
             keys,
+            device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol".into(),
         })
         .encode()
@@ -170,11 +173,13 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
     // The binding has applied, but the parent invite still records Approving,
     // as after interruption before its next local commit.
     ana.sync
-        .administer(StoreChange::AddMember {
+        .administer(StoreChange::AdmitMember {
             member: invite.member,
             keys,
             role: MemberRole::Member,
             access: work.access.member_access(),
+            device: coven_foundation::id_source::DeviceId(70),
+            device_name: "Carol".into(),
         })
         .await
         .unwrap();

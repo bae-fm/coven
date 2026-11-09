@@ -6,10 +6,10 @@ namespace CovenSequence
 
 variable {S : Sig} (R : Rules S)
 
-/-- No valid addition can reuse an id retained by removal. -/
-theorem retired_member_refused (L : Ledger S) (a : S.Dev) (m : S.Mem) (role : Role)
+/-- No valid admission can reuse an id retained by removal. -/
+theorem retired_member_refused (L : Ledger S) (a : S.Dev) (m : S.Mem) (role : Role) (d : S.Dev)
     (retired : L.retired m = true) :
-    ledgerValid R L (.admin a (.addMember m role)) = false := by
+    ledgerValid R L (.admin a (.admit m role d)) = false := by
   simp [ledgerValid, structural, retired]
 
 /-- Every slot preserves retirement and absence together. -/
@@ -22,10 +22,10 @@ theorem step_retired_member (L : Ledger S) (k : Nat) (x : Slot S) (m : S.Mem)
     cases x with
     | admin a e =>
       cases e with
-      | addMember target role =>
+      | admit target role d =>
         by_cases same : m = target
         · subst target
-          rw [retired_member_refused R L a m role retired] at valid
+          rw [retired_member_refused R L a m role d retired] at valid
           contradiction
         · simp [noteSlot, ledgerEffect, applyEntry, same, retired, absent]
       | removeMember target =>

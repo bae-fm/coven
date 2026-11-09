@@ -8,10 +8,7 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::LoadStep;
-use coven_format::{
-    floor::OriginalSlot,
-    sealed_slot::{SlotKind, SlotObjectPrefix},
-};
+use coven_format::{floor::OriginalSlot, sealed_slot::SlotObjectPrefix};
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId};
 use coven_foundation::progress::ProgressReport;
 use coven_merge::{Audience, Slot, SlotRange};
@@ -36,7 +33,8 @@ pub(crate) enum Bootstrap {
 /// What the key scan reads of one slot.
 struct ScannedSlot {
     prefix: SlotObjectPrefix,
-    /// The slot's bytes, when it is a copy sealed to a pair this member holds.
+    /// The slot's bytes, when one of its boxes is sealed to a pair this
+    /// member holds.
     copy: Option<OriginalSlot>,
 }
 
@@ -224,16 +222,12 @@ impl SequenceSync {
                 bytes += input.object().size;
                 let read = self.scan_slot(input, next, member).await?;
                 needed.get_or_insert(read.prefix.key);
-                if let SlotKind::KeyCopy(copy) = &read.prefix.kind {
-                    routed_past |=
-                        copy.routing.member == member.member() && !copy.routing.held_by(member);
-                }
+                // A key-copy slot's box, or an admission's (D9).
+                routed_past |= read.prefix.kind.boxes().any(|(_, copy)| {
+                    copy.routing.member == member.member() && !copy.routing.held_by(member)
+                });
                 if let Some(original) = &read.copy {
-                    keys.extend(crate::snapshot_object::routed_key(
-                        original,
-                        self.store(),
-                        member,
-                    )?);
+                    keys.extend(crate::snapshot_object::routed(original, self.store(), member)?.0);
                 }
                 if let Some(scan) = scan.as_deref_mut() {
                     let end = match located {
@@ -284,8 +278,8 @@ impl SequenceSync {
     }
 
     /// Read what the key scan looks at in `slot`, whose bytes `input` holds:
-    /// its clear prefix, and its whole bytes when it is a copy sealed to a
-    /// pair this member holds.
+    /// its clear prefix, and its whole bytes when a box in it, a key copy's
+    /// or an admission's, is sealed to a pair this member holds (D9).
     async fn scan_slot(
         &self,
         input: ObjectInput,
@@ -295,17 +289,16 @@ impl SequenceSync {
         let path = self.path(slot);
         let read = async {
             let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
-            let copy = match &prefix.kind {
-                SlotKind::KeyCopy(copy) if copy.routing.held_by(member) => {
-                    let object = slot_object::read_exact(
-                        &mut input.local_bytes().await?,
-                        (input.object().size).min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
-                            as usize,
-                        &path,
-                    )?;
-                    Some(OriginalSlot { slot, object })
-                }
-                _ => None,
+            let copy = if prefix.kind.boxes().any(|(_, copy)| copy.routing.held_by(member)) {
+                let object = slot_object::read_exact(
+                    &mut input.local_bytes().await?,
+                    (input.object().size).min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
+                        as usize,
+                    &path,
+                )?;
+                Some(OriginalSlot { slot, object })
+            } else {
+                None
             };
             Ok::<_, SyncError>(ScannedSlot { prefix, copy })
         }
@@ -353,12 +346,18 @@ impl SequenceSync {
                     return Ok(None);
                 };
                 let read = self.scan_slot(input, next, member).await?;
-                let wanted = matches!(&read.prefix.kind, SlotKind::KeyCopy(copy)
-                    if copy.routing.audience == Audience::Circle(circle)
-                        && copy.routing.key == key);
+                let wanted = read.prefix.kind.boxes().any(|(_, copy)| {
+                    copy.routing.audience == Audience::Circle(circle) && copy.routing.key == key
+                });
                 let opened = match read.copy.filter(|_| wanted) {
                     Some(original) => {
-                        crate::snapshot_object::routed_key(&original, self.store(), member)?
+                        crate::snapshot_object::routed(&original, self.store(), member)?
+                            .0
+                            .into_iter()
+                            .find(|opened| {
+                                matches!(opened, RoutedKey::Circle(found)
+                                    if found.circle() == circle && found.id() == key)
+                            })
                     }
                     None => None,
                 };

@@ -383,13 +383,24 @@ pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
 
 /// The statuses after a new installation's open: they begin with the open's
 /// steps, which end with its one migration done (E10).
-/// What a bootstrap that opened its store reported before it finished: the
+/// What a restore that opened its store reported before it finished: the
 /// statuses before `Registering` and `Committing`, which end every such
-/// bootstrap, in that order (E10).
+/// restore, in that order (E10).
 pub(super) fn before_finishing(reported: &[BootstrapStatus]) -> &[BootstrapStatus] {
     let [before @ .., BootstrapStatus::Registering, BootstrapStatus::Committing] = reported else {
         panic!("{reported:?} doesn't end registering, then committing");
     };
+    before
+}
+
+/// What a join that opened its store reported before it finished: the
+/// statuses before `Committing`, which ends it. A join never reports
+/// `Registering`: its approval registered its device (E10).
+pub(super) fn before_committing(reported: &[BootstrapStatus]) -> &[BootstrapStatus] {
+    let [before @ .., BootstrapStatus::Committing] = reported else {
+        panic!("{reported:?} doesn't end committing");
+    };
+    assert!(!before.contains(&BootstrapStatus::Registering), "{reported:?}");
     before
 }
 

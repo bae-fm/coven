@@ -13,15 +13,15 @@ use coven_database::{
 };
 use coven_format::{
     admin::StoreChange,
-    sealed_key::{CopyBox, KeyCopyPrefix},
-    sealed_slot::{SlotKind, SlotObjectPrefix},
+    sealed_key::KeyCopyPrefix,
+    sealed_slot::{BoxPlace, SlotKind, SlotObjectPrefix},
     sequence::{Purpose, SlotFrame, SlotHeader},
 };
 use coven_merge::{Audience, Slot};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
-use super::sequence_copies::{required_copies, route};
+use super::sequence_copies::{admission_boxes, admits, required_copies, route, seal_copy};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Request {
@@ -610,6 +610,8 @@ impl SequenceSync {
                 step = match &request {
                     Request::Key(_) => unreachable!("key preparation has advanced"),
                     Request::Copy(route) => OperationStep::Copy(route.clone()),
+                    // An admission carries its copies in its own slot.
+                    Request::Change(change) if admits(change) => OperationStep::Claiming,
                     Request::Change(change) => {
                         match required_copies(&session.history, ring, change, member.member())
                             .into_iter()
@@ -762,30 +764,42 @@ impl SequenceSync {
                     }
                     _ => unreachable!("copy step"),
                 };
-                let context = SlotObjectPrefix::copy_context(
-                    coven_format::FormatVersion::CURRENT,
-                    store_key,
-                    &route,
-                )?;
-                let sealed = match route.audience {
-                    Audience::Store => coven_crypto::seal_store_key(
-                        ring.store_key(route.key)?,
-                        &route.sealing,
-                        path.as_str(),
-                        &context,
-                    )?,
-                    Audience::Circle(circle) => coven_crypto::seal_circle_key(
-                        ring.circle_key(circle, route.key)?,
-                        &route.sealing,
-                        path.as_str(),
-                        &context,
-                    )?,
-                };
-                (SlotFrame::KeyCopy, SlotKind::KeyCopy(CopyBox { routing: route, sealed }))
+                let copy = seal_copy(ring, &path, store_key, BoxPlace::KeyCopy, route)?;
+                (SlotFrame::KeyCopy, SlotKind::KeyCopy(copy))
             }
             OperationStep::Claiming => {
                 let Request::Change(change) = request else { unreachable!("plain admin claim") };
-                (SlotFrame::Admin(change.clone()), SlotKind::Admin)
+                if !admits(change) {
+                    (SlotFrame::Admin(change.clone()), SlotKind::Admin)
+                } else {
+                    let copies = required_copies(&session.history, ring, change, member.member());
+                    let kind = admission_boxes(ring, &path, store_key, copies)?;
+                    let frame = SlotFrame::Admin(change.clone());
+                    let prefix = SlotObjectPrefix {
+                        format: coven_format::FormatVersion::CURRENT,
+                        key: store_key,
+                        kind: kind.clone(),
+                    };
+                    let header = self.operation_header(session, member, 1);
+                    // An admission too large for one slot is refused before it
+                    // claims anything (format.md D2).
+                    if !prefix.fits(frame.encode(&header, &path)?.len())? {
+                        self.database
+                            .advance_operation(
+                                SequenceOperation {
+                                    request: request.clone(),
+                                    progress: OperationProgress::Undo {
+                                        step: OperationStep::Claiming,
+                                        reason: OperationRejection::NotAllowed,
+                                    },
+                                }
+                                .update(record)?,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                    (frame, kind)
+                }
             }
             OperationStep::Announcing(artifact) => {
                 (SlotFrame::Announcement(artifact.announcement()), SlotKind::Announcement)
@@ -942,7 +956,8 @@ fn operation_kind(change: &StoreChange) -> crate::OperationKind {
     match change {
         StoreChange::CreateStore { .. } => K::CreateStore,
         StoreChange::RenameStore { .. } => K::RenameStore,
-        StoreChange::AddMember { .. }
+        StoreChange::AdmitMember { .. }
+        | StoreChange::RecoverMember { .. }
         | StoreChange::AddInviteShare { .. }
         | StoreChange::EndInviteShare { .. } => K::Invite,
         StoreChange::RemoveMember { .. } => K::RemoveMember,

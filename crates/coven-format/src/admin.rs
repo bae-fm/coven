@@ -71,16 +71,40 @@ pub enum StoreChange {
         /// The new name.
         name: String,
     },
-    /// Add a member's stable id with both public keys and their initial role.
-    AddMember {
+    /// Admit a joining person: add their stable id with both public keys,
+    /// their initial role and access, and register the device their request
+    /// names. Only an admission slot holds it, beside the member's key copies
+    /// (§13.2, D9).
+    AdmitMember {
         /// The added member's stable id, fixed by the admin's invite.
         member: MemberId,
         /// The member's initial public pair.
         keys: MemberPublicKeys,
-        /// Storage access granted by the inviting owner.
-        access: crate::MemberAccess,
         /// The initial role.
         role: MemberRole,
+        /// Storage access granted by the inviting owner.
+        access: crate::MemberAccess,
+        /// The joining installation, registered for the member. Never the
+        /// writing device.
+        device: DeviceId,
+        /// The joining installation's name, from its request.
+        device_name: String,
+    },
+    /// Recover an active member on a new device: rebind their pair, as
+    /// replace-member-keys does, and register the device their request
+    /// names. Only an admission slot holds it (§13.2, D9).
+    RecoverMember {
+        /// The recovered member.
+        member: MemberId,
+        /// The binding which must still be current before this slot.
+        expected: MemberPublicKeys,
+        /// The member's new public pair.
+        keys: MemberPublicKeys,
+        /// The new installation, registered for the member. Never the writing
+        /// device.
+        device: DeviceId,
+        /// The new installation's name, from its request.
+        device_name: String,
     },
     /// Record a member's current storage access, used by a later removal (§10):
     /// the author's own, or an admin's replacement S3 key for another member.
@@ -213,6 +237,8 @@ impl StoreChange {
                 name(device_name)
             }
             Self::RenameStore { name: n }
+            | Self::AdmitMember { device_name: n, .. }
+            | Self::RecoverMember { device_name: n, .. }
             | Self::AddDevice { name: n, .. }
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
@@ -231,7 +257,6 @@ impl StoreChange {
             Self::RemoveMember { .. }
             | Self::RotateKey { .. }
             | Self::SetAccess { .. }
-            | Self::AddMember { .. }
             | Self::ChangeRole { .. }
             | Self::RemoveDevice { .. }
             | Self::DeleteCircle { .. }
@@ -263,7 +288,7 @@ macro_rules! store_changes {
 }
 store_changes!(
     0 => CreateStore { store, name => crate::wire::get_name, admin, access, device_name => crate::wire::get_name, key, key_hash },
-    1 => AddMember { member, keys, role, access },
+    1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },
     4 => AddDevice { name => crate::wire::get_name, replaces },
@@ -281,6 +306,7 @@ store_changes!(
     17 => RenameStore { name => crate::wire::get_name },
     18 => AddInviteShare { invite, account => get_account },
     19 => EndInviteShare { invite },
+    20 => RecoverMember { member, expected, keys, device, device_name => crate::wire::get_name },
 );
 
 /// An invite share's provider account, bounded as member access bounds an

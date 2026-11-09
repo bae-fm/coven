@@ -56,18 +56,15 @@ impl Case {
         let ben = group.device(2).await;
         group.create(&ana).await;
         ana.sync
-            .administer(StoreChange::AddMember {
-                member: ben.identity.member(),
-                keys: ben.identity.keys().public_keys(),
-                role: MemberRole::Admin,
-                access: MemberAccess::ProviderAccount("ben@example.org".into()),
-            })
+            .administer(admission(
+                &ben,
+                MemberRole::Admin,
+                MemberAccess::ProviderAccount("ben@example.org".into()),
+                "Ben",
+            ))
             .await
             .unwrap();
-        ben.sync
-            .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
-            .await
-            .unwrap();
+        ben.sync.pass().await.unwrap();
         let laptop = group.laptop(&ana).await;
         ana.sync.pass().await.unwrap();
         ben.sync.pass().await.unwrap();
@@ -346,6 +343,7 @@ impl Case {
             invite: code.invite,
             member: code.member,
             keys: self.ben.identity.keys().public_keys(),
+            device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol's phone".into(),
         };
         let path = code.request_path();

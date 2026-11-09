@@ -352,7 +352,7 @@ An admin claim settled by whether its change is present in the snapshot's
 state has the same problem: a later entry can undo the change. -/
 
 open CovenSequence in
-/-- Two devices of one admin member; member `false` is added then removed. -/
+/-- Two devices of one admin member; the store is renamed, then renamed back. -/
 def adminSig : Sig where
   Dev := Bool
   Digest := Nat
@@ -379,7 +379,7 @@ def adminRules : Rules adminSig where
   sinceReset := fun _ b => b
   number := fun _ => fun
     | .admin true _ => 1
-    | .admin false (.addMember _ _) => 1
+    | .admin false (.renameStore "Family") => 1
     | .admin false _ => 2
     | _ => 0
   digest := fun k _ => k
@@ -389,22 +389,22 @@ def adminRules : Rules adminSig where
   rows0 := fun _ => ()
 
 open CovenSequence in
-/-- Device `true` adds member `false`; device `false` removes it. -/
+/-- Device `true` renames the store; device `false` renames it back. -/
 def adminLanded : Nat → Slot adminSig
-  | 1 => .admin true (.addMember false .member)
-  | 2 => .admin false (.removeMember false)
+  | 1 => .admin true (.renameStore "Family")
+  | 2 => .admin false (.renameStore "Household")
   | _ => .admin false (.other ())
 
 open CovenSequence in
-/-- Device `false` adds member `false` and removes it. -/
+/-- Device `false` renames the store and renames it back. -/
 def adminLost : Nat → Slot adminSig
-  | 1 => .admin false (.addMember false .member)
-  | 2 => .admin false (.removeMember false)
+  | 1 => .admin false (.renameStore "Family")
+  | 2 => .admin false (.renameStore "Household")
   | _ => .admin false (.other ())
 
 open CovenSequence in
 /-- **Counterexample: settling an admin claim from the state.** Device `true`
-recorded its claim 1, of slot 1, adding member `false`. Whether it landed or
+recorded its claim 1, of slot 1, renaming the store. Whether it landed or
 another device's identical change took the slot, the ledger after slot 2 is the
 same apart from the claim numbers: the change was undone. Settling by presence
 says "not landed" in both, losing the first history's successful outcome. The
@@ -415,9 +415,9 @@ theorem admin_state_cannot_settle :
       { ledgerAt adminRules adminLost 2 with claims := fun _ => none } ∧
     (ledgerAt adminRules adminLanded 2).claims true = some ⟨1, (1 : Nat)⟩ ∧
     (ledgerAt adminRules adminLost 2).claims true = none ∧
-    (ledgerAt adminRules adminLanded 2).member false = false ∧
-    adminLanded 1 = .admin true (.addMember false .member) ∧
-    adminLost 1 ≠ .admin true (.addMember false .member) := by
+    (ledgerAt adminRules adminLanded 2).name = "Household" ∧
+    adminLanded 1 = .admin true (.renameStore "Family") ∧
+    adminLost 1 ≠ .admin true (.renameStore "Family") := by
   refine ⟨rfl, rfl, rfl, rfl, rfl, fun h => ?_⟩
   simp only [adminLost] at h
   injection h with h1
@@ -637,9 +637,9 @@ floor naming that snapshot, first kept slot 2. The store is in good order, the
 floor is honest, and the losing device's claim slot is kept. -/
 
 open CovenSequence in
-/-- Slot 1 adds member `false`; slot 2 announces the snapshot covering it. -/
+/-- Slot 1 renames the store; slot 2 announces the snapshot covering it. -/
 def lostSeq : Nat → Slot adminSig
-  | 1 => .admin true (.addMember false .member)
+  | 1 => .admin true (.renameStore "Family")
   | 2 => .snapshot false () 1 0 ()
   | _ => .admin false (.other ())
 

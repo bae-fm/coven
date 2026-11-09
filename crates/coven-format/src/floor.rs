@@ -34,12 +34,13 @@ impl Wire for OriginalSlot {
     }
 }
 impl OriginalSlot {
-    /// Check the expected clear slot kind and bounded envelope. Authentication
-    /// and the encrypted header's path binding are checked when opening it.
-    pub fn validate_kind(&self, kind: u8) -> Result<(), Error> {
+    /// Check that the clear slot kind is one of `kinds` and the bounded
+    /// envelope. Authentication and the encrypted header's path binding are
+    /// checked when opening it.
+    pub fn validate_kind(&self, kinds: &[u8]) -> Result<(), Error> {
         crate::error::bound(self.object.len(), MAX_BOUNDED_SLOT, "retained slot")?;
         let object = crate::sealed_slot::BoundedSlot::decode(&self.object)?;
-        require(object.prefix.kind.tag() == kind, "retained slot kind", Rule::Kind)
+        require(kinds.contains(&object.prefix.kind.tag()), "retained slot kind", Rule::Kind)
     }
 }
 
@@ -104,7 +105,7 @@ impl FloorFrames {
         &self.header
     }
     fn accept(&mut self, slot: &OriginalSlot) -> Result<(), Error> {
-        slot.validate_kind(3)?;
+        slot.validate_kind(&[3])?;
         require(
             !self.ended && self.header.snapshots.get(self.next) == Some(&slot.slot),
             "floor announcement order",

@@ -35,6 +35,15 @@ pub(crate) fn fresh(state: &StoreState, keys: &coven_crypto::MemberPublicKeys) -
         .all(|bound| bound.signing != keys.signing && bound.sealing != keys.sealing)
 }
 
+/// Whether `device` is registered for `member`, whatever its state since.
+fn registered_for(
+    state: &StoreState,
+    device: &coven_foundation::id_source::DeviceId,
+    member: &MemberId,
+) -> bool {
+    state.devices.get(device).is_some_and(|registered| registered.member == *member)
+}
+
 /// Resolve an activation through its earlier authenticated announcement.
 fn boundary(
     change: &StoreChange,
@@ -126,7 +135,8 @@ pub(crate) fn checked_change(
     let authorized = match change {
         CreateStore { .. } | AddDevice { .. } | CreateCircle { .. } => true,
         RenameStore { .. }
-        | AddMember { .. }
+        | AdmitMember { .. }
+        | RecoverMember { .. }
         | RemoveMember { .. }
         | ChangeRole { .. }
         | AddInviteShare { .. } => is_admin,
@@ -187,12 +197,13 @@ pub(crate) fn checked_change(
             store.name = name.clone();
             store.named_at = slot;
         }
-        AddMember { member: id, keys, role, access } => {
+        AdmitMember { member: id, keys, role, access, device, device_name } => {
             if let Some(existing) = state.members.get(id) {
                 if !existing.removed
                     && existing.keys == *keys
                     && existing.role == *role
                     && existing.access == *access
+                    && registered_for(state, device, id)
                 {
                     return Ok(None);
                 }
@@ -201,11 +212,39 @@ pub(crate) fn checked_change(
             if !fresh(state, keys) {
                 return Err(OperationRejection::KeysAlreadyUsed);
             }
+            if state.devices.contains_key(device) {
+                return Err(TargetGone(EntryTarget::Device(*device)));
+            }
             next.members.insert(
                 *id,
                 StoreMember { keys: *keys, access: access.clone(), role: *role, removed: false },
             );
             next.bound_keys.insert(*keys);
+            next.devices.insert(
+                *device,
+                StoreDevice { member: *id, name: device_name.clone(), state: DeviceState::Active },
+            );
+        }
+        RecoverMember { member: id, expected, keys, device, device_name } => {
+            let target = state.active_member(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
+            if target.keys == *keys && registered_for(state, device, id) {
+                return Ok(None);
+            }
+            if target.keys != *expected {
+                return Err(OperationRejection::MemberKeysChanged(*id));
+            }
+            if !fresh(state, keys) {
+                return Err(OperationRejection::KeysAlreadyUsed);
+            }
+            if state.devices.contains_key(device) {
+                return Err(TargetGone(EntryTarget::Device(*device)));
+            }
+            next.members.get_mut(id).expect("checked target").keys = *keys;
+            next.bound_keys.insert(*keys);
+            next.devices.insert(
+                *device,
+                StoreDevice { member: *id, name: device_name.clone(), state: DeviceState::Active },
+            );
         }
         RemoveMember { member: id } => {
             let target = next.members.get_mut(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;

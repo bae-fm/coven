@@ -411,7 +411,8 @@ def changes(sodium):
     return [
         b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + s3_key + text(b"D")
         + bytes([1]) * 16 + initial_hash,
-        b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test"),
+        b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test")
+        + u64(2) + text(b"D"),
         b"\x02" + BEN,
         b"\x03" + ANA + b"\x00",
         b"\x04" + text(b"D") + b"\x00",
@@ -430,12 +431,13 @@ def changes(sodium):
         b"\x11" + text(b"N"),
         b"\x12" + bytes([0x55]) * 16 + text(b"dan@example.org"),
         b"\x13" + bytes([0x55]) * 16,
+        b"\x14" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34) + u64(3) + text(b"D"),
     ]
 
 
 def join_request(sodium):
     """Ana's request answering the re-binding invite with her replacement pair."""
-    return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + text(b"D"))
+    return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + u64(3) + text(b"D"))
 
 
 def objects(sodium):
@@ -564,6 +566,21 @@ def load_sodium():
     sodium.crypto_scalarmult.argtypes = [pointer, pointer, pointer]
 
     return sodium
+
+
+def admission(sodium):
+    """Ana's device admitting Ben at slot 4 and registering his device 2, its
+    prefix carrying his copy of the store key at index 0 (D6, D9, D11)."""
+    path = STORE_TEXT + b"seq/4"
+    key_id = bytes([1]) * 16
+    routing = b"\x00" + key_id + BEN + sealing_public(sodium, 0x35)
+    fixed = bytes([33, 0, 1, 4]) + key_id
+    sealed = anonymous_box(sodium, b"store", path, fixed + u32(0) + routing,
+                           key_id + bytes([17]) * 32, 0x35, 0x57, 0x46)
+    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:]
+    plaintext = slot_header(4, 4) + frame(4, changes(sodium)[1])
+    body = chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext)
+    return signed(sodium, path, prefix + body)
 
 
 def copies(sodium):
@@ -709,6 +726,7 @@ def main():
         ("sealed-join-request.hex", join_object),
         ("sealed-store-key.hex", store_key),
         ("sealed-circle-key.hex", circle_key),
+        ("sealed-admission.hex", admission(sodium)),
         ("restore-code.hex", restore_code()),
         ("invite-code.hex", invite_code()),
         ("invite-end.hex", invite_end()),

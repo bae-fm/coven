@@ -77,13 +77,13 @@ end Store
 
 /-! ## Reading forward past a moved floor
 
-Slot 1 adds member `false`; slot 2 announces `false`'s snapshot covering 1, and
+Slot 1 renames the store; slot 2 announces `false`'s snapshot covering 1, and
 slot 3 its snapshot covering 2. The floor names the one at 3, with `at` 3 and
 first kept slot 3: slots 1 and 2 are deleted. A device has applied slot 1. -/
 
 open CovenSequence in
 def compactSeq : Nat → Slot adminSig
-  | 1 => .admin true (.addMember false .member)
+  | 1 => .admin true (.renameStore "Family")
   | 2 => .snapshot false () 1 0 ()
   | 3 => .snapshot false () 2 0 ()
   | _ => .admin false (.other ())

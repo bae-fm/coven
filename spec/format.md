@@ -90,6 +90,7 @@ spaces only separate fields for reading. Example times are UTC.
 | · admin entry slot | | one membership or settings change | D6, D9 |
 | · writes slot | | one device's queued writes, each an inner write | D5, D9 |
 | · key copy slot | | one audience key sealed to one member | D9, D11 |
+| · admission slot | | an admin entry admitting a member and registering their first device, with that member's key copies | D6, D9, D11 |
 | · snapshot announcement slot | | a snapshot's id, coverage, breaking version, purpose and hash | D9 |
 | Inner write | inside a writes slot | one write: a header, then one part per audience | D5, D9 |
 | Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
@@ -298,9 +299,11 @@ unique constraints.
 
 ### Size of a slot
 
-- A complete admin, key-copy or announcement slot is at most 4 MiB, including
-  its prefix, framing, authentication and signature. An operation that would
-  exceed it is rejected before it prepares anything.
+- A complete admin, admission, key-copy or announcement slot is at most 4 MiB,
+  including its prefix, framing, authentication and signature. An operation
+  that would exceed it is rejected before it prepares anything. An admission
+  carries a copy of every store key in history, 189 bytes each, so about
+  22,000 store keys fit in one.
 - A writes slot has no format-wide size limit. Its individual writes and frames
   keep their bounds.
 - Provider transfer limits still apply ([§20](coven.md#20-what-coven-needs-from-a-provider)).
@@ -855,7 +858,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | Tag | Change | Fields |
 | --- | --- | --- |
 | 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| access:MemberAccess \| device_name:name \| key:uuid \| key_hash:32 bytes` |
-| 1 | Add member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess` |
+| 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name`; only in an admission slot |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
 | 4 | Add device | `name:name \| replaces:Option<DeviceId>`; registers the writing device, which `replaces` must not name |
@@ -873,6 +876,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 17 | Rename store | `name:name` |
 | 18 | Add invite share | `invite:uuid \| account:text` |
 | 19 | End invite share | `invite:uuid` |
+| 20 | Recover member | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys \| device:DeviceId \| device_name:name`; only in an admission slot |
 
 - Tag 12 is unused.
 - A role is `0` admin or `1` member.
@@ -896,7 +900,32 @@ slot.
 replaces the current name. Creation supplies the initial name (§10.3).
 
 **Devices.** Add-device registers the slot's writing device. A replacement
-retires a distinct older device of the same member.
+retires a distinct older device of the same member. Admit-member and
+recover-member register the device they name, which is never the writing
+device: the first device of the member they admit (below).
+
+**Admissions.** An approved join request becomes one admission slot (§13.2):
+its entry admits the request's member with the request's pair and registers
+the request's device, and its clear prefix carries that member's key copies
+(D9). Both changes are an admin's, written by the device that made the
+invite.
+
+- Admit-member: the member id has never been bound, and both keys have never
+  been used. Recover-member: the member is active, its current binding equals
+  `expected`, and both new keys have never been used; it rebinds the member
+  like replace-member-keys. A recovery keeps the member's role, access,
+  circles and existing device records; its earlier devices are gone for good
+  from this slot (§14.1).
+- `device` has never been registered. Admit-member's `access` is of the kind
+  creation's `access` has.
+- The prefix's copies are all routed to the entry's `member` and
+  `keys.sealing`, and name every store key introduced before the slot, each
+  once. A circle key copy may follow, for a circle the member belongs to.
+- The slot's own body is sealed with one of the store keys it copies.
+- Applying it binds the pair, records the access and registers the device
+  for the member, in one transaction. An admission whose member, pair, role,
+  access and device all match the state already is satisfied and changes
+  nothing.
 
 **Replacing member keys.**
 
@@ -989,7 +1018,7 @@ as shown. Empty sections emit nothing.
 | 4 | Authored change: `header:WriteHeader \| complete:bool \| change:record \| verdict` | `ChangeId` |
 | 5 | Creation: `row:RowId \| write:WriteId \| creator:ChangeId` | `RowId` |
 | 6 | Write evidence: `write:WriteId \| prefix:bytes \| header:bytes \| roots:[32 bytes] \| header_signature:64 bytes \| proof:Multiproof` | `WriteId` |
-| 7 | Original admin slot: `slot:Slot \| object:bytes` | slot |
+| 7 | Original admin or admission slot: `slot:Slot \| object:bytes` | slot |
 | 8 | Original key-copy slot: `slot:Slot \| object:bytes` | slot |
 | 9 | Original announcement slot: `slot:Slot \| object:bytes` | slot |
 | 10 | Last included claim: `device:DeviceId \| number:u64 \| digest:Option<32 bytes>` | device |
@@ -1366,8 +1395,9 @@ which keys reached whom. So the store snapshot keeps the signed slots
 themselves, not a summary.
 
 - Sections 7 to 9 occur only in the store snapshot.
-- They keep the original signed admin, key-copy and announcement slots through
-  coverage, including creation. Verify each object using its original slot path.
+- They keep the original signed admin, admission, key-copy and announcement
+  slots through coverage, including creation; section 7 holds admin slots and
+  admissions. Verify each object using its original slot path.
 - These records preserve historical bindings, key introductions, exposure and
   announcements. Admin state is derived from them in order; retained later slots
   supply newer bindings.
@@ -1459,18 +1489,22 @@ a new device needs.
 ### The join request (kind 9)
 
 Dan's phone asks to join by writing a join request (§13.2), which is
-`invite:uuid | member:MemberId | keys:MemberKeys | device_name:name`:
+`invite:uuid | member:MemberId | keys:MemberKeys | device:DeviceId |
+device_name:name`:
 
 ```
 invite       uuid
 member       MemberId
 keys         MemberKeys
+device       DeviceId
 device_name  name
 ```
 
 - Verify its supplied signing key: the request is signed with the key it
   carries.
 - Require the invite's fixed member id.
+- `device` is the joining installation's own id, fixed when the join begins.
+  The approval registers it (D6).
 
 ### An ended invite's marker (kind 37)
 
@@ -1533,7 +1567,7 @@ objects.
 | Kind | Object | Prefix |
 | --- | --- | --- |
 | 32 | Inner write | `header_key:uuid \| part_keys:[uuid]` |
-| 33 | Sequence slot | `slot_kind:u8 \| key:uuid \| copy:Option<CopyBox>` |
+| 33 | Sequence slot | `slot_kind:u8 \| key:uuid \| copy:Option<CopyBox>`, or for an admission `slot_kind:u8 \| key:uuid \| copies:[CopyBox]` |
 | 34 | Snapshot | `audience:Audience \| key:uuid \| covers:u64 \| purpose:Purpose` |
 | 36 | Join request | empty |
 | 39 | Floor | `key:uuid \| first:Slot \| copies:[slot:Slot \| object:bytes]` |
@@ -1561,9 +1595,10 @@ Every slot has the same envelope, whatever it holds.
 
 | Field | Rule |
 | --- | --- |
-| `slot_kind` | `0` admin, `1` writes, `2` key copy, `3` snapshot announcement |
+| `slot_kind` | `0` admin, `1` writes, `2` key copy, `3` snapshot announcement, `4` admission |
 | `key` | names the store key that seals the slot's body. A prerequisite copy's body uses an accepted store key (§12.1). |
-| `copy` | present exactly for kind 2 (below) |
+| `copy` | present exactly for kind 2 (below); kinds 0, 1 and 3 write it absent |
+| `copies` | kind 4 only, in place of `copy`: one or more boxes, all to one recipient and sealing key (below) |
 
 **The slot header.** Every slot starts its encrypted body with a kind-14 header,
 `device:DeviceId | claim:u64 | author:MemberId | after:u64`:
@@ -1579,8 +1614,8 @@ Every member can read the device and claim number; the provider can't.
 
 **Signing.**
 
-- Admin, copy and announcement slots use the device owner's preceding current
-  key. Creation supplies it in its D6 payload.
+- Admin, admission, copy and announcement slots use the device owner's
+  preceding current key. Creation supplies it in its D6 payload.
 - Registration uses the new device's existing member key.
 - A writes slot uses the signing credential its inner writes share, resolved from
   their authored views. Check that historical signature before consuming a batch
@@ -1591,6 +1626,7 @@ Every member can read the device and claim number; the provider can't.
 | Slot kind | Body |
 | --- | --- |
 | admin | one D6 frame |
+| admission | one D6 frame: admit-member or recover-member, and no other |
 | writes | `count:u64`, at least 1, then `length:u64 \| inner write` for each queued write, the length positive and within the body: in strictly increasing write-number order, all by the header's device, with no omitted unconfirmed predecessor |
 | key copy | one empty kind-16 frame |
 | announcement | one kind-15 frame: `snapshot:SnapshotId \| covers:u64 \| breaking_version:u32 \| purpose:Purpose \| digest:32 bytes` |
@@ -1657,8 +1693,9 @@ would change: inner writes 9 and 10 keep every byte.
 
 A key copy seals an audience key to one member (§12.1). Its routing must be
 readable before the recipient holds any key, so Dan can find his copy. So the
-box sits in the slot's clear prefix, and the slot's body is only an
-acknowledgement.
+box sits in the slot's clear prefix: a key-copy slot's one box, whose body is
+only an acknowledgement, or each of an admission's boxes, beside the entry
+that admits their recipient.
 
 `CopyBox` is:
 
@@ -1688,7 +1725,11 @@ ephemeral:32 bytes | nonce:24 bytes | ciphertext:bytes | tag:16 bytes
   the copy: in the sequence, the floor's `copies` or a store snapshot. It is
   never a local failure, since the reader's own keys are what it was sealed to.
 - The box's context uses the slot prefix through `sealing`, leaving out the
-  ephemeral key and ciphertext. D11 adds the ephemeral key separately.
+  ephemeral key and ciphertext. D11 adds the ephemeral key separately. In an
+  admission, the prefix in that context is the slot's kind, version,
+  `slot_kind`, `key`, the box's index in `copies` as a `u32`, and its routing.
+- An admission's boxes are in increasing order of `(audience, key)`, with no
+  duplicates.
 
 ### The floor (kind 39)
 
@@ -1700,10 +1741,9 @@ needs before it holds any key (§16.4).
   positive, like every `Slot`, and is authenticated with the complete prefix.
   Until then it grants no authority. After opening the body, require its `first`
   to equal the prefix's; refuse a mismatch as damaged.
-- `copies` keeps the exact, complete original key-copy slots needed to open that
-  key, in slot order, from history applied through `at`. This includes copies
-  for joining credentials before admission. They are evidence, not newly sealed
-  copies.
+- `copies` keeps the exact, complete original slots carrying the copies needed
+  to open that key, key-copy slots and admissions, in slot order, from history
+  applied through `at`. They are evidence, not newly sealed copies.
 - Verify each copy with its original slot path and historical binding, from the
   authenticated store snapshot.
 - The floor's signer is `author`, in the state at `at`; `at` covers all
@@ -2102,7 +2142,9 @@ A sealed audience key in a sequence slot has D9's clear routing prefix and box.
   32-byte output. Its info is the context of `coven/sealed-box/v1`; `store` or
   `circle`; the path; the exact D9 clear prefix; the ephemeral key;
   and the member's sealing key, in that order. That context is also the
-  associated data.
+  associated data. For a box in an admission, the clear prefix in it is the
+  one D9 gives for that box: the slot's fixed fields, the box's index and its
+  routing, so no box can be moved to another index or slot.
 - **The plaintext** is `key:uuid | key bytes:32` for a store key, and
   `circle:uuid | key:uuid | key bytes:32` for a circle key.
 
@@ -2286,10 +2328,12 @@ storage          bytes
 - A joiner checks the routing of subsequent slots for its copy, or follows the
   floor when that prefix is gone (§13.2).
 - Routing scans establish no applied progress or authority.
-- Approval publishes the request's exact pair, after the prerequisite copies.
-- Bootstrap requires a claimed, matching id-and-pair binding from the approving
-  writer named in the invite. Never merely an active id, another writer's equal
-  pair, or an available key copy.
+- Approval publishes the request's exact pair and device in one admission,
+  whose prefix carries the joiner's copies (D6, D9).
+- Bootstrap requires a claimed admission from the approving writer named in
+  the invite, binding the request's id and pair and registering its device.
+  Never merely an active id, another writer's equal pair, or an available key
+  copy.
 
 ### Storage parts
 
@@ -2403,7 +2447,8 @@ kind, sealed object, file and code. Format 1 includes:
   roots, SQL execution records and a migration write;
 - every admin tag and first-slot creation, stable member ids, expected and
   replacement member keys, access key ids and key introductions;
-- key copies for old and current credentials, with signed clear routing;
+- key copies for old and current credentials, with signed clear routing, and
+  an admission whose box opens only at its own index;
 - snapshot announcements, and snapshots with every evidence section,
   active and frozen lost values, first-slot creations and per-device last-claim
   numbers;

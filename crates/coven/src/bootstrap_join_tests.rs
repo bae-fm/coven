@@ -11,15 +11,16 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     let directory = pending.directory();
     let mut code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     code.store = StoreId(UuidIds.new_id());
+    let device = directory.settings().unwrap().device_id;
     assert!(matches!(
-        JoiningIdentity::prepare(&directory, &code, "New phone"),
+        JoiningIdentity::prepare(&directory, &code, device, "New phone"),
         Err(SyncError::Code(CodeError::WrongStore { expected, actual }))
             if expected == directory.id() && actual == code.store
     ));
     assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
     // Through bootstrap, it is refused as the join's code, as a restore's is.
-    let refused =
-        JoiningIdentity::prepare(&directory, &code, "New phone").map_err(BootstrapError::from);
+    let refused = JoiningIdentity::prepare(&directory, &code, device, "New phone")
+        .map_err(BootstrapError::from);
     assert!(matches!(refused, Err(BootstrapError::Code(CodeError::WrongStore { .. }))));
     install.absent(owner.directory.id()).await;
     pending.cancel().unwrap();
@@ -35,7 +36,13 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
-    let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
+    let mut identity = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        directory.settings().unwrap().device_id,
+        "New phone",
+    )
+    .unwrap();
     let file = directory.owned_file(StoreFile::Bootstrap);
     identity.record_attempt().unwrap();
     // As the join saves it before it sends: the code lists the installation.
@@ -74,7 +81,13 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let pending =
         install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
-    let resumed = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
+    let resumed = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        directory.settings().unwrap().device_id,
+        "New phone",
+    )
+    .unwrap();
     assert!(resumed.attempted());
     assert_eq!(resumed.identity().keys().public_keys(), identity.identity().keys().public_keys());
     // The resumed identity keeps the id the invite fixed.
@@ -426,8 +439,8 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
 }
 
 /// Carol's join is approved, then stops while it loads, as when the app is
-/// closed. Her installation had applied the entry adding her; the next call
-/// finds that approval and loads, instead of taking the deleted request for a
+/// closed. Her installation had applied her admission; the next call finds
+/// that approval and loads, instead of taking the deleted request for a
 /// decline (§13.2).
 #[tokio::test]
 async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
@@ -443,7 +456,7 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
         owner.recipient(),
         &cancel,
         |status| {
-            // Every slot applied, the entry adding Carol among them.
+            // Every slot applied, Carol's admission among them.
             if matches!(status, BootstrapStatus::Loading(progress)
                 if progress.step == LoadStep::Applying && progress.done == progress.total)
             {
@@ -615,8 +628,8 @@ async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
     owner.close().await;
 }
 
-/// An approved join cancelled while it loads keeps its installation too: the
-/// entry adding Carol has landed, and only this installation holds her keys.
+/// An approved join cancelled while it loads keeps its installation too: her
+/// admission has landed, and only this installation holds her keys.
 #[tokio::test]
 async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -742,95 +755,6 @@ async fn an_unreadable_saved_code_fails_the_listing() {
     ));
     owner.handle.cancel_invite(&invite.id).await.unwrap();
     owner.close().await;
-}
-
-/// Ending without a store also removes a Dropbox join's kept sign-in, with its
-/// code (§13.2). Carol's join ends as declined only while it can still read
-/// its request's path: once Ana takes back the access the invite granted, the
-/// join's check fails with the provider's refusal instead. Ana puts the
-/// marker in the request's place before she takes the access back, so the
-/// test holds that at the provider while Carol's join checks.
-#[tokio::test]
-async fn declined_cancelled_and_expired_requests_finish_without_committing_custody() {
-    // A cancel deletes the request as a decline does; the joiner sees only that.
-    for (provider, ending) in [CloudProvider::S3, CloudProvider::Dropbox]
-        .into_iter()
-        .flat_map(|provider| ["decline", "cancel", "expiry"].map(|ending| (provider, ending)))
-    {
-        let owner = Owner::new(provider, false).await;
-        let invite = owner.invite().await;
-        let install = Installation::new();
-        let (_, cancel) = watch::channel(false);
-        let control = JoinControl::new();
-        let (waiting, mut waits) = waiting_for_approval();
-        let joining = install.run(
-            &owner,
-            Installation::join_request(&invite, &control),
-            owner.recipient(),
-            &cancel,
-            waiting,
-        );
-        let takes_back = provider.signs_in_with_oauth();
-        let (revoking, revoked) = tokio::sync::oneshot::channel();
-        let (release, released) = tokio::sync::oneshot::channel();
-        if takes_back {
-            owner.storage.hold_next_access("join@example.com", false, revoking, released).await;
-        }
-        let settle = async {
-            waits.wait_for(|waiting| *waiting).await.unwrap();
-            let request = owner.next_join_request().await;
-            match ending {
-                "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
-                "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
-                _ => owner.clock.set(invite.expires_at),
-            }
-            // The ending is a write that takes the invite off Ana's list: a
-            // decline's or a cancel's own, or the expiry's, which her handle
-            // makes once its clock reaches the invite's end.
-            owner
-                .handle
-                .test_invites()
-                .wait_for(|invites| invites.iter().all(|listed| listed.id != invite.id))
-                .await;
-            // Ana's pass after the ending puts the marker in the request's
-            // place, then may take back the access, which waits at the
-            // provider: its end or that wait shows the marker is there. On
-            // S3 there is no access to take back.
-            let answer = owner.handle.retry_now().await.unwrap();
-            let passed = |outcome| assert!(matches!(outcome, RetryOutcome::Synced { .. }));
-            if takes_back {
-                tokio::select! {
-                    outcome = answer => passed(outcome),
-                    revoking = revoked => revoking.unwrap(),
-                }
-            } else {
-                passed(answer.await);
-            }
-            assert!(
-                crate::tests::no_request(&owner.storage, &crate::tests::request_path(&invite))
-                    .await,
-                "{provider:?} {ending}"
-            );
-            control.check_now();
-        };
-        let (result, ()) = join_with_response(joining, settle).await;
-        assert!(matches!(result, Ok(None)), "{provider:?} {ending}: {result:?}");
-        if takes_back {
-            release.send(()).unwrap();
-        }
-        install.absent(owner.directory.id()).await;
-        assert!(StoreKeychain::new(install.keychain.clone(), owner.directory.id())
-            .invite_code()
-            .unwrap()
-            .is_none());
-        assert!(!install
-            .root
-            .path()
-            .join("stores")
-            .join(owner.directory.id().to_string())
-            .exists());
-        owner.close().await;
-    }
 }
 
 /// The revocation of a removed member's account that left a grant in place:

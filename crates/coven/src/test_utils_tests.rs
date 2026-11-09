@@ -511,6 +511,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
             invite: invite.id,
             member: code.member,
             keys: keys.public_keys(),
+            device: coven_foundation::id_source::DeviceId(70),
             device_name: "Departing member".into(),
         },
         keys,

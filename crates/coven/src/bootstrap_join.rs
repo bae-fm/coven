@@ -26,7 +26,10 @@ pub(super) fn prepare_request(
     check: tokio::sync::watch::Receiver<u64>,
 ) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match name {
-        DeviceName::Given(name) => JoiningIdentity::prepare(directory, code, name)?,
+        DeviceName::Given(name) => {
+            let device = directory.settings().map_err(CovenError::from)?.device_id;
+            JoiningIdentity::prepare(directory, code, device, name)?
+        }
         DeviceName::Saved => JoiningIdentity::resume(directory, code)?,
     };
     // Kept from before the request can be sent until the join ends, so a
@@ -135,11 +138,10 @@ impl Joining {
         };
         // The conditions the last check found unmet, shown instead of the wait.
         let mut pending = Vec::new();
-        // Once its copies open, in this call or an earlier one, the join
-        // only waits for the entry approving it: its status stays at
-        // loading, never going back to waiting (E10).
-        // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
-        // survives reopening and a provider cooldown holds them (§6.7).
+        // Once its copies open, in its admission, in this call or an earlier
+        // one, its status stays at loading, never going back to waiting
+        // (E10). Polls back off 1, 2, 4, … 300 seconds apart; the persisted
+        // delay survives reopening and a provider cooldown holds them (§6.7).
         loop {
             let identity = &self.identity;
             sync.join_poll_due(&mut self.check, |next_check| {
@@ -164,10 +166,49 @@ impl Joining {
                     pending = database.pending::<coven_sync::PendingRecord>().await?;
                     sync.join_poll_waiting().await?
                 }
-                JoinOutcome::Approving => sync.join_poll_waiting().await?,
             }
         }
     }
+}
+
+/// End a join whose call failed once the facts end it: the history its
+/// installation applied stops its device for good, the device or its member
+/// removed or the member's keys replaced (§13.2, §14.1). Only the admission
+/// that admits a join registers its device, so a stop is always past it;
+/// before it, nothing ends the join, since the admission may still land.
+/// Then the join records that it ends and deletes what it kept, the kept
+/// sign-in before the code, then the installation (§13.4), and the call
+/// returns the stop. Any other failure leaves it listed for the next call.
+pub(super) async fn ended(
+    builder: &CovenBuilder,
+    pending: &BootstrapStore,
+    entries: &StoreKeychain,
+    request: &BootstrapRequest,
+    error: BootstrapError,
+) -> Result<Option<CovenHandle>, BootstrapError> {
+    if !matches!(
+        error,
+        BootstrapError::Sync(SyncError::Removed | SyncError::MemberKeysReplaced { .. })
+    ) {
+        return Err(error);
+    }
+    match stopped(builder, pending.directory()).await {
+        Ok(true) => match record_ending(request, pending) {
+            Ok(()) => remove_unfinished(entries, pending, Err(error)),
+            Err(recording) => combine(Err(error), Err(recording)),
+        },
+        Ok(false) => Err(error),
+        Err(read) => combine(Err(error), Err(read)),
+    }
+}
+
+/// Whether the history the installation in `directory` applied stops its
+/// device for good. Read from the installation's own database, with nothing
+/// of it running.
+async fn stopped(builder: &CovenBuilder, directory: StoreDir) -> Result<bool, BootstrapError> {
+    let database = open_installation(builder.database(directory)?, &|_| ()).await?;
+    let stop = database.device_stop().await.map_err(CovenError::from).map_err(Into::into);
+    combine(stop.map(|stop| stop.is_some()), close_database(&database).await)
 }
 
 /// What a waiting join shows: the unmet conditions its last check found, or

@@ -300,12 +300,14 @@ impl<'write> CovenWrite<'write> {
     /// journals it, with or without storage, without checking it against the
     /// state this device has applied: one the caught-up history refuses,
     /// such as this admin's demotion, is the operation's outcome. Once it
-    /// commits, a pass catches up, claims copies of every store key and the
-    /// held circle keys for the request's pair, then adds the new member
-    /// with the invite's role, or replaces the existing member's pair; once
-    /// begun, approval finishes. A rejection there ends the invite as a
-    /// decline does, and is the operation's outcome; it is not retried with
-    /// a new entry. A request the invite no longer shows, and an invite
+    /// commits, a pass catches up and claims one admission: the entry adding
+    /// the new member with the invite's role, or rebinding the existing
+    /// member's pair, and registering the request's device, its prefix
+    /// carrying the joiner's copies of every store key and the held circle
+    /// keys. It waits, claiming nothing, while this device lacks a store key
+    /// it must copy. Once begun, approval finishes. A rejection, met before
+    /// anything is claimed, ends the invite as a decline does, and is the
+    /// operation's outcome; it is not retried with a new entry. A request the invite no longer shows, and an invite
     /// whose lifetime has ended, fail with `InvitationChanged`.
     pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError> {
         self.steps.approve_join_request(&self.sql, request)

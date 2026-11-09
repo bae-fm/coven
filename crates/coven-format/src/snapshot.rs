@@ -226,9 +226,10 @@ impl SnapshotRecord {
             Self::Authored(AuthoredRecord::Change(v)) => v.validate(),
             Self::Creation(v) => v.validate(),
             Self::Evidence(v) => v.validate(),
-            Self::Admin(v) => v.validate_kind(0),
-            Self::KeyCopy(v) => v.validate_kind(2),
-            Self::Announcement(v) => v.validate_kind(3),
+            // An admission is an admin entry with its member's copies (D7.6).
+            Self::Admin(v) => v.validate_kind(&[0, 4]),
+            Self::KeyCopy(v) => v.validate_kind(&[2]),
+            Self::Announcement(v) => v.validate_kind(&[3]),
             Self::Claim(v) => {
                 require((v.number == 0) == v.digest.is_none(), "last claim digest", Rule::Required)
             }

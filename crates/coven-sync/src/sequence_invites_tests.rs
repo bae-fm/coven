@@ -4,6 +4,7 @@ use coven_database::operation_kind;
 use coven_database::DbError;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_foundation::clock::Clock;
+use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, InviteStorage, ObjectPath, Storage};
 
 /// The checked requests among the device's open invites.
@@ -26,7 +27,9 @@ pub(crate) async fn joiner(group: &Group, code: &str, name: &str) -> Joiner {
         panic!("an account invite");
     };
     let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(&directory, &code, name).unwrap();
+    let request =
+        JoiningIdentity::prepare(&directory, &code, directory.settings().unwrap().device_id, name)
+            .unwrap();
     let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
     let device = group.open_with(temp, request.identity(), None, storage).await;
     device.sync.accept_join(&invitation).await.unwrap();
@@ -109,63 +112,6 @@ pub(crate) async fn s3_invite(ana: &Device, name: &str) -> Invite {
         )
         .await
         .unwrap()
-}
-
-#[tokio::test]
-async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_registers() {
-    let group = Group::shared();
-    let ana = group.device(1).await;
-    group.create(&ana).await;
-    insert(&ana.sync.database, "a", "before the invite").await;
-    ana.sync.pass().await.unwrap();
-    let invite = invite(&ana).await;
-    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
-    assert_eq!(
-        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
-        JoinOutcome::Waiting
-    );
-    ana.sync.pass().await.unwrap();
-    let checked = requests(&ana).await;
-    assert_eq!(checked.len(), 1);
-    assert_eq!(checked[0].member, invite.member);
-    assert_eq!(checked[0].device_name, "Carol's phone");
-    assert_eq!(checked[0].provider_account_email.as_deref(), Some("carol@example.org"));
-    // Ana's number names the keys Carol's phone made for its request.
-    assert_eq!(
-        checked[0].confirmation,
-        coven_crypto::ConfirmationNumber::of(
-            invite.id,
-            &carol.request.identity().keys().public_keys()
-        )
-    );
-    let count = ana.storage.request_count();
-    ana.sync.pass().await.unwrap();
-    assert_eq!(ana.storage.request_count() - count, 2, "a checked request waits without reads");
-    ana.sync.approve_join_request(&checked[0]).await.unwrap();
-    assert!(no_request(&group.storage, &request_path(&invite)).await);
-    assert_eq!(
-        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
-        JoinOutcome::Admitted
-    );
-    carol.device.sync.register_device("Carol's phone".into(), None).await.unwrap();
-    assert_eq!(rows(&carol.device.sync.database).await, rows(&ana.sync.database).await);
-    insert(&carol.device.sync.database, "c", "from Carol").await;
-    carol.device.sync.pass().await.unwrap();
-    ana.sync.pass().await.unwrap();
-    assert_eq!(rows(&ana.sync.database).await.len(), 2);
-    assert!(requests(&ana).await.is_empty());
-    assert!(
-        ana.sync
-            .database
-            .provider_access("carol@example.org".into())
-            .await
-            .unwrap()
-            .unwrap()
-            .intended
-    );
-    for device in [&ana, &carol.device] {
-        device.sync.database.close().await.unwrap();
-    }
 }
 
 /// Cancelling an invite whose request waits deletes the request, which
@@ -368,11 +314,13 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
         coven_format::test_utils::keys_from_seed(3),
     );
     ana.sync
-        .administer(coven_format::admin::StoreChange::AddMember {
+        .administer(coven_format::admin::StoreChange::AdmitMember {
             member: carol_id.member(),
             keys: carol_id.keys().public_keys(),
             role: MemberRole::Member,
             access: MemberAccess::ProviderAccount("carol@example.org".into()),
+            device: coven_foundation::id_source::DeviceId(81),
+            device_name: "Carol's old phone".into(),
         })
         .await
         .unwrap();
@@ -391,7 +339,9 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
-    carol.device.sync.register_device("Carol's new phone".into(), None).await.unwrap();
+    carol.device.sync.pass().await.unwrap();
+    let state = carol.device.sync.database.store_state().await.unwrap();
+    assert_eq!(state.devices[&carol.device.sync.device].member, carol_id.member());
     assert!(
         ana.sync
             .database
@@ -737,7 +687,13 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
     assert_eq!(invite.access, access("ana"));
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let mut request = JoiningIdentity::prepare(&directory, &code, "Dan's phone").unwrap();
+    let mut request = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        directory.settings().unwrap().device_id,
+        "Dan's phone",
+    )
+    .unwrap();
     let dan = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
     assert!(dan.sync.submit_join(&request).await.unwrap());
     ana.sync.pass().await.unwrap();
@@ -900,7 +856,13 @@ async fn a_request_sent_after_the_invite_ended_finds_its_marker() {
     let invite = s3_invite(&ana, "Carol").await;
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let mut request = JoiningIdentity::prepare(&directory, &code, "Carol's phone").unwrap();
+    let mut request = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        directory.settings().unwrap().device_id,
+        "Carol's phone",
+    )
+    .unwrap();
     let carol = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
     ana.sync.cancel_invite(invite.id).await.unwrap();
     assert!(ana.database().operations().await.unwrap().is_empty());

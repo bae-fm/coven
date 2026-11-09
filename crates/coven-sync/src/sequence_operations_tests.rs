@@ -13,19 +13,9 @@ async fn the_provider_owner_cannot_be_removed_or_claim_a_removal() {
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     group.create(&ana).await;
-    ana.sync
-        .administer(StoreChange::AddMember {
-            member: ben.identity.member(),
-            keys: ben.identity.keys().public_keys(),
-            role: MemberRole::Admin,
-            access: coven_format::MemberAccess::ProviderAccount("ben@example.org".into()),
-        })
-        .await
-        .unwrap();
-    ben.sync
-        .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
-        .await
-        .unwrap();
+    let access = coven_format::MemberAccess::ProviderAccount("ben@example.org".into());
+    ana.sync.administer(admission(&ben, MemberRole::Admin, access, "Ben")).await.unwrap();
+    ben.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
     let before = ana.sync.database.applied_slot().await.unwrap();
     for initiator in [&ana, &ben] {
@@ -175,12 +165,12 @@ async fn provider_access_stays_until_the_last_member_using_the_account_is_remove
     group.storage.grant_access("shared@example.org").await.unwrap();
     for member in [&ben, &carol] {
         ana.sync
-            .administer(StoreChange::AddMember {
-                member: member.identity.member(),
-                keys: member.identity.keys().public_keys(),
-                role: MemberRole::Member,
-                access: coven_format::MemberAccess::ProviderAccount("shared@example.org".into()),
-            })
+            .administer(admission(
+                member,
+                MemberRole::Member,
+                coven_format::MemberAccess::ProviderAccount("shared@example.org".into()),
+                "phone",
+            ))
             .await
             .unwrap();
     }

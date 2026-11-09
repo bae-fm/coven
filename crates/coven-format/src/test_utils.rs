@@ -591,11 +591,13 @@ pub fn store_changes() -> Vec<StoreChange> {
     let m = member_id();
     vec![
         creation_change(),
-        StoreChange::AddMember {
+        StoreChange::AdmitMember {
             member: other_member_id(),
-            access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
             keys: other_member(),
             role: MemberRole::Member,
+            access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
+            device: DeviceId(2),
+            device_name: "D".into(),
         },
         member_removal(),
         StoreChange::ChangeRole { member: m, role: MemberRole::Admin },
@@ -635,6 +637,13 @@ pub fn store_changes() -> Vec<StoreChange> {
             account: "dan@example.org".into(),
         },
         StoreChange::EndInviteShare { invite: InviteId(Uuid::from_bytes([0x55; 16])) },
+        StoreChange::RecoverMember {
+            member: m,
+            expected: member(),
+            keys: replacement(),
+            device: DeviceId(3),
+            device_name: "D".into(),
+        },
     ]
 }
 /// Every independently decoded ordinary object kind.
@@ -652,6 +661,7 @@ pub fn join_request() -> JoinRequest {
         invite: InviteId(Uuid::from_bytes([0x55; 16])),
         member: member_id(),
         keys: replacement(),
+        device: DeviceId(3),
         device_name: "D".into(),
     }
 }

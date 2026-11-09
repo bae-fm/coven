@@ -6,9 +6,9 @@ impl SequenceSync {
     /// Open and check a request: it opens with the invite's secret, its own
     /// new signing key verifies it, it repeats the invite's id and member id,
     /// and `state`, the history this pass caught up with, has bound neither
-    /// of its keys (§13.2). A request that fails a check is `Refused`; one
-    /// in a newer format than this device reads waits for its update, as an
-    /// error.
+    /// of its keys and registers no device with its device id (§13.2). A
+    /// request that fails a check is `Refused`; one in a newer format than
+    /// this device reads waits for its update, as an error.
     pub(super) fn open_request(
         &self,
         work: &InviteWork,
@@ -32,6 +32,11 @@ impl SequenceSync {
         }
         if !crate::effects::fresh(state, &request.keys) {
             return Ok(Opened::Refused(SyncError::Rejected(OperationRejection::KeysAlreadyUsed)));
+        }
+        if state.devices.contains_key(&request.device) {
+            return Ok(Opened::Refused(SyncError::Rejected(OperationRejection::TargetGone(
+                crate::EntryTarget::Device(request.device),
+            ))));
         }
         Ok(Opened::Checked(plain))
     }

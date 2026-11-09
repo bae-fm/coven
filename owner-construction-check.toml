@@ -1536,7 +1536,12 @@ tables = [
     # Committing custody reads and restores the installation's settings.
     "commit",
 ]
-"crates/coven/src/bootstrap_join.rs" = ["prepare_request"]
+"crates/coven/src/bootstrap_join.rs" = [
+    "prepare_request",
+    # Ending a join past its admission reads its installation's own database
+    # for the facts (§13.2).
+    "stopped",
+]
 # Restore connects through the builder's held sign-in.
 "crates/coven/src/restore_credentials.rs" = ["restore_connection"]
 # A join keeps its sign-in in the device custody it composes for the store,

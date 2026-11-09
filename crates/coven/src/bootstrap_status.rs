@@ -25,13 +25,15 @@ pub enum BootstrapStatus {
     /// the floor holds none, the floor's snapshots, then the slots after
     /// them, each step with how much of it is done (§13.4). A waiting join's
     /// scan for its keys is part of its wait; the check in which its keys
-    /// open reports that scan, then loads. Registering follows the last.
+    /// open, in its admission, reports that scan, then loads. A restore's
+    /// registering follows the last.
     Loading(Progress<coven_database::LoadStep>),
     /// Registering this device once the store is loaded: a restore's check
     /// of the access it reaches storage with, the device's registration,
     /// whose claim first reads the slots added since loading, and the
     /// recorded access that follows (§13.1). No count: how many slots the
-    /// claim reads isn't known until it has read them.
+    /// claim reads isn't known until it has read them. A join never reports
+    /// it: its approval registered its device (§13.2).
     Registering,
     /// Keeping the member's keys and the device's credentials in custody and
     /// publishing the store, the last work before the handle opens (§13.1).

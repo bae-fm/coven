@@ -18,18 +18,15 @@ pub(crate) async fn household(group: &Group) -> (Device, Device, Device) {
     group.create(&phone).await;
     phone
         .sync
-        .administer(StoreChange::AddMember {
-            member: ben.identity.member(),
-            keys: ben.identity.keys().public_keys(),
-            role: MemberRole::Admin,
-            access: MemberAccess::ProviderAccount("ben@example.org".into()),
-        })
+        .administer(admission(
+            &ben,
+            MemberRole::Admin,
+            MemberAccess::ProviderAccount("ben@example.org".into()),
+            "Ben's phone",
+        ))
         .await
         .unwrap();
-    ben.sync
-        .administer(StoreChange::AddDevice { name: "Ben's phone".into(), replaces: None })
-        .await
-        .unwrap();
+    ben.sync.pass().await.unwrap();
     let laptop = group.laptop(&phone).await;
     phone.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
@@ -381,11 +378,13 @@ async fn a_share_applied_after_its_account_was_taken_back_grants_it_again() {
     );
     phone
         .sync
-        .administer(StoreChange::AddMember {
+        .administer(StoreChange::AdmitMember {
             member: carol,
             keys: coven_format::test_utils::keys_from_seed(4).public_keys(),
             role: MemberRole::Member,
             access: MemberAccess::ProviderAccount(CAROL.into()),
+            device: coven_foundation::id_source::DeviceId(40),
+            device_name: "Carol's phone".into(),
         })
         .await
         .unwrap();

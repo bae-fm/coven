@@ -1,7 +1,7 @@
 //! Signed snapshot prefixes, and their bodies read once in one stream.
 
 use crate::{
-    history::History,
+    history::{History, KeyCopy},
     object_input::ObjectInput,
     slot_object::{read_exact, SignedDigest},
     write_object::{checked, damaged},
@@ -10,8 +10,8 @@ use crate::{
 use coven_crypto::{MemberIdentity, Signature, StoreKeyring, SIGNATURE_LEN};
 use coven_database::Database;
 use coven_format::{
-    admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_key::CopyBox,
-    sealed_slot::SlotObjectPrefix, sealed_snapshot::SnapshotObjectPrefix,
+    admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_slot::SlotObjectPrefix,
+    sealed_snapshot::SnapshotObjectPrefix,
 };
 use coven_storage::{ByteRange, Storage};
 use std::{
@@ -193,17 +193,13 @@ pub(crate) enum RoutedKey {
 }
 
 impl RoutedKey {
-    /// Open the key held for `member` by `copy`, the kind of the slot whose
-    /// clear prefix is `prefix`, at `path`. A box sealed to a pair this
-    /// member holds that doesn't open at its slot's path is that slot's
-    /// damage, not a local failure.
-    pub(crate) fn open(
-        prefix: &SlotObjectPrefix,
-        copy: &CopyBox,
-        path: &ObjectPath,
-        member: &MemberIdentity,
-    ) -> Result<Self, SyncError> {
-        let context = SlotObjectPrefix::copy_context(prefix.format, prefix.key, &copy.routing)?;
+    /// Open the key `saved`'s box holds for `member`. A box sealed to a pair
+    /// this member holds that doesn't open at its slot's path and place is
+    /// that slot's damage, not a local failure.
+    pub(crate) fn open(saved: &KeyCopy, member: &MemberIdentity) -> Result<Self, SyncError> {
+        let (copy, path) = (&saved.copy, &saved.path);
+        let context =
+            SlotObjectPrefix::copy_context(saved.format, saved.key, saved.place, &copy.routing)?;
         match copy.routing.audience {
             coven_merge::Audience::Store => {
                 copy.open_store_key(member, path.as_str(), &context).map(Self::Store)
@@ -232,37 +228,28 @@ impl RoutedKey {
     }
 }
 
-/// Bootstrap may open a box before knowing its signer's history. The key is
-/// tentative until the original slots and enclosing object authenticate.
-pub(crate) fn routed_key(
+/// What `original`'s boxes route to this member: the keys those sealed to a
+/// pair it holds open, and whether one names it but a pair it doesn't hold,
+/// one its replacement's copies go to (§12.3). Bootstrap may open a box
+/// before knowing its signer's history. The keys are tentative until the
+/// original slots and enclosing object authenticate.
+pub(crate) fn routed(
     original: &OriginalSlot,
     store: coven_foundation::id_source::StoreId,
     member: &MemberIdentity,
-) -> Result<Option<RoutedKey>, SyncError> {
-    use coven_format::sealed_slot::{BoundedSlot, SlotKind};
+) -> Result<(Vec<RoutedKey>, bool), SyncError> {
     let path = original.path(store);
-    let object = checked(&path, BoundedSlot::decode(&original.object))?;
-    let SlotKind::KeyCopy(copy) = &object.prefix.kind else {
-        return Ok(None);
-    };
-    if !copy.routing.held_by(member) {
-        return Ok(None);
+    let object = checked(&path, coven_format::sealed_slot::BoundedSlot::decode(&original.object))?;
+    let mut keys = Vec::new();
+    let mut past = false;
+    for saved in KeyCopy::all(&path, &object.prefix) {
+        if saved.route().held_by(member) {
+            keys.push(RoutedKey::open(&saved, member)?);
+        } else {
+            past |= saved.route().member == member.member();
+        }
     }
-    RoutedKey::open(&object.prefix, copy, &path, member).map(Some)
-}
-
-/// Whether `original` is a copy for this member sealed to a pair it doesn't
-/// hold: one its replacement's copies go to (§12.3).
-pub(crate) fn routed_past(
-    original: &OriginalSlot,
-    store: coven_foundation::id_source::StoreId,
-    member: &MemberIdentity,
-) -> Result<bool, SyncError> {
-    use coven_format::sealed_slot::{BoundedSlot, SlotKind};
-    let path = original.path(store);
-    let object = checked(&path, BoundedSlot::decode(&original.object))?;
-    Ok(matches!(&object.prefix.kind, SlotKind::KeyCopy(copy)
-        if copy.routing.member == member.member() && !copy.routing.held_by(member)))
+    Ok((keys, past))
 }
 
 pub(crate) fn open_routing(
@@ -271,10 +258,7 @@ pub(crate) fn open_routing(
     ring: &mut StoreKeyring,
     member: &MemberIdentity,
 ) -> Result<(), SyncError> {
-    match routed_key(original, store, member)? {
-        Some(key) => key.insert(ring),
-        None => Ok(()),
-    }
+    routed(original, store, member)?.0.into_iter().try_for_each(|key| key.insert(ring))
 }
 
 #[cfg(test)]

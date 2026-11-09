@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    sealed_slot::{BoundedSlot, SlotKind, SlotObjectPrefix},
+    sealed_slot::{BoundedSlot, BoxPlace, SlotKind, SlotObjectPrefix},
     sequence::SlotFrame,
     test_utils as f,
 };
@@ -17,8 +17,13 @@ fn routing(audience: Audience) -> KeyCopyPrefix {
     }
 }
 fn context(routing: &KeyCopyPrefix) -> Vec<u8> {
-    SlotObjectPrefix::copy_context(crate::FormatVersion::CURRENT, f::store_key().id(), routing)
-        .unwrap()
+    SlotObjectPrefix::copy_context(
+        crate::FormatVersion::CURRENT,
+        f::store_key().id(),
+        BoxPlace::KeyCopy,
+        routing,
+    )
+    .unwrap()
 }
 fn seal(routing: KeyCopyPrefix, audience: Audience, key: KeyId) -> CopyBox {
     let path = f::slot_path(2);
@@ -89,6 +94,7 @@ fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
         let changed = SlotObjectPrefix::copy_context(
             crate::FormatVersion::CURRENT,
             KeyId(Uuid::from_u128(99)),
+            BoxPlace::KeyCopy,
             &routing,
         )
         .unwrap();
@@ -180,6 +186,7 @@ fn key_copy_fixtures_are_signed_slots_with_recoverable_boxes() {
             let context = SlotObjectPrefix::copy_context(
                 envelope.prefix.format,
                 envelope.prefix.key,
+                BoxPlace::KeyCopy,
                 &copy.routing,
             )?;
             match copy.routing.audience {
@@ -216,4 +223,58 @@ fn key_copy_fixtures_are_signed_slots_with_recoverable_boxes() {
             }
         });
     }
+}
+
+/// Ana's device admits Ben at slot 4: the admission's prefix carries his copy
+/// of the store key at index 0, bound to that index and the slot's path, and
+/// its body is the entry admitting him and registering his device (D6, D9).
+#[test]
+fn admission_fixture_is_a_signed_slot_whose_box_opens_at_its_index() {
+    let bytes = crate::tests::hex(include_str!("../fixtures/sealed-admission.hex"));
+    let path = f::slot_path(4);
+    let ben = MemberIdentity::new(f::other_member_id(), f::keys_from_seed(0x35));
+    let check = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+        let envelope = BoundedSlot::decode(bytes)?;
+        let SlotKind::Admission(copies) = &envelope.prefix.kind else {
+            return Err("expected an admission".into());
+        };
+        let [copy] = copies.as_slice() else {
+            return Err("expected one copy".into());
+        };
+        let context = |place| {
+            SlotObjectPrefix::copy_context(
+                envelope.prefix.format,
+                envelope.prefix.key,
+                place,
+                &copy.routing,
+            )
+        };
+        let key = copy.open_store_key(&ben, path.as_str(), &context(BoxPlace::Admission(0))?)?;
+        assert_eq!(key.id(), f::store_key().id());
+        // The box opens only at its own index, not as a key-copy slot's box.
+        for place in [BoxPlace::Admission(1), BoxPlace::KeyCopy] {
+            assert!(copy.open_store_key(&ben, path.as_str(), &context(place)?).is_err());
+        }
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&bytes[..bytes.len() - 64]);
+        f::member().signing.verify_object(path.as_str(), &hash.finish(), &envelope.signature)?;
+        let plain = f::store_key().derive().open_object_chunk(
+            path.as_str(),
+            &envelope.prefix.encode()?,
+            0,
+            0,
+            envelope.chunk,
+        )?;
+        let (_, frame) = SlotFrame::decode(&plain, &path)?;
+        envelope.prefix.kind.check_frame(&frame)?;
+        assert_eq!(frame, SlotFrame::Admin(f::store_changes().remove(1)));
+        assert_eq!(envelope.encode()?, bytes);
+        Ok(())
+    };
+    check(&bytes).unwrap();
+    crate::tests::mutations(&bytes, |changed| {
+        if changed != bytes {
+            assert!(check(changed).is_err());
+        }
+    });
 }

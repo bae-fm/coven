@@ -4,7 +4,7 @@ use crate::admin::MemberPublicKeys;
 use crate::error::Error;
 use crate::value::name;
 use crate::wire::wire_struct;
-use coven_foundation::id_source::{InviteId, MemberId};
+use coven_foundation::id_source::{DeviceId, InviteId, MemberId};
 
 /// A new person's request, encrypted with the invite-derived key and signed (§13.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,10 +16,13 @@ pub struct JoinRequest {
     pub member: MemberId,
     /// The requested public pair; it verifies this request's signature.
     pub keys: MemberPublicKeys,
+    /// The joining installation's own id, fixed when the join begins: the
+    /// approval registers it (D6).
+    pub device: DeviceId,
     /// The new device's name shown to the approving admin.
     pub device_name: String,
 }
-wire_struct!(JoinRequest, invite, member, keys, device_name => crate::wire::get_name);
+wire_struct!(JoinRequest, invite, member, keys, device, device_name => crate::wire::get_name);
 impl JoinRequest {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         name(&self.device_name)

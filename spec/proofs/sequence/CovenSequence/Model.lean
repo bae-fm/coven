@@ -80,7 +80,13 @@ inductive Role where
 
 /-- Admin entries. -/
 inductive Entry (S : Sig) where
-  | addMember (m : S.Mem) (role : Role)
+  /-- The admission approving a join (coven.md §13.2): member `m` joins with
+  `role`, and their first installation `d` is registered for them. An admin's
+  active device writes it, never `d` itself. -/
+  | admit (m : S.Mem) (role : Role) (d : S.Dev)
+  /-- The admission recovering member `m` on installation `d`: their key is
+  replaced, as `replaceKey` replaces it, and `d` is registered for them. -/
+  | recover (m : S.Mem) (d : S.Dev)
   | removeMember (m : S.Mem)
   | changeRole (m : S.Mem) (role : Role)
   /-- Installation `d` registers for member `m`. `replaces` names an earlier
@@ -208,10 +214,13 @@ def adminAuthor (L : Ledger S) (d : S.Dev) (e : Entry S) : Bool :=
     | .addDevice target _ _ => decide (d = target) && (L.deviceOf d).isNone
     | _ => false
 
-/-- The checks of an entry that do not depend on roles. Only an installation
-itself can register its id, including when the member is an admin. -/
+/-- The checks of an entry that do not depend on roles. An installation
+registers its own id, including when the member is an admin, except the
+first installation of a person an admission admits or recovers, which the
+admission's author registers. -/
 def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
-  | .addMember m _ => !L.member m && !L.retired m
+  | .admit m _ d => !L.member m && !L.retired m && (L.deviceOf d).isNone && !decide (author = d)
+  | .recover m d => L.member m && (L.deviceOf d).isNone && !decide (author = d)
   | .removeMember m => L.member m
   | .changeRole m _ => L.member m
   | .addDevice d m replaces => decide (author = d) && (L.deviceOf d).isNone && L.member m &&
@@ -224,9 +233,13 @@ def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
 
 /-- An entry's effect. Removal retires the member id and every device bound to it. -/
 def applyEntry (L : Ledger S) : Entry S → Ledger S
-  | .addMember m role =>
+  | .admit m role d =>
     { L with member := fun x => if x = m then true else L.member x
-             role := fun x => if x = m then role else L.role x }
+             role := fun x => if x = m then role else L.role x
+             deviceOf := fun x => if x = d then some m else L.deviceOf x }
+  | .recover m d =>
+    { L with keyGen := fun x => if x = m then L.keyGen m + 1 else L.keyGen x
+             deviceOf := fun x => if x = d then some m else L.deviceOf x }
   | .removeMember m =>
     { L with
       member := fun x => if x = m then false else L.member x

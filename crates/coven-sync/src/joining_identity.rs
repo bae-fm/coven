@@ -13,6 +13,7 @@ use coven_format::{
 use coven_format::{device_gone::DeviceGone, invite_end::InviteEnd};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
+use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use zeroize::Zeroizing;
 
@@ -87,7 +88,7 @@ pub struct JoiningIdentity {
     sealing: Sealing,
     /// The name the device gave itself in its request.
     device_name: String,
-    inviting_writer: coven_foundation::id_source::DeviceId,
+    inviting_writer: DeviceId,
     read_through: u64,
     /// When the invite ends, in seconds since the Unix epoch: no first
     /// request is sent after it.
@@ -108,7 +109,8 @@ enum JoinStage {
     Accepted,
     /// It may have been sent: on restart an absent request is final.
     Sent,
-    /// Its copies opened this member's keys: approval has begun (§13.2).
+    /// Its copies opened this member's keys, in the admission that carries
+    /// them: the approving device's admission is in history (§13.2).
     Opened,
     /// The join decided to end without a store, and is deleting what it
     /// kept: whatever call finds it finishes the deletion, without
@@ -159,16 +161,19 @@ impl Sealing {
 
 impl JoiningIdentity {
     /// Restore a fixed request or prepare it before any provider mutation.
-    /// A changed invite or device name cannot silently reuse another request.
+    /// A new request names `device`, the joining installation's id, for the
+    /// approval to register. A changed invite or device name cannot silently
+    /// reuse another request.
     pub fn prepare(
         directory: &StoreDir,
         code: &InviteCode,
+        device: DeviceId,
         device_name: &str,
     ) -> Result<Self, SyncError> {
         match Self::saved(directory, code)? {
             Some(saved) if saved.device_name != device_name => Err(SyncError::InvitationChanged),
             Some(saved) => Ok(saved),
-            None => Self::create(directory, code, device_name),
+            None => Self::create(directory, code, device, device_name),
         }
     }
 
@@ -235,11 +240,12 @@ impl JoiningIdentity {
     fn create(
         directory: &StoreDir,
         code: &InviteCode,
+        device: DeviceId,
         device_name: &str,
     ) -> Result<Self, SyncError> {
         let path = code.request_path();
         // The request repeats the id the invite fixed and names this
-        // device's fresh pair, which signs it (D8).
+        // device's fresh pair, which signs it, and this installation (D8).
         let identity = MemberIdentity::generate(code.member)?;
         let request = sealed_join_request(
             &code.secret,
@@ -248,6 +254,7 @@ impl JoiningIdentity {
                 invite: code.invite,
                 member: code.member,
                 keys: identity.keys().public_keys(),
+                device,
                 device_name: device_name.into(),
             },
             identity.keys(),
@@ -275,8 +282,8 @@ impl JoiningIdentity {
         self.identity.clone()
     }
 
-    /// The inviting device: only its kept binding admits this request (§13.2).
-    pub fn approver(&self) -> coven_foundation::id_source::DeviceId {
+    /// The inviting device: only its admission admits this request (§13.2).
+    pub fn approver(&self) -> DeviceId {
         self.inviting_writer
     }
 
@@ -286,8 +293,8 @@ impl JoiningIdentity {
         self.read_through
     }
 
-    /// The name the device gave itself in its request, which it registers
-    /// with once admitted.
+    /// The name the device gave itself in its request, which its admission
+    /// registers it with.
     pub fn device_name(&self) -> &str {
         &self.device_name
     }
@@ -322,8 +329,8 @@ impl JoiningIdentity {
     }
 
     /// Whether this member's keys have opened, in this call or an earlier
-    /// one: approval has begun, and the join never reports waiting for it
-    /// again (§13.2, E10).
+    /// one: the admission carrying them is in history, and the join never
+    /// reports waiting for approval again (§13.2, E10).
     pub fn opened(&self) -> bool {
         self.state == JoinStage::Opened
     }
@@ -353,9 +360,9 @@ impl JoiningIdentity {
         self.record(JoinStage::Accepted)
     }
 
-    /// This member's copies opened its keys. Recorded before the join
-    /// reports loading, so a resumed join knows approval has begun before
-    /// its first check (§13.2, E10).
+    /// This member's copies opened its keys, in its admission. Recorded
+    /// before the join reports loading, so a resumed join knows it was
+    /// approved before its first check (§13.2, E10).
     pub(crate) fn record_opened(&mut self) -> Result<(), SyncError> {
         self.record(JoinStage::Opened)
     }

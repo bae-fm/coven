@@ -674,24 +674,9 @@ async fn a_newcomer_verifies_slots_signed_with_a_replaced_pair() {
     ana.sync.pass().await.unwrap();
     assert!(ana.sync.database.pending::<PendingRecord>().await.unwrap().is_empty());
 
-    ana.sync
-        .administer(coven_format::admin::StoreChange::AddMember {
-            member: newcomer.member(),
-            keys: newcomer.keys().public_keys(),
-            role: coven_format::admin::MemberRole::Member,
-            access: group.access("newcomer"),
-        })
-        .await
-        .unwrap();
     let ben = group.newcomer(newcomer, group.storage.for_device()).await;
-    ben.sync.pass().await.unwrap();
-    ben.sync
-        .administer(coven_format::admin::StoreChange::AddDevice {
-            name: "Newcomer".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let role = coven_format::admin::MemberRole::Member;
+    ana.sync.administer(admission(&ben, role, group.access("newcomer"), "Newcomer")).await.unwrap();
     ben.sync.pass().await.unwrap();
 
     assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);

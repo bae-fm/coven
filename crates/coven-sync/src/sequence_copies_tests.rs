@@ -406,12 +406,8 @@ async fn no_copy_is_owed_to_a_removed_member() {
     let owed = session.history.owed_copies(&ring, carol.identity.member());
     assert!(owed.iter().all(|route| route.member != ben.identity.member()), "{}", owed.len());
     assert!(!session.history.state.reads_circle(circle, &ben.identity.member()));
-    assert!(session.history.copies.iter().all(|copy| match &copy.prefix.kind {
-        coven_format::sealed_slot::SlotKind::KeyCopy(copy) => {
-            copy.routing.sealing != again.sealing
-                || copy.routing.audience != Audience::Circle(circle)
-        }
-        _ => true,
+    assert!(session.history.copies.iter().all(|copy| {
+        copy.route().sealing != again.sealing || copy.route().audience != Audience::Circle(circle)
     }));
     drop(session);
     for device in [&ana, &ben, &carol] {

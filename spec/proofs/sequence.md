@@ -328,35 +328,40 @@ scan the physical SQLite files, whose encoding is outside the model.
 below every slot that needs it, since a reader that reaches a slot it can't open
 stops there, and reading in order never reaches a later copy (`keyless_stops`). It sets `Keys`' projection beside a roster of who
 reads each audience with which sealing key, as `effects.rs` and
-`circle_effects.rs` keep it. `required` is Rust's `required_copies`, and `legal`
-says a slot followed the rules at its position: an entry's required copies are
-in the prefix before it, which `operation_outcome` gives when validation asks
-for them, and every key sealing the slot is introduced. `Follows` is a history
-of legal slots after creation's two. `CopyPrecedesNeed` is the claim: for every
-slot after creation, every key it needs and every member reading that key's
-audience just before it, a copy to the member's current sealing key sits below.
+`circle_effects.rs` keep it. `required` is Rust's `required_copies`. An
+admission, admitting or recovering a member (§13.2), carries those copies in
+its own slot (`carried`); the projection takes a slot's copies from what it
+carries, a key-copy slot's one or an admission's. `legal` says a slot followed
+the rules at its position: any other entry's required copies are in the prefix
+before it, which `operation_outcome` gives when validation asks for them, and
+every key sealing the slot is introduced. `Follows` is a history of legal slots
+after creation's two. `CopyPrecedesNeed` is the claim: for every slot after
+creation, every key it needs and every member reading that key's audience just
+before it, a slot below carries a copy to the member's current sealing key.
 
 - `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside`:
   every key introduced for an audience has a copy to each reader's current
-  sealing key, at every prefix from slot 2 on, when each replacement of a reader
-  comes from another reader. That holds of the store, so a store key's copy is
-  always first; for a circle it is the premise of `copy_precedes_need_inside`.
+  sealing key, at every prefix from slot 2 on, when each replacement or
+  recovery of a reader comes from another reader. That holds of the store, so
+  a store key's copy is always first, an admitted member's in its admission;
+  for a circle it is the premise of `copy_precedes_need_inside`.
 - `races_follow`, `races_keep_order`, `stale_rotation_illegal`
   ([`CopyOrderExamples`](sequence/CovenSequence/CopyOrderExamples.lean)): Ben
-  rotates the store key while Ana adds Dan, and Dan replaces his keys among the
-  next rotation's copies. Each race is one history of `Follows`, not a case of
-  the proof. A rotation that kept the routes it first read is not legal.
+  rotates the store key while Ana admits Dan, and Dan replaces his keys among
+  the next rotation's copies. Each race is one history of `Follows`, not a case
+  of the proof. A rotation that kept the routes it first read is not legal.
 - `copy_precedes_need_fails` is a checked counterexample: §12.1's recovery of
   Ben by Ana, an admin outside Gifts.
-  1. Ana replaces Ben's keys at slot 13 and sends what she holds, the store key.
-  2. Carol's write chose the Gifts key and lost slot 13. Her device comes back
+  1. Ana recovers Ben at slot 10, her admission carrying what she holds, the
+     store key.
+  2. Carol's write chose the Gifts key and lost slot 10. Her device comes back
      after Ana's rotation of the exposed store key, and a pass sends writes
-     first, so it lands at slot 18 with the Gifts key of its first attempt.
-  3. Carol's pass then sends Ben's copy, at slot 22. Ben reads Gifts at slot 18,
+     first, so it lands at slot 15 with the Gifts key of its first attempt.
+  3. Carol's pass then sends Ben's copy, at slot 19. Ben reads Gifts at slot 15,
      and no copy of the Gifts key below it is sealed to his new key.
 - `early_scan_stops_below_replacement`: the claim names the sealing key current
   at each slot, but a recovered device reads old slots with its new pair. A key
-  scan that ended before the copy can't open Carol's write at slot 11 either,
+  scan that ended before the copy can't open Carol's write at slot 9 either,
   and a scan after it can.
 - `need_introduced`, `stuck_scan_finds_copy`, `owed_complete`: where the claim
   fails, the stopped reader scans the slots after its stop for its copy
@@ -463,8 +468,13 @@ rules independently of the supplied authority policy:
   no previously active device of the member is required.
 - `registration_self_authored`: every applied registration is authored by the
   device it registers, for every authority policy.
-- `registration_at_most_once`: two applied registrations of one id have the
-  same positive slot number. `registration_never_repeated` and
+- `admission_registers`: an applied admission, admitting or recovering a
+  member, registers the device it names for that member, and its author is
+  another device: a joining person's first device is the one the admission
+  registers (§13.2).
+- `registration_at_most_once`: two applied entries registering one id, an
+  installation's own registration or an admission, have the same positive slot
+  number. `registration_never_repeated` and
   `initial_registration_never_repeated` also cover subsequent attempts after
   removal and ids already bound by store creation. Refused attempts do not
   reserve an id; historical bindings never disappear.
@@ -480,14 +490,14 @@ ledger must contain an admin; no active admin device is required.
 [`Membership`](sequence/CovenSequence/Membership.lean) proves permanent retirement
 independently of the authority policy:
 
-- `retired_member_refused`: no valid addition reuses a retired member id.
+- `retired_member_refused`: no valid admission reuses a retired member id.
 - `step_retired_member`, `retired_member_stays`: retirement and absence hold
   together after every subsequent slot and at every later prefix.
 - `removed_member_never_active`: once a positive slot applies a member removal,
   that id is retired and absent at every later prefix, including after attempted
   additions, role changes, registrations and key replacements.
 
-The ledger retains retirement history, and member addition checks it regardless
+The ledger retains retirement history, and an admission checks it regardless
 of the supplied authority policy. The runner examples refuse both reuse and a
 fresh device registration for the retired id; separate examples admit a fresh
 member id and preserve recovery for an active member without devices.
@@ -649,9 +659,11 @@ what make one conditional floor write safe.
   needs the audience's key and the body in storage. Without either the reader
   moves at most to its next slot; no step loads an older snapshot instead.
 - Before it holds the store key, a joiner reads slots too, scanning for the
-  copy its approval sealed to it. [`JoinScan`](sequence/CovenSequence/JoinScan.lean)
+  copy its admission carries. [`JoinScan`](sequence/CovenSequence/JoinScan.lean)
   models that scan: `approved_progress` finds a claimed copy while retention
-  deletes the prefix under it, and
+  deletes the prefix under it, `opened_decides` has a check whose copies open
+  end the join, admitted or declined, since the slot they open from is the
+  admission itself, and
   `JoinScanExamples.exponential_probes_miss_approval` and
   `missing_below_existing_is_deleted` show why a missing slot below a kept
   one is read as deleted history, not probed past.
@@ -1237,12 +1249,13 @@ records in and lets go of one nothing journals or records:
 join reports across its checks and across the calls that resume it: a call
 may stop between checks, or in the check whose copies opened its keys, after
 it reported loading. The scan for the copies is part of the wait. The first
-check whose copies open the keys records that with the saved request before
-it reports loading. `phases_forward` proves the phases never go back:
-waiting, then loading, then done. Each rule is needed:
+check whose copies open the keys, in its admission, records that with the
+saved request before it reports loading, and that check ends the join.
+`phases_forward` proves the phases never go back: waiting, then loading, then
+done. Each rule is needed:
 
-- `resumed_waits_again`: with the opened keys kept only in the call, the
-  resumed call reports waiting after the call before it loaded.
+- `resumed_waits_again`: with the opened keys kept only in the call, a call
+  that stops while it loads is resumed by a call that reports waiting again.
 - `scan_shown_as_loading`: a scan that finds no copy, reported as loading,
   puts the next check's wait after it.
 
@@ -1305,7 +1318,9 @@ before sending, or declined, and a restore cancelled or failed before its
 record, remove the installation and everything kept beside it. A join
 accepts the provider's share before it sends, and a cancel takes back the
 acceptance it records first; a decline's acceptance ends with the invite, and
-an approval's becomes the store's access. The app drops either call at any
+an approval's becomes the store's access. Past its admission, which
+registered its device, the facts end a join as a decline does: a later slot
+stops its device for good (`stopped`). The app drops either call at any
 point. Under `Rules.correct` a restore refuses an installation holding an
 invite code, and a join one holding a restore's record, and a join records
 that it is accepting before it accepts.
@@ -1520,11 +1535,10 @@ Three checked counterexamples explain the evidence:
 - `state_alone_cannot_settle`: a batch can land and have its value overwritten,
   or lose its slot to another device, leaving identical final state. Looking
   only at that state can duplicate a landed batch or drop an unlanded one.
-- `admin_state_cannot_settle`: a member addition followed by removal leaves
-  the same membership whether this device's addition landed or another
-  device's did. Settling by presence loses the successful outcome of the original
-  addition. Retrying cannot reuse the retired id. The per-device records
-  distinguish the histories.
+- `admin_state_cannot_settle`: a store rename followed by a rename back
+  leaves the same ledger whether this device's rename landed or another
+  device's did. Settling by presence loses the successful outcome of the
+  original rename. The per-device records distinguish the histories.
 
 **Another copy using this device id.** Each copy records an attempt before
 sending it and creates only what it recorded, signed with its id.
@@ -1585,7 +1599,7 @@ holds: through the target, then the kept slots it reads through the floor's
 `at`.
 
 - `atTarget_refuses_honest_floor` is a checked counterexample to checking at the
-  target. In `Settle.lostStore`, slot 1 adds a member and slot 2 announces a
+  target. In `Settle.lostStore`, slot 1 renames the store and slot 2 announces a
   snapshot covering it; the honest floor names that announcement, with `at` 2.
   A reload activated by slot 1 targets slot 1; checked against the slots
   through 1, the floor is refused.
@@ -1748,7 +1762,7 @@ their own devices and replace their own keys. Admins may also remove another
 member's device or replace that member's keys; only admins add or remove members
 and change roles or the store name. Registration must be authored by the fresh
 device itself, including for admins. Other admin entries need an active author. Membership
-must retain an admin, and an added member id must never have been a member.
+must retain an admin, and an admitted member id must never have been a member.
 Conversion is the identity; audience writer lists and
 conversion are fixture parameters, not additional store rules.
 
@@ -1756,7 +1770,8 @@ Slots occupy positions `1..slots.length`. Each has `device`, positive `claim`,
 and `digest`. Repeated or decreasing numbers are accepted because copies can
 share an id. An admin slot is
 `{"kind":"admin","device":0,"claim":1,"digest":"slot-1-hash","entry":{"kind":"removeDevice","device":1}}`.
-Entry kinds are `renameStore` (`name`), `addMember` (`member`, `role`),
+Entry kinds are `renameStore` (`name`), `admitMember` (`member`, `role`,
+`device`, the device the admission registers for the member, never its author),
 `removeMember` (`member`), `changeRole` (`member`, `role`),
 `addDevice` (`device`, `member`), `removeDevice`
 (`device`), `replaceKey` (`member`), and `circleMember` (`audience`, `member`,

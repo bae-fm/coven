@@ -83,7 +83,7 @@ theorem honest_floor_installs {st : Store S} {seq : Nat → Slot S} (g : Good R 
 end Store
 
 /-- **Counterexample: checking at the target refuses an honest floor.** In
-`Settle.lostStore`, slot 1 adds member `false` and slot 2 announces `false`'s
+`Settle.lostStore`, slot 1 renames the store and slot 2 announces `false`'s
 snapshot covering it; the floor, honest in the store in good order, names that
 announcement, with `at` 2. A reload activated by slot 1, starting from coverage
 1 and targeting slot 1, checks the floor against the slots through 1 and

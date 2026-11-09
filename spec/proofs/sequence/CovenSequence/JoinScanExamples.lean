@@ -21,15 +21,21 @@ theorem missing_below_existing_is_deleted {S : Sig} (R : Rules S)
       good.first_genuine missing positive (by omega)] at absent
     cases absent
 
+/-- Members and devices are `Bool`: Ana is member `false` with device `false`;
+Dan is member `true`, and his phone is device `true`. -/
 abbrev sig : Sig :=
-  { ReaderExamples.sig with Mem := Bool, decMem := inferInstanceAs (DecidableEq Bool) }
+  { ReaderExamples.sig with
+    Mem := Bool
+    Dev := Bool
+    decMem := inferInstanceAs (DecidableEq Bool)
+    decDev := inferInstanceAs (DecidableEq Bool) }
 
 def initial : Ledger sig where
   name := "Household"
   member := fun member => !member
   retired := fun _ => false
   role := fun _ => .admin
-  deviceOf := fun _ => some false
+  deviceOf := fun device => if device then none else some false
   removed := fun _ => false
   keyGen := fun _ => 0
   aux := ()
@@ -65,12 +71,12 @@ def rules : Rules sig where
   aud0 := fun _ => audience
   rows0 := fun _ => []
 
-/-- Ana snapshots through 12, then sends Dan's copy and admits him. -/
+/-- Ana snapshots through 12, then admits Dan in one admission, which
+carries his copy and registers his phone, and writes. -/
 def history (slot : Nat) : Slot sig :=
-  if slot = 13 then .snapshot () () 12 0 1
-  else if slot = 14 then .keyCopy () true 0
-  else if slot = 15 then .admin () (.addMember true .member)
-  else .writes () 0 (fun _ => none)
+  if slot = 13 then .snapshot false () 12 0 1
+  else if slot = 14 then .admin false (.admit true .member true)
+  else .writes false 0 (fun _ => none)
 
 /-- The floor captured at 13 has no copy for Dan. Retention deletes 1..12. -/
 def retained : Store sig where
@@ -101,7 +107,7 @@ theorem retained_good : Good rules retained history := by
   · intro a; cases a; rfl
   · intro a
     cases a
-    exact Or.inr ⟨13, (), 0, by decide, by decide, rfl, by unfold AppliedTo; decide⟩
+    exact Or.inr ⟨13, false, 0, by decide, by decide, rfl, by unfold AppliedTo; decide⟩
   · intro a r author kind covered path _ _ boundary _
     simp only [history] at boundary
     split at boundary <;> first
@@ -111,12 +117,11 @@ theorem retained_good : Good rules retained history := by
           | (split at boundary <;> contradiction))
 
 theorem approval_is_kept :
-    retained.slot 14 = some (.keyCopy () true 0) ∧
-    retained.slot 15 = some (.admin () (.addMember true .member)) ∧
-    Applied rules history 14 ∧ Applied rules history 15 ∧
+    retained.slot 14 = some (.admin false (.admit true .member true)) ∧
+    Applied rules history 14 ∧
     (ledgerAt rules history 15).member true = true ∧
-    (ledgerAt rules history 13).copies = [] := by
-  exact ⟨rfl, rfl, by unfold Applied; decide, by unfold Applied; decide, by decide, by decide⟩
+    (ledgerAt rules history 15).deviceOf true = some true := by
+  exact ⟨rfl, by unfold Applied; decide, by decide, by decide⟩
 
 /-- Every representable exponential probe from missing slot 4 misses.
 Even probing beyond the first miss cannot obtain a binary-search bracket. -/

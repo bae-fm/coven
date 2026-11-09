@@ -50,7 +50,7 @@ def readConfig (n : Nat) (j : Json) : Except String (Config n) := do
 
 def readEntry (n : Nat) (j : Json) : Except String (Entry (sig n)) := do
   match ← j.getObjValAs? String "kind" with
-  | "addMember" => return .addMember (← member n j) (← readRole j)
+  | "admitMember" => return .admit (← member n j) (← readRole j) (← nat j "device")
   | "removeMember" => return .removeMember (← member n j)
   | "changeRole" => return .changeRole (← member n j) (← readRole j)
   | "addDevice" =>
@@ -376,8 +376,7 @@ def readJoinScan (j : Json) : Except String Json := do
     | .advance _ => throw "scan did not reach its target"
   return toJson (match JoinScan.outcome key (← j.getObjValAs? Bool "binding")
       (← j.getObjValAs? Bool "pending") with
-    | .waiting => "Waiting" | .approving => "Approving" | .admitted => "Admitted"
-    | .declined => "Declined")
+    | .waiting => "Waiting" | .admitted => "Admitted" | .declined => "Declined")
 
 def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with

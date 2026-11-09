@@ -1355,11 +1355,13 @@ fold. Both can back an index, so the sort or filter reads it like any other.
 
 All of a store's history is one numbered sequence of objects in storage:
 `<store>/seq/1`, `seq/2`, `seq/3`, and so on. Each object is a *slot*. A slot
-holds one of four things:
+holds one of five things:
 
 - **writes:** one device's queued writes, sent together in one pass;
 - **an admin entry:** a membership or settings change, such as adding Carol;
 - **a key copy:** a key sealed to one member (§12.1);
+- **an admission:** the entry admitting a new member and registering their
+  first device, with that member's key copies (§13.2);
 - **a snapshot announcement:** "a snapshot of this audience, covering slots up
   to n, is at this path" (§16.2).
 
@@ -3354,7 +3356,7 @@ device, which is how coven notices a restored backup posing as the original
 | Create the store | the first device, which becomes the first admin (§10.3) |
 | Rename the store | an admin |
 | Add or remove a member, change a role | an admin |
-| Add a device | the member it belongs to, from that new device itself |
+| Add a device | the member it belongs to, from that new device itself; a joining person's first device, the admin whose approval admits them (§13.2) |
 | Remove a device | its member, or an admin |
 | Replace a member's keys | that member, or an admin (§12.3) |
 | Set a member's provider access | that member; an admin may set another member's S3 access |
@@ -3411,7 +3413,10 @@ failure. No removal of Ana ever enters history.
 Devices register themselves. A new installation claims an entry adding its own
 fresh id. A member who has lost every device can still register a new one,
 because the entry is authorised by the member's current signing key, not by an
-existing device.
+existing device. A joining person's first device is the one exception: it
+has no member yet to sign with, and the admin approving the join is there, so
+the admission that admits the person registers the device their request
+names (§13.2).
 
 #### 10.3 Creating a store
 
@@ -3467,8 +3472,9 @@ renames, so loading one recovers the name at its covered prefix.
 #### 10.4 Edge cases
 
 - **Already done.** A request that is already satisfied completes without another
-  entry. Adding someone who is already an active member counts as satisfied only
-  if it repeats their exact keys, role and access.
+  entry. Admitting someone who is already an active member counts as satisfied
+  only if it repeats their exact keys, role and access, and the device it
+  registers is already theirs.
 - **Ids are never reused.** Neither device ids nor member ids are reused. Added
   devices always get fresh ids. A person removed and invited again gets a new
   member id and new keys.
@@ -3539,7 +3545,8 @@ storage in more than one step is held to it too (§11.6).
 3. **Prepare.** Record each piece of preparatory work in the journal before
    doing it: a new key, a provider share, an S3 key, a key delivery, a snapshot,
    an upload session. Record enough to finish it or undo it. Then do the work.
-   Key copies and snapshot announcements claim their own, earlier slots.
+   Key copies and snapshot announcements claim their own, earlier slots; an
+   admission carries its copies in its own slot (§13.2).
 4. **Claim** the next slot with the entry, settling the claim as §5.1 describes.
 5. **If someone else claimed it first,** apply their slot and check again. If the
    action is still allowed, finish any preparation that changed and claim the
@@ -3640,7 +3647,7 @@ snapshot body is deleted (§16.3).
 |---|---|
 | Key rotation, circle creation | keep the new key; claim its copies; claim its introduction (§12.1) |
 | Adding a circle member | supply the circle's earlier keys to them first (§15.7) |
-| Invite | record the fixed target member and the new provider access, then show the code (§13.2) |
+| Invite | record the fixed target member and the new provider access, then show the code; approving it seals the joiner's copies into the admission itself (§13.2) |
 | Older keys for a member | at a pass, for each key held and each current member lacking a copy of it: claim the copy (§12.1) |
 | Replacing one's own keys | pause app writes; confirm the writes queued before the replacement; keep the new pair; claim copies, then the replacement; install custody and refresh the restore code before lifting the pause (§12.3) |
 | Schema raise | confirm captured writes and the raise marker; upload and announce the snapshot; claim the raise (§18.5) |
@@ -3806,7 +3813,7 @@ can apply the same sequence; circle row values remain separately encrypted.
 
 | Who can read it | What |
 |---|---|
-| The provider (in the clear) | each slot's kind and the id of the store key sealing its body; a key copy's audience, copied key id, recipient member and exact public sealing key (§12.1); object kinds, format versions, framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
+| The provider (in the clear) | each slot's kind and the id of the store key sealing its body; a key copy's audience, copied key id, recipient member and exact public sealing key, whether in a key-copy slot or an admission (§12.1); object kinds, format versions, framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
 | Holders of the store key | store row values, slot headers and all admin contents, including circle names, key commitments and membership operations |
 | A circle's members (sealed under its key) | the contents of that circle's parts |
 
@@ -3831,7 +3838,10 @@ of the entry.
 
 **Copies come first, then the introduction.** An operation claims every copy the
 key needs before it claims the introduction, so by the time a key is in use,
-everyone who should have it has a copy. Each copy's sealed box sits in the
+everyone who should have it has a copy. Admitting a member is the same rule
+held in one slot: the admission's prefix carries the new member's copies, and
+its entry admits them, so the copies never stand in history without the
+admission, nor the admission without them (§13.2). Each copy's sealed box sits in the
 clear part of its slot, sealed to its recipient alone; no second layer of
 encryption wraps it. The rest of the copy's slot, only an acknowledgement, is
 encrypted with a store key already accepted. The new key may encrypt its own
@@ -3861,15 +3871,15 @@ has no copy of an older key is sent one, so they can read history made under it.
 An operation that retries doesn't need to send a copy that is already in the
 sequence.
 
-Adding or recovering a member sends only the keys the acting device holds, so
-the others reach them through the pass. After it applies what arrived, each
+Adding or recovering a member sends only the keys the acting device holds, in
+the admission, so the others reach them through the pass. After it applies what arrived, each
 device of a member in an audience works out the copies it owes: for each key of
 that audience it holds, one to each current member whose current sealing key has
 no copy of it in the sequence. It claims each as an operation of its own (kind
 `SendKeyCopy`), the way any key copy is claimed, with no turn-taking: if two
 members' devices send the same copy, both stay readable (above). A member who
 has left the audience is owed none. Ana, an admin outside Gifts, recovers Ben
-and can send him only the store key. Carol is in Gifts: her next pass sends
+and can send him only the store keys. Carol is in Gifts: her next pass sends
 Ben's new sealing key a copy of each Gifts key she holds, and his new phone
 opens them with its first keys.
 
@@ -3938,9 +3948,10 @@ Removing one device doesn't retire anything here. A member's key pairs are share
 by all their devices, so removing Ben's lost phone, without removing Ben or
 replacing his keys, leaves his sealing key current (§14).
 
-A tentative copy's recipient is checked once the later entry that admits them, or
-the key's introduction, applies. A recipient who never ends up admitted still
-received the key; undo can't erase that.
+A tentative copy's recipient is checked once the key's introduction applies.
+A copy never names someone who isn't a member yet: a new member's copies come
+in the admission that admits them (§13.2), so no key counts as exposed while
+an approval is under way.
 
 **Choosing a key.** Before a write is first sent, its device picks, for each
 audience, the newest usable key by introduction slot. Usable means, judged on
@@ -4492,11 +4503,12 @@ Ana adds Dan to Household on Dropbox, with Dan beside her:
 3. Ana's phone, the only device holding the secret, reads the request, checks it
    and shows it to Ana with the same number. The numbers on the two screens
    match, and Ana approves.
-4. Ana's phone claims copies of every store key it holds, sealed to Dan's new
-   sealing key, then the entry adding him. Every key, not just the newest, so Dan
-   can read a late write made under an older one.
-5. Dan's phone opens its keys, loads the store, registers itself with its own
-   "add device" entry, and Dan writes down his own restore code.
+4. Ana's phone claims one slot, the *admission*: an entry adding Dan and
+   registering his phone, whose clear prefix carries copies of every store
+   key, sealed to Dan's new sealing key. Every key, not just the newest, so
+   Dan can read a late write made under an older one.
+5. Dan's phone finds the admission, opens its keys and loads the store, and
+   Dan writes down his own restore code.
 
 The invite only lets Dan ask; Ana's phone lets him in. It carries the current
 store name when Ana makes it. If Household is renamed before Dan joins, the
@@ -4569,7 +4581,8 @@ are kept. Dan can't pick a different target.
 **The join request** lives at `<store>/join-requests/<device>/<invite id>`,
 under the id of the device that made the invite, which the code carries. It
 holds the invite id, the chosen member id, both of Dan's new public keys, and
-his device's name. The provider sees only an encrypted object under the
+his phone's device id and name. The device id is the joining installation's
+own, fixed when the join begins. The provider sees only an encrypted object under the
 inviting device's id and the invite's id.
 
 **Approving.** Ana's phone opens the request and checks it:
@@ -4577,7 +4590,8 @@ inviting device's id and the invite's id.
 - the signature verifies with the signing key the request supplies;
 - the member id matches the invite;
 - both keys are fresh: no entry in the history her phone has caught up with
-  bound either one to a member, current or past (§12.3).
+  bound either one to a member, current or past (§12.3);
+- the device id is fresh: that history registers no device with it.
 
 A request that fails a check is neither offered nor approved. A request
 carrying Ben's keys, which history bound when he joined, fails, though his
@@ -4612,8 +4626,9 @@ The pass refuses it, and her app shows the approval refused, with
 request her app was offering to approve, with nothing in `coven_invites`
 saying why. A pass then does the
 work below. Approval, once begun, finishes: Ana can no longer decline or
-cancel the invite. If the caught-up history refuses the entry, the
-operation ends rejected, and the invite ends as a decline does. The rejection
+cancel the invite: its one claim may already be on its way. If the caught-up
+history refuses the entry, the operation ends rejected before it claims
+anything, and the invite ends as a decline does; Dan's phone receives no key. The rejection
 is never claimed again with a new entry: the invite records the operation it
 journaled, and that operation ends, with its outcome, in the transaction that
 moves the invite on. A crash between any two of the approval's writes leaves
@@ -4621,15 +4636,32 @@ both under way or both ended. Ending them apart, a crash between the two left
 the binding's outcome in `coven_operations` beside an approval
 `coven_invites` still listed as under way.
 
-Approval records exactly the pair it checked: as *add member* for a fresh id, or
-*replace member keys* for an existing one. A request that changes afterwards
-needs a new approval. Before the entry, approval claims copies for Dan's exact
-sealing key: every store key in history, and, when recovering an existing
-member, the keys Ana holds for that member's circles. If Ana's phone lacks a key
-it must send, approval is blocked until it has it. The keys of a circle Ana is
-outside reach him from that circle's members at their next passes (§12.1).
+**The admission.** Approval claims exactly one slot. Its entry records exactly
+the pair and device it checked: *admit member* for a fresh id, or *recover
+member* for an existing one, each registering the device the request names
+(format.md [D6](format.md#d6-admin-entries)). A request that changes
+afterwards needs a new approval. The slot's clear prefix carries the copies
+for Dan's exact sealing key: every store key in history, and, when recovering
+an existing member, the keys Ana holds for that member's circles. Every device
+checks that the copies name every store key introduced before the slot. If
+Ana's phone lacks a store key it must send, approval waits until it has it,
+claiming nothing: a late write sealed with that key could otherwise land
+after the admission, below any copy of it to Dan. The keys of a circle Ana is
+outside reach him from that circle's members at their next passes (§12.1);
+the admission doesn't wait for them.
 
-The entry adding a new member records how they reach storage: their provider
+So the copies and the entry stand in history together or not at all. Each
+claim is checked against exactly the slots before the one it lands in
+(§11.1), so an admission that lands always counts: Dan never holds a key
+without being a member, and is never a member without a registered device.
+Before the admission, claiming the copies in slots of their own left both
+open. Ana's phone could stop between the copies and the entry, and Dan's
+phone would hold every store key and wait, its store loaded, for an entry
+that might never come. Meanwhile every device counted the newest store key
+exposed, its copy naming someone who wasn't a member, and replaced it
+([`split_approval_exposes`](proofs/sequence/CovenSequence/Admission.lean)).
+
+The admission records how a new member reaches storage: their provider
 account, or the id of the S3 key made for them and who holds it. Any admin can
 then take it back later (§14.2, §14.3).
 
@@ -4728,19 +4760,19 @@ keys open, the ordinary reader stops at that slot and reports it, if it is one
 he must apply (§6.1). A restoring device scans for its member's copies the
 same way (§13.1, §13.4).
 
-Once his copies arrive, Dan's phone opens them, checks the entry from Ana's
-approving device that admits him, loads the floor's snapshot and applies the
-slots after it in order. If history he had scanned has since been deleted, the
-copies the floor carries supply his keys (§16.4). He registers only with both his
-own sealed keys and that applied entry; copies alone aren't enough.
-Copies opening means approval has begun, and Ana's entry follows them. A
-check that finds his copies but not yet the entry has loaded the store, so
-his status stays at loading while his phone keeps checking for the entry on
-the same waits; it never goes back to waiting for approval. His phone records
-that his keys opened in its saved request (below) before it reports loading.
-Dan closes the app between the copies and the entry; the resumed join reports
-no wait, even before its first check opens his keys again. Without the record,
-it would show the wait again until that check.
+Once his copies arrive, in the admission or in the floor, Dan's phone opens
+them, loads the floor's snapshot and applies the slots after it in order,
+through the admission. If history he had scanned has since been deleted, the
+copies the floor carries supply his keys (§16.4). He is admitted only by an
+applied admission from Ana's approving device that binds his exact pair and
+registers his own device id; copies alone aren't enough. Applied, it has
+registered his phone: nothing is left for the phone to claim, and the rest is
+loading. His phone records in its saved request (below) that it found its
+admission before it reports loading. Dan closes the app while it loads; the
+resumed join reports no wait, even before its first check opens his keys
+again. Without the record, it would show the wait again until that check.
+An admission that its applied history refuses, which only a faulty or
+hostile writer can land, ends the join as declined.
 
 **Checking for approval.** Dan's phone checks for his copies on the same doubling
 waits, kept across restarts. Its status says when the next check is, and shows
@@ -4842,11 +4874,23 @@ A saved code coven can't read fails the listing: the join it belongs to may have
 sent its request, so leaving it out would hide a join the app has to finish.
 
 Dan's phone may also stop after Ana approves, while it loads. By then Ana's phone
-has deleted the request, and Dan's installation has applied the entry adding him
-but has kept no store key. Resuming, it opens its copies again and rebuilds the
-history it applied from those slots, so it finds that entry and loads. Without
-the rebuilt history, the missing request would read as a decline, and the join
-would throw away the only keys Ana approved.
+has deleted the request, and Dan's installation has applied the admission but
+has kept no store key. Resuming, it opens its copies again and rebuilds the
+history it applied from those slots, so it finds the admission and loads.
+Without the rebuilt history, the missing request would read as a decline, and
+the join would throw away the only keys Ana approved.
+
+Past its admission, the facts can still end the join, as they end a restore
+past its registration (§13.1). Ben removes Dan, or his phone, while it
+loads, or replaces Dan's keys: once the phone applies that slot, its device is
+gone for good, and the join deletes every device-only entry of the store, the
+kept sign-in before the code, then the installation (§13.4). The call returns
+the stop. A phone that registered itself after loading, as a restore does,
+would fail that registration on every call once a removal came in between,
+with the request already sent and nothing to end the join
+([`removal_strands_admitted_join`](proofs/sequence/CovenSequence/Admission.lean)).
+A phone past its admission that can't reach storage at all fails each call
+with the provider's error and stays listed.
 
 **No cancelling once sent.** Once Dan's phone has sent the request, nothing on
 its side can take it back safely. Ana's phone may already have read it, and her
@@ -4862,8 +4906,7 @@ object with a *marker*: it deletes
 the request, then creates the marker at the same path, create-once. Dan's phone
 sees only that his request is gone, so a cancel, a decline and an expiry all
 end his join the same way. Once approval has begun, Ana can no longer cancel:
-the copies for Dan may already be claimed, and stopping there would leave him
-half admitted.
+the admission may already be on its way.
 
 The marker is for a request sent late. Dan scans an S3 invite on Monday and
 opens it on Wednesday, after Ana cancelled it. On S3 nothing was shared, so
@@ -4967,14 +5010,15 @@ Dan is a member by then, or if one of its own invites names his account too
 provider's member list with history: that would take away a share the person
 made outside coven.
 
-Recovering an existing member changes none of their access records or device
-ids. The new installation registers its own fresh device after the key
-replacement is claimed. If provider access changes too, that is separate work with
-its own access entry (§14.3). Cleaning up a recovery invite takes back only what
-that invite newly granted, never the member's existing access, and the usual
-checks on shared accounts and other grants still apply (§14.2).
+Recovering an existing member keeps their role, access records, circles and
+device records. The admission rebinds their pair and registers the new
+installation's fresh device; the member's earlier devices are gone for good
+from that slot (§14.1). If provider access changes too, that is separate work
+with its own access entry (§14.3). Cleaning up a recovery invite takes back
+only what that invite newly granted, never the member's existing access, and
+the usual checks on shared accounts and other grants still apply (§14.2).
 
-A recovery invite on S3 carries the member's new key. Once the replacement
+A recovery invite on S3 carries the member's new key. Once the admission
 lands, Ana's phone claims the access entry recording that key for them. If the
 history it catches up with refuses the entry, because Ben removed the member
 meanwhile, the invite ends without it, as a refused approval does: nothing
@@ -4985,9 +5029,11 @@ keep the invite forever. Ana deletes the key in the provider's console
 #### 13.3 Losing everything
 
 Ben loses every device and his restore code. An admin invites him again, to his
-*existing* member id. Approving replaces his keys:
+*existing* member id. Approving recovers him in one admission, which replaces
+his keys and registers his new device:
 
-- his role, circles and existing device ids stay attached to his id;
+- his role, circles and existing device ids stay attached to his id; those
+  devices are gone for good;
 - his old keys count as exposed (§12.2);
 - writes signed with his old keys that land after the replacement are refused
   (§14.1).
@@ -5045,8 +5091,8 @@ everything is encrypted.
   0 of 166" before anything else. A step with nothing to do reports nothing.
   If the floor moves past what the phone read, loading starts over from the
   newer floor's snapshots, and its steps begin again. A join loads in the
-  approval check in which its keys first open (§13.2), so it can report
-  loading before that check finds the entry that admits it. Until then, each
+  approval check in which its keys first open (§13.2): the slot whose copies
+  open them is its admission. Until then, each
   check reads, for its copies, the slots after its invite that no earlier
   check in the same call read. That scan is part of the wait: the phone still
   shows that it is checking for approval. A scan that finds no copy reports
@@ -5075,8 +5121,8 @@ everything is encrypted.
   store one value at a time: the location, the store keys, the member's keys,
   the device id and the credentials, with the person's restore code. Those go
   to the keychain and to files, so they can't be one transaction. The commit
-  runs past its call's point of no return (§11.6): the join's request was
-  approved, the restore's device registered. So a commit that fails, panics or
+  runs past its call's point of no return (§11.6): the join's admission, which
+  registered its device, applied; the restore's device registered. So a commit that fails, panics or
   is cut by a crash keeps what it wrote. The installation stays listed, and the
   next call loads it again and writes everything again, each value the one the
   loaded installation fixes, then publishes. A rollback held in memory would
@@ -5089,7 +5135,8 @@ everything is encrypted.
   person's restore code and S3 key stay, as they do when a store is deleted. Ana's
   laptop crashes part way through its commit, with its device id and keys
   written, and her phone removes the laptop before she resumes. The facts end
-  the restore (§13.1), and nothing of Household is left on the laptop. Had
+  the restore (§13.1), and nothing of Household is left on the laptop. A join
+  past its admission ends the same way (§13.2). Had
   ending deleted only the kept sign-in and the record, the device id and keys
   would have outlived the installation
   ([`cut_commit_orphans_custody`](proofs/sequence/CovenSequence/BootstrapCommit.lean)).
@@ -5944,14 +5991,14 @@ moves `first` to 161 and slots 1 to 160 are deleted (§16.6).
   boundary history matter even without write parts.
 - **Snapshots may cover different slots.** The store's might cover 560 and
   Gifts' 520, with `first` at 501.
-- **It carries the original key-copy boxes** needed to open the store key. Their
+- **It carries the original key-copy boxes** needed to open the store key,
+  with the key-copy slots and admissions that hold them. Their
   routing and `first` are visible, as in the sequence (§12.1, §20.4); the snapshot
   references are encrypted ([format.md D8](format.md#d8-small-frames),
   [D9](format.md#d9-sealed-objects)). A new device can find its copy or the kept
   slots before it holds any key.
 - **It captures those copies from history through the writer's applied slot,**
-  `at`, including copies for joining credentials whose admission has not yet
-  applied. The writer has applied every selected snapshot's announcement, so
+  `at`. The writer has applied every selected snapshot's announcement, so
   `at` covers at least `first - 1`. A copy below `first` is therefore captured
   before retention can delete its slot.
 - **It takes effect when written,** even while old slots still sit in storage.
@@ -10664,6 +10711,7 @@ identifiers let a reader choose the key before opening the encrypted contents.
 |---|---|---|
 | Key introduction (inside an admin entry) | the common slot prefix above | the introduced key's random id and the SHA-256 of its 32 bytes |
 | Key copy (its own slot) | the common slot prefix; audience, copied key id, recipient member, the exact public sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
+| Admission | the common slot prefix; each copy's audience, copied key id, recipient member, exact public sealing key and box, in key order | each key, inside a box sealed to the new member alone, bound to its index; the entry admitting the member and registering their device, under a store key the copies carry |
 | Any slot | the common slot prefix | its device and claim number, under the store key |
 | Writes slot | the common slot prefix | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
 | Join request, `<store>/join-requests/<device>/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
@@ -12154,8 +12202,8 @@ Write-ups explain each model and state its assumptions:
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | A copy opened before its key's introduction is held as tentative and not accepted; once the introduction applies, the device ends as if it had applied the introduction first: the key accepted when its material matches the commitment, a stop when it doesn't | `copy_order_agrees` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
 | The copies an audience still needs, of every key introduced for it to each current member's current sealing key, give every current member every older key once published; then none is needed, so a retry sends none, and they expose no key | `needed_complete`, `needed_after_none`, `needed_exposes_nothing` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
-| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, and so has a circle's key while each replacement of one of its members comes from another of them. Store creation's slot 2 is the exception §12.1 names | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
-| A rotation among another admin's addition and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the added member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
+| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation's slot 2 is the exception §12.1 names | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
+| A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
 | *Body.* Every key a slot needs is introduced by that slot, so a copy of it found above the slot is checked against an applied commitment. Publishing the copies an audience still needs, as a member's pass does, gives each current reader a copy of every key introduced for it; then a stopped reader that scans through them finds a copy of every key its stop needs | `need_introduced`, `stuck_scan_finds_copy`, `owed_complete` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §5.4, §12.1 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
@@ -12165,11 +12213,11 @@ Write-ups explain each model and state its assumptions:
 | A member's S3 key replacement connects with the new key only once history records it, whatever crash cuts it; from every reachable state coven's own steps end with no key kept apart and custody on the recorded key | `custody_never_ahead`, `replacement_settles` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | *Body.* Committing the new key to custody before its entry lets a crash strand custody on a key history never records | `custody_first_strands` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
-| With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied approval still admits a member not subsequently removed. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
-| A scan with no matching copies reaches the end; an absent request without its approving binding reports declined | `no_copy_reaches_end`, `real_decline` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
+| With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied admission still admits a member not subsequently removed, with the device it registered. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
+| A scan with no matching copies reaches the end; an absent request without its approving admission reports declined; a check whose copies open, in the admission's own slot, reports admitted or declined, never a wait | `no_copy_reaches_end`, `real_decline`, `opened_decides` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | A scan for a member's copies never reads past a damaged slot; recording no block, it reads past the slot once a later floor's `first` passes it, where stopping for good keeps reporting the slot | `damaged_not_passed`, `readOrDamage_undamaged`, `deleted_damage_recovers` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | *Body.* A scan that stops for good at a damaged slot never finds the key a later floor carries | `stop_strands_scan` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
-| Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied approval; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
+| Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied admission; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
 | No write from a stale read: an invite's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled, and take back its share unless a member uses the account: nothing stays listed, running, pending or shared | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1, §14.2 |
 | A share an invite granted is always one history records, so the owner's other devices can take it back once the inviting device is gone for good | `share_recorded` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
@@ -12190,10 +12238,12 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |
 | A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
+| An approval admits its member in one slot: in every history whose admissions were each checked against the slots before them, no copy names someone who isn't a member, every member has a registered device, and a removal after an admission makes the device it registered gone for good | `admission_never_exposes`, `member_has_device`, `removal_stops_admitted_device` | `proofs/sequence/CovenSequence/Admission.lean` | §12.2, §13.2, §14.1 |
+| *Body.* With copies in slots of their own before the entry, a demotion between them leaves a copy naming someone never admitted, in every extension; and a removal between the entry and the phone's own registration leaves the member with no device in every extension, so the join can neither finish nor end on the facts | `split_approval_exposes`, `removal_strands_admitted_join` | `proofs/sequence/CovenSequence/Admission.lean` | §13.2 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | *Body.* A member's removal is applied only after the person's saved restore code and S3 key are deleted and the keychain refuses to write them again, whatever passes failed before; a pass at the removal's slot that deletes them then applies it | `removal_applies_only_after_deletion`, `removal_applies_after_follow` | `proofs/sequence/CovenSequence/PersonLeaves.lean` | §13.1, §14.1 |
 | *Body.* Applying the removal before deleting leaves the code offered with nothing left to delete it | `apply_first_leaves_code` | `proofs/sequence/CovenSequence/PersonLeaves.lean` | §14.1 |
-| Writes after a removal, a registration of another installation in the device's place, or a key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
+| Writes after a removal, a registration of another installation in the device's place, or a key replacement or recovery are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |
 | A circle's name is its creation's, then each valid rename's in slot order; once it is deleted, a rename of it, an addition to it or a removal from it is refused because its target is gone | `name_is_latest_rename`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.5 |

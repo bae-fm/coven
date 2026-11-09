@@ -7,8 +7,8 @@ use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
 use coven_database::{AdminEffect, DeviceStop, StoreCircle, StoreDevice, StoreMember, StoreState};
 use coven_format::{
     admin::StoreChange,
-    sealed_key::KeyCopyPrefix,
-    sealed_slot::SlotObjectPrefix,
+    sealed_key::{CopyBox, KeyCopyPrefix},
+    sealed_slot::{BoxPlace, SlotObjectPrefix},
     sequence::{SlotFrame, SlotHeader, SnapshotAnnouncement},
     MemberAccess,
 };
@@ -16,11 +16,37 @@ use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId}
 use coven_merge::{Audience, Slot};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A signed routing prefix and the slot path which authenticates its anonymous box.
+/// One key box in a signed slot's clear prefix, with what its context binds:
+/// the slot's path, format and sealing key, and the box's place in the slot
+/// (D9, D11). A key-copy slot carries one; an admission carries its member's.
 #[derive(Clone)]
 pub(crate) struct KeyCopy {
     pub(crate) path: coven_format::path::ObjectPath,
-    pub(crate) prefix: SlotObjectPrefix,
+    pub(crate) format: coven_format::FormatVersion,
+    pub(crate) key: KeyId,
+    pub(crate) place: BoxPlace,
+    pub(crate) copy: CopyBox,
+}
+
+impl KeyCopy {
+    /// Every box `prefix`, the clear prefix of the slot at `path`, carries.
+    pub(crate) fn all<'a>(
+        path: &'a coven_format::path::ObjectPath,
+        prefix: &'a SlotObjectPrefix,
+    ) -> impl Iterator<Item = Self> + 'a {
+        prefix.kind.boxes().map(move |(place, copy)| Self {
+            path: path.clone(),
+            format: prefix.format,
+            key: prefix.key,
+            place,
+            copy: copy.clone(),
+        })
+    }
+
+    /// The copy's routing.
+    pub(crate) fn route(&self) -> &KeyCopyPrefix {
+        &self.copy.routing
+    }
 }
 
 /// One accepted introduction's place in the sequence and key commitment.
@@ -153,8 +179,9 @@ impl History {
 
     /// The first counted entry that stopped `device` for good, and how
     /// (§14.1): its removal or its member's, a reset registering another
-    /// installation in its place, or its member's keys replaced, after it was
-    /// added, by another of the member's devices or an admin's. The pair
+    /// installation in its place, or its member's keys replaced or the
+    /// member recovered, after it was added, by another of the member's
+    /// devices or an admin's. The pair
     /// that replacement binds is one the device doesn't hold; the device
     /// that wrote it does. Another copy of an installation using its device
     /// id is never here: only that installation sees it (§19.3).
@@ -184,6 +211,7 @@ impl History {
                     DeviceStop::Replaced
                 }
                 StoreChange::ReplaceMemberKeys { member: replaced, .. }
+                | StoreChange::RecoverMember { member: replaced, .. }
                     if *replaced == member
                         && cutoff.slot.get() > added
                         && cutoff.author != device =>
@@ -294,7 +322,7 @@ impl History {
             &self.boundaries,
         )?;
         match change {
-            StoreChange::AddMember { member, access, .. }
+            StoreChange::AdmitMember { member, access, .. }
             | StoreChange::SetAccess { member, access } => self.access_allowed(*member, access)?,
             StoreChange::AddInviteShare { invite, account } => {
                 if let Some(share) = self.invite_shares.get(invite) {
@@ -328,12 +356,60 @@ impl History {
         Ok(effect)
     }
 
+    /// Validate an admission: its entry, as `validate` does, and the copies
+    /// its clear prefix carries. They all go to the entry's member and new
+    /// sealing key, name each store key introduced before the slot, and
+    /// otherwise only keys introduced for circles the member reads before it
+    /// (§13.2, format.md D6). The format keeps each key to one copy.
+    pub(crate) fn validate_admission(
+        &self,
+        header: &SlotHeader,
+        slot: Slot,
+        change: &StoreChange,
+        copies: &[CopyBox],
+    ) -> Result<Option<AdminEffect>, OperationRejection> {
+        let effect = self.validate(header, slot, change)?;
+        let (StoreChange::AdmitMember { member, keys, .. }
+        | StoreChange::RecoverMember { member, keys, .. }) = change
+        else {
+            unreachable!("an admission's kind holds only an admit or recover change")
+        };
+        let introduced: BTreeSet<KeyId> = self
+            .introductions
+            .iter()
+            .filter(|intro| intro.audience == Audience::Store)
+            .map(|intro| intro.key)
+            .collect();
+        let copied: BTreeSet<KeyId> = copies
+            .iter()
+            .filter(|copy| copy.routing.audience == Audience::Store)
+            .map(|copy| copy.routing.key)
+            .collect();
+        let routed = copies.iter().all(|copy| {
+            let route = &copy.routing;
+            route.member == *member
+                && route.sealing == keys.sealing
+                && match &route.audience {
+                    Audience::Store => true,
+                    audience => {
+                        effects::belongs(&self.state, audience, member)
+                            && self.commitment(audience, route.key).is_some()
+                    }
+                }
+        });
+        if !routed || copied != introduced {
+            return Err(OperationRejection::NotAllowed);
+        }
+        Ok(effect)
+    }
+
     /// Install only the effect validated against this preceding state. Invalid
     /// admin attempts still consume their slot and retain their signed original.
     pub(crate) fn accept_admin(&mut self, slot: Slot, header: &SlotHeader, effect: &AdminEffect) {
         let bound = match &effect.change {
             StoreChange::CreateStore { admin, .. } => Some((header.author, *admin)),
-            StoreChange::AddMember { member, keys, .. }
+            StoreChange::AdmitMember { member, keys, .. }
+            | StoreChange::RecoverMember { member, keys, .. }
             | StoreChange::ReplaceMemberKeys { member, keys, .. } => Some((*member, *keys)),
             _ => None,
         };
@@ -376,6 +452,7 @@ impl History {
             StoreChange::RemoveDevice { .. }
                 | StoreChange::RemoveMember { .. }
                 | StoreChange::ReplaceMemberKeys { .. }
+                | StoreChange::RecoverMember { .. }
                 | StoreChange::AddDevice { replaces: Some(_), .. }
         ) {
             self.cutoffs.push(Cutoff {
@@ -432,10 +509,7 @@ impl History {
 
     pub(crate) fn exposed(&self, audience: &Audience, key: KeyId) -> bool {
         self.copies.iter().any(|copy| {
-            let coven_format::sealed_slot::SlotKind::KeyCopy(copy) = &copy.prefix.kind else {
-                unreachable!("copy routing")
-            };
-            let route = &copy.routing;
+            let route = copy.route();
             &route.audience == audience
                 && route.key == key
                 && (!effects::belongs(&self.state, audience, &route.member)
@@ -521,9 +595,7 @@ impl History {
 
     /// Whether a copy with `route`'s routing is in the sequence.
     pub(crate) fn has_copy(&self, route: &KeyCopyPrefix) -> bool {
-        self.copies.iter().any(|copy| {
-            matches!(&copy.prefix.kind, coven_format::sealed_slot::SlotKind::KeyCopy(copy) if &copy.routing == route)
-        })
+        self.copies.iter().any(|copy| copy.route() == route)
     }
 
     /// Whether `author` should send the copy `route` describes: they and the
@@ -564,10 +636,7 @@ impl History {
     ) -> Result<bool, SyncError> {
         let mut changed = false;
         for saved in &self.copies {
-            let coven_format::sealed_slot::SlotKind::KeyCopy(copy) = &saved.prefix.kind else {
-                unreachable!("copy routing")
-            };
-            let route = &copy.routing;
+            let route = saved.route();
             if !route.held_by(member) || self.accepted(ring, &route.audience, route.key) {
                 continue;
             }
@@ -576,7 +645,7 @@ impl History {
             {
                 continue;
             }
-            let key = RoutedKey::open(&saved.prefix, copy, &saved.path, member)?;
+            let key = RoutedKey::open(saved, member)?;
             if let Some(hash) = hash {
                 key.check_hash(&hash).map_err(|error| {
                     crate::write_object::damaged(

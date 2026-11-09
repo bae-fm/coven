@@ -182,7 +182,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
     assert_honest(&reported);
-    let after_loading_began: Vec<_> = before_finishing(&reported)
+    let after_loading_began: Vec<_> = before_committing(&reported)
         .iter()
         .skip_while(|status| !matches!(status, BootstrapStatus::Loading(_)))
         .collect();
@@ -249,7 +249,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     let (result, request) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
-    let reported = before_finishing(after_opening(&reported));
+    let reported = before_committing(after_opening(&reported));
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
     assert_honest(reported);
     let loading = reported
@@ -274,11 +274,11 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     owner.close().await;
 }
 
-/// Ana's approval claims Carol's copies, then the entry adding her, and the
-/// entry fails to land. Carol's next check opens her keys and loads the
-/// store, and finds no entry; from then on her join reports loading as it
-/// waits for the entry, never waiting for approval again (E10). Nor does it
-/// once she closes the app and resumes the join: its keys opened in the call
+/// Ana's approval lands Carol's admission. Carol's next check opens her keys
+/// in it and loads the store, and reading the store's first slot fails: the
+/// call ends with that failure, its status at loading from the moment her keys
+/// opened (E10). Nor does the join wait again once her app resumes it while the
+/// slot still can't be read: its keys opened, in its admission, in the call
 /// before, so the resumed call reports no wait even before its first check.
 #[tokio::test]
 async fn a_join_whose_keys_opened_never_reports_waiting_again() {
@@ -303,14 +303,11 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         },
         &control,
     );
-    // Each check that loads or finds no entry ends by asking whether the
-    // request is still there.
-    let request_path = crate::tests::request_path(&invite);
-    async fn checked(owner: &Owner, request_path: &ObjectPath, control: &JoinControl) {
-        let asked = owner.storage.request_trace().len();
-        control.check_now();
-        requested(owner, asked, &MemoryRequest::Read(request_path.clone(), None)).await;
-    }
+    let first = ObjectPath::slot(owner.directory.id(), 1.try_into().unwrap());
+    let unreadable = Faults {
+        read_failures: [(first.clone(), StorageFailure::Network)].into(),
+        ..Faults::none()
+    };
     let approve = async {
         seen.wait_for(|reported| {
             matches!(
@@ -321,24 +318,16 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         .await
         .unwrap();
         let request = owner.next_join_request().await;
-        // The copy lands in the next slot; the entry after it never does.
-        let entry =
-            ObjectPath::slot(owner.directory.id(), (owner.applied().await + 2).try_into().unwrap());
-        owner
-            .storage
-            .set_faults(Faults {
-                create_failures: [(entry.clone(), (StorageFailure::Network, 500))].into(),
-                ..Faults::none()
-            })
-            .await;
+        let before = owner.applied().await;
         owner.handle.approve_join_request(&request).await.unwrap();
-        // The pass the approval asks for claims the copy, then fails at the
-        // entry.
-        requested(&owner, 0, &MemoryRequest::Create(entry.clone())).await;
-        // The check that loads, then one more after its wait.
-        checked(&owner, &request_path, &control).await;
-        checked(&owner, &request_path, &control).await;
-        control.cancel();
+        owner.pass().await;
+        assert!(owner.applied().await > before, "the admission landed");
+        owner.storage.set_faults(unreadable.clone()).await;
+        let asked = owner.storage.request_trace().len();
+        control.check_now();
+        // The check opens Carol's keys in her admission, then loads from
+        // the first slot.
+        requested(&owner, asked, &MemoryRequest::Read(first.clone(), None)).await;
     };
     let (result, ()) = join_with_response(joining, approve).await;
     assert!(result.is_err());
@@ -351,7 +340,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         reported[loading..].iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
         "{reported:?}"
     );
-    // The entry still hasn't landed when Carol's app resumes the join.
+    // The first slot still can't be read when Carol's app resumes the join.
     let control = JoinControl::new();
     let reported = std::sync::Mutex::new(Vec::new());
     let resumed = install.builder(&owner, owner.recipient()).resume_join(
@@ -364,13 +353,9 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         },
         &control,
     );
-    let check_twice = async {
-        checked(&owner, &request_path, &control).await;
-        checked(&owner, &request_path, &control).await;
-        control.cancel();
-    };
-    let (result, ()) = join_with_response(resumed, check_twice).await;
+    let result = tokio::time::timeout(HANG_GUARD, resumed).await.unwrap();
     assert!(result.is_err());
+    owner.storage.set_faults(Faults::none()).await;
     let reported = reported.into_inner().unwrap();
     assert!(
         reported.iter().any(|status| matches!(status, BootstrapStatus::Loading(_))),

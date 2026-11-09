@@ -171,9 +171,10 @@ fn invite_grant(
 /// Approve exactly this checked request, as a step of a write (§13.2), and
 /// return the operation that binds its pair: the write journals it, and the
 /// invite's approval begins, with or without storage. Once the write commits, a
-/// pass is asked for, which catches up, claims copies of every store key and
-/// the held circle keys for the request's pair, then the entry adding the
-/// member or replacing their pair; once begun, approval finishes. The
+/// pass is asked for, which catches up and claims one admission: the entry
+/// admitting the member with the request's pair, or rebinding their pair, and
+/// registering the request's device, carrying copies of every store key and
+/// the held circle keys for that pair; once begun, approval finishes. The
 /// operation's outcome is listed in `coven_operations`: a rejection ends the
 /// invite as a decline does. The step doesn't check the approval against the
 /// applied state, so the app is never refused an approval it was shown as

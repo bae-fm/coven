@@ -17,19 +17,16 @@ async fn only_the_owners_device_records_the_work_a_removal_needs() {
     group.create(&ana).await;
     for (device, account) in [(&ben, "ben@example.org"), (&dan, "dan@example.org")] {
         ana.sync
-            .administer(StoreChange::AddMember {
-                member: device.identity.member(),
-                keys: device.identity.keys().public_keys(),
-                role: MemberRole::Admin,
-                access: MemberAccess::ProviderAccount(account.into()),
-            })
+            .administer(admission(
+                device,
+                MemberRole::Admin,
+                MemberAccess::ProviderAccount(account.into()),
+                "phone",
+            ))
             .await
             .unwrap();
     }
-    ben.sync
-        .administer(StoreChange::AddDevice { name: "Ben's phone".into(), replaces: None })
-        .await
-        .unwrap();
+    ben.sync.pass().await.unwrap();
     ben.sync.administer(StoreChange::RemoveMember { member: dan.identity.member() }).await.unwrap();
     ben.sync.pass().await.unwrap();
     assert!(ben.database().operations().await.unwrap().is_empty());
@@ -60,21 +57,17 @@ async fn retained_grants_stay_one_record_per_account_whoever_removed_the_member(
         (&dan, MemberRole::Member, "dan@example.org"),
     ] {
         ana.sync
-            .administer(StoreChange::AddMember {
-                member: device.identity.member(),
-                keys: device.identity.keys().public_keys(),
+            .administer(admission(
+                device,
                 role,
-                access: MemberAccess::ProviderAccount(account.into()),
-            })
+                MemberAccess::ProviderAccount(account.into()),
+                "phone",
+            ))
             .await
             .unwrap();
     }
-    for (device, name) in [(&ben, "Ben's phone"), (&dan, "Dan's phone")] {
-        device
-            .sync
-            .administer(StoreChange::AddDevice { name: name.into(), replaces: None })
-            .await
-            .unwrap();
+    for device in [&ben, &dan] {
+        device.sync.pass().await.unwrap();
     }
     dan.sync
         .administer(StoreChange::SetAccess {

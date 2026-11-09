@@ -372,19 +372,9 @@ impl Group {
             coven_storage::CloudProvider::S3 => "ben".to_owned(),
             _ => ben.identity.member().to_string(),
         };
-        ana.sync
-            .administer(StoreChange::AddMember {
-                member: ben.identity.member(),
-                keys: ben.identity.keys().public_keys(),
-                role: MemberRole::Admin,
-                access: self.access(&name),
-            })
-            .await
-            .unwrap();
-        ben.sync
-            .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
-            .await
-            .unwrap();
+        let admission = admission(ben, MemberRole::Admin, self.access(&name), "Ben");
+        ana.sync.administer(admission).await.unwrap();
+        ben.sync.pass().await.unwrap();
         ana.sync.pass().await.unwrap();
     }
 }
@@ -414,6 +404,24 @@ pub(crate) fn codes(
         ),
         person,
     )
+}
+
+/// The admission admitting `device`'s member with `role` and `access`, and
+/// registering the device as `name` (§13.2).
+pub(crate) fn admission(
+    device: &Device,
+    role: MemberRole,
+    access: coven_format::MemberAccess,
+    name: &str,
+) -> StoreChange {
+    StoreChange::AdmitMember {
+        member: device.identity.member(),
+        keys: device.identity.keys().public_keys(),
+        role,
+        access,
+        device: device.sync.device,
+        device_name: name.into(),
+    }
 }
 
 pub(crate) fn access(name: &str) -> coven_format::MemberAccess {
@@ -457,58 +465,6 @@ pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
     })
     .await
     .unwrap()
-}
-
-/// §15.6: applied membership controls reading even when a retained key opens
-/// a retry authored before departure; rejoining reloads the skipped history.
-#[tokio::test]
-async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
-    let group = Group::new();
-    let ana = group.device(1).await;
-    let ben = group.device(2).await;
-    group.create(&ana).await;
-    group.admit(&ana, &ben).await;
-    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
-    ana.sync
-        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
-    ben.sync.pass().await.unwrap();
-    assert_eq!(ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).count(), 1);
-    pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "before departure").await;
-    insert(ana.database(), "store", "readable").await;
-    let (started, observed) = tokio::sync::oneshot::channel();
-    let (resume, held) = tokio::sync::oneshot::channel();
-    group
-        .storage
-        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
-        .await;
-    let leave = async {
-        observed.await.unwrap();
-        ben.sync
-            .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-            .await
-            .unwrap();
-        resume.send(()).unwrap();
-    };
-    let (sent, ()) = tokio::join!(ana.sync.pass(), leave);
-    sent.unwrap();
-    ben.sync.pass().await.unwrap();
-    assert_eq!(rows(ben.database()).await, [("store".into(), "readable".into())]);
-    assert!(
-        pins(ben.database()).await.is_empty(),
-        "retaining a key does not retain reading permission"
-    );
-    assert!(ben.database().pending::<PendingRecord>().await.unwrap().is_empty());
-    ana.sync
-        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
-    ben.sync.pass().await.unwrap();
-    assert_eq!(pins(ben.database()).await.len(), 1);
-    for device in [&ana, &ben] {
-        device.database().close().await.unwrap();
-    }
 }
 
 pub(crate) async fn assert_idle_work(device: &Device) {

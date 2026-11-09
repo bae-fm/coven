@@ -202,6 +202,9 @@ fn check_admin(change: &StoreChange, header: &SlotHeader, path: &ObjectPath) -> 
         StoreChange::AddDevice { replaces, .. } => {
             require(*replaces != Some(header.device), "replacement device", Rule::DeviceReplacement)
         }
+        StoreChange::AdmitMember { device, .. } | StoreChange::RecoverMember { device, .. } => {
+            require(*device != header.device, "admitted device", Rule::AdmittedDevice)
+        }
         StoreChange::RaiseSchema { announcement, .. } | StoreChange::Reset { announcement } => {
             require(announcement.get() <= header.after, "activation announcement", Rule::Coverage)
         }

@@ -1,4 +1,6 @@
-use crate::sequence_sync::sequence_invites::tests::requests;
+use crate::sequence_sync::sequence_invites::tests::{
+    invite, join, no_request, request_path, requests,
+};
 use crate::sequence_sync::sequence_invites::{InviteState, InviteWork};
 use crate::sequence_sync::tests::*;
 use crate::sequence_sync::OperationState;
@@ -9,7 +11,70 @@ use coven_format::{admin::MemberRole, MemberAccess};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, Storage};
 
-/// Once Ana's approval has begun, copies for Carol may already be claimed:
+/// Ana approves Carol's checked request. One admission admits Carol with the
+/// request's pair, carries her copies and registers her phone, which writes
+/// without registering itself (§13.2).
+#[tokio::test]
+async fn an_approved_request_admits_its_pair_and_registers_its_device() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "a", "before the invite").await;
+    ana.sync.pass().await.unwrap();
+    let invite = invite(&ana).await;
+    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Waiting
+    );
+    ana.sync.pass().await.unwrap();
+    let checked = requests(&ana).await;
+    assert_eq!(checked.len(), 1);
+    assert_eq!(checked[0].member, invite.member);
+    assert_eq!(checked[0].device_name, "Carol's phone");
+    assert_eq!(checked[0].provider_account_email.as_deref(), Some("carol@example.org"));
+    // Ana's number names the keys Carol's phone made for its request.
+    assert_eq!(
+        checked[0].confirmation,
+        coven_crypto::ConfirmationNumber::of(
+            invite.id,
+            &carol.request.identity().keys().public_keys()
+        )
+    );
+    let count = ana.storage.request_count();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.storage.request_count() - count, 2, "a checked request waits without reads");
+    ana.sync.approve_join_request(&checked[0]).await.unwrap();
+    assert!(no_request(&group.storage, &request_path(&invite)).await);
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Admitted
+    );
+    // The admission registered Carol's phone: it applies it and writes.
+    carol.device.sync.pass().await.unwrap();
+    let state = carol.device.sync.database.store_state().await.unwrap();
+    assert_eq!(state.devices[&carol.device.sync.device].member, invite.member);
+    assert_eq!(rows(&carol.device.sync.database).await, rows(&ana.sync.database).await);
+    insert(&carol.device.sync.database, "c", "from Carol").await;
+    carol.device.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(rows(&ana.sync.database).await.len(), 2);
+    assert!(requests(&ana).await.is_empty());
+    assert!(
+        ana.sync
+            .database
+            .provider_access("carol@example.org".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .intended
+    );
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Once Ana's approval has begun, its admission may already be on its way:
 /// approving, declining and cancelling all fail with `InvitationChanged`,
 /// and the approval finishes on retry (§13.2).
 #[tokio::test]
@@ -67,30 +132,26 @@ async fn an_approval_under_way_refuses_the_apps_decisions() {
     }
 }
 
-/// Ana's approval claims Carol's copies, then the entry adding her. A check
-/// between the two opens Carol's keys and loads the store, so the join is
-/// past waiting for her copies: it is `Approving`, never `Waiting` again,
-/// until the entry admits her (§13.2).
+/// Ana's approval posts one slot, the admission carrying Carol's copies.
+/// While that post fails, a check finds no copy and Carol's join keeps
+/// waiting; once it lands, the next check finds her copies and her admission
+/// together and she is admitted. No check finds one without the other
+/// (§13.2).
 #[tokio::test]
-async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
+async fn a_join_waits_until_its_admission_lands_whole() {
     use coven_storage::test_utils::Faults;
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
     let invite = invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
-    assert_eq!(
-        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
-        JoinOutcome::Waiting
-    );
     ana.sync.pass().await.unwrap();
     approve(&ana, &requests(&ana).await.remove(0)).await;
-    // The copy lands in the next slot; the entry after it fails.
-    let entry = ana.sync.database.applied_slot().await.unwrap() + 2;
+    let admission = ana.sync.database.applied_slot().await.unwrap() + 1;
     ana.storage
         .set_faults(Faults {
             create_failures: [(
-                ObjectPath::slot(group.store, entry.try_into().unwrap()),
+                ObjectPath::slot(group.store, admission.try_into().unwrap()),
                 (coven_storage::StorageFailure::Network, 500),
             )]
             .into(),
@@ -101,7 +162,7 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     for _ in 0..2 {
         assert_eq!(
             carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
-            JoinOutcome::Approving
+            JoinOutcome::Waiting
         );
     }
     ana.storage.set_faults(Faults::none()).await;
@@ -121,6 +182,54 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana's approval hands Carol every store key, and Ben's phone syncs while
+/// it is under way. Carol's keys reach her only with the entry admitting
+/// her, so at no point does a key's copy name someone who isn't a member:
+/// Ben's pass finds no store key exposed and rotates none (§12.2, §13.2).
+#[tokio::test]
+async fn no_device_rotates_the_store_key_during_an_approval() {
+    use coven_storage::test_utils::Faults;
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let store_keys = |device: &Device| {
+        let device = device.sync.clone();
+        async move {
+            let session = device.session.lock().await;
+            let introductions = &session.history.introductions;
+            introductions.iter().filter(|intro| intro.audience == Audience::Store).count()
+        }
+    };
+    let before = store_keys(&ben).await;
+    let invite = invite(&ana).await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    approve(&ana, &requests(&ana).await.remove(0)).await;
+    // The approval's first slot lands; whatever it posts after fails.
+    let second = ana.sync.database.applied_slot().await.unwrap() + 2;
+    ana.storage
+        .set_faults(Faults {
+            create_failures: [(
+                ObjectPath::slot(group.store, second.try_into().unwrap()),
+                (coven_storage::StorageFailure::Network, 500),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    // Ben's phone reaches storage while Ana's waits to retry.
+    ana.storage.set_faults(Faults::none()).await;
+    ben.sync.pass().await.unwrap();
+    assert_eq!(store_keys(&ben).await, before, "Ben's pass rotated the store key");
+    for device in [&ana, &ben, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
 }
@@ -217,11 +326,13 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
         group.admit(&ana, &ben).await;
         let target = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91));
         ana.sync
-            .administer(coven_format::admin::StoreChange::AddMember {
+            .administer(coven_format::admin::StoreChange::AdmitMember {
                 member: target,
                 keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
                 role: MemberRole::Member,
                 access: MemberAccess::ProviderAccount("carol@example.org".into()),
+                device: coven_foundation::id_source::DeviceId(81),
+                device_name: "Carol's old phone".into(),
             })
             .await
             .unwrap();
@@ -340,11 +451,13 @@ async fn a_refused_access_record_ends_its_invite() {
         coven_format::test_utils::keys_from_seed(3),
     );
     ana.sync
-        .administer(coven_format::admin::StoreChange::AddMember {
+        .administer(coven_format::admin::StoreChange::AdmitMember {
             member: carol.member(),
             keys: carol.keys().public_keys(),
             role: MemberRole::Member,
             access: access("carol-old"),
+            device: coven_foundation::id_source::DeviceId(81),
+            device_name: "Carol's old phone".into(),
         })
         .await
         .unwrap();
@@ -466,15 +579,16 @@ async fn publish_request(
     group.storage.create(&path, &bytes).await.unwrap();
 }
 
-/// A request that fails one of Ana's checks, published at her invite's one
-/// path, ends the invite in the pass that reads it, as a decline does: no
+/// A request that fails one of Ana's checks, among them one naming a device
+/// id history registered, published at her invite's one path, ends the
+/// invite in the pass that reads it, as a decline does: no
 /// attempt could pass it, and no other request can reach that path. The
 /// invite leaves her list with no pending record and no binding journaled,
 /// its marker takes the request's place, and the next pass takes back
 /// Carol's account (§13.2).
 #[tokio::test]
 async fn a_request_failing_a_check_ends_its_invite() {
-    for check in ["signature", "member", "keys"] {
+    for check in ["signature", "member", "keys", "device"] {
         let group = Group::shared();
         let ana = group.device(1).await;
         let ben = group.device(2).await;
@@ -493,12 +607,19 @@ async fn a_request_failing_a_check_ends_its_invite() {
                 &carol,
             ),
             // Ben's pair, which history bound when he joined.
-            _ => (ben.identity.keys().public_keys(), member, ben.identity.keys()),
+            "keys" => (ben.identity.keys().public_keys(), member, ben.identity.keys()),
+            // A fresh pair naming Ben's phone, which history registered.
+            _ => (carol.public_keys(), member, &carol),
+        };
+        let device = match check {
+            "device" => ben.sync.device,
+            _ => coven_foundation::id_source::DeviceId(70),
         };
         let request = coven_format::objects::JoinRequest {
             invite: code.invite,
             member,
             keys,
+            device,
             device_name: "Carol's phone".into(),
         };
         publish_request(&group, &code, &request, signer).await;

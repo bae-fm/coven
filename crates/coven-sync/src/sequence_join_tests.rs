@@ -1,6 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::{floor_object::FloorObject, JoinOutcome};
-use coven_format::{admin::StoreChange, sealed_slot::SlotKind};
+use coven_format::admin::StoreChange;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::clock::HANG_GUARD;
 use coven_merge::Audience;
@@ -95,12 +95,8 @@ async fn approved_with_retention(
         .history
         .copies
         .iter()
-        .filter_map(|copy| match &copy.prefix.kind {
-            SlotKind::KeyCopy(route) if route.routing.held_by(&carol.device.identity) => {
-                Some(copy.path.slot_number().unwrap().get())
-            }
-            _ => None,
-        })
+        .filter(|copy| copy.route().held_by(&carol.device.identity))
+        .map(|copy| copy.path.slot_number().unwrap().get())
         .collect();
     assert!(!copies.is_empty());
     if deleted_copy {
@@ -136,7 +132,10 @@ async fn approved_with_retention(
             serde_json::json!(format!("{outcome:?}"))
         );
     }
-    carol.device.sync.register_device("Carol's phone".into(), None).await.unwrap();
+    // The admission registered Carol's phone; it registers nothing itself.
+    carol.device.sync.pass().await.unwrap();
+    let state = carol.device.database().store_state().await.unwrap();
+    assert!(state.devices.contains_key(&carol.device.sync.device));
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }

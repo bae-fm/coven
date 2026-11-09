@@ -7389,6 +7389,10 @@ pub enum ProviderSignOut {
   each as `decode_code_info` reads its code, and `resume_join` continues one
   with neither the code nor a new sign-in. Once the request may have been
   sent, a join can't be cancelled; it ends only by approval, decline or expiry.
+  Past its admission, a removal of its member or device, or a replacement of
+  its member's keys, ends it once loading applies that slot: it deletes the
+  kept sign-in, the code and the installation, in that order, and the call
+  returns the stop (§13.2).
   Before then a cancel unmounts the Dropbox folder the join may have mounted,
   then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
 - A join sends no first request once the invite's `expires_at` has passed by
@@ -7427,11 +7431,13 @@ pub enum ProviderSignOut {
   refuses when the returned participants contain no added invitee. The share
   may have changed, but this refusal retains no unwanted participant.
 - A replacement invite fixes an existing active id before the requester
-  generates keys. Approval binds the exact signed request's new pair after
-  publishing copies of every store key and the held circle keys. The
-  join requires its approving device’s claimed matching id-and-pair binding
-  before registration. If the expected binding changed first, approval undoes
-  its owned artifacts and fails; available key bytes alone are not admission.
+  generates keys. Approval claims one admission that rebinds the id to the
+  exact signed request's new pair and registers the request's device, its
+  prefix carrying copies of every store key and the held circle keys. On S3
+  an access entry recording the invite's new key for the member follows it.
+  The join requires that admission from its approving device. If the expected binding changed
+  first, approval claims nothing and fails; available key bytes alone are
+  not admission.
   Restore checks the supplied pair against the current binding and reports
   `SyncError::MemberKeysReplaced` when authenticated history shows an old
   code. If the current snapshot cannot be opened, report the unavailable
@@ -7462,11 +7468,10 @@ pub enum ProviderSignOut {
     [§13.4](coven.md#134-edge-cases-installing-on-the-device)). A check's
     scan for a join's copies is part of its wait and reports no `Loading`.
     A join loads in the approval check in which its keys first open in that
-    call, reporting that scan first, so its `Loading` can come while approval
-    is still being checked. A phase never comes back: once a join's keys
-    open, it reports no `WaitingForApproval` or `Pending` again, in that call
-    or any call that resumes it, and checks on its waits for the entry
-    approving it with its status at loading's last step. It records the
+    call, which is the check that finds its admission: the slot carrying its
+    copies. A phase never comes back: once a join's keys open, it reports no
+    `WaitingForApproval` or `Pending` again, in that call or any call that
+    resumes it. It records the
     opened keys with its saved request before it reports `Loading`. A join
     resumed part way through loading reports the slots it has left. An app
     that redraws more slowly sees the newest report, as `CovenBuilder::open`'s
@@ -7499,8 +7504,10 @@ pub enum ProviderSignOut {
     retains encrypted work for explicit retry. There is no cancellable await
     between the final cancellation check, custody commitment, publication and
     returning the handle.
-  - Restore and joining register the supplied device name. Every installation
-    receives its own device id; resuming a pending join keeps that id.
+  - A restore registers the supplied device name. A join's request carries
+    the name and the installation's device id, and the approval's admission
+    registers them (§13.2). Every installation receives its own device id;
+    resuming a pending join keeps that id.
   - Each loading step logs what it took at info level, so a slow restore shows
     where its time went: opening the database (migrating and optimizing),
     connecting to storage, reading the member's store keys from their copies,
@@ -7780,10 +7787,13 @@ impl CovenWrite<'_> {
     /// the app acknowledges its outcome (E6). The write journals it, offline
     /// too, without checking it against the applied state: a pass checks it
     /// after catching up, and a refusal, such as this admin's demotion, is
-    /// the operation's outcome. A pass confirms initial and historical
-    /// key copies, then adds the new member with the invite's role or
-    /// replaces the existing member's keys. Approval, once begun, finishes. A
-    /// rejection is the operation's outcome and ends the invite as a decline
+    /// the operation's outcome. A pass claims one admission: the entry adding
+    /// the new member with the invite's role, or rebinding the existing
+    /// member's pair, and registering the request's device, its prefix
+    /// carrying the joiner's copies of every store key. It waits, claiming
+    /// nothing, while this device lacks a store key it must copy. Approval,
+    /// once begun, finishes. A rejection is the operation's outcome, met
+    /// before anything is claimed, and ends the invite as a decline
     /// does; it is never retried with a new entry. A request the invite no
     /// longer shows and an invite whose lifetime has ended fail with
     /// InvitationChanged.
@@ -7924,13 +7934,14 @@ pub enum BootstrapStatus {
     },
     /// Loading the store from storage, with loading's steps (§13.4). A
     /// waiting join's scan for its keys is part of its wait; the check in
-    /// which its keys open reports that scan, then loads. Registering follows
-    /// the last.
+    /// which its keys open, in its admission, reports that scan, then loads.
+    /// A restore's registering follows the last.
     Loading(Progress<LoadStep>),
     /// Registering this device once the store is loaded: a restore's check of
     /// the access it reaches storage with, the registration, whose claim first
     /// reads the slots added since loading, and the recorded access that
     /// follows (§13.1). No count: the claim's reads aren't known until made.
+    /// A join never reports it: its approval registered its device.
     Registering,
     /// Keeping the member's keys and the device's credentials in custody and
     /// publishing the store, the last work before the handle opens. A

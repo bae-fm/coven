@@ -387,7 +387,9 @@ async fn bootstrap_device(
                     Err(recording) => combine(Err(error), Err(recording)),
                 }
             }
-            BootstrapRequest::Join { .. } => Err(error),
+            BootstrapRequest::Join { .. } => {
+                join::ended(&builder, &pending, &device_entries, &request, error).await
+            }
         },
     }
 }
@@ -490,7 +492,8 @@ struct Loaded {
     waits: Arc<coven_sync::RetryWaits>,
 }
 
-/// Load the store into `pending` and register its device. A replacement
+/// Load the store into `pending` and register its device, which a join's
+/// admission has already registered (§13.2). A replacement
 /// runs the app's `prepare` step on its loaded installation, then keeps what
 /// finishing needs and records itself, before it registers (§19.3).
 async fn prepare_and_load(
@@ -656,27 +659,34 @@ async fn prepare_and_load(
         // The folder's label as this member's account names it, read once a
         // join has accepted the share (§20.2).
         let labelled = storage.labelled_config().await.map_err(SyncError::from)?;
-        status(BootstrapStatus::Registering);
-        // A restore checks the access it reaches storage with before it
-        // registers, and records it after, as setup does, so the member's
-        // recorded access is the one in use (§13.1). A joiner's is the one
-        // its approval recorded from the invite.
-        let access = match admission {
-            Admission::Restoring => {
-                let access = crate::storage::member_access(&data.credentials, &storage)
-                    .await
-                    .map_err(SyncError::from)?;
-                sync.check_access(&access).await?;
-                Some(access)
-            }
-            Admission::Joining(_) => None,
-        };
         let registered = database
             .store_state()
             .await?
             .devices
             .get(&settings.device_id)
             .is_some_and(|device| device.member == member.member());
+        // A restore checks the access it reaches storage with before it
+        // registers, and records it after, as setup does, so the member's
+        // recorded access is the one in use (§13.1). A join registers
+        // nothing: the admission that admitted it registered its device and
+        // recorded its access from the invite (§13.2).
+        let access = match admission {
+            Admission::Restoring => {
+                status(BootstrapStatus::Registering);
+                let access = crate::storage::member_access(&data.credentials, &storage)
+                    .await
+                    .map_err(SyncError::from)?;
+                sync.check_access(&access).await?;
+                Some(access)
+            }
+            Admission::Joining(_) if registered => None,
+            Admission::Joining(_) => {
+                return Err(SyncError::from(coven_database::DbError::Invariant {
+                    what: "the admission that admits a join registers its device",
+                })
+                .into())
+            }
+        };
         Ok::<_, BootstrapError>(Some((access, registered, labelled)))
     };
     let mut cancellation = cancel.clone();

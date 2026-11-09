@@ -1,5 +1,6 @@
-//! How a join that ends without a store stops part way and finishes (§13.4),
-//! and how one that recorded its send before the create sends it again
+//! How a join that ends without a store, declined, cancelled or expired,
+//! stops part way and finishes (§13.4), how one admitted and then removed
+//! ends, and how one that recorded its send before the create sends it again
 //! (§13.2).
 
 use super::*;
@@ -28,6 +29,54 @@ async fn a_join_stopped_after_its_sign_in_was_deleted_finishes_without_signing_i
     assert!(matches!(resumed, Ok(None)), "{resumed:?}");
     install.absent(store).await;
     assert!(!install.root.path().join("stores").join(store.to_string()).exists());
+    owner.close().await;
+}
+
+/// Carol's join is approved, then stops while it loads, and Ana removes her
+/// before the next call. That call applies the removal, which stops Carol's
+/// device for good: the join ends with `Removed` and deletes what it kept,
+/// instead of waiting on a store it can never open (§13.2).
+#[tokio::test]
+async fn an_approved_join_whose_member_is_removed_before_it_loads_ends() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let (loading, mut loaded) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |status| {
+            if matches!(status, BootstrapStatus::Loading(progress)
+                if progress.step == LoadStep::Applying && progress.done == progress.total)
+            {
+                loading.send_replace(true);
+            }
+        },
+    );
+    let stopped = async {
+        tokio::select! {
+            result = joining => panic!("the join finished before it stopped: {result:?}"),
+            changed = loaded.wait_for(|loading| *loading) => drop(changed.unwrap()),
+        }
+    };
+    let ((), member) = join_with_response(stopped, owner.approve_join(&control)).await;
+    crate::tests::landed(&owner.handle, owner.handle.remove_member(&member).await.unwrap()).await;
+    let result =
+        install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
+    assert!(matches!(result, Err(BootstrapError::Sync(SyncError::Removed))), "{result:?}");
+    assert!(saved_code(&install, store).is_none());
+    install.absent(store).await;
+    assert!(install
+        .builder(&owner, owner.recipient())
+        .unfinished_joins()
+        .await
+        .unwrap()
+        .is_empty());
     owner.close().await;
 }
 
@@ -103,7 +152,9 @@ async fn an_unsent_join_left_without_its_code_does_not_fail_the_next_invite() {
     let builder = install.builder(&owner, owner.recipient());
     let pending = builder.directories.begin_bootstrap(store, builder.ids.as_ref()).await.unwrap();
     let code = coven_sync::read_invite_code(first.shown_code()).unwrap();
-    coven_sync::JoiningIdentity::prepare(&pending.directory(), &code, "Carol's phone").unwrap();
+    let directory = pending.directory();
+    let device = directory.settings().unwrap().device_id;
+    coven_sync::JoiningIdentity::prepare(&directory, &code, device, "Carol's phone").unwrap();
     drop(pending);
     assert!(saved_code(&install, store).is_none());
     joins_and_is_approved(&owner, &install, &owner.invite().await).await;
@@ -181,4 +232,93 @@ async fn opening_a_published_store_deletes_the_joining_keys_and_code_a_stopped_j
     assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
     assert!(kept.invite_code().unwrap().is_none());
     owner.close().await;
+}
+
+/// Ending without a store also removes a Dropbox join's kept sign-in, with its
+/// code (§13.2). Carol's join ends as declined only while it can still read
+/// its request's path: once Ana takes back the access the invite granted, the
+/// join's check fails with the provider's refusal instead. Ana puts the
+/// marker in the request's place before she takes the access back, so the
+/// test holds that at the provider while Carol's join checks.
+#[tokio::test]
+async fn declined_cancelled_and_expired_requests_finish_without_committing_custody() {
+    // A cancel deletes the request as a decline does; the joiner sees only that.
+    for (provider, ending) in [CloudProvider::S3, CloudProvider::Dropbox]
+        .into_iter()
+        .flat_map(|provider| ["decline", "cancel", "expiry"].map(|ending| (provider, ending)))
+    {
+        let owner = Owner::new(provider, false).await;
+        let invite = owner.invite().await;
+        let install = Installation::new();
+        let (_, cancel) = watch::channel(false);
+        let control = JoinControl::new();
+        let (waiting, mut waits) = waiting_for_approval();
+        let joining = install.run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancel,
+            waiting,
+        );
+        let takes_back = provider.signs_in_with_oauth();
+        let (revoking, revoked) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        if takes_back {
+            owner.storage.hold_next_access("join@example.com", false, revoking, released).await;
+        }
+        let settle = async {
+            waits.wait_for(|waiting| *waiting).await.unwrap();
+            let request = owner.next_join_request().await;
+            match ending {
+                "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
+                "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
+                _ => owner.clock.set(invite.expires_at),
+            }
+            // The ending is a write that takes the invite off Ana's list: a
+            // decline's or a cancel's own, or the expiry's, which her handle
+            // makes once its clock reaches the invite's end.
+            owner
+                .handle
+                .test_invites()
+                .wait_for(|invites| invites.iter().all(|listed| listed.id != invite.id))
+                .await;
+            // Ana's pass after the ending puts the marker in the request's
+            // place, then may take back the access, which waits at the
+            // provider: its end or that wait shows the marker is there. On
+            // S3 there is no access to take back.
+            let answer = owner.handle.retry_now().await.unwrap();
+            let passed = |outcome| assert!(matches!(outcome, RetryOutcome::Synced { .. }));
+            if takes_back {
+                tokio::select! {
+                    outcome = answer => passed(outcome),
+                    revoking = revoked => revoking.unwrap(),
+                }
+            } else {
+                passed(answer.await);
+            }
+            assert!(
+                crate::tests::no_request(&owner.storage, &crate::tests::request_path(&invite))
+                    .await,
+                "{provider:?} {ending}"
+            );
+            control.check_now();
+        };
+        let (result, ()) = join_with_response(joining, settle).await;
+        assert!(matches!(result, Ok(None)), "{provider:?} {ending}: {result:?}");
+        if takes_back {
+            release.send(()).unwrap();
+        }
+        install.absent(owner.directory.id()).await;
+        assert!(StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+            .invite_code()
+            .unwrap()
+            .is_none());
+        assert!(!install
+            .root
+            .path()
+            .join("stores")
+            .join(owner.directory.id().to_string())
+            .exists());
+        owner.close().await;
+    }
 }

@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::{admin::StoreChange, device_gone::DeviceGone};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 
@@ -9,7 +10,9 @@ use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 async fn s3_joiner(group: &Group, invite: &Invite, name: &str) -> Joiner {
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(&directory, &code, name).unwrap();
+    let request =
+        JoiningIdentity::prepare(&directory, &code, directory.settings().unwrap().device_id, name)
+            .unwrap();
     let device = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
     Joiner { device, request }
 }
@@ -140,18 +143,15 @@ async fn only_an_admins_device_that_applied_the_stop_ends_the_requests() {
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ana.sync
-        .administer(StoreChange::AddMember {
-            member: dan.identity.member(),
-            keys: dan.identity.keys().public_keys(),
-            role: coven_format::admin::MemberRole::Member,
-            access: access("dan"),
-        })
+        .administer(admission(
+            &dan,
+            coven_format::admin::MemberRole::Member,
+            access("dan"),
+            "Dan's phone",
+        ))
         .await
         .unwrap();
-    dan.sync
-        .administer(StoreChange::AddDevice { name: "Dan's phone".into(), replaces: None })
-        .await
-        .unwrap();
+    dan.sync.pass().await.unwrap();
     let carols = s3_invite(&ana, "Carol").await;
     let carol = s3_joiner(&group, &carols, "Carol's phone").await;
     assert!(carol.device.sync.submit_join(&carol.request).await.unwrap());

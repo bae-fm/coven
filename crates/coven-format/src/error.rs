@@ -19,6 +19,10 @@ pub enum Rule {
     WriteDevice,
     /// A device registration replaces the same id it adds.
     DeviceReplacement,
+    /// An admission's key boxes name more than one recipient or sealing key.
+    Recipient,
+    /// An admission registers the device that writes it.
+    AdmittedDevice,
     /// A part, row or removal rule named an audience it cannot contain or describe.
     Audience,
     /// A reported storage path belongs to a different store.

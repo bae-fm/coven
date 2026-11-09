@@ -1,4 +1,5 @@
-//! Key copies sent beside an operation's entry and on their own (§12.1).
+//! Key copies sent beside an operation's entry, in an admission's slot and on
+//! their own (§12.1, §13.2).
 
 use crate::{
     history::History,
@@ -7,12 +8,17 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_format::{admin::StoreChange, sealed_key::KeyCopyPrefix};
+use coven_format::{
+    admin::StoreChange,
+    sealed_key::{CopyBox, KeyCopyPrefix},
+    sealed_slot::{BoxPlace, SlotKind, SlotObjectPrefix},
+};
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 
 /// The copies `change` sends before its entry, when `author`'s device
-/// holding `ring` makes it.
+/// holding `ring` makes it. An admission carries its own in its slot, each
+/// key once, in `(audience, key)` order (format.md D9).
 pub(super) fn required_copies(
     history: &History,
     ring: &StoreKeyring,
@@ -38,7 +44,8 @@ pub(super) fn required_copies(
                 sealing: history.state.members[member].keys.sealing,
             })
             .collect(),
-        StoreChange::AddMember { member, keys, .. }
+        StoreChange::AdmitMember { member, keys, .. }
+        | StoreChange::RecoverMember { member, keys, .. }
         | StoreChange::ReplaceMemberKeys { member, keys, .. } => history
             .introductions
             .iter()
@@ -47,15 +54,75 @@ pub(super) fn required_copies(
                     || (crate::effects::belongs(&history.state, &intro.audience, member)
                         && history.accepted(ring, &intro.audience, intro.key))
             })
-            .map(|intro| KeyCopyPrefix {
-                audience: intro.audience.clone(),
-                key: intro.key,
+            .map(|intro| ((intro.audience.clone(), intro.key), keys.sealing))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_iter()
+            .map(|((audience, key), sealing)| KeyCopyPrefix {
+                audience,
+                key,
                 member: *member,
-                sealing: keys.sealing,
+                sealing,
             })
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Whether `change` is an admission's entry, whose slot carries its copies.
+pub(super) fn admits(change: &StoreChange) -> bool {
+    matches!(change, StoreChange::AdmitMember { .. } | StoreChange::RecoverMember { .. })
+}
+
+/// An admission's clear kind: each of `copies`, in order, sealed for its box
+/// at its index in the slot at `path` whose body `store_key` seals. A claim
+/// that loses its slot seals them again (D11). A store key `ring` lacks fails
+/// here, before anything is claimed: the approval waits for it (§13.2).
+pub(super) fn admission_boxes(
+    ring: &StoreKeyring,
+    path: &coven_storage::ObjectPath,
+    store_key: coven_foundation::id_source::KeyId,
+    copies: Vec<KeyCopyPrefix>,
+) -> Result<SlotKind, SyncError> {
+    let boxes = copies
+        .into_iter()
+        .enumerate()
+        .map(|(index, route)| {
+            seal_copy(ring, path, store_key, BoxPlace::Admission(index as u32), route)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SlotKind::Admission(boxes))
+}
+
+/// `route`'s key from `ring`, sealed to its recipient for the box at `place`
+/// in the slot at `path` whose body `store_key` seals (D11).
+pub(super) fn seal_copy(
+    ring: &StoreKeyring,
+    path: &coven_storage::ObjectPath,
+    store_key: coven_foundation::id_source::KeyId,
+    place: BoxPlace,
+    route: KeyCopyPrefix,
+) -> Result<CopyBox, SyncError> {
+    let context = SlotObjectPrefix::copy_context(
+        coven_format::FormatVersion::CURRENT,
+        store_key,
+        place,
+        &route,
+    )?;
+    let sealed = match route.audience {
+        Audience::Store => coven_crypto::seal_store_key(
+            ring.store_key(route.key)?,
+            &route.sealing,
+            path.as_str(),
+            &context,
+        )?,
+        Audience::Circle(circle) => coven_crypto::seal_circle_key(
+            ring.circle_key(circle, route.key)?,
+            &route.sealing,
+            path.as_str(),
+            &context,
+        )?,
+    };
+    Ok(CopyBox { routing: route, sealed })
 }
 
 pub(super) mod route {

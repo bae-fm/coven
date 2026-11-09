@@ -120,17 +120,30 @@ pub(crate) fn clear_prefix(
     mut input: RetainedBytes,
     path: &ObjectPath,
 ) -> Result<SlotObjectPrefix, SyncError> {
+    let (mut head, length) = prefix_head(&mut input, path)?;
+    head.truncate(length);
+    checked(path, SlotObjectPrefix::decode(&head))
+}
+
+/// The slot's first bytes, read from its start, and the length of the clear
+/// prefix they begin with. They hold the whole prefix: an admission's, which
+/// only its bounded slot bounds, is read through that bound (D9).
+fn prefix_head(
+    input: &mut RetainedBytes,
+    path: &ObjectPath,
+) -> Result<(Vec<u8>, usize), SyncError> {
     let size = input.len();
-    let head =
-        read_exact(&mut input, size.min(SlotObjectPrefix::MAX_LENGTH as u64) as usize, path)?;
+    input.seek(SeekFrom::Start(0)).map_err(SyncError::disk)?;
+    let mut head = read_exact(input, size.min(SlotObjectPrefix::MAX_LENGTH as u64) as usize, path)?;
+    if checked(path, SlotObjectPrefix::admission(&head))? {
+        let bound = size.min(coven_format::sequence::MAX_BOUNDED_SLOT as u64) as usize;
+        head.extend(read_exact(input, bound - head.len(), path)?);
+    }
     let length = checked(path, SlotObjectPrefix::length(&head))?;
-    checked(
-        path,
-        SlotObjectPrefix::decode(
-            head.get(..length)
-                .ok_or_else(|| damaged(path, Refusal::from(coven_format::Error::Truncated)))?,
-        ),
-    )
+    if length > head.len() {
+        return Err(damaged(path, Refusal::from(coven_format::Error::Truncated)));
+    }
+    Ok((head, length))
 }
 
 pub(crate) fn open(
@@ -141,17 +154,9 @@ pub(crate) fn open(
     readable: impl Fn(&Audience) -> bool,
 ) -> Result<ReceivedSlot, SyncError> {
     let size = input.len();
-    let mut head =
-        read_exact(&mut input, size.min(SlotObjectPrefix::MAX_LENGTH as u64) as usize, path)?;
-    let length = checked(path, SlotObjectPrefix::length(&head))?;
-    let prefix = checked(
-        path,
-        SlotObjectPrefix::decode(
-            head.get(..length)
-                .ok_or_else(|| damaged(path, Refusal::from(coven_format::Error::Truncated)))?,
-        ),
-    )?;
+    let (mut head, length) = prefix_head(&mut input, path)?;
     head.truncate(length);
+    let prefix = checked(path, SlotObjectPrefix::decode(&head))?;
     if !matches!(prefix.kind, SlotKind::Writes) {
         if size > coven_format::sequence::MAX_BOUNDED_SLOT as u64 {
             return Err(damaged(path, Refusal::Parse { cause: None }));

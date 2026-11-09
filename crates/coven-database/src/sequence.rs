@@ -95,7 +95,8 @@ pub(crate) fn cutoff(
         StoreChange::RemoveDevice { device }
         | StoreChange::AddDevice { replaces: Some(device), .. } => (Some(*device), None, None),
         StoreChange::RemoveMember { member } => (None, Some(*member), None),
-        StoreChange::ReplaceMemberKeys { member, expected, .. } => {
+        StoreChange::ReplaceMemberKeys { member, expected, .. }
+        | StoreChange::RecoverMember { member, expected, .. } => {
             (None, Some(*member), Some(expected.signing.as_bytes().to_vec()))
         }
         _ => return Ok(()),

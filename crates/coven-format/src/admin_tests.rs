@@ -168,7 +168,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
 
 #[test]
 fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17, 18, 19];
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17, 18, 19, 20];
     let changes = test_utils::store_changes();
     assert_eq!(changes.len(), tags.len());
     for (change, tag) in changes.into_iter().zip(tags) {
@@ -251,9 +251,14 @@ fn every_change_fits_one_request_at_its_field_bounds() {
                 *device_name = "d".repeat(1024);
                 *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
             }
-            StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. } => {
+            StoreChange::AdmitMember { access, device_name, .. } => {
+                *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
+                *device_name = "d".repeat(1024);
+            }
+            StoreChange::SetAccess { access, .. } => {
                 *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
             }
+            StoreChange::RecoverMember { device_name, .. } => *device_name = "d".repeat(1024),
             StoreChange::AddInviteShare { account, .. } => *account = "a".repeat(1024),
             StoreChange::RenameStore { name }
             | StoreChange::AddDevice { name, .. }
@@ -305,11 +310,13 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
     let pair = |keys: MemberPublicKeys| {
         [keys.signing.as_bytes().as_slice(), keys.sealing.as_bytes().as_slice()].concat()
     };
-    let add = frame(StoreChange::AddMember {
+    let add = frame(StoreChange::AdmitMember {
         member: ben,
         keys: test_utils::other_member(),
         role: MemberRole::Member,
         access: crate::MemberAccess::ProviderAccount("b".into()),
+        device: coven_foundation::id_source::DeviceId(7),
+        device_name: "p".into(),
     })
     .encode()
     .unwrap();
@@ -320,6 +327,8 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
             ben.0.as_bytes().to_vec(),
             pair(test_utils::other_member()),
             vec![1, 0, 0, 0, 0, 1, b'b'],
+            7u64.to_be_bytes().to_vec(),
+            vec![0, 0, 0, 1, b'p'],
         ]
         .concat()
     );

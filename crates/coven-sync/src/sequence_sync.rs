@@ -19,6 +19,7 @@ use coven_database::{
 };
 use coven_format::{
     floor::OriginalSlot,
+    sealed_slot::SlotKind,
     sequence::{Purpose, SlotFrame},
 };
 use coven_foundation::{
@@ -568,7 +569,16 @@ impl History {
         let content = match body {
             SlotBody::Writes { size, writes } => SlotContent::Writes { size, writes },
             SlotBody::Bounded { frame: SlotFrame::Admin(change), original } => {
-                let effect = match self.validate(&received.header, slot, &change) {
+                // An admission's copies stand in history whether or not its
+                // entry counts: a refused one still disclosed them (§12.2).
+                let validated = match &received.prefix.kind {
+                    SlotKind::Admission(copies) => {
+                        self.validate_admission(&received.header, slot, &change, copies)
+                    }
+                    _ => self.validate(&received.header, slot, &change),
+                };
+                self.copies.extend(KeyCopy::all(&received.path, &received.prefix));
+                let effect = match validated {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
                             if self.state.store.is_some()
@@ -607,7 +617,7 @@ impl History {
                 SlotContent::Admin { original, effect }
             }
             SlotBody::Bounded { frame: SlotFrame::KeyCopy, original } => {
-                self.copies.push(KeyCopy { path: received.path, prefix: received.prefix });
+                self.copies.extend(KeyCopy::all(&received.path, &received.prefix));
                 SlotContent::KeyCopy(original)
             }
             SlotBody::Bounded { frame: SlotFrame::Announcement(announcement), original } => {

@@ -1,11 +1,19 @@
 import CovenSequence.Authority
 
 /-! Registration is authored by the fresh installation, authenticated outside
-the model with its member's current key. Registration persists after removal,
-so neither removal nor a later membership change makes the id reusable. -/
+the model with its member's current key, except a joining person's first
+installation, which the admission admitting or recovering them registers
+(coven.md §13.2). Registration persists after removal, so neither removal nor
+a later membership change makes the id reusable. -/
 namespace CovenSequence
 
 variable {S : Sig} (R : Rules S)
+
+/-- The installation an entry registers: an installation's own registration,
+or an admission's named device. -/
+def registers : Entry S → Option S.Dev
+  | .addDevice d _ _ | .admit _ _ d | .recover _ d => some d
+  | _ => none
 
 /-- Removal only marks registered ids. -/
 theorem step_unregistered_unremoved (L : Ledger S) (k : Nat) (x : Slot S)
@@ -38,6 +46,16 @@ theorem step_unregistered_unremoved (L : Ledger S) (k : Nat) (x : Slot S)
       | removeMember m =>
         change L.deviceOf d = none at fresh
         simp [ledgerEffect, applyEntry, fresh, prior d fresh]
+      | admit m r target =>
+        simp only [ledgerEffect, applyEntry] at fresh ⊢
+        split at fresh
+        · contradiction
+        · exact prior d fresh
+      | recover m target =>
+        simp only [ledgerEffect, applyEntry] at fresh ⊢
+        split at fresh
+        · contradiction
+        · exact prior d fresh
       | _ => exact prior d fresh
     | _ => exact prior d fresh
   · simp [valid, refuse] at fresh ⊢
@@ -63,55 +81,88 @@ theorem self_registration_applied (L : Ledger S) (k : Nat) (d : S.Dev) (m : S.Me
   simp [ledgerStep, self_registration_valid R L d m fresh member authorized,
     ledgerEffect, applyEntry]
 
+/-- **An applied admission registers its named device for its member.** The
+joining person's first installation is registered by the admission that
+admits or recovers them, written by an admin's device, not by itself. -/
+theorem admission_registers (seq : Nat → Slot S) (i : Nat) (positive : 1 ≤ i)
+    (a d : S.Dev) (e : Entry S) (m : S.Mem) (role : Role)
+    (admission : e = .admit m role d ∨ e = .recover m d)
+    (slot : seq i = .admin a e) (applied : Applied R seq i) :
+    (ledgerAt R seq i).deviceOf d = some m ∧ a ≠ d := by
+  have valid := applied
+  unfold Applied at valid
+  rw [slot] at valid
+  rcases admission with rfl | rfl
+  · refine ⟨by
+      rw [applied_ledger R seq positive applied, slot]; simp [ledgerEffect, applyEntry], ?_⟩
+    simp only [ledgerValid, structural, Bool.and_eq_true, Bool.not_eq_true',
+      decide_eq_false_iff_not] at valid
+    exact valid.2.2
+  · refine ⟨by
+      rw [applied_ledger R seq positive applied, slot]; simp [ledgerEffect, applyEntry], ?_⟩
+    simp only [ledgerValid, structural, Bool.and_eq_true, Bool.not_eq_true',
+      decide_eq_false_iff_not] at valid
+    exact valid.2.2
+
 /-- Every authority policy must respect the installation's own authorship. -/
 theorem registration_self_authored (L : Ledger S) (a d : S.Dev) (m : S.Mem) (r : Option S.Dev)
     (valid : ledgerValid R L (.admin a (.addDevice d m r)) = true) : a = d := by
   simp only [ledgerValid, structural, Bool.and_eq_true, decide_eq_true_eq] at valid
   exact valid.2.1.1.1
 
-/-- A binding from creation or an applied registration cannot be registered
-again, whether its device or member is active or removed. -/
-theorem registered_device_refused (L : Ledger S) (a d : S.Dev) (m old : S.Mem) (r : Option S.Dev)
-    (registered : L.deviceOf d = some old) :
-    ledgerValid R L (.admin a (.addDevice d m r)) = false := by
-  simp [ledgerValid, structural, registered]
+/-- A binding from creation, an applied registration or an applied admission
+cannot be registered again, by an installation itself or by an admission,
+whether its device or member is active or removed. -/
+theorem registered_device_refused (L : Ledger S) (a d : S.Dev) (e : Entry S) (old : S.Mem)
+    (names : registers e = some d) (registered : L.deviceOf d = some old) :
+    ledgerValid R L (.admin a e) = false := by
+  cases e <;> simp only [registers, Option.some.injEq, reduceCtorEq] at names <;> subst names <;>
+    simp [ledgerValid, structural, registered]
 
 theorem initial_registration_never_repeated (seq : Nat → Slot S)
-    (a d : S.Dev) (m old : S.Mem) (r : Option S.Dev) (registered : R.ledger0.deviceOf d = some old)
-    (k : Nat) :
-    ledgerValid R (ledgerAt R seq k) (.admin a (.addDevice d m r)) = false := by
-  exact registered_device_refused R _ a d m old r
+    (a d : S.Dev) (e : Entry S) (old : S.Mem) (names : registers e = some d)
+    (registered : R.ledger0.deviceOf d = some old) (k : Nat) :
+    ledgerValid R (ledgerAt R seq k) (.admin a e) = false := by
+  exact registered_device_refused R _ a d e old names
     (deviceOf_stays R seq 0 registered k (Nat.zero_le _))
 
-/-- After an applied registration, every later registration of that id is
-refused, including attempts naming a different member or author. -/
-theorem registration_never_repeated (seq : Nat → Slot S) (i : Nat) (positive : 1 ≤ i)
-    (a d : S.Dev) (m : S.Mem) (r : Option S.Dev) (slot : seq i = .admin a (.addDevice d m r))
-    (applied : Applied R seq i) (k : Nat) (later : i ≤ k) (a' : S.Dev) (m' : S.Mem)
-    (r' : Option S.Dev) :
-    ledgerValid R (ledgerAt R seq k) (.admin a' (.addDevice d m' r')) = false := by
-  have registered : (ledgerAt R seq i).deviceOf d = some m := by
-    rw [applied_ledger R seq positive applied, slot]
+/-- What an applied entry registering `d` binds it to. -/
+theorem registered_by (seq : Nat → Slot S) (i : Nat) (positive : 1 ≤ i)
+    (a d : S.Dev) (e : Entry S) (names : registers e = some d) (slot : seq i = .admin a e)
+    (applied : Applied R seq i) : ∃ m, (ledgerAt R seq i).deviceOf d = some m := by
+  rw [applied_ledger R seq positive applied, slot]
+  cases e <;> simp only [registers, Option.some.injEq, reduceCtorEq] at names <;> subst names <;>
     simp [ledgerEffect, applyEntry]
-  exact registered_device_refused R _ a' d m' m r'
+
+/-- After an applied registration or admission, every later entry
+registering that id is refused, including attempts naming a different
+member or author, and admissions. -/
+theorem registration_never_repeated (seq : Nat → Slot S) (i : Nat) (positive : 1 ≤ i)
+    (a d : S.Dev) (e : Entry S) (names : registers e = some d) (slot : seq i = .admin a e)
+    (applied : Applied R seq i) (k : Nat) (later : i ≤ k) (a' : S.Dev) (e' : Entry S)
+    (names' : registers e' = some d) :
+    ledgerValid R (ledgerAt R seq k) (.admin a' e') = false := by
+  obtain ⟨m, registered⟩ := registered_by R seq i positive a d e names slot applied
+  exact registered_device_refused R _ a' d e' m names'
     (deviceOf_stays R seq i registered k later)
 
-/-- Two applied registrations of one device id occupy the same slot. -/
+/-- Two applied entries registering one device id, registrations or
+admissions, occupy the same slot. -/
 theorem registration_at_most_once (seq : Nat → Slot S) (i j : Nat)
-    (ipos : 1 ≤ i) (jpos : 1 ≤ j) (a b d : S.Dev) (m n : S.Mem) (r r' : Option S.Dev)
-    (islot : seq i = .admin a (.addDevice d m r))
-    (jslot : seq j = .admin b (.addDevice d n r'))
+    (ipos : 1 ≤ i) (jpos : 1 ≤ j) (a b d : S.Dev) (e e' : Entry S)
+    (inames : registers e = some d) (jnames : registers e' = some d)
+    (islot : seq i = .admin a e) (jslot : seq j = .admin b e')
     (iapplied : Applied R seq i) (japplied : Applied R seq j) : i = j := by
   rcases Nat.lt_trichotomy i j with before | same | after
-  · have refused := registration_never_repeated R seq i ipos a d m r islot iapplied
-      (j - 1) (by omega) b n r'
+  · have refused := registration_never_repeated R seq i ipos a d e inames islot iapplied
+      (j - 1) (by omega) b e' jnames
     have valid := japplied
     unfold Applied at valid
     rw [jslot, refused] at valid
     contradiction
   · exact same
-  · have refused := registration_never_repeated R seq j jpos b d n r' jslot japplied
-      (i - 1) (by omega) a m r
+  · have refused := registration_never_repeated R seq j jpos b d e' jnames jslot japplied
+      (i - 1) (by omega) a e inames
     have valid := iapplied
     unfold Applied at valid
     rw [islot, refused] at valid

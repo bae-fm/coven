@@ -27,6 +27,12 @@ leaves the acceptance, with nothing on the device to take it back
 (`cancel_strands_acceptance`). A declined join's acceptance ends with the
 invite, which the inviting device takes back; an approved one's becomes the
 store's access.
+
+A join's approval is one admission, which also registers its device (§13.2).
+Past it, the facts end the join as they end a restore past its registration:
+a removal of its device or member, or a replacement of its member's keys,
+stops its device for good, and the join ends without its store, its outcome
+met (`stopped`).
 -/
 namespace CovenSequence.FirstInstallation
 
@@ -98,6 +104,9 @@ inductive Act where
   | declined
   /-- The join's request is approved: it publishes the store. -/
   | approved
+  /-- The join's admission applied, and a later slot stopped its device for
+  good: it ends without its store. -/
+  | stopped
   /-- A restore begins on the store's installation, making one if none is
   there. -/
   | beginRestore
@@ -119,7 +128,7 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .accept => w.call == .join && !w.sent && (!R.recordsAcceptance || w.acceptKept)
   | .send => w.call == .join
   | .joinCancel => w.call == .join && !w.sent
-  | .declined | .approved => w.call == .join && w.sent
+  | .declined | .approved | .stopped => w.call == .join && w.sent
   | .beginRestore => w.call == .none && w.inst != .published && (!R.exclusive || !w.code)
   | .record => w.call == .restore
   | .register => w.call == .restore && w.record
@@ -133,7 +142,7 @@ def act (w : World) : Act → World
   | .accept => { w with accepted := true }
   | .send => { w with sent := true }
   | .joinCancel => { undo w with accepted := w.accepted && !w.acceptKept, acceptKept := false }
-  | .declined => { undo w with sent := false, accepted := false, acceptKept := false }
+  | .declined | .stopped => { undo w with sent := false, accepted := false, acceptKept := false }
   | .approved =>
     { w with inst := .published, call := .none, code := false, sent := false, accepted := false,
              acceptKept := false }

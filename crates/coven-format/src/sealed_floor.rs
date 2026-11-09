@@ -95,5 +95,6 @@ fn check_copy(remaining: u32, previous: Option<Slot>, copy: &OriginalSlot) -> Re
         "floor key-copy order",
         Rule::Order,
     )?;
-    copy.validate_kind(2)
+    // Key-copy slots and admissions carry copies (D9).
+    copy.validate_kind(&[2, 4])
 }

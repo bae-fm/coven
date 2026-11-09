@@ -1,4 +1,4 @@
-//! The joining device's wait for its approving device's binding (§13.2).
+//! The joining device's wait for its approving device's admission (§13.2).
 
 use super::{
     sequence_bootstrap::{Bootstrap, KeyScan, MemberBinding},
@@ -27,13 +27,11 @@ pub enum NextCheck {
 pub enum JoinOutcome {
     /// The request exists and no copy for it has opened.
     Waiting,
-    /// Its copies opened and the store loaded, but the approving device's
-    /// entry has not applied yet: approval has begun, and the entry follows
-    /// the copies (§13.2).
-    Approving,
-    /// The approving device's applied entry binds this request's pair.
+    /// The approving device's applied admission binds this request's pair
+    /// and registers this installation.
     Admitted,
-    /// The request is gone and no binding admits it.
+    /// The request is gone and no admission admits it, or the admission
+    /// carrying its copies was refused when applied.
     Declined,
 }
 
@@ -73,9 +71,9 @@ impl SequenceSync {
     }
 
     /// Inspect the slots after the invite for copies routed to the request's
-    /// pair; once they open a store key, record that approval has begun,
-    /// apply the sequence and look for the approving device's binding.
-    /// Copies alone do not admit (§13.2). A check that finds no keys in
+    /// pair; once they open a store key, in the admission that carries them,
+    /// record that, apply the sequence and check that admission. Copies alone
+    /// do not admit (§13.2). A check that finds no keys in
     /// custody reports nothing to `subscribe_progress` while it scans for the
     /// copies: the scan is part of the wait. Once they open, it reports the
     /// scan, then loading's steps, a resumed join's too, which may have
@@ -129,9 +127,9 @@ impl SequenceSync {
                 }
             },
         };
-        // Approval has begun. The join keeps that before it reports loading,
-        // so it never reports waiting for approval again, even resumed
-        // (E10).
+        // The admission carrying its copies is found. The join keeps that
+        // before it reports loading, so it never reports waiting for approval
+        // again, even resumed (E10).
         if !request.opened() {
             request.record_opened()?;
         }
@@ -143,13 +141,9 @@ impl SequenceSync {
         }
         self.restore_history(&mut session, &mut ring, &member).await?;
         self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut()).await?;
-        if self.admitted(&session, &member, request) {
-            return Ok(JoinOutcome::Admitted);
-        }
-        if request.pending(self.storage.as_ref()).await? {
-            return Ok(JoinOutcome::Approving);
-        }
-        self.read_forward(&mut session, &mut ring, &member).await?;
+        // The copies and the entry are one slot, which reading forward has
+        // applied: an admission that didn't count, which only a faulty writer
+        // lands, ends the join as declined (§13.2).
         Ok(if self.admitted(&session, &member, request) {
             JoinOutcome::Admitted
         } else {
@@ -233,6 +227,8 @@ impl SequenceSync {
         Ok(())
     }
 
+    /// Whether the approving device's admission binds this request's pair
+    /// and registered this installation for its member (§13.2, D13).
     fn admitted(
         &self,
         session: &super::Session,
@@ -241,6 +237,12 @@ impl SequenceSync {
     ) -> bool {
         matches!(self.admission(session, member),
             MemberBinding::Bound { device } if device == request.approver())
+            && session
+                .history
+                .state
+                .devices
+                .get(&self.device)
+                .is_some_and(|device| device.member == member.member())
     }
 }
 

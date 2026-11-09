@@ -241,7 +241,8 @@ read; it reuses an actual slot instead of inventing a sentinel operation. -/
 def run (c : Config n) (entries : List (ClaimRecord String × Slot (sig n))) : Json := Id.run do
   let devices := sorted (c.devices.map (·.1) ++ entries.flatMap fun (_, s) =>
     author s :: match s with
-      | .admin _ (.addDevice d _ _) | .admin _ (.removeDevice d) => [d]
+      | .admin _ (.addDevice d _ _) | .admin _ (.removeDevice d)
+      | .admin _ (.admit _ _ d) | .admin _ (.recover _ d) => [d]
       | _ => [])
   let audiences := c.audiences.mergeSort (fun a b => a.id ≤ b.id)
   let state : Nat → Ledger (sig n) × (Nat → AudLedger (sig n)) × (Nat → List Row) :=
