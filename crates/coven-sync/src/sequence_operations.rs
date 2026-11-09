@@ -21,7 +21,7 @@ use coven_merge::{Audience, Slot};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
-use super::sequence_copies::{admission_boxes, admits, required_copies, route, seal_copy};
+use super::sequence_copies::{admission_prefix, admits, required_copies, route, seal_copy};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Request {
@@ -773,32 +773,27 @@ impl SequenceSync {
                     (SlotFrame::Admin(change.clone()), SlotKind::Admin)
                 } else {
                     let copies = required_copies(&session.history, ring, change, member.member());
-                    let kind = admission_boxes(ring, &path, store_key, copies)?;
                     let frame = SlotFrame::Admin(change.clone());
-                    let prefix = SlotObjectPrefix {
-                        format: coven_format::FormatVersion::CURRENT,
-                        key: store_key,
-                        kind: kind.clone(),
-                    };
                     let header = self.operation_header(session, member, 1);
-                    // An admission too large for one slot is refused before it
-                    // claims anything (format.md D2).
-                    if !prefix.fits(frame.encode(&header, &path)?.len())? {
-                        self.database
-                            .advance_operation(
-                                SequenceOperation {
-                                    request: request.clone(),
-                                    progress: OperationProgress::Undo {
-                                        step: OperationStep::Claiming,
-                                        reason: OperationRejection::NotAllowed,
-                                    },
-                                }
-                                .update(record)?,
-                            )
-                            .await?;
-                        return Ok(());
+                    let plaintext = frame.encode(&header, &path)?.len();
+                    match admission_prefix(ring, &path, store_key, copies, plaintext)? {
+                        Ok(prefix) => (frame, prefix.kind),
+                        Err(reason) => {
+                            self.database
+                                .advance_operation(
+                                    SequenceOperation {
+                                        request: request.clone(),
+                                        progress: OperationProgress::Undo {
+                                            step: OperationStep::Claiming,
+                                            reason,
+                                        },
+                                    }
+                                    .update(record)?,
+                                )
+                                .await?;
+                            return Ok(());
+                        }
                     }
-                    (frame, kind)
                 }
             }
             OperationStep::Announcing(artifact) => {

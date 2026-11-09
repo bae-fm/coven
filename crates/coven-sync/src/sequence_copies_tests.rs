@@ -443,3 +443,36 @@ async fn a_device_without_the_key_owes_nothing() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana approves a join in a store that has made 22,500 store keys. Her
+/// admission would carry a copy of each to the joiner, more than one slot
+/// holds, so it is refused with `AdmissionTooLarge` before anything is
+/// claimed; with 100 keys it fits (format.md D2, §13.2).
+#[test]
+fn an_admission_over_a_slots_size_is_refused_with_its_own_rejection() {
+    use coven_crypto::{StoreKey, StoreKeyring};
+    use coven_format::sealed_key::KeyCopyPrefix;
+    use coven_foundation::id_source::{KeyId, MemberId, StoreId};
+    let id = |n: u128| KeyId(uuid::Uuid::from_u128(n));
+    let mut ring = StoreKeyring::new(StoreKey::generate(id(1)).unwrap());
+    let joiner = MemberId(uuid::Uuid::from_u128(91));
+    let sealing = coven_format::test_utils::keys_from_seed(3).public_keys().sealing;
+    let mut copies =
+        vec![KeyCopyPrefix { audience: Audience::Store, key: id(1), member: joiner, sealing }];
+    for n in 2..=22_500 {
+        ring.insert_store_key(StoreKey::generate(id(n)).unwrap()).unwrap();
+        copies.push(KeyCopyPrefix {
+            audience: Audience::Store,
+            key: id(n),
+            member: joiner,
+            sealing,
+        });
+    }
+    let path =
+        coven_storage::ObjectPath::slot(StoreId(uuid::Uuid::from_u128(7)), 5.try_into().unwrap());
+    let refused = super::admission_prefix(&ring, &path, id(1), copies.clone(), 200).unwrap();
+    assert!(matches!(refused, Err(crate::OperationRejection::AdmissionTooLarge)));
+    copies.truncate(100);
+    let prefix = super::admission_prefix(&ring, &path, id(1), copies, 200).unwrap().unwrap();
+    assert_eq!(prefix.kind.boxes().count(), 100);
+}

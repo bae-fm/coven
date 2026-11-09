@@ -303,7 +303,8 @@ unique constraints.
   including its prefix, framing, authentication and signature. An operation
   that would exceed it is rejected before it prepares anything. An admission
   carries a copy of every store key in history, 189 bytes each, so about
-  22,000 store keys fit in one.
+  22,000 store keys fit in one; a larger one is rejected with
+  `AdmissionTooLarge` ([api.md](api.md)).
 - A writes slot has no format-wide size limit. Its individual writes and frames
   keep their bounds.
 - Provider transfer limits still apply ([§20](coven.md#20-what-coven-needs-from-a-provider)).

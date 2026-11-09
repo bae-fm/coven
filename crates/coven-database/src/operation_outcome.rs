@@ -35,6 +35,10 @@ pub enum OperationRejection {
     /// or, for a snapshot, this device's raise of its audience has not landed
     /// yet (§16.2).
     NotAllowed,
+    /// The admission approving a join would carry a copy of every store key
+    /// in history, more than one slot holds (format.md D2): about 22,000
+    /// keys, one per removal or exposed key (§13.2).
+    AdmissionTooLarge,
 }
 
 /// How an operation an app's write journaled ended (§11.4):

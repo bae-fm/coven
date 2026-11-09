@@ -5,7 +5,7 @@ use crate::{
     history::History,
     sequence_sync::sequence_operations::Request,
     sequence_sync::{SequenceSync, Session},
-    SyncError,
+    OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_format::{
@@ -73,16 +73,20 @@ pub(super) fn admits(change: &StoreChange) -> bool {
     matches!(change, StoreChange::AdmitMember { .. } | StoreChange::RecoverMember { .. })
 }
 
-/// An admission's clear kind: each of `copies`, in order, sealed for its box
-/// at its index in the slot at `path` whose body `store_key` seals. A claim
-/// that loses its slot seals them again (D11). A store key `ring` lacks fails
-/// here, before anything is claimed: the approval waits for it (§13.2).
-pub(super) fn admission_boxes(
+/// An admission's clear prefix: each of `copies`, in order, sealed for its
+/// box at its index in the slot at `path` whose body `store_key` seals. A
+/// claim that loses its slot seals them again (D11). A store key `ring` lacks
+/// fails here, before anything is claimed: the approval waits for it (§13.2).
+/// An admission whose slot, with `plaintext` bytes of body, would exceed a
+/// slot's size is refused with `AdmissionTooLarge`, also before anything is
+/// claimed (format.md D2).
+pub(super) fn admission_prefix(
     ring: &StoreKeyring,
     path: &coven_storage::ObjectPath,
     store_key: coven_foundation::id_source::KeyId,
     copies: Vec<KeyCopyPrefix>,
-) -> Result<SlotKind, SyncError> {
+    plaintext: usize,
+) -> Result<Result<SlotObjectPrefix, OperationRejection>, SyncError> {
     let boxes = copies
         .into_iter()
         .enumerate()
@@ -90,7 +94,16 @@ pub(super) fn admission_boxes(
             seal_copy(ring, path, store_key, BoxPlace::Admission(index as u32), route)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(SlotKind::Admission(boxes))
+    let prefix = SlotObjectPrefix {
+        format: coven_format::FormatVersion::CURRENT,
+        key: store_key,
+        kind: SlotKind::Admission(boxes),
+    };
+    Ok(if prefix.fits(plaintext)? {
+        Ok(prefix)
+    } else {
+        Err(OperationRejection::AdmissionTooLarge)
+    })
 }
 
 /// `route`'s key from `ring`, sealed to its recipient for the box at `place`

@@ -307,7 +307,8 @@ impl<'write> CovenWrite<'write> {
     /// keys. It waits, claiming nothing, while this device lacks a store key
     /// it must copy. Once begun, approval finishes. A rejection, met before
     /// anything is claimed, ends the invite as a decline does, and is the
-    /// operation's outcome; it is not retried with a new entry. A request the invite no longer shows, and an invite
+    /// operation's outcome; it is not retried with a new entry. An admission
+    /// too large for one slot is refused with `AdmissionTooLarge`. A request the invite no longer shows, and an invite
     /// whose lifetime has ended, fail with `InvitationChanged`.
     pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError> {
         self.steps.approve_join_request(&self.sql, request)

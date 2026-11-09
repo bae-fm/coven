@@ -5523,6 +5523,10 @@ pub enum OperationRejection {
     /// snapshot, also this device's raise of its audience still waiting
     /// (§16.2).
     NotAllowed,
+    /// The admission approving a join would carry a copy of every store key
+    /// in history, more than one slot holds (format.md D2): about 22,000
+    /// keys, one per removal or exposed key (§13.2).
+    AdmissionTooLarge,
 
     /// The provider account owns the store: its member can't be removed, and
     /// their access can't move to another account (§10.1): OneDrive and
@@ -7794,7 +7798,8 @@ impl CovenWrite<'_> {
     /// nothing, while this device lacks a store key it must copy. Approval,
     /// once begun, finishes. A rejection is the operation's outcome, met
     /// before anything is claimed, and ends the invite as a decline
-    /// does; it is never retried with a new entry. A request the invite no
+    /// does; it is never retried with a new entry. An admission too large
+    /// for one slot is refused with `AdmissionTooLarge`. A request the invite no
     /// longer shows and an invite whose lifetime has ended fail with
     /// InvitationChanged.
     pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError>;
