@@ -203,7 +203,7 @@ import CovenStorage
 #print axioms CovenStorage.UploadSession.steps_good
 #print axioms CovenStorage.UploadSession.reachable_good
 #print axioms CovenStorage.UploadSession.progress_never_ahead
-#print axioms CovenStorage.UploadSession.next_part_new
+#print axioms CovenStorage.UploadSession.confirmed_held
 #print axioms CovenStorage.UploadSession.held_nodup
 #print axioms CovenStorage.UploadSession.published_whole
 #print axioms CovenStorage.UploadSession.crash_keeps

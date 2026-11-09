@@ -272,8 +272,8 @@ proved in [IO](io.md#removed-device-file-scan).
 
 [UploadSession.lean](storage/CovenStorage/UploadSession.lean) models one queued
 upload going up in parts (coven.md §17.9): the provider's live session, with the
-parts it holds in the order they arrived, the sessions it began that the row
-never named, and the published object; the queue row, with whether a file
+parts it holds, each once, in whatever order they arrived, the sessions it
+began that the row never named, and the published object; the queue row, with whether a file
 still waits for it, what it records of its session (nothing, a plan naming
 where the next session will be, marked or not, or the session with its
 confirmed parts), its pending failure and what that failure waits for; the
@@ -281,23 +281,31 @@ attempt this process is running, in memory only; and whether the upload's
 place is the device's own. A part is its index. The steps are the upload
 worker's: start an attempt when the upload is due, resume the recorded session
 or record a plan, mark the plan, begin the planned session, record a session,
-send a part, publish, complete, fail with a class, refuse a begin before its
-request goes out, stop for a pause, crash, abort and forget what an upload no
-file waits for records, and retire one that records nothing. The provider may
-lose the reply to a begin or a part, drop a part, expire its sessions or lose
-the completion reply.
+send any part the attempt hasn't confirmed, publish once every part is
+recorded, complete, fail with a class, refuse a begin before its request goes
+out, stop for a pause, crash, abort and forget what an upload no file waits
+for records, and retire one that records nothing. Parts sent together are
+part steps in the order their replies come back, so the model covers an
+attempt sending several of a file's parts at once (§17.9). The provider may
+lose the reply to a begin or a part, keeping the part, expire its sessions or
+lose the completion reply; a part it never got changes nothing, and the
+attempt fails.
 
 `steps_good` carries one invariant through every step. The provider's session
-holds parts `0 … n-1` in order (`held_nodup`), and the published object is
-every part once, in order (`published_whole`), after any crashes, failed
-attempts and expired sessions. The part an attempt sends next is the first the
-provider lacks (`next_part_new`). The recorded parts are always ones the
-provider holds, so the progress `uploads()` and `coven_uploads` show, which is
-the recorded session's, is never ahead of them (`progress_never_ahead`). A
-crash forgets only memory (`crash_keeps`): every session the provider holds
-stays, one the row doesn't name yet as a stray. After it, a session the
-provider still has continues from the parts it holds (`resume_continues`), and
-one it expired starts over with a new plan (`expired_starts_over`). No step
+holds each part once, and none the file lacks (`held_nodup`), and the published
+object is every part once, in order (`published_whole`), after any crashes,
+failed attempts, lost replies and expired sessions: publishing waits until the
+row records every part. The parts an attempt counts confirmed are ones the
+provider holds, each once, so it sends only parts it hasn't confirmed, and a
+part whose reply was lost goes again and takes its own place
+(`confirmed_held`). The recorded parts are always ones the provider holds,
+each once, so the progress `uploads()` and `coven_uploads` show, which is the
+recorded session's, is never ahead of them (`progress_never_ahead`). A crash
+forgets only memory (`crash_keeps`): every session the provider holds stays,
+one the row doesn't name yet as a stray. After it, a session the provider still
+has continues from the parts it holds, whichever they are
+(`resume_continues`), and one it expired starts over with a new plan
+(`expired_starts_over`). No step
 changes the location, key and chunk hashes the staging write fixed
 (`steps_keep_fixed`).
 
@@ -351,7 +359,10 @@ the device's own place and once at a shared one:
 coven-sync compares, after each run, the queue row, the parts its session
 records, the provider's live session and its parts, the sessions it began that
 the row never named, the published object, the switched file and the class of
-the pending failure.
+the pending failure. A run sends the parts its attempt hasn't confirmed one at a
+time, in index order, as that provider takes them; parts sent together, their
+replies in any order and some lost, are covered by the invariant, which holds
+over every sequence of steps.
 
 ## Sharing with accounts
 

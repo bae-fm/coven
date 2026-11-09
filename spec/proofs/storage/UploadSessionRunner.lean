@@ -40,7 +40,7 @@ the pending failure's class. -/
 private def observe (s : State) : Json :=
   Json.mkObj [
     ("queued", toJson s.row.isSome),
-    ("recorded", toJson s.progress),
+    ("recorded", toJson (s.progress.map List.length)),
     ("held", toJson (s.session.map List.length)),
     ("stray", toJson s.stray),
     ("published", toJson s.published.isSome),
