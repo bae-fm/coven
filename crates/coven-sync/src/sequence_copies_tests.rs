@@ -1,4 +1,5 @@
 use crate::sequence_sync::tests::*;
+use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_format::admin::StoreChange;
 use coven_merge::Audience;
 
@@ -54,6 +55,66 @@ async fn a_circle_member_sends_the_circle_key_to_a_member_an_outside_admin_recov
     let through = carol.sync.session.lock().await.through;
     carol.sync.pass().await.unwrap();
     assert_eq!(carol.sync.session.lock().await.through, through);
+    for device in [&ana, &ben, &carol, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// §5.4, §12.1: Ana, an admin outside Gifts, replaces Ben's keys. Ben's new
+/// phone opens before Carol's Gifts copy lands and stops at Carol's Gifts
+/// write, whose key it has no copy of. Carol's pass sends the copy in a later
+/// slot; the stuck phone scans ahead for it and reads on, with no fresh
+/// restore.
+#[tokio::test]
+async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
+    let gifts = carol.sync.create_circle("Gifts".into()).await.unwrap();
+    carol
+        .sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(carol.database(), "00000000-0000-4000-8000-000000000001", gifts, "scarf").await;
+    carol.sync.pass().await.unwrap();
+    let write = carol.sync.session.lock().await.through;
+    ana.sync.pass().await.unwrap();
+    let replacement = coven_crypto::MemberIdentity::new(
+        ben.identity.member(),
+        coven_format::test_utils::keys_from_seed(12),
+    );
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), replacement.keys().public_keys())
+        .await
+        .unwrap();
+
+    let phone = group.newcomer(replacement, group.storage.for_device()).await;
+    assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable(_))));
+    assert_eq!(phone.database().applied_slot().await.unwrap(), write - 1);
+    let stuck = coven_merge::slot(write);
+    assert!(phone.database().pending::<PendingRecord>().await.unwrap().iter().any(|record| {
+        record.subject == PendingSubject::Slot(stuck)
+            && matches!(record.reason, PendingReason::KeyUnavailable { .. })
+    }));
+
+    carol.sync.pass().await.unwrap();
+    phone.sync.pass().await.unwrap();
+    assert_eq!(
+        pins(phone.database()).await,
+        [("00000000-0000-4000-8000-000000000001".into(), "scarf".into())]
+    );
+    assert!(phone
+        .database()
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.subject != PendingSubject::Slot(stuck)));
     for device in [&ana, &ben, &carol, &phone] {
         device.sync.database.close().await.unwrap();
     }

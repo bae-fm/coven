@@ -41,6 +41,9 @@ pub(crate) struct Session {
     blocked: Option<PendingRecord>,
     /// The next slot a member without store keys inspects for its copies.
     scanned: Slot,
+    /// How far the scan for the circle key a stuck slot waits on got, while
+    /// this owner is open (§5.4, §12.1).
+    stuck_scan: Option<sequence_bootstrap::StuckScan>,
     /// Committed originals wait for store keys before their history is
     /// reconstructed: custody held none when this owner opened.
     locked: bool,
@@ -138,6 +141,7 @@ impl SequenceSync {
                 checked_floor: None,
                 blocked,
                 scanned: Slot::FIRST,
+                stuck_scan: None,
                 locked,
             })),
         })

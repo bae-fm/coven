@@ -326,7 +326,7 @@ scan the physical SQLite files, whose encoding is outside the model.
 
 [`CopyOrder`](sequence/CovenSequence/CopyOrder.lean) asks whether a copy sits
 below every slot that needs it, since a reader that reaches a slot it can't open
-stops there (`keyless_stops`). It sets `Keys`' projection beside a roster of who
+stops there, and reading in order never reaches a later copy (`keyless_stops`). It sets `Keys`' projection beside a roster of who
 reads each audience with which sealing key, as `effects.rs` and
 `circle_effects.rs` keep it. `required` is Rust's `required_copies`, and `legal`
 says a slot followed the rules at its position: an entry's required copies are
@@ -358,6 +358,16 @@ audience just before it, a copy to the member's current sealing key sits below.
   at each slot, but a recovered device reads old slots with its new pair. A key
   scan that ended before the copy can't open Carol's write at slot 11 either,
   and a scan after it can.
+- `need_introduced`, `stuck_scan_finds_copy`, `owed_complete`: where the claim
+  fails, the stopped reader scans the slots after its stop for its copy
+  (coven.md §5.4). Every key a slot needs is introduced by that slot, so the
+  copy the scan finds is checked against an applied commitment and its key is
+  accepted at once. Publishing `needed`, as a member of the audience does in
+  its pass, makes the audience complete: each current reader has a copy of
+  every key introduced for it. A reader whose pair is current at a complete
+  prefix, scanning through it, finds a copy of every key its stop needs.
+  The model doesn't say when that member's pass runs; until it does, the
+  reader waits.
 
 `Follows` allows more than Rust does, as it asks nothing of fresh sealing keys
 or a write's authority, so `store_copy_precedes_need` and

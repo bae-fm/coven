@@ -84,7 +84,9 @@ def holdsAt (seq : Nat → CopyOrder.Slot Nat Nat) (m c scan s : Nat) (key : Key
 store's history with his new pair. If its key scan ends before Carol's copy
 lands, it can't open her write at slot 11, whose copy to Ben's pair of the time
 sits below it; a phone that scans after slot 22 can. A reader that can't open a
-slot stops there (`keyless_stops`), so the copy at slot 22 doesn't reach it. -/
+slot stops there (`keyless_stops`), so reading in order never brings it the
+copy at slot 22. Scanning again from its stop once slot 22 has landed does
+(`stuck_scan_finds_copy`): the scan's end moves from 13 to 22. -/
 theorem early_scan_stops_below_replacement :
     holdsAt recovery ben 21 13 11 giftsKey = false ∧
     holdsAt recovery ben 21 21 18 giftsKey = false ∧

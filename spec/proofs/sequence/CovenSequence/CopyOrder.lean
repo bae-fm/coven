@@ -4,11 +4,13 @@ import CovenSequence.Keys
 # Copies before need (§12.1, §12.3)
 
 A device reads slots in order, and a slot it can't open stops it there (§5.4):
-a key arriving in a later slot can't get it past the stop (`keyless_stops`). So
-a member following an audience reads a slot of that audience only if a copy of
-the slot's key, sealed to the member's current sealing key, sits below it. This
-module states that claim for every history whose devices follow §12.1's order,
-as `CopyPrecedesNeed`, and shows where it holds and where it doesn't.
+reading in order, it never reaches a key in a later slot (`keyless_stops`). So
+a member following an audience reads a slot of that audience without waiting
+only if a copy of the slot's key, sealed to the member's current sealing key,
+sits below it. This module states that claim for every history whose devices
+follow §12.1's order, as `CopyPrecedesNeed`, shows where it holds and where it
+doesn't, and shows that where it fails, a stuck reader that scans ahead for its
+copy finds it once a member of the audience has sent what it owes.
 
 The model is `Keys`' projection (`keysAt`) beside a roster of who reads each
 audience with which sealing key (`Keys.Current`), as `effects.rs` and
@@ -611,5 +613,91 @@ theorem copy_precedes_need_inside {store : Aud} {seq : Nat → Slot Aud Mem} {n 
     (inside : ∀ a k, 3 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k)) :
     CopyPrecedesNeed store seq n := fun _ three below _ need _ _ reads =>
   need_met hf (inside _) three below need rfl reads
+
+/-! ## A stuck reader scans ahead
+
+Where `CopyPrecedesNeed` fails, a reader stops at a slot whose key has no copy
+below it. Reading in order, it would never reach the copy. So the stuck reader
+scans the slots after the stop for a copy of the missing key sealed to its pair,
+and a copy found there ends the wait. Two facts make the scan enough. Every key
+a slot needs is introduced by that slot (`need_introduced`), so the copy's
+material is checked against an applied commitment and is accepted at once, not
+held as tentative (`Keys.openCopy`). And a circle member's pass sends every copy
+its audience still needs (`owed_complete`); once those copies are in the
+sequence, a scan through them finds a copy of every key the stuck slot needs
+(`stuck_scan_finds_copy`). -/
+
+omit [DecidableEq Mem] in
+/-- An introduction applied by slot `j` is applied by every later slot. -/
+theorem introduced_mono {seq : Nat → Slot Aud Mem} {j k : Nat} (le : j ≤ k) {key : Key Aud}
+    (known : introduced (keysAt seq j) key = true) : introduced (keysAt seq k) key = true := by
+  simp only [introduced, List.any_eq_true, decide_eq_true_eq] at known ⊢
+  obtain ⟨i, hi, hk⟩ := known
+  have at_j := (introduction_slot _ i j).mp hi
+  exact ⟨i, (introduction_slot _ i k).mpr ⟨at_j.1, by omega, at_j.2.2⟩, hk⟩
+
+/-- **A slot's keys are introduced by that slot.** In a followed history,
+every key a slot after creation needs has an applied introduction at or below
+the slot: its store key and its parts' keys below it, or the slot's own
+rotation. -/
+theorem need_introduced {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
+    (hf : Follows store seq n) {s : Nat} (three : 3 ≤ s) (below : s ≤ n) {key : Key Aud}
+    (need : key ∈ (seq s).needs) : introduced (keysAt seq s) key = true := by
+  have yes := hf.2 s three below
+  have up := fun known => introduced_mono (seq := seq) (show s - 1 ≤ s by omega) (key := key) known
+  cases hs : seq s with
+  | entry author outer change =>
+    rw [hs] at yes need
+    simp only [Slot.needs, List.mem_singleton] at need
+    subst need
+    obtain ⟨_, _, _, seals⟩ := legal_entry yes
+    rcases seals with old | ⟨hash, rfl⟩
+    · exact up old
+    · simp only [introduced, List.any_eq_true, decide_eq_true_eq]
+      exact ⟨⟨key, hash, s⟩, (introduction_slot _ _ s).mpr ⟨show 0 < s by omega, Nat.le_refl s,
+        by simp [hs, Slot.event]⟩, rfl⟩
+  | copy outer route =>
+    rw [hs] at yes need
+    simp only [Slot.needs, List.mem_singleton] at need
+    subst need
+    simp only [legal, Bool.and_eq_true] at yes
+    exact up yes.2
+  | writes outer parts =>
+    rw [hs] at yes need
+    simp only [legal, Bool.and_eq_true, List.all_eq_true] at yes
+    simp only [Slot.needs, List.mem_cons] at need
+    rcases need with rfl | part
+    · exact up yes.1.1.2
+    · exact up (yes.2 key part)
+
+/-- **A stuck reader's scan finds its copy.** In a followed history through
+`n`, take any slot `s` after creation, any key it needs, and a member reading
+that key's audience with pair `c` at `n`. Once the audience is complete at `n`,
+some slot through `n` holds a copy of the key sealed to `c`. The copy may sit
+above `s` (`CopyOrderExamples.copy_precedes_need_fails`), so only a reader that
+scans past its stop finds it. -/
+theorem stuck_scan_finds_copy {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
+    (hf : Follows store seq n) {s : Nat} (three : 3 ≤ s) (below : s ≤ n) {key : Key Aud}
+    (need : key ∈ (seq s).needs) {m : Mem} {c : Nat}
+    (reads : (rosterAt store seq n).current key.audience m = some c)
+    (owed : Complete (keysAt seq n) (rosterAt store seq n) key.audience) :
+    ∃ t, 0 < t ∧ t ≤ n ∧ (seq t).event = .copy ⟨key, m, c⟩ := by
+  have known := introduced_mono below (need_introduced hf three below need)
+  simp only [introduced, List.any_eq_true, decide_eq_true_eq] at known
+  obtain ⟨i, hi, hk⟩ := known
+  have sent := owed i hi (by rw [hk]) m c reads
+  rw [hk] at sent
+  exact (copy_slot _ _ n).mp sent
+
+/-- **A circle member's pass completes its audience.** Publishing the copies
+`Keys.needed` lists for an audience, as a pass of one of its members does
+(§12.1), gives every key introduced for it a copy to each current reader's
+current sealing key. -/
+theorem owed_complete {store a : Aud} {r : Roster Aud Mem} (ok : RosterOk store r)
+    (h : History Aud Mem) (through : Nat) :
+    Complete (publish h through ((needed h r.current r.people a).map Event.copy)) r a := by
+  intro i hi ha m c reads
+  rw [publish_copies] at hi
+  exact needed_complete h through r.current r.people a i hi ha m c (ok.people a m c reads) reads
 
 end CovenSequence.CopyOrder

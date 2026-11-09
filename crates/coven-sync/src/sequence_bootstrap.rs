@@ -1,14 +1,20 @@
-//! The first store keys of an installation whose custody holds none, and
-//! the registration that follows its admission (§13).
+//! The key scan: the first store keys of an installation whose custody
+//! holds none, and the registration that follows its admission (§13), and
+//! the circle key a stuck slot waits on (§5.4, §12.1).
 
 use super::{next_slot, sequence_read::SlotStep, SequenceSync, Session};
-use crate::{floor_object, slot_object, snapshot_object::RoutedKey, SyncError};
+use crate::{
+    floor_object, object_input::ObjectInput, slot_object, snapshot_object::RoutedKey, SyncError,
+};
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::LoadStep;
-use coven_format::{floor::OriginalSlot, sealed_slot::SlotKind};
-use coven_foundation::id_source::{DeviceId, KeyId};
+use coven_format::{
+    floor::OriginalSlot,
+    sealed_slot::{SlotKind, SlotObjectPrefix},
+};
+use coven_foundation::id_source::{CircleId, DeviceId, KeyId};
 use coven_foundation::progress::ProgressReport;
-use coven_merge::{Slot, SlotRange};
+use coven_merge::{Audience, Slot, SlotRange};
 use coven_storage::{ObjectPath, StorageFailure};
 
 /// What storage supplied to a member that holds no store key yet.
@@ -25,6 +31,24 @@ pub(crate) enum Bootstrap {
     Replaced,
     /// Neither a floor nor a first slot exists.
     Empty,
+}
+
+/// What the key scan reads of one slot.
+struct ScannedSlot {
+    prefix: SlotObjectPrefix,
+    /// The slot's bytes, when it is a copy sealed to a pair this member holds.
+    copy: Option<OriginalSlot>,
+}
+
+/// How far the scan for the circle key a stuck slot waits on got.
+#[derive(Clone, Copy)]
+pub(crate) struct StuckScan {
+    /// The slot reading stopped at.
+    stuck: Slot,
+    /// The circle key it waits on.
+    key: KeyId,
+    /// The next slot the scan reads.
+    next: Slot,
 }
 
 /// How this member's binding stands in the applied history (§13).
@@ -193,39 +217,21 @@ impl SequenceSync {
             // The end of the sequence, found once this pass reads a slot.
             let mut located = None;
             while let Some(input) = reads.next().await? {
-                let path = self.path(next);
                 scanned += 1;
                 bytes += input.object().size;
-                let read = async {
-                    let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
-                    needed.get_or_insert(prefix.key);
-                    if let SlotKind::KeyCopy(copy) = &prefix.kind {
-                        routed_past |=
-                            copy.routing.member == member.member() && !copy.routing.held_by(member);
-                        if copy.routing.held_by(member) {
-                            let object = slot_object::read_exact(
-                                &mut input.local_bytes().await?,
-                                (input.object().size)
-                                    .min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
-                                    as usize,
-                                &path,
-                            )?;
-                            let original = OriginalSlot { slot: next, object };
-                            keys.extend(crate::snapshot_object::routed_key(
-                                &original,
-                                self.store(),
-                                member,
-                            )?);
-                        }
-                    }
-                    Ok::<_, SyncError>(())
+                let read = self.scan_slot(input, next, member).await?;
+                needed.get_or_insert(read.prefix.key);
+                if let SlotKind::KeyCopy(copy) = &read.prefix.kind {
+                    routed_past |=
+                        copy.routing.member == member.member() && !copy.routing.held_by(member);
                 }
-                .await;
-                // The scan is done with the slot's bytes, read or refused:
-                // they stay for the reader that applies the slot, but count
-                // against the input budget only as bytes it may evict (§21.1).
-                input.release().await?;
-                read?;
+                if let Some(original) = &read.copy {
+                    keys.extend(crate::snapshot_object::routed_key(
+                        original,
+                        self.store(),
+                        member,
+                    )?);
+                }
                 if let Some(scan) = scan.as_deref_mut() {
                     let end = match located {
                         Some(end) => end,
@@ -272,6 +278,129 @@ impl SequenceSync {
             "read this member's store keys from their copies"
         );
         Ok(result)
+    }
+
+    /// Read what the key scan looks at in `slot`, whose bytes `input` holds:
+    /// its clear prefix, and its whole bytes when it is a copy sealed to a
+    /// pair this member holds.
+    async fn scan_slot(
+        &self,
+        input: ObjectInput,
+        slot: Slot,
+        member: &MemberIdentity,
+    ) -> Result<ScannedSlot, SyncError> {
+        let path = self.path(slot);
+        let read = async {
+            let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
+            let copy = match &prefix.kind {
+                SlotKind::KeyCopy(copy) if copy.routing.held_by(member) => {
+                    let object = slot_object::read_exact(
+                        &mut input.local_bytes().await?,
+                        (input.object().size).min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
+                            as usize,
+                        &path,
+                    )?;
+                    Some(OriginalSlot { slot, object })
+                }
+                _ => None,
+            };
+            Ok::<_, SyncError>(ScannedSlot { prefix, copy })
+        }
+        .await;
+        // The scan is done with the slot's bytes, read or refused: they stay
+        // for the reader that applies the slot, but count against the input
+        // budget only as bytes it may evict (§21.1).
+        input.release().await?;
+        read
+    }
+
+    /// Scan the slots after `stuck`, where reading stopped for want of
+    /// `circle`'s key `key`, for a copy of it sealed to this member's pair.
+    /// Reading in order never reaches a copy in a later slot, so this scan is
+    /// what ends the wait. `hash` is the key's applied commitment: the copy's
+    /// key is checked against it, so the key it gives is accepted at once
+    /// (§5.4, §12.1).
+    ///
+    /// The scan reads each slot's clear prefix and applies nothing. It goes
+    /// on from where an earlier scan for the same stop and key got, since
+    /// slots never change. At a slot whose prefix is damaged, or whose copy of
+    /// the key doesn't open or match, it stops without reading past it, and
+    /// the next scan starts there. A failed read fails it.
+    pub(crate) async fn scan_for_stuck_key(
+        &self,
+        session: &mut Session,
+        member: &MemberIdentity,
+        stuck: Slot,
+        circle: CircleId,
+        key: KeyId,
+        hash: &[u8; 32],
+    ) -> Result<Option<RoutedKey>, SyncError> {
+        let started = self.clock.elapsed();
+        let from = match session.stuck_scan {
+            Some(scan) if scan.stuck == stuck && scan.key == key => scan.next,
+            _ => next_slot(stuck.get())?,
+        };
+        let mut next = from;
+        let mut reads = super::SlotReads::new(self, SlotRange::new(next, u64::MAX));
+        let found = loop {
+            let opened = async {
+                let Some(input) = reads.next().await? else {
+                    return Ok(None);
+                };
+                let read = self.scan_slot(input, next, member).await?;
+                let wanted = matches!(&read.prefix.kind, SlotKind::KeyCopy(copy)
+                    if copy.routing.audience == Audience::Circle(circle)
+                        && copy.routing.key == key);
+                let opened = match read.copy.filter(|_| wanted) {
+                    Some(original) => {
+                        crate::snapshot_object::routed_key(&original, self.store(), member)?
+                    }
+                    None => None,
+                };
+                if let Some(opened) = &opened {
+                    opened.check_hash(hash).map_err(|error| {
+                        crate::write_object::damaged(
+                            &self.path(next),
+                            crate::Refusal::WrongIdentity {
+                                cause: Some(std::sync::Arc::new(error)),
+                            },
+                        )
+                    })?;
+                }
+                Ok::<_, SyncError>(Some(opened))
+            }
+            .await;
+            match opened {
+                // The end of the sequence.
+                Ok(None) => break None,
+                Ok(Some(opened)) => {
+                    next = next_slot(next.get())?;
+                    if opened.is_some() {
+                        break opened;
+                    }
+                }
+                Err(error @ SyncError::Damaged(_)) => {
+                    tracing::warn!(
+                        slot = next.get(),
+                        "the scan for a stuck slot's circle key stops at a damaged slot: {error}"
+                    );
+                    break None;
+                }
+                Err(error) => {
+                    session.stuck_scan = Some(StuckScan { stuck, key, next });
+                    return Err(error);
+                }
+            }
+        };
+        session.stuck_scan = Some(StuckScan { stuck, key, next });
+        tracing::info!(
+            stuck = stuck.get(),
+            found = found.is_some(),
+            scanned_slots = next.get() - from.get(),
+            time = ?(self.clock.elapsed() - started),
+            "scanned ahead for the circle key a stuck slot needs"
+        );
+        Ok(found)
     }
 
     /// This member's binding in the applied history.

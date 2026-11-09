@@ -289,6 +289,22 @@ impl SequenceSync {
                 {
                     return Err(error);
                 }
+                // A circle key with no copy below the slot that needs it may
+                // have one above: reading in order never gets there, so scan
+                // ahead for it. The key's introduction applied below the
+                // slot, so its commitment checks the copy (§5.4, §12.1).
+                if let SyncError::KeyUnavailable(key) = error {
+                    if let Some((circle, hash)) = session.history.circle_commitment(key) {
+                        if let Some(found) = self
+                            .scan_for_stuck_key(session, member, slot, circle, key, &hash)
+                            .await?
+                        {
+                            found.insert(ring)?;
+                            self.keys.persist(ring)?;
+                            continue;
+                        }
+                    }
+                }
                 return Err(self.block(session, slot, error).await);
             }
             if next.get() <= known_end {

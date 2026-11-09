@@ -414,6 +414,16 @@ impl History {
         values.all(|value| value.hash == first).then_some(first)
     }
 
+    /// The circle an applied introduction names for `key`, with the key's
+    /// commitment: none for a store key or a key with no single commitment.
+    pub(crate) fn circle_commitment(&self, key: KeyId) -> Option<(CircleId, [u8; 32])> {
+        let circle = self.introductions.iter().find_map(|value| match value.audience {
+            Audience::Circle(circle) if value.key == key => Some(circle),
+            _ => None,
+        })?;
+        Some((circle, self.commitment(&Audience::Circle(circle), key)?))
+    }
+
     pub(crate) fn accepted(&self, ring: &StoreKeyring, audience: &Audience, key: KeyId) -> bool {
         self.commitment(audience, key).is_some_and(|hash| {
             crate::write_seal::held(ring, audience, key).map(|held| held.hash()) == Some(hash)

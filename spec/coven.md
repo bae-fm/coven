@@ -1533,8 +1533,13 @@ is allowed to.
 Stopping is deliberate. Skipping slot 80 could mean missing Ben's removal at 81
 while still sending writes Ben's removal should have cut off.
 
-Ben's laptop reads slot 41, a copy of a Gifts key it can't open. A key that
-arrives in a later slot can't let it get past 41.
+A missing circle key is the one stop the device works its own way out of. Ben's
+new phone stops at slot 41, Carol's Gifts write, because it holds no Gifts key
+yet; Carol's copy of the key for him will land at slot 45. Reading in order, the
+phone never reaches 45. So a device stopped for want of a circle key scans the
+slots after its stop for a copy of that key sealed to its member, and a copy it
+finds there ends the wait: it applies 41 and reads on (§12.1). A later slot
+still never lets it skip 41.
 
 A slot the device can't apply at all stops it the same way: its bytes are
 damaged, written in a newer format than its app reads, or a write at a newer
@@ -1612,7 +1617,9 @@ until one is missing.
   ([`checkFirst_blames_honest_floor`](proofs/sequence/CovenSequence/ReadPass.lean)).
 - **A block ends reading.** Once a slot is found that can't apply (§5.4), the
   device reads no further. Requests already started may finish, but their results
-  can't move the device past the block.
+  can't move the device past the block. A stop for a circle key is the one
+  exception: the device scans the later slots' clear prefixes for that key's
+  copy, applying none of them (§12.1).
 - **A new device** starts from the floor whenever one exists, even while its
   `first` is 1, or from slot 1 before a floor exists (§16.4). Opening its first
   key follows the joining rules (§12.1, §13).
@@ -3835,9 +3842,28 @@ opens them with its first keys.
 Ben's phone can get there first. It scans for its copies once, while it holds
 no keys, then reads the slots in order. If the scan ended before Carol's copy
 landed, the phone stops with `KeyUnavailable` at the first Gifts part it reaches
-(§5.4), even one written before the recovery. The copy is in a later slot, which
-can't get it past that one, and neither can a later floor. A phone restored
-after Carol's pass finds the copy and reads on.
+(§5.4), even one written before the recovery. Carol's copy lands in a later
+slot, which reading in order never reaches, and a later floor doesn't take the
+phone past its stop either. So the stopped phone runs the key scan again, from
+its stop: it reads each later slot's clear prefix, looking for a copy of the
+missing key sealed to its pair. Once Carol's pass has landed, the scan finds her
+copy. The key's introduction applied below the stop, so the phone checks the key
+against it, keeps it and reads on. Ben needs no fresh restore. A circle member's
+pass sends every copy its circle still owes, and once one has run, the scan
+finds a copy of every key the stop needs
+([`stuck_scan_finds_copy`, `owed_complete`](proofs/sequence/CovenSequence/CopyOrder.lean)).
+
+- **When it scans.** The phone scans each time it tries the stopped slot again,
+  on that slot's wait (§6.7). The scan applies nothing and gives no right to
+  send. While the store stays open, each scan goes on from where the last one
+  got: slots never change.
+- **Damage stops the scan.** At a slot whose clear prefix is damaged, or whose
+  copy of the key doesn't open or doesn't match the key's introduction, the
+  scan stops without reading past it, as the join scan does (§13.2). The phone
+  stays stopped with `KeyUnavailable`, and the next scan starts at that slot. A
+  failed read fails the pass, as any failed read does (§6.1).
+- **Only a circle key.** A store key's copy is always below the slot that needs
+  it (below), so a stop for a store key has nothing to scan for.
 
 So a copy doesn't always come before the slot that needs it. A Gifts write can
 even land between the recovery and the copy: Carol's write lost its slot to the
@@ -4916,6 +4942,11 @@ Ben loses every device and his restore code. An admin invites him again, to his
 - his old keys count as exposed (§12.2);
 - writes signed with his old keys that land after the replacement are refused
   (§14.1).
+
+Approving sends his new keys only the keys the approving admin holds. If that
+admin is outside Gifts, his Gifts keys come from a Gifts member's next pass. A
+new device of his that reaches a Gifts slot before then stops there, and scans
+ahead until the copy lands; he needs no second invite or restore (§12.1).
 
 A removed member can't be brought back by replacing keys. Inviting that person
 again gives them a fresh id, under the ordinary rules for adding a member.
@@ -8642,7 +8673,9 @@ read, never a refusal.
 
 The app can ask a working device to reload from snapshots and the sequence
 (§16.5), for example when its data looks wrong. It keeps its device id and its
-unsent writes. A stuck device still stays stuck (§5.4).
+unsent writes. A stuck device still stays stuck (§5.4): a reload loads nothing
+past its stop. A device stuck for want of a circle key gets out by scanning
+ahead for the key's copy, not by reloading (§12.1).
 
 - Claims in flight settle first, as usual (§5.1).
 - Old-schema writes received from others are converted or kept as lost values
@@ -12013,7 +12046,8 @@ Write-ups explain each model and state its assumptions:
 | The copies an audience still needs, of every key introduced for it to each current member's current sealing key, give every current member every older key once published; then none is needed, so a retry sends none, and they expose no key | `needed_complete`, `needed_after_none`, `needed_exposes_nothing` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
 | *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, and so has a circle's key while each replacement of one of its members comes from another of them. Store creation's slot 2 is the exception §12.1 names | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
 | A rotation among another admin's addition and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the added member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
-| *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
+| *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
+| *Body.* Every key a slot needs is introduced by that slot, so a copy of it found above the slot is checked against an applied commitment. Publishing the copies an audience still needs, as a member's pass does, gives each current reader a copy of every key introduced for it; then a stopped reader that scans through them finds a copy of every key its stop needs | `need_introduced`, `stuck_scan_finds_copy`, `owed_complete` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §5.4, §12.1 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
 | A replacement applies only while the pair it expects is current; once one applies, its member never has the replaced pair again, so a competing replacement, and every retry of it, is refused at every later slot | `replaced_never_current`, `competing_replacement_refused` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §10.4, §11.2, §12.3 |
 | Replacing one's own keys, every write under the old pair lands before the replacement's slot and every write under the new pair after it; once the replacement lands, writes resume only with the new pair kept, installed and its restore code refreshed, and a write meanwhile is refused | `writes_straddle_replacement`, `pause_lifts_after_install` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
