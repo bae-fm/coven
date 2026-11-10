@@ -105,6 +105,8 @@ pub(crate) struct InviteWork {
     /// ends the request where it is (§13.2, §19.3).
     device: DeviceId,
     member: MemberId,
+    /// The inviting admin's name, which the invite's code carries.
+    inviter: String,
     binding: InviteBinding,
     access: InviteGrant,
     secret: SecretText,
@@ -334,13 +336,14 @@ impl SequenceSync {
         access: InviteAccess,
         lifetime: InviteLifetime,
     ) -> Result<Invite, SyncError> {
+        let inviter = "Ana".to_owned();
         let steps = self.operation_steps();
         let location = self.storage.config().clone();
         coven_storage::record_config(&self.directory, &location)?;
         let (invite, _, operation) = self
             .database
             .write_as(move |sql| {
-                let made = NewInvite { target, access, lifetime };
+                let made = NewInvite { target, access, lifetime, inviter };
                 steps.create_invite(&sql, made)
             })
             .await?;
@@ -860,6 +863,7 @@ impl SequenceSync {
         let code = InviteCode {
             store: store.id,
             name: store.name.clone(),
+            inviter: work.inviter.clone(),
             kind: work.kind(),
             expires_at: seconds(work.expires_at)?,
             invite: work.id,

@@ -1,4 +1,4 @@
-//! The new person's name a join's invite carried, which the store the join
+//! The new person's name a join's request carried, which the store the join
 //! published keeps until the app acknowledges it (§13.2).
 
 macro_rules! coven_joined_invitee_tables {

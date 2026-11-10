@@ -252,8 +252,8 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     let (first, second) = (invite("first"), invite("second"));
     let made = ana
         .write(move |sql| {
-            let first = sql.create_invite(first.0, first.1, first.2)?;
-            let second = sql.create_invite(second.0, second.1, second.2)?;
+            let first = sql.create_invite(first.0, first.1, first.2, "Ana".into())?;
+            let second = sql.create_invite(second.0, second.1, second.2, "Ana".into())?;
             sql.execute("INSERT INTO parents(id,label,value) VALUES('invite','made',1)", [])?;
             Ok::<_, CovenError>((first, second))
         })

@@ -137,7 +137,7 @@ impl CovenHandle {
         self.database.subscribe_store_name()
     }
 
-    /// The new person's name the invite carried, which a store a join
+    /// The new person's name the join's request carried, which a store a join
     /// published keeps on this device until a write acknowledges it
     /// (`CovenWrite::acknowledge_joined_invitee`). None for a store no join
     /// published, for a recovery invite's, which carries no name, and once
@@ -419,8 +419,9 @@ impl CovenHandle {
         target: InviteTarget,
         access: InviteAccess,
         lifetime: InviteLifetime,
+        inviter: String,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.write(move |write| write.create_invite(target, access, lifetime)).await
+        self.write(move |write| write.create_invite(target, access, lifetime, inviter)).await
     }
     /// Follow `coven_invites` with a live query, as an app does (E10).
     #[cfg(any(test, feature = "test-utils"))]

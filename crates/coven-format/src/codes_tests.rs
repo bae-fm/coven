@@ -166,29 +166,30 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
     encoded[43] = b'X';
     assert!(matches!(RestoreCode::from_bytes(&encoded), Err(Error::Material(_))));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
-    encoded[133..137].copy_from_slice(&u32::MAX.to_be_bytes());
+    encoded[138..142].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(InviteCode::from_bytes(&encoded), Err(Error::Limit { .. })));
 }
 
 #[test]
-fn invite_carries_its_kind_and_no_person_after_the_store_name() {
+fn invite_carries_the_inviters_name_and_its_kind_after_the_store_name() {
     let mut invite = test_utils::invite();
     let bytes = invite.to_bytes().unwrap();
-    // Prefix, store id, then the store name `S`, then the kind: the fixture
-    // recovers a member.
+    // Prefix, store id, then the store name `S`, the inviter's name `A` and
+    // the kind: the fixture recovers a member.
     assert_eq!(&bytes[23..28], b"\0\0\0\x01S");
-    assert_eq!(bytes[28], 1);
+    assert_eq!(&bytes[28..33], b"\0\0\0\x01A");
+    assert_eq!(bytes[33], 1);
     assert_eq!(InviteCode::from_bytes(&bytes).unwrap().kind, InviteKind::Recovery);
     invite.kind = InviteKind::NewPerson;
     let bytes = invite.to_bytes().unwrap();
-    assert_eq!(bytes[28], 0);
+    assert_eq!(bytes[33], 0);
     let decoded = InviteCode::from_bytes(&bytes).unwrap();
     assert_eq!(decoded.kind, InviteKind::NewPerson);
     assert_eq!(decoded.invite, invite.invite);
-    // The code has no room for a person's name: the expiry follows the kind.
-    assert_eq!(&bytes[29..37], &86_400u64.to_be_bytes());
+    // No new person's name is in the code: the expiry follows the kind.
+    assert_eq!(&bytes[34..42], &86_400u64.to_be_bytes());
     let mut unknown = bytes.to_vec();
-    unknown[28] = 2;
+    unknown[33] = 2;
     assert_eq!(
         InviteCode::from_bytes(&unknown).err(),
         Some(Error::UnknownTag { field: "invite kind", tag: 2 })
@@ -211,7 +212,7 @@ fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
     let mut invite = test_utils::invite();
     invite.storage = SecretBytes::new(vec![0x44]);
     let mut bytes = invite.to_bytes().unwrap();
-    bytes.drain(94..126);
+    bytes.drain(99..131);
     let payload_length = (bytes.len() - FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&payload_length.to_be_bytes());
     assert!(matches!(InviteCode::from_bytes(&bytes), Err(Error::Truncated)));

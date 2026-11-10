@@ -42,6 +42,10 @@ pub struct InviteInfo {
     pub metadata: CodeMetadata,
     /// The store name at invitation creation.
     pub store_name: String,
+    /// The inviting admin's name, as their app gave it when it made the
+    /// invite, for the joining person's screens to say whom to tell the code
+    /// and whom they wait for (§13.2).
+    pub inviter: String,
     /// Whether the invite adds a new person, whose join request carries the
     /// name they type, or recovers a member, whose carries none.
     pub kind: InviteKind,
@@ -132,6 +136,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
         DecodedCode::Invite(code) => CodeInfo::Invite(InviteInfo {
             metadata: metadata(code.store, code.member),
             store_name: code.name,
+            inviter: code.inviter,
             kind: code.kind,
             expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
         }),

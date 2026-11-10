@@ -290,8 +290,10 @@ impl<'write> CovenWrite<'write> {
         target: InviteTarget,
         access: InviteAccess,
         lifetime: InviteLifetime,
+        inviter: String,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.steps.create_invite(&self.sql, coven_sync::NewInvite { target, access, lifetime })
+        self.steps
+            .create_invite(&self.sql, coven_sync::NewInvite { target, access, lifetime, inviter })
     }
 
     /// Approves exactly this checked request (§13.2, E10), and returns the

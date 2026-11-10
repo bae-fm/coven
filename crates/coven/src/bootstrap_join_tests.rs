@@ -601,7 +601,7 @@ async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
 }
 
 /// Carol closes the app while she waits. Her phone lists the join with the
-/// names the invite carried, and continues it without the code; once it
+/// store's name and the inviter's the invite carried, and continues it without the code; once it
 /// loads, the saved code is gone (§13.2).
 #[tokio::test]
 async fn a_closed_join_is_listed_and_resumes_without_its_code() {
@@ -615,7 +615,10 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
     let CodeInfo::Invite(info) = decode_code_info(invite.shown_code()).unwrap() else {
         panic!("an invite code");
     };
-    assert_eq!((info.store_name.as_str(), info.kind), ("Household", InviteKind::NewPerson));
+    assert_eq!(
+        (info.store_name.as_str(), info.inviter.as_str(), info.kind),
+        ("Household", "Ana", InviteKind::NewPerson)
+    );
     assert_eq!(builder.unfinished_joins().await.unwrap(), [info]);
     assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.shown_code());
     let control = JoinControl::new();

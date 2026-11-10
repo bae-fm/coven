@@ -139,7 +139,7 @@ pub(crate) async fn invite(
     access: InviteAccess,
     lifetime: crate::InviteLifetime,
 ) -> Invite {
-    let (id, _, _) = owner.create_invite(target, access, lifetime).await.unwrap();
+    let (id, _, _) = owner.create_invite(target, access, lifetime, "Ana".into()).await.unwrap();
     owner
         .test_invites()
         .wait_for(|invites| {

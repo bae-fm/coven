@@ -7726,6 +7726,10 @@ pub struct InviteInfo {
     /// Includes the sign-in the join needs.
     pub metadata: CodeMetadata,
     pub store_name: String,
+    /// The inviting admin's name, as their app gave it when it made the
+    /// invite, for the joining person's screens to say whom to tell the code
+    /// and whom they wait for (§13.2).
+    pub inviter: String,
     /// Which `Joiner` a join with this code takes: a new person's name or a
     /// recovery (§13.2).
     pub kind: InviteKind,
@@ -7949,6 +7953,7 @@ impl CovenHandle {
         target: InviteTarget,
         access: InviteAccess,
         lifetime: InviteLifetime,
+        inviter: String,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
 
     /// Approves a request, in a write of its own
@@ -7974,14 +7979,18 @@ impl CovenWrite<'_> {
     /// admin fails with `Rejected(NotAllowed)`, a replacement of a member who
     /// isn't active with `Rejected(TargetGone)`. A pass then checks it again,
     /// grants its access and fixes its code, which `coven_invites` shows. It
-    /// expires `lifetime` after it is made, by this device's clock.
-    /// Replacement preserves role, circle memberships and device ids; changed
-    /// provider access is separate.
+    /// expires `lifetime` after it is made, by this device's clock. The invite
+    /// carries `inviter`, the inviting admin's name, which follows the
+    /// format's `name` rule (format.md D2): an empty one fails the call with
+    /// `SyncError::Format` before any provider change. Replacement preserves
+    /// role, circle memberships and device ids; changed provider access is
+    /// separate.
     pub fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
         lifetime: InviteLifetime,
+        inviter: String,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
 
     /// Approves exactly this checked request, and returns

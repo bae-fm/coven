@@ -490,6 +490,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
                 secret_access_key: SecretText::new("secret".into()),
             },
             crate::InviteLifetime::Day,
+            "Ana".into(),
         )
         .await
         .unwrap();

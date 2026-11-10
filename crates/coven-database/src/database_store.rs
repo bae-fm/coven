@@ -27,8 +27,8 @@ impl Database {
     /// Save what the store a join publishes keeps from its invite before it
     /// loads, in one transaction: the store's `name`, set by `named_at`, the
     /// slot the inviting device had applied, and the new person's name,
-    /// `invitee`, which it keeps until the app acknowledges it. A recovery
-    /// invite carries none (§13.2).
+    /// `invitee`, which it keeps until the app acknowledges it. A recovery's
+    /// request carries none (§13.2).
     pub async fn initialize_joined_store(
         &self,
         name: String,

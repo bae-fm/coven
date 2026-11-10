@@ -252,12 +252,14 @@ async fn each_lifetime_expires_on_the_inviting_device() {
             .unwrap();
         assert_eq!(invite.expires_at, made + Duration::from_secs(seconds));
         assert_eq!(invite.kind, InviteKind::NewPerson);
-        let CodeInfo::Invite(InviteInfo { kind, .. }) =
+        let CodeInfo::Invite(InviteInfo { kind, inviter, .. }) =
             decode_code_info(invite.shown_code()).unwrap()
         else {
             panic!("an invite code");
         };
         assert_eq!(kind, InviteKind::NewPerson);
+        // The code names whom the joining person tells and waits for.
+        assert_eq!(inviter, "Ana");
         group.clock.set(invite.expires_at - Duration::from_secs(1));
         ana.sync.pass().await.unwrap();
         assert_eq!(ana.database().operations().await.unwrap().len(), 1);

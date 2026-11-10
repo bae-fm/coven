@@ -14,6 +14,9 @@ pub struct NewInvite {
     pub access: InviteAccess,
     /// How long after it is made the invite expires.
     pub lifetime: InviteLifetime,
+    /// The inviting admin's name, a format `name`, which the invite carries
+    /// for the joining person's screens (§13.2).
+    pub inviter: String,
 }
 
 /// Make an invite, as a step of a write (§13.2), and return its id, the
@@ -42,7 +45,8 @@ pub(crate) fn make_invite(
     custody: &crate::DeviceCredentials,
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-    let NewInvite { target, access, lifetime } = invite;
+    let NewInvite { target, access, lifetime, inviter } = invite;
+    coven_format::value::name(&inviter)?;
     if matches!(
         location,
         coven_storage::StorageConfig::Dropbox {
@@ -100,6 +104,7 @@ pub(crate) fn make_invite(
             id,
             device,
             member,
+            inviter,
             binding,
             access: grant,
             secret,

@@ -578,6 +578,7 @@ pub fn invite() -> InviteCode {
     InviteCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         name: "S".into(),
+        inviter: "A".into(),
         // A re-binding invite recovers Ana, whose profile has her name.
         kind: InviteKind::Recovery,
         expires_at: 86_400,

@@ -440,7 +440,7 @@ mod provider_access_tests {
         let before = fixture.storage.request_count();
         let credentials = fixture.credentials();
         assert!(
-            matches!(handle.create_invite(InviteTarget::NewMember { role: MemberRole::Member }, member(), crate::InviteLifetime::Day,).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
+            matches!(handle.create_invite(InviteTarget::NewMember { role: MemberRole::Member }, member(), crate::InviteLifetime::Day, "Ana".into()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
         );
         assert_eq!(fixture.storage.request_count(), before);
         assert_eq!(fixture.sign_in.presentation_count(), 1);

@@ -1,12 +1,12 @@
-//! The new person's name a join's invite carried. The invite code is the only
-//! other place on the device that holds it, and publishing deletes the code,
+//! The new person's name a join's request carried. The saved request is the
+//! only other place on the device that holds it, and publishing deletes it,
 //! so the store the join published keeps it, on this device only, until the
 //! app has recorded the person's profile and acknowledges it (§13.2).
 
 use crate::{sqlite::DatabaseConnection, DbError};
 
 /// The kept name; None once acknowledged, and for a store no join published
-/// or one a recovery invite published, which carries no name.
+/// or one a recovery published, whose request carries no name.
 pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<String>, DbError> {
     Ok(database
         .query("SELECT name FROM _coven_joined_invitee WHERE singleton=1", [], |row| row.get(0))?

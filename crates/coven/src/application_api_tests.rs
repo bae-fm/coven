@@ -272,12 +272,13 @@ fn bootstrap_and_operation_futures_stay_small() {
         (
             "create_invite",
             size(
-                |(h, t, a, d): (
+                |(h, t, a, d, i): (
                     &'static CovenHandle,
                     InviteTarget,
                     InviteAccess,
                     InviteLifetime,
-                )| h.create_invite(t, a, d),
+                    String,
+                )| h.create_invite(t, a, d, i),
             ),
         ),
         (

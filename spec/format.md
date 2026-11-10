@@ -2350,13 +2350,14 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | kind:u8 | expires_at:u64 | invite:uuid |
+`store:uuid | name:name | inviter:name | kind:u8 | expires_at:u64 | invite:uuid |
 member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
 read_through:u64 | storage:bytes`:
 
 ```
 store            uuid
 name             name
+inviter          name
 kind             u8
 expires_at       u64
 invite           uuid
@@ -2371,6 +2372,7 @@ storage          bytes
 | Field | Rule |
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
+| `inviter` | the inviting admin's name, as the app gave it when it made the invite: the joining device can't read who is who until it is let in, so its screens name whom to tell the code and whom it waits for (§13.2) |
 | `kind` | 0 when the invite adds a new person, 1 when it recovers an existing member, who already has a profile. It fixes which `joiner` the request carries (D8); the code carries no person's name, which the joining person types and their request carries (§13.2) |
 | `expires_at` | when the invite ends, in whole seconds since the Unix epoch by the inviting device's clock: the joining device sends no first request after it (§13.2) |
 | `invite` | the join request's path |

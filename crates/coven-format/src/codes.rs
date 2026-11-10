@@ -11,8 +11,8 @@ use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
 use coven_merge::Slot;
 use zeroize::Zeroizing;
 
-// Room for the largest invite: a 1,024-byte store name, 16 KiB of storage and
-// the frame's fixed fields.
+// Room for the largest invite: two 1,024-byte names, 16 KiB of storage and the
+// frame's fixed fields.
 const MAX_CODE_BYTES: usize = 19 * 1024;
 // A saved code adds its frame prefix, a name of at most 1,024 bytes, its slot
 // and the code's length to the code itself.
@@ -165,6 +165,9 @@ pub struct InviteCode {
     pub store: StoreId,
     /// The store's display name.
     pub name: String,
+    /// The inviting admin's name, as their app gave it when it made the
+    /// invite: the joining device can't read who is who until it is let in.
+    pub inviter: String,
     /// Whether the invite adds a new person or recovers a member.
     pub kind: InviteKind,
     /// When the invite ends, in seconds since the Unix epoch by the inviting
@@ -197,6 +200,7 @@ impl InviteCode {
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
         name(&self.name)?;
+        name(&self.inviter)?;
         let kind = match self.kind {
             InviteKind::NewPerson => 0,
             InviteKind::Recovery => 1,
@@ -207,6 +211,8 @@ impl InviteCode {
             &[
                 &(self.name.len() as u32).to_be_bytes(),
                 self.name.as_bytes(),
+                &(self.inviter.len() as u32).to_be_bytes(),
+                self.inviter.as_bytes(),
                 &[kind],
                 &self.expires_at.to_be_bytes(),
                 self.invite.0.as_bytes(),
@@ -225,6 +231,7 @@ impl InviteCode {
         let mut input = decode_frame_of(bytes, kinds::INVITE_CODE, "invite code kind")?;
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
+        let inviter = crate::wire::get_name(&mut input)?;
         let kind = InviteKind::get(&mut input)?;
         let expires_at = u64::get(&mut input)?;
         let invite = Wire::get(&mut input)?;
@@ -240,6 +247,7 @@ impl InviteCode {
         Ok(Self {
             store,
             name: label,
+            inviter,
             kind,
             expires_at,
             invite,

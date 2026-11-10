@@ -4601,7 +4601,9 @@ Ana adds Dan to Household on Dropbox, with Dan beside her:
    writes down his own restore code.
 
 The invite only lets Dan ask; Ana's phone lets him in. It carries the current
-store name when Ana makes it. If Household is renamed before Dan joins, the
+store name and Ana's name when she makes it, so that Dan's phone can say whom
+to tell the code and whom he waits for; it can't read her name from the store
+until it is let in. If Household is renamed before Dan joins, the
 invite still shows Household until it expires. Loading the store gives Dan its
 current name; the invite's label never becomes a local setting. Dan's name is
 the one Dan typed: his join request carries it, Ana's phone shows it with the
@@ -4655,6 +4657,7 @@ while either invite is open (§14.2), whichever of Ana's devices made it.
 |---|---|
 | store id and location | finding the store |
 | current store name, copied when the invite is made | showing which store the invite is for |
+| the inviter's name, as Ana's app gives it when it makes the invite | telling Dan whom to ask: his phone can't read who is who until it is let in |
 | whether it adds a new person or recovers an existing member (§13.3) | which join request Dan's phone sends: a new person's carries the name Dan typed, a recovery's none |
 | when it expires, to the second | Dan's phone sends no first request after it |
 | invite id | the join request's path |

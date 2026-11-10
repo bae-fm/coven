@@ -479,7 +479,7 @@ def invite_code():
     """A re-binding invite fixing Ana's existing id, so its kind is a recovery
     (tag 1), for the S3 location with the key made for it."""
     storage = s3_location() + text(b"id") + text(b"secret")
-    return frame(11, STORE + text(b"S") + b"\x01" + u64(86400) + bytes([0x55]) * 16 + ANA
+    return frame(11, STORE + text(b"S") + text(b"A") + b"\x01" + u64(86400) + bytes([0x55]) * 16 + ANA
                  + bytes([0x66]) * 32 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))
 
 
