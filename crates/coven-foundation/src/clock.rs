@@ -190,7 +190,7 @@ pub const HANG_GUARD: Duration = Duration::from_secs(300);
 /// `future`'s output, or `None` once `HANG_GUARD` of real time passes
 /// first: a test waiting on the system fails instead of hanging, whatever
 /// clock the store under it reads.
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn within<F: Future>(future: F) -> Option<F::Output> {
     tokio::time::timeout(HANG_GUARD, future).await.ok()
 }
