@@ -551,6 +551,10 @@ impl StoreDirAccess for StoreDir {
     fn staging_folder(
         &self,
         folder: &FileName,
+        #[cfg_attr(
+            not(unix),
+            expect(unused_variables, reason = "Windows writes a folder's entries through")
+        )]
         batch: &mut FlushBatch,
     ) -> Result<WriterFolder, StagingFolderError> {
         let lock = Arc::new(self.lock_read_only().map_err(WriterError::from)?);
@@ -572,9 +576,6 @@ impl StoreDirAccess for StoreDir {
                 WriterError::from(FileError::at("open folder", &files, source))
             })?,
         );
-        // Windows syncs no folder: it writes a folder's entries through.
-        #[cfg(windows)]
-        let _ = batch;
         Ok(WriterFolder::open(&path, lock, self.bugs.clone()).map_err(WriterError::from)?)
     }
     fn remove_staged(&self, name: &StagedName) -> Result<(), FileError> {
