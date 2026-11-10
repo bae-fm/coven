@@ -107,7 +107,7 @@ pub(crate) fn everything(
 pub(crate) fn assert_rules_settled(db: &Database) {
     db.inspect_writer_schema(|writer, schema| {
         writer
-            .discarded_transaction(|writer| {
+            .discarded_write_transaction(|writer| {
                 let before = everything(writer);
                 crate::download_stage::begin(writer)?;
                 let rows = writer.query(

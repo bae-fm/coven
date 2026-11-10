@@ -57,8 +57,30 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
+        self.discarded("BEGIN DEFERRED", run)
+    }
+
+    /// A discarded transaction, as [`Self::discarded_transaction`] runs,
+    /// that takes the write lock as it begins, for a test's check that
+    /// writes the main schema after reading it. SQLite never waits for the
+    /// write lock a transaction already reading asks for: it fails at once
+    /// with `SQLITE_BUSY` if another connection holds it even for a moment,
+    /// where `BEGIN IMMEDIATE` waits out the busy timeout.
+    #[cfg(test)]
+    pub(crate) fn discarded_write_transaction<T>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.discarded("BEGIN IMMEDIATE", run)
+    }
+
+    fn discarded<T>(
+        &self,
+        begin: &str,
+        run: impl FnOnce(&Self) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
         use crate::WriteFailure;
-        self.batch("BEGIN DEFERRED")?;
+        self.batch(begin)?;
         let mut guard = SqlTransaction { database: self, active: true };
         let result = run(self);
         guard.active = false;

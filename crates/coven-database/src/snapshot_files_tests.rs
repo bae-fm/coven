@@ -97,7 +97,7 @@ fn protection(db: &Database) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
 fn assert_protection_settled(db: &Database) {
     db.inspect_writer_schema(|writer, schema| {
         writer
-            .discarded_transaction(|writer| {
+            .discarded_write_transaction(|writer| {
                 let before = everything(writer);
                 let keys = writer.query(
                     "SELECT table_name,key FROM _coven_rows WHERE table_name IN ('t','coven_files')
