@@ -149,3 +149,21 @@ async fn a_closure_clock_refuses_a_wall_wait() {
     let clock = ClosureClock(|| UNIX_EPOCH);
     assert!(clock.sleep_until(UNIX_EPOCH + Duration::from_secs(1)).await.is_err());
 }
+
+#[test]
+fn nextest_ends_a_test_a_period_after_the_hang_guard_fires() {
+    let config = include_str!("../../../.config/nextest.toml");
+    let line = config.lines().find(|line| line.starts_with("slow-timeout")).expect("slow-timeout");
+    let number = |key: &str| -> u64 {
+        let rest = &line[line.find(key).expect(key) + key.len()..];
+        let rest = rest.trim_start_matches([' ', '=', '"']);
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap();
+        rest[..end].parse().expect(key)
+    };
+    let period = Duration::from_secs(number("period"));
+    let terminate = period * u32::try_from(number("terminate-after")).unwrap();
+    assert!(
+        terminate >= HANG_GUARD + period,
+        "nextest ends a test at {terminate:?}, which leaves the {HANG_GUARD:?} hang guard too little time to report"
+    );
+}

@@ -183,7 +183,10 @@ fn boot_time() -> Duration {
 /// How long a test waits on an event before failing instead of hanging.
 /// Every wait it bounds ends on the code's own event, so only code that never
 /// sends it reaches this. It is not a measure of speed, so it sits far above
-/// what any step takes on a loaded machine.
+/// what any step takes on a loaded machine (the slowest whole tests take about
+/// 260s there). nextest ends a test at `terminate-after` periods in
+/// `.config/nextest.toml`, which stays a period above this so the test's own
+/// report of where it hung prints first; `clock_tests` checks it.
 #[cfg(any(test, feature = "test-utils"))]
 pub const HANG_GUARD: Duration = Duration::from_secs(300);
 

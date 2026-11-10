@@ -1,4 +1,8 @@
-# A test still running after 5 minutes is hung: nextest ends it and names it,
-# instead of the run waiting for the CI job's own limit.
+# A test still running after 10 minutes is hung: nextest ends it and names it,
+# instead of the run waiting for the CI job's own limit. The limit sits above
+# `HANG_GUARD` (coven_foundation::clock) by at least a period, so a test's own
+# "hung at <step>" report prints first; a test in clock_tests.rs fails if the
+# two drift. Honest tests reach about 260s under CI load, so the guard cannot
+# come down to fit under a shorter limit.
 [profile.default]
-slow-timeout = { period = "60s", terminate-after = 5 }
+slow-timeout = { period = "60s", terminate-after = 10 }
