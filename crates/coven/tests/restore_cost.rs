@@ -26,17 +26,18 @@
 //! per byte, on the plain schema.
 #![cfg(feature = "test-utils")]
 
+#[path = "support/grace_clock.rs"]
+mod grace_clock;
+use grace_clock::GraceClock;
+
 use coven::{
     Clock, Coven, CovenBuilder, CovenHandle, CovenResult, CovenWrite, FileColumn, FileId,
     FileSource, MemoryStorage, Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance,
     RetryOutcome, RowIdentity, SecretText, Storage, SyncedTable,
 };
 use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 const RELEASES: usize = 3_000;
@@ -123,33 +124,6 @@ END;"
     };
 }
 
-/// The fixture's wall clock moves with real time and can jump ahead, so
-/// snapshots age past retention's grace; elapsed time is real, so coven's
-/// timing lines report real durations.
-struct BenchClock {
-    origin: Instant,
-    ahead: AtomicU64,
-}
-
-impl Clock for BenchClock {
-    fn now(&self) -> SystemTime {
-        UNIX_EPOCH
-            + Duration::from_secs(1_000_000 + self.ahead.load(Ordering::SeqCst))
-            + self.origin.elapsed()
-    }
-    fn elapsed(&self) -> Duration {
-        self.origin.elapsed()
-    }
-    fn sleep_until(
-        &self,
-        _at: std::time::SystemTime,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), coven::WallTimerError>> + Send>,
-    > {
-        Box::pin(std::future::ready(Err(coven::WallTimerError::NoTimer)))
-    }
-}
-
 /// A builder for a device of `library`.
 fn configured(builder: CovenBuilder, library: Library) -> CovenBuilder {
     let tables = ["releases", "tracks", "files"]
@@ -180,7 +154,7 @@ fn configured(builder: CovenBuilder, library: Library) -> CovenBuilder {
 
 /// One sync pass that starts after this call: the retry's answer comes from
 /// the pass that took the request, not one already running.
-async fn pass(handle: &CovenHandle, clock: &BenchClock) {
+async fn pass(handle: &CovenHandle, clock: &GraceClock) {
     let after = clock.now();
     match handle.retry_now().await.unwrap().await {
         RetryOutcome::Synced { finished_at } => assert!(finished_at >= after),
@@ -191,7 +165,7 @@ async fn pass(handle: &CovenHandle, clock: &BenchClock) {
 /// Write `releases` releases, ten a write, with a sync pass after each. A
 /// stored library stages each file's bytes in the write that adds its row,
 /// and waits for every upload before it returns.
-async fn import(handle: &CovenHandle, clock: &BenchClock, library: Library, releases: usize) {
+async fn import(handle: &CovenHandle, clock: &GraceClock, library: Library, releases: usize) {
     for write in 0..releases / RELEASES_PER_WRITE {
         let rows = write * RELEASES_PER_WRITE..(write + 1) * RELEASES_PER_WRITE;
         match library {
@@ -301,7 +275,7 @@ async fn uploaded(handle: &CovenHandle) {
     while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
 }
 
-async fn edit(handle: &CovenHandle, clock: &BenchClock) {
+async fn edit(handle: &CovenHandle, clock: &GraceClock) {
     for edit in 0..EDITS {
         handle
             .write(move |sql| {
@@ -317,14 +291,10 @@ async fn edit(handle: &CovenHandle, clock: &BenchClock) {
     }
 }
 
-fn bench_clock() -> Arc<BenchClock> {
-    Arc::new(BenchClock { origin: Instant::now(), ahead: AtomicU64::new(0) })
-}
-
 /// Ana's new store on `storage`, syncing.
 async fn create(
     storage: &Arc<MemoryStorage>,
-    clock: &Arc<BenchClock>,
+    clock: &Arc<GraceClock>,
     root: &std::path::Path,
     library: Library,
 ) -> CovenHandle {
@@ -352,7 +322,7 @@ async fn create(
 /// restore took.
 async fn restore(
     storage: &Arc<MemoryStorage>,
-    clock: &Arc<BenchClock>,
+    clock: &Arc<GraceClock>,
     root: &std::path::Path,
     library: Library,
     code: &str,
@@ -375,7 +345,7 @@ async fn restore(
 }
 
 async fn restore_cost(library: Library, floor: bool) {
-    let clock = bench_clock();
+    let clock = GraceClock::new();
     let storage = Arc::new(MemoryStorage::builder().clock(clock.clone()).build().unwrap());
     let owner_root = tempfile::tempdir().unwrap();
     let handle = create(&storage, &clock, owner_root.path(), library).await;
@@ -383,7 +353,7 @@ async fn restore_cost(library: Library, floor: bool) {
     import(&handle, &clock, library, RELEASES).await;
     if floor {
         // Past retention's week of grace, the next pass writes the floor.
-        clock.ahead.fetch_add(8 * 24 * 60 * 60, Ordering::SeqCst);
+        clock.pass_grace();
         pass(&handle, &clock).await;
         pass(&handle, &clock).await;
     }
@@ -460,7 +430,7 @@ async fn newest_snapshot_bytes(storage: &MemoryStorage, store: coven::StoreId) -
 /// grace, snapshots every slot and writes the floor naming it, and a second
 /// new device restores from that snapshot and the few slots after it.
 async fn snapshot_and_replay_cost(releases: usize) {
-    let clock = bench_clock();
+    let clock = GraceClock::new();
     let memory = || Arc::new(MemoryStorage::builder().clock(clock.clone()).build().unwrap());
 
     // The fixed work of a restore: an empty store's.
@@ -490,7 +460,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     assert_eq!(track_count(&replayed).await, (releases * TRACKS_PER_RELEASE) as i64);
 
     replayed.start_sync().await.unwrap();
-    clock.ahead.fetch_add(8 * 24 * 60 * 60, Ordering::SeqCst);
+    clock.pass_grace();
     pass(&replayed, &clock).await;
     pass(&replayed, &clock).await;
     let code = replayed.restore_code_for_transfer().await.unwrap();

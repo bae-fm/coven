@@ -3,8 +3,9 @@
 //!
 //! `a_snapshot_holds_a_rows_current_value_and_no_edit_every_device_wrote_past`
 //! runs with every test run and bounds a snapshot's size by the row's
-//! current value and a fixed overhead, with no term per edit, for a lone
-//! device and for one whose second device writes past each batch of edits.
+//! current value and a fixed overhead, with no term per edit or per
+//! snapshot announced, for a lone device and for one whose second device
+//! writes past each batch of edits.
 //! The measurements run explicitly:
 //!
 //!   scripts/cargo.sh test -p coven --all-features --test snapshot_size -- \
@@ -25,7 +26,11 @@ use coven::{
     SecretText, Storage, SyncedTable,
 };
 use coven_format::snapshot::section;
+use grace_clock::GraceClock;
 use std::sync::Arc;
+
+#[path = "support/grace_clock.rs"]
+mod grace_clock;
 
 const REPLACED: usize = 1 << 20;
 const WINNING: usize = 4 << 20;
@@ -54,8 +59,15 @@ async fn pass(handle: &CovenHandle) {
 /// A new store of one synced table, `notes(id, body)`, set up on `storage`
 /// and syncing.
 async fn notes_store(storage: &Arc<MemoryStorage>, root: &std::path::Path) -> CovenHandle {
-    let handle = Coven::in_memory(root.into())
-        .builder()
+    notes_store_builder(Coven::in_memory(root.into()).builder(), storage).await
+}
+
+/// The notes store set up on `storage` from `builder`, syncing.
+async fn notes_store_builder(
+    builder: coven::CovenBuilder,
+    storage: &Arc<MemoryStorage>,
+) -> CovenHandle {
+    let handle = builder
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::addition(
             1,
@@ -206,18 +218,17 @@ struct Case {
 const LISTED: usize = 5;
 
 /// What a snapshot of the notes store holds besides its rows' current
-/// values and its snapshot announcements: the rows' identities and
-/// generations, the synced column, each row's creation, the records and
-/// entries of the writes still current and of each device's last write, the
-/// original admin and key-copy slots, and the last claims. Nothing in it
-/// grows with the number of edits. Measured at about 1.5 KB alone, and
-/// 2.3 KB with a second device, whose addition, row and writes the snapshot
-/// holds too.
+/// values: the rows' identities and generations, the synced column, each
+/// row's creation, the records and entries of the writes still current and
+/// of each device's last write, the original admin and key-copy slots, the
+/// announcements its writer still keeps, and the last claims. Nothing in it
+/// grows with the number of edits or of snapshots announced.
 const OVERHEAD: u64 = 4096;
 
 /// The notes store restored on a second device of the same member, syncing.
 async fn second_device(
     storage: &Arc<MemoryStorage>,
+    clock: &Arc<GraceClock>,
     handle: &CovenHandle,
     root: &std::path::Path,
 ) -> CovenHandle {
@@ -226,6 +237,7 @@ async fn second_device(
     let restored = coven::restore_from_code(
         Coven::in_memory(root.into())
             .builder()
+            .clock(clock.clone())
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
             .migrations(vec![Migration::addition(
                 1,
@@ -271,25 +283,39 @@ async fn write_past(phone: &CovenHandle, written: usize) {
 /// second device, that device lands a write after each batch of edits. A
 /// snapshot that kept a fixed record per edit would grow by about 200 bytes
 /// an edit, which `OVERHEAD` leaves no room for at a hundred edits.
+///
+/// The passes announce snapshots as they go, and a week of grace passes
+/// after each batch, so the floor's `first` moves on: a snapshot holds the
+/// announcements no rule reads only until its writer forgets them (§16.8).
+/// One that kept every announcement would grow by about 265 bytes a
+/// snapshot, past `OVERHEAD` by a hundred edits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_holds_a_rows_current_value_and_no_edit_every_device_wrote_past() {
     let mut cases = Vec::new();
     for size in [1 << 10, 256 << 10] {
-        for edits in [1, 10, 100] {
+        for edits in [1, 10, 100, 200] {
             cases.push(Case { size, edits, delete: false });
         }
     }
+    // A thousand edits of 256 KiB take most of a minute; the small value
+    // shows the same flat size.
+    cases.push(Case { size: 1 << 10, edits: 1000, delete: false });
     cases.push(Case { size: 256 << 10, edits: 10, delete: true });
     for case in cases {
         for second in [false, true] {
-            let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+            let clock = GraceClock::new();
+            let storage = Arc::new(MemoryStorage::builder().clock(clock.clone()).build().unwrap());
             let root = tempfile::tempdir().unwrap();
             let phone_root = tempfile::tempdir().unwrap();
-            let handle = notes_store(&storage, root.path()).await;
+            let handle = notes_store_builder(
+                Coven::in_memory(root.path().into()).builder().clock(clock.clone()),
+                &storage,
+            )
+            .await;
             write(&handle, "INSERT INTO notes VALUES('note', ?1)", case.size, b'a').await;
             pass(&handle).await;
             let phone = match second {
-                true => Some(second_device(&storage, &handle, phone_root.path()).await),
+                true => Some(second_device(&storage, &clock, &handle, phone_root.path()).await),
                 false => None,
             };
             let mut written = 0;
@@ -305,6 +331,7 @@ async fn a_snapshot_holds_a_rows_current_value_and_no_edit_every_device_wrote_pa
                 if let Some(phone) = &phone {
                     write_past(phone, written).await;
                 }
+                clock.pass_grace();
             }
             if case.delete {
                 handle
@@ -321,22 +348,20 @@ async fn a_snapshot_holds_a_rows_current_value_and_no_edit_every_device_wrote_pa
             }
             pass(&handle).await;
             pass(&handle).await;
-            // Each snapshot the passes took adds its announcement slot, which
-            // retention deletes in time (§16.6): they follow the passes this
-            // test makes, not the edits.
             let sections = handle.test_snapshot_section_bytes().await.unwrap();
-            let total: u64 = sections.iter().sum::<u64>() - sections[section::ANNOUNCEMENT];
+            let total: u64 = sections.iter().sum();
             handle.close().await.unwrap();
             if let Some(phone) = phone {
                 phone.close().await.unwrap();
             }
             let current = if case.delete { 0 } else { case.size as u64 };
             eprintln!(
-                "{:>7} {:>4} {:>5} {second:>5}: {:>7} beyond the value",
+                "{:>7} {:>4} {:>5} {second:>5}: {:>7} beyond the value, {:>6} of announcements",
                 case.size,
                 case.edits,
                 case.delete,
-                total.saturating_sub(current)
+                total.saturating_sub(current),
+                sections[section::ANNOUNCEMENT]
             );
             let bound = current + OVERHEAD;
             assert!(
