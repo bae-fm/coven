@@ -1,5 +1,6 @@
 //! Joining with an invite: the fixed request, provider access and the wait for
-//! approval, before the shared new-device loading (§13.2).
+//! approval, which ends once the join finds its admission and publishes the
+//! store, which loads after (§13.2).
 
 use super::*;
 use coven_crypto::ConfirmationNumber;
@@ -89,23 +90,34 @@ impl Joining {
         Ok(sync.leave_join(&self.invitation).await?)
     }
 
-    /// Accept provider access, send the request once, and wait for its outcome.
-    /// Returns false when the request was declined or expired.
-    /// The connection refreshes its sign-in on rejection however long the
-    /// wait lasts (§20.2).
-    pub(super) async fn admit(
+    /// Accept provider access, recording first that it accepts. Returns
+    /// false when the invite has ended before the request was sent: it takes
+    /// no first request (§13.2).
+    pub(super) async fn accept(
         &mut self,
         sync: &SequenceSync,
-        database: &Database,
         status: &impl Fn(BootstrapStatus),
     ) -> Result<bool, BootstrapError> {
-        // An invite that has ended takes no first request (§13.2).
         if !self.identity.attempted() && !sync.join_open(&self.identity) {
             return Ok(false);
         }
         status(BootstrapStatus::Connecting);
         self.identity.record_acceptance()?;
         sync.accept_join(&self.invitation).await?;
+        Ok(true)
+    }
+
+    /// Send the request once, once the share is accepted, and wait for its
+    /// outcome. Returns true once the join finds its admission, its copies'
+    /// keys in the sync's custody, and false when the request was declined
+    /// or expired. The connection refreshes its sign-in on rejection however
+    /// long the wait lasts (§20.2).
+    pub(super) async fn admit(
+        &mut self,
+        sync: &SequenceSync,
+        database: &Database,
+        status: &impl Fn(BootstrapStatus),
+    ) -> Result<bool, BootstrapError> {
         let sent_before = self.identity.attempted() && !self.identity.opened();
         if !self.identity.attempted() {
             self.identity.record_attempt()?;
@@ -169,46 +181,6 @@ impl Joining {
             }
         }
     }
-}
-
-/// End a join whose call failed once the facts end it: the history its
-/// installation applied stops its device for good, the device or its member
-/// removed or the member's keys replaced (§13.2, §14.1). Only the admission
-/// that admits a join registers its device, so a stop is always past it;
-/// before it, nothing ends the join, since the admission may still land.
-/// Then the join records that it ends and deletes what it kept, the kept
-/// sign-in before the code, then the installation (§13.4), and the call
-/// returns the stop. Any other failure leaves it listed for the next call.
-pub(super) async fn ended(
-    builder: &CovenBuilder,
-    pending: &BootstrapStore,
-    entries: &StoreKeychain,
-    request: &BootstrapRequest,
-    error: BootstrapError,
-) -> Result<Option<CovenHandle>, BootstrapError> {
-    if !matches!(
-        error,
-        BootstrapError::Sync(SyncError::Removed | SyncError::MemberKeysReplaced { .. })
-    ) {
-        return Err(error);
-    }
-    match stopped(builder, pending.directory()).await {
-        Ok(true) => match record_ending(request, pending) {
-            Ok(()) => remove_unfinished(entries, pending, Err(error)),
-            Err(recording) => combine(Err(error), Err(recording)),
-        },
-        Ok(false) => Err(error),
-        Err(read) => combine(Err(error), Err(read)),
-    }
-}
-
-/// Whether the history the installation in `directory` applied stops its
-/// device for good. Read from the installation's own database, with nothing
-/// of it running.
-async fn stopped(builder: &CovenBuilder, directory: StoreDir) -> Result<bool, BootstrapError> {
-    let database = open_installation(builder.database(directory)?, &|_| ()).await?;
-    let stop = database.device_stop().await.map_err(CovenError::from).map_err(Into::into);
-    combine(stop.map(|stop| stop.is_some()), close_database(&database).await)
 }
 
 /// What a waiting join shows: the unmet conditions its last check found, or

@@ -5158,7 +5158,8 @@ pub enum StorageSetupError {
     OAuth(OAuthError),
     /// Keeping credentials or keys failed.
     SecureStorage(KeyError),
-    /// This device or its member was removed from the store (§14.1).
+    /// This device or its member was removed from the store, or a joined
+    /// store's admission was refused (§13.2, §14.1).
     Removed,
     /// This member's account holds the store, and setup signed in with
     /// another account. Their access stays on the account that holds it:
@@ -5221,7 +5222,8 @@ pub enum StoreKeyUnlockError {
     Crypto(CryptoError),
     /// Unlocking or keeping keys in custody failed.
     SecureStorage(KeyError),
-    /// This device or its member was removed from the store (§14.1).
+    /// This device or its member was removed from the store, or a joined
+    /// store's admission was refused (§13.2, §14.1).
     Removed,
     /// The store needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
@@ -5259,6 +5261,11 @@ pub enum SyncError {
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§14.1).
     Removed,
+    /// A joined store read to the end of the sequence with its pair bound
+    /// nowhere in its history: the admission that published it was refused,
+    /// and its device never became a member. Syncing stops for good (§13.2,
+    /// §14.1).
+    NotAdmitted,
     /// A replacement of this member's S3 key by another key is still under
     /// way: its id isn't recorded yet, or custody doesn't connect with it
     /// yet (§14.3). Retrying with that key finishes it.
@@ -5507,6 +5514,8 @@ pub enum PendingReason {
     Cleanup { operation: Box<PendingReason>, cleanup: Box<PendingReason> },
     Paused,
     Removed,
+    /// The admission that published this joined store was refused (§13.2).
+    NotAdmitted,
     /// Sending needs this stable member's current credentials (§14.1).
     MemberKeysReplaced { member: MemberId },
 }
@@ -5749,6 +5758,8 @@ pub enum SyncFailure {
     UpdateRequired(RequiredUpdate),
     /// This device or its member has been removed.
     Removed,
+    /// The admission that published this joined store was refused (§13.2).
+    NotAdmitted,
     /// Another copy uses this device's id; this copy sends nothing more (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
     /// The provider refused or failed a request.
@@ -5814,7 +5825,8 @@ pub enum SyncState {
     ClockWrong(SyncCause),
     /// A newer app or coven is needed.
     UpdateNeeded(SyncCause),
-    /// This device or its member was removed.
+    /// This device or its member was removed, or a joined store's admission
+    /// was refused (`NotAdmitted`, §13.2).
     Removed(SyncCause),
     /// Another copy uses this device's id, or its member keys were replaced.
     NeedsReset(SyncCause),
@@ -5897,6 +5909,7 @@ pub enum LastPass {
 pub enum StatusFailure {
     UpdateRequired(RequiredUpdate),
     Removed,
+    NotAdmitted,
     DeviceIdInUse(DeviceIdEvidence),
     Storage(StorageFailure),
     Operation(PendingRecord),
@@ -6179,6 +6192,9 @@ pub enum UndoCause {
 pub enum DeviceStop {
     /// The device, or its member, was removed.
     Removed,
+    /// The admission that published this joined store was refused: its
+    /// device never became a member (§13.2).
+    NotAdmitted,
     /// A reset registered another installation in this device's place.
     Replaced,
     /// History shows another copy of this installation using its device id.
@@ -7461,10 +7477,10 @@ pub enum ProviderSignOut {
   each as `decode_code_info` reads its code, and `resume_join` continues one
   with neither the code nor a new sign-in. Once the request may have been
   sent, a join can't be cancelled; it ends only by approval, decline or expiry.
-  Past its admission, a removal of its member or device, or a replacement of
-  its member's keys, ends it once loading applies that slot: it deletes the
-  kept sign-in, the code and the installation, in that order, and the call
-  returns the stop (§13.2).
+  Once it finds its admission, the join publishes the store, deletes its code
+  and no longer lists; the store then loads as any store does, and stops as
+  any store does: removed, its member's keys replaced, or `NotAdmitted` when
+  the history it loads refused the admission (§13.2).
   Before then a cancel unmounts the Dropbox folder the join may have mounted,
   then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
 - A join sends no first request once the invite's `expires_at` has passed by
@@ -7539,13 +7555,16 @@ pub enum ProviderSignOut {
     with each of loading's steps as a `Progress<LoadStep>` (E1,
     [§13.4](coven.md#134-edge-cases-installing-on-the-device)). A check's
     scan for a join's copies is part of its wait and reports no `Loading`.
-    A join loads in the approval check in which its keys first open in that
-    call, which is the check that finds its admission: the slot carrying its
-    copies. A phase never comes back: once a join's keys open, it reports no
+    A join's keys first open in the approval check that finds its
+    admission: the slot carrying its copies. That check reports its scan as
+    `Loading`; the join then publishes the store, reporting `Committing`,
+    and reports the store's loading as `Loading`, from streaming on. A phase
+    never comes back: once a join's keys open, it reports no
     `WaitingForApproval` or `Pending` again, in that call or any call that
     resumes it. It records the
-    opened keys with its saved request before it reports `Loading`. A join
-    resumed part way through loading reports the slots it has left. An app
+    opened keys with its saved request before it reports `Loading`. A store
+    whose first load stopped part way loads the rest in its passes, which
+    report no steps. An app
     that redraws more slowly sees the newest report, as `CovenBuilder::open`'s
     caller does.
   - An unfinished store is created at its permanent path with a durable
@@ -7726,8 +7745,9 @@ pub enum BootstrapError {
     Sync(SyncError),
     /// Cleanup failed too; neither failure is hidden.
     Cleanup { operation: Box<BootstrapError>, cleanup: Box<BootstrapError> },
-    /// Publication took effect, but durability or cleanup failed. The handle
-    /// retains the loaded store and its session-only keys.
+    /// Publication took effect, but durability or cleanup failed, or a
+    /// joined store's first load failed (§13.2). The handle retains the
+    /// published store and its session-only keys.
     Published { handle: CovenHandle, source: Box<BootstrapError> },
     /// The saved restore codes' keychain work did not run: its runtime is
     /// shutting down (E15).
@@ -8007,8 +8027,10 @@ pub enum BootstrapStatus {
     },
     /// Loading the store from storage, with loading's steps (§13.4). A
     /// waiting join's scan for its keys is part of its wait; the check in
-    /// which its keys open, in its admission, reports that scan, then loads.
-    /// A restore's registering follows the last.
+    /// which its keys open, in its admission, reports that scan. The join
+    /// then publishes the store, reporting `Committing`, and reports the
+    /// published store's loading from streaming on. A restore's registering
+    /// follows the last.
     Loading(Progress<LoadStep>),
     /// Registering this device once the store is loaded: a restore's check of
     /// the access it reaches storage with, the registration, whose claim first
@@ -8017,7 +8039,8 @@ pub enum BootstrapStatus {
     /// A join never reports it: its approval registered its device.
     Registering,
     /// Keeping the member's keys and the device's credentials in custody and
-    /// publishing the store, the last work before the handle opens. A
+    /// publishing the store, the last work before the handle opens; for a
+    /// join, the work between finding its admission and loading. A
     /// replacement's swap and reopening, reported as `Opening`, come first;
     /// `restore_device` also removes the installation it replaced, on the
     /// blocking pool, with no count.
@@ -8251,12 +8274,19 @@ pub async fn restore_from_saved_code(
 /// code before sending the join request. CloudKit acceptance uses coven-storage's
 /// native adapter. If access is removed while joining, the provider's
 /// permission failure reaches the app and an admin can invite again. Keys and
-/// credentials are committed only after bootstrap succeeds, except a Dropbox
-/// or OneDrive sign-in, kept on the device beside the code until the join ends.
+/// credentials are committed only once the join finds its admission, except a
+/// Dropbox or OneDrive sign-in, kept on the device beside the code until the
+/// join ends.
 ///
 /// On the new person's device: makes their member keys, keeps the code in
 /// this device's keychain, writes a join request to storage, and waits for
-/// approval, then loads the store. Returns `None` when the request is declined
+/// approval. Once it finds its admission, it commits the store's custody and
+/// publishes the store, which no longer lists as a join, then loads it,
+/// reporting `Loading`, and returns the open store. A failure while the
+/// published store loads, its storage access lost among them, returns
+/// `BootstrapError::Published` with the open handle: the store stays
+/// published, its sync retries the load, and the app removes it as any store
+/// (§13.2). Returns `None` when the request is declined
 /// or the invite expires, including when it expired before the request was
 /// sent, which then isn't. Dropping the call keeps the unfinished join for
 /// `resume_join`. Cancelling through `control` before the request may have
@@ -8265,7 +8295,8 @@ pub async fn restore_from_saved_code(
 /// with `BootstrapError::Cleanup`, `Cancelled` with the unmount's failure as
 /// its `cleanup`, and keeps the join listed for another cancel. Cancelling once the request may have
 /// been sent ends the call with `BootstrapError::JoinRequestSent`, keeping the
-/// unfinished join, as dropping does. A store whose unfinished installation
+/// unfinished join, as dropping does; once the join has found its admission,
+/// a cancel changes nothing, and the call publishes and loads the store. A store whose unfinished installation
 /// holds a restore's record is refused with `StoreLockError::BootstrapPending`
 /// before anything changes (§13.4).
 pub async fn join_with_invite(
@@ -8559,10 +8590,14 @@ match join_with_invite(
     |step| show_step(step),
     &control,
 )
-.await?
+.await
 {
-    Some(handle) => show_store(handle),
-    None => show_declined(),
+    Ok(Some(handle)) => show_store(handle),
+    Ok(None) => show_declined(),
+    // Admitted and published: the store shows why it hasn't loaded yet, its
+    // sync retries, and Carol can remove it like any store.
+    Err(BootstrapError::Published { handle, .. }) => show_store(handle),
+    Err(error) => return Err(error.into()),
 }
 ```
 

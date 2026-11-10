@@ -87,6 +87,9 @@ pub enum UndoCause {
 pub enum DeviceStop {
     /// The device, or its member, was removed.
     Removed,
+    /// The admission that published this joined store was refused: its
+    /// device never became a member (§13.2).
+    NotAdmitted,
     /// A reset registered another installation in this device's place.
     Replaced,
     /// History shows another copy of this installation using its device id.

@@ -154,12 +154,37 @@ impl SequenceSync {
     /// steps go to `subscribe_progress` as they run (§13.4).
     pub async fn unlock(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
+        self.unlock_reporting(&mut session, ProgressReport::of(&self.progress, self.clock.clone()))
+            .await
+    }
+
+    async fn unlock_reporting(
+        &self,
+        session: &mut Session,
+        mut progress: ProgressReport<LoadStep>,
+    ) -> Result<(), SyncError> {
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut progress = ProgressReport::of(&self.progress, self.clock.clone());
-        let mut ring = self.ring_reporting(&mut session, &member, Some(&mut progress)).await?;
-        self.read_forward_reporting(&mut session, &mut ring, &member, Some(&mut progress)).await?;
+        let mut ring = self.ring_reporting(session, &member, Some(&mut progress)).await?;
+        self.read_forward_reporting(session, &mut ring, &member, Some(&mut progress)).await?;
         self.keys.persist(&ring)?;
         Ok(())
+    }
+
+    /// The first load of a store a join published once it found its
+    /// admission: read forward from nothing with the keys its copies opened,
+    /// reporting loading's steps into `progress`, then stop for good if the
+    /// history refused that admission (§13.2).
+    pub async fn load_joined(
+        &self,
+        progress: tokio::sync::watch::Sender<
+            Option<coven_foundation::progress::Progress<LoadStep>>,
+        >,
+    ) -> Result<(), SyncError> {
+        let mut session = self.session.lock().await;
+        self.unlock_reporting(&mut session, ProgressReport::new(progress, self.clock.clone()))
+            .await?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        self.check_admitted(&session, &member).await
     }
 
     /// Start the key scan after `slot`: a joiner's copies follow its invite.
@@ -464,14 +489,10 @@ impl SequenceSync {
         session: &Session,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        let keys = member.keys().public_keys();
-        let bound = session
-            .history
-            .bindings
-            .iter()
-            .any(|binding| binding.member == member.member() && binding.keys == keys);
         match self.admission(session, member) {
-            admission @ (MemberBinding::Replaced | MemberBinding::Removed) if bound => {
+            admission @ (MemberBinding::Replaced | MemberBinding::Removed)
+                if self.pair_bound(session, member) =>
+            {
                 restorable(admission, member)
             }
             _ => Ok(()),

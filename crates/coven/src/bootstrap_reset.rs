@@ -156,7 +156,10 @@ async fn reset_unconnected(
                 super::open_installation(builder.database(replacement.directory())?, status)
                     .await?;
             let recorded = async {
-                database.initialize_store_name(name.clone()).await.map_err(CovenError::from)?;
+                database
+                    .initialize_store_name(name.clone(), coven_merge::Slot::FIRST)
+                    .await
+                    .map_err(CovenError::from)?;
                 #[cfg(test)]
                 if builder.fail_device_reset_notice {
                     database.test_fail_device_reset().await.map_err(CovenError::from)?;

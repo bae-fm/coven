@@ -4576,8 +4576,9 @@ Ana adds Dan to Household on Dropbox, with Dan beside her:
    registering his phone, whose clear prefix carries copies of every store
    key, sealed to Dan's new sealing key. Every key, not just the newest, so
    Dan can read a late write made under an older one.
-5. Dan's phone finds the admission, opens its keys and loads the store, and
-   Dan writes down his own restore code.
+5. Dan's phone finds the admission and opens its keys. From then on
+   Household is a store on his phone like any other, which loads, and Dan
+   writes down his own restore code.
 
 The invite only lets Dan ask; Ana's phone lets him in. It carries the current
 store name when Ana makes it. If Household is renamed before Dan joins, the
@@ -4831,18 +4832,50 @@ he must apply (§6.1). A restoring device scans for its member's copies the
 same way (§13.1, §13.4).
 
 Once his copies arrive, in the admission or in the floor, Dan's phone opens
-them, loads the floor's snapshot and applies the slots after it in order,
-through the admission. If history he had scanned has since been deleted, the
-copies the floor carries supply his keys (§16.4). He is admitted only by an
+them, and the join is done. If history he had scanned has since been
+deleted, the copies the floor carries supply his keys (§16.4). The admission
+registered his phone, so nothing is left for the phone to claim. His phone
+records in its saved request (below) that it found its admission, then
+commits the store's custody, the keys his copies opened among them, and
+publishes Household as a store (§13.4). No storage request comes between
+finding the admission and publishing. Then Household loads as a store that
+has never loaded: the floor's snapshots and the slots after them, through
+the admission and on to the end of the sequence, as a device back from a
+long absence does (§16.5). The join call goes on loading, reports it, and
+returns the open store once it has loaded. A cancel that comes once the join
+has found its admission changes nothing: nothing is left for it to take
+back. Until the store has loaded its history, the app lists it by the name
+the invite carried, and Dan's saved restore code keeps that name with the
+slot the invite names, the latest Ana's phone had applied, at which the name
+was current (§13.1): a rename after it is newer, and one before it older.
+
+From the admission on, Household is a store on Dan's phone like any other.
+Say Dan's Dropbox session is revoked before his phone has downloaded
+anything. That is the ordinary lost access of any store that can't reach its
+storage: its sync state says so (§19.1), it retries on the shared schedule
+(§6.7), and the app removes it as it removes any store, with
+`discard_store` (api.md E1). The join call returns the open store with the
+error (`BootstrapError::Published`). Left listed as a join instead, it would
+be a join with nothing left to do, failing every call while Dan's access is
+gone, and nothing but a working connection would end it
+([`loaded_first_lists_admitted`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+Whatever Dan's phone did with Household after its admission, nothing lists
+it as a join.
+
+Copies alone don't admit Dan. His phone opens them before any history it
+applied could check the admission that carries them: the code names Ana's
+device, but no key to check her slots with. He is admitted only by an
 applied admission from Ana's approving device that binds his exact pair and
-registers his own device id; copies alone aren't enough. Applied, it has
-registered his phone: nothing is left for the phone to claim, and the rest is
-loading. His phone records in its saved request (below) that it found its
-admission before it reports loading. Dan closes the app while it loads; the
-resumed join reports no wait, even before its first check opens his keys
-again. Without the record, it would show the wait again until that check.
-An admission that its applied history refuses, which only a faulty or
-hostile writer can land, ends the join as declined.
+registers his own device id, and the store's first load applies it. An
+admission that its applied history refuses, which only a faulty or hostile
+writer can land, stops the store for good. On S3 the invite carries a
+storage key, so whoever saw the code can write such a slot. Once the store
+has read to the end of the sequence with Dan's pair bound nowhere in the
+history it applied, his phone was never a member: the store stops with
+`NotAdmitted`, which the app shows as it shows a removal (§14.1, §19.1), and
+the app removes it. Syncing on instead, it would send nothing and show
+nothing wrong, forever
+([`refused_syncs_forever`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
 
 **Checking for approval.** Dan's phone checks for his copies on the same doubling
 waits, kept across restarts. Its status says when the next check is, and shows
@@ -4919,7 +4952,7 @@ sent its request:
   in it, then saves the code, then keeps his sign-in, and only then may send the
   request. A listed join always has the request it resumes from, and a kept
   sign-in always belongs to a listed join.
-- Ending without loading, declined, expired, or cancelled before sending, it
+- Ending without its store, declined, expired, or cancelled before sending, it
   first records in the saved request that it ends, then deletes the store's
   entries on the device, the kept sign-in before the code, then the
   installation; cancelled, it unmounts a Dropbox folder first, while the
@@ -4943,24 +4976,22 @@ sent its request:
 A saved code coven can't read fails the listing: the join it belongs to may have
 sent its request, so leaving it out would hide a join the app has to finish.
 
-Dan's phone may also stop after Ana approves, while it loads. By then Ana's phone
-has deleted the request, and Dan's installation has applied the admission but
-has kept no store key. Resuming, it opens its copies again and rebuilds the
-history it applied from those slots, so it finds the admission and loads.
-Without the rebuilt history, the missing request would read as a decline, and
-the join would throw away the only keys Ana approved.
+Dan's phone may also stop after it found its admission and before it
+published the store: a crash, or a custody write that failed (§13.4). By
+then Ana's phone has deleted the request. The saved request records the
+admission found, so the resumed join reports no wait; its first check finds
+the copies again, as any check does, and publishes. A check that finds its
+copies never reads the request, so its absence can't read as a decline,
+which would throw away the only keys Ana approved.
 
-Past its admission, the facts can still end the join, as they end a restore
-past its registration (§13.1). Ben removes Dan, or his phone, while it
-loads, or replaces Dan's keys: once the phone applies that slot, its device is
-gone for good, and the join deletes every device-only entry of the store, the
-kept sign-in before the code, then the installation (§13.4). The call returns
-the stop. A phone that registered itself after loading, as a restore does,
-would fail that registration on every call once a removal came in between,
-with the request already sent and nothing to end the join
+Past its admission, the facts stop Household as they stop any store (§14.1).
+Ben removes Dan, or his phone, while it loads, or replaces Dan's keys: once
+the store applies that slot, its device is gone for good, and the store stops
+with `Removed` or `MemberKeysReplaced` for the app to remove. A phone that
+registered itself after loading, as a restore does, would fail that
+registration on every call once a removal came in between, with the request
+already sent and nothing to end the join
 ([`removal_strands_admitted_join`](proofs/sequence/CovenSequence/Admission.lean)).
-A phone past its admission that can't reach storage at all fails each call
-with the provider's error and stays listed.
 
 **No cancelling once sent.** Once Dan's phone has sent the request, nothing on
 its side can take it back safely. Ana's phone may already have read it, and her
@@ -5160,21 +5191,22 @@ everything is encrypted.
   restores her phone from a store with no floor: it shows "Finding your keys,
   0 of 166" before anything else. A step with nothing to do reports nothing.
   If the floor moves past what the phone read, loading starts over from the
-  newer floor's snapshots, and its steps begin again. A join loads in the
-  approval check in which its keys first open (§13.2): the slot whose copies
-  open them is its admission. Until then, each
+  newer floor's snapshots, and its steps begin again. A join's keys first
+  open in an approval check (§13.2): the slot whose copies open them is its
+  admission. Until then, each
   check reads, for its copies, the slots after its invite that no earlier
   check in the same call read. That scan is part of the wait: the phone still
   shows that it is checking for approval. A scan that finds no copy reports
   nothing, since reporting it as loading would put the next wait after
   loading. The check whose copies open the keys reports its scan as finding
-  keys, then the rest of loading. Each check reports its own steps, from the
-  first.
-  The keys are kept only once the store has loaded, so a join that stopped
-  part way through loading opens them again in its next call, and that check
-  reports the rest. Carol's phone stopped after applying slot 1; its next
-  call reports reading and applying the slots after it. The work after the
-  last slot applies reports nothing of its own.
+  keys. The join then publishes the store, and the call reports the rest of
+  loading as the published store loads, from streaming on: the opened keys
+  are in its custody, so it scans for nothing. Each check reports its own
+  steps, from the first.
+  Carol's phone stops after applying slot 1 of its first load. Household is
+  a published store by then, and its next pass reads and applies the slots
+  after it, as any store's pass does, reporting no steps. The work after
+  the last slot applies reports nothing of its own.
 - **No sends before loading.** Store creation and joining by invite have their
   own special rules (§10.3, §13.2). Neither lets a device send ordinary writes
   before it has applied the sequence.
@@ -5185,17 +5217,24 @@ everything is encrypted.
   replacement of an installation the device already has is not hidden: its
   store stays listed (§19.3). It stays at its permanent
   path throughout. Only after loading does coven commit the final keys and
-  credentials and make it visible, without closing or moving the database. So the
-  app's first commits are made against the installed membership and rows (§2.1).
+  credentials and make it visible, without closing or moving the database,
+  except a join's, which coven commits and makes visible once the join has
+  found its admission, before it loads (§13.2). So the app's first commits
+  are made against the installed membership and rows (§2.1), except on a
+  joined store before its first load has installed anything. Those commit
+  against what the device holds, which is nothing yet, as writes during a
+  device's reload after a long absence do, and are judged when the load
+  installs (§16.5).
 - **The commit only goes forward.** It writes the device's custody for the
   store one value at a time: the location, the store keys, the member's keys,
   the device id and the credentials, with the person's restore code. Those go
   to the keychain and to files, so they can't be one transaction. The commit
   runs past its call's point of no return (§11.6): the join's admission, which
-  registered its device, applied; the restore's device registered. So a commit that fails, panics or
+  registered its device, found; the restore's device registered. So a commit that fails, panics or
   is cut by a crash keeps what it wrote. The installation stays listed, and the
-  next call loads it again and writes everything again, each value the one the
-  loaded installation fixes, then publishes. A rollback held in memory would
+  next call loads it again, or for a join finds its admission again, and
+  writes everything again, each value the one the installation fixes, then
+  publishes. A rollback held in memory would
   never run after a crash, and a commit run again would take the half-written
   values for the ones to put back.
 - **Ending deletes the installation's custody.** A first installation is the
@@ -5205,8 +5244,7 @@ everything is encrypted.
   person's restore code and S3 key stay, as they do when a store is deleted. Ana's
   laptop crashes part way through its commit, with its device id and keys
   written, and her phone removes the laptop before she resumes. The facts end
-  the restore (§13.1), and nothing of Household is left on the laptop. A join
-  past its admission ends the same way (§13.2). Had
+  the restore (§13.1), and nothing of Household is left on the laptop. Had
   ending deleted only the kept sign-in and the record, the device id and keys
   would have outlived the installation
   ([`cut_commit_orphans_custody`](proofs/sequence/CovenSequence/BootstrapCommit.lean)).
@@ -5282,16 +5320,27 @@ hold reports `MemberKeysReplaced`. Each of these stops is for good, so the
 transaction that applies it also ends every operation the app's writes journaled
 that still runs (§11.4): the removal itself, when this device claimed it, ends
 landed at its slot, even if the claim never settled before the slot arrived,
-and each other ends `Stopped`, naming the stop: `Removed`, `Replaced` or
-`MemberKeysReplaced`. Nothing refused those operations, and another device may
-still make the same change, so reporting a refusal would tell the app
-something false. The same transaction ends
+and each other ends `Stopped`, naming the stop: `Removed`, `Replaced`,
+`MemberKeysReplaced` or `NotAdmitted` (below). Nothing refused those
+operations, and another device may still make the same change, so reporting
+a refusal would tell the app something false. The same transaction ends
 this device's invites: none of them can finish on a stopped device, and an
 approval under way never expires, so it would stay listed forever. Each leaves
 `coven_invites` with its approval's binding and its pending record (§13.2). To
 tell a replacement of its member's keys from its own, a device records each
 pair it holds, and the candidate its own replacement keeps before custody keeps
 it (§12.3).
+
+A joined store whose admission its history refused stops the same way, for
+good, reporting `NotAdmitted` (§13.2): its device was never a member. No slot
+applies that stop. It comes in a pass, or the joined store's first load, that
+has read to the end of the sequence, with at least one slot applied and the
+pair the device holds bound nowhere in its history, and every pass after
+finds it again. Every other store a pass runs on has a history that binds its
+pair before anything else applies: slot 1 binds its creator's (§10.3), a
+restore, a reset and a reconnecting setup load under a pair history bound,
+and a setup whose creation loses slot 1 is undone before any pass runs. Its
+operations and invites end as above, as a stopped copy's do (§19.3).
 
 Every device reads the same entries, so every device can tell which other
 devices have stopped. Ana's laptop registers at slot 30. At slot 48 her phone
@@ -8928,7 +8977,9 @@ The state is one of, in the order an app lists them:
   (`ContainerNotFound`) and **clock wrong** (`ClockSkew`).
 - **Update needed:** a slot, a write or a stored object needs a newer app or
   coven.
-- **Removed:** this device or its member was removed from the store.
+- **Removed:** this device or its member was removed from the store, or the
+  admission of a joined store was refused, so it never became a member
+  (`NotAdmitted`, §13.2).
 - **Device needs reset:** another copy uses this device's id (§19.3), or its
   member keys were replaced elsewhere.
 - **Failed:** any other failure, with no named cause, or a file that can't be
@@ -12577,7 +12628,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Committing the new key to custody before its entry lets a crash strand custody on a key history never records | `custody_first_strands` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied admission still admits a member not subsequently removed, with the device it registered. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
-| A scan with no matching copies reaches the end; an absent request without its approving admission reports declined; a check whose copies open, in the admission's own slot, reports admitted or declined, never a wait | `no_copy_reaches_end`, `real_decline`, `opened_decides` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
+| A scan with no matching copies reaches the end; an absent request without its approving admission reports declined; a check whose copies open, in the admission's own slot, ends the join by publishing the store, never a wait | `no_copy_reaches_end`, `real_decline`, `approved_never_declined`, `opened_never_waits` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | A scan for a member's copies never reads past a damaged slot; recording no block, it reads past the slot once a later floor's `first` passes it, where stopping for good keeps reporting the slot | `damaged_not_passed`, `readOrDamage_undamaged`, `deleted_damage_recovers` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | *Body.* A scan that stops for good at a damaged slot never finds the key a later floor carries | `stop_strands_scan` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied admission; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
@@ -12601,9 +12652,11 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |
 | A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
+| A join publishes the store in the step that finds its admission, and a store whose first load leaves its device never a member stops for good: a join that found its admission is a published store, listed as no join, and every such store whose first load reached the end of the sequence counts its device a member | `found_published`, `refused_stops` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §14.1 |
+| *Body.* Publishing only once the store has loaded, a call that stops while it loads leaves the join listed with nothing left to do; without the stop, a store whose first load applied a refused admission syncs on unregistered with no step left to take | `loaded_first_lists_admitted`, `refused_syncs_forever` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
 | An approval admits its member in one slot: in every history whose admissions were each checked against the slots before them, no copy names someone who isn't a member, every member has a registered device, and a removal after an admission makes the device it registered gone for good | `admission_never_exposes`, `member_has_device`, `removal_stops_admitted_device` | `proofs/sequence/CovenSequence/Admission.lean` | §12.2, §13.2, §14.1 |
 | *Body.* With copies in slots of their own before the entry, a demotion between them leaves a copy naming someone never admitted, in every extension; and a removal between the entry and the phone's own registration leaves the member with no device in every extension, so the join can neither finish nor end on the facts | `split_approval_exposes`, `removal_strands_admitted_join` | `proofs/sequence/CovenSequence/Admission.lean` | §13.2 |
-| A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
+| A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it; done is the store published. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | *Body.* A member's removal is applied only after the person's saved restore code and S3 key are deleted and the keychain refuses to write them again, whatever passes failed before; a pass at the removal's slot that deletes them then applies it | `removal_applies_only_after_deletion`, `removal_applies_after_follow` | `proofs/sequence/CovenSequence/PersonLeaves.lean` | §13.1, §14.1 |
 | *Body.* Applying the removal before deleting leaves the code offered with nothing left to delete it | `apply_first_leaves_code` | `proofs/sequence/CovenSequence/PersonLeaves.lean` | §14.1 |
 | Writes after a removal, a registration of another installation in the device's place, or a key replacement or recovery are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
@@ -12871,6 +12924,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
+| `NotAdmitted` | a joined store read to the end of the sequence with its pair bound nowhere in its history: the admission that published it was refused; the store stops for good | §13.2, §14.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
 | `SyncError::WorkerFailed` | the sync loop, a connection attempt or the upload worker ended on a panic, the sync loop ended on a bug in its own work, or the upload run serving a retry failed on a bug, which the bug sink heard; the retries and calls that waited on that work fail with it | api.md E15 |
 | `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
@@ -12924,7 +12978,7 @@ recorded, comes before them all.
 | ... with a failure that clears by itself (a record) | none |
 | ... with any other `StorageFailure` | failed |
 | the last pass `UpdateRequired`; a record's `UpdateRequired` | update needed |
-| the last pass `Removed`; a record's `Removed` | removed |
+| the last pass `Removed` or `NotAdmitted`; a record's `Removed` or `NotAdmitted` | removed |
 | the last pass `DeviceIdInUse`; a record's `MemberKeysReplaced` | device needs reset |
 | the last pass blocked at a slot whose reason names a state | what the slot's reason names |
 | the last pass failed on coven's own operation | what its record's reason names, else failed |

@@ -844,9 +844,10 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
 }
 
 /// Ana sets up Household with the app that already retitles notes in a
-/// breaking version 2. Ben's phone runs the app before that version: joining
-/// tells him to update, as it would for a store Ana raised to version 2 later,
-/// instead of failing on the snapshot it can't read (§18.3).
+/// breaking version 2. Ben's phone runs the app before that version: the
+/// store his join publishes tells him to update as it loads, as it would for
+/// a store Ana raised to version 2 later, instead of failing on the snapshot
+/// it can't read (§13.2, §18.3).
 #[tokio::test]
 async fn a_store_created_at_a_breaking_version_asks_an_older_app_to_update() {
     let mut network = Network::with_schema(CloudProvider::S3, tables(), retitled()).await;
@@ -856,13 +857,17 @@ async fn a_store_created_at_a_breaking_version_asks_an_older_app_to_update() {
     let joined = network
         .try_join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Ben".into() })
         .await;
+    let Err(BootstrapError::Published { handle, source }) = joined else {
+        panic!("the join publishes the store before it loads: {joined:?}");
+    };
     assert!(
         matches!(
-            &joined,
-            Err(BootstrapError::Sync(SyncError::Pending(record)))
+            &*source,
+            BootstrapError::Sync(SyncError::Pending(record))
                 if record.reason == PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 })
         ),
-        "{joined:?}"
+        "{source:?}"
     );
+    handle.close().await.unwrap();
     network.close().await;
 }

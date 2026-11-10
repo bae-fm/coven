@@ -299,7 +299,6 @@ async fn a_competing_first_setup_reports_that_the_store_exists() {
         matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::StoreExists),
         "{result:?}"
     );
-    ana.sync.pass().await.unwrap();
     assert_eq!(
         ana.sync.database.store_state().await.unwrap().members.keys().copied().collect::<Vec<_>>(),
         [ben.identity.member()]

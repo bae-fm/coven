@@ -149,7 +149,9 @@ fn reason_json(reason: &PendingReason) -> Value {
             json!({"cleanup": [reason_json(operation), reason_json(cleanup)]})
         }
         PendingReason::Paused => json!("paused"),
-        PendingReason::Removed => json!("removed"),
+        // A refused admission names the removed state, as a removal does:
+        // the model's fact is the same (§13.2).
+        PendingReason::Removed | PendingReason::NotAdmitted => json!("removed"),
         PendingReason::MemberKeysReplaced { .. } => json!("memberKeysReplaced"),
     }
 }
@@ -193,6 +195,7 @@ fn reasons() -> Vec<PendingReason> {
         PendingReason::Rejected(OperationRejection::TargetGone(EntryTarget::Member(member()))),
         PendingReason::Paused,
         PendingReason::Removed,
+        PendingReason::NotAdmitted,
         PendingReason::MemberKeysReplaced { member: member() },
     ];
     for answered in [false, true] {
@@ -248,6 +251,7 @@ fn passes() -> Vec<Option<LastPass>> {
         Some(LastPass::Offline { failure: StorageFailure::Network, error: "offline".into() }),
         failed(StatusFailure::UpdateRequired(RequiredUpdate::AppSchema { version: 2 })),
         failed(StatusFailure::Removed),
+        failed(StatusFailure::NotAdmitted),
         failed(StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced)),
         failed(StatusFailure::Other),
     ];
@@ -268,7 +272,7 @@ fn pass_json(last: &Option<LastPass>) -> Value {
         Some(LastPass::Blocked { reason, .. }) => json!({"blocked": reason_json(reason)}),
         Some(LastPass::Failed { failure, .. }) => match failure {
             StatusFailure::UpdateRequired(_) => json!("updateRequired"),
-            StatusFailure::Removed => json!("removed"),
+            StatusFailure::Removed | StatusFailure::NotAdmitted => json!("removed"),
             StatusFailure::DeviceIdInUse(_) => json!("deviceIdInUse"),
             StatusFailure::Storage(failure) => json!({"storage": failure_name(*failure)}),
             StatusFailure::Operation(record) => json!({"operation": reason_json(&record.reason)}),

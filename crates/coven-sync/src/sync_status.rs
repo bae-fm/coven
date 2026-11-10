@@ -67,7 +67,8 @@ pub enum SyncState {
     ClockWrong(SyncCause),
     /// A newer app or coven is needed.
     UpdateNeeded(SyncCause),
-    /// This device or its member was removed.
+    /// This device or its member was removed, or a joined store's admission
+    /// was refused (`NotAdmitted`, §13.2).
     Removed(SyncCause),
     /// Another copy uses this device's id, or its member keys were replaced.
     NeedsReset(SyncCause),
@@ -259,7 +260,7 @@ impl PendingReason {
                     .then_some(Named::Failed)
             }),
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
-            Self::Removed => Some(Named::Removed),
+            Self::Removed | Self::NotAdmitted => Some(Named::Removed),
             Self::MemberKeysReplaced { .. } => Some(Named::NeedsReset),
             Self::Refused(_) | Self::FileUnavailable(_) | Self::Original { .. } => {
                 Some(Named::Failed)
@@ -297,7 +298,7 @@ impl StatusFailure {
     fn names(&self) -> Option<Named> {
         match self {
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
-            Self::Removed => Some(Named::Removed),
+            Self::Removed | Self::NotAdmitted => Some(Named::Removed),
             Self::DeviceIdInUse(_) => Some(Named::NeedsReset),
             Self::Storage(failure) => storage_names(*failure)
                 .or_else(|| (*failure != StorageFailure::RateLimited).then_some(Named::Failed)),

@@ -160,7 +160,8 @@ theorem devices_stay : ∀ (s : State) (slots : List Slot) (p : Nat × Nat),
 
 /-- **Merged, a removal after the admission stops the phone it admitted.**
 The device the admission registered belongs to the removed member, so the
-removal makes it gone for good, and the facts end its join (§13.2, §14.1). -/
+removal makes it gone for good, and the store the joining phone published
+stops as any store does (§13.2, §14.1). -/
 theorem removal_stops_admitted_device (before after : List Slot) (m d : Nat)
     (good : Good start (before ++ [.admit m d] ++ after))
     (removal : ∃ pre post, after = pre ++ [.remove m] ++ post) :

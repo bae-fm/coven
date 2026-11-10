@@ -661,9 +661,10 @@ what make one conditional floor write safe.
 - Before it holds the store key, a joiner reads slots too, scanning for the
   copy its admission carries. [`JoinScan`](sequence/CovenSequence/JoinScan.lean)
   models that scan: `approved_progress` finds a claimed copy while retention
-  deletes the prefix under it, `opened_decides` has a check whose copies open
-  end the join, admitted or declined, since the slot they open from is the
-  admission itself, and
+  deletes the prefix under it, `approved_never_declined` has a check whose
+  copies open end the join by publishing the store, since the slot they open
+  from is the admission itself; the store's first load applies it
+  (`approved_eventually_admitted`), and
   `JoinScanExamples.exponential_probes_miss_approval` and
   `missing_below_existing_is_deleted` show why a missing slot below a kept
   one is read as deleted history, not probed past.
@@ -1248,12 +1249,14 @@ join reports across its checks and across the calls that resume it: a call
 may stop between checks, or in the check whose copies opened its keys, after
 it reported loading. The scan for the copies is part of the wait. The first
 check whose copies open the keys, in its admission, records that with the
-saved request before it reports loading, and that check ends the join.
+saved request before it reports loading, and that check ends the join: it
+publishes the store, which loads on as a store.
 `phases_forward` proves the phases never go back: waiting, then loading, then
 done. Each rule is needed:
 
 - `resumed_waits_again`: with the opened keys kept only in the call, a call
-  that stops while it loads is resumed by a call that reports waiting again.
+  that stops after finding its admission, before it published, is resumed by
+  a call that reports waiting again.
 - `scan_shown_as_loading`: a scan that finds no copy, reported as loading,
   puts the next check's wait after it.
 
@@ -1316,16 +1319,22 @@ before sending, or declined, and a restore cancelled or failed before its
 record, remove the installation and everything kept beside it. A join
 accepts the provider's share before it sends, and a cancel takes back the
 acceptance it records first; a decline's acceptance ends with the invite, and
-an approval's becomes the store's access. Past its admission, which
-registered its device, the facts end a join as a decline does: a later slot
-stops its device for good (`stopped`). The app drops either call at any
+an approval's becomes the store's access. A join finds its admission, which
+registered its device, by the copies it carries; the published store's
+first load applies it, counted or refused. The app drops either call at any
 point. Under `Rules.correct` a restore refuses an installation holding an
-invite code, and a join one holding a restore's record, and a join records
-that it is accepting before it accepts.
+invite code, and a join one holding a restore's record, a join records that
+it is accepting before it accepts, a join publishes the store in the step
+that finds its admission, and a store whose first load leaves its device
+never a member stops for good.
 
 - `never_stranded`: whatever storage may hold of a join's request or a
   restore's registration, and whatever acceptance the joining account
   holds, the call that made it stays listed until it meets its outcome.
+- `found_published`: a join that found its admission is a published store,
+  listed as no join, with no call on it.
+- `refused_stops`: a store a join published whose first load reached the end
+  of the sequence counts its device a member; a refused admission stopped it.
 
 Each rule is needed. Without the first, one call's removal takes the other's
 listing:
@@ -1339,6 +1348,12 @@ listing:
 Without the second, `cancel_strands_acceptance`: a join accepts, the app
 closes, and the resumed join is cancelled; it removes its code and leaves
 the acceptance in the joining account.
+
+Without the third, `loaded_first_lists_admitted`: a join finds its admission
+and the call stops while it loads, its storage access lost; the join stays
+listed with nothing left to do. Without the fourth,
+`refused_syncs_forever`: a store whose first load applied a refused
+admission syncs on unregistered, with no step left to take.
 
 [`DeviceReplacement`](sequence/CovenSequence/DeviceReplacement.lean)
 models `reset_device` and `restore_device` past loading (§19.3, §13.1): the

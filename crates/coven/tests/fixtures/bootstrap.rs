@@ -393,15 +393,26 @@ pub(super) fn before_finishing(reported: &[BootstrapStatus]) -> &[BootstrapStatu
     before
 }
 
-/// What a join that opened its store reported before it finished: the
-/// statuses before `Committing`, which ends it. A join never reports
-/// `Registering`: its approval registered its device (E10).
-pub(super) fn before_committing(reported: &[BootstrapStatus]) -> &[BootstrapStatus] {
-    let [before @ .., BootstrapStatus::Committing] = reported else {
-        panic!("{reported:?} doesn't end committing");
-    };
-    assert!(!before.contains(&BootstrapStatus::Registering), "{reported:?}");
-    before
+/// What a join that published its store reported around `Committing`: the
+/// statuses before it, through the scan that found its admission, and the
+/// loading of the store it published after it, every one `Loading`. A join
+/// never reports `Registering`: its approval registered its device (E10,
+/// §13.2).
+pub(super) fn around_committing(
+    reported: &[BootstrapStatus],
+) -> (&[BootstrapStatus], &[BootstrapStatus]) {
+    let committing = reported
+        .iter()
+        .position(|status| *status == BootstrapStatus::Committing)
+        .unwrap_or_else(|| panic!("{reported:?} doesn't commit"));
+    let (before, after) = (&reported[..committing], &reported[committing + 1..]);
+    assert!(!reported.contains(&BootstrapStatus::Registering), "{reported:?}");
+    assert!(
+        !after.is_empty()
+            && after.iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
+    );
+    (before, after)
 }
 
 pub(super) fn after_opening(reported: &[BootstrapStatus]) -> &[BootstrapStatus] {

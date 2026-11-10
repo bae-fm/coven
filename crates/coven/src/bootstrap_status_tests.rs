@@ -69,11 +69,12 @@ async fn a_restore_reports_loading_from_the_snapshot_to_the_last_slot() {
     owner.close().await;
 }
 
-/// Carol's join stops part way through loading: reading slot 2 fails after
-/// her phone applied slot 1. Her next call opens her keys again, and that
-/// check reports reading and applying the slots left, to the last (E10).
+/// The store Carol's join publishes stops part way through its first load:
+/// reading slot 2 fails after her phone applied slot 1. The call returns the
+/// store with that failure, and the store's next pass loads the rest, as any
+/// store's pass does (§13.2).
 #[tokio::test]
-async fn a_resumed_join_reports_the_rest_of_its_loading() {
+async fn a_joined_store_whose_first_load_stopped_loads_the_rest_in_its_next_pass() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
@@ -94,33 +95,22 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
         &cancel,
         |_| {},
     );
-    let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
-    assert!(matches!(result, Err(BootstrapError::Sync(SyncError::Storage(_)))), "{result:?}");
+    let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    let Err(BootstrapError::Published { handle, source }) = result else {
+        panic!("the join publishes its store before it loads: {result:?}");
+    };
+    assert!(matches!(*source, BootstrapError::Sync(SyncError::Storage(_))), "{source:?}");
     owner.storage.set_faults(Faults::none()).await;
-    let reported = std::sync::Mutex::new(Vec::new());
-    let recorder = loading_recorder(&owner);
-    let handle = install
-        .run_recorded(
-            &owner,
-            Installation::join_request(&invite, &control),
-            owner.recipient(),
-            &cancel,
-            |status| reported.lock().unwrap().push(status),
-            &recorder,
-        )
+    handle.start_sync().await.unwrap();
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+    assert!(handle
+        .members()
         .await
         .unwrap()
-        .expect("the approved join loads");
+        .iter()
+        .any(|found| found.is_self && found.id == member));
     handle.close().await.unwrap();
-    let reported = reported.into_inner().unwrap();
-    assert_honest(&reported);
-    let loading = recorder.seen();
-    assert_load_order(&loading);
-    // Slot 1 was applied before the join stopped; the rest are read.
-    assert!(reported_whole(&loading, LoadStep::Reading), "{loading:?}");
-    let last = loading.last().unwrap();
-    assert_eq!(last.step, LoadStep::Applying, "{loading:?}");
-    assert_eq!(last.done, last.total, "{loading:?}");
     owner.close().await;
 }
 
@@ -145,8 +135,9 @@ async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
 }
 
 /// Carol's phone scans the slots after her invite for her copies in each
-/// check for approval. The check after Ana approves finds them, reports the
-/// scan as loading's first step and then loads the store (E10). Carol's
+/// check for approval. The check after Ana approves finds them and reports
+/// the scan as loading's first step; the join publishes the store and
+/// reports its loading after (E10, §13.2). Carol's
 /// waits end only when the test moves the clock, so no check runs while
 /// Ana's approval is half written; Check now runs the next one.
 #[tokio::test]
@@ -182,7 +173,8 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
     assert_honest(&reported);
-    let after_loading_began: Vec<_> = before_committing(&reported)
+    let after_loading_began: Vec<_> = around_committing(&reported)
+        .0
         .iter()
         .skip_while(|status| !matches!(status, BootstrapStatus::Loading(_)))
         .collect();
@@ -205,7 +197,8 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
 }
 
 /// A join reports opening its new installation, then connecting, then
-/// waiting for approval, then loading (E10). While it waits, its status
+/// waiting for approval, then the scan that found its admission, then
+/// publishing the store and loading it (E10). While it waits, its status
 /// carries the number Ana's phone shows with the request, and when the next
 /// check runs. Carol's waits end only when the test moves the clock, so
 /// Ana approves while the join waits, and Check now runs the next check.
@@ -249,7 +242,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     let (result, request) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
-    let reported = before_committing(after_opening(&reported));
+    let (reported, _) = around_committing(after_opening(&reported));
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
     assert_honest(reported);
     let loading = reported
@@ -275,11 +268,11 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
 }
 
 /// Ana's approval lands Carol's admission. Carol's next check opens her keys
-/// in it and loads the store, and reading the store's first slot fails: the
-/// call ends with that failure, its status at loading from the moment her keys
-/// opened (E10). Nor does the join wait again once her app resumes it while the
-/// slot still can't be read: its keys opened, in its admission, in the call
-/// before, so the resumed call reports no wait even before its first check.
+/// in it, and the join publishes the store, whose loading then fails reading
+/// its first slot: the call returns the store with that failure, its status
+/// at loading from the moment her keys opened but for committing, and never
+/// waiting again. No join is left to resume: the store's passes go on
+/// (E10, §13.2).
 #[tokio::test]
 async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     use coven_storage::test_utils::{Faults, MemoryRequest};
@@ -330,44 +323,36 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         requested(&owner, asked, &MemoryRequest::Read(first.clone(), None)).await;
     };
     let (result, ()) = join_with_response(joining, approve).await;
-    assert!(result.is_err());
+    let Err(BootstrapError::Published { handle, source }) = result else {
+        panic!("the join publishes its store before it loads: {result:?}");
+    };
+    assert!(
+        matches!(&*source, BootstrapError::Sync(SyncError::Storage(error))
+            if error.failure() == StorageFailure::Network),
+        "{source:?}"
+    );
+    handle.close().await.unwrap();
+    owner.storage.set_faults(Faults::none()).await;
     let reported = reported.into_inner().unwrap();
     let loading = reported
         .iter()
         .position(|status| matches!(status, BootstrapStatus::Loading(_)))
         .expect("the join loaded");
     assert!(
-        reported[loading..].iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
-        "{reported:?}"
-    );
-    // The first slot still can't be read when Carol's app resumes the join.
-    let control = JoinControl::new();
-    let reported = std::sync::Mutex::new(Vec::new());
-    let resumed = install.builder(&owner, owner.recipient()).resume_join(
-        owner.directory.id(),
-        |status| {
-            let mut reported = reported.lock().unwrap();
-            if reported.last() != Some(&status) {
-                reported.push(status);
-            }
-        },
-        &control,
-    );
-    let result = tokio::time::timeout(HANG_GUARD, resumed).await.unwrap();
-    assert!(result.is_err());
-    owner.storage.set_faults(Faults::none()).await;
-    let reported = reported.into_inner().unwrap();
-    assert!(
-        reported.iter().any(|status| matches!(status, BootstrapStatus::Loading(_))),
-        "{reported:?}"
-    );
-    assert!(
-        !reported.iter().any(|status| matches!(
+        reported[loading..].iter().all(|status| matches!(
             status,
-            BootstrapStatus::WaitingForApproval { .. } | BootstrapStatus::Pending(_)
+            BootstrapStatus::Loading(_) | BootstrapStatus::Committing
         )),
         "{reported:?}"
     );
+    let control = JoinControl::new();
+    let resumed = install.builder(&owner, owner.recipient()).resume_join(
+        owner.directory.id(),
+        |_| {},
+        &control,
+    );
+    let result = tokio::time::timeout(HANG_GUARD, resumed).await.unwrap();
+    assert!(matches!(result, Err(BootstrapError::NoUnfinishedJoin(_))), "{result:?}");
     owner.close().await;
 }
 

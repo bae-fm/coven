@@ -25,7 +25,8 @@ pub enum BootstrapStatus {
     /// the floor holds none, the floor's snapshots, then the slots after
     /// them, each step with how much of it is done (§13.4). A waiting join's
     /// scan for its keys is part of its wait; the check in which its keys
-    /// open, in its admission, reports that scan, then loads. A restore's
+    /// open, in its admission, reports that scan, and the join reports the
+    /// loading of the store it publishes after `Committing`. A restore's
     /// registering follows the last.
     Loading(Progress<coven_database::LoadStep>),
     /// Registering this device once the store is loaded: a restore's check
@@ -36,7 +37,9 @@ pub enum BootstrapStatus {
     /// it: its approval registered its device (§13.2).
     Registering,
     /// Keeping the member's keys and the device's credentials in custody and
-    /// publishing the store, the last work before the handle opens (§13.1).
+    /// publishing the store, the last work before the handle opens (§13.1);
+    /// for a join, the work between finding its admission and loading the
+    /// store it publishes (§13.2).
     /// A replacement's swap and its reopening, reported as `Opening`, come
     /// before it; `restore_device` also removes the installation it
     /// replaced, a folder of any size, which has no count either.
@@ -63,7 +66,7 @@ pub(super) async fn open_installation(
 
 /// Run `work`, in which `sync` may load the store into the new installation,
 /// reporting loading's steps as `Loading` (E10): a restore's unlock, or the
-/// approval check in which a join's keys first open.
+/// scan of the approval check in which a join's keys first open.
 pub(super) async fn loading<T>(
     sync: &SequenceSync,
     work: impl std::future::Future<Output = T>,

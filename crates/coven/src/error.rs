@@ -480,13 +480,15 @@ enum Stopped {
 
 fn stopped(error: &SyncError) -> Option<Stopped> {
     let reason = match error {
-        SyncError::Removed => return Some(Stopped::Removed),
+        // A joined store whose admission was refused never became a member:
+        // shown as a removal is (§13.2).
+        SyncError::Removed | SyncError::NotAdmitted => return Some(Stopped::Removed),
         SyncError::UpdateRequired(update) => return Some(Stopped::UpdateRequired(*update)),
         SyncError::Pending(record) => &record.reason,
         _ => return None,
     };
     match reason {
-        crate::PendingReason::Removed => Some(Stopped::Removed),
+        crate::PendingReason::Removed | crate::PendingReason::NotAdmitted => Some(Stopped::Removed),
         crate::PendingReason::UpdateRequired(update) => Some(Stopped::UpdateRequired(*update)),
         _ => None,
     }

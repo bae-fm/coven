@@ -225,7 +225,7 @@ type OnRecord<S> = Box<dyn Fn(&Progress<S>) + Send + Sync>;
 #[cfg(feature = "test-utils")]
 pub struct RecordingClock<S> {
     clock: ClockRef,
-    watch: std::sync::OnceLock<watch::Receiver<Option<Progress<S>>>>,
+    watch: std::sync::Mutex<Option<watch::Receiver<Option<Progress<S>>>>>,
     seen: std::sync::Mutex<Vec<Progress<S>>>,
     on_record: std::sync::OnceLock<OnRecord<S>>,
 }
@@ -236,15 +236,20 @@ impl<S: Clone + PartialEq> RecordingClock<S> {
     pub fn new(clock: ClockRef) -> Self {
         Self {
             clock,
-            watch: std::sync::OnceLock::new(),
+            watch: std::sync::Mutex::new(None),
             seen: std::sync::Mutex::new(Vec::new()),
             on_record: std::sync::OnceLock::new(),
         }
     }
 
-    /// Record the values reported into `watch`, from now on.
+    /// Record the values reported into `watch`, from now on, in place of
+    /// the watch an earlier part of the operation reported into, whose
+    /// newest value is recorded first: a join reports the scan that finds
+    /// its keys through its own owner, then the loading of the store it
+    /// publishes through the store's.
     pub fn watch(&self, watch: watch::Receiver<Option<Progress<S>>>) {
-        assert!(self.watch.set(watch).is_ok(), "a recording clock records one watch");
+        self.record();
+        *self.watch.lock().unwrap() = Some(watch);
     }
 
     /// Record the values an owner's operation reports into `progress`,
@@ -267,12 +272,15 @@ impl<S: Clone + PartialEq> RecordingClock<S> {
     }
 
     fn record(&self) {
-        let Some(watch) = self.watch.get() else { return };
         let recorded = {
             // Held while the watch is read, so two readers record in the
             // order the values were sent.
             let mut seen = self.seen.lock().unwrap();
-            let newest = watch.borrow().clone();
+            let Some(newest) =
+                self.watch.lock().unwrap().as_ref().map(|watch| watch.borrow().clone())
+            else {
+                return;
+            };
             match newest.filter(|newest| seen.last() != Some(newest)) {
                 Some(newest) => {
                     seen.push(newest.clone());

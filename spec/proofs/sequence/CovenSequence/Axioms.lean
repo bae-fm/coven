@@ -382,7 +382,7 @@ import SequenceApply
 #print axioms CovenSequence.JoinScan.miss_requires_refresh
 #print axioms CovenSequence.JoinScan.approved_never_declined
 #print axioms CovenSequence.JoinScan.real_decline
-#print axioms CovenSequence.JoinScan.opened_decides
+#print axioms CovenSequence.JoinScan.opened_never_waits
 #print axioms CovenSequence.JoinScan.approved_eventually_admitted
 #print axioms CovenSequence.JoinScanExamples.missing_below_existing_is_deleted
 #print axioms CovenSequence.JoinScanExamples.retained_good
@@ -442,6 +442,10 @@ import SequenceApply
 #print axioms CovenSequence.FirstInstallation.join_strands_restore
 #print axioms CovenSequence.FirstInstallation.cancel_strands_acceptance
 #print axioms CovenSequence.FirstInstallation.never_stranded
+#print axioms CovenSequence.FirstInstallation.found_published
+#print axioms CovenSequence.FirstInstallation.refused_stops
+#print axioms CovenSequence.FirstInstallation.loaded_first_lists_admitted
+#print axioms CovenSequence.FirstInstallation.refused_syncs_forever
 #print axioms CovenSequence.DeviceReplacement.old_never_stale
 #print axioms CovenSequence.DeviceReplacement.never_missing
 #print axioms CovenSequence.DeviceReplacement.progress

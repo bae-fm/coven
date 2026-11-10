@@ -52,6 +52,8 @@ pub enum StatusFailure {
     UpdateRequired(crate::RequiredUpdate),
     /// This device or its member has been removed.
     Removed,
+    /// The admission that published this joined store was refused (§13.2).
+    NotAdmitted,
     /// Another copy uses this device's id; this copy sends nothing more (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
     /// The provider refused or failed a request, as its adapter classified it.
@@ -71,6 +73,7 @@ impl LastPass {
         let failure = match failure {
             SyncFailure::UpdateRequired(update) => StatusFailure::UpdateRequired(update),
             SyncFailure::Removed => StatusFailure::Removed,
+            SyncFailure::NotAdmitted => StatusFailure::NotAdmitted,
             SyncFailure::DeviceIdInUse(evidence) => StatusFailure::DeviceIdInUse(evidence),
             SyncFailure::Storage(storage) => StatusFailure::Storage(storage.failure()),
             SyncFailure::Operation(record) => StatusFailure::Operation(*record),

@@ -126,7 +126,7 @@ async fn approved_with_retention(
     if compare {
         let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
             "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
-            "copies":copies, "scanned":scanned.get(), "binding":true, "pending":false});
+            "copies":copies, "scanned":scanned.get(), "pending":false});
         assert_eq!(
             crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
             serde_json::json!(format!("{outcome:?}"))
@@ -182,7 +182,7 @@ async fn declined_with_retention(compare: bool) {
         let current = floor(&group, &ana).await;
         let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
             "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
-            "copies":[], "scanned":scanned.get(), "binding":false, "pending":false});
+            "copies":[], "scanned":scanned.get(), "pending":false});
         assert_eq!(
             crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
             serde_json::json!(format!("{outcome:?}"))
@@ -303,43 +303,40 @@ async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
     }
 }
 
+/// The store a join published loads in its first pass. A failed read there
+/// keeps the keys the join's scan opened: the next pass loads with them,
+/// scanning for nothing (§13.2).
 #[tokio::test]
-async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
+async fn a_failed_first_load_keeps_the_scans_keys() {
     let group = Group::shared();
     let (ana, mut carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
     let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
-    let scanned = carol.device.sync.session.lock().await.scanned;
-    let path = ObjectPath::floor(group.store);
-    let (observed, floor_read) = tokio::sync::oneshot::channel();
-    let (resume, held) = tokio::sync::oneshot::channel();
-    carol.device.storage.hold_next_read(path.clone(), observed, held).await;
-    let polling = carol.device.sync.join_outcome(&mut carol.request);
-    let fail_history = async {
-        floor_read.await.unwrap();
-        // Bootstrap gets its floor response and finds the copy. The next
-        // floor read fails before authenticated history retains those keys.
-        carol
-            .device
-            .storage
-            .set_faults(coven_storage::test_utils::Faults {
-                read_failures: [(path, coven_storage::StorageFailure::Network)].into(),
-                ..coven_storage::test_utils::Faults::none()
-            })
-            .await;
-        resume.send(()).unwrap();
-    };
-    let (outcome, ()) = tokio::join!(polling, fail_history);
-    assert!(matches!(outcome, Err(crate::SyncError::Storage(error))
-        if error.failure() == coven_storage::StorageFailure::Network));
-    assert!(carol.device.sync.keys.read().unwrap().is_none());
-    assert_eq!(carol.device.sync.session.lock().await.scanned, scanned);
-    carol.device.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
+    assert!(carol.device.sync.keys.read().unwrap().is_some());
+    carol
+        .device
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            read_failures: [(
+                ObjectPath::floor(group.store),
+                coven_storage::StorageFailure::Network,
+            )]
+            .into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(matches!(carol.device.sync.pass().await, Err(crate::SyncError::Storage(error))
+        if error.failure() == coven_storage::StorageFailure::Network));
+    assert!(carol.device.sync.keys.read().unwrap().is_some());
+    carol.device.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    carol.device.sync.pass().await.unwrap();
+    let state = carol.device.database().store_state().await.unwrap();
+    assert!(state.devices.contains_key(&carol.device.sync.device));
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }
@@ -479,6 +476,8 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
+    // The store the join publishes loads in its first pass.
+    carol.device.sync.pass().await.unwrap();
     assert_eq!(rows(carol.device.database()).await, rows(ana.database()).await);
     let read: Vec<_> = carol.device.storage.request_trace()[before..]
         .iter()
@@ -492,6 +491,30 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
         "read {read:?} at or below coverage {covers}"
     );
     for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// A store a join published on copies whose admission its history then
+/// refused: the keys open every slot, and no slot binds the pair the device
+/// holds. Read to the end of the sequence, the store stops for good with
+/// `NotAdmitted`, as a removal stops a device, and every pass after finds it
+/// again; syncing on, it would send nothing and show nothing wrong (§13.2,
+/// §14.1).
+#[tokio::test]
+async fn a_store_whose_history_binds_its_pair_nowhere_stops_not_admitted() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let carol = group.device(3).await;
+    for _ in 0..2 {
+        assert!(matches!(carol.sync.pass().await, Err(crate::SyncError::NotAdmitted)));
+        assert!(matches!(
+            &*carol.sync.state.subscribe().borrow(),
+            crate::SequenceStatus::Stopped(crate::SyncFailure::NotAdmitted)
+        ));
+    }
+    for device in [&ana, &carol] {
         device.database().close().await.unwrap();
     }
 }

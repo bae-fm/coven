@@ -1,7 +1,6 @@
 //! How a join that ends without a store, declined, cancelled or expired,
-//! stops part way and finishes (§13.4), how one admitted and then removed
-//! ends, and how one that recorded its send before the create sends it again
-//! (§13.2).
+//! stops part way and finishes (§13.4), and how one that recorded its send
+//! before the create sends it again (§13.2).
 
 use super::*;
 
@@ -29,54 +28,6 @@ async fn a_join_stopped_after_its_sign_in_was_deleted_finishes_without_signing_i
     assert!(matches!(resumed, Ok(None)), "{resumed:?}");
     install.absent(store).await;
     assert!(!install.root.path().join("stores").join(store.to_string()).exists());
-    owner.close().await;
-}
-
-/// Carol's join is approved, then stops while it loads, and Ana removes her
-/// before the next call. That call applies the removal, which stops Carol's
-/// device for good: the join ends with `Removed` and deletes what it kept,
-/// instead of waiting on a store it can never open (§13.2).
-#[tokio::test]
-async fn an_approved_join_whose_member_is_removed_before_it_loads_ends() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let store = owner.directory.id();
-    let (_, cancel) = watch::channel(false);
-    let (loading, mut loaded) = watch::channel(false);
-    let control = JoinControl::new();
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite, &control),
-        owner.recipient(),
-        &cancel,
-        |status| {
-            if matches!(status, BootstrapStatus::Loading(progress)
-                if progress.step == LoadStep::Applying && progress.done == progress.total)
-            {
-                loading.send_replace(true);
-            }
-        },
-    );
-    let stopped = async {
-        tokio::select! {
-            result = joining => panic!("the join finished before it stopped: {result:?}"),
-            changed = loaded.wait_for(|loading| *loading) => drop(changed.unwrap()),
-        }
-    };
-    let ((), member) = join_with_response(stopped, owner.approve_join(&control)).await;
-    crate::tests::landed(&owner.handle, owner.handle.remove_member(&member).await.unwrap()).await;
-    let result =
-        install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
-    assert!(matches!(result, Err(BootstrapError::Sync(SyncError::Removed))), "{result:?}");
-    assert!(saved_code(&install, store).is_none());
-    install.absent(store).await;
-    assert!(install
-        .builder(&owner, owner.recipient())
-        .unfinished_joins()
-        .await
-        .unwrap()
-        .is_empty());
     owner.close().await;
 }
 

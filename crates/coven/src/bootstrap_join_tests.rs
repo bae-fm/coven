@@ -442,60 +442,6 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
     owner.close().await;
 }
 
-/// Carol's join is approved, then stops while it loads, as when the app is
-/// closed. Her installation had applied her admission; the next call finds
-/// that approval and loads, instead of taking the deleted request for a
-/// decline (§13.2).
-#[tokio::test]
-async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
-    let (loading, mut loaded) = watch::channel(false);
-    let control = JoinControl::new();
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite, &control),
-        owner.recipient(),
-        &cancel,
-        |status| {
-            // Every slot applied, Carol's admission among them.
-            if matches!(status, BootstrapStatus::Loading(progress)
-                if progress.step == LoadStep::Applying && progress.done == progress.total)
-            {
-                loading.send_replace(true);
-            }
-        },
-    );
-    let stopped = async {
-        tokio::select! {
-            result = joining => panic!("the join finished before it stopped: {result:?}"),
-            changed = loaded.wait_for(|loading| *loading) => drop(changed.unwrap()),
-        }
-    };
-    let ((), member) = join_with_response(stopped, owner.approve_join(&control)).await;
-    let handle = install
-        .run(
-            &owner,
-            Installation::join_request(&invite, &control),
-            owner.recipient(),
-            &cancel,
-            |_| {},
-        )
-        .await
-        .unwrap()
-        .expect("the approved join loads");
-    assert!(handle
-        .members()
-        .await
-        .unwrap()
-        .iter()
-        .any(|found| found.is_self && found.id == member));
-    handle.close().await.unwrap();
-    owner.close().await;
-}
-
 /// Once the request may have been sent, cancelling can't take it back: the
 /// join ends with `JoinRequestSent`, keeps its installation and request, and
 /// a later call with the same code continues it to approval (§13.2).
@@ -629,47 +575,6 @@ async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
     install.absent(owner.directory.id()).await;
     assert!(saved_code(&install, owner.directory.id()).is_none());
     assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
-    owner.close().await;
-}
-
-/// An approved join cancelled while it loads keeps its installation too: her
-/// admission has landed, and only this installation holds her keys.
-#[tokio::test]
-async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let (stop, cancel) = watch::channel(false);
-    let control = JoinControl::new();
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite, &control),
-        owner.recipient(),
-        &cancel,
-        cancel_at(Phase::Loading, &stop),
-    );
-    let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
-    assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
-    assert!(install.app.stores().await.unwrap().is_empty());
-    let (_, cancel) = watch::channel(false);
-    let handle = install
-        .run(
-            &owner,
-            Installation::join_request(&invite, &control),
-            owner.recipient(),
-            &cancel,
-            |_| {},
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(handle
-        .members()
-        .await
-        .unwrap()
-        .iter()
-        .any(|found| found.is_self && found.id == member));
-    handle.close().await.unwrap();
     owner.close().await;
 }
 

@@ -708,6 +708,29 @@ impl StorageConnections {
         .await
     }
 
+    /// Load a store a join published once it found its admission, before
+    /// anything of it was loaded: connect, through the connection the join
+    /// made, and read forward with the keys its copies opened, sending each
+    /// of loading's steps to `progress` (§13.2, §13.4). The loop doesn't
+    /// start; a failure leaves the store as a failed pass would, for the
+    /// loop's passes to go on from.
+    pub(crate) async fn load_joined(
+        self: &Arc<Self>,
+        progress: tokio::sync::watch::Sender<Option<Progress<coven_database::LoadStep>>>,
+    ) -> Result<(), SyncError> {
+        self.call(|owner| async move {
+            let mut live = owner.live.lock().await;
+            if !matches!(&*live, ConnectionState::Active(_)) {
+                owner.connect(&mut live).await?;
+            }
+            let ConnectionState::Active(candidate) = &*live else {
+                return Err(SyncError::NoStorage);
+            };
+            candidate.sync.load_joined(progress).await
+        })
+        .await
+    }
+
     pub(crate) async fn forget_store_keys(self: &Arc<Self>) -> Result<(), KeyError> {
         self.call(|owner| async move {
             let mut live = owner.live.lock().await;

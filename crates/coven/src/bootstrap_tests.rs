@@ -490,68 +490,6 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
 }
 
 #[tokio::test]
-async fn a_member_removed_while_joining_receives_the_provider_refusal() {
-    let owner = Owner::new(CloudProvider::OneDrive, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
-    let (read, reading) = tokio::sync::oneshot::channel();
-    let (resume, resumed) = tokio::sync::oneshot::channel();
-    let (sleeping, mut asleep) = watch::channel(false);
-    let (check, checking) = watch::channel(false);
-    // The joiner's next check waits until approval has published both slots.
-    let clock = Arc::new(JoinClock { clock: owner.clock.clone(), sleeping, resume: checking });
-    // Approval claims the store key's copy and then the binding.
-    let after = owner.applied().await + 3;
-    let joining = async {
-        Box::pin(bootstrap_device(
-            install.authenticated_builder(&owner, owner.recipient()).await.clock(clock),
-            Installation::join_request(&invite, &JoinControl::new()),
-            |_| {},
-            &cancel,
-        ))
-        .await
-    };
-    let remove = async {
-        // The joiner sleeps in its check wait once its request is made.
-        asleep.wait_for(|sleeping| *sleeping).await.unwrap();
-        let request = owner.next_join_request().await;
-        crate::tests::approve(&owner.handle, &request).await;
-        // The owner's own passes read that slot too: only the joiner's read
-        // is held.
-        owner.stop_sync().await;
-        // Finding the copy and the binding, the check's key scan reads on
-        // and ends on this slot's miss. A read ahead of a slot not yet
-        // published could be dropped with its pass; this one ends the scan.
-        owner
-            .storage
-            .hold_next_read(
-                ObjectPath::slot(owner.directory.id(), after.try_into().unwrap()),
-                read,
-                resumed,
-            )
-            .await;
-        check.send(true).unwrap();
-        reading.await.unwrap();
-        // Removal sends through the connection a pass makes.
-        owner.pass().await;
-        let removal = owner.handle.remove_member(&request.member).await.unwrap();
-        crate::tests::landed(&owner.handle, removal).await;
-        // Cut off this account in the fake to model provider refusal after removal.
-        owner.storage.revoke_access("join@example.com").await.unwrap();
-        resume.send(()).unwrap();
-    };
-    let (result, ()) = join_with_response(joining, remove).await;
-    assert!(
-        matches!(&result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied),
-        "{result:?}"
-    );
-    // Nothing is published; the unfinished join keeps only its sign-in.
-    assert!(install.only_kept_sign_in(owner.directory.id()).await.is_some());
-    owner.close().await;
-}
-
-#[tokio::test]
 async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
@@ -890,6 +828,9 @@ mod restore_credentials;
 
 #[path = "bootstrap_join_tests.rs"]
 mod join;
+
+#[path = "bootstrap_admitted_tests.rs"]
+mod admitted;
 
 #[path = "bootstrap_restore_tests.rs"]
 mod restore;

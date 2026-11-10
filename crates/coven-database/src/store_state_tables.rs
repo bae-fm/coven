@@ -106,17 +106,21 @@ pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbE
         .ok_or(DbError::DamagedDatabase)
 }
 
-/// Save the name chosen for a local store, which slot 1 will set (§10.3).
-/// Once the applied history has created the store, its name is the one the
-/// slots set.
-pub(crate) fn name_local_creation(
+/// Save the name a store has before its applied history creates it, with
+/// the slot that set it: a local store's chosen name, which slot 1 will set
+/// (§10.3), or the name a join's invite carried, current at the slot the
+/// inviting device had applied, for a store a join published before it
+/// loaded (§13.2). Once the applied history has created the store, its name
+/// is the one the slots set.
+pub(crate) fn name_before_creation(
     database: &DatabaseConnection,
     store: StoreId,
     name: &str,
+    named_at: Slot,
 ) -> Result<(), DbError> {
     database.internal_execute(
-        "INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,0) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name WHERE created=0",
-        params![store, name, 1u64.to_be_bytes().as_slice()],
+        "INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,0) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name,named_at=excluded.named_at WHERE created=0",
+        params![store, name, named_at.get().to_be_bytes().as_slice()],
     )?;
     Ok(())
 }

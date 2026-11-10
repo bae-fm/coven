@@ -269,6 +269,14 @@ impl CovenHandle {
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {
         self.storage.unlock().await
     }
+    /// The first load of a store a join published once it found its
+    /// admission, reporting loading's steps to `progress` (§13.2).
+    pub(crate) async fn load_joined(
+        &self,
+        progress: tokio::sync::watch::Sender<Option<Progress<coven_database::LoadStep>>>,
+    ) -> Result<(), SyncError> {
+        self.storage.load_joined(progress).await
+    }
     /// Whether custody holds opened store keys.
     pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError> {
         self.storage.key_state()

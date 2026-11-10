@@ -157,6 +157,22 @@ pub(super) async fn publish_bootstrap(
     }
 }
 
+/// The name of the store a join publishes before it loads: the name its
+/// invite carries, current at the slot the inviting device had applied when
+/// it made the invite, which the store keeps until its history creates it.
+/// The app lists the store by it meanwhile, and the saved code keeps it: a
+/// rename the store applies later is newer, and one before that slot older
+/// (§13.1, §13.2).
+pub(super) async fn joined_name(
+    database: &Database,
+    code: &InviteCode,
+) -> Result<coven_sync::SavedName, BootstrapError> {
+    let named_at = coven_merge::Slot::new(code.read_through)
+        .ok_or(BootstrapError::Code(CodeError::Invalid))?;
+    database.initialize_store_name(code.name.clone(), named_at).await.map_err(CovenError::from)?;
+    loaded_name(database).await
+}
+
 /// The loaded store's name and the slot that set it, for the saved code.
 pub(super) async fn loaded_name(
     database: &Database,

@@ -374,8 +374,7 @@ def readJoinScan (j : Json) : Except String Json := do
     | .key => pure true
     | .endOfSequence => pure false
     | .advance _ => throw "scan did not reach its target"
-  return toJson (match JoinScan.outcome key (← j.getObjValAs? Bool "binding")
-      (← j.getObjValAs? Bool "pending") with
+  return toJson (match JoinScan.outcome key (← j.getObjValAs? Bool "pending") with
     | .waiting => "Waiting" | .admitted => "Admitted" | .declined => "Declined")
 
 def run (j : Json) : Except String Json := do

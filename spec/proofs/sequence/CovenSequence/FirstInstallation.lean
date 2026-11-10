@@ -29,10 +29,26 @@ invite, which the inviting device takes back; an approved one's becomes the
 store's access.
 
 A join's approval is one admission, which also registers its device (§13.2).
-Past it, the facts end the join as they end a restore past its registration:
-a removal of its device or member, or a replacement of its member's keys,
-stops its device for good, and the join ends without its store, its outcome
-met (`stopped`).
+Once the join finds it, the join has met its outcome: there is nothing left
+for it to claim. `Rules.publishesAtAdmission`: the join publishes the store
+in the step that finds its admission, and the store loads after. Then a join
+whose admission is found is a published store, never a listed join
+(`found_published`), and a store whose storage can't be reached shows it as
+any store does. Publishing only once the store has loaded, a call that stops
+while it loads, its storage access lost say, leaves a join listed that has
+nothing left to do (`loaded_first_lists_admitted`). The custody commit between
+finding and publishing only goes forward (`BootstrapCommit`); this model takes
+it as part of the step.
+
+The join finds its admission by its copies, before any history it applied
+could check that admission; the store's first load applies it. A refused one,
+which only a faulty or hostile writer lands, leaves the store's device never a
+member. `Rules.stopsRefused`: such a load stops the store for good, which the
+app shows and removes. Then every loaded store from a join is a member
+(`refused_stops`); without it the store syncs on unregistered, with no step
+of coven's own or the app's left to take (`refused_syncs_forever`). Past its
+admission, the other facts, a removal or a replacement of its member's keys,
+stop the store as any store, outside this model.
 -/
 namespace CovenSequence.FirstInstallation
 
@@ -68,9 +84,19 @@ structure World where
   accepted : Bool
   /-- The join's saved request records that it is accepting the share. -/
   acceptKept : Bool
+  /-- The join found its admission: its copies opened. -/
+  found : Bool
+  /-- The store's first load reached the end of the sequence, its device a
+  member or not. -/
+  loaded : Bool
+  /-- The history the store loaded counts its admission. -/
+  member : Bool
+  /-- The store stopped for good. -/
+  stopped : Bool
   deriving DecidableEq, Repr
 
-def start : World := ⟨.none, .none, false, false, false, false, false, false⟩
+def start : World :=
+  ⟨.none, .none, false, false, false, false, false, false, false, false, false, false⟩
 
 structure Rules where
   /-- A restore refuses an installation holding an invite code, and a join
@@ -78,9 +104,14 @@ structure Rules where
   exclusive : Bool
   /-- A join records that it is accepting the share before it accepts. -/
   recordsAcceptance : Bool
+  /-- A join publishes the store in the step that finds its admission. -/
+  publishesAtAdmission : Bool
+  /-- A store whose first load leaves its device never a member stops for
+  good. -/
+  stopsRefused : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true⟩
+def Rules.correct : Rules := ⟨true, true, true, true⟩
 
 /-- Remove the installation and everything kept beside it, as either call
 does when it ends without its store. What may be in storage stays. -/
@@ -102,11 +133,14 @@ inductive Act where
   | joinCancel
   /-- The join's request is declined: it ends without its store. -/
   | declined
-  /-- The join's request is approved: it publishes the store. -/
+  /-- The join finds its admission. -/
+  | found
+  /-- The join, its admission found, publishes the store once it has loaded
+  it, where it doesn't publish as it finds the admission. -/
   | approved
-  /-- The join's admission applied, and a later slot stopped its device for
-  good: it ends without its store. -/
-  | stopped
+  /-- The published store's first load reaches the end of the sequence, its
+  history counting the admission or not. -/
+  | load (counts : Bool)
   /-- A restore begins on the store's installation, making one if none is
   there. -/
   | beginRestore
@@ -128,7 +162,9 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .accept => w.call == .join && !w.sent && (!R.recordsAcceptance || w.acceptKept)
   | .send => w.call == .join
   | .joinCancel => w.call == .join && !w.sent
-  | .declined | .approved | .stopped => w.call == .join && w.sent
+  | .declined | .found => w.call == .join && w.sent && !w.found
+  | .approved => w.call == .join && w.found && !R.publishesAtAdmission
+  | .load _ => w.inst == .published && w.found && !w.loaded && !w.stopped
   | .beginRestore => w.call == .none && w.inst != .published && (!R.exclusive || !w.code)
   | .record => w.call == .restore
   | .register => w.call == .restore && w.record
@@ -136,16 +172,25 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .restored => w.call == .restore && w.registered
   | .drop => w.call != .none
 
-def act (w : World) : Act → World
+/-- Publish a join's store: its code, request and acceptance become the
+store's. -/
+def publish (w : World) : World :=
+  { w with inst := .published, call := .none, code := false, sent := false, accepted := false,
+           acceptKept := false }
+
+def act (R : Rules) (w : World) : Act → World
   | .beginJoin => { w with inst := .hidden, call := .join, code := true }
   | .keepAcceptance => { w with acceptKept := true }
   | .accept => { w with accepted := true }
   | .send => { w with sent := true }
   | .joinCancel => { undo w with accepted := w.accepted && !w.acceptKept, acceptKept := false }
-  | .declined | .stopped => { undo w with sent := false, accepted := false, acceptKept := false }
-  | .approved =>
-    { w with inst := .published, call := .none, code := false, sent := false, accepted := false,
-             acceptKept := false }
+  | .declined => { undo w with sent := false, accepted := false, acceptKept := false }
+  | .found => if R.publishesAtAdmission then publish { w with found := true } else { w with found := true }
+  | .approved => publish w
+  | .load counts =>
+    if counts then { w with loaded := true, member := true }
+    else if R.stopsRefused then { w with stopped := true }
+    else { w with loaded := true }
   | .beginRestore => { w with inst := .hidden, call := .restore }
   | .record => { w with record := true }
   | .register => { w with registered := true }
@@ -156,14 +201,14 @@ def act (w : World) : Act → World
 
 inductive Steps (R : Rules) : World → World → Prop
   | refl (w : World) : Steps R w w
-  | step {w w' : World} (a : Act) : enabled R w a = true → Steps R (act w a) w' → Steps R w w'
+  | step {w w' : World} (a : Act) : enabled R w a = true → Steps R (act R w a) w' → Steps R w w'
 
 def Reachable (R : Rules) (w : World) : Prop := Steps R start w
 
 /-- Take each action in turn while it is enabled. -/
 def trace (R : Rules) : World → List Act → Option World
   | w, [] => some w
-  | w, a :: rest => if enabled R w a then trace R (act w a) rest else none
+  | w, a :: rest => if enabled R w a then trace R (act R w a) rest else none
 
 /-- Storage may hold a call's request or registration whose outcome this
 device hasn't met, or the joining account a share's acceptance, and nothing
@@ -182,7 +227,7 @@ the restore records itself. The cancel removes the installation and the
 join's code with it: Ben may approve Dan's request, and no join on the
 phone is listed to finish it. -/
 theorem restore_strands_join :
-    ∃ w, trace ⟨false, true⟩ start [.beginJoin, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
+    ∃ w, trace ⟨false, true, true, true⟩ start [.beginJoin, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
       Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -193,7 +238,7 @@ before it sends its request. The cancel removes the installation and the
 restore's record with it: the registration may land, and no restore on the
 laptop is listed to finish it. -/
 theorem join_strands_restore :
-    ∃ w, trace ⟨false, true⟩ start [.beginRestore, .record, .register, .drop, .beginJoin, .joinCancel] =
+    ∃ w, trace ⟨false, true, true, true⟩ start [.beginRestore, .record, .register, .drop, .beginJoin, .joinCancel] =
         some w ∧ Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -202,9 +247,31 @@ app closes before sending his request. Resumed, the join is cancelled: it
 removes the installation and the code, and Household stays mounted in Dan's
 Dropbox with no join listed to take it out. -/
 theorem cancel_strands_acceptance :
-    ∃ w, trace ⟨true, false⟩ start [.beginJoin, .accept, .drop, .beginJoin, .joinCancel] =
+    ∃ w, trace ⟨true, false, true, true⟩ start [.beginJoin, .accept, .drop, .beginJoin, .joinCancel] =
         some w ∧ Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
+
+/-! ## Under the rules -/
+
+/-- Dan's phone finds its admission and records it, loading before it
+publishes, and the call stops while it loads: Dan's storage access was taken
+away. The join stays listed, though nothing is left for it to claim. -/
+theorem loaded_first_lists_admitted :
+    ∃ w, trace ⟨true, true, false, true⟩ start [.beginJoin, .send, .found, .drop] = some w ∧
+      w.found = true ∧ w.code = true := by
+  exact ⟨_, rfl, rfl, rfl⟩
+
+/-- Dan's phone publishes Household as it finds its admission, but the
+history its first load applies refused that admission, and the store doesn't
+stop. Its device never a member, it sends nothing, and no step is left to
+take: neither coven's nor the app's. -/
+theorem refused_syncs_forever :
+    ∃ w, trace ⟨true, true, true, false⟩ start [.beginJoin, .send, .found, .load false] = some w ∧
+      w.loaded = true ∧ w.member = false ∧ w.stopped = false ∧
+      ∀ a, enabled ⟨true, true, true, false⟩ w a = false := by
+  refine ⟨_, rfl, rfl, rfl, rfl, ?_⟩
+  intro a
+  cases a <;> rfl
 
 /-! ## Under the rules -/
 
@@ -217,21 +284,41 @@ structure Inv (w : World) : Prop where
   restore : w.call = .restore → w.code = false
   /-- An acceptance is kept by a listed join that records it, or has sent. -/
   accepted : w.accepted = true → w.code = true ∧ (w.acceptKept = true ∨ w.sent = true)
+  /-- A join that found its admission is a published store, with no call on
+  it. -/
+  found : w.found = true → w.inst = .published ∧ w.code = false ∧ w.call = .none
+  /-- A store whose first load reached the end is a member. -/
+  loaded : w.loaded = true → w.member = true
 
 theorem inv_start : Inv start := by
   constructor <;> simp [start]
 
 theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct w a = true) :
-    Inv (act w a) := by
-  obtain ⟨sent, registered, one, join, restore, accepted⟩ := inv
+    Inv (act Rules.correct w a) := by
+  obtain ⟨sent, registered, one, join, restore, accepted, found, loaded⟩ := inv
   cases a <;> rcases hc : w.call <;> constructor <;>
-    simp_all [act, enabled, Rules.correct, undo]
+    simp_all [act, enabled, Rules.correct, undo, publish] <;>
+    (try split) <;> simp_all
 
 theorem steps_keep_inv : ∀ {w w'}, Steps Rules.correct w w' → Inv w → Inv w' := by
   intro w w' h
   induction h with
   | refl => exact id
   | step a e _ ih => exact fun inv => ih (inv_step _ a inv e)
+
+/-- **Past its admission, a join is a store.** Whatever the app and the device
+do, a join that found its admission is a published store: nothing lists it as
+a join, and no call runs on it as one. -/
+theorem found_published {w : World} (h : Reachable Rules.correct w) (found : w.found = true) :
+    w.inst = .published ∧ w.code = false ∧ w.call = .none :=
+  (steps_keep_inv h inv_start).found found
+
+/-- **A refused admission stops the store.** Every store a join published
+whose first load reached the end of the sequence counts its device a member:
+one whose history refused the admission stopped instead. -/
+theorem refused_stops {w : World} (h : Reachable Rules.correct w) (loaded : w.loaded = true) :
+    w.member = true :=
+  (steps_keep_inv h inv_start).loaded loaded
 
 /-- Under the rules no call's removal takes another's listing, and no cancel
 leaves an acceptance behind: whatever storage may hold of a join's request or

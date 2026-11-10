@@ -29,6 +29,9 @@ mod commit;
 #[path = "bootstrap_join.rs"]
 mod join;
 
+#[path = "bootstrap_admitted.rs"]
+mod admitted;
+
 #[path = "bootstrap_replace.rs"]
 mod replace;
 pub(super) use replace::{restore_device, resume_replacement};
@@ -67,14 +70,18 @@ use status::{loading, open_installation};
 
 /// Accept provider access, retain one signed request across restarts, and wait
 /// for approval. Returns the open store, or None when declined or expired.
-/// Dropping the future preserves the unfinished join for a subsequent call
-/// with the same invite and device name, or `resume_join`. On Dropbox and
+/// Dropping the future before the join finds its admission preserves the
+/// unfinished join for a subsequent call with the same invite and device
+/// name, or `resume_join`. On Dropbox and
 /// OneDrive the builder's sign-in is kept on the device beside the saved code
 /// until the join ends, and a later call without one uses it (§13.2).
 /// `control` cancels the join or asks for a check for approval at once.
 /// Cancelling before the request may have been sent removes the unpublished
 /// installation; after, the call ends with `BootstrapError::JoinRequestSent`
-/// and keeps it, as dropping does. A store whose unfinished installation
+/// and keeps it, as dropping does. Once the join finds its admission it
+/// publishes the store, a cancel notwithstanding, then loads it, reporting
+/// `Loading`; a failure while it loads returns `BootstrapError::Published`
+/// with the open handle (§13.2). A store whose unfinished installation
 /// holds a restore's record is refused with `StoreLockError::BootstrapPending`
 /// before anything changes (§13.4).
 pub async fn join_with_invite(
@@ -237,6 +244,8 @@ async fn bootstrap_device(
     let device_entries = StoreKeychain::new(keychain.clone(), id);
     let clock = builder.clock.clone();
     let started = clock.elapsed();
+    #[cfg(test)]
+    let recorder = builder.loading_recorder.clone();
     // A deletion of the store a cut call left recorded still holds its id
     // (§19.3): it is finished first.
     if builder.directories.deletion_recorded(id).await.map_err(BootstrapDirectoryError::from)? {
@@ -284,8 +293,13 @@ async fn bootstrap_device(
             status(BootstrapStatus::Committing);
             // The saved code's name, read before the final steps, which no
             // await separates; so is the status the published store opens
-            // with (E5).
-            let name = match commit::loaded_name(&database).await {
+            // with (E5). A join publishes before it loads, with the name its
+            // invite carries (§13.2).
+            let name = match &request {
+                BootstrapRequest::Join { code, .. } => commit::joined_name(&database, code).await,
+                BootstrapRequest::Restore { .. } => commit::loaded_name(&database).await,
+            };
+            let name = match name {
                 Ok(name) => crate::storage::record_opened(
                     &database,
                     &clock,
@@ -298,13 +312,13 @@ async fn bootstrap_device(
                 Err(error) => Err(error),
             };
             let result = match name.and_then(|name| {
-                // A loaded join was approved: its request was sent. A loaded
-                // restore registered its device (§13.1).
-                if check_cancel(cancel).is_err() {
-                    return Err(match &request {
-                        BootstrapRequest::Join { .. } => BootstrapError::JoinRequestSent,
-                        BootstrapRequest::Restore { .. } => BootstrapError::RestoreRegistered,
-                    });
+                // A loaded restore registered its device: a cancel can't take
+                // it back, and ends the call (§13.1). A join that found its
+                // admission publishes, cancelled or not (§13.2).
+                if matches!(request, BootstrapRequest::Restore { .. })
+                    && check_cancel(cancel).is_err()
+                {
+                    return Err(BootstrapError::RestoreRegistered);
                 }
                 builder.authentication.take();
                 let credentials = match &sign_in {
@@ -365,7 +379,19 @@ async fn bootstrap_device(
                 }
             };
             match result {
-                Ok(handle) => Ok(Some(handle)),
+                Ok(handle) => match &request {
+                    BootstrapRequest::Join { .. } => {
+                        let (progress, watch) = watch::channel(None);
+                        #[cfg(test)]
+                        if let Some(recorder) = &recorder {
+                            recorder.watch(watch.clone());
+                        }
+                        admitted::load_joined(handle, &status, &clock, progress, watch)
+                            .await
+                            .map(Some)
+                    }
+                    BootstrapRequest::Restore { .. } => Ok(Some(handle)),
+                },
                 Err(error @ BootstrapError::Published { .. }) => Err(error),
                 // A loaded join or restore is past cancelling: it stays for
                 // the next call.
@@ -387,9 +413,9 @@ async fn bootstrap_device(
                     Err(recording) => combine(Err(error), Err(recording)),
                 }
             }
-            BootstrapRequest::Join { .. } => {
-                join::ended(&builder, &pending, &device_entries, &request, error).await
-            }
+            // Before its admission nothing ends a join but its outcome: it
+            // stays listed for the next call (§13.2).
+            BootstrapRequest::Join { .. } => Err(error),
         },
     }
 }
@@ -474,6 +500,18 @@ impl Admission {
     }
 }
 
+/// What a new installation does once what it reads from storage is read.
+enum Finishing {
+    /// A join that found its admission, which registered its device,
+    /// publishes the store, recording `labelled`, the location as the
+    /// joining account names it; the store loads after (§13.2).
+    Publish { labelled: StorageConfig },
+    /// A restore or replacement, loaded, registers its device unless an
+    /// interrupted call's registration is `registered` already, and records
+    /// `access`, the access it reaches storage with (§13.1, §19.3).
+    Register { access: coven_format::MemberAccess, registered: bool, labelled: StorageConfig },
+}
+
 /// A loaded store awaiting publication, with what reaches its storage.
 struct Loaded {
     code: RestoreCode,
@@ -492,8 +530,9 @@ struct Loaded {
     waits: Arc<coven_sync::RetryWaits>,
 }
 
-/// Load the store into `pending` and register its device, which a join's
-/// admission has already registered (§13.2). A replacement
+/// Load the store into `pending` and register its device. A join loads
+/// nothing here: once it finds its admission, which registered its device,
+/// it returns the store to publish, which loads after (§13.2). A replacement
 /// runs the app's `prepare` step on its loaded installation, then keeps what
 /// finishing needs and records itself, before it registers (§19.3).
 async fn prepare_and_load(
@@ -640,11 +679,24 @@ async fn prepare_and_load(
     if let Some(recorder) = &builder.loading_recorder {
         recorder.watch_progress(sync.subscribe_progress());
     }
+    // The location as the joining account names it, read once the share is
+    // accepted (§20.2): the store a join publishes records it, and no storage
+    // request comes between finding the admission and publishing (§13.2).
+    let mut accepted_label = None;
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
+            if !joining.accept(&sync, status).await? {
+                return Ok(None);
+            }
+            let labelled = storage.labelled_config().await.map_err(SyncError::from)?;
+            accepted_label = Some(labelled.clone());
             if !joining.admit(&sync, &database, status).await? {
                 return Ok(None);
             }
+            // Its admission found, which registered its device, the join
+            // publishes the store, which loads after (§13.2): nothing is
+            // left to register, and no access to record.
+            return Ok(Some(Finishing::Publish { labelled }));
         }
         // Reading forward opens this member's copies and loads the floor's
         // snapshots and the slots after them; an interrupted bootstrap's
@@ -656,8 +708,7 @@ async fn prepare_and_load(
             requests = %storage.requests().since(&unlocking.1),
             "read the store forward with this member's keys"
         );
-        // The folder's label as this member's account names it, read once a
-        // join has accepted the share (§20.2).
+        // The folder's label as this member's account names it (§20.2).
         let labelled = storage.labelled_config().await.map_err(SyncError::from)?;
         let registered = database
             .store_state()
@@ -667,27 +718,13 @@ async fn prepare_and_load(
             .is_some_and(|device| device.member == member.member());
         // A restore checks the access it reaches storage with before it
         // registers, and records it after, as setup does, so the member's
-        // recorded access is the one in use (§13.1). A join registers
-        // nothing: the admission that admitted it registered its device and
-        // recorded its access from the invite (§13.2).
-        let access = match admission {
-            Admission::Restoring => {
-                status(BootstrapStatus::Registering);
-                let access = crate::storage::member_access(&data.credentials, &storage)
-                    .await
-                    .map_err(SyncError::from)?;
-                sync.check_access(&access).await?;
-                Some(access)
-            }
-            Admission::Joining(_) if registered => None,
-            Admission::Joining(_) => {
-                return Err(SyncError::from(coven_database::DbError::Invariant {
-                    what: "the admission that admits a join registers its device",
-                })
-                .into())
-            }
-        };
-        Ok::<_, BootstrapError>(Some((access, registered, labelled)))
+        // recorded access is the one in use (§13.1).
+        status(BootstrapStatus::Registering);
+        let access = crate::storage::member_access(&data.credentials, &storage)
+            .await
+            .map_err(SyncError::from)?;
+        sync.check_access(&access).await?;
+        Ok::<_, BootstrapError>(Some(Finishing::Register { access, registered, labelled }))
     };
     let mut cancellation = cancel.clone();
     let loaded = tokio::select! {
@@ -695,8 +732,24 @@ async fn prepare_and_load(
         _ = cancelled(&mut cancellation) => Err(BootstrapError::Cancelled),
         result = loading => result,
     };
+    // A join whose keys opened in this call has found its admission, which
+    // registered its device: it publishes the store, cancelled or not, since
+    // nothing is left for a cancel to take back (§13.2).
+    let loaded = match (loaded, &admission, accepted_label) {
+        (Err(BootstrapError::Cancelled), Admission::Joining(_), Some(labelled))
+            if ring.read()?.is_some() =>
+        {
+            Ok(Some(Finishing::Publish { labelled }))
+        }
+        (loaded, ..) => loaded,
+    };
     let result = match loaded {
-        Ok(Some((access, registered, labelled))) => {
+        // A join that found its admission has nothing left to write.
+        Ok(Some(Finishing::Publish { labelled })) => {
+            data.location = labelled;
+            Ok(true)
+        }
+        Ok(Some(Finishing::Register { access, registered, labelled })) => {
             data.location = labelled;
             // The work that writes to storage. A cancel stops it only between
             // its steps: one under way, a registration on its way above all,
@@ -732,14 +785,12 @@ async fn prepare_and_load(
                         "registered this device"
                     );
                 }
-                if let Some(access) = access {
-                    let state = database.store_state().await?;
-                    if let Some(change) =
-                        crate::storage::access_change(&state, member.member(), access)?
-                    {
-                        check_cancel(cancel)?;
-                        sync.administer(change).await?;
-                    }
+                let state = database.store_state().await?;
+                if let Some(change) =
+                    crate::storage::access_change(&state, member.member(), access)?
+                {
+                    check_cancel(cancel)?;
+                    sync.administer(change).await?;
                 }
                 // The notice commits before any handle is published (E5).
                 if let Some(replacement) = replacement {

@@ -213,6 +213,7 @@ impl SequenceSync {
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
+        self.check_admitted(&session, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
         if let Some((through, first)) = sendable {
             // The queue's first write names a wait for its sealing key; a
@@ -335,6 +336,47 @@ impl SequenceSync {
             tracing::error!("a stopped copy's operations stay journaled: {error}");
         }
         stopped
+    }
+
+    /// Whether the applied history ever bound this member id to the pair
+    /// this installation holds. A store's history binds it before it has
+    /// applied anything else, slot 1 its creator's and a restore's loading
+    /// a pair history bound, except a store a join published once it found
+    /// its admission, whose first load applies that admission (§13.2).
+    pub(crate) fn pair_bound(&self, session: &Session, member: &MemberIdentity) -> bool {
+        let keys = member.keys().public_keys();
+        session
+            .history
+            .bindings
+            .iter()
+            .any(|binding| binding.member == member.member() && binding.keys == keys)
+    }
+
+    /// Stop for good once a store's history, read to the end of the
+    /// sequence, binds its pair nowhere: the admission a join published it
+    /// on was refused, and its device never became a member (§13.2, §14.1).
+    /// Only a pass, and the first load of a store a join published, check
+    /// this: every store a pass runs on has a pair its history binds first,
+    /// but a joined store's, while a creation that loses slot 1 never gets a
+    /// pass. No slot applies this stop, so it ends what the app journaled
+    /// and the invites the device made, as a stopped copy does; every pass
+    /// finds it again. A failed write fails the handle with its cause, which
+    /// every call reports.
+    pub(crate) async fn check_admitted(
+        &self,
+        session: &Session,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        if session.through == 0 || self.pair_bound(session, member) {
+            return Ok(());
+        }
+        self.state.set(SequenceStatus::Stopped(crate::SyncFailure::NotAdmitted));
+        if let Err(error) =
+            self.database.end_for_good(coven_database::DeviceStop::NotAdmitted).await
+        {
+            tracing::error!("a store never admitted keeps its operations journaled: {error}");
+        }
+        Err(SyncError::NotAdmitted)
     }
 
     pub(crate) async fn check_copy(

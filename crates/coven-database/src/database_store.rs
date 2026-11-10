@@ -3,17 +3,24 @@
 use super::*;
 
 impl Database {
-    /// Save the name chosen for a local store before publishing its directory.
-    /// This row is not sequence membership until slot 1 applies, the slot that
-    /// will set the name.
-    pub async fn initialize_store_name(&self, name: String) -> Result<(), DbError> {
+    /// Save the name chosen for a local store before publishing its
+    /// directory, which slot 1 will set, or the name a join's invite carried,
+    /// set by `named_at`, for the store a join publishes before it loads
+    /// (§13.2). This row is not sequence membership until the applied history
+    /// creates the store and sets its name.
+    pub async fn initialize_store_name(
+        &self,
+        name: String,
+        named_at: coven_merge::Slot,
+    ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    crate::store_state_tables::name_local_creation(
+                    crate::store_state_tables::name_before_creation(
                         db,
                         inner.access.directory.id(),
                         &name,
+                        named_at,
                     )
                 })
             })

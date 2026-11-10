@@ -349,32 +349,27 @@ inductive Outcome where
   | declined
   deriving DecidableEq
 
-/-- Finding a key grants no authority. `binding` is the ordinary reader's
-verified admission from the invite's approving device for this exact pair
-and device. The key opens only from that admission's own slot, which the
-reader has applied when it reports: a key without a counting admission is an
-admission the history refused, and the join is declined. -/
-def outcome (key binding pending : Bool) : Outcome :=
-  if key then (if binding then .admitted else .declined)
+/-- What a check decides. Finding a key grants no authority: the key opens
+only from the admission's own slot, so a check whose copies open has found
+its admission, and the join publishes the store (§13.2). Whether that
+admission counts is for the store's first load, which applies it
+(`approved_eventually_admitted`); a refused one stops the store for good
+(`FirstInstallation.refused_stops`), not the join. -/
+def outcome (key pending : Bool) : Outcome :=
+  if key then .admitted
   else if pending then .waiting
   else .declined
 
-/-- A join whose copies opened never goes back to waiting for them. -/
-theorem opened_never_waits (binding pending : Bool) :
-    outcome true binding pending ≠ .waiting := by
-  cases binding <;> cases pending <;> simp [outcome]
+/-- A join whose copies opened never goes back to waiting for them: no outcome
+waits for an entry that follows its copies. -/
+theorem opened_never_waits (pending : Bool) : outcome true pending ≠ .waiting := by
+  cases pending <;> simp [outcome]
 
-theorem approved_never_declined (pending : Bool) : outcome true true pending = .admitted := by
+theorem approved_never_declined (pending : Bool) : outcome true pending = .admitted := by
   simp [outcome]
 
-theorem real_decline (key : Bool) : outcome key false false = .declined := by
-  cases key <;> simp [outcome]
-
-/-- A join whose copies opened is admitted or declined: no outcome waits for
-an entry that follows its copies. -/
-theorem opened_decides (binding pending : Bool) :
-    outcome true binding pending = .admitted ∨ outcome true binding pending = .declined := by
-  cases binding <;> simp [outcome]
+theorem real_decline : outcome false false = .declined := by
+  simp [outcome]
 
 /-- An applied admission admits its member; retention cannot undo it. Only a
 later explicit removal can change this membership fact. -/
