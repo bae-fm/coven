@@ -1,5 +1,5 @@
 use super::*;
-pub(super) use crate::tests::join_with_response;
+pub(super) use crate::tests::{carol_joins, join_with_response};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::RecordingClock;
 
@@ -180,7 +180,7 @@ impl Owner {
         };
         crate::tests::invite(
             &self.handle,
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             access,
             InviteLifetime::Day,
         )
@@ -323,7 +323,10 @@ impl Installation {
     pub(super) fn join_request(invite: &Invite, control: &JoinControl) -> BootstrapRequest {
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(invite.shown_code()).unwrap(),
-            name: DeviceName::Given("New phone".into()),
+            terms: RequestTerms::Given {
+                device_name: "New phone".into(),
+                joiner: crate::tests::carol_joins(invite.shown_code()),
+            },
             check: control.check.subscribe(),
         }
     }
@@ -522,6 +525,7 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "Carol's phone",
         |status| {
             if matches!(

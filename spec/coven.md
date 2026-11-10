@@ -4580,17 +4580,18 @@ failed. Instead the app passes Carol's current code to
 
 Ana adds Dan to Household on Dropbox, with Dan beside her:
 
-1. Ana enters Dan's name and Dropbox email, and picks his role. Her phone
-   shares the store's folder with that account and shows an *invite*: a QR code
-   holding the store's location, Dan's name, a member id chosen for Dan, and a
-   one-time *invite secret*.
-2. Dan's phone scans it, signs in to his own Dropbox, mounts the shared folder,
-   makes Dan's member keys, and writes a *join request* to storage, encrypted with
-   a key derived from the invite secret and signed with Dan's new key. It shows
-   a six-digit *confirmation number*.
+1. Ana enters Dan's Dropbox email and picks his role. Her phone shares the
+   store's folder with that account and shows an *invite*: a QR code holding
+   the store's location, a member id chosen for Dan, and a one-time *invite
+   secret*.
+2. Dan's phone scans it, Dan types his name, and his phone signs in to his own
+   Dropbox, mounts the shared folder, makes Dan's member keys, and writes a
+   *join request* to storage, carrying his name, encrypted with a key derived
+   from the invite secret and signed with Dan's new key. It shows a six-digit
+   *confirmation number*.
 3. Ana's phone, the only device holding the secret, reads the request, checks it
-   and shows it to Ana with the same number. The numbers on the two screens
-   match, and Ana approves.
+   and shows it to Ana with Dan's name and the same number. The numbers on the
+   two screens match, and Ana approves.
 4. Ana's phone claims one slot, the *admission*: an entry adding Dan and
    registering his phone, whose clear prefix carries copies of every store
    key, sealed to Dan's new sealing key. Every key, not just the newest, so
@@ -4603,7 +4604,8 @@ The invite only lets Dan ask; Ana's phone lets him in. It carries the current
 store name when Ana makes it. If Household is renamed before Dan joins, the
 invite still shows Household until it expires. Loading the store gives Dan its
 current name; the invite's label never becomes a local setting. Dan's name is
-the one Ana typed: the app uses it for his profile, and Dan can change it later.
+the one Dan typed: his join request carries it, Ana's phone shows it with the
+request, and the app uses it for his profile. Dan can change it later.
 
 **Every request waits for Ana.** Ana may show the code to Dan beside her, or
 send it by message or email, which she doesn't control. Either way, someone
@@ -4653,7 +4655,7 @@ while either invite is open (§14.2), whichever of Ana's devices made it.
 |---|---|
 | store id and location | finding the store |
 | current store name, copied when the invite is made | showing which store the invite is for |
-| the person's name, as Ana typed it; none when recovering an existing member | the new member's profile, which the app writes |
+| whether it adds a new person or recovers an existing member (§13.3) | which join request Dan's phone sends: a new person's carries the name Dan typed, a recovery's none |
 | when it expires, to the second | Dan's phone sends no first request after it |
 | invite id | the join request's path |
 | the chosen member id | fixed by Ana before she shows the invite |
@@ -4670,14 +4672,20 @@ are kept. Dan can't pick a different target.
 **The join request** lives at `<store>/join-requests/<device>/<invite id>`,
 under the id of the device that made the invite, which the code carries. It
 holds the invite id, the chosen member id, both of Dan's new public keys, and
-his phone's device id and name. The device id is the joining installation's
-own, fixed when the join begins. The provider sees only an encrypted object under the
-inviting device's id and the invite's id.
+his phone's device id and name, and who is asking: a new person, with the name
+they typed, or a recovery, which carries none because the member's profile
+already has one. The device id is the joining installation's own, fixed when
+the join begins. The provider sees only an encrypted object under the
+inviting device's id and the invite's id. Dan's phone knows from the code
+whether the invite adds a new person or recovers a member, and refuses to
+begin with the other kind of request, before it changes anything.
 
 **Approving.** Ana's phone opens the request and checks it:
 
 - the signature verifies with the signing key the request supplies;
 - the member id matches the invite;
+- the kind matches the invite: a request for a new person's invite carries a
+  name, and one for a recovery's carries none;
 - both keys are fresh: no entry in the history her phone has caught up with
   bound either one to a member, current or past (§12.3);
 - the device id is fresh: that history registers no device with it.
@@ -4798,7 +4806,8 @@ never send a write again
 [`cancelled_share_strands_claim`](proofs/sequence/CovenSequence/InviteClaims.lean)).
 
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
-ended: the person's name, the access granted, when it expires, the operation
+ended: whether it adds a new person or recovers a member, the access granted,
+when it expires, the operation
 that names its pending record, and where each is: granting its access, waiting
 for its request or Ana's decision with the code to show again, or approving
 it. An approval under way names the
@@ -4869,18 +4878,19 @@ slot the invite names, the latest Ana's phone had applied, at which the name
 was current (§13.1): a rename after it is newer, and one before it older.
 
 Dan's own name goes with the store too. The app makes his profile from the
-name the invite carried (above), and only the invite code holds it: the
-admission names no person. Publishing deletes the code, so Household keeps
-Dan's name, in a table of coven's on his phone, never synced, until the app
+name his request carried (above), and only the saved request holds it on his
+phone: the admission names no person. Publishing deletes the saved request, so
+Household keeps Dan's name, in a table of coven's on his phone, never synced,
+until the app
 acknowledges it. Say Household's first load fails, or Dan closes the app
 before it has recorded his profile: the store still holds the name, and the
 app records the profile when it next opens Household. The app reads the name
 through the handle, and acknowledges it in the write that records the
 profile, or its request for one, so the two commit together. Acknowledging
 again changes nothing. Removing the store removes the name with it. A
-recovery invite carries no name (§13.3), and its store keeps none. Kept
-only in the code, the name would go as the join publishes, and Dan would
-have to type it again
+recovery's request carries no name (§13.3), and its store keeps none. Kept
+only in the saved request, the name would go as the join publishes, and Dan
+would have to type it again
 ([`published_join_loses_invitee`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
 
 From the admission on, Household is a store on Dan's phone like any other.
@@ -4925,8 +4935,10 @@ reports it. Another device's unrelated entry can't stand in for it.
 **Before Dan's phone sends the request,** it keeps his new keys and the request's
 exact bytes in a local directory not yet published to the app, encrypted with the
 invite secret and tied to the store, the invite and the chosen member id. These
-are not his keys' final custody. Restarting with the same invite and device name
-reuses them, and the same device id.
+are not his keys' final custody. Restarting with the same invite, device name and person
+reuses them, and the same device id; a call that gives another name, or a
+recovery where a name was given, fails with `InvitationChanged` rather than
+reuse them.
 
 - It sends no first request once the invite has expired by its own clock: the
   code carries the expiry, and the join ends as an expired one does, leaving
@@ -4960,11 +4972,12 @@ stops it in the background. The saved keys and request are encrypted with the
 invite secret, so without the code nothing can read them. So while joining, Dan's
 phone also keeps the invite code in this device's keychain, never synced, under
 the unfinished store. When the app next starts, coven lists the unfinished join
-with the store's and Dan's names from the code, and the app resumes it without
-asking Dan for the code again. His Dropbox sign-in is kept beside the code, in
-the store's device credentials, so the join resumes without asking him to sign
-in again either. An S3 invite's code carries its key, and CloudKit uses the
-device's Apple account, so no join needs anything from the person to resume.
+with the store's name from the code, and the app resumes it without asking Dan
+for the code or his name again: the name comes back from his saved request.
+His Dropbox sign-in is kept beside the code, in the store's device
+credentials, so the join resumes without asking him to sign in again either.
+An S3 invite's code carries its key, and CloudKit uses the device's Apple
+account, so no join needs anything from the person to resume.
 
 The kept sign-in refreshes where it is kept. When Dropbox rejects Dan's token
 while he waits, its one refresh is committed to the keychain before any request
@@ -5002,8 +5015,8 @@ sent its request:
   every later invite of the store: a join that stopped before it saved its code
   leaves one, and so does one that stopped after deleting it.
 - Finishing, it publishes the store, with the kept sign-in as its credentials
-  and the person's name the code carries kept in its database (above), then
-  deletes the code. A failure deleting it is reported to the call with the
+  and the person's name the saved request carries kept in its database (above),
+  then deletes the code. A failure deleting it is reported to the call with the
   open handle. A crash after publishing and before either deletion leaves the
   saved request, which holds Dan's private keys, and the code. Opening a
   published store deletes both, so neither outlives the first open.
@@ -11024,7 +11037,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, or the own write a raise wait holds, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
-| `_coven_joined_invitee` | the new person's name the invite carried, which a store a join published keeps until the app acknowledges it (§13.2) |
+| `_coven_joined_invitee` | the new person's name the join request carried, which a store a join published keeps until the app acknowledges it (§13.2) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 
 ### C.2 Storage format versions
@@ -12816,8 +12829,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | A join publishes the store in the step that finds its admission, and a store whose first load leaves its device never a member stops for good: a join that found its admission is a published store, listed as no join, and every such store whose first load reached the end of the sequence counts its device a member | `found_published`, `refused_stops` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §14.1 |
 | *Body.* Publishing only once the store has loaded, a call that stops while it loads leaves the join listed with nothing left to do; without the stop, a store whose first load applied a refused admission syncs on unregistered with no step left that would end it | `loaded_first_lists_admitted`, `refused_syncs_forever` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
-| Publishing a join's store keeps the person's name its invite carried with the store: whatever happens between, a first load that fails or an app that quits, the store keeps that name until the app acknowledges it, and acknowledging again is allowed and changes nothing | `invitee_kept`, `acknowledge_idempotent` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
-| *Body.* Kept only in the invite code, the name goes as the join publishes, and an app that hasn't recorded the person's profile has nothing left to record it from | `published_join_loses_invitee` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
+| Publishing a join's store keeps the person's name its request carried with the store: whatever happens between, a first load that fails or an app that quits, the store keeps that name until the app acknowledges it, and acknowledging again is allowed and changes nothing | `invitee_kept`, `acknowledge_idempotent` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
+| *Body.* Kept only in the saved request, the name goes as the join publishes, and an app that hasn't recorded the person's profile has nothing left to record it from | `published_join_loses_invitee` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
 | An approval admits its member in one slot: in every history whose admissions were each checked against the slots before them, no copy names someone who isn't a member, every member has a registered device, and a removal after an admission makes the device it registered gone for good | `admission_never_exposes`, `member_has_device`, `removal_stops_admitted_device` | `proofs/sequence/CovenSequence/Admission.lean` | §12.2, §13.2, §14.1 |
 | *Body.* With copies in slots of their own before the entry, a demotion between them leaves a copy naming someone never admitted, in every extension; and a removal between the entry and the phone's own registration leaves the member with no device in every extension, so the join can neither finish nor end on the facts | `split_approval_exposes`, `removal_strands_admitted_join` | `proofs/sequence/CovenSequence/Admission.lean` | §13.2 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it; done is the store published. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |

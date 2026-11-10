@@ -162,9 +162,7 @@ async fn leaving_the_store_deletes_the_persons_synced_entries() {
 
 async fn leave(refused: bool) {
     let mut network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
-    network
-        .join_as(1, InviteTarget::NewMember { role: MemberRole::Admin, name: "Carol".into() })
-        .await;
+    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Admin }).await;
     let ana = &network.devices[0];
     let ben = &network.devices[1];
     let laptop_dir = tempfile::tempdir().unwrap();

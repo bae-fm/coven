@@ -97,10 +97,6 @@ pub enum InviteTarget {
     NewMember {
         /// The role the person receives on approval.
         role: MemberRole,
-        /// The person's name as the admin typed it, a format `name`: the
-        /// invite carries it to their device, whose app uses it for their
-        /// profile.
-        name: String,
     },
     /// An existing active member who lost every device: approval binds the
     /// requester's new keys to this id, keeping its role, circles and devices.
@@ -162,8 +158,8 @@ pub struct Invite {
     pub operation: coven_database::OperationId,
     /// The stable member id the invite fixed.
     pub member: MemberId,
-    /// The new person's name; `None` for a replacement.
-    pub invitee: Option<String>,
+    /// Whether the invite adds a new person or recovers a member.
+    pub kind: coven_format::codes::InviteKind,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries, never its secret (§14.3).
     pub access: coven_format::MemberAccess,
@@ -239,6 +235,9 @@ pub struct JoinRequest {
     pub keys: coven_crypto::MemberPublicKeys,
     /// The device's name, covered by its signature.
     pub device_name: String,
+    /// Who asks: a new person with the name they typed, or a recovery. It
+    /// matches the invite's kind (§13.2).
+    pub joiner: coven_format::objects::Joiner,
     /// Account invited by the owner, absent on S3.
     pub provider_account_email: Option<String>,
     /// Computed from the invite id and `keys`; the requester's device shows

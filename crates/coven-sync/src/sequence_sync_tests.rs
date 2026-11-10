@@ -385,7 +385,7 @@ impl Group {
 }
 pub(crate) use super::sequence_invites::tests::{
     carol_invite, invite, join, joiner, key_replacement_invite, listed, no_request, request_path,
-    s3_invite, Joiner,
+    s3_invite, JoiningDevice,
 };
 
 pub(crate) fn codes(

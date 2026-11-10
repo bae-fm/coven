@@ -225,13 +225,14 @@ fn bootstrap_and_operation_futures_stay_small() {
         (
             "join_with_invite",
             size(
-                |(b, c, d, o, x): (
+                |(b, c, j, d, o, x): (
                     CovenBuilder,
                     &'static str,
+                    crate::Joiner,
                     &'static str,
                     Status,
                     &'static JoinControl,
-                )| crate::join_with_invite(b, c, d, o, x),
+                )| crate::join_with_invite(b, c, j, d, o, x),
             ),
         ),
         (

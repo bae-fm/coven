@@ -99,8 +99,6 @@ pub(crate) struct InviteWork {
     /// ends the request where it is (§13.2, §19.3).
     device: DeviceId,
     member: MemberId,
-    /// The new person's name; `None` for a replacement.
-    invitee: Option<String>,
     binding: InviteBinding,
     access: InviteGrant,
     secret: SecretText,
@@ -116,6 +114,14 @@ impl InviteWork {
     }
     fn secret(&self) -> Result<InviteSecret, SyncError> {
         Ok(InviteSecret::from_bytes(serde_json::from_str(self.secret.as_str())?))
+    }
+    /// Whether the invite adds a new person or recovers a member: the kind of
+    /// request it takes.
+    fn kind(&self) -> coven_format::codes::InviteKind {
+        match self.binding {
+            InviteBinding::Add { .. } => coven_format::codes::InviteKind::NewPerson,
+            InviteBinding::Replace { .. } => coven_format::codes::InviteKind::Recovery,
+        }
     }
     fn account(&self) -> Option<&str> {
         match &self.access {
@@ -204,7 +210,7 @@ impl InviteWork {
             id: self.id,
             operation,
             member: self.member,
-            invitee: self.invitee.clone(),
+            kind: self.kind(),
             access: self.access.member_access(),
             expires_at: self.expires_at,
             stage,
@@ -219,6 +225,7 @@ impl InviteWork {
             confirmation: ConfirmationNumber::of(request.invite, &request.keys),
             keys: request.keys,
             device_name: request.device_name,
+            joiner: request.joiner,
             provider_account_email: self.account().map(str::to_owned),
             record: bytes.to_vec(),
         })
@@ -768,7 +775,7 @@ impl SequenceSync {
         let code = InviteCode {
             store: store.id,
             name: store.name.clone(),
-            invitee: work.invitee.clone(),
+            kind: work.kind(),
             expires_at: seconds(work.expires_at)?,
             invite: work.id,
             member: work.member,

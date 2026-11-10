@@ -96,7 +96,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
-| Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite | a would-be member's id, public keys and device name | D8, D9 |
+| Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite | a would-be member's id, public keys, device name and, for a new person, their name | D8, D9 |
 | Ended invite's marker | `<store>/join-requests/<device>/<invite>`, in the request's place | when it may be deleted | D8 |
 | Gone device's marker | `<store>/join-requests/<device>/gone`, beside the device's requests | nothing but its kind and format | D8 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
@@ -1542,7 +1542,7 @@ a new device needs.
 
 Dan's phone asks to join by writing a join request (§13.2), which is
 `invite:uuid | member:MemberId | keys:MemberKeys | device:DeviceId |
-device_name:name`:
+device_name:name | joiner:Joiner`:
 
 ```
 invite       uuid
@@ -1550,6 +1550,7 @@ member       MemberId
 keys         MemberKeys
 device       DeviceId
 device_name  name
+joiner       u8, then a name for a new person
 ```
 
 - Verify its supplied signing key: the request is signed with the key it
@@ -1557,6 +1558,11 @@ device_name  name
 - Require the invite's fixed member id.
 - `device` is the joining installation's own id, fixed when the join begins.
   The approval registers it (D6).
+- `joiner` says who asks. Tag 0 is a recovery: the member already has a
+  profile, so the request carries no name. Tag 1 is a new person, followed by
+  the name they typed, which the admin sees with the request and the app makes
+  their profile with (§13.2). Any other tag is refused. The invite's `kind`
+  fixes which tag a request may carry; the inviting device refuses the other.
 
 ### An ended invite's marker (kind 37)
 
@@ -2344,14 +2350,14 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | invitee:Option<name> | expires_at:u64 | invite:uuid |
+`store:uuid | name:name | kind:u8 | expires_at:u64 | invite:uuid |
 member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
 read_through:u64 | storage:bytes`:
 
 ```
 store            uuid
 name             name
-invitee          Option<name>
+kind             u8
 expires_at       u64
 invite           uuid
 member           MemberId
@@ -2365,7 +2371,7 @@ storage          bytes
 | Field | Rule |
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
-| `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one. The joining device keeps it with the store it publishes, after deleting the code, until the app acknowledges it (§13.2) |
+| `kind` | 0 when the invite adds a new person, 1 when it recovers an existing member, who already has a profile. It fixes which `joiner` the request carries (D8); the code carries no person's name, which the joining person types and their request carries (§13.2) |
 | `expires_at` | when the invite ends, in whole seconds since the Unix epoch by the inviting device's clock: the joining device sends no first request after it (§13.2) |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |

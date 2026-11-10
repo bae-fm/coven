@@ -18,7 +18,7 @@ async fn confirming_a_lost_device_cut_off_takes_back_a_share_that_landed_late() 
     let (release, released) = tokio::sync::oneshot::channel();
     phone.storage.hold_next_access(CAROL, true, entered, released).await;
     let making = phone.sync.create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount { email: CAROL.into() },
         InviteLifetime::Day,
     );

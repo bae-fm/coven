@@ -50,17 +50,17 @@ of coven's own or the app's left that would end it (`refused_syncs_forever`).
 Past its admission, the other facts, a removal or a replacement of its
 member's keys, stop the store as any store, outside this model.
 
-The invite code carries the new person's name, which the app makes their
-profile with, and nothing in history does. Publishing deletes the code, so
-the store keeps that name, on the device only, until the app has recorded the
-profile and acknowledges it. `Rules.keepsInvitee`: publishing keeps the name
-with the store. Then the name is there until the app acknowledges it
-(`invitee_kept`), whatever happens between: a first load that fails, an app
-that quits. Without it, the code goes as the join publishes and the app,
-which hadn't yet recorded the profile, has nothing to record it from
-(`published_join_loses_invitee`). Acknowledging again changes nothing
-(`acknowledge_idempotent`). Discarding the store, outside this model, takes
-the name with it.
+The join's request carries the new person's name, which the app makes their
+profile with, and nothing in history does; the join keeps the request on the
+device beside its code. Publishing deletes both, so the store keeps that name,
+on the device only, until the app has recorded the profile and acknowledges
+it. `Rules.keepsInvitee`: publishing keeps the name with the store. Then the
+name is there until the app acknowledges it (`invitee_kept`), whatever happens
+between: a first load that fails, an app that quits. Without it, the name goes
+with the request as the join publishes and the app, which hadn't yet recorded
+the profile, has nothing to record it from (`published_join_loses_invitee`).
+Acknowledging again changes nothing (`acknowledge_idempotent`). Discarding the
+store, outside this model, takes the name with it.
 -/
 namespace CovenSequence.FirstInstallation
 
@@ -105,7 +105,7 @@ structure World where
   member : Bool
   /-- The store stopped for good. -/
   stopped : Bool
-  /-- The published store keeps the invite's person's name, on the device
+  /-- The published store keeps the person's name the join's request carried, on the device
   only. -/
   inviteeKept : Bool
   /-- The app has recorded the person's profile, or its request for it, and
@@ -128,7 +128,7 @@ structure Rules where
   /-- A store whose first load leaves its device never a member stops for
   good. -/
   stopsRefused : Bool
-  /-- Publishing a join's store keeps the invite's person's name with it. -/
+  /-- Publishing a join's store keeps the person's name its request carried with it. -/
   keepsInvitee : Bool
   deriving DecidableEq, Repr
 
@@ -199,7 +199,7 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .drop => w.call != .none
 
 /-- Publish a join's store: its code, request and acceptance become the
-store's, and the store keeps the person's name the code carried where the
+store's, and the store keeps the person's name the request carried where the
 rules say. -/
 def publish (R : Rules) (w : World) : World :=
   { w with inst := .published, call := .none, code := false, sent := false, accepted := false,
@@ -248,7 +248,7 @@ def Stranded (w : World) : Prop :=
     (w.accepted = true ∧ w.code = false)
 
 /-- A store a join published whose person the app hasn't recorded, with the
-name the invite carried nowhere on the device: not in a code, not kept with
+name the request carried nowhere on the device: not in a code, not kept with
 the store. The person has to type it. -/
 def InviteeLost (w : World) : Prop :=
   w.inst = .published ∧ w.found = true ∧ w.profiled = false ∧ w.code = false ∧
@@ -369,7 +369,7 @@ theorem refused_stops {w : World} (h : Reachable Rules.correct w) (loaded : w.lo
   (steps_keep_inv h inv_start).loaded loaded
 
 /-- **The person's name outlives the code.** Whatever the app and the device
-do, a store a join published keeps the name its invite carried until the app
+do, a store a join published keeps the name its request carried until the app
 acknowledges it: a first load that fails, an app that quits, leave it. -/
 theorem invitee_kept {w : World} (h : Reachable Rules.correct w) (found : w.found = true)
     (unrecorded : w.profiled = false) : w.inviteeKept = true :=

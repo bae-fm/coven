@@ -11,7 +11,8 @@ use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
 use coven_merge::Slot;
 use zeroize::Zeroizing;
 
-// The largest invite: two 1,024-byte names and 16 KiB of storage.
+// Room for the largest invite: a 1,024-byte store name, 16 KiB of storage and
+// the frame's fixed fields.
 const MAX_CODE_BYTES: usize = 19 * 1024;
 // A saved code adds its frame prefix, a name of at most 1,024 bytes, its slot
 // and the code's length to the code itself.
@@ -130,6 +131,33 @@ impl KeychainRestoreCode {
     }
 }
 
+/// What an invite is for, fixed when the admin makes it (§13.2, §13.3). It
+/// decides which person a join request may name (`objects::Joiner`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteKind {
+    /// A new person: the join request carries the name they typed.
+    NewPerson,
+    /// An existing member getting access again: their profile already has a
+    /// name, so the request carries none.
+    Recovery,
+}
+impl Wire for InviteKind {
+    fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), Error> {
+        match self {
+            Self::NewPerson => 0u8,
+            Self::Recovery => 1,
+        }
+        .put(out)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(Self::NewPerson),
+            1 => Ok(Self::Recovery),
+            tag => Err(Error::UnknownTag { field: "invite kind", tag }),
+        }
+    }
+}
+
 /// A one-time invitation; the secret permits a join request, not store access.
 #[derive(Debug)]
 pub struct InviteCode {
@@ -137,9 +165,8 @@ pub struct InviteCode {
     pub store: StoreId,
     /// The store's display name.
     pub name: String,
-    /// The new person's name, as the admin typed it; `None` for a
-    /// replacement, whose member already has one.
-    pub invitee: Option<String>,
+    /// Whether the invite adds a new person or recovers a member.
+    pub kind: InviteKind,
     /// When the invite ends, in seconds since the Unix epoch by the inviting
     /// device's clock: a joining device sends no first request after it.
     pub expires_at: u64,
@@ -170,16 +197,9 @@ impl InviteCode {
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
         name(&self.name)?;
-        let invitee = match &self.invitee {
-            Some(invitee) => {
-                name(invitee)?;
-                let mut bytes = Vec::with_capacity(5 + invitee.len());
-                bytes.push(1);
-                bytes.extend_from_slice(&(invitee.len() as u32).to_be_bytes());
-                bytes.extend_from_slice(invitee.as_bytes());
-                bytes
-            }
-            None => vec![0],
+        let kind = match self.kind {
+            InviteKind::NewPerson => 0,
+            InviteKind::Recovery => 1,
         };
         encode_code(
             kinds::INVITE_CODE,
@@ -187,7 +207,7 @@ impl InviteCode {
             &[
                 &(self.name.len() as u32).to_be_bytes(),
                 self.name.as_bytes(),
-                &invitee,
+                &[kind],
                 &self.expires_at.to_be_bytes(),
                 self.invite.0.as_bytes(),
                 self.member.0.as_bytes(),
@@ -205,11 +225,7 @@ impl InviteCode {
         let mut input = decode_frame_of(bytes, kinds::INVITE_CODE, "invite code kind")?;
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
-        let invitee = match u8::get(&mut input)? {
-            0 => None,
-            1 => Some(crate::wire::get_name(&mut input)?),
-            tag => return Err(Error::UnknownTag { field: "option", tag }),
-        };
+        let kind = InviteKind::get(&mut input)?;
         let expires_at = u64::get(&mut input)?;
         let invite = Wire::get(&mut input)?;
         let member = Wire::get(&mut input)?;
@@ -224,7 +240,7 @@ impl InviteCode {
         Ok(Self {
             store,
             name: label,
-            invitee,
+            kind,
             expires_at,
             invite,
             member,

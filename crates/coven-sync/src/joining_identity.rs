@@ -6,7 +6,7 @@ use coven_crypto::{
 };
 use coven_format::{
     codes::InviteCode,
-    objects::JoinRequest,
+    objects::{JoinRequest, Joiner},
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
 };
@@ -88,6 +88,8 @@ pub struct JoiningIdentity {
     sealing: Sealing,
     /// The name the device gave itself in its request.
     device_name: String,
+    /// Who the request is for, and the new person's name it carries.
+    joiner: Joiner,
     inviting_writer: DeviceId,
     read_through: u64,
     /// When the invite ends, in seconds since the Unix epoch: no first
@@ -162,23 +164,34 @@ impl Sealing {
 impl JoiningIdentity {
     /// Restore a fixed request or prepare it before any provider mutation.
     /// A new request names `device`, the joining installation's id, for the
-    /// approval to register. A changed invite or device name cannot silently
-    /// reuse another request.
+    /// approval to register, and `joiner`, which must be the kind the invite
+    /// is for. A changed invite, device name or person cannot silently reuse
+    /// another request.
     pub fn prepare(
         directory: &StoreDir,
         code: &InviteCode,
         device: DeviceId,
         device_name: &str,
+        joiner: Joiner,
     ) -> Result<Self, SyncError> {
+        if joiner.kind() != code.kind {
+            return Err(crate::CodeError::WrongJoiner {
+                expected: code.kind,
+                actual: joiner.kind(),
+            }
+            .into());
+        }
         match Self::saved(directory, code)? {
-            Some(saved) if saved.device_name != device_name => Err(SyncError::InvitationChanged),
+            Some(saved) if saved.device_name != device_name || saved.joiner != joiner => {
+                Err(SyncError::InvitationChanged)
+            }
             Some(saved) => Ok(saved),
-            None => Self::create(directory, code, device, device_name),
+            None => Self::create(directory, code, device, device_name, joiner),
         }
     }
 
-    /// Continue a join from its saved request, with the device name that
-    /// request carries (§13.2). A join's code is saved only after its
+    /// Continue a join from its saved request, with the device name and
+    /// person that request carries (§13.2). A join's code is saved only after its
     /// request, so a missing request is damaged local state.
     pub fn resume(directory: &StoreDir, code: &InviteCode) -> Result<Self, SyncError> {
         Self::saved(directory, code)?.ok_or_else(|| coven_database::DbError::DamagedDatabase.into())
@@ -231,6 +244,7 @@ impl JoiningIdentity {
             state,
             sealing,
             device_name: opened.device_name,
+            joiner: opened.joiner,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
             expires_at: code.expires_at,
@@ -242,6 +256,7 @@ impl JoiningIdentity {
         code: &InviteCode,
         device: DeviceId,
         device_name: &str,
+        joiner: Joiner,
     ) -> Result<Self, SyncError> {
         let path = code.request_path();
         // The request repeats the id the invite fixed and names this
@@ -256,6 +271,7 @@ impl JoiningIdentity {
                 keys: identity.keys().public_keys(),
                 device,
                 device_name: device_name.into(),
+                joiner: joiner.clone(),
             },
             identity.keys(),
         )?;
@@ -268,6 +284,7 @@ impl JoiningIdentity {
             state: JoinStage::Unsent,
             sealing: Sealing::new(code)?,
             device_name: device_name.into(),
+            joiner,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
             expires_at: code.expires_at,
@@ -297,6 +314,12 @@ impl JoiningIdentity {
     /// registers it with.
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// Who the request is for. A new person's name is kept here until the
+    /// join publishes the store (§13.2).
+    pub fn joiner(&self) -> &Joiner {
+        &self.joiner
     }
 
     /// The number the admin compares before approving; the admin's device

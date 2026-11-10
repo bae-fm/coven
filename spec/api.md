@@ -7516,15 +7516,15 @@ pub enum ProviderSignOut {
   the history it loads refused the admission (§13.2).
   Before then a cancel unmounts the Dropbox folder the join may have mounted,
   then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
-- The store a join publishes keeps the new person's name its code carried,
+- The store a join publishes keeps the new person's name its request carried,
   on the device only, never synced, until the app acknowledges it: the app
   makes the person's profile from it, and nothing else on the device holds
-  it once the code is deleted. `CovenHandle::joined_invitee` reads it, from
+  it once the saved request is deleted. `CovenHandle::joined_invitee` reads it, from
   the first open of the store on, whether or not its first load has
   finished; `CovenWrite::acknowledge_joined_invitee` ends it, in the write
   that records the profile, or the app's request for one, so the two commit
   together. Acknowledging again succeeds and changes nothing. Deleting or
-  discarding the store removes it; a recovery invite carries no name, and
+  discarding the store removes it; a recovery's request carries no name, and
   its store keeps none ([§13.2](coven.md#132-adding-a-person-invites)).
 - A join sends no first request once the invite's `expires_at` has passed by
   the joining device's clock: it ends as an expired one does. An ended
@@ -7674,7 +7674,7 @@ pub enum CodeInfo {
     /// A restore code reveals no name before loading.
     Restore(CodeMetadata),
     /// An invite carries the store's name captured when the admin made it
-    /// and the new person's name (None for a replacement).
+    /// and whether it adds a new person or recovers a member.
     Invite(InviteInfo),
 }
 
@@ -7689,11 +7689,38 @@ pub struct InviteInfo {
     /// Includes the sign-in the join needs.
     pub metadata: CodeMetadata,
     pub store_name: String,
-    pub invitee: Option<String>,
+    /// Which `Joiner` a join with this code takes: a new person's name or a
+    /// recovery (§13.2).
+    pub kind: InviteKind,
     /// When the invite ends, by the inviting device's clock, to the second:
     /// the joining device sends no first request after it, so the app can
     /// say until when it may be used (§13.2).
     pub expires_at: SystemTime,
+}
+
+/// What an invite is for, fixed when the admin makes it (§13.2, §13.3).
+pub enum InviteKind {
+    /// A new person: the join's request carries the name they typed.
+    NewPerson,
+    /// An existing member getting access again: their profile already has a
+    /// name, so the request carries none.
+    Recovery,
+}
+
+/// Who a join request is for, and the only place a new person's name lives
+/// before the store keeps it (§13.2).
+pub enum Joiner {
+    /// A new person, with the name they typed. It follows the format's `name`
+    /// rule (format.md D2): an empty one fails the call with
+    /// `SyncError::Format` before anything is written.
+    NewPerson { name: String },
+    /// An existing member, whose profile already has a name.
+    Recovery,
+}
+
+impl Joiner {
+    /// The kind of invite this request answers.
+    pub fn kind(&self) -> InviteKind;
 }
 
 /// Facts that either code carries, without secrets or a store name.
@@ -7734,6 +7761,9 @@ pub enum CodeError {
     /// restore code for a store being restored in place, or an invite code
     /// saved for another store's join.
     WrongStore { expected: StoreId, actual: StoreId },
+    /// A join's `Joiner` is not the kind the invite is for: a name for a
+    /// recovery invite, or a recovery for a new person's.
+    WrongJoiner { expected: InviteKind, actual: InviteKind },
 }
 
 /// Filesystem failures while reserving, publishing or cancelling a new device.
@@ -7958,11 +7988,9 @@ impl CovenWrite<'_> {
 
 /// The admin's choice, fixed before sharing the invite (§13.2, §13.3).
 pub enum InviteTarget {
-    /// The name is the one the admin typed; the invite carries it to the new
-    /// person's device, and the app uses it for their profile. It follows the
-    /// format's `name` rule (format.md D2): an empty one fails the call with
-    /// `SyncError::Format` before any provider change.
-    NewMember { role: MemberRole, name: String },
+    /// A new person. The invite carries no name: the person types theirs
+    /// when they join, and their request carries it (`Joiner::NewPerson`).
+    NewMember { role: MemberRole },
     ReplaceMemberKeys { member: MemberId },
 }
 
@@ -7994,8 +8022,8 @@ pub struct Invite {
     /// or its grant waits or is refused.
     pub operation: OperationId,
     pub member: MemberId,
-    /// The new person's name; None for a replacement.
-    pub invitee: Option<String>,
+    /// Whether the invite adds a new person or recovers a member.
+    pub kind: InviteKind,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries; never a secret (§14.3).
     pub access: MemberAccess,
@@ -8036,6 +8064,10 @@ pub struct JoinRequest {
     pub keys: MemberPublicKeys,
     /// The name the new device gave itself, for the admin to check.
     pub device_name: String,
+    /// Who asks: a new person with the name they typed, which the approval
+    /// shows, or a recovery. The request's kind always matches its invite's:
+    /// the inviting device refuses any other, as a failed check (§13.2).
+    pub joiner: Joiner,
     pub provider_account_email: Option<String>,
     /// Computed from the invite id and `keys`; the requester's phone shows the
     /// same number (format.md D11).
@@ -8323,7 +8355,12 @@ pub async fn restore_from_saved_code(
 ///
 /// On the new person's device: makes their member keys, keeps the code in
 /// this device's keychain, writes a join request to storage, and waits for
-/// approval. Once it finds its admission, it commits the store's custody and
+/// approval. The request carries `joiner`: the name the person typed, for an
+/// invite of kind `NewPerson`, or `Recovery`. A `joiner` of the other kind
+/// than the code's `InviteInfo::kind` fails the call with
+/// `CodeError::WrongJoiner` before anything changes, and one that differs from
+/// the unfinished join's saved request, or a device name that does, with
+/// `SyncError::InvitationChanged`. Once it finds its admission, it commits the store's custody and
 /// publishes the store, which no longer lists as a join, then loads it,
 /// reporting `Loading`, and returns the open store. A failure while the
 /// published store loads, its storage access lost among them, returns
@@ -8345,6 +8382,7 @@ pub async fn restore_from_saved_code(
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
+    joiner: Joiner,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
@@ -8365,7 +8403,7 @@ impl JoinControl {
 }
 
 impl CovenHandle {
-    /// The new person's name the invite carried, which a store a join
+    /// The new person's name the join's request carried, which a store a join
     /// published keeps on this device until a write acknowledges it (§13.2).
     /// None for a store no join published, for a recovery invite's, and once
     /// acknowledged.
@@ -8389,7 +8427,8 @@ impl CovenBuilder {
     /// storage (§13.4).
     pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError>;
 
-    /// Continues an unfinished join from its saved code and device name, as
+    /// Continues an unfinished join from its saved code and the device name
+    /// and `Joiner` its saved request carries, as
     /// `join_with_invite` does. On Dropbox and OneDrive it connects through the
     /// sign-in the join kept, or a sign-in this builder holds, which replaces
     /// the kept one once it grants the location's access. With neither, or a
@@ -8599,7 +8638,7 @@ Example, Ana adding Carol. On Ana's phone:
 ```rust
 let (invite, _, _) = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
         InviteLifetime::Day,
     )
@@ -8645,6 +8684,8 @@ let control = JoinControl::new();
 match join_with_invite(
     builder,
     &scanned,
+    // The name Carol typed on the screen after she scanned the code.
+    Joiner::NewPerson { name: "Carol".into() },
     "Carol's phone",
     |step| show_step(step),
     &control,

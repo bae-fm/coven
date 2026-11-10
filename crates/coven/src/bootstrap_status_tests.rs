@@ -153,6 +153,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "New phone",
         |status| {
             if matches!(
@@ -215,6 +216,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "New phone",
         |status| {
             if matches!(
@@ -286,6 +288,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "New phone",
         |status| {
             let mut reported = reported.lock().unwrap();
@@ -373,6 +376,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "New phone",
         |status| {
             let mut reported = reported.lock().unwrap();

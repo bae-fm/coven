@@ -5,7 +5,7 @@ pub const STORE_ID: coven_foundation::id_source::StoreId =
     coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
 
 use crate::admin::*;
-use crate::codes::{InviteCode, KeychainRestoreCode, RestoreCode};
+use crate::codes::{InviteCode, InviteKind, KeychainRestoreCode, RestoreCode};
 use crate::key::encode_key;
 use crate::objects::*;
 use crate::snapshot::{SnapshotEncoder, SnapshotHeader, SnapshotRecord};
@@ -578,8 +578,8 @@ pub fn invite() -> InviteCode {
     InviteCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         name: "S".into(),
-        // A replacement carries no name for the person.
-        invitee: None,
+        // A re-binding invite recovers Ana, whose profile has her name.
+        kind: InviteKind::Recovery,
         expires_at: 86_400,
         invite: InviteId(Uuid::from_bytes([0x55; 16])),
         // A re-binding invite names Ana's existing id (D13).
@@ -673,6 +673,7 @@ pub fn join_request() -> JoinRequest {
         keys: replacement(),
         device: DeviceId(3),
         device_name: "D".into(),
+        joiner: Joiner::Recovery,
     }
 }
 /// A two-audience write with a row frame spanning three chunks.

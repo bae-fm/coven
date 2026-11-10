@@ -21,7 +21,7 @@ fn clocks(provider: SystemTime, deleting: SystemTime) -> Group {
     group
 }
 
-async fn waiting(group: &Group) -> (Device, Joiner) {
+async fn waiting(group: &Group) -> (Device, JoiningDevice) {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let invitation = invite(&ana).await;

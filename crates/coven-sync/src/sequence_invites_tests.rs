@@ -12,32 +12,54 @@ pub(super) async fn requests(device: &Device) -> Vec<JoinRequest> {
     listed(device).await.into_iter().filter_map(|invite| invite.shown_request().cloned()).collect()
 }
 
-pub(crate) struct Joiner {
+pub(crate) struct JoiningDevice {
     pub(crate) device: Device,
     pub(crate) request: JoiningIdentity,
 }
 
-/// A joining device for an account invite's `code`: its request prepared
-/// and the provider's share accepted, the request not yet sent.
-pub(crate) async fn joiner(group: &Group, code: &str, name: &str) -> Joiner {
-    let code = read_invite_code(code).unwrap();
+/// Who joins with `code`: Carol, typing her name, when it adds a new person;
+/// a recovery otherwise.
+pub(crate) fn carol_for(code: &coven_format::codes::InviteCode) -> Joiner {
+    match code.kind {
+        InviteKind::NewPerson => Joiner::NewPerson { name: "Carol".into() },
+        InviteKind::Recovery => Joiner::Recovery,
+    }
+}
+
+/// The provider's invitation an account invite's `code` holds.
+pub(crate) fn accepted_invitation(
+    code: &coven_format::codes::InviteCode,
+) -> coven_storage::StorageInvitation {
     let InviteStorage::Account(invitation) =
         InviteStorage::decode(code.storage.as_bytes()).unwrap()
     else {
         panic!("an account invite");
     };
+    invitation
+}
+
+/// A joining device for an account invite's `code`: its request prepared
+/// and the provider's share accepted, the request not yet sent.
+pub(crate) async fn joiner(group: &Group, code: &str, name: &str) -> JoiningDevice {
+    let code = read_invite_code(code).unwrap();
+    let invitation = accepted_invitation(&code);
     let (temp, directory) = group.directory();
-    let request =
-        JoiningIdentity::prepare(&directory, &code, directory.settings().unwrap().device_id, name)
-            .unwrap();
+    let request = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        directory.settings().unwrap().device_id,
+        name,
+        carol_for(&code),
+    )
+    .unwrap();
     let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
     let device = group.open_with(temp, request.identity(), None, storage).await;
     device.sync.accept_join(&invitation).await.unwrap();
-    Joiner { device, request }
+    JoiningDevice { device, request }
 }
 
 /// A joining device that has sent its request to an open invite.
-pub(crate) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
+pub(crate) async fn join(group: &Group, code: &str, name: &str) -> JoiningDevice {
     let joiner = joiner(group, code, name).await;
     assert!(joiner.device.sync.submit_join(&joiner.request).await.unwrap(), "the invite is open");
     joiner
@@ -69,7 +91,7 @@ pub(crate) async fn listed(device: &Device) -> Vec<Invite> {
 pub(crate) async fn carol_invite(ana: &Device, lifetime: InviteLifetime) -> Invite {
     ana.sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "Carol@example.org".into() },
             lifetime,
         )
@@ -103,7 +125,7 @@ pub(crate) async fn key_replacement_invite(
 pub(crate) async fn s3_invite(ana: &Device, name: &str) -> Invite {
     ana.sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: name.into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::S3AccessKey {
                 access_key_id: format!("{}-key", name.to_lowercase()),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -219,7 +241,7 @@ async fn each_lifetime_expires_on_the_inviting_device() {
         let invite = ana
             .sync
             .create_invite(
-                InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+                InviteTarget::NewMember { role: MemberRole::Member },
                 InviteAccess::S3AccessKey {
                     access_key_id: "dan-key".into(),
                     secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
@@ -229,13 +251,13 @@ async fn each_lifetime_expires_on_the_inviting_device() {
             .await
             .unwrap();
         assert_eq!(invite.expires_at, made + Duration::from_secs(seconds));
-        assert_eq!(invite.invitee.as_deref(), Some("Dan"));
-        let CodeInfo::Invite(InviteInfo { invitee, .. }) =
+        assert_eq!(invite.kind, InviteKind::NewPerson);
+        let CodeInfo::Invite(InviteInfo { kind, .. }) =
             decode_code_info(invite.shown_code()).unwrap()
         else {
             panic!("an invite code");
         };
-        assert_eq!(invitee.as_deref(), Some("Dan"));
+        assert_eq!(kind, InviteKind::NewPerson);
         group.clock.set(invite.expires_at - Duration::from_secs(1));
         ana.sync.pass().await.unwrap();
         assert_eq!(ana.database().operations().await.unwrap().len(), 1);
@@ -262,28 +284,6 @@ async fn opening_writes_the_expiry_of_an_invite_that_ended_while_closed() {
     opened(invite.expires_at).await.unwrap();
     assert!(listed(&ana).await.is_empty());
     ana.sync.database.close().await.unwrap();
-}
-
-/// A new person's invite needs a name the format can carry, checked before
-/// any provider change.
-#[tokio::test]
-async fn an_invite_for_a_new_person_refuses_an_empty_name() {
-    let group = Group::shared();
-    let ana = group.device(1).await;
-    group.create(&ana).await;
-    let count = ana.storage.request_count();
-    let result = ana
-        .sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: String::new() },
-            InviteAccess::ProviderAccount { email: "dan@example.org".into() },
-            InviteLifetime::Hour,
-        )
-        .await;
-    assert!(matches!(result, Err(SyncError::Format(_))), "{:?}", result.err());
-    assert_eq!(ana.storage.request_count(), count);
-    assert!(ana.database().operations().await.unwrap().is_empty());
-    ana.database().close().await.unwrap();
 }
 
 #[tokio::test]
@@ -400,7 +400,7 @@ async fn a_refused_grant_is_the_invites_pending_record_until_cancelled() {
     let result = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "owner@example.test".into() },
             crate::InviteLifetime::Day,
         )
@@ -455,7 +455,7 @@ async fn an_invite_its_maker_can_no_longer_make_is_refused_before_any_grant() {
     let result = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "carol@example.org".into() },
             crate::InviteLifetime::Day,
         )
@@ -499,7 +499,7 @@ async fn a_live_query_follows_each_open_invite_in_order() {
         (shown[0].id, shown[0].shown_code(), &shown[0].shown_request().cloned()),
         (invite.id, invite.shown_code(), &None)
     );
-    assert_eq!(shown[0].invitee.as_deref(), Some("Carol"));
+    assert_eq!(shown[0].kind, InviteKind::NewPerson);
     assert_eq!(shown[0], invite);
     // A rename and the slots after it leave the code the joiner scanned as
     // it was: its saved request is bound to those exact bytes.
@@ -675,7 +675,7 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
     let invite = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::S3AccessKey {
                 access_key_id: "ana".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -692,6 +692,7 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
         &code,
         directory.settings().unwrap().device_id,
         "Dan's phone",
+        carol_for(&code),
     )
     .unwrap();
     let dan = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
@@ -723,7 +724,7 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
     let invite = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::S3AccessKey {
                 access_key_id: "dan-key".into(),
                 secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
@@ -787,7 +788,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     let waiting = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "dan@example.org".into() },
             InviteLifetime::Day,
         )
@@ -861,6 +862,7 @@ async fn a_request_sent_after_the_invite_ended_finds_its_marker() {
         &code,
         directory.settings().unwrap().device_id,
         "Carol's phone",
+        carol_for(&code),
     )
     .unwrap();
     let carol = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;

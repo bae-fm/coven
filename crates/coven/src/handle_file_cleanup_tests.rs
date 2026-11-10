@@ -12,9 +12,7 @@ use coven_storage::Storage;
 /// Returns Ben's member id and the file.
 async fn bens_upload() -> (Network, MemberId, FileId) {
     let mut network = file_network().await;
-    network
-        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
-        .await;
+    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
     let ben = &network.devices[1];
     let kept = attach(&ben.handle, "kept", vec![5; 1024]).await;
     wait_for_empty_queue(&ben.handle).await;
@@ -188,9 +186,7 @@ async fn an_admin_cleans_up_after_a_members_last_device() {
 #[tokio::test]
 async fn an_admin_cleans_up_when_the_owner_has_no_device_left() {
     let mut network = file_network().await;
-    network
-        .join_as(1, InviteTarget::NewMember { role: MemberRole::Admin, name: "Ben".into() })
-        .await;
+    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Admin }).await;
     let ana = &network.devices[0];
     let kept = attach(&ana.handle, "kept", vec![5; 1024]).await;
     wait_for_empty_queue(&ana.handle).await;

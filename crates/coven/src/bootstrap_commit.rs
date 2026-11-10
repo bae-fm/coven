@@ -162,16 +162,18 @@ pub(super) async fn publish_bootstrap(
 /// it made the invite, which the store keeps until its history creates it.
 /// The app lists the store by it meanwhile, and the saved code keeps it: a
 /// rename the store applies later is newer, and one before that slot older
-/// (§13.1, §13.2). The store also keeps the new person's name the invite
-/// carries, which only the code held, until the app acknowledges it.
+/// (§13.1, §13.2). The store also keeps `invitee`, the new person's name the
+/// join's request carried, which only the saved request held, until the app
+/// acknowledges it.
 pub(super) async fn joined_name(
     database: &Database,
     code: &InviteCode,
+    invitee: Option<String>,
 ) -> Result<coven_sync::SavedName, BootstrapError> {
     let named_at = coven_merge::Slot::new(code.read_through)
         .ok_or(BootstrapError::Code(CodeError::Invalid))?;
     database
-        .initialize_joined_store(code.name.clone(), named_at, code.invitee.clone())
+        .initialize_joined_store(code.name.clone(), named_at, invitee)
         .await
         .map_err(CovenError::from)?;
     loaded_name(database).await

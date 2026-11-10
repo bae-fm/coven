@@ -66,6 +66,8 @@ pub use coven_database::WriteCutoff;
 pub use coven_database::{
     DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
 };
+pub use coven_format::codes::InviteKind;
+pub use coven_format::objects::Joiner;
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{CutOffRefusal, DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;

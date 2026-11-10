@@ -5,8 +5,9 @@ use super::*;
 impl SequenceSync {
     /// Open and check a request: it opens with the invite's secret, its own
     /// new signing key verifies it, it repeats the invite's id and member id,
-    /// and `state`, the history this pass caught up with, has bound neither
-    /// of its keys and registers no device with its device id (§13.2). A
+    /// it is for the invite's kind of person, and `state`, the history this
+    /// pass caught up with, has bound neither of its keys and registers no
+    /// device with its device id (§13.2). A
     /// request that fails a check is `Refused`; one in a newer format than
     /// this device reads waits for its update, as an error.
     pub(super) fn open_request(
@@ -27,7 +28,12 @@ impl SequenceSync {
         let Some((request, plain)) = opened else {
             return Ok(Opened::Refused(crate::write_object::wrong_identity(&path)));
         };
-        if request.invite != work.id || request.member != work.member {
+        // A request for a new person carries the name they typed, and one for
+        // a recovery none; an invite takes only its own kind (§13.2).
+        if request.invite != work.id
+            || request.member != work.member
+            || request.joiner.kind() != work.kind()
+        {
             return Ok(Opened::Refused(crate::write_object::wrong_identity(&path)));
         }
         if !crate::effects::fresh(state, &request.keys) {

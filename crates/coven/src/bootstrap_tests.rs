@@ -251,6 +251,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         let mut joining = Box::pin(join_with_invite(
             install.builder(&owner, owner.recipient()),
             invite.shown_code(),
+            carol_joins(invite.shown_code()),
             "New phone",
             |_| {},
             &control,
@@ -271,6 +272,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let mut joining = Box::pin(join_with_invite(
         install.builder(&owner, owner.recipient()),
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "New phone",
         |_| {},
         &control,
@@ -784,7 +786,14 @@ async fn joining_retains_the_approved_member_in_session_custody() {
         .builder(&owner, owner.recipient())
         .key_custody(CustodyChoice::InMemory)
         .identity_custody(CustodyChoice::InMemory);
-    let joining = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
+    let joining = join_with_invite(
+        builder,
+        invite.shown_code(),
+        carol_joins(invite.shown_code()),
+        "New phone",
+        |_| {},
+        &control,
+    );
     let (handle, member) = owner
         .join_and_approve(joining, &control, |_| async {
             install.absent(owner.directory.id()).await;

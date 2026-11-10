@@ -171,21 +171,28 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
 }
 
 #[test]
-fn invite_carries_the_person_after_the_store_name() {
+fn invite_carries_its_kind_and_no_person_after_the_store_name() {
     let mut invite = test_utils::invite();
-    invite.invitee = Some("Dan".into());
     let bytes = invite.to_bytes().unwrap();
-    // Prefix, store id, then the store name `S`.
+    // Prefix, store id, then the store name `S`, then the kind: the fixture
+    // recovers a member.
     assert_eq!(&bytes[23..28], b"\0\0\0\x01S");
-    assert_eq!(&bytes[28..36], b"\x01\0\0\0\x03Dan");
+    assert_eq!(bytes[28], 1);
+    assert_eq!(InviteCode::from_bytes(&bytes).unwrap().kind, InviteKind::Recovery);
+    invite.kind = InviteKind::NewPerson;
+    let bytes = invite.to_bytes().unwrap();
+    assert_eq!(bytes[28], 0);
     let decoded = InviteCode::from_bytes(&bytes).unwrap();
-    assert_eq!(decoded.invitee.as_deref(), Some("Dan"));
+    assert_eq!(decoded.kind, InviteKind::NewPerson);
     assert_eq!(decoded.invite, invite.invite);
-    // The fixture's replacement names no person.
-    let fixture = test_utils::invite().to_bytes().unwrap();
-    assert_eq!(fixture[28], 0);
-    invite.invitee = Some(String::new());
-    assert!(invite.to_bytes().is_err());
+    // The code has no room for a person's name: the expiry follows the kind.
+    assert_eq!(&bytes[29..37], &86_400u64.to_be_bytes());
+    let mut unknown = bytes.to_vec();
+    unknown[28] = 2;
+    assert_eq!(
+        InviteCode::from_bytes(&unknown).err(),
+        Some(Error::UnknownTag { field: "invite kind", tag: 2 })
+    );
 }
 
 #[test]
@@ -219,7 +226,6 @@ fn maximum_storage_and_names_use_zeroizing_frame_and_text_types() {
     assert_eq!(decoded.to_bytes().unwrap(), bytes);
     let mut invite = test_utils::invite();
     invite.name = "N".repeat(1024);
-    invite.invitee = Some("P".repeat(1024));
     invite.storage = SecretBytes::new(vec![0xcd; MAX_STORAGE]);
     assert_eq!(
         InviteCode::from_text(&invite.to_text().unwrap()).unwrap().to_bytes().unwrap(),

@@ -1326,13 +1326,13 @@ acceptance it records first; a decline's acceptance ends with the invite, and
 an approval's becomes the store's access. A join finds its admission, which
 registered its device, by the copies it carries; the published store's
 first load applies it, counted or refused. The app drops either call at any
-point, and records the person's profile from the name the invite carried,
+point, and records the person's profile from the name the join's request carried,
 acknowledging the name the store keeps. Under `Rules.correct` a restore
 refuses an installation holding an invite code, and a join one holding a
 restore's record, a join records that it is accepting before it accepts, a
 join publishes the store in the step that finds its admission, a store whose
 first load leaves its device never a member stops for good, and publishing
-keeps the invite's person's name with the store.
+keeps the person's name its request carried with the store.
 
 - `never_stranded`: whatever storage may hold of a join's request or a
   restore's registration, and whatever acceptance the joining account
@@ -1342,7 +1342,7 @@ keeps the invite's person's name with the store.
 - `refused_stops`: a store a join published whose first load reached the end
   of the sequence counts its device a member; a refused admission stopped it.
 - `invitee_kept`: a store a join published keeps the person's name its
-  invite carried until the app acknowledges it, whatever happens between.
+  request carried until the app acknowledges it, whatever happens between.
 - `acknowledge_idempotent`: acknowledging the name again is allowed and
   changes nothing.
 

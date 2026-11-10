@@ -70,9 +70,12 @@ use status::{loading, open_installation};
 
 /// Accept provider access, retain one signed request across restarts, and wait
 /// for approval. Returns the open store, or None when declined or expired.
-/// Dropping the future before the join finds its admission preserves the
-/// unfinished join for a subsequent call with the same invite and device
-/// name, or `resume_join`. On Dropbox and
+/// `joiner` is the new person with the name they typed, or a recovery, as the
+/// invite's `InviteInfo::kind` says; the other kind fails with
+/// `CodeError::WrongJoiner` before anything changes. Dropping the future
+/// before the join finds its admission preserves the unfinished join for a
+/// subsequent call with the same invite, device name and person, or
+/// `resume_join`. On Dropbox and
 /// OneDrive the builder's sign-in is kept on the device beside the saved code
 /// until the join ends, and a later call without one uses it (§13.2).
 /// `control` cancels the join or asks for a check for approval at once.
@@ -87,6 +90,7 @@ use status::{loading, open_installation};
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
+    joiner: Joiner,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
@@ -98,7 +102,7 @@ pub async fn join_with_invite(
         builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
-            name: DeviceName::Given(device_name.into()),
+            terms: RequestTerms::Given { device_name: device_name.into(), joiner },
             check: control.check.subscribe(),
         },
         on_status,
@@ -143,8 +147,8 @@ pub(super) async fn unfinished_joins(
     Ok(joins)
 }
 
-/// Continue an unfinished join from its saved code and the device name its
-/// saved request carries (`CovenBuilder::resume_join`).
+/// Continue an unfinished join from its saved code and the device name and
+/// person its saved request carries (`CovenBuilder::resume_join`).
 pub(super) async fn resume_join(
     builder: CovenBuilder,
     store: StoreId,
@@ -156,7 +160,11 @@ pub(super) async fn resume_join(
     let cancel = control.cancel.subscribe();
     Box::pin(bootstrap_device(
         builder,
-        BootstrapRequest::Join { code, name: DeviceName::Saved, check: control.check.subscribe() },
+        BootstrapRequest::Join {
+            code,
+            terms: RequestTerms::Saved,
+            check: control.check.subscribe(),
+        },
         on_status,
         &cancel,
     ))
@@ -211,17 +219,17 @@ enum BootstrapRequest {
     },
     Join {
         code: InviteCode,
-        name: DeviceName,
+        terms: RequestTerms,
         /// Changes each time the app asks for a check for approval now.
         check: watch::Receiver<u64>,
     },
 }
 
-/// The device name a join's request carries.
-enum DeviceName {
-    /// The name the app passed, which a saved request must repeat.
-    Given(String),
-    /// The name the saved request carries: the join resumes from it.
+/// The device name and person a join's request carries.
+enum RequestTerms {
+    /// What the app passed, which a saved request must repeat.
+    Given { device_name: String, joiner: Joiner },
+    /// What the saved request carries: the join resumes from it.
     Saved,
 }
 
@@ -288,6 +296,7 @@ async fn bootstrap_device(
             storage,
             state,
             waits,
+            invitee,
         })) => {
             let requests = storage.requests();
             status(BootstrapStatus::Committing);
@@ -296,7 +305,9 @@ async fn bootstrap_device(
             // with (E5). A join publishes before it loads, with the name its
             // invite carries (§13.2).
             let name = match &request {
-                BootstrapRequest::Join { code, .. } => commit::joined_name(&database, code).await,
+                BootstrapRequest::Join { code, .. } => {
+                    commit::joined_name(&database, code, invitee).await
+                }
                 BootstrapRequest::Restore { .. } => commit::loaded_name(&database).await,
             };
             let name = match name {
@@ -528,6 +539,9 @@ struct Loaded {
     /// The sequence state the handle continues, which gates the connection.
     state: Arc<coven_sync::SequenceState>,
     waits: Arc<coven_sync::RetryWaits>,
+    /// The new person's name a join's request carried, for the store it
+    /// publishes to keep; none for a restore and for a recovery.
+    invitee: Option<String>,
 }
 
 /// Load the store into `pending` and register its device. A join loads
@@ -552,9 +566,9 @@ async fn prepare_and_load(
             name.clone(),
             Admission::Restoring,
         ),
-        BootstrapRequest::Join { code, name, check } => {
+        BootstrapRequest::Join { code, terms, check } => {
             let (joining, data, sign_in) =
-                join::prepare_request(builder, &directory, code, name, check.clone())?;
+                join::prepare_request(builder, &directory, code, terms, check.clone())?;
             (
                 joining.identity(),
                 data,
@@ -836,6 +850,10 @@ async fn prepare_and_load(
             ring,
         )))
     });
+    let invitee = match &admission {
+        Admission::Joining(joining) => joining.invitee(),
+        Admission::Restoring => None,
+    };
     match result {
         Ok(Some((code, location, credentials, ring))) => Ok(Some(Loaded {
             code,
@@ -848,6 +866,7 @@ async fn prepare_and_load(
             storage,
             state,
             waits,
+            invitee,
         })),
         result => {
             let closed = close_database(&database).await;

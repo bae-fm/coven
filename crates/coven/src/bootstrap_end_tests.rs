@@ -137,7 +137,14 @@ async fn an_unsent_join_left_without_its_code_does_not_fail_the_next_invite() {
     let code = coven_sync::read_invite_code(first.shown_code()).unwrap();
     let directory = pending.directory();
     let device = directory.settings().unwrap().device_id;
-    coven_sync::JoiningIdentity::prepare(&directory, &code, device, "Carol's phone").unwrap();
+    coven_sync::JoiningIdentity::prepare(
+        &directory,
+        &code,
+        device,
+        "Carol's phone",
+        carol_joins(first.shown_code()),
+    )
+    .unwrap();
     drop(pending);
     assert!(saved_code(&install, store).is_none());
     joins_and_is_approved(&owner, &install, &owner.invite().await).await;
@@ -149,6 +156,7 @@ async fn joins_and_is_approved(owner: &Owner, install: &Installation, invite: &I
     let joining = join_with_invite(
         install.builder(owner, owner.recipient()),
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "Carol's phone",
         |_| {},
         &control,
@@ -173,7 +181,10 @@ async fn a_join_that_stopped_before_its_create_sends_the_request_on_resume() {
     let control = JoinControl::new();
     let resumed = install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
     let (result, _) = owner.join_and_approve(resumed, &control, |_| async {}).await;
-    result.unwrap().unwrap().close().await.unwrap();
+    // The resume gave no name: the saved request returns the one Carol typed.
+    let handle = result.unwrap().unwrap();
+    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    handle.close().await.unwrap();
     owner.close().await;
 }
 

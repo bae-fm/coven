@@ -91,7 +91,7 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
     let control = JoinControl::new();
     let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
     assert!(matches!(
-        join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control).await,
+        join_with_invite(builder, invite.shown_code(), carol_joins(invite.shown_code()), "New phone", |_| {}, &control).await,
         Err(BootstrapError::Sync(SyncError::Storage(error)))
             if error.failure() == StorageFailure::AccessNotGranted { required }
     ));
@@ -113,7 +113,14 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
     let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()).clock(clock));
     sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await;
     let control = JoinControl::new();
-    let join = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
+    let join = join_with_invite(
+        builder,
+        invite.shown_code(),
+        carol_joins(invite.shown_code()),
+        "New phone",
+        |_| {},
+        &control,
+    );
     let (joined, ()) = join_with_response(join, async {
         // The join waits for approval once its request is made.
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();
@@ -263,7 +270,14 @@ async fn a_join_records_the_folder_label_once_it_accepted_the_share() {
         let access = owner.storage.config().oauth_access().unwrap();
         sign_in_held(&owner, &mut builder, access).await;
         let control = JoinControl::new();
-        let joining = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
+        let joining = join_with_invite(
+            builder,
+            invite.shown_code(),
+            carol_joins(invite.shown_code()),
+            "New phone",
+            |_| {},
+            &control,
+        );
         let (joined, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
         let handle = joined.unwrap().unwrap();
         let recorded = owner.handle.storage_config().await.unwrap().unwrap();
@@ -303,6 +317,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "Carol's phone",
         |status| {
             if matches!(

@@ -35,7 +35,7 @@ struct Case {
     ben: Device,
     /// Ana's other device, which takes back the share of her removed one.
     laptop: Device,
-    carol: Option<Joiner>,
+    carol: Option<JoiningDevice>,
     invite: Invite,
     operation: OperationId,
     /// The request the app was last shown.
@@ -345,6 +345,7 @@ impl Case {
             keys: self.ben.identity.keys().public_keys(),
             device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol's phone".into(),
+            joiner: crate::sequence_sync::sequence_invites::tests::carol_for(&code),
         };
         let path = code.request_path();
         let bytes =

@@ -30,8 +30,8 @@ pub struct NewInvite {
 /// Made by a device that isn't a registered admin, the step fails with
 /// `Rejected(NotAllowed)`; for a replacement of a member who isn't active,
 /// with `Rejected(TargetGone)`, and of this device's own member, with
-/// `Rejected(NotAllowed)`. A name that isn't one fails with `Format`, and
-/// access that doesn't fit `location` with its storage failure.
+/// `Rejected(NotAllowed)`. Access that doesn't fit `location` fails with its
+/// storage failure.
 pub(crate) fn make_invite(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
@@ -43,9 +43,6 @@ pub(crate) fn make_invite(
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
     let NewInvite { target, access, lifetime } = invite;
-    if let InviteTarget::NewMember { name, .. } = &target {
-        coven_format::value::name(name)?;
-    }
     if matches!(
         location,
         coven_storage::StorageConfig::Dropbox {
@@ -69,9 +66,9 @@ pub(crate) fn make_invite(
         if !applied.active_admin(&me) {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
-        let (member, binding, invitee) = match target {
-            InviteTarget::NewMember { role, name } => {
-                (MemberId(ids.new_id()), InviteBinding::Add { role }, Some(name))
+        let (member, binding) = match target {
+            InviteTarget::NewMember { role } => {
+                (MemberId(ids.new_id()), InviteBinding::Add { role })
             }
             InviteTarget::ReplaceMemberKeys { member: target } => {
                 let Some(existing) = applied.active_member(&target) else {
@@ -96,14 +93,13 @@ pub(crate) fn make_invite(
                             .into());
                     }
                 }
-                (target, InviteBinding::Replace { expected: existing.keys }, None)
+                (target, InviteBinding::Replace { expected: existing.keys })
             }
         };
         let work = InviteWork {
             id,
             device,
             member,
-            invitee,
             binding,
             access: grant,
             secret,

@@ -23,15 +23,15 @@ pub(super) fn prepare_request(
     builder: &CovenBuilder,
     directory: &StoreDir,
     code: &InviteCode,
-    name: &DeviceName,
+    terms: &RequestTerms,
     check: tokio::sync::watch::Receiver<u64>,
 ) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
-    let identity = match name {
-        DeviceName::Given(name) => {
+    let identity = match terms {
+        RequestTerms::Given { device_name, joiner } => {
             let device = directory.settings().map_err(CovenError::from)?.device_id;
-            JoiningIdentity::prepare(directory, code, device, name)?
+            JoiningIdentity::prepare(directory, code, device, device_name, joiner.clone())?
         }
-        DeviceName::Saved => JoiningIdentity::resume(directory, code)?,
+        RequestTerms::Saved => JoiningIdentity::resume(directory, code)?,
     };
     // Kept from before the request can be sent until the join ends, so a
     // join that may have sent its request is always listed and resumable
@@ -70,6 +70,15 @@ impl Joining {
     /// The name the device gave itself in its request.
     pub(super) fn device_name(&self) -> &str {
         self.identity.device_name()
+    }
+
+    /// The new person's name the request carries, which the store this join
+    /// publishes keeps until the app acknowledges it; none for a recovery.
+    pub(super) fn invitee(&self) -> Option<String> {
+        match self.identity.joiner() {
+            Joiner::NewPerson { name } => Some(name.clone()),
+            Joiner::Recovery => None,
+        }
     }
 
     /// Whether the request may have been sent, here or before a restart.

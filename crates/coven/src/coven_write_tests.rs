@@ -241,7 +241,7 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     stopped(&network.devices[0]).await;
     let invite = |key: &str| {
         (
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::S3AccessKey {
                 access_key_id: key.into(),
                 secret_access_key: SecretText::new("secret".into()),
@@ -332,7 +332,7 @@ async fn an_invite_carries_the_s3_key_this_device_holds() {
     let ana = &network.devices[0].handle;
     let invite = crate::tests::invite(
         ana,
-        InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+        InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::HeldS3AccessKey,
         crate::InviteLifetime::Day,
     )

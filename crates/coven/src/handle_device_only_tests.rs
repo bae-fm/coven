@@ -35,9 +35,7 @@ async fn household() -> Network {
         vec![Migration::addition(1, "tracks", SCHEMA)],
     )
     .await;
-    network
-        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
-        .await;
+    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
     network.sync(0).await;
     network
 }

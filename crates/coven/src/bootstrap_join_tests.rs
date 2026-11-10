@@ -13,14 +13,20 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     code.store = StoreId(UuidIds.new_id());
     let device = directory.settings().unwrap().device_id;
     assert!(matches!(
-        JoiningIdentity::prepare(&directory, &code, device, "New phone"),
+        JoiningIdentity::prepare(&directory, &code, device, "New phone", carol_joins(invite.shown_code())),
         Err(SyncError::Code(CodeError::WrongStore { expected, actual }))
             if expected == directory.id() && actual == code.store
     ));
     assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
     // Through bootstrap, it is refused as the join's code, as a restore's is.
-    let refused = JoiningIdentity::prepare(&directory, &code, device, "New phone")
-        .map_err(BootstrapError::from);
+    let refused = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        device,
+        "New phone",
+        carol_joins(invite.shown_code()),
+    )
+    .map_err(BootstrapError::from);
     assert!(matches!(refused, Err(BootstrapError::Code(CodeError::WrongStore { .. }))));
     install.absent(owner.directory.id()).await;
     pending.cancel().unwrap();
@@ -41,6 +47,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         &code,
         directory.settings().unwrap().device_id,
         "New phone",
+        carol_joins(invite.shown_code()),
     )
     .unwrap();
     let file = directory.owned_file(StoreFile::Bootstrap);
@@ -66,6 +73,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         let result = join_with_invite(
             install.builder(&owner, owner.recipient()),
             &changed.to_text().unwrap(),
+            carol_joins(invite.shown_code()),
             "New phone",
             |_| {},
             &control,
@@ -86,9 +94,21 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         &code,
         directory.settings().unwrap().device_id,
         "New phone",
+        carol_joins(invite.shown_code()),
     )
     .unwrap();
     assert!(resumed.attempted());
+    // The saved request gives the person's name back, and another name or a
+    // recovery in its place is a changed join.
+    assert_eq!(resumed.joiner(), &Joiner::NewPerson { name: "Carol".into() });
+    for other in [Joiner::NewPerson { name: "Caroline".into() }, Joiner::Recovery] {
+        let device = directory.settings().unwrap().device_id;
+        let changed = JoiningIdentity::prepare(&directory, &code, device, "New phone", other);
+        assert!(matches!(
+            changed,
+            Err(SyncError::InvitationChanged | SyncError::Code(CodeError::WrongJoiner { .. }))
+        ));
+    }
     assert_eq!(resumed.identity().keys().public_keys(), identity.identity().keys().public_keys());
     // The resumed identity keeps the id the invite fixed.
     assert_eq!(resumed.identity().member(), code.member);
@@ -289,6 +309,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     let joining = join_with_invite(
         joined.builder(&owner, owner.recipient()),
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "Guest phone",
         |_| {},
         &control,
@@ -351,6 +372,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     let joining = join_with_invite(
         builder,
         invite.shown_code(),
+        carol_joins(invite.shown_code()),
         "New phone",
         |status| {
             if matches!(
@@ -593,7 +615,7 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
     let CodeInfo::Invite(info) = decode_code_info(invite.shown_code()).unwrap() else {
         panic!("an invite code");
     };
-    assert_eq!((info.store_name.as_str(), info.invitee.as_deref()), ("Household", Some("Carol")));
+    assert_eq!((info.store_name.as_str(), info.kind), ("Household", InviteKind::NewPerson));
     assert_eq!(builder.unfinished_joins().await.unwrap(), [info]);
     assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.shown_code());
     let control = JoinControl::new();

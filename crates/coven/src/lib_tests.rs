@@ -119,6 +119,18 @@ pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>)
     }
 }
 
+/// Who joins with `code`: Carol, typing her name, when it adds a new person;
+/// a recovery otherwise.
+pub(crate) fn carol_joins(code: &str) -> Joiner {
+    let Ok(CodeInfo::Invite(info)) = decode_code_info(code) else {
+        panic!("an invite code");
+    };
+    match info.kind {
+        InviteKind::NewPerson => Joiner::NewPerson { name: "Carol".into() },
+        InviteKind::Recovery => Joiner::Recovery,
+    }
+}
+
 /// Make an invite, as an app does in a write of its own, and wait for the
 /// pass that grants its access to show its code.
 pub(crate) async fn invite(

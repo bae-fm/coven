@@ -1,3 +1,4 @@
+use crate::sequence_sync::sequence_invites::tests::carol_for;
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::{admin::StoreChange, device_gone::DeviceGone};
@@ -7,14 +8,19 @@ use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 
 /// A joining device for `invite`'s code, with its request prepared and not
 /// yet sent.
-async fn s3_joiner(group: &Group, invite: &Invite, name: &str) -> Joiner {
+async fn s3_joiner(group: &Group, invite: &Invite, name: &str) -> JoiningDevice {
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let request =
-        JoiningIdentity::prepare(&directory, &code, directory.settings().unwrap().device_id, name)
-            .unwrap();
+    let request = JoiningIdentity::prepare(
+        &directory,
+        &code,
+        directory.settings().unwrap().device_id,
+        name,
+        carol_for(&code),
+    )
+    .unwrap();
     let device = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
-    Joiner { device, request }
+    JoiningDevice { device, request }
 }
 
 /// What storage holds at `path`, if anything.

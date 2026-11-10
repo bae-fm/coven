@@ -153,11 +153,7 @@ impl Network {
         network
     }
     async fn join(&mut self, index: usize) {
-        self.join_as(
-            index,
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-        )
-        .await;
+        self.join_as(index, InviteTarget::NewMember { role: MemberRole::Member }).await;
     }
     /// Join device `index` through an invite for `target`, approved by device 0.
     pub(crate) async fn join_as(&mut self, index: usize, target: InviteTarget) {
@@ -199,6 +195,7 @@ impl Network {
                 .synced_tables(self.schema.0.clone())
                 .migrations(self.schema.1.clone()),
             invite.shown_code(),
+            carol_joins(invite.shown_code()),
             &name,
             |status| {
                 if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {

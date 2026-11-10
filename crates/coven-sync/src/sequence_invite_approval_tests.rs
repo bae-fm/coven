@@ -1,5 +1,5 @@
 use crate::sequence_sync::sequence_invites::tests::{
-    invite, join, no_request, request_path, requests,
+    carol_for, invite, join, no_request, request_path, requests,
 };
 use crate::sequence_sync::sequence_invites::InviteWork;
 use crate::sequence_sync::tests::*;
@@ -476,7 +476,9 @@ async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
     let device = directory.settings().unwrap().device_id;
-    let mut request = JoiningIdentity::prepare(&directory, &code, device, "Carol's phone").unwrap();
+    let mut request =
+        JoiningIdentity::prepare(&directory, &code, device, "Carol's phone", carol_for(&code))
+            .unwrap();
     let phone = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
     assert!(phone.sync.submit_join(&request).await.unwrap());
     ana.sync.pass().await.unwrap();
@@ -626,6 +628,7 @@ async fn a_request_failing_a_check_ends_its_invite() {
             keys,
             device,
             device_name: "Carol's phone".into(),
+            joiner: carol_for(&code),
         };
         publish_request(&group, &code, &request, signer).await;
         let pass = ana.sync.pass().await;
