@@ -377,7 +377,8 @@ private def reasons : List (String × Reason) := [
     ("memberKeysReplaced", .memberKeysReplaced)]
 
 private def locals : List (String × Local) := [
-    ("database", .database), ("disk", .disk), ("keyCustody", .keyCustody),
+    ("database", .database), ("diskFull", .diskFull), ("diskDenied", .diskDenied),
+    ("diskOther", .diskOther), ("keyCustody", .keyCustody),
     ("crypto", .crypto), ("operation", .operation), ("shutdown", .shutdown),
     ("bug", .bug)]
 
