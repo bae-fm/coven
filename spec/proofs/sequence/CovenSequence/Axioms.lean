@@ -511,6 +511,16 @@ import SequenceApply
 #print axioms CovenSequence.Retention.choose_kept
 #print axioms CovenSequence.Retention.kept_replacement
 #print axioms CovenSequence.Retention.kept_candidates_same_first
+#print axioms CovenSequence.Announcements.answer_same
+#print axioms CovenSequence.Announcements.rebuilt_same
+#print axioms CovenSequence.Announcements.filtered_replay
+#print axioms CovenSequence.Announcements.forgettable_of_passed
+#print axioms CovenSequence.Announcements.agree_forget
+#print axioms CovenSequence.Announcements.equal_coverage_kept
+#print axioms CovenSequence.Announcements.floor_names_kept
+#print axioms CovenSequence.Announcements.newest_kept
+#print axioms CovenSequence.Announcements.listing_spares
+#print axioms CovenSequence.Announcements.listing_finds_superseded
 #print axioms CovenSequence.JoinScan.readOrDamage_undamaged
 #print axioms CovenSequence.JoinScan.damaged_not_passed
 #print axioms CovenSequence.JoinScan.stop_strands_scan

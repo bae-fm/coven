@@ -7,6 +7,7 @@ import CovenSequence.Reader
 import CovenSequence.ReaderExamples
 import CovenSequence.Reload
 import CovenSequence.Retention
+import CovenSequence.Announcements
 import CovenSequence.Device
 import CovenSequence.Operation
 import CovenSequence.Setup

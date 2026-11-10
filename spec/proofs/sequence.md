@@ -1675,6 +1675,59 @@ The model takes the revision a floor read returns as storage's current one, and
 the log's revisions as distinct: a write makes a new revision, and a revision
 never reappears.
 
+## Which announcements a device keeps
+
+[`Announcements`](sequence/CovenSequence/Announcements.lean) models the
+announcements a device holds and the original slots it rebuilds them from
+([§16](../coven.md#16-snapshots-the-floor-and-deleting-history)). An announcement has a slot,
+an audience, a coverage, a purpose and the body it names. `accepts` is
+`announcement_allowed`: coverage below the slot, nothing of the audience past
+it, and the state allowing it. `activation` is a raise's or reset's check in
+`checked_change`: it finds the announcement by its slot, needs an earlier one of
+its kind, the state's permission, a boundary not already in place, and nothing
+of the audience past the named coverage. `Checks` stands for what reads the
+store's state rather than its announcements; admin entries are never
+forgotten, so every device sees the same state there.
+
+`forgettable` is the rule: no applied raise or reset names the announcement,
+another of its audience covers more, its slot is below the floor's `first`, an
+ordinary one of its audience is newer, and no journaled floor capture names it.
+A `Device` applies entries and, at any point, forgets what is forgettable at the
+`first` and journal it is given. It stores each admin entry's original and an
+announcement's only when it accepts it.
+
+- `answer_same`: after any interleaving of entries and forgetting, a device
+  accepts or refuses every later announcement, and applies or refuses every
+  later raise or reset, exactly as a device holding every announcement does.
+  `Agree` is what the two share: the same raises and resets, a part of the same
+  announcements, one at least as large for each coverage the full history
+  holds, and for each one missing, one covering more. `agree_forget`: an
+  announcement at its audience's greatest coverage is never forgettable, so
+  forgetting keeps that.
+- `rebuilt_same`: replaying a device's stored originals gives its history.
+  `filtered_replay` is the step that needs care: the replay without the
+  forgotten announcements meets each raise or reset before everything that
+  later passed it. `forgettable_of_passed` shows a raise named an announcement
+  it would now accept only if that announcement is forgettable too, since the
+  one that passed it is older than an ordinary one, below `first` and covers
+  more than the named one, and no raise or reset applied after the passing one
+  could name it.
+- `equal_coverage_kept`: Ana's raise announcement at slot 50 and Ben's ordinary
+  one at 60 both cover 49. Her raise entry at 120 applies on a device holding
+  both and is refused on one without hers; hers is not forgettable.
+- `floor_names_kept`: a floor write meeting `Retention.floor_write_rules` from
+  a `first` at least the device's names announcements at or after it, since
+  each announcement is after its coverage. `newest_kept`: the newest
+  announcement of an audience, and the newest usable one, are never
+  forgettable.
+- `listing_spares` and `listing_finds_superseded`: a listing of a device's
+  snapshot folders deletes no body a kept announcement or an open operation
+  names, and every other body it lists.
+
+The model's journal keeps only ordinary announcements, as a floor capture names
+only ordinary ones. It takes slots in increasing order and does not model the
+state checks, the provider or the order in which a pass runs its steps.
+
 ## JSON runner
 
 Build with `cd spec/proofs/sequence && lake build`; the executable is
