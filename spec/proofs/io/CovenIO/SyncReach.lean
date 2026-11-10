@@ -26,38 +26,42 @@ theorem state_iff (f : Facts) (recorded : f.storage ≠ .none) (s : State) :
   · intro e; subst e; exact ⟨mem, highest⟩
   · intro h; exact (only s h.1 h.2).symm
 
-/-- **Which fact names a state.** The loop, a download, an upload, the missing
-credentials or a pending record. -/
+/-- **Which fact names a state.** The loop, a download, an upload, a queued
+write, the missing credentials or a pending record. -/
 theorem candidate_iff (f : Facts) (s : State) :
     s ∈ f.candidates ↔ f.loop = s ∨ (s = .syncing ∧ f.downloading = true) ∨
-      (∃ u ∈ f.uploads, u.candidate = some s) ∨ (s = .signedOut ∧ f.storage = .signedOut) ∨
-      ∃ r ∈ f.records, r.state = some s := by
-  simp only [Facts.candidates, Facts.rest, Facts.files, Facts.others, List.mem_cons,
-    List.mem_append, List.mem_filterMap]
+      (∃ u ∈ f.uploads, u.candidate = some s) ∨ (s = .waitingToSync ∧ f.unsent = true) ∨
+      (s = .signedOut ∧ f.storage = .signedOut) ∨ ∃ r ∈ f.records, r.state = some s := by
+  simp only [Facts.candidates, Facts.rest, Facts.files, Facts.writes, Facts.others,
+    List.mem_cons, List.mem_append, List.mem_filterMap]
   constructor
-  · rintro (e | (down | up) | (signed | named))
+  · rintro (e | ((down | up) | write) | (signed | named))
     · exact .inl e.symm
     · split at down
       · rename_i d; simp at down; exact .inr (.inl ⟨down, d⟩)
       · simp at down
     · exact .inr (.inr (.inl up))
+    · split at write
+      · rename_i w; simp at write; exact .inr (.inr (.inr (.inl ⟨write, w⟩)))
+      · simp at write
     · split at signed
-      · rename_i h; simp at signed; exact .inr (.inr (.inr (.inl ⟨signed, h⟩)))
+      · rename_i h; simp at signed; exact .inr (.inr (.inr (.inr (.inl ⟨signed, h⟩))))
       · simp at signed
-    · exact .inr (.inr (.inr (.inr named)))
-  · rintro (e | ⟨e, d⟩ | up | ⟨e, h⟩ | named)
+    · exact .inr (.inr (.inr (.inr (.inr named))))
+  · rintro (e | ⟨e, d⟩ | up | ⟨e, w⟩ | ⟨e, h⟩ | named)
     · exact .inl e.symm
-    · exact .inr (.inl (.inl (by simp [d, e])))
-    · exact .inr (.inl (.inr up))
+    · exact .inr (.inl (.inl (.inl (by simp [d, e]))))
+    · exact .inr (.inl (.inl (.inr up)))
+    · exact .inr (.inl (.inr (by simp [w, e])))
     · exact .inr (.inr (.inl (by simp [h, e])))
     · exact .inr (.inr (.inr named))
 
 /-- **Synced, exactly.** Synced has the lowest rank, so it shows only when it is
 every candidate: a connected device whose last pass ended synced, with nothing
-moving, every upload stored and no record naming a state. -/
+moving, every upload stored, no write queued and no record naming a state. -/
 theorem synced_iff (f : Facts) :
     state f = .synced ↔ f.storage = .connected ∧ f.last = .synced ∧ f.moving = false ∧
-      f.downloading = false ∧ (∀ u ∈ f.uploads, u.progress = .stored) ∧
+      f.downloading = false ∧ (∀ u ∈ f.uploads, u.progress = .stored) ∧ f.unsent = false ∧
       ∀ r ∈ f.records, r.state = none := by
   constructor
   · intro h
@@ -72,12 +76,13 @@ theorem synced_iff (f : Facts) :
       cases mv : f.moving
       · rfl
       · simp [Facts.loop, mv] at loop
-    refine ⟨?_, ?_, still, ?_, synced_files_stored f h, ?_⟩
+    refine ⟨?_, ?_, still, ?_, synced_files_stored f h, synced_writes_sent f h, ?_⟩
     · cases hs : f.storage with
       | none => exact absurd hs recorded
       | connected => rfl
       | signedOut =>
-          have := only .signedOut ((candidate_iff f _).mpr (.inr (.inr (.inr (.inl ⟨rfl, hs⟩)))))
+          have := only .signedOut
+            ((candidate_iff f _).mpr (.inr (.inr (.inr (.inr (.inl ⟨rfl, hs⟩))))))
           cases this
     · cases hl : f.last with
       | synced => rfl
@@ -93,19 +98,20 @@ theorem synced_iff (f : Facts) :
       cases hs : r.state with
       | none => rfl
       | some s =>
-          have := only s ((candidate_iff f _).mpr (.inr (.inr (.inr (.inr ⟨r, hr, hs⟩)))))
+          have := only s ((candidate_iff f _).mpr (.inr (.inr (.inr (.inr (.inr ⟨r, hr, hs⟩))))))
           subst this
           have := reason_named r _ hs
           simp [State.named] at this
-  · rintro ⟨connected, last, still, down, stored, records⟩
+  · rintro ⟨connected, last, still, down, stored, sent, records⟩
     have recorded : f.storage ≠ .none := by rw [connected]; simp
     apply (state_iff f recorded .synced).mpr
     have loop : f.loop = .synced := by simp [Facts.loop, still, Facts.ended, last]
     refine ⟨(candidate_iff f _).mpr (.inl loop), fun c hc => ?_⟩
-    rcases (candidate_iff f c).mp hc with e | ⟨_, d⟩ | ⟨u, mu, hu⟩ | ⟨_, s⟩ | ⟨r, hr, hs⟩
+    rcases (candidate_iff f c).mp hc with e | ⟨_, d⟩ | ⟨u, mu, hu⟩ | ⟨_, w⟩ | ⟨_, s⟩ | ⟨r, hr, hs⟩
     · rw [← e, loop]; exact Nat.le_refl _
     · rw [down] at d; cases d
     · simp [Upload.candidate, stored u mu] at hu
+    · rw [sent] at w; cases w
     · rw [connected] at s; cases s
     · rw [records r hr] at hs; cases hs
 
@@ -134,18 +140,23 @@ theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitH
         · cases hb
     · simp [hr, hc] at h; subst h; exact ⟨hr, hc⟩
 
+/-- What the next pass waits for, the held-back pass's and a queued write's
+wait, holds: what holds every transfer, else nothing does. -/
+theorem pass_wait_holds (f : Facts) : f.waitHolds f.passWait := by
+  cases hh : f.heldAll with
+  | none => simp only [Facts.passWait, hh, Option.getD_none]; exact hh
+  | some x => simp only [Facts.passWait, hh, Option.getD_some]; exact held_holds f x hh
+
 /-- **Why waiting to sync waits.** Each wait named holds for the fact that
 names it: sync stopped, a cooldown, a slot that can't apply, or, for a queued
 upload, what holds that upload. -/
 theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds w := by
   simp only [Facts.waits, List.mem_append, List.mem_filterMap] at h
-  rcases h with pass | ⟨u, mu, hu⟩
+  rcases h with (pass | ⟨u, mu, hu⟩) | write
   · split at pass
     · simp only [List.mem_singleton] at pass
       subst pass
-      cases hh : f.heldAll with
-      | none => simp only [Facts.passWait, hh, Option.getD_none]; exact hh
-      | some x => simp only [Facts.passWait, hh, Option.getD_some]; exact held_holds f x hh
+      exact pass_wait_holds f
     · simp at pass
   · split at hu
     · simp only [Option.some.injEq] at hu
@@ -171,6 +182,11 @@ theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds 
               · subst hu
                 exact hh
     · simp at hu
+  · split at write
+    · simp only [List.mem_singleton] at write
+      subst write
+      exact pass_wait_holds f
+    · simp at write
 
 namespace Reached
 

@@ -1,12 +1,15 @@
 //! The sync state an app shows (§19.1, E5), as `subscribe_sync_status`
 //! follows it: synced means data and files are in storage, a queued file
-//! names what it waits for, one whose original is missing names failed,
-//! offline with a file or a write queued is offline with unsent changes, a
-//! location without credentials is signed out, and the last synced time
-//! survives every state and every reopen without going backward.
+//! names what it waits for, a queued write waits for the next pass, a file
+//! whose original is missing names failed, offline with a file or a write
+//! queued is offline with unsent changes, a location without credentials is
+//! signed out, and the last synced time survives every state and every
+//! reopen without going backward.
 use crate::tests::{file_stored, stage, upload_path, wait_for_sent, Device, Network};
 use crate::*;
-use coven_storage::test_utils::Faults;
+use coven_storage::test_utils::{Faults, MemoryRequest, MemoryStorage};
+use coven_storage::ObjectPath;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 fn tables() -> Vec<SyncedTable> {
@@ -296,4 +299,53 @@ async fn the_first_value_is_the_state_and_the_last_synced_time_is_kept() {
     );
     network.devices[0].handle = reopened;
     network.close().await;
+}
+
+/// Dan writes a note before he sets up storage. Once setup finishes, the note
+/// waits to sync for the first pass, here held before its first request, so
+/// the state doesn't say synced with the note only on his device. Once that
+/// pass sends it, he is synced (§19.1).
+#[tokio::test]
+async fn a_write_before_setup_waits_until_the_first_pass_sends_it() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let storage = std::sync::Arc::new(MemoryStorage::builder().build().unwrap());
+    let directory =
+        app.create_closed_store("Household", std::sync::Arc::new(UuidIds)).await.unwrap();
+    let dan = app
+        .builder()
+        .storage_connector(storage.clone())
+        .synced_tables(tables())
+        .migrations(vec![Migration::addition(1, "covers", SCHEMA)])
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
+    dan.write(|sql| {
+        sql.execute("INSERT INTO notes(id,title) VALUES('milk','Buy milk')", [])?;
+        Ok::<_, CovenError>(())
+    })
+    .await
+    .unwrap();
+    // Setup claims slot 1 and its key copy at slot 2; the first pass after
+    // it begins by reading slot 3.
+    let next = ObjectPath::slot(directory.id(), NonZeroU64::new(3).unwrap());
+    let (started, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    storage.hold_next_request_of(MemoryRequest::Read(next, None), started, resumed).await;
+    dan.setup_s3_storage(
+        storage.config(),
+        "Dan's laptop",
+        "member-key".into(),
+        SecretText::new("secret".into()),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    held.await.unwrap();
+    assert_eq!(dan.sync_status().await.unwrap().state, SyncState::WaitingToSync(SyncWait::Queued));
+    assert_eq!(dan.unsent_work().await.unwrap().writes, 1);
+    resume.send(()).unwrap();
+    dan.test_sync_status().wait_for(|status| status.state == SyncState::Synced).await;
+    assert_eq!(dan.unsent_work().await.unwrap().writes, 0);
+    dan.close().await.unwrap();
 }

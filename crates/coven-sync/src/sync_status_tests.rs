@@ -401,19 +401,20 @@ fn shown(facts: &Facts) -> Value {
 }
 
 /// Every set of facts the differential test compares: each pass of every
-/// kind alone, with a write or a stored file queued or not; each reason as
+/// kind with a write queued, a stored file, both or neither; each reason as
 /// a record, as a queued upload's record with and without the record in the
 /// list, and beside a location with no credentials; every location, moving,
 /// download and upload progress combination, offline; and queued uploads
 /// under every wait, one alone or two after a stored one, so the first
 /// waiting one names the wait, with the setting to move files only on
-/// unmetered networks on or off and the network metered or not; and a pass
-/// held at a slot or by a cooldown, with nothing queued, under each way sync
-/// can be held.
+/// unmetered networks on or off and the network metered or not, with a write
+/// queued beside them or not; and a pass held at a slot or by a cooldown,
+/// with nothing queued, and a write queued alone, under each way sync can be
+/// held.
 fn cases() -> Vec<Facts> {
     let mut cases = Vec::new();
     for last in passes() {
-        for (unsent, stored) in [(false, 0), (true, 0), (false, 1)] {
+        for (unsent, stored) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
             cases.push(Facts {
                 last: last.clone(),
                 unsent,
@@ -468,7 +469,11 @@ fn cases() -> Vec<Facts> {
         for last in [blocked.clone(), limited.clone()] {
             cases.push(Facts { sync, last, ..connected() });
         }
-        for last in [None, blocked.clone()] {
+        cases.push(Facts { sync, unsent: true, ..connected() });
+        for (last, unsent) in [None, blocked.clone()]
+            .into_iter()
+            .flat_map(|last| [(last.clone(), false), (last, true)])
+        {
             for (paused, unmetered_only, metered) in [
                 (false, false, false),
                 (true, false, false),
@@ -490,6 +495,7 @@ fn cases() -> Vec<Facts> {
                             cases.push(Facts {
                                 sync,
                                 last: last.clone(),
+                                unsent,
                                 paused,
                                 unmetered_only,
                                 metered,
@@ -627,6 +633,38 @@ fn a_waiting_pass_is_never_synced() {
     assert_eq!(shown(&limited, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
 }
 
+/// Synced means nothing waits, writes included. A write in the send queue,
+/// with nothing moving and the last pass synced or none ended here yet,
+/// waits to sync: for what holds every transfer, else its turn. A queued
+/// upload's wait comes before the write's (§19.1).
+#[test]
+fn a_queued_write_is_never_synced() {
+    let until = UNIX_EPOCH + Duration::from_secs(60);
+    for last in [None, Some(LastPass::Synced)] {
+        let shown = |sync| Facts { last: last.clone(), unsent: true, sync, ..connected() }.state();
+        assert_eq!(
+            shown(RetrySync::Started { cooling_until: None }),
+            SyncState::WaitingToSync(SyncWait::Queued)
+        );
+        assert_eq!(shown(RetrySync::Stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
+        assert_eq!(
+            shown(RetrySync::Started { cooling_until: Some(until) }),
+            SyncState::WaitingToSync(SyncWait::CoolingDown { until })
+        );
+        let paused = Facts {
+            last: last.clone(),
+            unsent: true,
+            paused: true,
+            uploads: vec![upload(Progress::Queued)],
+            queued: true,
+            ..connected()
+        };
+        assert_eq!(paused.state(), SyncState::WaitingToSync(SyncWait::Paused));
+        let moving = Facts { last: last.clone(), unsent: true, moving: true, ..connected() };
+        assert_eq!(moving.state(), SyncState::Syncing);
+    }
+}
+
 /// A bug stays failed while its work retries: a record of storage's bug
 /// names failed, as one of a local bug does, never nothing (§19.1, E15).
 #[test]
@@ -741,8 +779,9 @@ fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
 
 /// A closed store's state is the one opening shows before sync starts: the
 /// move and the cooldown a process that ended mid-pass left in its rows
-/// show nothing, so its queued photo waits with sync not running, and the
-/// credentials the keychain holds now decide signed out (api.md E1, E5).
+/// show nothing, so its queued photo waits with sync not running, as a
+/// queued write alone does, and the credentials the keychain holds now
+/// decide signed out (api.md E1, E5).
 #[test]
 fn a_closed_store_shows_what_opening_shows() {
     let facts = coven_database::SyncFacts::<PendingRecord> {
@@ -783,5 +822,12 @@ fn a_closed_store_shows_what_opening_shows() {
     assert_eq!(
         closed(RecordedLocation::SignedOut(CloudProvider::Dropbox)).state,
         SyncState::SignedOut { provider: CloudProvider::Dropbox, cause: None }
+    );
+    let write_only = coven_database::SyncFacts { uploads: Vec::new(), queued: false, ..facts };
+    assert_eq!(
+        SyncStatus::closed(write_only, RecordedLocation::Connected(CloudProvider::Dropbox))
+            .unwrap()
+            .state,
+        SyncState::WaitingToSync(SyncWait::NotSyncing)
     );
 }

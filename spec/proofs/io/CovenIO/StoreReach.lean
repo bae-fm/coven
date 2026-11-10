@@ -94,7 +94,8 @@ theorem quiet_shows {f : Facts} (q : Quiet f) (last : LastPass) (now : Nat) :
   simp only [run, CovenIO.SyncState.step, q.idle, Bool.false_eq_true, ite_false, ite_true,
     Option.bind_some, Option.map_some, Option.some.injEq]
   simp [state, q.connected, CovenIO.SyncState.top, CovenIO.SyncState.Facts.rest,
-    CovenIO.SyncState.Facts.files, CovenIO.SyncState.Facts.others, CovenIO.SyncState.Facts.loop,
+    CovenIO.SyncState.Facts.files, CovenIO.SyncState.Facts.writes,
+    CovenIO.SyncState.Facts.others, CovenIO.SyncState.Facts.loop,
     CovenIO.SyncState.Facts.ended, CovenIO.SyncState.Facts.unsentWork, q.still, q.noUploads,
     q.noRecords, q.noWrites]
 
@@ -137,12 +138,13 @@ theorem key_wait_reached {st : Store S} {seq : Nat → Slot S} (g : Good R st se
     cases ended with
     | caughtUp all => have := all B (sameFollows ▸ followed); omega
   · simp [run, CovenIO.SyncState.step, q.idle, state, q.connected, CovenIO.SyncState.top,
-      CovenIO.SyncState.Facts.rest, CovenIO.SyncState.Facts.files, CovenIO.SyncState.Facts.others,
+      CovenIO.SyncState.Facts.rest, CovenIO.SyncState.Facts.files,
+      CovenIO.SyncState.Facts.writes, CovenIO.SyncState.Facts.others,
       CovenIO.SyncState.Facts.loop, CovenIO.SyncState.Facts.ended,
       CovenIO.SyncState.PassFailure.state, CovenIO.SyncState.Reason.state,
       CovenIO.SyncState.Facts.waits, CovenIO.SyncState.Facts.passWait,
       CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked, q.still, q.noUploads,
-      q.noRecords, running, cooling]
+      q.noWrites, q.noRecords, running, cooling]
 
 /-- **A device that can't open a kept slot is held there.** It ends every pass
 from there blocked at that slot, however it steps, and shows failed for damaged

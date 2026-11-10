@@ -4476,7 +4476,9 @@ while let Some(Ok(values)) = lost.next().await {
     holds it (`SyncWait`); while a file waits in the upload queue the state
     is syncing as files move, waiting to sync while none does, with what the
     first waiting file waits for, or failed when its source failed, naming
-    it.
+    it; while a write waits in the send queue the state is waiting to sync
+    until a pass claims a slot for it, naming what holds every pass, else
+    its turn. A waiting file's wait shows before the write's.
   - Syncing shows only while a pass has read or claimed a slot, or a file is
     moving. A pass that finds nothing writes nothing the state reads until it
     ends, and then only the last synced time when it ends synced again, so
@@ -4513,7 +4515,7 @@ while let Some(Ok(values)) = lost.next().await {
   opening shows before sync starts, read from the same facts with what opening
   writes over them: whether a location is recorded and this device holds its
   credentials, read from the keychain; no pass moving, whatever a process that
-  ended mid-pass left; sync not running, so a queued file waits with
+  ended mid-pass left; sync not running, so a queued write or file waits with
   `SyncWait::NotSyncing`; and nothing sent or downloaded. The network, which
   coven doesn't watch for a closed store, changes nothing then: what holds
   every transfer comes before it. The last pass, the last synced time, the
@@ -5785,8 +5787,8 @@ pub struct SyncStatus {
 
 /// A closed store's sync status, as `Coven::closed_sync_status` reads it
 /// (E1): the state opening shows before sync starts, and what deleting the
-/// store would lose. A pass that ended synced leaves the state synced with a
-/// write queued since, so `unsent` is what says a write or a file waits.
+/// store would lose. A queued write or file waits to sync with `NotSyncing`,
+/// as sync isn't running; `unsent` counts them.
 pub struct ClosedSyncStatus {
     pub sync: SyncStatus,
     pub unsent: UnsentWork,
@@ -5805,11 +5807,12 @@ pub enum SyncState {
     Syncing,
     /// Nothing moves, and the last pass was held back, at a slot that can't
     /// apply yet or by a provider's cooldown, or a file waits in the upload
-    /// queue: what the pass waits for, else what the first such file waits
-    /// for.
+    /// queue, or a write in the send queue: what the pass waits for, else
+    /// what the first such file waits for, else what the write waits for.
     WaitingToSync(SyncWait),
     /// The last pass reached the end of the sequence, every file this device
-    /// uploads is stored, and nothing below holds: nothing waits.
+    /// uploads is stored, the send queue is empty, and nothing below holds:
+    /// nothing waits.
     Synced,
     /// The last pass got no provider response.
     Offline(SyncCause),
@@ -5857,8 +5860,8 @@ pub enum SyncWait {
     /// Its last attempt failed, and it retries then, or at the person's
     /// retry (§6.7); `coven_uploads.pending` says why.
     Retrying { at: SystemTime },
-    /// Its turn hasn't come: a file's, or the next pass's once a cooldown
-    /// that held the last one is over.
+    /// Its turn hasn't come: a file's, a write's, or the next pass's once a
+    /// cooldown that held the last one is over.
     Queued,
 }
 

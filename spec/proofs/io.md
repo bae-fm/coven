@@ -251,17 +251,20 @@ that one or one that outranks it, never synced.
 
 Synced means nothing waits: this device's data and files are in storage.
 `synced_files_stored` proves synced shows only while every upload in the
-queue has its bytes stored: none moving, queued or failed, and
+queue has its bytes stored: none moving, queued or failed;
+`synced_writes_sent` that it shows only with the send queue empty; and
 `failed_pass_not_synced` that it shows only after a pass that ended synced.
-A pass held back by a wait, and an upload queued with nothing moving, name
-waiting to sync, and `waiting_not_moving` proves that state shows only while
-no slot and no file moves, with a wait to name: the pass's, by
-`Facts.passWait`, else the first waiting upload's, by `Facts.uploadWait`.
-Both take what holds every transfer first, `Facts.heldAll` (sync not
-running, a provider's cooldown, a blocked pass); the pass then waits its
-turn, and an upload what holds it alone (the pause, for a trailing upload,
-then a metered network the setting to transfer only on unmetered networks
-holds it on, then its backoff), else its turn.
+A pass held back by a wait, an upload queued with nothing moving, and a
+write in the send queue name waiting to sync, and `waiting_not_moving`
+proves that state shows only while no slot and no file moves, with a wait
+to name: the pass's, by `Facts.passWait`, else the first waiting upload's,
+by `Facts.uploadWait`, else the write's, which waits for the next pass as a
+held-back pass does. Both take what holds every transfer first,
+`Facts.heldAll` (sync not running, a provider's cooldown, a blocked pass);
+the next pass then waits its turn, and an upload what holds it alone (the
+pause, for a trailing upload, then a metered network the setting to
+transfer only on unmetered networks holds it on, then its backoff), else its
+turn.
 
 Which uploads that setting holds is one definition, `Upload.heldOnMetered`:
 the trailing ones, as the pause holds them. `metered_holds` proves that with
@@ -274,10 +277,11 @@ the network, only what a waiting upload waits for does.
 [SyncReach.lean](io/CovenIO/SyncReach.lean) goes the other way, from the facts
 to the state. `state_iff` proves a state shows exactly when a fact names it and
 none names one above it, and `candidate_iff` says which facts can name one: the
-loop, a download, an upload, missing credentials or a pending record.
-`synced_iff` unfolds that for synced: a connected device whose last pass ended
-synced, with nothing moving, every upload stored and no record naming a state.
-`wait_facts` gives what each wait says of the facts. `every_state` and
+loop, a download, an upload, a queued write, missing credentials or a pending
+record. `synced_iff` unfolds that for synced: a connected device whose last
+pass ended synced, with nothing moving, every upload stored, no write queued
+and no record naming a state. `wait_facts` gives what each wait says of the
+facts, with `pass_wait_holds` for the next pass's wait. `every_state` and
 `every_wait` run the model's events from a synced device to each state and each
 wait, so none of them is dead.
 
@@ -329,9 +333,10 @@ answers the state's name and, for waiting to sync, its wait.
 `sync_status::tests::io_differential_sync_state` compares the state coven
 computes with the runner's for each pending reason, each provider failure
 answered or not, each local failure, each way a pass ends, blocked on or
-failed with each reason, and queued uploads under each wait, alone and
-behind a stored one, with the setting to transfer only on unmetered
-networks on or off and the network metered or not.
+failed with each reason, each with a write queued or not, and queued
+uploads under each wait, alone and behind a stored one, with the setting to
+transfer only on unmetered networks on or off, the network metered or not,
+and a write queued beside them or not.
 
 ## Work notifications
 

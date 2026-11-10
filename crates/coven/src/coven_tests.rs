@@ -845,15 +845,19 @@ mod closed_sync_status {
         network.close().await;
     }
 
-    /// Ana stops sync, writes a note and takes a photo, and closes the store
-    /// before either goes out. Closed, it reads the unsent work the open handle
-    /// counted, and the photo waits with sync not running, as it does once the
-    /// store opens again.
+    /// Ana stops sync, writes a note and closes the store before it goes
+    /// out. Closed, the note waits with sync not running, never synced, as it
+    /// does once the store opens again. She takes a photo and closes the
+    /// store again: closed, it reads the unsent work the open handle counted,
+    /// and still waits.
     #[tokio::test]
     async fn a_closed_store_reads_its_unsent_work() {
         let mut network = household().await;
         let ana = &network.devices[0];
-        let synced = ana.handle.sync_status().await.unwrap().last_synced;
+        let waiting = SyncStatus {
+            state: SyncState::WaitingToSync(SyncWait::NotSyncing),
+            last_synced: ana.handle.sync_status().await.unwrap().last_synced,
+        };
         ana.stop_sync().await;
         ana.handle
             .write(|sql| {
@@ -862,19 +866,18 @@ mod closed_sync_status {
             })
             .await
             .unwrap();
+        let (closed, opened) = closed_then_reopened(&mut network, |_| ()).await;
+        assert_eq!(closed.unsent.files, 0, "{:?}", closed.unsent);
+        assert_eq!(closed.sync, waiting);
+        assert_eq!(opened, waiting);
+        let ana = &network.devices[0];
         stage(ana, "photos", "beach", vec![7; 4096]).await;
         let unsent = ana.handle.unsent_work().await.unwrap();
         assert_eq!(unsent.files, 1, "{unsent:?}");
         assert!(unsent.writes >= 1, "{unsent:?}");
         let (closed, opened) = closed_then_reopened(&mut network, |_| ()).await;
         assert_eq!(closed.unsent, unsent);
-        assert_eq!(
-            closed.sync,
-            SyncStatus {
-                state: SyncState::WaitingToSync(SyncWait::NotSyncing),
-                last_synced: synced
-            }
-        );
+        assert_eq!(closed.sync, waiting);
         assert_eq!(closed.sync, opened);
         network.close().await;
     }

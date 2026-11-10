@@ -62,12 +62,14 @@ theorem queue_holds_synced (f : Facts) (s : Files.State) (uploads : f.uploads = 
   cases this
 
 /-- A device with nothing but its uploads to name a state: connected, its last
-pass synced, nothing moving, no record, sync running and nothing holding it. -/
+pass synced, nothing moving, no write queued, no record, sync running and
+nothing holding it. -/
 structure Settled (f : Facts) : Prop where
   connected : f.storage = .connected
   last : f.last = .synced
   still : f.moving = false
   noDownload : f.downloading = false
+  noWrites : f.unsent = false
   noRecords : f.records = []
   running : f.running = true
   cooling : f.cooling = false
@@ -88,7 +90,7 @@ theorem queued_waits (f : Facts) (s : Files.State) (settled : Settled f)
     · exact ⟨⟨.queued, false, false, none⟩, by simp [uploads, queued, eq], by
         simp [Upload.candidate]⟩
     · intro c hc
-      rcases (candidate_iff f c).mp hc with e | ⟨_, d⟩ | ⟨x, mx, hx⟩ | ⟨_, h⟩ | ⟨r, hr, _⟩
+      rcases (candidate_iff f c).mp hc with e | ⟨_, d⟩ | ⟨x, mx, hx⟩ | ⟨_, w⟩ | ⟨_, h⟩ | ⟨r, hr, _⟩
       · rw [← e, loop]; simp [State.rank]
       · rw [settled.noDownload] at d; cases d
       · simp only [uploads, queued, List.mem_map] at mx
@@ -96,12 +98,14 @@ theorem queued_waits (f : Facts) (s : Files.State) (settled : Settled f)
         simp [Upload.candidate] at hx
         subst hx
         simp [State.rank]
+      · rw [settled.noWrites] at w; cases w
       · rw [settled.connected] at h; cases h
       · rw [settled.noRecords] at hr; cases hr
   · have blocked : f.blocked = false := by simp [Facts.blocked, settled.last]
     have free : f.heldAll = none := by
       simp [Facts.heldAll, settled.running, settled.cooling, blocked]
     simp [Facts.waits, loop, uploads, queued, eq, Facts.uploadWait, free, settled.unpaused,
+      settled.noWrites,
       Facts.meteredHolds, settled.anyNetwork, Upload.candidate]
 
 theorem complete_queue (s : Files.State) (r : CovenStorage.Files.Reference)
@@ -125,7 +129,8 @@ theorem completed_synced (f : Facts) (s : Files.State) (r : CovenStorage.Files.R
   have empty : f.uploads = [] := by
     rw [uploads, queued, completed_empties s r only]; rfl
   apply (synced_iff f).mpr
-  refine ⟨settled.connected, settled.last, settled.still, settled.noDownload, ?_, ?_⟩
+  refine ⟨settled.connected, settled.last, settled.still, settled.noDownload, ?_,
+    settled.noWrites, ?_⟩
   · intro u hu; rw [empty] at hu; cases hu
   · intro x hx; rw [settled.noRecords] at hx; cases hx
 

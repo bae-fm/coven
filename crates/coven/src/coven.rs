@@ -37,8 +37,8 @@ pub struct StoreInfo {
 
 /// A closed store's sync status, as `Coven::closed_sync_status` reads it
 /// (E1): the state opening shows before sync starts, and what deleting the
-/// store would lose. A pass that ended synced leaves the state synced with a
-/// write queued since, so `unsent` is what says a write or a file waits.
+/// store would lose. A queued write or file waits to sync with `NotSyncing`,
+/// as sync isn't running; `unsent` counts them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClosedSyncStatus {
     /// The sync state and the last synced time.

@@ -130,6 +130,7 @@ import CovenIO
 #print axioms CovenIO.SyncState.syncing_only_moving
 #print axioms CovenIO.SyncState.waiting_not_moving
 #print axioms CovenIO.SyncState.synced_files_stored
+#print axioms CovenIO.SyncState.synced_writes_sent
 #print axioms CovenIO.SyncState.bad_file_fails
 #print axioms CovenIO.SyncState.quiet_pass_keeps
 #print axioms CovenIO.SyncState.last_synced_never_back
@@ -150,6 +151,7 @@ import CovenIO
 #print axioms CovenIO.SyncState.state_iff
 #print axioms CovenIO.SyncState.candidate_iff
 #print axioms CovenIO.SyncState.synced_iff
+#print axioms CovenIO.SyncState.pass_wait_holds
 #print axioms CovenIO.SyncState.wait_facts
 #print axioms CovenIO.SyncState.Reached.every_state
 #print axioms CovenIO.SyncState.Reached.every_wait

@@ -39,11 +39,12 @@ pub enum SyncState {
     Syncing,
     /// Nothing moves, and the last pass was held back, at a slot that can't
     /// apply yet or by a provider's cooldown, or a file waits in the upload
-    /// queue: what the pass waits for, else what the first such file waits
-    /// for.
+    /// queue, or a write in the send queue: what the pass waits for, else
+    /// what the first such file waits for, else what the write waits for.
     WaitingToSync(SyncWait),
     /// The last pass reached the end of the sequence, every file this device
-    /// uploads is stored, and nothing below holds: nothing waits.
+    /// uploads is stored, the send queue is empty, and nothing below holds:
+    /// nothing waits.
     Synced,
     /// The last pass got no provider response.
     Offline(SyncCause),
@@ -106,8 +107,8 @@ pub enum SyncWait {
         /// When its backoff ends, by the store's clock.
         at: SystemTime,
     },
-    /// Its turn hasn't come: a file's, or the next pass's once a cooldown
-    /// that held the last one is over.
+    /// Its turn hasn't come: a file's, a write's, or the next pass's once a
+    /// cooldown that held the last one is over.
     Queued,
 }
 
@@ -419,9 +420,9 @@ impl Facts {
         self.unsent || self.queued
     }
 
-    /// What holds every transfer, the pass's and each upload's alike: sync
-    /// stopped, a provider's cooldown, or a slot that can't apply yet (the
-    /// model's `Facts.heldAll`).
+    /// What holds every transfer, the pass's, each upload's and a queued
+    /// write's alike: sync stopped, a provider's cooldown, or a slot that
+    /// can't apply yet (the model's `Facts.heldAll`).
     fn held_all(&self) -> Option<SyncWait> {
         match self.sync {
             RetrySync::Stopped => Some(SyncWait::NotSyncing),
@@ -474,8 +475,9 @@ impl Facts {
     /// highest-ranked candidate. Among candidates of one state the first
     /// shows, so the cause is the last pass, or else the first record, in
     /// the order they arose, that names the state, and waiting to sync names
-    /// the held-back pass's wait, else the first waiting upload's. Signed out
-    /// with no credentials comes first of all, with no cause.
+    /// the held-back pass's wait, else the first waiting upload's, else a
+    /// queued write's. Signed out with no credentials comes first of all,
+    /// with no cause.
     pub(crate) fn state(&self) -> SyncState {
         let (provider, credentials) = match self.location {
             RecordedLocation::None => return SyncState::NotSynced,
@@ -498,12 +500,18 @@ impl Facts {
             .filter_map(|record| Some(Candidate::Named(record.reason.names()?, record)));
         let downloading = self.downloading.then_some(Candidate::State(SyncState::Syncing));
         let uploads = self.uploads.iter().filter_map(|upload| self.upload(upload));
+        // A write goes out with the next pass, so it waits for what holds
+        // every pass, else its turn (the model's `Facts.writes`).
+        let writes = self.unsent.then(|| {
+            Candidate::State(SyncState::WaitingToSync(self.held_all().unwrap_or(SyncWait::Queued)))
+        });
         signed_out
             .into_iter()
             .chain([looping])
             .chain(records)
             .chain(downloading)
             .chain(uploads)
+            .chain(writes)
             .reduce(|shown, next| if next.rank() > shown.rank() { next } else { shown })
             .expect("the loop's candidate is always one")
             .state(provider)
