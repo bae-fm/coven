@@ -59,10 +59,11 @@ fn a_directory_at_the_settings_path_is_not_valid_settings() {
 #[test]
 fn an_unreadable_settings_path_is_a_file_failure() {
     let directory = tempfile::tempdir().unwrap();
-    // A file where the store directory should be: the settings path can't be
-    // inspected, which is neither absence nor damage.
-    let store = directory.path().join("store");
-    std::fs::write(&store, b"not a directory").unwrap();
+    // A store directory whose name holds a NUL byte, which no system's file
+    // names may: the settings path can't be inspected, which is neither
+    // absence nor damage. (A file where the store directory should be fails
+    // as not found on Windows, so it can't show this there.)
+    let store = directory.path().join("st\0re");
     let id = StoreId(Uuid::from_u128(3));
     let Err(SettingsError::File(FileError::Io { operation, path, source })) = read(&store, id)
     else {
