@@ -368,7 +368,10 @@ async fn a_failed_snapshot_deletion_resumes_its_recorded_body_after_reopening() 
     ana.storage.set_faults(Faults::none()).await;
     ana.sync.retry_pending_operation(operation).await.unwrap();
     assert!(ana.storage.status(&path).await.unwrap().is_none());
-    assert!(ana.database().snapshot_absent(old).await.unwrap());
+    // Its announcement was forgotten, so no absence is kept for its body
+    // (§16.8).
+    assert!(!ana.sync.session.lock().await.history.announcements.contains_key(&first));
+    assert!(!ana.database().snapshot_absent(old).await.unwrap());
     assert!(ana.database().operation(operation).await.unwrap().is_none());
     assert!(ana
         .database()
@@ -641,8 +644,15 @@ async fn daily_snapshots(compare: bool) {
         let expected = if day >= 7 { published[day - 7].1 + 1 } else { 1 };
         assert_eq!(capture.first.get(), expected, "day {day}");
         if compare {
+            // The model chooses among the announcements Ana keeps: one she
+            // forgot is below `first`, which the model never reads (§16.8).
             let mut snapshots = Vec::new();
-            for ((slot, covers, _), latest) in published.iter().zip(&published_at).rev() {
+            for ((slot, covers, _), latest) in published
+                .iter()
+                .zip(&published_at)
+                .rev()
+                .filter(|((slot, _, _), _)| session.history.announcements.contains_key(slot))
+            {
                 snapshots.push(
                     json!({"slot":slot.get(),"covers":covers,"announced_at":latest.as_nanos(),
                     "usable":session.history.usable(&session.history.announcements[slot])}),

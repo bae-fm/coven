@@ -47,6 +47,31 @@ impl SnapshotArtifact {
     }
 }
 
+impl crate::sequence_sync::sequence_operations::SequenceOperation {
+    /// The snapshot body this operation owns: the one it is capturing,
+    /// uploading, announcing, activating or finishing, or whose upload its
+    /// undo deletes. Its journal still owns the references the capture
+    /// holds (§17.10), and a listing of its folder leaves it (§16.8).
+    pub(crate) fn snapshot(&self) -> Option<&SnapshotId> {
+        use crate::sequence_sync::sequence_operations::{OperationProgress, OperationStep};
+        let (OperationProgress::Running(step) | OperationProgress::Undo { step, .. }) =
+            &self.progress;
+        match step {
+            OperationStep::Capturing(capture) => Some(&capture.id),
+            OperationStep::Uploading(artifact)
+            | OperationStep::Announcing(artifact)
+            | OperationStep::Activating { artifact, .. }
+            | OperationStep::SnapshotApplied { artifact, .. } => Some(&artifact.capture.id),
+            OperationStep::Preparing
+            | OperationStep::Copy(_)
+            | OperationStep::Claiming
+            | OperationStep::CreatorCopy(_)
+            | OperationStep::Applied(_)
+            | OperationStep::Satisfied => None,
+        }
+    }
+}
+
 pub(crate) mod purpose {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(

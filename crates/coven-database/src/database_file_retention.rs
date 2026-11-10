@@ -58,6 +58,37 @@ impl Database {
             inner.inputs.forget_path(path.as_str())
         }).await
     }
+    /// Forget announcements no rule reads any more (§16.8): their original
+    /// slots at `slots`, and the absences recorded for `snapshots`, the
+    /// bodies only they named. `listings` journals the listings that find
+    /// those bodies in storage, in the same transaction, so a forgotten
+    /// announcement's body is never left without one.
+    pub async fn forget_announcements(
+        &self,
+        slots: BTreeSet<Slot>,
+        snapshots: BTreeSet<coven_format::admin::SnapshotId>,
+        listings: Vec<crate::NewOperation>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    crate::sequence_apply::forget_announcements(db, &slots)?;
+                    for id in &snapshots {
+                        db.internal_execute(
+                            "DELETE FROM _coven_absent_snapshots WHERE audience=?1 AND device=?2 AND number=?3",
+                            params![&id.audience, id.device, id.number.to_be_bytes()],
+                        )?;
+                    }
+                    for listing in &listings {
+                        crate::operation::insert(db, listing)?;
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Every fixed path local data protects, in one read transaction.
     #[cfg(test)]
     pub(crate) async fn retained_files(&self) -> Result<FileRetention, DbError> {

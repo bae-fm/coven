@@ -1441,10 +1441,14 @@ themselves, not a summary.
 - Sections 7 to 9 occur only in the store snapshot.
 - They keep the original signed admin, admission and key-copy slots through
   coverage, including creation, and the announcement slots their writer
-  accepted; section 7 holds admin slots and admissions. Verify each object
-  using its original slot path.
+  accepted and still keeps; section 7 holds admin slots and admissions. Verify
+  each object using its original slot path.
 - A refused announcement is in none of them. No rule reads one again
-  ([§16.1](coven.md#161-what-a-snapshot-holds)).
+  ([§16.1](coven.md#161-what-a-snapshot-holds)). Nor is one its writer forgot:
+  section 9 holds those an applied raise or reset names, each audience's
+  newest and those newer than its newest ordinary one, those at its greatest
+  coverage, and those at or after the floor's `first` or named by a journaled
+  floor write ([§16.8](coven.md#168-forgetting-announcements)).
 - These records preserve historical bindings, key introductions, exposure and
   announcements. Admin state is derived from them in order; retained later slots
   supply newer bindings.

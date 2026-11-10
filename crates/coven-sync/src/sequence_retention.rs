@@ -31,8 +31,12 @@ enum Retention {
     ),
     /// Clear what a device gone for good left besides its files: end its
     /// uploads, then list its snapshot folders, deleting every body there
-    /// that no announcement names.
+    /// that no kept announcement names.
     GoneListing(DeviceId),
+    /// List this device's own snapshot folders, deleting every body there
+    /// that no kept announcement and no open operation names: what its
+    /// forgotten announcements alone named (§16.8).
+    OwnListing,
     Capture(FloorCapture),
     Floor(FloorArtifact),
     Delete {
@@ -98,12 +102,13 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// Delete the snapshot bodies of this device, and of each device gone
-    /// for good whose files it deletes (§17.10), that nothing still loads:
-    /// not a floor or pending floor snapshot, not the body of a raise or
-    /// reset applied after the floor's coverage, and replaced by a newer
-    /// usable announcement covering at least as much whose slot has passed
-    /// grace. A gone device's folders are listed once, too, for bodies no
+    /// Forget the announcements no rule reads any more, then delete the
+    /// snapshot bodies of this device, and of each device gone for good
+    /// whose files it deletes (§17.10), that nothing still loads: not a
+    /// floor or pending floor snapshot, not the body of a raise or reset
+    /// applied after the floor's coverage, and replaced by a newer usable
+    /// announcement covering at least as much whose slot has passed grace.
+    /// A gone device's folders are listed once, too, for bodies no
     /// announcement names: it never runs the undo that would delete them.
     pub(crate) async fn retain_snapshots(
         &self,
@@ -114,18 +119,19 @@ impl SequenceSync {
         if !session.history.state.devices.get(&self.device).is_some_and(|device| device.active()) {
             return Ok(());
         }
-        let history = &session.history;
         let first_kept = session.floor.as_ref().map_or(Slot::FIRST, |floor| floor.header.first);
         // The devices gone for good whose files this device deletes: their
         // stored bytes are its to delete, and they never return to delete
         // their own (§16.6).
-        let gone: BTreeSet<DeviceId> = history
+        let gone: BTreeSet<DeviceId> = session
+            .history
             .state
             .devices
             .keys()
             .copied()
             .filter(|device| {
-                *device != self.device && history.deletes_for(self.device, member.member(), *device)
+                *device != self.device
+                    && session.history.deletes_for(self.device, member.member(), *device)
             })
             .collect();
         let mut kept: BTreeSet<Slot> = session
@@ -135,6 +141,7 @@ impl SequenceSync {
             .unwrap_or_default();
         let mut pending_snapshots = Vec::new();
         let mut pending_listings = BTreeSet::new();
+        let mut own_listing = false;
         for record in self.database.operations().await? {
             if record.kind != operation_kind::SEQUENCE_RETENTION {
                 continue;
@@ -146,24 +153,41 @@ impl SequenceSync {
                 Retention::GoneListing(device) => {
                     pending_listings.insert(device);
                 }
+                Retention::OwnListing => own_listing = true,
                 Retention::Delete { .. } => (),
             }
         }
         if !gone.is_empty() {
             let listed = self.database.gone_storage_cleared().await?;
-            for device in
-                gone.difference(&listed).filter(|device| !pending_listings.contains(device))
-            {
+            let unlisted: Vec<DeviceId> = gone
+                .difference(&listed)
+                .filter(|device| !pending_listings.contains(device))
+                .copied()
+                .collect();
+            for device in unlisted {
                 self.database
                     .start_operation(NewOperation {
                         kind: operation_kind::SEQUENCE_RETENTION.into(),
-                        data: serde_json::to_vec(&Retention::GoneListing(*device))?,
+                        data: serde_json::to_vec(&Retention::GoneListing(device))?,
                         started_by: operation_kind::COVEN.into(),
                         pauses_writes: false,
                     })
                     .await?;
+                pending_listings.insert(device);
             }
         }
+        // The floor and a journaled floor write name their snapshots, so
+        // those announcements stay, and the walk below keeps their bodies.
+        self.forget_announcements(
+            session,
+            first_kept,
+            &kept,
+            &gone,
+            &pending_listings,
+            own_listing,
+        )
+        .await?;
+        let history = &session.history;
         let floor_covers = |audience: &Audience| {
             session
                 .floor
@@ -223,6 +247,89 @@ impl SequenceSync {
                 .await?;
         }
         self.resume_retention(session, ring, member).await
+    }
+
+    /// Forget the announcements no rule reads any more (§16.8). Their
+    /// original slots go, and the absence recorded for each body only they
+    /// named. A body only they named is found by listing its folder, which
+    /// is journaled in the same transaction for this device's own and for
+    /// each gone device in `gone`, unless one is journaled already
+    /// (`own_listing`, `listings`). `named` holds the announcements the
+    /// floor and each journaled floor write name, which stay.
+    async fn forget_announcements(
+        &self,
+        session: &mut Session,
+        first: Slot,
+        named: &BTreeSet<Slot>,
+        gone: &BTreeSet<DeviceId>,
+        listings: &BTreeSet<DeviceId>,
+        own_listing: bool,
+    ) -> Result<(), SyncError> {
+        let forgotten = session.history.forgettable(first, named);
+        if forgotten.is_empty() {
+            return Ok(());
+        }
+        let history = &session.history;
+        let named: BTreeSet<&coven_format::admin::SnapshotId> = history
+            .announcements
+            .iter()
+            .filter(|(slot, _)| !forgotten.contains(slot))
+            .map(|(_, announcement)| &announcement.snapshot)
+            .collect();
+        let bodies: BTreeSet<coven_format::admin::SnapshotId> = forgotten
+            .iter()
+            .map(|slot| &history.announcements[slot].snapshot)
+            .filter(|id| !named.contains(id))
+            .cloned()
+            .collect();
+        let devices: BTreeSet<DeviceId> = bodies.iter().map(|id| id.device).collect();
+        let mut work = Vec::new();
+        if devices.contains(&self.device) && !own_listing {
+            work.push(Retention::OwnListing);
+        }
+        for device in devices.intersection(gone).filter(|device| !listings.contains(device)) {
+            work.push(Retention::GoneListing(*device));
+        }
+        let listings = work
+            .iter()
+            .map(|work| {
+                Ok(NewOperation {
+                    kind: operation_kind::SEQUENCE_RETENTION.into(),
+                    data: serde_json::to_vec(work)?,
+                    started_by: operation_kind::COVEN.into(),
+                    pauses_writes: false,
+                })
+            })
+            .collect::<Result<Vec<_>, SyncError>>()?;
+        self.database.forget_announcements(forgotten.clone(), bodies, listings).await?;
+        session.history.forget(&forgotten);
+        Ok(())
+    }
+
+    /// The snapshot bodies open operations own, read before a listing in the
+    /// same pass: one being captured, uploaded, announced or activated, a
+    /// raise or reset waiting for its entry or its undo, and one queued for
+    /// deletion. A listing of this device's folders leaves them (§16.8).
+    async fn journaled_snapshots(
+        &self,
+    ) -> Result<BTreeSet<coven_format::admin::SnapshotId>, SyncError> {
+        let mut journaled = BTreeSet::new();
+        for record in self.database.operations().await? {
+            match record.kind.as_str() {
+                operation_kind::SEQUENCE => {
+                    let work: super::sequence_operations::SequenceOperation =
+                        serde_json::from_slice(&record.data)?;
+                    journaled.extend(work.snapshot().cloned());
+                }
+                operation_kind::SEQUENCE_RETENTION => {
+                    if let Retention::Snapshot(id) = serde_json::from_slice(&record.data)? {
+                        journaled.insert(id);
+                    }
+                }
+                _ => (),
+            }
+        }
+        Ok(journaled)
     }
 
     async fn propose_floor(
@@ -322,7 +429,17 @@ impl SequenceSync {
         if let Retention::Snapshot(id) = work {
             self.state.check()?;
             self.storage.delete(&crate::snapshot_object::path(self.store(), &id)?).await?;
-            self.database.record_absent_snapshot(id, BTreeSet::new()).await?;
+            // Only a kept announcement's body is looked up as absent; one
+            // forgotten since its deletion was journaled names no body.
+            if session.history.announcements.values().any(|announced| announced.snapshot == id) {
+                self.database.record_absent_snapshot(id, BTreeSet::new()).await?;
+            }
+            self.database.finish_operation(record.id).await?;
+            return Ok(());
+        }
+        if let Retention::OwnListing = work {
+            let journaled = self.journaled_snapshots().await?;
+            self.list_own_snapshots(&session.history, &journaled).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(());
         }

@@ -1679,7 +1679,7 @@ never reappears.
 
 [`Announcements`](sequence/CovenSequence/Announcements.lean) models the
 announcements a device holds and the original slots it rebuilds them from
-([§16](../coven.md#16-snapshots-the-floor-and-deleting-history)). An announcement has a slot,
+([§16.8](../coven.md#168-forgetting-announcements)). An announcement has a slot,
 an audience, a coverage, a purpose and the body it names. `accepts` is
 `announcement_allowed`: coverage below the slot, nothing of the audience past
 it, and the state allowing it. `activation` is a raise's or reset's check in

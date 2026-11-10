@@ -9,10 +9,12 @@ use std::{sync::Arc, time::UNIX_EPOCH};
 /// snapshot and goes quiet. Ana announces two more, and once the newer has
 /// passed grace her floor's first kept slot passes all of Ben's slots and
 /// both his announcement's and her older one's. Ben reloads from her floor;
-/// by his clock her newer snapshot hasn't passed grace. Choosing a
-/// replacement for his old snapshot, or what bounds `first`, he never reads
-/// the slot of her older announcement, which retention may have deleted
-/// (§16.6, `Retention.kept_replacement`, `Retention.kept_candidates_same_first`).
+/// by his clock her newer snapshot hasn't passed grace. His retention never
+/// reads the slot of her older announcement, which retention may have
+/// deleted: it forgets both announcements below `first`, and his listing
+/// deletes his old body at once, since no reader loads it again (§16.6,
+/// §16.8, `Retention.kept_candidates_same_first`,
+/// `Announcements.listing_finds_superseded`).
 #[tokio::test]
 async fn retention_never_reads_an_announcement_slot_below_the_floor() {
     let group = Group::new();
@@ -64,17 +66,14 @@ async fn retention_never_reads_an_announcement_slot_below_the_floor() {
     ben.sync.read_forward(&mut session, &mut ring, &ben.identity).await.unwrap();
     assert!(session.history.announcements.contains_key(&slot(older)));
     ben.sync.retain_snapshots(&mut session, &mut ring, &ben.identity).await.unwrap();
-    assert!(
-        group.storage.status(&body).await.unwrap().is_some(),
-        "no replacement has passed grace"
-    );
-    ben.sync.retain_sequence(&mut session, &mut ring, &ben.identity).await.unwrap();
+    for forgotten in [his, older] {
+        assert!(!session.history.announcements.contains_key(&slot(forgotten)), "{forgotten}");
+    }
     drop(session);
-    ben.sync.pass().await.unwrap();
-    // Once Ana's newer snapshot passes grace by his clock, it replaces his.
-    clock.set(UNIX_EPOCH + super::GRACE + std::time::Duration::from_secs(1));
-    ben.sync.pass().await.unwrap();
-    assert!(group.storage.status(&body).await.unwrap().is_none());
+    assert!(
+        group.storage.status(&body).await.unwrap().is_none(),
+        "his body below `first` goes though no replacement has passed grace by his clock"
+    );
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }

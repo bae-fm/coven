@@ -3,7 +3,7 @@ use super::snapshot_file_scan::{Listing, UploaderScan};
 use crate::{
     history::History,
     object_input::ObjectInput,
-    sequence_sync::sequence_operations::{OperationProgress, OperationStep, SequenceOperation},
+    sequence_sync::sequence_operations::SequenceOperation,
     sequence_sync::{SequenceSync, Session},
     slot_object::{self, SlotBody},
     snapshot_authorship::SnapshotAuthorship,
@@ -40,17 +40,7 @@ impl SequenceSync {
     ) -> Result<Option<coven_database::OperationId>, SyncError> {
         for record in records.iter().filter(|record| record.kind == operation_kind::SEQUENCE) {
             let work: SequenceOperation = serde_json::from_slice(&record.data)?;
-            let step = match work.progress {
-                OperationProgress::Running(step) | OperationProgress::Undo { step, .. } => step,
-            };
-            if matches!(
-                step,
-                OperationStep::Capturing(_)
-                    | OperationStep::Uploading(_)
-                    | OperationStep::Announcing(_)
-                    | OperationStep::Activating { .. }
-                    | OperationStep::SnapshotApplied { .. }
-            ) {
+            if work.snapshot().is_some() {
                 return Ok(Some(record.id));
             }
         }

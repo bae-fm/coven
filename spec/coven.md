@@ -5825,8 +5825,9 @@ deleted slots.
 This section follows that story in order: what a snapshot holds (§16.1), how one
 is taken (§16.2), the extra rules schema raises and resets add (§16.3), the floor
 that names where to start and records what was deleted (§16.4), how a device
-reloads from it (§16.5), deleting history (§16.6), and forgetting the records
-of changes no write can name any more (§16.7).
+reloads from it (§16.5), deleting history (§16.6), forgetting the records
+of changes no write can name any more (§16.7), and forgetting the
+announcements no rule reads any more (§16.8).
 
 #### 16.1 What a snapshot holds
 
@@ -5857,6 +5858,8 @@ schema raises and resets happened
 ([format.md D7](format.md#d7-snapshots)). It holds only announcements its
 writer accepted. No rule reads a refused announcement again, so no device
 keeps one, and a loader rebuilding history from the snapshot never meets it.
+Of the accepted ones it holds those its writer still keeps: an announcement no
+rule reads any more is forgotten, and no snapshot holds it (§16.8).
 
 Every snapshot also records, for each device, the greatest claim number it
 includes from that device and the SHA-256 hash of that claim's slot bytes (§5.3).
@@ -6379,13 +6382,20 @@ That publication time is read from the announcement's slot, so retention
 considers only announcements at or above `first`, whose slots are kept. The slot
 of one below `first` may be deleted, and its publication time with it. Leaving
 those out changes nothing `first` could become: an announcement below `first`
-covers less than `first - 1`. A body only such an announcement would replace
-stays until a kept replacement passes grace. Ben's laptop, whose clock runs
-behind the provider's, reloads from a floor with `first` 40 and holds Ana's
-announcements at slots 30 and 40 in the floor snapshot's history without having
-read their slots. By his clock the one at 40 hasn't passed grace; slot 30 is
-gone, so he doesn't consider it, and keeps his own older snapshot's body until
-the one at 40 passes grace by his clock.
+covers less than `first - 1`.
+
+Grace by the deleting device's own clock guards a body announced at or above
+`first`, which a reader may still load. A body only forgotten announcements
+below `first` named is never loaded again: the floor's writer already saw a
+replacement pass grace (§16.8). Once the device forgets those announcements,
+its listing deletes the body at once, whatever its own clock says. Ben's
+laptop, whose clock runs behind the provider's, reloads from a floor with
+`first` 40 and holds Ana's announcements at slots 30 and 40 in the floor
+snapshot's history without having read their slots, and his own at 20. By his
+clock the one at 40 hasn't passed grace. Slots 20 and 30 are below `first`, so
+retention doesn't consider them, and no raise or reset names them: he forgets
+both announcements, and his listing deletes his body from slot 20 without
+waiting for the one at 40 to pass grace by his clock.
 
 A slot at or above `first` that's missing from storage is damage, since storage
 in good order holds every kept slot: the device reports it damaged, as a pass
@@ -6426,13 +6436,16 @@ The rules:
   doesn't wait for them to finish.
 - **Keep the snapshots still in use:** those the floor names, those a pending
   floor write names, and those a raise or reset still needs. Keep an older body
-  until a newer applicable snapshot has passed grace, covers at least as much
-  and keeps the needed evidence. Newer announcements do not extend that wait.
+  announced at or above `first` until a newer applicable snapshot has passed
+  grace by this device's clock, covers at least as much and keeps the needed
+  evidence. Newer announcements do not extend that wait.
 - **Each device deletes its own snapshots.** Once the protections above no
-  longer keep one of its announced snapshots, the device deletes the body. An
-  absent device's superseded snapshots wait in storage until it returns. A body
-  it uploaded and never announced is its operation's journal's to delete (§16.2).
-  The one exception is a device gone for good, below.
+  longer keep one of its announced snapshots, the device deletes the body. A
+  body whose announcement it has forgotten it finds by listing its own
+  folders (§16.8). An absent device's superseded snapshots wait in storage
+  until it returns. A body it uploaded and never announced is its operation's
+  journal's to delete (§16.2). The one exception is a device gone for good,
+  below.
 - **An audience nobody can snapshot has no deadline.** If no member able to read
   a circle comes online to supply the coverage, that circle's uncovered history
   stays. History it already covers is deleted without waiting for that member.
@@ -6459,13 +6472,16 @@ Ana's own would.
 - **Which bodies.** Nothing a device announces after the entry that stopped it
   counts (§14.1), and the deleting device has applied that entry, so it holds
   every announcement of the gone device there will ever be. A listed body none
-  of them names can never count, and goes at once. An announced one follows the
-  rules above, as the device's own would: the floor naming it, a pending floor
-  write naming it, or a raise or reset needing it keeps it.
-- **Once.** The deleting device ends the gone device's uploads and lists its
-  folders once, journaled, and records that it did. A failure stays with its
-  journal, which runs again from the start. Announced snapshots need no
-  listing: their announcements name them.
+  of the announcements it keeps names can never count, and goes at once. An
+  announced one follows the rules above, as the device's own would: the floor
+  naming it, a pending floor write naming it, or a raise or reset needing it
+  keeps it.
+- **Once, and again for each forgotten announcement.** The deleting device
+  ends the gone device's uploads and lists its folders once, journaled, and
+  records that it did. A failure stays with its journal, which runs again from
+  the start. Announced snapshots need no listing while their announcements
+  are kept: those name them. When the deleting device forgets one of the gone
+  device's announcements, it lists the folders again (§16.8).
 - **Several at once.** Ana's laptop and her tablet may both do this, and the
   phone may run until it reads its removal. Each of them deletes only bodies that
   can never count, and deleting an absent object succeeds, so doing it twice
@@ -6638,6 +6654,96 @@ above read
 - **Reloading keeps what the device held.** A record this device holds and
   the loaded snapshot doesn't stays until this device forgets it. Holding a
   record longer changes no verdict.
+
+#### 16.8 Forgetting announcements
+
+Every announcement a device accepts would stay in its history, and in every
+store snapshot it writes, forever: about 265 bytes each. A small store being
+edited announces a snapshot at nearly every pass that writes (§16.2), so a
+store edited daily for a year would carry hundreds. Rules read only a few of
+them. Once none reads an announcement, the device forgets it: its original
+slot goes from the device's records, so the store snapshots it writes next
+leave it out, and its place in the device's history goes with it.
+
+Ana's laptop announces store snapshots at slots 30, 40 and 60, covering 29, 39
+and 59. Once the one at 60 has passed grace, her floor moves `first` to 60
+(§16.6). The announcements at 30 and 40 are below `first`, older than the
+ordinary one at 60 and cover less than it, and no raise or reset names them.
+Her laptop forgets both, and lists its own snapshot folder to delete their
+bodies.
+
+**What stays.** A device keeps an announcement while any of these reads it:
+
+- **An applied raise or reset names it.** The entry stays forever, and a device
+  rebuilding its history checks the entry against the announcement again.
+- **It is the newest of its audience, or newer than its audience's newest
+  ordinary one.** A floor names the newest usable ordinary snapshot (§16.6), a
+  snapshot request measures from the newest usable one (§16.2), and a circle
+  reload starts from the circle's newest (§16.5).
+- **It is at its audience's greatest coverage.** A new announcement, and a raise
+  or reset entry, are each checked against the greatest coverage so far
+  (§16.3), and an older raise announcement can share it with a newer ordinary
+  one. Ana's raise announcement at slot 50 and Ben's ordinary one at slot 60
+  both cover 49, and her raise entry at slot 120 still applies; a device that
+  had forgotten hers would refuse it while every other device applied it.
+- **Retention reads it.** Its slot is at or after the floor's `first`, so
+  retention reads its publication time (§16.6), or a journaled floor write
+  names it and copies its original slot. A floor write journaled before
+  another device's floor moved `first` past its names still copies them.
+
+Every other announcement is forgotten: no applied raise or reset names it,
+another of its audience covers more, an ordinary one of its audience is
+newer, its slot is below `first`, and no journaled floor write names it. A
+device forgets in its retention, after reading the floor and writing its own.
+
+**Every device still agrees.** A device that forgot an announcement accepts and
+refuses exactly what one holding it does (Appendix G.5). Each
+audience's greatest coverage stays, so a new announcement meets the same
+check. A raise or reset naming a forgotten announcement is refused either
+way: another announcement of the audience covers more. A device rebuilds its
+history from the original slots it keeps whenever the store opens, and a
+loader from a store snapshot's (§16.4). Replaying them gives the history the
+device held. The case that needs care is a raise or reset entry refused
+because another announcement covered more than the one it named. If that
+other announcement is forgotten, so is the named one: it is older, so below
+`first` and older than the same ordinary announcement. The replay refuses the
+entry again. Refused announcements are never stored (§16.1): checked again
+against fewer announcements, one could be accepted.
+
+**Bodies.** A reader loads only the floor's snapshots, the newest usable one of
+an audience, or the body of an applied raise or reset (§16.4, §16.5). A floor
+names announcements at or after its `first`: each covers at least
+`first - 1` (§16.6), and an announcement comes after its coverage. `first`
+never moves back, so a floor written later, even one journaled long before it
+lands, names announcements at or after the `first` a device forgets by. So a
+body only forgotten announcements named is never loaded again, and goes
+without waiting for a replacement to pass grace by this device's clock: the
+floor's writer already saw one pass grace (§16.6). Its files
+need no protection (§17.10), and the absence recorded for it, if its deletion
+was already confirmed, goes with the announcement.
+
+The device finds such a body by listing its folder, not from its history. When
+it forgets one of its own announcements, it journals a listing of its own
+snapshot folders, `snapshots/<audience>/<device>/`, in the same transaction:
+no body is left without the listing that finds it. The listing deletes every
+body there that no kept announcement names, except one an open operation
+names, which it reads in the same pass before listing: a snapshot being
+captured, uploaded, announced or activated, a raise or reset waiting for its
+entry or its undo, and a body already queued for deletion. Without that, Ana's
+laptop would delete the body of a snapshot whose announcement's claim had just
+failed, and her floor would later name a body that isn't there. A body
+uploaded after the listing waits for the next. The devices that delete a
+gone device's files list its folders the same way when they forget one of
+its announcements (§16.6).
+
+**Edge cases.**
+
+- **Devices forget at different times.** Each forgets by the floor it has read
+  and the history it holds. Holding an announcement longer changes no answer.
+- **A loader inherits what its snapshot's writer forgot.** A store snapshot
+  holds the announcements its writer kept at its coverage.
+- **An idle circle holds its own back.** An audience whose newest snapshot is
+  old keeps it, as the newest of its audience, however far `first` moves.
 
 ### 17. Files
 
@@ -8150,9 +8256,11 @@ the same test (§16.7).
   missing permission stays visible (§19.1).
 - **No idle listing.** No quiet pass lists files. File work follows changed
   records, uploads, retired uploads, deleted history, a device going for good
-  or another device's write reading past a waiting candidate. Announcements and
-  the floor name the snapshots to inspect; file deletion never lists snapshot
-  folders.
+  or another device's write reading past a waiting candidate. The
+  announcements this device keeps and the floor name the snapshots to inspect;
+  file deletion never lists snapshot folders. A body only forgotten
+  announcements named is never loaded again (§16.8), so its files need no
+  protection.
 - **Ownership stays known.** A file's storage path and coordinates carry the
   uploader's device id, so whose bytes they are stays known after the last
   record naming them disappears.
@@ -10861,7 +10969,8 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_part_leaves` | the leaf hashes of each part this device received whole, for the same writes, so a later snapshot opens the leaves it needs ([format.md D7.5](format.md#d75-write-evidence-section-6)) |
 | `_coven_part_proofs` | each opening a loaded snapshot proved for the same writes, with its leaf hashes, which this device's own later snapshot prunes and carries on ([format.md D7.5](format.md#d75-write-evidence-section-6)) |
 | `_coven_migration_records` | this device's own migration write's row changes, whole, which its marker's slot applies, since the marker carries none (§18.4), until a loaded snapshot replaces them (§18.5) |
-| `_coven_slot_records` | the original signed admin, admission and key-copy slots, and each announcement slot this device accepted, which store snapshots carry and history is rebuilt from when the store opens ([format.md D7.6](format.md#d76-original-slots-sections-7-to-9)). A refused announcement has none (§16.1) |
+| `_coven_slot_records` | the original signed admin, admission and key-copy slots, and each announcement slot this device accepted and still keeps, which store snapshots carry and history is rebuilt from when the store opens ([format.md D7.6](format.md#d76-original-slots-sections-7-to-9)). A refused announcement has none (§16.1), and a forgotten one's goes (§16.8) |
+| `_coven_absent_snapshots` | each snapshot whose body this device confirmed absent, by its deletion or by a read that found nothing, while an announcement it keeps names it: retention and file deletion skip it (§16.6, §17.10). The row goes with its last announcement (§16.8) |
 | `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists all but the hash (§17.3) |
 | `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored; a move's upload checks against them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
@@ -12713,6 +12822,9 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Past a floor whose `first` has passed a device's next slot, reading forward from its own slots needs a deleted slot, and the floor is refused against those slots | `history_needs_deleted_slot` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §16.4 |
 | The floor check a settling claim runs, reading the slots after where it starts in order and reporting the first missing one, accepts an honest floor in storage in good order | `honest_floor_accepted` | `proofs/sequence/CovenSequence/FloorCheck.lean` | §5.2, §5.3 |
 | Retention considers only announcements at or after the first kept slot: choosing among them gives the same `first` as choosing among all, and a replacement found among them is the one found among all | `choose_kept`, `kept_candidates_same_first`, `kept_replacement` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
+| A device that forgets the announcements no rule reads accepts or refuses every later announcement, and applies or refuses every later raise or reset, as a device holding all of them does, however entries and forgetting interleave; rebuilding history from the original slots it keeps, with no refused announcement among them, gives the history it holds | `answer_same`, `agree_forget`, `rebuilt_same`, `filtered_replay`, `forgettable_of_passed` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.1, §16.8 |
+| An older raise announcement matched in coverage by a newer ordinary one can still be activated, so forgetting it would change a raise's answer; it is never forgettable | `equal_coverage_kept` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.8 |
+| What a reader loads is never forgettable: a floor written from a `first` at least the device's names announcements at or after it, and an audience's newest and newest usable announcements stay. A listing deletes no body a kept announcement or an open operation names, and every other body it lists | `floor_names_kept`, `newest_kept`, `listing_spares`, `listing_finds_superseded` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.6, §16.8, §17.10 |
 | Settling a lost floor reply: a landed write is always confirmed, at the `first` of the floor read, which can be past its own; a write not confirmed did not land; the deletions a confirmed verdict makes are storage steps then and after any later storage steps | `landed_confirms`, `unconfirmed_not_landed`, `confirmed_deletes`, `moved_floor_confirms` | `proofs/sequence/CovenSequence/RetentionConfirm.lean` | §16.6 |
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |

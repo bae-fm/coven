@@ -74,6 +74,25 @@ pub(crate) fn retain(
     Ok(())
 }
 
+/// Forget the original slots of announcements no rule reads any more
+/// (§16.8). Each is a kept announcement's: one missing means the history the
+/// caller holds and these records disagree.
+pub(crate) fn forget_announcements(
+    db: &DatabaseConnection,
+    slots: &BTreeSet<Slot>,
+) -> Result<(), DbError> {
+    for slot in slots {
+        let deleted = db.internal_execute(
+            "DELETE FROM _coven_slot_records WHERE slot=?1 AND kind='announcement'",
+            [slot.get().to_be_bytes()],
+        )?;
+        if deleted != 1 {
+            return Err(DbError::DamagedDatabase);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn apply<P: crate::PendingValue>(
     db: &mut DatabaseConnection,
     before: &DatabaseConnection,

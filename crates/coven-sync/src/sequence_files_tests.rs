@@ -836,3 +836,85 @@ async fn deleting_stored_files_waits_for_an_unfinished_snapshot() {
     ana.sync.clean_up_gone_devices_files().await.unwrap();
     ana.database().close().await.unwrap();
 }
+
+/// Ana's first store snapshot names her recording's file. She deletes the
+/// row and takes a second snapshot without it. Once her floor passes the
+/// first, she forgets its announcement, and deleting its body fails, so the
+/// body stays in storage. File deletion reads the snapshots of the
+/// announcements she keeps: the second, not the first, so the file goes
+/// (§16.8, §17.10).
+#[tokio::test]
+async fn file_deletion_reads_no_snapshot_whose_announcement_was_forgotten() {
+    use coven_database::FilePlace;
+    use coven_storage::{
+        test_utils::{Faults, MemoryRequest},
+        StorageFailure,
+    };
+    let group = Group::new();
+    let mut devices = file_devices(&group, &[1]).await;
+    let ana = devices.remove(0);
+    group.create(&ana).await;
+    let originals = tempfile::tempdir().unwrap();
+    let recording = originals.path().join("recording");
+    std::fs::write(&recording, b"sound").unwrap();
+    let prepared = coven_database::prepare_user_file(&recording, |_| {}).await.unwrap();
+    let staged = ana
+        .database()
+        .write_as::<_, _, coven_database::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, coven_database::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
+            Ok(file)
+        })
+        .await
+        .unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    let file = ana.database().file_ref(staged).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        panic!("the upload stored the file");
+    };
+    let object = location.path(group.store);
+    ana.sync.pass().await.unwrap();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let forgotten = announced_body(&group, &ana, announced).await;
+    ana.database()
+        .write(|sql| {
+            sql.execute("DELETE FROM files", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let kept = announced_body(&group, &ana, announced).await;
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.storage
+        .set_faults(Faults {
+            delete_failures: [(forgotten.clone(), StorageFailure::PermissionDenied)].into(),
+            ..Faults::none()
+        })
+        .await;
+    let before = ana.storage.request_trace().len();
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert!(group.storage.status(&forgotten).await.unwrap().is_some(), "its deletion failed");
+    assert!(group.storage.status(&object).await.unwrap().is_none(), "the file is deleted");
+    let trace = ana.storage.request_trace().split_off(before);
+    let read = |path: &ObjectPath| {
+        trace.iter().any(|request| matches!(request, MemoryRequest::Read(read, _) if read == path))
+    };
+    assert!(read(&kept), "the kept announcement's snapshot is read: {trace:?}");
+    assert!(!read(&forgotten), "the forgotten one's is not: {trace:?}");
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}
+
+/// The path of the body the announcement at `slot` names.
+async fn announced_body(group: &Group, device: &Device, slot: coven_merge::Slot) -> ObjectPath {
+    let id = device.sync.session.lock().await.history.announcements[&slot].snapshot.clone();
+    crate::snapshot_object::path(group.store, &id).unwrap()
+}

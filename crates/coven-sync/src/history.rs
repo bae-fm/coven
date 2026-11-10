@@ -98,6 +98,9 @@ pub(crate) struct History {
     pub(crate) copies: Vec<KeyCopy>,
     pub(crate) announcements: BTreeMap<Slot, SnapshotAnnouncement>,
     pub(crate) boundaries: Vec<coven_database::BoundaryCoverage>,
+    /// The slot of each announcement an applied raise or reset named: it
+    /// stays as long as its entry does (§16.8).
+    activated: BTreeSet<Slot>,
     pub(crate) cutoffs: Vec<Cutoff>,
     pub(crate) bindings: Vec<Binding>,
     /// Every invite share a counted entry recorded, ended or not.
@@ -464,6 +467,7 @@ impl History {
                 boundary: boundary.clone(),
                 included: self.announcements[announcement].covers,
             });
+            self.activated.insert(*announcement);
         }
         if matches!(
             effect.change,
@@ -569,6 +573,44 @@ impl History {
                     None => SyncError::Rejected(OperationRejection::NotAllowed),
                 }
             })
+    }
+
+    /// The announcements no rule reads any more (§16.8): each below the
+    /// floor's first kept slot `first`, named by no applied raise or reset,
+    /// not in `named` (the floor's and each journaled floor write's names),
+    /// older than an ordinary announcement of its audience, and covering
+    /// less than another of it.
+    /// Acceptance and a raise or reset compare with the audience's greatest
+    /// coverage, so every announcement at it stays, even one only matched by
+    /// a newer one: a raise naming it can still apply
+    /// (`Announcements.forgettable`, `answer_same`, `equal_coverage_kept`).
+    pub(crate) fn forgettable(&self, first: Slot, named: &BTreeSet<Slot>) -> BTreeSet<Slot> {
+        let mut greatest = BTreeMap::new();
+        let mut ordinary = BTreeMap::new();
+        for (slot, announcement) in &self.announcements {
+            let audience = &announcement.snapshot.audience;
+            let covers = greatest.entry(audience).or_insert(announcement.covers);
+            *covers = announcement.covers.max(*covers);
+            if announcement.purpose == coven_format::sequence::Purpose::Ordinary {
+                ordinary.insert(audience, *slot);
+            }
+        }
+        self.announcements
+            .range(..first)
+            .filter(|(slot, announcement)| {
+                let audience = &announcement.snapshot.audience;
+                !self.activated.contains(slot)
+                    && !named.contains(slot)
+                    && greatest[audience] > announcement.covers
+                    && ordinary.get(audience).is_some_and(|newest| newest > slot)
+            })
+            .map(|(slot, _)| *slot)
+            .collect()
+    }
+
+    /// Forget the announcements at `slots`, as their original slots go.
+    pub(crate) fn forget(&mut self, slots: &BTreeSet<Slot>) {
+        self.announcements.retain(|slot, _| !slots.contains(slot));
     }
 
     /// Metadata must remain publishable while a disclosed key is replaced.
