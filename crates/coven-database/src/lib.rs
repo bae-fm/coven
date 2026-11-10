@@ -38,6 +38,7 @@ mod from_item;
 mod insert_rows;
 mod internal_schema;
 mod interpretation;
+mod joined_invitee;
 mod judge;
 mod judge_view;
 mod live_query;

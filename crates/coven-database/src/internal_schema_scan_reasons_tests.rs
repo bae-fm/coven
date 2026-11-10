@@ -124,6 +124,7 @@ mod fixture {
         crate::file_pins::tests::fill_for_plans(&db);
         crate::file_table::tests::fill_for_plans(&db);
         crate::device_reset::tests::fill_for_plans(&db);
+        crate::joined_invitee::tests::fill_for_plans(&db);
         crate::upload::tests::fill_for_plans(&db);
         crate::retry::tests::fill_for_plans(&db);
         crate::write_boundary::tests::fill_for_plans(&db);
@@ -157,6 +158,7 @@ mod fixture {
                 | "_coven_snapshot_reservation"
                 | "_coven_snapshot_schema"
                 | "_coven_device_reset"
+                | "_coven_joined_invitee"
                 | "_coven_upload_pause"
                 | "_coven_unmetered_only"
                 | "_coven_write_pause"
@@ -295,6 +297,7 @@ mod source {
                     | "file_pins_schema.rs"
                     | "file_table_schema.rs"
                     | "device_reset_schema.rs"
+                    | "joined_invitee_schema.rs"
                     | "upload_schema.rs"
                     | "retry_schema.rs"
                     | "write_boundary_schema.rs"

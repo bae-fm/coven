@@ -46,9 +46,21 @@ which only a faulty or hostile writer lands, leaves the store's device never a
 member. `Rules.stopsRefused`: such a load stops the store for good, which the
 app shows and removes. Then every loaded store from a join is a member
 (`refused_stops`); without it the store syncs on unregistered, with no step
-of coven's own or the app's left to take (`refused_syncs_forever`). Past its
-admission, the other facts, a removal or a replacement of its member's keys,
-stop the store as any store, outside this model.
+of coven's own or the app's left that would end it (`refused_syncs_forever`).
+Past its admission, the other facts, a removal or a replacement of its
+member's keys, stop the store as any store, outside this model.
+
+The invite code carries the new person's name, which the app makes their
+profile with, and nothing in history does. Publishing deletes the code, so
+the store keeps that name, on the device only, until the app has recorded the
+profile and acknowledges it. `Rules.keepsInvitee`: publishing keeps the name
+with the store. Then the name is there until the app acknowledges it
+(`invitee_kept`), whatever happens between: a first load that fails, an app
+that quits. Without it, the code goes as the join publishes and the app,
+which hadn't yet recorded the profile, has nothing to record it from
+(`published_join_loses_invitee`). Acknowledging again changes nothing
+(`acknowledge_idempotent`). Discarding the store, outside this model, takes
+the name with it.
 -/
 namespace CovenSequence.FirstInstallation
 
@@ -93,10 +105,17 @@ structure World where
   member : Bool
   /-- The store stopped for good. -/
   stopped : Bool
+  /-- The published store keeps the invite's person's name, on the device
+  only. -/
+  inviteeKept : Bool
+  /-- The app has recorded the person's profile, or its request for it, and
+  acknowledged the name. -/
+  profiled : Bool
   deriving DecidableEq, Repr
 
 def start : World :=
-  ⟨.none, .none, false, false, false, false, false, false, false, false, false, false⟩
+  ⟨.none, .none, false, false, false, false, false, false, false, false, false, false, false,
+    false⟩
 
 structure Rules where
   /-- A restore refuses an installation holding an invite code, and a join
@@ -109,9 +128,11 @@ structure Rules where
   /-- A store whose first load leaves its device never a member stops for
   good. -/
   stopsRefused : Bool
+  /-- Publishing a join's store keeps the invite's person's name with it. -/
+  keepsInvitee : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true, true, true⟩
+def Rules.correct : Rules := ⟨true, true, true, true, true⟩
 
 /-- Remove the installation and everything kept beside it, as either call
 does when it ends without its store. What may be in storage stays. -/
@@ -152,6 +173,10 @@ inductive Act where
   | restoreUndo
   /-- The restore's registration ended: it publishes the store. -/
   | restored
+  /-- The app records the person's profile from the name the published store
+  keeps, or a request for it, and acknowledges the name in the same write;
+  or acknowledges again. -/
+  | acknowledge
   /-- The app drops the running call, or the device crashes. -/
   | drop
   deriving DecidableEq, Repr
@@ -170,13 +195,15 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .register => w.call == .restore && w.record
   | .restoreUndo => w.call == .restore && !w.record
   | .restored => w.call == .restore && w.registered
+  | .acknowledge => w.inst == .published && w.found && (w.inviteeKept || w.profiled)
   | .drop => w.call != .none
 
 /-- Publish a join's store: its code, request and acceptance become the
-store's. -/
-def publish (w : World) : World :=
+store's, and the store keeps the person's name the code carried where the
+rules say. -/
+def publish (R : Rules) (w : World) : World :=
   { w with inst := .published, call := .none, code := false, sent := false, accepted := false,
-           acceptKept := false }
+           acceptKept := false, inviteeKept := R.keepsInvitee }
 
 def act (R : Rules) (w : World) : Act → World
   | .beginJoin => { w with inst := .hidden, call := .join, code := true }
@@ -185,8 +212,9 @@ def act (R : Rules) (w : World) : Act → World
   | .send => { w with sent := true }
   | .joinCancel => { undo w with accepted := w.accepted && !w.acceptKept, acceptKept := false }
   | .declined => { undo w with sent := false, accepted := false, acceptKept := false }
-  | .found => if R.publishesAtAdmission then publish { w with found := true } else { w with found := true }
-  | .approved => publish w
+  | .found =>
+    if R.publishesAtAdmission then publish R { w with found := true } else { w with found := true }
+  | .approved => publish R w
   | .load counts =>
     if counts then { w with loaded := true, member := true }
     else if R.stopsRefused then { w with stopped := true }
@@ -197,6 +225,7 @@ def act (R : Rules) (w : World) : Act → World
   | .restoreUndo => undo w
   | .restored =>
     { w with inst := .published, call := .none, record := false, registered := false }
+  | .acknowledge => { w with profiled := true, inviteeKept := false }
   | .drop => { w with call := .none }
 
 inductive Steps (R : Rules) : World → World → Prop
@@ -218,6 +247,13 @@ def Stranded (w : World) : Prop :=
   (w.sent = true ∧ w.code = false) ∨ (w.registered = true ∧ w.record = false) ∨
     (w.accepted = true ∧ w.code = false)
 
+/-- A store a join published whose person the app hasn't recorded, with the
+name the invite carried nowhere on the device: not in a code, not kept with
+the store. The person has to type it. -/
+def InviteeLost (w : World) : Prop :=
+  w.inst = .published ∧ w.found = true ∧ w.profiled = false ∧ w.code = false ∧
+    w.inviteeKept = false
+
 /-! ## Counterexamples: one call's removal takes the other's listing -/
 
 /-- Dan's phone sends its join request for Household, and the app drops the
@@ -227,7 +263,7 @@ the restore records itself. The cancel removes the installation and the
 join's code with it: Ben may approve Dan's request, and no join on the
 phone is listed to finish it. -/
 theorem restore_strands_join :
-    ∃ w, trace ⟨false, true, true, true⟩ start [.beginJoin, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
+    ∃ w, trace ⟨false, true, true, true, true⟩ start [.beginJoin, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
       Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -238,7 +274,7 @@ before it sends its request. The cancel removes the installation and the
 restore's record with it: the registration may land, and no restore on the
 laptop is listed to finish it. -/
 theorem join_strands_restore :
-    ∃ w, trace ⟨false, true, true, true⟩ start [.beginRestore, .record, .register, .drop, .beginJoin, .joinCancel] =
+    ∃ w, trace ⟨false, true, true, true, true⟩ start [.beginRestore, .record, .register, .drop, .beginJoin, .joinCancel] =
         some w ∧ Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -247,7 +283,7 @@ app closes before sending his request. Resumed, the join is cancelled: it
 removes the installation and the code, and Household stays mounted in Dan's
 Dropbox with no join listed to take it out. -/
 theorem cancel_strands_acceptance :
-    ∃ w, trace ⟨true, false, true, true⟩ start [.beginJoin, .accept, .drop, .beginJoin, .joinCancel] =
+    ∃ w, trace ⟨true, false, true, true, true⟩ start [.beginJoin, .accept, .drop, .beginJoin, .joinCancel] =
         some w ∧ Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -257,21 +293,30 @@ theorem cancel_strands_acceptance :
 publishes, and the call stops while it loads: Dan's storage access was taken
 away. The join stays listed, though nothing is left for it to claim. -/
 theorem loaded_first_lists_admitted :
-    ∃ w, trace ⟨true, true, false, true⟩ start [.beginJoin, .send, .found, .drop] = some w ∧
+    ∃ w, trace ⟨true, true, false, true, true⟩ start [.beginJoin, .send, .found, .drop] = some w ∧
       w.found = true ∧ w.code = true := by
   exact ⟨_, rfl, rfl, rfl⟩
 
 /-- Dan's phone publishes Household as it finds its admission, but the
 history its first load applies refused that admission, and the store doesn't
-stop. Its device never a member, it sends nothing, and no step is left to
-take: neither coven's nor the app's. -/
+stop. Its device never a member, it sends nothing, and no step is left that
+would end it: coven has none, and the app's only one records Dan's name. -/
 theorem refused_syncs_forever :
-    ∃ w, trace ⟨true, true, true, false⟩ start [.beginJoin, .send, .found, .load false] = some w ∧
-      w.loaded = true ∧ w.member = false ∧ w.stopped = false ∧
-      ∀ a, enabled ⟨true, true, true, false⟩ w a = false := by
+    ∃ w, trace ⟨true, true, true, false, true⟩ start [.beginJoin, .send, .found, .load false] =
+        some w ∧ w.loaded = true ∧ w.member = false ∧ w.stopped = false ∧
+      ∀ a, a ≠ .acknowledge → enabled ⟨true, true, true, false, true⟩ w a = false := by
   refine ⟨_, rfl, rfl, rfl, rfl, ?_⟩
-  intro a
-  cases a <;> rfl
+  intro a h
+  cases a <;> first | rfl | exact absurd rfl h
+
+/-- Dan's phone finds its admission and publishes Household, deleting the
+invite code, but the store keeps none of the code's person's name. Its first
+load fails, or the app quits, before the app has recorded Dan's profile: the
+name is nowhere on the phone, and the app can't record it. -/
+theorem published_join_loses_invitee :
+    ∃ w, trace ⟨true, true, true, true, false⟩ start [.beginJoin, .send, .found] = some w ∧
+      InviteeLost w ∧ enabled ⟨true, true, true, true, false⟩ w .acknowledge = false := by
+  exact ⟨_, rfl, by simp [InviteeLost, act, publish, start], rfl⟩
 
 /-! ## Under the rules -/
 
@@ -289,13 +334,16 @@ structure Inv (w : World) : Prop where
   found : w.found = true → w.inst = .published ∧ w.code = false ∧ w.call = .none
   /-- A store whose first load reached the end is a member. -/
   loaded : w.loaded = true → w.member = true
+  /-- A join that found its admission keeps its person's name until the app
+  acknowledges it. -/
+  invitee : w.found = true → w.profiled = false → w.inviteeKept = true
 
 theorem inv_start : Inv start := by
   constructor <;> simp [start]
 
 theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct w a = true) :
     Inv (act Rules.correct w a) := by
-  obtain ⟨sent, registered, one, join, restore, accepted, found, loaded⟩ := inv
+  obtain ⟨sent, registered, one, join, restore, accepted, found, loaded, invitee⟩ := inv
   cases a <;> rcases hc : w.call <;> constructor <;>
     simp_all [act, enabled, Rules.correct, undo, publish] <;>
     (try split) <;> simp_all
@@ -319,6 +367,21 @@ one whose history refused the admission stopped instead. -/
 theorem refused_stops {w : World} (h : Reachable Rules.correct w) (loaded : w.loaded = true) :
     w.member = true :=
   (steps_keep_inv h inv_start).loaded loaded
+
+/-- **The person's name outlives the code.** Whatever the app and the device
+do, a store a join published keeps the name its invite carried until the app
+acknowledges it: a first load that fails, an app that quits, leave it. -/
+theorem invitee_kept {w : World} (h : Reachable Rules.correct w) (found : w.found = true)
+    (unrecorded : w.profiled = false) : w.inviteeKept = true :=
+  (steps_keep_inv h inv_start).invitee found unrecorded
+
+/-- **Acknowledging is idempotent.** Once the app has acknowledged the name,
+acknowledging again is allowed and changes nothing. -/
+theorem acknowledge_idempotent (R : Rules) (w : World)
+    (e : enabled R w .acknowledge = true) :
+    enabled R (act R w .acknowledge) .acknowledge = true ∧
+      act R (act R w .acknowledge) .acknowledge = act R w .acknowledge := by
+  simp_all [enabled, act]
 
 /-- Under the rules no call's removal takes another's listing, and no cancel
 leaves an acceptance behind: whatever storage may hold of a join's request or

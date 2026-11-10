@@ -2365,7 +2365,7 @@ storage          bytes
 | Field | Rule |
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
-| `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one |
+| `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one. The joining device keeps it with the store it publishes, after deleting the code, until the app acknowledges it (§13.2) |
 | `expires_at` | when the invite ends, in whole seconds since the Unix epoch by the inviting device's clock: the joining device sends no first request after it (§13.2) |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |

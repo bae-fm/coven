@@ -447,6 +447,9 @@ import SequenceApply
 #print axioms CovenSequence.FirstInstallation.refused_stops
 #print axioms CovenSequence.FirstInstallation.loaded_first_lists_admitted
 #print axioms CovenSequence.FirstInstallation.refused_syncs_forever
+#print axioms CovenSequence.FirstInstallation.invitee_kept
+#print axioms CovenSequence.FirstInstallation.acknowledge_idempotent
+#print axioms CovenSequence.FirstInstallation.published_join_loses_invitee
 #print axioms CovenSequence.DeviceReplacement.old_never_stale
 #print axioms CovenSequence.DeviceReplacement.never_missing
 #print axioms CovenSequence.DeviceReplacement.progress

@@ -227,7 +227,7 @@ async fn reading_a_discarded_database_needs_none_of_the_apps_collations() {
         .open()
         .await
         .unwrap();
-    database.initialize_store_name("Household".into(), coven_merge::Slot::FIRST).await.unwrap();
+    database.initialize_store_name("Household".into()).await.unwrap();
     sql(&database, "INSERT INTO notes VALUES ('1','apples')").await.unwrap();
     database.close().await.unwrap();
 
@@ -638,7 +638,7 @@ async fn reading_a_discarded_database_needs_none_of_the_apps_functions() {
         .open()
         .await
         .unwrap();
-    database.initialize_store_name("Household".into(), coven_merge::Slot::FIRST).await.unwrap();
+    database.initialize_store_name("Household".into()).await.unwrap();
     sql(&database, "INSERT INTO notes VALUES ('1','École')").await.unwrap();
     database.close().await.unwrap();
 

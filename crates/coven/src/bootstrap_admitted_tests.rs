@@ -312,3 +312,163 @@ async fn an_admitted_store_whose_member_is_removed_before_it_loads_stops() {
     install.absent(store).await;
     owner.close().await;
 }
+
+/// Carol's join publishes Household and deletes its invite code, the only
+/// other place on her phone holding her name, and the store's first load
+/// fails: her storage access is taken away before it streams the floor's
+/// snapshot. Household keeps her name, through closing and opening it again
+/// and through the load that runs once access is back, for the app to record
+/// her profile from (§13.2).
+#[tokio::test]
+async fn a_joined_store_keeps_its_persons_name_through_a_failed_first_load() {
+    let owner = Owner::new(CloudProvider::S3, true).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let snapshot = crate::tests::snapshots(&owner.storage, store).await.remove(0).path;
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, _) = owner
+        .join_and_approve(joining, &control, |_| async {
+            owner
+                .storage
+                .set_faults(coven_storage::test_utils::Faults {
+                    read_failures: [(snapshot, StorageFailure::PermissionDenied)].into(),
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
+        })
+        .await;
+    let Err(BootstrapError::Published { handle, source }) = result else {
+        panic!("the admitted join is a store that couldn't load: {result:?}");
+    };
+    assert!(
+        matches!(&*source, BootstrapError::Sync(SyncError::Storage(error))
+            if error.failure() == StorageFailure::PermissionDenied),
+        "{source:?}"
+    );
+    assert!(saved_code(&install, store).is_none());
+    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    handle.close().await.unwrap();
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let handle = install.builder(&owner, owner.recipient()).open(store, |_| {}).await.unwrap();
+    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    // The load installs the floor's snapshot and applies the slots after it.
+    handle.start_sync().await.unwrap();
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Carol's app records her profile from the name Household keeps and
+/// acknowledges the name in the same write. A write that fails after
+/// acknowledging keeps it, so the profile and the acknowledgement commit
+/// together; once one commits, the store keeps the name no longer, opened
+/// again too. Acknowledging again, as an app that can't tell whether its
+/// write committed does, succeeds and changes nothing (§13.2).
+#[tokio::test]
+async fn acknowledging_a_joined_stores_person_ends_the_name_and_may_be_repeated() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    let handle = result.unwrap().expect("the admitted join publishes its store");
+    let name = handle.joined_invitee().await.unwrap().expect("the store keeps Carol's name");
+    let failed = handle
+        .write(|sql| {
+            sql.acknowledge_joined_invitee()?;
+            sql.execute("INSERT INTO profiles VALUES('Carol')", [])?;
+            Ok::<_, CovenError>(())
+        })
+        .await;
+    assert!(failed.is_err(), "{failed:?}");
+    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    handle
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('profile',?1)",
+                coven_database::params![name.into_bytes()],
+            )?;
+            sql.acknowledge_joined_invitee()?;
+            Ok::<_, CovenError>(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    handle.write(|sql| Ok::<_, CovenError>(sql.acknowledge_joined_invitee()?)).await.unwrap();
+    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    handle.close().await.unwrap();
+    let handle = install.builder(&owner, owner.recipient()).open(store, |_| {}).await.unwrap();
+    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Carol discards Household before her app recorded her profile, and joins
+/// it again with a recovery invite, which names no one: the name her first
+/// join kept went with the store she discarded, and the store the recovery
+/// publishes keeps none (§13.2, §13.3).
+#[tokio::test]
+async fn discarding_a_joined_store_removes_its_persons_name() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, carol) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    let handle = result.unwrap().expect("the admitted join publishes its store");
+    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    handle.close().await.unwrap();
+    install.app.discard_store(&install.app.store_dir(&store)).await.unwrap();
+    let recovery = crate::tests::invite(
+        &owner.handle,
+        InviteTarget::ReplaceMemberKeys { member: carol },
+        InviteAccess::S3AccessKey {
+            access_key_id: "recovery-key".into(),
+            secret_access_key: SecretText::new("recovery-secret".into()),
+        },
+        crate::InviteLifetime::Day,
+    )
+    .await;
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&recovery, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    assert_eq!(member, carol);
+    let handle = result.unwrap().expect("the recovery publishes its store");
+    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    handle.close().await.unwrap();
+    owner.close().await;
+}

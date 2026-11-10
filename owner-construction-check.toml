@@ -576,6 +576,7 @@ table_macros = [
     "coven_retries_tables",
     "coven_uploads_tables",
     "coven_device_reset_tables",
+    "coven_joined_invitee_tables",
     "coven_file_columns_tables",
     "coven_pin_requests_tables",
     "coven_file_moves_tables",
@@ -796,6 +797,17 @@ homes = [
 ]
 tables = [
     "_coven_device_reset",
+]
+
+[[database.domains]]
+name = "joined invitee"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/joined_invitee.rs",
+    "crates/coven-database/src/joined_invitee_schema.rs",
+]
+tables = [
+    "_coven_joined_invitee",
 ]
 
 [[database.domains]]

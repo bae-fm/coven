@@ -43,7 +43,7 @@ async fn prepare(
 ) -> Result<CovenHandle, StoreCreationError> {
     let directory = pending.directory();
     let database = builder.database(directory.clone())?.open().await?;
-    if let Err(error) = database.initialize_store_name(name, coven_merge::Slot::FIRST).await {
+    if let Err(error) = database.initialize_store_name(name).await {
         return Err(close_failed(&database, CovenError::from(error).into()).await);
     }
     let waits = match coven_sync::RetryWaits::open(database.clone(), builder.clock.clone()).await {

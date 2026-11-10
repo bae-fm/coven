@@ -1326,11 +1326,13 @@ acceptance it records first; a decline's acceptance ends with the invite, and
 an approval's becomes the store's access. A join finds its admission, which
 registered its device, by the copies it carries; the published store's
 first load applies it, counted or refused. The app drops either call at any
-point. Under `Rules.correct` a restore refuses an installation holding an
-invite code, and a join one holding a restore's record, a join records that
-it is accepting before it accepts, a join publishes the store in the step
-that finds its admission, and a store whose first load leaves its device
-never a member stops for good.
+point, and records the person's profile from the name the invite carried,
+acknowledging the name the store keeps. Under `Rules.correct` a restore
+refuses an installation holding an invite code, and a join one holding a
+restore's record, a join records that it is accepting before it accepts, a
+join publishes the store in the step that finds its admission, a store whose
+first load leaves its device never a member stops for good, and publishing
+keeps the invite's person's name with the store.
 
 - `never_stranded`: whatever storage may hold of a join's request or a
   restore's registration, and whatever acceptance the joining account
@@ -1339,6 +1341,10 @@ never a member stops for good.
   listed as no join, with no call on it.
 - `refused_stops`: a store a join published whose first load reached the end
   of the sequence counts its device a member; a refused admission stopped it.
+- `invitee_kept`: a store a join published keeps the person's name its
+  invite carried until the app acknowledges it, whatever happens between.
+- `acknowledge_idempotent`: acknowledging the name again is allowed and
+  changes nothing.
 
 Each rule is needed. Without the first, one call's removal takes the other's
 listing:
@@ -1357,7 +1363,10 @@ Without the third, `loaded_first_lists_admitted`: a join finds its admission
 and the call stops while it loads, its storage access lost; the join stays
 listed with nothing left to do. Without the fourth,
 `refused_syncs_forever`: a store whose first load applied a refused
-admission syncs on unregistered, with no step left to take.
+admission syncs on unregistered, with no step left that would end it.
+Without the fifth, `published_join_loses_invitee`: the join publishes,
+deleting its code, and the app hasn't recorded the person's profile; the
+name is nowhere on the device.
 
 [`DeviceReplacement`](sequence/CovenSequence/DeviceReplacement.lean)
 models `reset_device` and `restore_device` past loading (§19.3, §13.1): the

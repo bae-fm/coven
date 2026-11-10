@@ -1,17 +1,39 @@
-//! Store names share the transaction that commits their sequence prefix.
+//! Store names share the transaction that commits their sequence prefix; the
+//! store a join publishes also keeps its new person's name (§13.2).
 
 use super::*;
 
 impl Database {
     /// Save the name chosen for a local store before publishing its
-    /// directory, which slot 1 will set, or the name a join's invite carried,
-    /// set by `named_at`, for the store a join publishes before it loads
-    /// (§13.2). This row is not sequence membership until the applied history
-    /// creates the store and sets its name.
-    pub async fn initialize_store_name(
+    /// directory, which slot 1 will set (§10.3). This row is not sequence
+    /// membership until the applied history creates the store and sets its
+    /// name.
+    pub async fn initialize_store_name(&self, name: String) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    crate::store_state_tables::name_before_creation(
+                        db,
+                        inner.access.directory.id(),
+                        &name,
+                        coven_merge::Slot::FIRST,
+                    )
+                })
+            })
+        })
+        .await
+    }
+
+    /// Save what the store a join publishes keeps from its invite before it
+    /// loads, in one transaction: the store's `name`, set by `named_at`, the
+    /// slot the inviting device had applied, and the new person's name,
+    /// `invitee`, which it keeps until the app acknowledges it. A recovery
+    /// invite carries none (§13.2).
+    pub async fn initialize_joined_store(
         &self,
         name: String,
         named_at: coven_merge::Slot,
+        invitee: Option<String>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -21,11 +43,22 @@ impl Database {
                         inner.access.directory.id(),
                         &name,
                         named_at,
-                    )
+                    )?;
+                    match &invitee {
+                        Some(invitee) => crate::joined_invitee::keep(db, invitee),
+                        None => Ok(()),
+                    }
                 })
             })
         })
         .await
+    }
+
+    /// The new person's name the store a join published keeps until the app
+    /// acknowledges it; None for any other store, and once acknowledged
+    /// (§13.2).
+    pub async fn joined_invitee(&self) -> Result<Option<String>, DbError> {
+        self.read(|sql| sql.joined_invitee()).await
     }
 
     /// The same name query, live (E4).

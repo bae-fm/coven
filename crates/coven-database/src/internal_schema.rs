@@ -106,6 +106,9 @@ mod file_table_schema;
 #[path = "forget_records_schema.rs"]
 mod forget_records_schema;
 #[macro_use]
+#[path = "joined_invitee_schema.rs"]
+mod joined_invitee_schema;
+#[macro_use]
 #[path = "loss_record_schema.rs"]
 mod loss_record_schema;
 #[macro_use]
@@ -190,6 +193,7 @@ macro_rules! coven_tables {
         coven_device_reset_tables!($visit);
         coven_SQL_versions_tables!($visit);
         coven_store_state_tables!($visit);
+        coven_joined_invitee_tables!($visit);
         coven_write_boundaries_tables!($visit);
         coven_raises_tables!($visit);
         coven_merge_store_tables!($visit);

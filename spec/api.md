@@ -7491,6 +7491,16 @@ pub enum ProviderSignOut {
   the history it loads refused the admission (§13.2).
   Before then a cancel unmounts the Dropbox folder the join may have mounted,
   then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
+- The store a join publishes keeps the new person's name its code carried,
+  on the device only, never synced, until the app acknowledges it: the app
+  makes the person's profile from it, and nothing else on the device holds
+  it once the code is deleted. `CovenHandle::joined_invitee` reads it, from
+  the first open of the store on, whether or not its first load has
+  finished; `CovenWrite::acknowledge_joined_invitee` ends it, in the write
+  that records the profile, or the app's request for one, so the two commit
+  together. Acknowledging again succeeds and changes nothing. Deleting or
+  discarding the store removes it; a recovery invite carries no name, and
+  its store keeps none ([§13.2](coven.md#132-adding-a-person-invites)).
 - A join sends no first request once the invite's `expires_at` has passed by
   the joining device's clock: it ends as an expired one does. An ended
   invite's marker at the request's path (format.md D8) ends a join that
@@ -8327,6 +8337,22 @@ impl JoinControl {
     /// that finds the request still waiting waits the next longer delay. A
     /// provider cooldown still holds, and the status says when it ends.
     pub fn check_now(&self);
+}
+
+impl CovenHandle {
+    /// The new person's name the invite carried, which a store a join
+    /// published keeps on this device until a write acknowledges it (§13.2).
+    /// None for a store no join published, for a recovery invite's, and once
+    /// acknowledged.
+    pub async fn joined_invitee(&self) -> CovenResult<Option<String>>;
+}
+
+impl CovenWrite<'_> {
+    /// Acknowledges the name `joined_invitee` reads, as a step of this
+    /// write: the store keeps it no longer. The app records the person's
+    /// profile, or its request for one, in the same write. With no name
+    /// kept, it succeeds and changes nothing.
+    pub fn acknowledge_joined_invitee(&self) -> Result<(), DbError>;
 }
 
 impl CovenBuilder {

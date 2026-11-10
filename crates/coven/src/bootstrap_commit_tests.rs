@@ -88,7 +88,7 @@ async fn prepared_continuing(
         .key_custody(keys)
         .identity_custody(identity);
     let database = builder.database(pending.directory()).unwrap().open().await.unwrap();
-    database.initialize_store_name("Household".into(), coven_merge::Slot::FIRST).await.unwrap();
+    database.initialize_store_name("Household".into()).await.unwrap();
     let owners = builder
         .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)), continuing)
         .unwrap();

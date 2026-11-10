@@ -152,6 +152,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_forgotten",
                 "_coven_gone_storage_cleared",
                 "_coven_held_keys",
+                "_coven_joined_invitee",
                 "_coven_last_claims",
                 "_coven_lost",
                 "_coven_members",
