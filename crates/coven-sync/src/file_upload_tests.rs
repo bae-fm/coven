@@ -677,8 +677,13 @@ mod differential {
                         }
                     };
                     f.storage.set_online(true);
+                    // The model settles on what storage holds: the bytes are
+                    // stored whether or not a file still waited for them.
                     let settlement = match &result {
-                        Ok(crate::files::file_upload::Attempted::Stored) => "stored",
+                        Ok(
+                            crate::files::file_upload::Attempted::Stored
+                            | crate::files::file_upload::Attempted::Retired,
+                        ) => "stored",
                         Err(TransferError::File(FileReadError::Storage(error)))
                             if error.failure() == StorageFailure::Network =>
                         {
