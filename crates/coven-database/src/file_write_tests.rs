@@ -1,4 +1,5 @@
 use crate::{tests::TestStore, write::tests::records, *};
+#[cfg(unix)]
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     clock::FixedClock,

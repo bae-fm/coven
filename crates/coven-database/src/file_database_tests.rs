@@ -4,6 +4,7 @@ use crate::{
     tests::TestStore,
     DbError, Migration, Namespace, Provenance, SchemaError,
 };
+#[cfg(unix)]
 use coven_foundation::clock::HANG_GUARD;
 
 /// A stored file of these bytes, referenced by row `7`.

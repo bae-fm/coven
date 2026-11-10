@@ -762,7 +762,7 @@ async fn stored_objects_never_hold_a_files_key_hashes_or_path() {
             "the content hash in hex",
             content_hash.iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes(),
         ),
-        ("the original's path", std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec()),
+        ("the original's path", path.to_str().unwrap().as_bytes().to_vec()),
         ("the original's name", b"private-recording-title".to_vec()),
     ];
     if key_text.len() == 64 {
