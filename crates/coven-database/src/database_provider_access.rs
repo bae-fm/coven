@@ -145,6 +145,36 @@ impl crate::Database {
         .await
     }
 
+    /// Advance an invite whose grant the provider refused for good, and end
+    /// the account's grant request `grant` as not granted, in one commit: the
+    /// refusal leaves nothing shared, and retrying the grant would be refused
+    /// the same way. The account's intention is the invite's end's to change
+    /// (§13.2). A request that is not `grant`, fixed on granting, fails with
+    /// `OperationChanged`.
+    pub async fn advance_operation_refusing_grant(
+        &self,
+        update: crate::OperationUpdate,
+        account: String,
+        grant: OperationId,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|db| {
+                db.transaction(|db| {
+                    crate::operation::advance(db, &update)?;
+                    let state = read(db, &account)?.ok_or(DbError::OperationChanged(grant))?;
+                    if state.request
+                        != Some(ProviderAccessRequest { operation: grant, target: Some(true) })
+                    {
+                        return Err(DbError::OperationChanged(grant));
+                    }
+                    crate::provider_access::confirm(db, &account, false, None)?;
+                    finish(db, &account, grant)
+                })
+            })
+        })
+        .await
+    }
+
     /// Confirm a fixed request and either finish it or queue the opposite target
     /// on the same pending subject, in one commit.
     pub async fn complete_provider_request<P: PendingValue>(

@@ -228,6 +228,7 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         | InvalidRange
         | NotStoreOwner
         | InviteeIsStoreOwner
+        | SharingRefused(_)
         | AccountIdUnavailable
         | InvitationMismatch
         | SessionMismatch

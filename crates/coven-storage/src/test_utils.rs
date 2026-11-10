@@ -779,6 +779,9 @@ impl ProviderOps for MemoryProvider {
         if account.eq_ignore_ascii_case(OWNER_ACCOUNT) {
             return Err(StorageFailure::InviteeIsStoreOwner.into());
         }
+        if let Some(failure) = self.state.lock().await.faults.grant_failure {
+            return Err(failure.into());
+        }
         let invitation = match self.config.provider() {
             CloudProvider::CloudKit => StorageInvitation::new(
                 self.config(),

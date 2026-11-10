@@ -379,6 +379,10 @@ impl Case {
             Some(Some(OperationOutcome::Cancelled | OperationOutcome::Undone(_))) => {
                 unreachable!("only storage setup is cancelled or undone")
             }
+            // The differential drives storage that always answers.
+            Some(Some(OperationOutcome::SharingRefused { .. })) => {
+                unreachable!("the differential's storage never refuses to share")
+            }
         }
     }
 

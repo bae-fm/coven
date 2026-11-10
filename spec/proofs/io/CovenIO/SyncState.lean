@@ -122,7 +122,7 @@ inductive Failure
   | permissionDenied | notFound | alreadyExists | conflict | containerNotFound
   | regionMismatch | storeExists | clockSkew | ownLocationRequired | quotaExceeded
   | rateLimited | invalidConfiguration | refused | protocol | invalidPath
-  | invalidRange | notStoreOwner | inviteeIsStoreOwner | accountIdUnavailable
+  | invalidRange | notStoreOwner | inviteeIsStoreOwner | sharingRefused | accountIdUnavailable
   | invitationMismatch | sessionMismatch | sessionExpired | sessionIdentityUnknown
   | invalidPart | singleRequestTooLarge | copyTooLarge | encoding | file
   | memberKeysMissing | bug

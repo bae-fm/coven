@@ -1190,6 +1190,12 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
   request stays at the invite's one path, so the pass refuses it again, and
   the invite stays listed, with its share standing, until the app cancels it
   or it expires.
+- `refused_grant_retried`: an invite whose grant the provider refuses for a
+  reason only a person can fix, left granting on a pending record, stays
+  listed without a code, and the pass never runs it again: only the app
+  cancelling it ends it.
+- `refused_grant_ends`: under the rules the same refusal ends the invite in
+  the pass that found it, as a failed request check does.
 
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.

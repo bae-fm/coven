@@ -436,6 +436,7 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
         | InvalidConfiguration
         | NotStoreOwner
         | AccountIdUnavailable
+        | SharingRefused(_)
         | ProviderUnavailable
         | MemberKeysMissing => Clears::ByPerson,
         DropboxAppFolderNotShareable

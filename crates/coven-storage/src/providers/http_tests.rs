@@ -1,6 +1,7 @@
 use super::*;
 use crate::providers::tests::{response, TestServer};
 use axum::Router;
+use coven_foundation::sharing::SharingRefusal;
 
 /// GET `url` through the providers' client, as a OneDrive call.
 async fn get(url: &str) -> Result<reqwest::Response, StorageError> {
@@ -251,6 +252,42 @@ fn dropbox_native_failures_in_tags_and_summary_prefixes() {
             StorageFailure::Authentication,
         ),
         (409, "rate_limit", json!({".tag":"rate_limit"}), StorageFailure::RateLimited),
+        (
+            409,
+            "bad_member/invalid_email",
+            json!({".tag":"bad_member","bad_member":{".tag":"invalid_email","invalid_email":"x"}}),
+            StorageFailure::SharingRefused(SharingRefusal::InvalidAddress),
+        ),
+        (
+            409,
+            "email_unverified",
+            json!({".tag":"email_unverified"}),
+            StorageFailure::SharingRefused(SharingRefusal::EmailUnverified),
+        ),
+        (
+            409,
+            "cant_share_outside_team",
+            json!({".tag":"cant_share_outside_team"}),
+            StorageFailure::SharingRefused(SharingRefusal::TeamSharingOff),
+        ),
+        (
+            409,
+            "insufficient_plan",
+            json!({".tag":"insufficient_plan"}),
+            StorageFailure::SharingRefused(SharingRefusal::PlanWithoutSharing),
+        ),
+        (
+            409,
+            "too_many_members",
+            json!({".tag":"too_many_members"}),
+            StorageFailure::SharingRefused(SharingRefusal::TooManyMembers),
+        ),
+        (
+            409,
+            "too_many_pending_invites",
+            json!({".tag":"too_many_pending_invites"}),
+            StorageFailure::SharingRefused(SharingRefusal::TooManyMembers),
+        ),
         (
             409,
             "path/too_many_write_operations",

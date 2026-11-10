@@ -482,3 +482,126 @@ async fn a_recovery_invites_cleanup_takes_back_only_its_new_grant() {
         device.database().close().await.unwrap();
     }
 }
+
+/// The invite operation's outcome, as `coven_operations` lists it: none while
+/// no such row is listed.
+async fn listed_outcome(device: &Device) -> Vec<(i64, OperationKind, OperationOutcome)> {
+    device
+        .database()
+        .read(|sql| {
+            Ok::<_, coven_database::DbError>(sql.query(
+                "SELECT operation,kind,outcome FROM coven_operations \
+                 WHERE outcome IS NOT NULL ORDER BY operation",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// Dropbox refuses to share the folder for a reason only a person can fix,
+/// each side of it. The invite ends in the pass that met the refusal, as a
+/// failed request check does: it leaves `coven_invites`, nothing stays shared,
+/// and its operation's outcome names the address and the refusal until the
+/// app acknowledges it (§13.2).
+#[tokio::test]
+async fn a_refusal_only_a_person_can_fix_ends_the_invite_and_keeps_its_reason() {
+    use coven_foundation::sharing::SharingRefusal;
+    for refusal in [
+        SharingRefusal::InvalidAddress,
+        SharingRefusal::EmailUnverified,
+        SharingRefusal::TeamSharingOff,
+        SharingRefusal::PlanWithoutSharing,
+        SharingRefusal::TooManyMembers,
+    ] {
+        let group = Group::shared();
+        let (phone, ben, laptop) = household(&group).await;
+        phone
+            .storage
+            .set_faults(Faults {
+                grant_failure: Some(coven_storage::StorageFailure::SharingRefused(refusal)),
+                ..Faults::none()
+            })
+            .await;
+        let made = phone
+            .sync
+            .create_invite(
+                InviteTarget::NewMember { role: MemberRole::Member },
+                InviteAccess::ProviderAccount { email: CAROL.into() },
+                InviteLifetime::Day,
+            )
+            .await;
+        assert!(made.is_err(), "{refusal:?}: the invite never shows a code");
+        for _ in 0..3 {
+            phone.sync.pass().await.unwrap();
+        }
+        assert!(listed(&phone).await.is_empty(), "{refusal:?}");
+        assert!(!group.storage.shared_with(CAROL).await);
+        assert_eq!(
+            listed_outcome(&phone)
+                .await
+                .into_iter()
+                .map(|(_, kind, outcome)| (kind, outcome))
+                .collect::<Vec<_>>(),
+            [(
+                OperationKind::Invite,
+                OperationOutcome::SharingRefused { account: CAROL.into(), refusal }
+            )],
+            "{refusal:?}"
+        );
+        let left = phone.database().operations().await.unwrap();
+        assert!(
+            left.is_empty(),
+            "{refusal:?}: {:?}",
+            left.iter()
+                .map(|r| (&r.kind, r.last_step, String::from_utf8_lossy(&r.data).to_string()))
+                .collect::<Vec<_>>()
+        );
+        assert!(phone.database().pending::<PendingRecord>().await.unwrap().is_empty());
+        // Acknowledging is local to the phone and ends the listing.
+        let (operation, ..) = listed_outcome(&phone).await.remove(0);
+        let steps = phone.sync.operation_steps();
+        phone
+            .database()
+            .write_as(move |sql| {
+                let _ = &steps;
+                sql.acknowledge_operation(coven_database::OperationId(operation))
+            })
+            .await
+            .unwrap();
+        assert!(listed_outcome(&phone).await.is_empty());
+        for device in [&phone, &ben, &laptop] {
+            device.database().close().await.unwrap();
+        }
+    }
+}
+
+/// A failure a retry can fix keeps the invite: it waits on its pending
+/// record and the next pass grants it (§13.2).
+#[tokio::test]
+async fn a_failure_a_retry_can_fix_keeps_the_invite_waiting() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    phone
+        .storage
+        .set_faults(Faults {
+            grant_failure: Some(coven_storage::StorageFailure::RateLimited),
+            ..Faults::none()
+        })
+        .await;
+    let made = phone
+        .sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member },
+            InviteAccess::ProviderAccount { email: CAROL.into() },
+            InviteLifetime::Day,
+        )
+        .await;
+    assert!(made.is_err());
+    assert_eq!(listed(&phone).await.len(), 1);
+    assert!(listed_outcome(&phone).await.is_empty());
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}

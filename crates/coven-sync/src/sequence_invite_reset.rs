@@ -30,7 +30,7 @@ impl SequenceSync {
                     // The operations it started stay with the discarded
                     // installation: the share it recorded there ends when
                     // this one registers in its place (§19.3).
-                    work.state = InviteState::Settled { share: None, end: None };
+                    work.state = InviteState::Settled { share: None, end: None, refusal: None };
                     operations.push(NewOperation {
                         kind: operation_kind::INVITE.into(),
                         data: serde_json::to_vec(&work)?,

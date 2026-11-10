@@ -81,6 +81,9 @@ pub struct Faults {
     /// they name the current revision, leaving the object unchanged, as
     /// OneDrive can refuse every writer of one race.
     pub refuse_replacements: usize,
+    /// Fail every grant of access to an account with this failure, as a
+    /// provider refusing to share the store would.
+    pub grant_failure: Option<StorageFailure>,
 }
 /// Faults on the way to the device that change one byte of a response.
 #[derive(Clone, Copy, Debug)]
@@ -121,6 +124,7 @@ impl Faults {
             fail_duplicate_cleanup: false,
             refuse_replacements: 0,
             refuse_after_storing: 0,
+            grant_failure: None,
             hide_listings: false,
             listing_lag: None,
         }

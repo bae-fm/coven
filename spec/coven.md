@@ -4771,11 +4771,30 @@ id and the secret, journals the invite, and returns its id. A pass then catches
 up and checks the invite again before granting anything: a slot Ana's phone
 hadn't read yet may have taken away her role, or her account's hold on the
 storage. Only then does it share the folder with Dan's account and fix the
-code. The check that refuses it, or a grant the provider refuses, is the
-invite's pending record, under its operation; Ana's app shows it beside the
-invite, and Ana cancels the invite to end it. Without the second check, an
-admin demoted while offline could still share the store's storage with someone
-new.
+code. The check that refuses it, or a grant that fails for a reason a retry
+can fix, such as no route to the provider, a rate limit or a server error, is
+the invite's pending record, under its operation; Ana's app shows it beside
+the invite, and the pass tries again on the shared backoff (§6.7), or Ana
+cancels the invite to end it. Without the second check, an admin demoted
+while offline could still share the store's storage with someone new.
+
+**A sharing refusal only a person can fix.** The provider can refuse to
+share the folder for good on either side. It may not take Dan's address:
+Dropbox answers `invalid_email`, or says the address has no verified account.
+Or Ana's own account may not share it: her Dropbox team doesn't share outside
+the team, her plan has no sharing, her email is unverified, or the folder
+holds as many members as her account allows. Retrying would be refused the
+same way until someone changed an address or an account, so the invite ends
+in the pass that found the refusal, as a failed request check does: its
+marker replaces the request's path, and the access it granted is taken back.
+It leaves `coven_invites`. Its operation's outcome, `SharingRefused`, names
+the address and what went wrong, and stays in `coven_operations` until
+Ana's app acknowledges it (§11.4), a write local to her phone. Her app shows
+the outcome in the invite's place, with what to fix, such as verifying her
+email, and she invites Dan again once it is fixed. Waiting on a refusal that
+a retry never changes would leave the invite listed without a code, as a
+pending record only cancelling ends, while Dan had nothing to scan
+([`refused_grant_retried`](proofs/sequence/CovenSequence/InviteLifecycle.lean)).
 
 **The invite's share in history.** Before it shares the folder, the pass
 claims an entry recording the *invite share*: the invite's id and Dan's
@@ -12815,6 +12834,7 @@ Write-ups explain each model and state its assumptions:
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | *Body.* A request whose keys are checked only when its binding applies is offered for approval though a member holds its keys, and history refuses the binding only once the admin approves it | `unchecked_keys_approved` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | *Body.* An invite left waiting on a request that failed its checks offers the app a retry that comes back to the same state, and stays listed with its share standing until the app cancels it or it expires | `refused_request_retried` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| *Body.* An invite whose grant the provider refuses for a reason only a person can fix, left on a pending record, stays listed without a code and is never run again until the app cancels it | `refused_grant_retried` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | An approval whose binding history refuses ends the invite as a decline does, in the pass that ran the binding, and the next pass puts the marker in the request's place | `refused_approval_ends` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | An invite ends together with every operation it started for its own entries, its share and the share's end, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |

@@ -12,6 +12,7 @@ pub mod java_exception;
 pub mod locks;
 pub mod network_watch;
 pub mod progress;
+pub mod sharing;
 pub mod task;
 pub mod uuid_text;
 

@@ -72,6 +72,10 @@ pub enum StorageFailure {
     NotStoreOwner,
     /// The invited account is the one holding the store (§13.2).
     InviteeIsStoreOwner,
+    /// The provider refused to share the store for a reason only a person
+    /// can fix, the invited address's or the inviting account's, so no retry
+    /// changes the answer (§13.2).
+    SharingRefused(coven_foundation::sharing::SharingRefusal),
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
     /// The invite belongs to another provider location.

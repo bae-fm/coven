@@ -5040,6 +5040,10 @@ pub enum StorageFailure {
     NotStoreOwner,
     /// The invited account is the one holding the store (§13.2).
     InviteeIsStoreOwner,
+    /// The provider refused to share the store for a reason only a person
+    /// can fix, the invited address's or the inviting account's, so no retry
+    /// changes the answer (§13.2).
+    SharingRefused(SharingRefusal),
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
     /// The invite belongs to another provider location.
@@ -6209,6 +6213,32 @@ pub enum OperationOutcome {
     /// before anything it claimed landed (§11.6). Only storage setup ends
     /// this way.
     Undone(UndoCause),
+    /// An invite's operation ended because the provider refused to share the
+    /// store for a reason only a person can fix (§13.2). The invite is gone
+    /// from `coven_invites`; the outcome stays until a write acknowledges it,
+    /// for the app to say what went wrong and what to fix.
+    SharingRefused {
+        /// The address the invite was to share with.
+        account: String,
+        /// What was refused.
+        refusal: SharingRefusal,
+    },
+}
+
+/// Why sharing a store was refused for good (§13.2).
+pub enum SharingRefusal {
+    /// The provider won't take the invited address: it names no account the
+    /// provider can share with.
+    InvalidAddress,
+    /// The inviting account's email is unverified.
+    EmailUnverified,
+    /// The inviting account's team doesn't share outside the team.
+    TeamSharingOff,
+    /// The inviting account's plan has no sharing.
+    PlanWithoutSharing,
+    /// The folder holds as many members or pending invitations as the
+    /// inviting account allows.
+    TooManyMembers,
 }
 
 /// Why an operation was undone (§11.6).
@@ -7471,10 +7501,17 @@ pub enum ProviderSignOut {
   and its operation, and the invite is listed from the write's commit as
   `InviteStage::Granting`. A pass checks it again against the history it
   catches up with, grants its access and fixes its code. A check that
-  refuses it, such as the admin's role taken away meanwhile, and a failed
-  grant are the invite's pending record under its operation in
+  refuses it, such as the admin's role taken away meanwhile, and a grant that
+  fails for a reason a retry can fix (`Network`, `RateLimited`, a server
+  error) are the invite's pending record under its operation in
   `coven_pending`, not an error of any call; the app shows it beside the
-  listed invite and cancels the invite to end it.
+  listed invite and cancels the invite to end it, or the pass retries it. A
+  grant the provider refuses with `StorageFailure::SharingRefused` ends the
+  invite at once, as a failed request check does: its operation ends with
+  `OperationOutcome::SharingRefused` naming the address and the
+  `SharingRefusal`, which stays in `coven_operations` until the app
+  acknowledges it with `CovenWrite::acknowledge_operation`
+  ([§13.2](coven.md#132-adding-a-person-invites)).
 - Only the inviting device lists its open invites, in `coven_invites` (E4),
   each with its stage: granting, waiting with its code to show again and the
   request once one has arrived, or approving. The code it lists is the one
@@ -8037,8 +8074,10 @@ pub struct Invite {
 /// only for a request that is `Waiting`.
 pub enum InviteStage {
     /// Made by the app's write: a pass checks it again and grants its access,
-    /// and then it shows its code. A refusal or failed grant is its pending
-    /// record; cancelling ends it.
+    /// and then it shows its code. A refusal, or a grant that fails for a
+    /// reason a retry can fix, is its pending record; cancelling ends it. A
+    /// grant refused for a reason only a person can fix ends the invite
+    /// (`OperationOutcome::SharingRefused`).
     Granting,
     /// The code to show as a QR code, again whenever the admin asks, and the
     /// checked request once one has arrived, waiting for the app's decision.

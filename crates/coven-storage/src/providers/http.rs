@@ -497,6 +497,26 @@ fn onedrive_failure(value: &Value) -> Option<StorageFailure> {
         _ => return None,
     })
 }
+/// What Dropbox's answer to adding a folder member says that only a person
+/// can fix, on either side: the invited address, or the inviting account's
+/// team, plan, email or member limit (§13.2). A retry is answered the same.
+fn sharing_refusal(names: &[&str]) -> Option<coven_foundation::sharing::SharingRefusal> {
+    use coven_foundation::sharing::SharingRefusal as Refusal;
+    let named = |wanted: &[&str]| names.iter().any(|name| wanted.contains(name));
+    if named(&["invalid_email"]) {
+        Some(Refusal::InvalidAddress)
+    } else if named(&["email_unverified"]) {
+        Some(Refusal::EmailUnverified)
+    } else if named(&["cant_share_outside_team"]) {
+        Some(Refusal::TeamSharingOff)
+    } else if named(&["insufficient_plan"]) {
+        Some(Refusal::PlanWithoutSharing)
+    } else if named(&["too_many_members", "too_many_pending_invites"]) {
+        Some(Refusal::TooManyMembers)
+    } else {
+        None
+    }
+}
 fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
     fn tags<'a>(value: &'a Value, result: &mut Vec<&'a str>) {
         if let Some(object) = value.as_object() {
@@ -524,6 +544,8 @@ fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
         matches!(*name, "too_many_requests" | "too_many_write_operations" | "rate_limit")
     }) {
         Some(StorageFailure::RateLimited)
+    } else if let Some(refusal) = sharing_refusal(&names) {
+        Some(StorageFailure::SharingRefused(refusal))
     } else if names.contains(&"missing_scope") {
         // Refreshing the same authorization cannot add a required scope.
         Some(StorageFailure::InvalidConfiguration)

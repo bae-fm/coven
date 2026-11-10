@@ -146,12 +146,17 @@ structure Rules where
   once at the invite's one path and never changes, so no retry passes it and
   no other request can arrive. -/
   endRefused : Bool
+  /-- A grant the provider refuses for a reason only a person can fix, the
+  invited address's or the inviting account's, ends the invite, as a decline
+  does, rather than leaving it granting on a pending record that retrying
+  never changes. -/
+  endSharingRefused : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true, true, true, true, true, false, true, true, true⟩
+def Rules.correct : Rules := ⟨true, true, true, true, true, true, false, true, true, true, true⟩
 
 /-- The rules the Rust follows, as the differential test drives it. -/
-def Rules.rust : Rules := ⟨true, true, true, true, true, true, false, true, true, true⟩
+def Rules.rust : Rules := ⟨true, true, true, true, true, true, false, true, true, true, true⟩
 
 /-- Stages that end at the invite's expiry; approval, once begun, finishes. -/
 def expires : Stage → Bool
@@ -233,6 +238,8 @@ inductive Act where
   | bind
   /-- An attempt fails with a storage error, saved as its pending record. -/
   | fail (p : Retry)
+  /-- The pass's grant is refused for a reason only a person can fix. -/
+  | refuse
   /-- A pass runs the app's admin change. -/
   | runOp
   /-- A pass applies the approver's demotion. -/
@@ -320,6 +327,7 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .bind => !w.stopped && !R.bindingWithInvite && w.binding &&
       w.read.map (·.stage) == some .approving
   | .fail p => w.read.isSome && p != .never
+  | .refuse => !w.stopped && w.read.any (·.stage == .grant)
   | .runOp => !w.stopped && w.op == some none
   | .demote => applying w && w.approvable
   | .stop => applying w
@@ -343,6 +351,13 @@ def act (R : Rules) (w : World) : Act → World
   | .bind => endBinding w (bindingOutcome w)
   | .fail p => match w.read with
     | some r => { recordAt R w r p with read := none }
+    | none => w
+  | .refuse => match w.read with
+    | some r =>
+      -- Ended, the outcome `SharingRefused` is the app's to acknowledge; not
+      -- ended, the refusal is a pending record that retrying never changes.
+      if R.endSharingRefused then { guarded w r (advance · .settled) with read := none }
+      else { recordAt R w r .never with read := none }
     | none => w
   | .runOp => { w with op := some (some (if w.approvable then .landed else .rejected)) }
   | .demote => { w with approvable := false }
@@ -723,6 +738,29 @@ theorem refused_request_retried :
       listed refusalWaits w = some (.waiting false) ∧ w.shared = true :=
   ⟨_, rfl, rfl, rfl, rfl, rfl⟩
 
+def refusalRetried : Rules := { Rules.correct with endSharingRefused := false }
+
+/-- The invite as far as the pass having read it granting. -/
+def toGranting : List Act := [.read, .commit, .read]
+
+/-- Left granting on a refusal only a person can fix, the invite stays
+listed without a code, on a pending record the pass never runs again: the
+refusal is the same each time, and only the app cancelling the invite ends
+it, though the joiner has nothing to scan. -/
+theorem refused_grant_retried :
+    ∃ w, trace refusalRetried made (toGranting ++ [.refuse]) = some w ∧
+      listed refusalRetried w = some .granting ∧ w.pending = some .never ∧
+      ready w.pending = false :=
+  ⟨_, rfl, rfl, rfl, rfl⟩
+
+/-- Under the rules the same refusal ends the invite: it leaves the listing,
+and the settling steps that follow take its share back and put its marker in
+the request's place. -/
+theorem refused_grant_ends :
+    ∃ w, trace Rules.correct made (toGranting ++ [.refuse]) = some w ∧
+      listed Rules.correct w = none ∧ w.row.map (·.stage) = some .settled :=
+  ⟨_, rfl, rfl, rfl⟩
+
 /-! ## The properties, under the rules -/
 
 /-- What every world reachable under `correct` satisfies. -/
@@ -773,11 +811,32 @@ theorem advance_some {w : World} {r : Row} (hrow : w.row = some r) (s : Stage) :
     advance w s = { w with row := some ⟨s, r.step + 1⟩, pending := none, pendingAt := r.step + 1 } := by
   simp [advance, hrow]
 
-theorem inv_lapse (w : World) (inv : Inv w)
-    (e : enabled Rules.correct w .lapse = true) : Inv (act Rules.correct w .lapse) := by
-  obtain ⟨fresh, readRow, binding, running, early, zero, once, never, stopped⟩ := inv
+/-- A refused grant ends the invite as the pass ends one it read past its
+expiry does. -/
+theorem act_refuse_correct (w : World) :
+    act Rules.correct w .refuse = act Rules.correct w .lapse := by
+  simp [act, Rules.correct]
+
+/-- The pass has read an invite that ends: one still granting, or waiting for
+its request or the app. -/
+def endsRead (w : World) : Bool := !w.stopped && w.read.any (expires ·.stage)
+
+theorem endsRead_lapse {w : World} (e : enabled Rules.correct w .lapse = true) :
+    endsRead w = true := by
+  simp_all [enabled, endsRead]
+
+theorem endsRead_refuse {w : World} (e : enabled Rules.correct w .refuse = true) :
+    endsRead w = true := by
   rcases hr : w.read with _ | r
   · simp [enabled, hr] at e
+  obtain ⟨stage, n⟩ := r
+  cases stage <;> simp_all [enabled, endsRead, expires]
+
+theorem inv_lapse (w : World) (inv : Inv w)
+    (e : endsRead w = true) : Inv (act Rules.correct w .lapse) := by
+  obtain ⟨fresh, readRow, binding, running, early, zero, once, never, stopped⟩ := inv
+  rcases hr : w.read with _ | r
+  · simp [endsRead, hr] at e
   obtain ⟨r', hrow, hs⟩ := readRow r hr
   simp only [act, hr, guarded, atRead, hrow]
   split
@@ -789,7 +848,7 @@ theorem inv_lapse (w : World) (inv : Inv w)
     subst same
     obtain ⟨stage, n⟩ := r'
     rw [advance_some hrow]
-    constructor <;> simp_all [enabled, expires] <;> cases stage <;> simp_all [expires]
+    constructor <;> simp_all [enabled, expires, endsRead] <;> cases stage <;> simp_all [expires]
   · constructor <;> simp_all
 
 set_option maxHeartbeats 2000000 in
@@ -907,7 +966,11 @@ theorem inv_step (w : World) (a : Act) (inv : Inv w)
     · constructor <;> simp_all
     · constructor <;> simp_all
   case lapse => exact inv_lapse w ⟨fresh, readRow, binding, running, early, zero, once,
-      never, stopped⟩ e
+      never, stopped⟩ (endsRead_lapse e)
+  case refuse =>
+    rw [act_refuse_correct]
+    exact inv_lapse w ⟨fresh, readRow, binding, running, early, zero, once,
+      never, stopped⟩ (endsRead_refuse e)
   case commit => exact inv_commit w ⟨fresh, readRow, binding, running, early, zero, once,
       never, stopped⟩ e
   case stop => exact inv_stop w ⟨fresh, readRow, binding, running, early, zero, once,
@@ -953,6 +1016,16 @@ theorem share_step (w : World) (a : Act) (inv : Inv w) (sh : ShareInv w)
     · simp only [act, hr, commitOf_stale w r (by simpa using cur)]
       exact ⟨granting, recorded, over⟩
   case lapse =>
+    rcases hr : w.read with _ | r
+    · simp [enabled, hr] at e
+    simp only [act, hr, guarded]
+    split
+    · rcases hrow : w.row with _ | ⟨stage, n⟩
+      · constructor <;> simp_all
+      · constructor <;> simp_all [advance]
+    · constructor <;> simp_all
+  case refuse =>
+    rw [act_refuse_correct]
     rcases hr : w.read with _ | r
     · simp [enabled, hr] at e
     simp only [act, hr, guarded]
@@ -1022,6 +1095,16 @@ theorem keys_step (w : World) (a : Act) (inv : Inv w) (k : KeysInv w)
     · simp only [act, hr, commitOf_stale w r (by simpa using cur)]
       exact ⟨checked⟩
   case lapse =>
+    rcases hr : w.read with _ | r
+    · simp [enabled, hr] at e
+    simp only [act, hr, guarded]
+    split
+    · rcases hrow : w.row with _ | ⟨stage, n⟩
+      · constructor <;> simp_all
+      · constructor <;> simp_all [advance]
+    · constructor <;> simp_all
+  case refuse =>
+    rw [act_refuse_correct]
     rcases hr : w.read with _ | r
     · simp [enabled, hr] at e
     simp only [act, hr, guarded]
@@ -1307,11 +1390,11 @@ theorem commit_forward (w : World) (inv : Inv w)
 
 set_option maxHeartbeats 2000000 in
 theorem lapse_forward (w : World)
-    (e : enabled Rules.correct w .lapse = true) :
+    (e : endsRead w = true) :
     stageRank w.row ≤ stageRank (act Rules.correct w .lapse).row ∧
       bindingRank w ≤ bindingRank (act Rules.correct w .lapse) := by
   rcases hr : w.read with _ | r
-  · simp [enabled, hr] at e
+  · simp [endsRead, hr] at e
   simp only [act, hr, guarded]
   split
   · rcases hrow : w.row with _ | ⟨stage, n⟩
@@ -1338,7 +1421,10 @@ theorem forward (w : World) (a : Act) (inv : Inv w)
   rw [listed_rank, listed_rank]
   cases a
   case commit => exact commit_forward w inv e
-  case lapse => exact lapse_forward w e
+  case lapse => exact lapse_forward w (endsRead_lapse e)
+  case refuse =>
+    rw [act_refuse_correct]
+    exact lapse_forward w (endsRead_refuse e)
   case stop => exact stop_forward w
   case bind => simp [enabled, Rules.correct] at e
   case fail p =>

@@ -66,6 +66,16 @@ pub enum OperationOutcome {
     /// It was undone before its point of no return, or refused after it
     /// before anything it claimed landed (§11.6).
     Undone(UndoCause),
+    /// An invite's operation ended because the provider refused to share the
+    /// store for a reason only a person can fix (§13.2). The invite is gone
+    /// from `coven_invites`; the outcome stays until a write acknowledges
+    /// it, for the app to say what went wrong and what to fix.
+    SharingRefused {
+        /// The address the invite was to share with.
+        account: String,
+        /// What was refused.
+        refusal: coven_foundation::sharing::SharingRefusal,
+    },
 }
 
 /// Why an operation was undone (§11.6).

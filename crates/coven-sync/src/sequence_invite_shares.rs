@@ -55,7 +55,8 @@ impl SequenceSync {
             return Ok(None);
         }
         let change = StoreChange::EndInviteShare { invite: work.id };
-        let settled = move |end| InviteState::Settled { share, end: Some(end) };
+        let refusal = work.refusal();
+        let settled = move |end| InviteState::Settled { share, end: Some(end), refusal };
         Ok(
             match self
                 .start_child(session, member, change, InviteWork::naming(record, settled))

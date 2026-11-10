@@ -203,17 +203,26 @@ impl Database {
 
     /// Retire an ended invite in one commit with the operations it started
     /// that are still journaled, its `children`, and with the deletion it
-    /// leaves owed: its marker's, once that has passed (§13.2). An invite,
-    /// or a child, that has ended already fails with `OperationChanged`.
+    /// leaves owed: its marker's, once that has passed (§13.2). An `outcome`
+    /// the invite ends with, with its `kind` as `coven_operations` lists it,
+    /// is listed there until the app acknowledges it. An invite, or a child,
+    /// that has ended already fails with `OperationChanged`.
     pub async fn finish_operation_with_removal(
         &self,
         id: OperationId,
         children: Vec<OperationId>,
         removal: crate::ObjectRemoval,
+        outcome: Option<(String, crate::OperationOutcome)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
+                    // The invite's outcome is listed in `coven_operations`
+                    // until the app acknowledges it, the journal row's end
+                    // requiring it written first.
+                    if let Some((kind, outcome)) = &outcome {
+                        crate::operation::list_outcome(db, id, kind, outcome)?;
+                    }
                     for id in children.iter().copied().chain([id]) {
                         if crate::operation::finish(db, id)? != 1 {
                             return Err(DbError::OperationChanged(id));

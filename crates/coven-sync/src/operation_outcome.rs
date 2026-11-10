@@ -26,6 +26,11 @@ pub(crate) fn into_slot(outcome: OperationOutcome) -> Result<Option<Slot>, SyncE
             }
             .into())
         }
+        // An invite ends this way, and no call waits for an invite's outcome.
+        OperationOutcome::SharingRefused { .. } => Err(coven_database::DbError::Invariant {
+            what: "only an invite ends with a sharing refusal",
+        }
+        .into()),
     }
 }
 

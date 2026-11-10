@@ -87,8 +87,14 @@ pub(crate) enum InviteState {
     /// `end`, once journaled with this state, is the operation claiming the
     /// share's end. Both end with the invite. An S3 key it carried is the
     /// person's to delete in the provider's console; coven records nothing
-    /// about it (§14.3).
-    Settled { share: Option<OperationId>, end: Option<OperationId> },
+    /// about it (§14.3). `refusal`, when the invite ended because the provider
+    /// refused to share the store for a reason only a person can fix, is what
+    /// the invite's operation ends with, for the app to acknowledge (§13.2).
+    Settled {
+        share: Option<OperationId>,
+        end: Option<OperationId>,
+        refusal: Option<coven_foundation::sharing::SharingRefusal>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,6 +117,13 @@ impl OperationState for InviteWork {}
 impl InviteWork {
     fn read(record: &OperationRecord) -> Result<Self, SyncError> {
         Ok(serde_json::from_slice(&record.data)?)
+    }
+    /// The refusal that ended the invite, once it has settled.
+    fn refusal(&self) -> Option<coven_foundation::sharing::SharingRefusal> {
+        match &self.state {
+            InviteState::Settled { refusal, .. } => *refusal,
+            _ => None,
+        }
     }
     fn secret(&self) -> Result<InviteSecret, SyncError> {
         Ok(InviteSecret::from_bytes(serde_json::from_str(self.secret.as_str())?))
@@ -152,7 +165,7 @@ impl InviteWork {
             InviteState::Sharing { share } => Some(share),
             _ => None,
         };
-        self.state = InviteState::Settled { share, end: None };
+        self.state = InviteState::Settled { share, end: None, refusal: None };
     }
 
     /// The invite's step from `record` to `state`, built from the id of the
@@ -501,6 +514,12 @@ impl SequenceSync {
                             }
                             .into())
                         }
+                        OperationOutcome::SharingRefused { .. } => {
+                            return Err(coven_database::DbError::Invariant {
+                                what: "only an invite ends with a sharing refusal",
+                            }
+                            .into())
+                        }
                     }
                 }
                 InviteState::Grant => {
@@ -522,6 +541,23 @@ impl SequenceSync {
                                     }
                                     None => None,
                                 };
+                                if let Some(PendingRecord {
+                                    reason:
+                                        PendingReason::Storage {
+                                            failure: StorageFailure::SharingRefused(refusal),
+                                            ..
+                                        },
+                                    ..
+                                }) = &failed
+                                {
+                                    let grant = access
+                                        .request
+                                        .as_ref()
+                                        .ok_or(coven_database::DbError::DamagedDatabase)?
+                                        .operation;
+                                    self.end_refused(id, grant, *refusal).await?;
+                                    continue;
+                                }
                                 return Ok(InviteProgress::Waiting(failed.map_or(
                                     PendingReason::ProviderPending {
                                         action: ProviderAccessAction::Grant,
@@ -594,13 +630,13 @@ impl SequenceSync {
                     // Landed or refused, the invite ends. A refusal is the
                     // binding's outcome, which `coven_operations` lists for the
                     // app that approved it; the invite ends as a decline does.
-                    work.state = InviteState::Settled { share: None, end: None };
+                    work.state = InviteState::Settled { share: None, end: None, refusal: None };
                     self.database
                         .finish_operation_advancing(binding, outcome, work.update(&record)?)
                         .await?;
                 }
-                InviteState::Settled { share, end } => {
-                    let (share, end) = (*share, *end);
+                InviteState::Settled { share, end, refusal } => {
+                    let (share, end, refusal) = (*share, *end, *refusal);
                     let kept_until = self.end_request(&work).await?;
                     // The share's record the invite was claiming when it
                     // ended: its claim may have landed, and is settled
@@ -631,7 +667,26 @@ impl SequenceSync {
                         after: kept_until,
                     };
                     let children = share.into_iter().chain(end).collect();
-                    self.database.finish_operation_with_removal(id, children, removal).await?;
+                    // An invite ended by a refusal only a person can fix keeps
+                    // that as its outcome, listed in `coven_operations` until
+                    // the app acknowledges it (§13.2).
+                    let outcome = match refusal {
+                        Some(refusal) => {
+                            let account =
+                                work.account().ok_or(coven_database::DbError::DamagedDatabase)?;
+                            Some((
+                                crate::OperationKind::Invite.listed(),
+                                OperationOutcome::SharingRefused {
+                                    account: account.to_owned(),
+                                    refusal,
+                                },
+                            ))
+                        }
+                        None => None,
+                    };
+                    self.database
+                        .finish_operation_with_removal(id, children, removal, outcome)
+                        .await?;
                     return Ok(InviteProgress::Finished);
                 }
             }
@@ -680,8 +735,38 @@ impl SequenceSync {
             None => None,
         };
         if let Some(grant) = grant {
-            self.apply_access(session, ring, member, grant).await?;
+            if let Err(error) = self.apply_access(session, ring, member, grant).await {
+                return match sharing_refusal(&error) {
+                    Some(refusal) => self.end_refused(record.id, grant, refusal).await,
+                    None => Err(error),
+                };
+            }
         }
+        Ok(())
+    }
+
+    /// End the invite whose grant the provider refused for a reason only a
+    /// person can fix, as a failed request check does: it settles, putting
+    /// its marker in the request's place and taking its access back, and
+    /// ends with the refusal as its outcome (§13.2).
+    async fn end_refused(
+        &self,
+        id: OperationId,
+        grant: OperationId,
+        refusal: coven_foundation::sharing::SharingRefusal,
+    ) -> Result<(), SyncError> {
+        let record = self
+            .database
+            .operation(id)
+            .await?
+            .ok_or(coven_database::DbError::OperationChanged(id))?;
+        let mut work = InviteWork::read(&record)?;
+        tracing::warn!(?id, ?refusal, "the provider refused to share the store for an invite");
+        let account = work.account().ok_or(coven_database::DbError::DamagedDatabase)?.to_owned();
+        work.state = InviteState::Settled { share: None, end: None, refusal: Some(refusal) };
+        self.database
+            .advance_operation_refusing_grant(work.update(&record)?, account, grant)
+            .await?;
         Ok(())
     }
 
@@ -800,8 +885,17 @@ pub(crate) enum InviteProgress {
     Finished,
 }
 
-/// A time as whole seconds since the Unix epoch, as codes and markers carry
-/// it.
+/// The refusal a failed grant carries, when only a person can fix it.
+fn sharing_refusal(error: &SyncError) -> Option<coven_foundation::sharing::SharingRefusal> {
+    match error {
+        SyncError::Storage(error) => match error.failure() {
+            StorageFailure::SharingRefused(refusal) => Some(refusal),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// When the marker of an invite that expires at `expires`, in seconds since
 /// 1970, may go: the retention grace after it (§13.2). A time the marker's
 /// seconds can't hold is refused as the expiry the clock can't represent is.
@@ -813,6 +907,8 @@ fn kept_until(expires: u64) -> Result<u64, SyncError> {
     })
 }
 
+/// A time as whole seconds since the Unix epoch, as codes and markers carry
+/// it.
 fn seconds(at: SystemTime) -> Result<u64, SyncError> {
     Ok(at
         .duration_since(std::time::UNIX_EPOCH)

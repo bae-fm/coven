@@ -343,6 +343,7 @@ private def failures : List (String × CovenIO.SyncState.Failure) := [
     ("invalidRange", .invalidRange),
     ("notStoreOwner", .notStoreOwner),
     ("inviteeIsStoreOwner", .inviteeIsStoreOwner),
+    ("sharingRefused", .sharingRefused),
     ("accountIdUnavailable", .accountIdUnavailable),
     ("invitationMismatch", .invitationMismatch),
     ("sessionMismatch", .sessionMismatch),

@@ -87,6 +87,7 @@ fn failure_name(failure: StorageFailure) -> &'static str {
         InvalidRange => "invalidRange",
         NotStoreOwner => "notStoreOwner",
         InviteeIsStoreOwner => "inviteeIsStoreOwner",
+        SharingRefused(_) => "sharingRefused",
         AccountIdUnavailable => "accountIdUnavailable",
         InvitationMismatch => "invitationMismatch",
         SessionMismatch => "sessionMismatch",

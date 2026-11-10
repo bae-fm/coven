@@ -109,6 +109,22 @@ pub(crate) fn insert_for_app(
     Ok(id)
 }
 
+/// List the outcome of an operation the app's write didn't journal, as one
+/// it did: in `coven_operations` until the app acknowledges it. An invite
+/// ends this way when a refusal only a person can fix ends it (§13.2).
+pub(crate) fn list_outcome(
+    db: &DatabaseConnection,
+    id: OperationId,
+    kind: &str,
+    outcome: &crate::OperationOutcome,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_app_operations(operation,kind,outcome) VALUES(?1,?2,?3)",
+        (id.0, kind, outcome.encode()),
+    )?;
+    Ok(())
+}
+
 /// End the app's record of a finished operation: it leaves
 /// `coven_operations`. One still running fails with `OperationRunning`;
 /// one this device doesn't list, never journaled by the app or
