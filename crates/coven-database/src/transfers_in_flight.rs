@@ -385,10 +385,10 @@ impl Drop for Transferring {
             // run during an unwind, so it fails the store's handle instead of
             // panicking, and the bug goes to the call it runs in or the bug
             // sink (E15).
-            None => self.owner.shared.observer.fail_with_bug(coven_foundation::task::Bug {
-                operation: "end a transfer in flight",
-                message: "an attempt in flight lost its place in its object's entry".into(),
-            }),
+            None => self.owner.shared.observer.fail_with_bug(coven_foundation::task::Bug::new(
+                "end a transfer in flight",
+                "an attempt in flight lost its place in its object's entry",
+            )),
         }
     }
 }

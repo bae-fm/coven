@@ -42,10 +42,10 @@ impl ReservedNames {
             names.into_iter().filter(|name| !reserved.remove(name.borrow())).count()
         };
         if unreserved > 0 {
-            self.handle.fail_with_bug(Bug {
-                operation: "release reserved file names",
-                message: format!("{unreserved} released names were not reserved"),
-            });
+            self.handle.fail_with_bug(Bug::new(
+                "release reserved file names",
+                format!("{unreserved} released names were not reserved"),
+            ));
         }
     }
 

@@ -424,11 +424,9 @@ struct Call {
 
 /// The bug of `what`, a lock's state, which a panic while it was held may
 /// have left half-changed.
+#[track_caller]
 fn half_changed(what: &'static str) -> Bug {
-    Bug {
-        operation: what,
-        message: "a panic while it was locked may have left it half-changed".into(),
-    }
+    Bug::new(what, "a panic while it was locked may have left it half-changed")
 }
 
 impl ObserverState {

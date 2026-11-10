@@ -499,10 +499,10 @@ async fn a_loop_ending_mid_pass_shows_its_failure() {
         ana.database().record_moving().await.unwrap();
         assert_eq!(crate::sync_status(ana.database()).await.unwrap().state, SyncState::Syncing);
         if panic {
-            let bug = coven_foundation::task::Bug {
-                operation: "the sync loop",
-                message: "a pass broke after reading a slot".into(),
-            };
+            let bug = coven_foundation::task::Bug::new(
+                "the sync loop",
+                "a pass broke after reading a slot",
+            );
             super::panicked(&ana.sync, bug).await;
         } else {
             super::give_up(&ana.sync, SyncError::NoStorage).await;
@@ -542,10 +542,7 @@ async fn a_halt_during_a_pass_ends_the_loop_and_the_pass_writes_nothing_after_it
         .await;
     ben_loop.sync_now().unwrap();
     tokio::time::timeout(HANG_GUARD, observing).await.unwrap().unwrap();
-    let bug = coven_foundation::task::Bug {
-        operation: "the upload worker",
-        message: "the upload of a photo broke".into(),
-    };
+    let bug = coven_foundation::task::Bug::new("the upload worker", "the upload of a photo broke");
     ben.sync.waits.sync_halted(bug.clone()).await.unwrap();
     at(&group, 200);
     resume.send(()).unwrap();

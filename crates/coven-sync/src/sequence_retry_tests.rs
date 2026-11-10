@@ -207,10 +207,7 @@ async fn a_bug_a_resumed_operation_hit_reaches_the_sink_once() {
     group.create(&ana).await;
     let id = ana.database().start_operation(operation("failing")).await.unwrap();
     let kind = crate::OperationKind::RetainFiles;
-    let bug = coven_foundation::task::Bug {
-        operation: "resume an operation",
-        message: "the attempt broke".into(),
-    };
+    let bug = coven_foundation::task::Bug::new("resume an operation", "the attempt broke");
     ana.sync.settle_resumed(id, kind, Err(SyncError::Bug(bug.clone())), &group.ring).await.unwrap();
     assert!(ana.database().operation_pending::<PendingRecord>(id).await.unwrap().is_some());
     assert_eq!(group.bugs.take(), std::slice::from_ref(&bug));

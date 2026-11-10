@@ -2,7 +2,7 @@ use super::*;
 use coven_foundation::task::HeardBugs;
 
 fn bug(message: &str) -> Bug {
-    Bug { operation: "a test's work", message: message.into() }
+    Bug::new("a test's work", message)
 }
 
 /// A bug that fails the handle inside one of its calls is that call's own,

@@ -112,13 +112,20 @@ fn a_panic_in_a_platform_callback_goes_to_the_bug_sink_and_cannot_tell() {
     lock_unpoisoned(&sink).observe(Some(UsableNetwork { id: "wifi".into(), metered: false }));
     let bugs = crate::task::HeardBugs::shared();
     heard(&sink, bugs.as_ref(), "read the network's path", || panic!("the path has no interfaces"));
+    let panicked_on = line!() - 1;
     assert_eq!(*state.borrow(), NetworkState { usable: None, metered: true, joined: 1 });
+    let reported: Vec<_> = bugs
+        .take()
+        .into_iter()
+        .map(|bug| (bug.operation, bug.message, bug.location.map(|at| (at.file, at.line))))
+        .collect();
     assert_eq!(
-        bugs.take(),
-        [crate::task::Bug {
-            operation: "read the network's path",
-            message: "the path has no interfaces".into()
-        }]
+        reported,
+        [(
+            "read the network's path",
+            "the path has no interfaces".to_string(),
+            Some((file!().to_string(), panicked_on))
+        )]
     );
     // The platform saying again tells the network: the same one is no report.
     heard(&sink, bugs.as_ref(), "read the network's path", || {

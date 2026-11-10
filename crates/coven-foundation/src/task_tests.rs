@@ -3,6 +3,28 @@ use std::sync::Arc;
 
 use super::*;
 
+/// Panics with `message`. Its `panic!` is on line [`PANIC_LINE`], column 5.
+const PANIC_LINE: u32 = line!() + 2;
+fn panics(message: &str) -> ! {
+    panic!("{message}")
+}
+
+/// Panics with `message` from a second place, on line [`PANIC_AGAIN_LINE`].
+const PANIC_AGAIN_LINE: u32 = line!() + 2;
+fn panics_again(message: &str) -> ! {
+    panic!("{message}")
+}
+
+/// Where [`panics`] panics.
+fn panic_site() -> Option<SourceLocation> {
+    Some(SourceLocation { file: file!().to_string(), line: PANIC_LINE, column: 5 })
+}
+
+/// The bug `operation` gives once [`panics`] panics in it with `message`.
+fn panicked(operation: &'static str, message: &str) -> Bug {
+    Bug { operation, message: message.to_string(), location: panic_site() }
+}
+
 /// Sets its flag when dropped: the cleanup a caller's work holds.
 struct SetOnDrop(Arc<AtomicBool>);
 
@@ -20,23 +42,17 @@ async fn blocking_returns_the_work_s_value() {
 
 #[tokio::test]
 #[expect(clippy::disallowed_methods, reason = "a test of `blocking` itself")]
-async fn blocking_turns_a_panic_into_panicked_with_its_message() {
-    let failed = blocking("read the journal", || -> u8 { panic!("journal is empty") })
+async fn blocking_turns_a_panic_into_panicked_with_its_message_and_place() {
+    let failed = blocking("read the journal", || -> u8 { panics("journal is empty") })
         .await
         .expect_err("a panicking closure gives no value");
-    assert_eq!(
-        failed,
-        TaskFailed::Panicked(Bug {
-            operation: "read the journal",
-            message: "journal is empty".to_string(),
-        })
-    );
+    assert_eq!(failed, TaskFailed::Panicked(panicked("read the journal", "journal is empty")));
     assert_eq!(failed.to_string(), "read the journal panicked: journal is empty");
 }
 
 #[tokio::test]
-async fn joined_turns_a_cancelled_task_into_shutdown() {
-    let task = tokio::spawn(std::future::pending::<()>());
+async fn a_cancelled_task_s_join_is_shutdown() {
+    let task = tokio::spawn(caught("wait forever", std::future::pending::<()>()));
     task.abort();
     let failed = joined("wait forever", task).await.expect_err("an aborted task gives no value");
     assert_eq!(
@@ -73,20 +89,36 @@ fn blocking_sent_after_its_runtime_shut_down_did_not_run() {
     assert_eq!(failed.to_string(), "read the tags did not run: its runtime is shutting down");
 }
 
+/// A task whose work didn't run under a catch of coven's panics into its
+/// join, where no catch saw the panic begin: its bug keeps the message and
+/// names no place.
 #[tokio::test]
-async fn joined_carries_a_formatted_panic_message() {
+async fn a_panic_that_reached_its_join_uncaught_names_no_place() {
     let task = tokio::spawn(async {
         let index = 7;
         panic!("no window {index}");
     });
-    let failed = joined("fill the read-ahead", task).await.expect_err("panicked");
+    let failed = TaskFailed::of_join("fill the read-ahead", task.await.expect_err("panicked"));
     assert_eq!(
         failed,
         TaskFailed::Panicked(Bug {
             operation: "fill the read-ahead",
             message: "no window 7".to_string(),
+            location: None,
         })
     );
+}
+
+/// A task whose work runs under `caught` hands its panic, and where it began,
+/// back through its join as a value.
+#[tokio::test]
+async fn a_task_s_caught_panic_names_its_place_through_the_join() {
+    let task = tokio::spawn(caught("fill the read-ahead", async {
+        tokio::task::yield_now().await;
+        panics("no window 7")
+    }));
+    let failed = joined("fill the read-ahead", task).await;
+    assert_eq!(failed, Err(TaskFailed::Panicked(panicked("fill the read-ahead", "no window 7"))));
 }
 
 #[tokio::test]
@@ -103,6 +135,16 @@ async fn caught_fails_the_work_and_its_held_cleanup_runs() {
     assert_eq!(failed.operation, "apply one slot");
     assert_eq!(failed.message, "row count went negative");
     assert!(cleaned.load(Ordering::SeqCst), "the work's drop guard ran");
+}
+
+#[tokio::test]
+async fn caught_names_where_a_later_poll_panicked() {
+    let failed = caught("apply one slot", async {
+        tokio::task::yield_now().await;
+        panics("row count went negative")
+    })
+    .await;
+    assert_eq!(failed, Err(panicked("apply one slot", "row count went negative")));
 }
 
 #[tokio::test]
@@ -125,7 +167,7 @@ impl Future for PanicsTwice {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
-        panic!("decoder state is wrong");
+        panics("decoder state is wrong")
     }
 }
 
@@ -138,18 +180,97 @@ impl Drop for PanicsTwice {
 #[tokio::test]
 async fn caught_keeps_a_panicking_drop_of_the_failed_work_from_unwinding() {
     let failed = caught("decode", PanicsTwice).await;
-    assert_eq!(
-        failed,
-        Err(Bug { operation: "decode", message: "decoder state is wrong".to_string() })
-    );
+    assert_eq!(failed, Err(panicked("decode", "decoder state is wrong")));
 }
 
 #[test]
 fn caught_sync_turns_a_panic_into_its_bug() {
     let failed =
-        caught_sync("read callback", || -> i32 { panic!("buffer gone") }).expect_err("panicked");
-    assert_eq!(failed, Bug { operation: "read callback", message: "buffer gone".to_string() });
+        caught_sync("read callback", || -> i32 { panics("buffer gone") }).expect_err("panicked");
+    assert_eq!(failed, panicked("read callback", "buffer gone"));
     assert_eq!(caught_sync("read callback", || 5), Ok(5));
+}
+
+/// A catch inside another names its own panic, and the outer catch, once
+/// the inner one has ended, names the panic that reached it.
+#[test]
+fn a_catch_inside_another_names_its_own_panic() {
+    let outer = caught_sync("serve a message", || {
+        let inner = caught_sync("decode", || -> u8 { panics("decoder state is wrong") });
+        assert_eq!(inner, Err(panicked("decode", "decoder state is wrong")));
+        panics_again("the reply channel is gone")
+    })
+    .map(|_: ()| ());
+    assert_eq!(
+        outer,
+        Err(Bug {
+            operation: "serve a message",
+            message: "the reply channel is gone".to_string(),
+            location: Some(SourceLocation {
+                file: file!().to_string(),
+                line: PANIC_AGAIN_LINE,
+                column: 5,
+            }),
+        })
+    );
+    let recovered = caught_sync("serve a message", || {
+        caught_sync("decode", || -> u8 { panics("decoder state is wrong") }).unwrap_or(0)
+    });
+    assert_eq!(recovered, Ok(0));
+}
+
+/// Panics on a thread of its own as it drops, and waits for that thread.
+struct PanicsElsewhereWhenDropped;
+
+impl Drop for PanicsElsewhereWhenDropped {
+    fn drop(&mut self) {
+        let other = std::thread::spawn(|| panics_again("another thread's bug"));
+        assert!(other.join().is_err(), "the other thread panicked");
+    }
+}
+
+/// A panic on another thread, while this thread's panic unwinds to its catch,
+/// leaves this thread's catch naming its own: each thread's catch hears only
+/// its own thread's panics.
+#[test]
+fn a_panic_on_another_thread_leaves_this_catch_s_place() {
+    let failed = caught_sync("read callback", || -> i32 {
+        let _elsewhere = PanicsElsewhereWhenDropped;
+        panics("buffer gone")
+    });
+    assert_eq!(failed, Err(panicked("read callback", "buffer gone")));
+}
+
+/// coven's hook runs in front of the one the app set, which still hears
+/// every panic.
+#[test]
+fn the_app_s_own_panic_hook_still_runs() {
+    static HEARD: AtomicBool = AtomicBool::new(false);
+    let earlier = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        if panic_message(panic.payload()) == "the app's hook hears this" {
+            HEARD.store(true, Ordering::SeqCst);
+        }
+        earlier(panic);
+    }));
+    let failed = caught_sync("read callback", || -> i32 { panics("the app's hook hears this") });
+    assert_eq!(failed, Err(panicked("read callback", "the app's hook hears this")));
+    assert!(HEARD.load(Ordering::SeqCst), "the app's hook heard the panic");
+}
+
+/// A bug code finds without a panic names the line that made it.
+#[test]
+fn a_bug_made_without_a_panic_names_where_it_was_made() {
+    let bug = Bug::new("release reserved file names", "2 released names were not reserved");
+    let made_on = line!() - 1;
+    assert_eq!(
+        bug.location,
+        Some(SourceLocation { file: file!().to_string(), line: made_on, column: 15 })
+    );
+    assert_eq!(
+        bug.to_string(),
+        "release reserved file names panicked: 2 released names were not reserved"
+    );
 }
 
 #[test]
@@ -171,26 +292,23 @@ impl Drop for PanicsWhenDropped {
 #[test]
 fn caught_sync_keeps_a_payload_whose_drop_panics_from_unwinding() {
     let failed =
-        caught_sync("seek callback", || -> i32 { std::panic::panic_any(PanicsWhenDropped) });
-    assert_eq!(
-        failed,
-        Err(Bug {
-            operation: "seek callback",
-            message: "a panic whose payload is not text".to_string(),
-        })
-    );
+        caught_sync("seek callback", || -> i32 { std::panic::panic_any(PanicsWhenDropped) })
+            .expect_err("panicked");
+    assert_eq!(failed.operation, "seek callback");
+    assert_eq!(failed.message, "a panic whose payload is not text");
 }
 
 #[tokio::test]
-async fn joined_keeps_a_payload_whose_drop_panics_from_unwinding() {
+async fn a_joined_payload_whose_drop_panics_does_not_unwind() {
     let task = tokio::spawn(async { std::panic::panic_any(PanicsWhenDropped) });
-    let failed = joined("upload a file", task).await;
+    let failed = TaskFailed::of_join("upload a file", task.await.expect_err("panicked"));
     assert_eq!(
         failed,
-        Err(TaskFailed::Panicked(Bug {
+        TaskFailed::Panicked(Bug {
             operation: "upload a file",
             message: "a panic whose payload is not text".to_string(),
-        }))
+            location: None,
+        })
     );
 }
 
@@ -201,13 +319,13 @@ async fn an_owned_task_s_panic_goes_to_the_sink_then_its_owner_ends_its_work() {
     let task = spawn_owned(
         "upload files",
         bugs.clone(),
-        async { panic!("the queue's first row is gone") },
+        async { panics("the queue's first row is gone") },
         |bug| async move {
             ended.send(bug).unwrap();
         },
     );
     task.ended().await;
-    let bug = Bug { operation: "upload files", message: "the queue's first row is gone".into() };
+    let bug = panicked("upload files", "the queue's first row is gone");
     assert_eq!(bugs.take(), std::slice::from_ref(&bug));
     assert_eq!(owner_heard.await.unwrap(), bug);
 }
@@ -239,15 +357,15 @@ async fn an_owned_task_that_finishes_reports_nothing() {
 async fn a_completing_task_s_panic_goes_to_its_waiting_caller_alone() {
     let bugs = HeardBugs::shared();
     let failed = spawn_completing("close the store", bugs.clone(), async {
-        panic!("a writer is still held")
+        panics("a writer is still held")
     })
     .await;
     assert_eq!(
         failed,
-        Err::<Result<(), Bug>, _>(TaskFailed::Panicked(Bug {
-            operation: "close the store",
-            message: "a writer is still held".into(),
-        }))
+        Err::<Result<(), Bug>, _>(TaskFailed::Panicked(panicked(
+            "close the store",
+            "a writer is still held"
+        )))
     );
     assert!(bugs.take().is_empty());
     assert_eq!(spawn_completing("add", bugs, async { Ok::<_, Bug>(2 + 2) }).await, Ok(Ok(4)));
@@ -264,7 +382,7 @@ impl BugSink for SentBugs {
 
 /// Work whose state is gone: it panics before it can answer.
 fn loop_is_gone() -> Result<(), Bug> {
-    panic!("the loop is gone")
+    panics("the loop is gone")
 }
 
 #[tokio::test]
@@ -277,10 +395,7 @@ async fn a_completing_task_whose_caller_stopped_waiting_reports_its_panic() {
     });
     drop(completion);
     go.send(()).unwrap();
-    assert_eq!(
-        reported.recv().await,
-        Some(Bug { operation: "stop sync", message: "the loop is gone".into() })
-    );
+    assert_eq!(reported.recv().await, Some(panicked("stop sync", "the loop is gone")));
 }
 
 #[tokio::test]
@@ -289,16 +404,14 @@ async fn a_completing_task_whose_caller_stopped_waiting_reports_the_bug_its_erro
     let (go, wait) = tokio::sync::oneshot::channel::<()>();
     let completion = spawn_completing("close custody", Arc::new(SentBugs(sent)), async move {
         wait.await.unwrap();
-        Err::<u8, _>(TaskFailed::Panicked(Bug {
-            operation: "forget the keys",
-            message: "no key session".into(),
-        }))
+        Err::<u8, _>(TaskFailed::Panicked(Bug::new("forget the keys", "no key session")))
     });
     drop(completion);
     go.send(()).unwrap();
+    let carried = reported.recv().await.expect("the sink heard the carried bug");
     assert_eq!(
-        reported.recv().await,
-        Some(Bug { operation: "forget the keys", message: "no key session".into() })
+        (carried.operation, carried.message.as_str()),
+        ("forget the keys", "no key session")
     );
 }
 
@@ -313,11 +426,8 @@ async fn blocking_work_whose_caller_stopped_waiting_reports_its_panic_and_carrie
     });
     drop(completion);
     go.send(()).unwrap();
-    assert_eq!(
-        reported.recv().await,
-        Some(Bug { operation: "read the tags", message: "the loop is gone".into() })
-    );
-    let carried = Bug { operation: "seal a part", message: "no key".into() };
+    assert_eq!(reported.recv().await, Some(panicked("read the tags", "the loop is gone")));
+    let carried = Bug::new("seal a part", "no key");
     let (go, wait) = std::sync::mpsc::channel::<()>();
     let error = carried.clone();
     let completion = blocking_completing("write the part", bugs, move || -> Result<(), _> {
@@ -336,10 +446,7 @@ async fn blocking_work_answers_a_caller_still_waiting() {
     assert_eq!(blocking_completing("add", bugs.clone(), || Ok::<_, Bug>(2 + 2)).await, Ok(Ok(4)));
     assert_eq!(
         blocking_completing("read the tags", bugs, loop_is_gone).await,
-        Err(TaskFailed::Panicked(Bug {
-            operation: "read the tags",
-            message: "the loop is gone".into()
-        }))
+        Err(TaskFailed::Panicked(panicked("read the tags", "the loop is gone")))
     );
     assert!(reported.try_recv().is_err(), "a caller heard the bug, so no sink did");
 }
@@ -360,10 +467,7 @@ async fn a_completing_task_dropped_with_its_answer_unread_reports_the_answer_s_b
     // hand once the test hears.
     crate::clock::within(answered).await.unwrap().unwrap();
     drop(completion);
-    assert_eq!(
-        reported.try_recv(),
-        Ok(Bug { operation: "stop sync", message: "the loop is gone".into() })
-    );
+    assert_eq!(reported.try_recv(), Ok(panicked("stop sync", "the loop is gone")));
 }
 
 /// A test's sink dropped with a bug no test took fails the test, so a bug no
@@ -372,5 +476,5 @@ async fn a_completing_task_dropped_with_its_answer_unread_reports_the_answer_s_b
 #[should_panic(expected = "coven reported bugs no test took")]
 fn a_test_sink_dropped_with_a_bug_untaken_fails_the_test() {
     let bugs = HeardBugs::shared();
-    report(bugs.as_ref(), &Bug { operation: "read the tags", message: "no tags".into() });
+    report(bugs.as_ref(), &Bug::new("read the tags", "no tags"));
 }

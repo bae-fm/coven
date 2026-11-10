@@ -31,7 +31,7 @@ fn encoding_preserves_an_opaque_cause() {
 #[test]
 fn a_bug_in_a_requests_file_work_is_storages_bug() {
     use coven_foundation::task::{Bug, CarriesBug};
-    let bug = Bug { operation: "stage the asset", message: "it panicked".into() };
+    let bug = Bug::new("stage the asset", "it panicked");
     let storage = || StorageError::from(coven_foundation::files::FileError::Bug(bug.clone()));
     assert!(matches!(storage(), StorageError::Bug(found) if found == bug));
     assert_eq!(storage().failure(), StorageFailure::Bug);

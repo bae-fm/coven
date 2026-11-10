@@ -257,7 +257,7 @@ fn a_failing_operation_names_its_reason_and_cause() {
 #[test]
 fn storage_and_custody_bugs_are_syncs_bug() {
     use coven_foundation::task::Bug;
-    let bug = Bug { operation: "read the object", message: "it panicked".into() };
+    let bug = Bug::new("read the object", "it panicked");
     let storage = SyncError::from(StorageError::Bug(bug.clone()));
     assert!(matches!(storage, SyncError::Bug(found) if found == bug));
     let custody = SyncError::from(KeyError::Bug(bug.clone()));
@@ -271,7 +271,7 @@ fn storage_and_custody_bugs_are_syncs_bug() {
 #[test]
 fn a_repeated_bug_carries_none_to_report() {
     use coven_foundation::task::{Bug, CarriesBug};
-    let bug = Bug { operation: "the sync loop", message: "it panicked".into() };
+    let bug = Bug::new("the sync loop", "it panicked");
     let worker = SyncError::WorkerFailed(bug.clone());
     assert_eq!(worker.bug(), None);
     assert_eq!(worker.local_failure(), crate::LocalFailure::Bug);

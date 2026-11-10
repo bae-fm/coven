@@ -264,19 +264,26 @@ async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
     f.connector.panics.store(true, Ordering::SeqCst);
     resume.send(()).unwrap();
     let answer = tokio::time::timeout(HANG_GUARD, answer).await.unwrap();
-    let bug =
-        crate::task::Bug { operation: "connect to storage", message: "connecting panicked".into() };
     let coven_sync::RetryOutcome::Failed(coven_sync::PassFailure::Failed {
         error: coven_sync::SyncFailure::Other(error),
     }) = &answer
     else {
         panic!("the retry heard no failure: {answer:?}");
     };
+    let [bug] = <[_; 1]>::try_from(f.bugs.take()).expect("the sink heard the one bug");
+    assert_eq!(
+        (bug.operation, bug.message.as_str()),
+        ("connect to storage", "connecting panicked")
+    );
+    assert_eq!(
+        bug.location.as_ref().map(|at| at.file.as_str()),
+        Some(file!()),
+        "the bug names where the connector panicked"
+    );
     assert!(
         matches!(error.downcast_ref::<SyncError>(), Some(SyncError::WorkerFailed(heard)) if *heard == bug),
         "{error:?}"
     );
-    assert_eq!(f.bugs.take(), std::slice::from_ref(&bug));
     last_pass(&f.handle, |last| {
         matches!(last, Some(LastPass::Failed { error, .. }) if error.contains("connecting panicked"))
     })

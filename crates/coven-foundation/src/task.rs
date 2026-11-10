@@ -14,6 +14,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[path = "task_location.rs"]
+mod location;
+
+pub use location::SourceLocation;
+
 /// Why work apart from its caller gave no result.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TaskFailed {
@@ -36,6 +41,25 @@ pub struct Bug {
     pub operation: &'static str,
     /// The text the panic carried ([`panic_message`]).
     pub message: String,
+    /// Where the bug showed itself: where the panic began, or where the code
+    /// that found the bug made it ([`Bug::new`]). `None` for a panic no catch
+    /// of coven's saw begin: one that reached a join uncaught
+    /// ([`TaskFailed::of_join`]), or one resumed with
+    /// `std::panic::resume_unwind` from a panic elsewhere.
+    pub location: Option<SourceLocation>,
+}
+
+impl Bug {
+    /// The bug code found in `operation` without a panic, such as state a
+    /// `Drop` finds wrong, located where this is called.
+    #[track_caller]
+    pub fn new(operation: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            operation,
+            message: message.into(),
+            location: Some(SourceLocation::of(std::panic::Location::caller())),
+        }
+    }
 }
 
 /// Work its runtime dropped as it shut down, before the work finished. Not a
@@ -74,22 +98,17 @@ impl std::fmt::Display for ShutdownOutcome {
 }
 
 impl TaskFailed {
-    /// The failure of `operation` whose panic carried `payload`.
-    pub fn panicked(operation: &'static str, payload: &(dyn Any + Send)) -> Self {
-        Self::Panicked(Bug { operation, message: panic_message(payload) })
-    }
-
     /// The failure a joined task's `error` stands for. A task the runtime
-    /// dropped may have run in part: `ShutdownOutcome::Unknown`.
+    /// dropped may have run in part: `ShutdownOutcome::Unknown`. A task
+    /// whose work runs under [`caught`] hands its panic back as a value, so
+    /// its join fails only as its runtime ends it; a panic that reached the
+    /// join uncaught gives a bug that can't say where it began.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
-        Self::of_dropped(operation, ShutdownOutcome::Unknown, error)
-    }
-
-    /// The failure a join of a closure on the blocking pool stands for. The
-    /// pool can't stop a closure once it has started, so one it dropped
-    /// never ran: `ShutdownOutcome::NotRun`.
-    pub fn of_blocking_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
-        Self::of_dropped(operation, ShutdownOutcome::NotRun, error)
+        if error.is_panic() {
+            failed_with(operation, error.into_panic())
+        } else {
+            Self::Shutdown(Shutdown { operation, outcome: ShutdownOutcome::Unknown })
+        }
     }
 
     /// This failure as the error of the call whose work it ended: its
@@ -98,20 +117,6 @@ impl TaskFailed {
         match self {
             Self::Panicked(bug) => E::from(bug),
             Self::Shutdown(shutdown) => E::from(shutdown),
-        }
-    }
-
-    /// `error`'s failure, where a task the runtime dropped got as far as
-    /// `outcome` says.
-    fn of_dropped(
-        operation: &'static str,
-        outcome: ShutdownOutcome,
-        error: tokio::task::JoinError,
-    ) -> Self {
-        if error.is_panic() {
-            failed_with(operation, error.into_panic())
-        } else {
-            Self::Shutdown(Shutdown { operation, outcome })
         }
     }
 
@@ -149,18 +154,28 @@ pub async fn blocking<T: Send + 'static>(
     operation: &'static str,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, TaskFailed> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| TaskFailed::of_blocking_join(operation, error))
+    match tokio::task::spawn_blocking(move || caught_sync(operation, work)).await {
+        Ok(done) => done.map_err(TaskFailed::Panicked),
+        // The closure catches its own panic, and the pool can't stop a
+        // closure once it has started, so the pool dropped it unstarted.
+        Err(_dropped) => {
+            Err(TaskFailed::Shutdown(Shutdown { operation, outcome: ShutdownOutcome::NotRun }))
+        }
+    }
 }
 
-/// Wait for a task already spawned. Its panic, or the runtime cancelling it,
-/// comes back as `TaskFailed`.
+/// Wait for a task whose work runs under [`caught`], as
+/// `tokio::spawn(caught(operation, work))` starts it. Its panic comes back as
+/// `TaskFailed::Panicked`, naming where it began; the runtime cancelling it,
+/// as `Shutdown`.
 pub async fn joined<T: Send + 'static>(
     operation: &'static str,
-    task: tokio::task::JoinHandle<T>,
+    task: tokio::task::JoinHandle<Result<T, Bug>>,
 ) -> Result<T, TaskFailed> {
-    task.await.map_err(|error| TaskFailed::of_join(operation, error))
+    match task.await {
+        Ok(caught) => caught.map_err(TaskFailed::Panicked),
+        Err(error) => Err(TaskFailed::of_join(operation, error)),
+    }
 }
 
 /// Run `work` inline, catching a panic in any of its polls. For one message of
@@ -180,7 +195,7 @@ pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -
 /// process, so such a function catches here and answers with its own failure
 /// value.
 pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug> {
-    catch_unwind(AssertUnwindSafe(work)).map_err(|payload| bug_of(operation, payload))
+    location::catch_located(work).map_err(|(payload, at)| bug_of(operation, payload, at))
 }
 
 /// Where a bug in work nobody waits for goes (E15): a store's long-lived
@@ -201,7 +216,11 @@ pub struct LoggedBugs;
 
 impl BugSink for LoggedBugs {
     fn report(&self, bug: &Bug) {
-        tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
+        tracing::error!(
+            operation = bug.operation,
+            location = bug.location.as_ref().map(tracing::field::display),
+            "a bug in work nobody waits for: {bug}"
+        );
     }
 }
 
@@ -263,7 +282,11 @@ impl HeardBugs {
 #[cfg(any(test, feature = "test-utils"))]
 impl BugSink for HeardBugs {
     fn report(&self, bug: &Bug) {
-        tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
+        tracing::error!(
+            operation = bug.operation,
+            location = bug.location.as_ref().map(tracing::field::display),
+            "a bug in work nobody waits for: {bug}"
+        );
         let hook = crate::locks::lock_unpoisoned(&self.next_report).take();
         if let Some(hook) = hook {
             hook(bug);
@@ -519,16 +542,29 @@ impl<T> Future for CompletingTask<T> {
     }
 }
 
-/// The failure a joined panic's `payload` stands for.
+/// The failure a panic that reached a join uncaught, with `payload`, stands
+/// for. No catch of coven's saw it begin, so its bug can't say where.
 fn failed_with(operation: &'static str, payload: Box<dyn Any + Send>) -> TaskFailed {
-    TaskFailed::Panicked(bug_of(operation, payload))
+    TaskFailed::Panicked(bug_of(operation, payload, None))
 }
 
-/// The bug a caught panic's `payload` stands for. The payload is dropped
-/// here inside a catch of its own: a payload whose `Drop` panics would
-/// otherwise unwind out of the helper that caught the first panic.
-fn bug_of(operation: &'static str, payload: Box<dyn Any + Send>) -> Bug {
-    let bug = Bug { operation, message: panic_message(payload.as_ref()) };
+/// The bug a caught panic's `payload`, begun at `location`, stands for. The
+/// payload is dropped here inside a catch of its own: a payload whose `Drop`
+/// panics would otherwise unwind out of the helper that caught the first
+/// panic.
+fn bug_of(
+    operation: &'static str,
+    payload: Box<dyn Any + Send>,
+    location: Option<SourceLocation>,
+) -> Bug {
+    let bug = Bug { operation, message: panic_message(payload.as_ref()), location };
+    if bug.location.is_none() {
+        tracing::warn!(
+            operation,
+            "{bug}, where no catch of coven's saw the panic begin, so its bug names no place in \
+             the code"
+        );
+    }
     if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
         tracing::error!(
             operation,
@@ -556,14 +592,14 @@ impl<F: Future> Future for Caught<F> {
         let Some(work) = self.work.as_mut() else {
             panic!("{operation} polled after it finished");
         };
-        match catch_unwind(AssertUnwindSafe(|| work.as_mut().poll(cx))) {
+        match location::catch_located(|| work.as_mut().poll(cx)) {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(value)) => {
                 self.work = None;
                 Poll::Ready(Ok(value))
             }
-            Err(payload) => {
-                let bug = bug_of(operation, payload);
+            Err((payload, at)) => {
+                let bug = bug_of(operation, payload, at);
                 let work = self.work.take();
                 if let Err(payload) = catch_unwind(AssertUnwindSafe(move || drop(work))) {
                     tracing::error!(

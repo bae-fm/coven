@@ -9243,13 +9243,34 @@ pub async fn empty_s3_bucket(
   table is empty" }))`. The import removes its staged files, as on any other error,
   and the app reports the bug. Had the panic been re-raised, it would have
   unwound through the import and left the staged files behind.
-- `blocking` runs a closure on the blocking pool. `joined` waits for a task
-  already spawned. `caught` runs a future inline and catches a panic in any
-  of its polls: one message of a long-lived loop fails with its `Bug`, and
-  the loop serves the next. `caught_sync` does the same for a synchronous
-  call, such as a callback foreign code calls. Unwinding out of an
-  `extern "C"` function ends the process, so such a callback catches the
-  panic and answers with its own failure value.
+- A `Bug` names where in the code the panic began, in its `location`: the
+  file, line and column. Without it the app's crash report would say what
+  broke but not where. Only the panic hook's log line, kept apart from the
+  report, would say. The tag reader's bug above comes back with `location:
+  Some(SourceLocation { file: "src/tags.rs", line: 88, column: 9 })`.
+- A panic's payload holds only its text. Where the panic began reaches only
+  the process's panic hook. So each of coven's catches marks its thread
+  while its work runs. A hook coven adds once, in front of the app's own,
+  writes where a panic began into the panicking thread's mark, then calls
+  the app's hook. The catch takes the place back with the payload. A panic
+  unwinds only on the thread that raised it, so with many threads each
+  catch reads only its own thread's panic. A panic outside every catch of
+  coven's goes to the app's hook alone.
+- `blocking` runs a closure on the blocking pool. `caught` runs a future
+  inline and catches a panic in any of its polls: one message of a
+  long-lived loop fails with its `Bug`, and the loop serves the next.
+  `caught_sync` does the same for a synchronous call, such as a callback
+  foreign code calls. Unwinding out of an `extern "C"` function ends the
+  process, so such a callback catches the panic and answers with its own
+  failure value. Work run as its own task or on the blocking pool runs
+  under such a catch on its own thread, so its bug, place included, comes
+  back through the join as a value.
+- `joined` waits for a task spawned as `tokio::spawn(caught(operation,
+  work))`, and gives its bug as `TaskFailed::Panicked`. A task whose work
+  runs under `caught` fails its join only when its runtime ends it.
+  `TaskFailed::of_join` reads any other join. A panic that reached the
+  join uncaught gives a `Bug` whose `location` is `None`, since no catch of
+  coven's saw it begin.
 
 A runtime that shuts down drops the work it has not finished, and coven's own
 calls run work the same way: database calls and file work on the blocking
@@ -9495,9 +9516,24 @@ Edge cases:
   helper. So none of them unwinds into its caller.
 - A payload that is not text, thrown with `std::panic::panic_any`, gives the
   message "a panic whose payload is not text".
+- A bug coven finds without a panic, such as a transfer that lost its place
+  in its object's entry, names the line that found it (`Bug::new`).
+- A bug's `location` is `None` when coven's hook didn't see the panic
+  begin. `std::panic::resume_unwind` calls no hook, so a payload resumed
+  from a panic elsewhere has no place. Neither does a panic after the app
+  replaced the process's hook with one that doesn't call the hook it
+  replaced (`std::panic::take_hook`). coven logs a warning for each such
+  bug, so a hook set that way shows.
+- A catch entered while its thread is already unwinding, such as in a
+  `Drop`, doesn't add coven's hook: std refuses to set a hook from a
+  panicking thread. The next catch on a thread that isn't panicking adds
+  it.
+- A catch inside another names its own panic. The outer catch's mark is
+  kept aside while the inner one runs, and put back as it ends.
 - tokio reports an aborted task and a task its runtime dropped the same way.
-  `joined` gives `Shutdown` with `ShutdownOutcome::Unknown` for both;
-  `blocking` gives `ShutdownOutcome::NotRun`.
+  `joined` and `TaskFailed::of_join` give `Shutdown` with
+  `ShutdownOutcome::Unknown` for both; `blocking` gives
+  `ShutdownOutcome::NotRun`.
 - A store's background workers, such as the upload worker, that the runtime
   dropped have stopped, which is all closing waits for: closing goes on.
 - Dropping the future `blocking` or `joined` returns does not stop work
@@ -9541,6 +9577,32 @@ pub struct Bug {
     pub operation: &'static str,
     /// The text the panic carried (`panic_message`).
     pub message: String,
+    /// Where the bug showed itself: where the panic began, or where the code
+    /// that found the bug made it (`Bug::new`). `None` for a panic no catch
+    /// of coven's saw begin: one that reached a join uncaught
+    /// (`TaskFailed::of_join`), or one resumed with
+    /// `std::panic::resume_unwind` from a panic elsewhere.
+    pub location: Option<SourceLocation>,
+}
+
+impl Bug {
+    /// The bug code found in `operation` without a panic, such as state a
+    /// `Drop` finds wrong, located where this is called.
+    #[track_caller]
+    pub fn new(operation: &'static str, message: impl Into<String>) -> Self;
+}
+
+/// Where in the code a bug showed itself: the file, line and column of the
+/// panic, or of the code that found the bug and made it. Shown as
+/// "{file}:{line}:{column}".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// The source file, as the compiler named it.
+    pub file: String,
+    /// The line in it, from 1.
+    pub line: u32,
+    /// The column in that line, from 1.
+    pub column: u32,
 }
 
 /// Work its runtime dropped as it shut down, before the work finished (E15).
@@ -9568,16 +9630,10 @@ pub enum ShutdownOutcome {
 }
 
 impl TaskFailed {
-    /// The failure of `operation` whose panic carried `payload`.
-    pub fn panicked(operation: &'static str, payload: &(dyn std::any::Any + Send)) -> Self;
-
-    /// The failure a joined task's `error` stands for: `Panicked` for a
-    /// panic, `Shutdown` with `ShutdownOutcome::Unknown` for a cancelled task.
+    /// The failure a joined task's `error` stands for: `Shutdown` with
+    /// `ShutdownOutcome::Unknown` for a cancelled task, and `Panicked` for a
+    /// panic that reached the join uncaught, whose `Bug` has no `location`.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self;
-
-    /// The failure a join of a closure on the blocking pool stands for:
-    /// `Shutdown` with `ShutdownOutcome::NotRun` for one the pool dropped.
-    pub fn of_blocking_join(operation: &'static str, error: tokio::task::JoinError) -> Self;
 
     /// This failure as the error of the call whose work it ended: its `Bug`
     /// for a panic, its `Shutdown` for the runtime dropping the work.
@@ -9602,11 +9658,12 @@ pub async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, TaskFailed>;
 
-/// Wait for a task already spawned. Its panic, or the runtime cancelling it,
-/// comes back as `TaskFailed`.
+/// Wait for a task spawned as `tokio::spawn(caught(operation, work))`. Its
+/// panic comes back as `TaskFailed::Panicked`, naming where it began; the
+/// runtime cancelling it, as `Shutdown`.
 pub async fn joined<T: Send + 'static>(
     operation: &'static str,
-    task: tokio::task::JoinHandle<T>,
+    task: tokio::task::JoinHandle<Result<T, Bug>>,
 ) -> Result<T, TaskFailed>;
 
 /// Run `work` inline, catching a panic in any of its polls. Run inline, the

@@ -3,7 +3,7 @@ use crate::LocalFileError;
 use coven_foundation::files::FileError;
 
 fn bug() -> Bug {
-    Bug { operation: "read the bytes", message: "the read panicked".into() }
+    Bug::new("read the bytes", "the read panicked")
 }
 
 /// A panic in file work a database call ran is the call's bug, not a disk

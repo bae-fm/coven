@@ -515,10 +515,7 @@ async fn a_halt_ends_a_waiting_connection_attempt() {
     f.handle.test_parked().await;
     let attempts = *f.connector.attempts.borrow();
     *f.connector.failure.lock().unwrap() = Some(attempt_failure(2));
-    let bug = crate::task::Bug {
-        operation: "the upload worker",
-        message: "the upload of a photo broke".into(),
-    };
+    let bug = crate::task::Bug::new("the upload worker", "the upload of a photo broke");
     f.handle.test_halt(bug.clone()).await;
     // Past the attempt's backoff: an attempt still running would try again.
     f.advance(Duration::from_secs(600));

@@ -28,7 +28,7 @@ fn setup_preserves_sign_in_and_custody_causes() {
 #[test]
 fn setup_classifies_a_bug_and_a_checks_storage_failure() {
     use coven_foundation::task::Bug;
-    let bug = Bug { operation: "stage the asset", message: "it panicked".into() };
+    let bug = Bug::new("stage the asset", "it panicked");
     let storage = || StorageError::from(FileError::Bug(bug.clone()));
     assert!(
         matches!(StorageSetupError::from(storage()), StorageSetupError::Bug(found) if found == bug)
@@ -174,7 +174,7 @@ fn setup_and_unlock_name_a_removal_and_a_required_update() {
 #[test]
 fn a_bug_taking_a_stores_lock_is_each_errors_bug() {
     use crate::task::{Bug, CarriesBug};
-    let bug = Bug { operation: "lock the store", message: "the lock panicked".into() };
+    let bug = Bug::new("lock the store", "the lock panicked");
     let lock = || StoreLockError::from(FileError::Bug(bug.clone()));
     assert!(matches!(lock(), StoreLockError::Bug(found) if found == bug));
     assert!(
@@ -197,7 +197,7 @@ fn a_bug_taking_a_stores_lock_is_each_errors_bug() {
 fn a_bug_listing_the_stores_is_the_listings_bug() {
     use crate::task::{Bug, CarriesBug};
     use crate::StoreListError;
-    let bug = Bug { operation: "list stores", message: "the listing panicked".into() };
+    let bug = Bug::new("list stores", "the listing panicked");
     let listing = StoreListError::from(FileError::Bug(bug.clone()));
     assert!(matches!(&listing, StoreListError::Bug(found) if *found == bug));
     assert_eq!(listing.bug(), Some(&bug));
@@ -218,7 +218,7 @@ fn a_bug_in_what_coven_calls_keep_is_the_calls_bug() {
     use crate::task::{Bug, CarriesBug};
     use crate::{BootstrapError, CovenError, IdentityError, ReadOnlyOpenError};
     use coven_foundation::files::BootstrapDirectoryError;
-    let bug = Bug { operation: "create the store", message: "it panicked".into() };
+    let bug = Bug::new("create the store", "it panicked");
     let directory = || BootstrapDirectoryError::from(FileError::Bug(bug.clone()));
     assert!(matches!(directory(), BootstrapDirectoryError::Bug(found) if found == bug));
     let locked = BootstrapDirectoryError::from(StoreLockError::Bug(bug.clone()));

@@ -55,7 +55,7 @@ fn upload_failures_keep_native_storage_causes_from_reads_and_writes() {
 fn a_bug_in_file_work_is_the_calls_bug() {
     use coven_foundation::files::CopyPathError;
     use coven_foundation::task::{Bug, CarriesBug};
-    let bug = Bug { operation: "read the file", message: "it panicked".into() };
+    let bug = Bug::new("read the file", "it panicked");
     let reads = [
         FileReadError::from(FileError::Bug(bug.clone())),
         FileReadError::from(StoreLockError::Bug(bug.clone())),

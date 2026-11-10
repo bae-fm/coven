@@ -1,7 +1,7 @@
 use super::*;
 
 fn bug() -> Bug {
-    Bug { operation: "read the bytes", message: "the read panicked".into() }
+    Bug::new("read the bytes", "the read panicked")
 }
 
 fn refused() -> SqliteError {

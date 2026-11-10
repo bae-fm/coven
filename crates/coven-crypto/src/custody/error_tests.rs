@@ -63,7 +63,7 @@ fn apple_statuses_classify_a_locked_keychain_and_a_missing_entitlement() {
 #[test]
 fn a_bug_in_custody_file_work_is_custodys_bug() {
     use coven_foundation::task::{Bug, CarriesBug};
-    let bug = Bug { operation: "write the passphrase file", message: "it panicked".into() };
+    let bug = Bug::new("write the passphrase file", "it panicked");
     let custody = || KeyError::from(coven_foundation::files::FileError::Bug(bug.clone()));
     assert!(matches!(custody(), KeyError::Bug(found) if found == bug));
     let identity = crate::custody::IdentityError::from(custody());

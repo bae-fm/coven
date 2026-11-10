@@ -236,10 +236,7 @@ fn sdk_transport_failures_remain_retryable_and_name_their_redacted_causes() {
 /// (E15).
 #[test]
 fn a_bug_behind_a_dispatch_failure_is_the_requests_bug() {
-    let bug = coven_foundation::task::Bug {
-        operation: "send a request body",
-        message: "the progress bar is gone".into(),
-    };
+    let bug = coven_foundation::task::Bug::new("send a request body", "the progress bar is gone");
     let native = SdkError::<ListObjectsV2Error>::dispatch_failure(ConnectorError::other(
         Box::new(bug.clone()),
         None,
