@@ -3571,6 +3571,12 @@ let moved = handle
   app's triggers on those tables apply and fire as in a store, and the app
   keeps no copy of coven's tables that could fall behind them. Nothing of
   coven's writes them there: the test writes the rows coven would.
+- *`coven_path_text`, in tests.* With the test-utils feature, `path_text_sql`
+  gives what `coven_path_text` returns for one argument as SQLite holds it:
+  NULL for NULL, the text of a path's bytes (a byte that isn't part of a valid
+  path shows as `\xNN`), and an error for any other value. A test that
+  registers the function on a connection it opened itself, outside any store,
+  calls it, so the app keeps no copy of it that could fall behind.
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
@@ -4009,6 +4015,11 @@ impl LiveQueryRuns {
 /// store (E4).
 #[cfg(feature = "test-utils")]
 pub fn followed_tables_sql() -> impl Iterator<Item = &'static str>;
+
+/// What `coven_path_text` returns for its argument, for a test that
+/// registers the function outside any store.
+#[cfg(feature = "test-utils")]
+pub fn path_text_sql(value: rusqlite::types::ValueRef<'_>) -> rusqlite::Result<rusqlite::types::Value>;
 
 /// Counts the work a store's connections run; clones count into the same
 /// counts, and no other store's.

@@ -4,6 +4,7 @@ use crate::{Migration, RowIdentity, SyncedTable};
 
 #[path = "followed_tables.rs"]
 mod followed_tables;
+pub use crate::coven_functions::path_text_sql;
 pub use followed_tables::followed_tables_sql;
 
 #[path = "work_counts.rs"]

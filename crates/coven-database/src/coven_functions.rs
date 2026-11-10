@@ -21,6 +21,22 @@ const INTERNAL: FunctionFlags = FunctionFlags::SQLITE_UTF8
     .union(FunctionFlags::SQLITE_DETERMINISTIC)
     .union(FunctionFlags::SQLITE_DIRECTONLY);
 
+/// What `coven_path_text` returns for its argument: NULL for NULL, the text
+/// `path_bytes_text` shows for a path's bytes, and an error for any other
+/// value. Public so an app's test that registers the function itself on a
+/// connection outside any store gives the result a store does.
+pub fn path_text_sql(value: ValueRef<'_>) -> rusqlite::Result<Value> {
+    Ok(match value {
+        ValueRef::Null => Value::Null,
+        ValueRef::Blob(bytes) => Value::Text(coven_foundation::files::path_bytes_text(bytes)),
+        _ => {
+            return Err(rusqlite::Error::UserFunctionError(
+                "coven_path_text takes a path's bytes, as coven_user_files holds them".into(),
+            ))
+        }
+    })
+}
+
 pub(crate) fn register(
     connection: &Connection,
     authorization: &SqlAuthorization,
@@ -75,15 +91,7 @@ pub(crate) fn register(
     // The text that shows a path from the bytes `coven_user_files.path`
     // holds, as `path_bytes_text` gives it (§17.3).
     add(connection, authorization, "coven_path_text", 1, PURE, |ctx| {
-        Ok(match ctx.get_raw(0) {
-            ValueRef::Null => Value::Null,
-            ValueRef::Blob(bytes) => Value::Text(coven_foundation::files::path_bytes_text(bytes)),
-            _ => {
-                return Err(rusqlite::Error::UserFunctionError(
-                    "coven_path_text takes a path's bytes, as coven_user_files holds them".into(),
-                ))
-            }
-        })
+        path_text_sql(ctx.get_raw(0))
     })?;
     // What a file record and an app's file reference protect (§17.2,
     // §17.10), for coven's own statements that bring protection up to date a
