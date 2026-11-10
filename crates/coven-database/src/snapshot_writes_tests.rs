@@ -547,3 +547,69 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
         db.close().await.unwrap();
     }
 }
+
+/// A reload from an empty store prefix stages two announcement slots past
+/// its coverage: Ben's at slot 1, which the reloading device refused, and
+/// his at slot 2, which it accepted. Only the accepted one's original is
+/// kept for the store's snapshots and for rebuilding history: no rule reads
+/// a refused announcement again (§16.1).
+#[tokio::test]
+async fn a_reload_keeps_no_refused_announcements_original() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let ben = coven_foundation::id_source::DeviceId(99);
+    let state = db.store_state().await.unwrap();
+    let announcement = |slot: u64, accepted: bool| crate::IncomingSlot {
+        digest: [slot as u8; 32],
+        slot: coven_merge::slot(slot),
+        header: coven_format::sequence::SlotHeader {
+            device: ben,
+            claim: slot,
+            author: crate::tests::member(1),
+            after: slot - 1,
+        },
+        content: crate::SlotContent::Announcement {
+            original: coven_format::floor::OriginalSlot {
+                slot: coven_merge::slot(slot),
+                object: vec![slot as u8; 10],
+            },
+            accepted: accepted.then(|| coven_format::sequence::SnapshotAnnouncement {
+                snapshot: coven_format::admin::SnapshotId {
+                    audience: Audience::Store,
+                    device: ben,
+                    number: slot,
+                },
+                covers: slot - 1,
+                breaking_version: 0,
+                purpose: coven_format::sequence::Purpose::Ordinary,
+                digest: [0; 32],
+            }),
+        },
+    };
+    db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
+        crate::SnapshotReload {
+            snapshots: vec![crate::SnapshotSource::Empty(Audience::Store)],
+            slots: vec![announcement(1, false), announcement(2, true)],
+            target: 2,
+            state,
+            provider_access: Vec::new(),
+            cutoffs: vec![],
+            boundaries: vec![],
+            operation: None,
+            authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let kept: Vec<_> = db
+        .original_slots()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|original| original.slot.get())
+        .collect();
+    assert_eq!(kept, [2]);
+    assert_eq!(db.applied_slot().await.unwrap(), 2, "the refused slot still counts as staged");
+    db.close().await.unwrap();
+}
