@@ -168,7 +168,7 @@ async fn a_kept_pins_wait_ends_with_its_request() {
                 // A clock at the end of its range has no instant for the
                 // wait's deadline, so the wait can't be saved.
                 f.storage.set_online(false);
-                clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(i64::MAX as u64));
+                clock.set(end_of_time());
                 assert!(f.files.inner.keep_pinned().await.is_err());
                 clock.set(start);
                 f.storage.set_online(true);
@@ -192,6 +192,19 @@ async fn a_kept_pins_wait_ends_with_its_request() {
         assert!(pinned(&f, file).await, "{cause}");
         f.close().await;
     }
+}
+
+/// The latest time this platform's clock can name: on Windows long before
+/// Unix's `i64::MAX` seconds past the epoch.
+fn end_of_time() -> SystemTime {
+    let (mut end, mut step) = (SystemTime::UNIX_EPOCH, Duration::MAX);
+    while !step.is_zero() {
+        match end.checked_add(step) {
+            Some(later) => end = later,
+            None => step /= 2,
+        }
+    }
+    end
 }
 
 /// Make the user's file kept here device-only on this device, which ends its
