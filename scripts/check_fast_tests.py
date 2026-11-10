@@ -2,27 +2,42 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
 
+# In forward slashes, which the script's `dirname "$0"` splits on every platform.
+SCRIPT = Path(__file__).with_name("check-fast.sh").as_posix()
+# The bash on PATH, the one running these checks. Named bare, Windows would
+# start System32's bash.exe, which runs WSL: CreateProcess looks there first.
+BASH = shutil.which("bash")
+if BASH is None:
+    raise RuntimeError("no bash on PATH")
+
+
+def tool(directory, name, body):
+    """A stand-in for the command `name` in `directory`, run by bash. Its lines
+    end in LF on every platform: bash would read a CR as part of each line."""
+    path = directory / name
+    path.write_text("#!/bin/bash\n" + body, newline="\n")
+    path.chmod(0o755)
+
 
 class FastChecks(unittest.TestCase):
     def test_checker_precedes_compilation_and_stops_on_failure(self):
-        script = Path(__file__).with_name("check-fast.sh")
         for checker_status in (0, 1):
             with self.subTest(checker_status=checker_status), tempfile.TemporaryDirectory() as tmp:
                 directory = Path(tmp)
-                cargo = directory / "cargo"
-                cargo.write_text(
-                    '#!/bin/bash\n'
+                tool(
+                    directory,
+                    "cargo",
                     'echo "$*" >> "$CARGO_CALLS"\n'
-                    'if [ "$1" = run ]; then exit "$CHECKER_STATUS"; fi\n'
+                    'if [ "$1" = run ]; then exit "$CHECKER_STATUS"; fi\n',
                 )
-                cargo.chmod(0o755)
                 calls = directory / "calls"
                 result = subprocess.run(
-                    ["bash", str(script)],
+                    [BASH, SCRIPT],
                     env={
                         **os.environ,
                         "HOME": str(directory),
@@ -36,8 +51,8 @@ class FastChecks(unittest.TestCase):
                     text=True,
                     check=False,
                 )
-                commands = calls.read_text().splitlines()
                 self.assertEqual(result.returncode, checker_status, result.stderr)
+                commands = calls.read_text().splitlines()
                 expected = [
                     "fmt --all --check",
                     "run --quiet -p owner-construction-check -- . coven-storage",
@@ -52,19 +67,16 @@ class FastChecks(unittest.TestCase):
                 self.assertEqual(commands, expected)
 
     def test_quick_mode_checks_instead_of_linting_and_a_bad_mode_fails(self):
-        script = Path(__file__).with_name("check-fast.sh")
         for mode, expected_status, expected_tail in (
             ("quick", 0, ["check -p coven-storage --all-targets --all-features"]),
             ("fast", 1, None),
         ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 directory = Path(tmp)
-                cargo = directory / "cargo"
-                cargo.write_text('#!/bin/bash\necho "$*" >> "$CARGO_CALLS"\n')
-                cargo.chmod(0o755)
+                tool(directory, "cargo", 'echo "$*" >> "$CARGO_CALLS"\n')
                 calls = directory / "calls"
                 result = subprocess.run(
-                    ["bash", str(script)],
+                    [BASH, SCRIPT],
                     env={
                         **os.environ,
                         "HOME": str(directory),
@@ -88,7 +100,6 @@ class FastChecks(unittest.TestCase):
                     self.assertNotIn("check -p coven-storage", commands)
 
     def test_machine_wide_mode_comes_from_builds_and_defaults_to_strict(self):
-        script = Path(__file__).with_name("check-fast.sh")
         for builds_body, expected_first in (
             ("echo quick", "check -p coven-storage --all-targets --all-features"),
             ("echo strict", "clippy -p coven-storage --all-targets --all-features -- -D warnings"),
@@ -96,17 +107,12 @@ class FastChecks(unittest.TestCase):
         ):
             with self.subTest(builds=builds_body), tempfile.TemporaryDirectory() as tmp:
                 directory = Path(tmp)
-                for name, body in (
-                    ("cargo", 'echo "$*" >> "$CARGO_CALLS"\n'),
-                    ("builds", builds_body + "\n"),
-                ):
-                    tool = directory / name
-                    tool.write_text("#!/bin/bash\n" + body)
-                    tool.chmod(0o755)
+                tool(directory, "cargo", 'echo "$*" >> "$CARGO_CALLS"\n')
+                tool(directory, "builds", builds_body + "\n")
                 calls = directory / "calls"
                 env = {k: v for k, v in os.environ.items() if k != "HOOK_MODE"}
                 result = subprocess.run(
-                    ["bash", str(script)],
+                    [BASH, SCRIPT],
                     env={
                         **env,
                         "HOME": str(directory),

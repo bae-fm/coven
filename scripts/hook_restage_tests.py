@@ -2,11 +2,17 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
 
 LIB = Path(__file__).with_name("hooks") / "restage-formatted.sh"
+# The bash on PATH, the one running these checks. Named bare, Windows would
+# start System32's bash.exe, which runs WSL: CreateProcess looks there first.
+BASH = shutil.which("bash")
+if BASH is None:
+    raise RuntimeError("no bash on PATH")
 CLEAN = "fn main() {}\n"
 UGLY = "fn  main( ) {}\n"
 
@@ -23,7 +29,7 @@ def git(repo, *args):
 def run_hook_step(repo, mutate):
     """Snapshot, apply `mutate` (standing in for cargo fmt), then restage."""
     script = f'source "{LIB}"; snapshot_staged_files; {mutate}; restage_and_fail_if_formatted "cargo fmt"'
-    return subprocess.run(["bash", "-c", script], cwd=repo, env=CLEAN_ENV, capture_output=True, text=True)
+    return subprocess.run([BASH, "-c", script], cwd=repo, env=CLEAN_ENV, capture_output=True, text=True)
 
 
 class Restage(unittest.TestCase):
