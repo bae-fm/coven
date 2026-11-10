@@ -627,12 +627,14 @@ impl History {
                 SlotContent::KeyCopy(original)
             }
             SlotBody::Bounded { frame: SlotFrame::Announcement(announcement), original } => {
-                if self.announcement_allowed(slot, &received.header, &announcement) {
-                    self.announcements.insert(slot, announcement);
+                let accepted = if self.announcement_allowed(slot, &received.header, &announcement) {
+                    self.announcements.insert(slot, announcement.clone());
+                    Some(announcement)
                 } else {
                     tracing::debug!(?slot, "consumed stale or unauthorized snapshot announcement");
-                }
-                SlotContent::Announcement(original)
+                    None
+                };
+                SlotContent::Announcement { original, accepted }
             }
         };
         IncomingSlot { slot, header: received.header, digest: received.digest, content }

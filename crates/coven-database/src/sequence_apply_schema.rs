@@ -27,7 +27,9 @@ macro_rules! coven_sequence_application_tables {
         );
         // The audiences each applied writes slot carries a part for, from its
         // writes' headers: snapshot requests count the slot toward each
-        // (§16.2). A write's header may be forgotten (§16.7); this stays.
+        // (§16.2). A write's header may be forgotten (§16.7); this stays
+        // until an ordinary snapshot of the audience covers the slot, and the
+        // slot's size until no audience here counts it.
         $visit!(
             _coven_write_slot_audiences,
             "
@@ -36,6 +38,7 @@ macro_rules! coven_sequence_application_tables {
                 slot BLOB NOT NULL CHECK(length(slot)=8),
                 PRIMARY KEY(audience,slot)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_write_slot_audiences_slot ON _coven_write_slot_audiences(slot);
         "
         );
         $visit!(

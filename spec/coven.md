@@ -5863,7 +5863,13 @@ and the audiences its writes carry parts for, as it applies the slot; it
 keeps admin, key-copy and announcement slots whole already. The writes'
 headers may be forgotten long before a snapshot covers the slot (§16.7).
 Slots it loaded inside a snapshot instead of reading count nothing; they are
-at or below that snapshot's coverage.
+at or below that snapshot's coverage. Once it applies an ordinary snapshot's
+announcement, the slots that snapshot covers count nothing for its audience
+again: coverage only moves forward, and an ordinary snapshot is always the
+one a new device can start from. So it forgets which of those slots carry
+the audience's parts, and a slot's size once no audience counts it. A raise's
+or reset's snapshot waits for its entry to land before a new device starts
+from it, so its announcement forgets nothing; the next ordinary one does.
 
 **Why the gap grows with the snapshot.** Each snapshot is uploaded whole, and a
 restore loads one and replays the slots after it. With a gap of k × S, snapshot

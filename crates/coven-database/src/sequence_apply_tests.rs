@@ -624,3 +624,94 @@ async fn a_write_reading_less_than_its_devices_last_landed_write_refuses_its_slo
     );
     db.close().await.unwrap();
 }
+
+/// Ben's writes land in slots 1 to 3, each slot 100 sealed bytes. A raise's
+/// announcement covering slot 3 forgets nothing: until its raise lands it
+/// isn't the snapshot a new device starts from. Ben's ordinary store
+/// snapshot covering slot 2 is: those slots no longer count toward the
+/// store's next snapshot, so their sizes go, and what counts after slot 2
+/// is still slot 3 and the announcements.
+#[tokio::test]
+async fn an_ordinary_announcement_forgets_the_slot_sizes_it_covers() {
+    let store = TestStore::new();
+    let db =
+        store.schema(vec![SyncedTable::new("rows", RowIdentity::SharedKey)], SCHEMA).await.unwrap();
+    let ben = DeviceId(900);
+    TestStore::register(&db, ben, 2);
+    let header = |slot: u64| SlotHeader {
+        device: ben,
+        claim: slot,
+        author: crate::tests::member(2),
+        after: slot - 1,
+    };
+    for slot in 1..=3u64 {
+        let mut write = record(ben.0, slot, slot, slot as usize, slot as usize, 0);
+        write.parts[0].rows.retain(|row| row.row.table == "rows");
+        write.header.read_through = slot - 1;
+        db.apply_slot::<crate::pending::tests::Record, _, _>(
+            IncomingSlot {
+                slot: coven_merge::slot(slot),
+                header: header(slot),
+                digest: [slot as u8; 32],
+                content: SlotContent::Writes {
+                    size: 100,
+                    writes: vec![crate::sequence::tests::stream(write.into())],
+                },
+            },
+            crate::test_utils::idle_writers(),
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+    }
+    let announce = |slot: u64, covers: u64, purpose| {
+        db.apply_slot::<crate::pending::tests::Record, std::io::Cursor<Vec<u8>>, _>(
+            IncomingSlot {
+                slot: coven_merge::slot(slot),
+                header: header(slot),
+                digest: [slot as u8; 32],
+                content: SlotContent::Announcement {
+                    original: coven_format::floor::OriginalSlot {
+                        slot: coven_merge::slot(slot),
+                        object: vec![0; 10],
+                    },
+                    accepted: Some(coven_format::sequence::SnapshotAnnouncement {
+                        snapshot: coven_format::admin::SnapshotId {
+                            audience: Audience::Store,
+                            device: ben,
+                            number: slot,
+                        },
+                        covers,
+                        breaking_version: 0,
+                        purpose,
+                        digest: [0; 32],
+                    }),
+                },
+            },
+            crate::test_utils::idle_writers(),
+            || Ok(()),
+        )
+    };
+    let counted = || {
+        db.inspect_writer(|c| {
+            ["_coven_write_slots", "_coven_write_slot_audiences"].map(|table| {
+                c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
+                    .unwrap()
+            })
+        })
+    };
+    assert_eq!(db.snapshot_slot_bytes(Audience::Store, 0).await.unwrap(), 300);
+
+    announce(4, 3, coven_format::sequence::Purpose::Raise(1)).await.unwrap();
+    assert_eq!(counted(), [3, 3]);
+    announce(5, 2, coven_format::sequence::Purpose::Ordinary).await.unwrap();
+    assert_eq!(counted(), [1, 1]);
+    // Slot 3's writes and the two announcement slots, of 10 bytes each.
+    assert_eq!(db.snapshot_slot_bytes(Audience::Store, 2).await.unwrap(), 120);
+    assert_eq!(
+        db.snapshot_slot_bytes(Audience::Store, 0).await.unwrap(),
+        120,
+        "the slots the snapshot covers count nothing"
+    );
+    db.close().await.unwrap();
+}

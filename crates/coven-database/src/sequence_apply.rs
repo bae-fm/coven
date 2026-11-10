@@ -37,7 +37,13 @@ pub enum SlotContent<R> {
     /// An authenticated key-copy object, including refused copies.
     KeyCopy(OriginalSlot),
     /// An authenticated snapshot announcement, including refused announcements.
-    Announcement(OriginalSlot),
+    Announcement {
+        /// Exact signed evidence retained by store snapshots.
+        original: OriginalSlot,
+        /// The announcement as this device accepted it against the preceding
+        /// prefix; absent for a refused one, and for one a reload stages again.
+        accepted: Option<coven_format::sequence::SnapshotAnnouncement>,
+    },
 }
 
 /// Membership and required reload work installed with an authorized admin slot.
@@ -149,7 +155,12 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 }
             }
             SlotContent::KeyCopy(original) => retain(db, "key", &original)?,
-            SlotContent::Announcement(original) => retain(db, "announcement", &original)?,
+            SlotContent::Announcement { original, accepted } => {
+                retain(db, "announcement", &original)?;
+                if let Some(announcement) = accepted {
+                    snapshot_announced(db, &announcement)?;
+                }
+            }
         }
         authenticate()?;
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
@@ -168,6 +179,31 @@ pub(crate) fn apply<P: crate::PendingValue>(
         crate::operation::end_on_stop(db)?;
         Ok(crate::ApplyOutcome::Applied)
     }))
+}
+
+/// `announcement` was accepted. An ordinary snapshot's coverage only moves
+/// forward and is always usable, so a new device replays for its audience
+/// only the slots after it, and those at or below it never count toward that
+/// audience's next snapshot again (§16.2): their records of the audience's
+/// parts go, and each slot's size once no audience's part records it.
+fn snapshot_announced(
+    db: &DatabaseConnection,
+    announcement: &coven_format::sequence::SnapshotAnnouncement,
+) -> Result<(), DbError> {
+    if announcement.purpose != coven_format::sequence::Purpose::Ordinary {
+        return Ok(());
+    }
+    let covers = announcement.covers.to_be_bytes();
+    db.internal_execute(
+        "DELETE FROM _coven_write_slot_audiences WHERE audience=?1 AND slot<=?2",
+        rusqlite::params![announcement.snapshot.audience, covers],
+    )?;
+    db.internal_execute(
+        "DELETE FROM _coven_write_slots WHERE slot<=?1
+         AND NOT EXISTS(SELECT 1 FROM _coven_write_slot_audiences a WHERE a.slot=_coven_write_slots.slot)",
+        [covers],
+    )?;
+    Ok(())
 }
 
 /// How a slot's writes are staged: as the next slot, or replayed by a reload.
@@ -268,7 +304,9 @@ impl<R: std::io::Read> IncomingSlot<crate::DownloadedWriteStream<R>> {
             },
             SlotContent::Admin { original, effect } => SlotContent::Admin { original, effect },
             SlotContent::KeyCopy(original) => SlotContent::KeyCopy(original),
-            SlotContent::Announcement(original) => SlotContent::Announcement(original),
+            SlotContent::Announcement { original, accepted } => {
+                SlotContent::Announcement { original, accepted }
+            }
         };
         Ok(IncomingSlot { slot: self.slot, header: self.header, digest: self.digest, content })
     }

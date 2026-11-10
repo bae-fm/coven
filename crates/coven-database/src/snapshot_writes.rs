@@ -38,7 +38,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 crate::sequence_apply::retain(db, "admin", &original)?
             }
             SlotContent::KeyCopy(original) => crate::sequence_apply::retain(db, "key", &original)?,
-            SlotContent::Announcement(original) => {
+            SlotContent::Announcement { original, .. } => {
                 crate::sequence_apply::retain(db, "announcement", &original)?
             }
         }

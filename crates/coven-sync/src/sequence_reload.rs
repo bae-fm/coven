@@ -827,7 +827,7 @@ fn retained_slot(
         }
         SlotBody::Bounded { frame: SlotFrame::KeyCopy, original } => SlotContent::KeyCopy(original),
         SlotBody::Bounded { frame: SlotFrame::Announcement(_), original } => {
-            SlotContent::Announcement(original)
+            SlotContent::Announcement { original, accepted: None }
         }
     };
     IncomingSlot {

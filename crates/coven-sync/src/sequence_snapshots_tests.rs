@@ -24,6 +24,36 @@ async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
     ben.sync.database.close().await.unwrap();
 }
 
+/// Ana's insert lands in a writes slot that Ben applies. Once he applies
+/// her ordinary store snapshot covering it, that slot counts nothing toward
+/// the store's next snapshot, from any coverage: he keeps no size for it.
+/// The admin, key-copy and announcement slots it covers he keeps whole for
+/// the store's snapshots anyway.
+#[tokio::test]
+async fn an_applied_snapshot_announcement_stops_counting_the_slots_it_covers() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "recorded").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let store = coven_merge::Audience::Store;
+    let covered = ana.sync.database.applied_slot().await.unwrap();
+    let inserted = sealed(&group, covered - 1, covered).await;
+    let below = || async {
+        ben.sync.database.snapshot_slot_bytes(store.clone(), 0).await.unwrap()
+            - ben.sync.database.snapshot_slot_bytes(store.clone(), covered).await.unwrap()
+    };
+    let before = below().await;
+    ana.sync.snapshot(store.clone()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(below().await, before - inserted);
+    ana.sync.database.close().await.unwrap();
+    ben.sync.database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn sealed_slot_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_size() {
     let group = Group::new();
