@@ -758,7 +758,7 @@ async fn a_coven_calls_panic_reaches_the_apps_sink_once_its_caller_stops_waiting
         "{answered:?}"
     );
     keychain.panic_next_operation();
-    dropped_at_first_poll(app.saved_restore_codes()).await;
+    keychain.with_operations_held(|| dropped_at_first_poll(app.saved_restore_codes()));
     let bug = tokio::time::timeout(HANG_GUARD, bugs.next()).await.unwrap();
     assert_eq!(
         (bug.operation, bug.message.as_str()),
@@ -766,19 +766,19 @@ async fn a_coven_calls_panic_reaches_the_apps_sink_once_its_caller_stops_waiting
     );
     let store = app.create_closed_store("Household", Arc::new(SequentialIds::new())).await.unwrap();
     keychain.panic_next_operation();
-    dropped_at_first_poll(app.discard_store(&store)).await;
+    keychain.with_operations_held(|| dropped_at_first_poll(app.discard_store(&store)));
     let bug = tokio::time::timeout(HANG_GUARD, bugs.next()).await.unwrap();
     assert_eq!(bug.operation, "delete the store");
 }
 
 /// Poll `call` once, which starts the work it runs apart from its caller,
-/// then drop it, as an app does when the screen that asked goes away.
-async fn dropped_at_first_poll<T: std::fmt::Debug>(call: impl std::future::Future<Output = T>) {
+/// then drop it, as an app does when the screen that asked goes away. The
+/// caller holds what the work waits on, so the work can't answer first.
+fn dropped_at_first_poll<T: std::fmt::Debug>(call: impl std::future::Future<Output = T>) {
+    use std::task::{Context, Poll, Waker};
     let mut call = std::pin::pin!(call);
-    tokio::select! {
-        biased;
-        answer = &mut call => panic!("the call answered at its first poll: {answer:?}"),
-        () = std::future::ready(()) => {}
+    if let Poll::Ready(answer) = call.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        panic!("the call answered at its first poll: {answer:?}");
     }
 }
 

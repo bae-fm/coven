@@ -435,6 +435,13 @@ impl Keychain {
         self.with_memory(|memory| memory.panic_next = true);
     }
 
+    /// Run `run` while every call on this keychain's entries waits, as a
+    /// keychain slow to answer would: for a test that acts while a call
+    /// waits on the keychain. Panics if this is a native keychain.
+    pub fn with_operations_held<T>(&self, run: impl FnOnce() -> T) -> T {
+        self.with_memory(|_entries| run())
+    }
+
     /// Refuse successive operations after each given number of successful calls.
     /// For example `[2, 0]` refuses the third call and its immediate rollback.
     /// Replaces any existing failure schedule; requires an in-memory keychain.
