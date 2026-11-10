@@ -4,8 +4,16 @@ use crate::{Migration, RowIdentity, SyncedTable};
 
 #[path = "followed_tables.rs"]
 mod followed_tables;
-pub use crate::coven_functions::path_text_sql;
 pub use followed_tables::followed_tables_sql;
+
+/// What `coven_path_text` returns for its argument, for an app's test that
+/// registers the function on a connection it opened itself, outside any
+/// store: the body every store registers.
+pub fn path_text_sql(
+    value: rusqlite::types::ValueRef<'_>,
+) -> rusqlite::Result<rusqlite::types::Value> {
+    crate::coven_functions::path_text_sql(value)
+}
 
 #[path = "work_counts.rs"]
 mod work_counts;

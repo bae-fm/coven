@@ -23,9 +23,10 @@ const INTERNAL: FunctionFlags = FunctionFlags::SQLITE_UTF8
 
 /// What `coven_path_text` returns for its argument: NULL for NULL, the text
 /// `path_bytes_text` shows for a path's bytes, and an error for any other
-/// value. Public so an app's test that registers the function itself on a
-/// connection outside any store gives the result a store does.
-pub fn path_text_sql(value: ValueRef<'_>) -> rusqlite::Result<Value> {
+/// value. `test_utils::path_text_sql` hands it to an app's test that
+/// registers the function itself on a connection outside any store, so the
+/// test gets the result a store does.
+pub(crate) fn path_text_sql(value: ValueRef<'_>) -> rusqlite::Result<Value> {
     Ok(match value {
         ValueRef::Null => Value::Null,
         ValueRef::Blob(bytes) => Value::Text(coven_foundation::files::path_bytes_text(bytes)),
