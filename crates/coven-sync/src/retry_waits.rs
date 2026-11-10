@@ -209,9 +209,12 @@ impl RetryWaits {
         Ok(RetryWait { failures, not_before, wait })
     }
 
-    /// Enforce a persisted wait monotonically from now.
+    /// Enforce a persisted wait monotonically from now, by the restart rule:
+    /// time that passed since its `T` was computed counts toward it, so it
+    /// ends no later than the `T` it reports.
     pub(crate) fn arm(&self, subject: RetrySubject, wait: &RetryWait) {
-        self.arm_for(subject, wait.not_before, wait.wait);
+        let left = restart_wait(wait.not_before, self.clock.now(), wait.wait);
+        self.arm_for(subject, wait.not_before, left);
         self.rearmed.send_modify(|count| *count = count.wrapping_add(1));
     }
 

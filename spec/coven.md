@@ -1969,7 +1969,9 @@ Unrelated commits and finished passes don't reset the delay.
 
 - **Deadlines survive restarts.** Before waiting, coven saves with the work the
   wall-clock deadline T and the full wait W. It measures the delay with a clock
-  that wall-clock changes don't move.
+  that wall-clock changes don't move. Once saved, it waits
+  `max(0, min(T - now, W))`, as on reopening: the time saving took counts, so
+  the wait ends no later than the T it reports.
 - **Reopening** waits `max(0, min(T - now, W))`, keeping T, W and the backoff step
   until the next attempt. Ana restarts with four seconds left of eight and waits
   four. A clock jumped backward allows at most eight; one jumped forward can cut

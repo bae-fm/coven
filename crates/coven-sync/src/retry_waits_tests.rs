@@ -77,6 +77,22 @@ async fn unsuccessful_attempts_double_their_persisted_wait() {
     database.close().await.unwrap();
 }
 
+/// A wait is persisted, then armed. The clock can reach its `T` in between,
+/// as a test following the persisted wait moves it there: the wait armed
+/// then is already over, not a full `W` later than the `T` it reported.
+#[tokio::test]
+async fn a_wait_armed_once_its_deadline_has_passed_is_over() {
+    let fixture = Fixture::new();
+    let (database, waits) = fixture.open().await;
+    let wait = waits.next(None).unwrap();
+    fixture.advance(wait.wait.as_secs());
+    assert_eq!(fixture.clock.now(), wait.not_before);
+    waits.arm(JOIN, &wait);
+    assert_eq!(waits.next_due(|subject| *subject == JOIN), Some(Duration::ZERO));
+    assert!(waits.due(JOIN, Some(&wait)));
+    database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn reopening_arms_the_remaining_wait_bounded_by_the_full_wait() {
     // Ana restarts with four seconds left in an eight-second delay (§6.7).
