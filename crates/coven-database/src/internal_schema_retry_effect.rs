@@ -26,7 +26,8 @@ use std::time::SystemTime;
 /// The retry effect table, which the app's triggers may follow.
 pub(crate) const RETRY_EFFECT: &str = "coven_retry_effect";
 
-pub(super) const SCHEMA: &str = "CREATE TABLE coven_retry_effect (
+/// The table and its one row, as every store holds them from its creation.
+pub(super) const TABLE: &str = "CREATE TABLE coven_retry_effect (
         singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
         syncing INTEGER NOT NULL CHECK(syncing IN (0,1)),
         held INTEGER NOT NULL CHECK(held IN (0,1)),

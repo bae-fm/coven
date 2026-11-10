@@ -12,6 +12,7 @@
 /// follow.
 pub(crate) const PIN_REQUESTS: &str = "coven_pin_requests";
 
-pub(super) const SCHEMA: &str = "CREATE TABLE coven_pin_requests (
+/// The table, as every store holds it.
+pub(super) const TABLE: &str = "CREATE TABLE coven_pin_requests (
         file TEXT PRIMARY KEY NOT NULL
     ) STRICT, WITHOUT ROWID;";

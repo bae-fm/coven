@@ -14,7 +14,8 @@
 /// triggers may follow.
 pub(crate) const MOVES: &str = "coven_moves";
 
-pub(super) const SCHEMA: &str = "CREATE TABLE coven_moves (
+/// The table and its index, as every store holds them.
+pub(super) const TABLE: &str = "CREATE TABLE coven_moves (
         move INTEGER NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('moving','failed')),
         file TEXT PRIMARY KEY NOT NULL

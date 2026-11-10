@@ -240,13 +240,11 @@ pub(crate) fn initial_schema() -> String {
     }
     coven_tables!(append);
     sql.push_str(row_queries_schema::COLUMN_RELEASE);
-    sql.push_str(files::SCHEMA);
-    sql.push_str(&pins::schema());
-    sql.push_str(pin_requests::SCHEMA);
-    sql.push_str(moves::SCHEMA);
-    sql.push_str(upload_queue::SCHEMA);
-    sql.push_str(sync_status::SCHEMA);
-    sql.push_str(retry_effect::SCHEMA);
+    for followed in FOLLOWED {
+        sql.push_str(followed.table);
+    }
+    sql.push_str(&pins::source());
+    sql.push_str(upload_queue::TRIGGERS);
     sql.push_str(views::SCHEMA);
     sql
 }
@@ -279,13 +277,28 @@ pub(crate) use sync_status::SYNC_STATUS;
 pub(crate) mod retry_effect;
 pub(crate) use retry_effect::RETRY_EFFECT;
 
+/// One of coven's tables the app's local triggers may follow: its name, and
+/// the SQL that makes it as every store holds it, which an app's test of its
+/// own schema runs too (`followed_tables_sql`).
+pub(crate) struct FollowedTable {
+    pub(crate) name: &'static str,
+    pub(crate) table: &'static str,
+}
+
 /// Coven's tables the app's local triggers may follow (§9.4): coven changes
 /// their rows in the statements that change what they say, its files table
 /// as each record is made, stored or deleted here or merged from another
 /// device, its sync status and retry effect as they change, and the app's
 /// AFTER triggers on them write only local tables.
-pub(crate) const FOLLOWED: [&str; 7] =
-    [FILES, PINS, PIN_REQUESTS, MOVES, UPLOAD_QUEUE, SYNC_STATUS, RETRY_EFFECT];
+pub(crate) const FOLLOWED: [FollowedTable; 7] = [
+    FollowedTable { name: FILES, table: files::TABLE },
+    FollowedTable { name: PINS, table: pins::TABLE },
+    FollowedTable { name: PIN_REQUESTS, table: pin_requests::TABLE },
+    FollowedTable { name: MOVES, table: moves::TABLE },
+    FollowedTable { name: UPLOAD_QUEUE, table: upload_queue::TABLE },
+    FollowedTable { name: SYNC_STATUS, table: sync_status::TABLE },
+    FollowedTable { name: RETRY_EFFECT, table: retry_effect::TABLE },
+];
 
 /// Coven's tables that describe this process's own sync, which only the
 /// handle holding the store's writer lock may read.
@@ -293,7 +306,7 @@ pub(crate) const WRITER_STATE: [&str; 2] = [SYNC_STATUS, RETRY_EFFECT];
 
 /// Whether `name` is one of the tables the app's triggers may follow.
 pub(crate) fn followed(name: &str) -> bool {
-    FOLLOWED.iter().any(|table| table.eq_ignore_ascii_case(name))
+    FOLLOWED.iter().any(|table| table.name.eq_ignore_ascii_case(name))
 }
 
 #[path = "internal_schema_views.rs"]

@@ -10,12 +10,16 @@
 /// The table of queued files, which the app's triggers may follow.
 pub(crate) const UPLOAD_QUEUE: &str = "coven_upload_queue";
 
-pub(super) const SCHEMA: &str = "CREATE TABLE coven_upload_queue (
+/// The table and its index, as every store holds them.
+pub(super) const TABLE: &str = "CREATE TABLE coven_upload_queue (
         file TEXT PRIMARY KEY NOT NULL,
         position INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
-    CREATE INDEX _coven_upload_queue_position ON coven_upload_queue(position);
-    CREATE TRIGGER _coven_upload_queue_queued AFTER INSERT ON _coven_upload_files BEGIN
+    CREATE INDEX _coven_upload_queue_position ON coven_upload_queue(position);";
+
+/// The triggers keeping the table to the uploads' files.
+pub(super) const TRIGGERS: &str =
+    "CREATE TRIGGER _coven_upload_queue_queued AFTER INSERT ON _coven_upload_files BEGIN
         INSERT INTO coven_upload_queue(file,position) VALUES(NEW.file,NEW.upload);
     END;
     CREATE TRIGGER _coven_upload_queue_ended AFTER DELETE ON _coven_upload_files BEGIN

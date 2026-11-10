@@ -9,7 +9,8 @@
 /// The table of files, which app SQL reads and the app's triggers may follow.
 pub(crate) const FILES: &str = "coven_files";
 
-pub(super) const SCHEMA: &str = "CREATE TABLE coven_files (
+/// The table, as every store holds it.
+pub(super) const TABLE: &str = "CREATE TABLE coven_files (
         id TEXT PRIMARY KEY NOT NULL,
         audience TEXT NOT NULL,
         size INTEGER NOT NULL,

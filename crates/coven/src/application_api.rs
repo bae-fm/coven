@@ -32,7 +32,7 @@ pub use coven_crypto::{
     MemberPublicKeys, SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_database::test_utils::{WorkCounter, WorkCounts};
+pub use coven_database::test_utils::{followed_tables_sql, WorkCounter, WorkCounts};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{

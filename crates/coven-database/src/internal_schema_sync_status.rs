@@ -28,7 +28,8 @@ use std::time::SystemTime;
 /// The sync status table, which the app's triggers may follow.
 pub(crate) const SYNC_STATUS: &str = "coven_sync_status";
 
-pub(super) const SCHEMA: &str = "CREATE TABLE coven_sync_status (
+/// The table and its one row, as every store holds them from its creation.
+pub(super) const TABLE: &str = "CREATE TABLE coven_sync_status (
         singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
         storage TEXT NOT NULL CHECK(storage IN ('none','signed_out','connected')),
         provider TEXT,

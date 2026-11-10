@@ -3563,6 +3563,14 @@ let moved = handle
 - A pending record's cause is the text of the error the running process met
   for it, written with the record. Opening clears every cause: one an earlier
   run wrote names a failure nothing has met since (E5).
+- *The app's schema outside a store, in tests.* With the test-utils
+  feature, `followed_tables_sql` gives the SQL that makes the seven tables
+  above as every store makes them, `coven_sync_status` and
+  `coven_retry_effect` with their one row. A test that runs the app's schema
+  on a connection it opened itself, outside any store, runs it first, so the
+  app's triggers on those tables apply and fire as in a store, and the app
+  keeps no copy of coven's tables that could fall behind them. Nothing of
+  coven's writes them there: the test writes the rows coven would.
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
@@ -3995,6 +4003,12 @@ impl LiveQueryRuns {
     /// query didn't return.
     pub fn equal(&self) -> u64;
 }
+
+/// The SQL that makes each table the app's local triggers may follow, as
+/// every store makes it, for a test that runs the app's schema outside any
+/// store (E4).
+#[cfg(feature = "test-utils")]
+pub fn followed_tables_sql() -> impl Iterator<Item = &'static str>;
 
 /// Counts the work a store's connections run; clones count into the same
 /// counts, and no other store's.

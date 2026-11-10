@@ -41,9 +41,14 @@ macro_rules! named_by {
     };
 }
 
-/// The view, table and triggers, with the cache's whole-file chunk
-/// number filled in.
-pub(super) fn schema() -> String {
+/// The table, as every store holds it.
+pub(super) const TABLE: &str = "CREATE TABLE coven_pins (
+        file TEXT PRIMARY KEY NOT NULL
+    ) STRICT, WITHOUT ROWID;";
+
+/// The view saying which files are pinned, and the triggers keeping the
+/// table to it, with the cache's whole-file chunk number filled in.
+pub(super) fn source() -> String {
     format!(
         concat!(
     "CREATE VIEW _coven_pin_source(file) AS
@@ -51,9 +56,6 @@ pub(super) fn schema() -> String {
         JOIN _coven_cache AS c ON c.namespace=f.namespace
             AND c.object_path=f.object_path AND c.chunk={complete}
             AND c.pinned=1 AND c.checked_hash=f.hash;
-    CREATE TABLE coven_pins (
-        file TEXT PRIMARY KEY NOT NULL
-    ) STRICT, WITHOUT ROWID;
     CREATE TRIGGER _coven_pins_stored_file_added AFTER INSERT ON _coven_stored_files BEGIN ",
     refresh!("SELECT NEW.file"),
     " END;

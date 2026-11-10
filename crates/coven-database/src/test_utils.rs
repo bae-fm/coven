@@ -2,6 +2,10 @@
 
 use crate::{Migration, RowIdentity, SyncedTable};
 
+#[path = "followed_tables.rs"]
+mod followed_tables;
+pub use followed_tables::followed_tables_sql;
+
 #[path = "work_counts.rs"]
 mod work_counts;
 pub use work_counts::{WorkCounter, WorkCounts};
