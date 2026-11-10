@@ -10506,11 +10506,12 @@ scan to keep them held, a slot loading doesn't read again would stay held for
 good and never be evicted.
 
 **Reading many slots reads ahead.** A device reading consecutive slots starts
-with one read and doubles the reads in flight with each slot storage sends, up
-to 16. Ana's 166 slots then wait for about 14 round trips instead of 166. A
-quiet pass still sends its one miss, and slots the device already holds don't
-widen the window. The cost is at most 15 reads past the end whose slots are
-absent.
+with one read and, from the second slot storage sends, doubles the reads in
+flight with each, up to 16. Ana's 166 slots then wait for about 15 round trips
+instead of 166. A quiet pass still sends its one miss, a pass that finds one
+new slot sends only the miss after it, and slots the device already holds
+don't widen the window. The cost is at most 15 reads past the end whose slots
+are absent.
 
 The sequence's reads don't count against the download limit the app sets,
 which is for files (api.md E5). Ben's music app keeps three file downloads at

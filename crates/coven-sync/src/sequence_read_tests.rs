@@ -96,9 +96,10 @@ async fn one_new_note_costs_its_reader_three_reads() {
     insert(ana.database(), "added", "one note").await;
     ana.sync.pass().await.unwrap();
 
-    let before = ben.storage.request_count();
+    let before = ben.storage.request_trace().len();
     ben.sync.pass().await.unwrap();
-    assert_eq!(ben.storage.request_count() - before, 3);
+    let requests = &ben.storage.request_trace()[before..];
+    assert_eq!(requests.len(), 3, "{requests:?}");
     assert_eq!(rows(ben.database()).await, [("added".into(), "one note".into())]);
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();

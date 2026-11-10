@@ -537,19 +537,20 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     let through = ana.sync.database.applied_slot().await.unwrap();
     let storage = group.storage.for_device();
     let laptop = group.newcomer(ana.identity.clone(), storage.clone()).await;
-    // While slot 2's read is held, a reader one slot at a time sends
-    // nothing more; one reading ahead also asks for slot 3.
+    // Slots 1 and 2 are read one at a time; from the second the window
+    // widens. While slot 3's read is held, a reader one slot at a time sends
+    // nothing more; one reading ahead also asks for slot 4.
     let (observed, _held) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     storage
-        .hold_next_read(ObjectPath::slot(group.store, 2.try_into().unwrap()), observed, resume)
+        .hold_next_read(ObjectPath::slot(group.store, 3.try_into().unwrap()), observed, resume)
         .await;
     let mut requests = storage.subscribe_requests();
     let restoring = laptop.sync.unlock();
     tokio::pin!(restoring);
-    while !slot_reads(&storage).contains(&3) {
+    while !slot_reads(&storage).contains(&4) {
         tokio::select! {
-            result = &mut restoring => panic!("the restore ended with slot 2 held: {result:?}"),
+            result = &mut restoring => panic!("the restore ended with slot 3 held: {result:?}"),
             changed = requests.changed() => changed.unwrap(),
         }
     }

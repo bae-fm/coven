@@ -16,8 +16,9 @@ type SlotRead<'a> =
     Pin<Box<dyn Future<Output = Result<(Option<ObjectInput>, bool), SyncError>> + Send + 'a>>;
 
 /// Reads the slots of a range in order.
-/// It starts with one read, so a quiet pass sends only the one miss, and
-/// doubles the reads in flight with each slot the provider sends, up to
+/// It starts with one read, so a quiet pass sends only the one miss, and a
+/// pass that finds one new slot only the miss after it. From the second
+/// slot the provider sends, it doubles the reads in flight with each, up to
 /// [`AHEAD`]; slots this device already holds don't widen it. So reading a
 /// long history waits for one round trip per [`AHEAD`] slots rather than one
 /// per slot, and past the end it sends at most `AHEAD - 1` reads whose slots
@@ -28,12 +29,15 @@ pub(crate) struct SlotReads<'a> {
     /// The slots still to send a read for.
     requested: SlotRange,
     ahead: usize,
+    /// Whether the provider has sent a slot yet: the first leaves the
+    /// window at one read.
+    sent_one: bool,
     reads: FuturesOrdered<SlotRead<'a>>,
 }
 
 impl<'a> SlotReads<'a> {
     pub(crate) fn new(sync: &'a SequenceSync, slots: SlotRange) -> Self {
-        Self { sync, requested: slots, ahead: 1, reads: FuturesOrdered::new() }
+        Self { sync, requested: slots, ahead: 1, sent_one: false, reads: FuturesOrdered::new() }
     }
 
     /// The next slot in order, None once it is absent or past the range.
@@ -56,7 +60,10 @@ impl<'a> SlotReads<'a> {
         };
         let (input, sent) = read?;
         if sent && input.is_some() {
-            self.ahead = (self.ahead * 2).min(AHEAD);
+            if self.sent_one {
+                self.ahead = (self.ahead * 2).min(AHEAD);
+            }
+            self.sent_one = true;
         }
         Ok(input)
     }
