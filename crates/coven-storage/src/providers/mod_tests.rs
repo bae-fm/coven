@@ -468,6 +468,7 @@ pub(crate) fn http_client() -> crate::providers::http_client::HttpClient {
 
 /// The providers' HTTP client for a live provider's network, its stall
 /// window on the system clock, as the app's.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub(crate) fn live_http_client() -> crate::providers::http_client::HttpClient {
     crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
         coven_foundation::clock::SystemClock,
