@@ -260,7 +260,8 @@ fn assert_writer_refused_to_close(cleanup: &StoreCreationError) {
 }
 
 /// Creation fails after saving the identity, and SQLite won't close the
-/// store. Both causes remain (E1), and what creation made is still undone.
+/// store. Both causes remain (E1), and what creation made is still undone,
+/// but for the files Windows can't remove while SQLite holds them open.
 #[tokio::test]
 async fn a_close_failing_in_a_failed_creation_keeps_both_causes_and_leaves_no_store() {
     let root = tempfile::tempdir().unwrap();
@@ -282,6 +283,19 @@ async fn a_close_failing_in_a_failed_creation_keeps_both_causes_and_leaves_no_st
         .create_store("Refused")
         .await
         .unwrap_err();
+    // The connection SQLite wouldn't close keeps its files open, and Windows
+    // won't move a directory holding an open file: there removing the
+    // unpublished store fails at its first step, moving it to its deletion
+    // name, so its files stay where they are, still unpublished, and that
+    // failure is a third cause.
+    #[cfg(windows)]
+    let error = match error {
+        StoreCreationError::Cleanup { operation, cleanup } => {
+            assert!(matches!(*cleanup, StoreCreationError::Directory(_)), "{cleanup:?}");
+            *operation
+        }
+        error => panic!("the removal's failure too, not {error:?}"),
+    };
     let StoreCreationError::Cleanup { operation, cleanup } = &error else {
         panic!("both causes, not {error:?}");
     };
@@ -289,7 +303,7 @@ async fn a_close_failing_in_a_failed_creation_keeps_both_causes_and_leaves_no_st
     assert_writer_refused_to_close(cleanup);
     assert!(identity.identity.lock().unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
-    assert!(!app.store_dir(&expected).database_path().exists());
+    assert_eq!(app.store_dir(&expected).database_path().exists(), cfg!(windows));
 }
 
 /// Publishing's directory sync fails, and SQLite won't close the published
