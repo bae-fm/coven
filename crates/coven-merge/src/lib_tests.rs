@@ -33,9 +33,12 @@ pub(crate) fn id(n: u64) -> WriteId {
 pub(crate) fn stamp(n: u64) -> Timestamp {
     Timestamp::new(n, 0, DeviceId(n)).unwrap()
 }
+/// The claim order of a write published in the slot its timestamp's order
+/// gives, counted from slot 1: a generated history's first write can stamp
+/// millisecond 0, counter 0.
 pub(crate) fn claim_order(timestamp: Timestamp) -> ClaimOrder {
     ClaimOrder::Published {
-        slot: crate::slot((timestamp.milliseconds() << 16) | u64::from(timestamp.counter())),
+        slot: crate::slot(((timestamp.milliseconds() << 16) | u64::from(timestamp.counter())) + 1),
         number: timestamp.device().0,
     }
 }
