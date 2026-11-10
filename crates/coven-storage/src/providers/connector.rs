@@ -454,9 +454,6 @@ impl StorageConnector for ProviderConnector {
     }
 }
 
-/// Why `provider`'s requests can't be sent: the connector's HTTP client could
-/// not set up TLS.
-
 #[cfg(all(test, not(target_vendor = "apple")))]
 #[path = "connector_tests.rs"]
 mod tests;
