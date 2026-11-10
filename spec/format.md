@@ -1439,9 +1439,12 @@ which keys reached whom. So the store snapshot keeps the signed slots
 themselves, not a summary.
 
 - Sections 7 to 9 occur only in the store snapshot.
-- They keep the original signed admin, admission, key-copy and announcement
-  slots through coverage, including creation; section 7 holds admin slots and
-  admissions. Verify each object using its original slot path.
+- They keep the original signed admin, admission and key-copy slots through
+  coverage, including creation, and the announcement slots their writer
+  accepted; section 7 holds admin slots and admissions. Verify each object
+  using its original slot path.
+- A refused announcement is in none of them. No rule reads one again
+  ([§16.1](coven.md#161-what-a-snapshot-holds)).
 - These records preserve historical bindings, key introductions, exposure and
   announcements. Admin state is derived from them in order; retained later slots
   supply newer bindings.

@@ -816,6 +816,8 @@ impl SequenceSync {
         Ok(None)
     }
 }
+/// A slot at or below the store snapshot's coverage: the snapshot, or this
+/// device when none is loaded, already holds its kept originals.
 fn retained_slot(
     received: ReceivedSlot,
 ) -> IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>> {

@@ -36,12 +36,15 @@ pub enum SlotContent<R> {
     },
     /// An authenticated key-copy object, including refused copies.
     KeyCopy(OriginalSlot),
-    /// An authenticated snapshot announcement, including refused announcements.
+    /// An authenticated snapshot announcement. Its original is kept only when
+    /// it is accepted: no rule reads a refused one (§16.1).
     Announcement {
         /// Exact signed evidence retained by store snapshots.
         original: OriginalSlot,
         /// The announcement as this device accepted it against the preceding
-        /// prefix; absent for a refused one, and for one a reload stages again.
+        /// prefix; absent for a refused one, and for one a reload stages again
+        /// at or below its store snapshot's coverage, whose originals the
+        /// snapshot or this device already holds.
         accepted: Option<coven_format::sequence::SnapshotAnnouncement>,
     },
 }
@@ -156,8 +159,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
             }
             SlotContent::KeyCopy(original) => retain(db, "key", &original)?,
             SlotContent::Announcement { original, accepted } => {
-                retain(db, "announcement", &original)?;
                 if let Some(announcement) = accepted {
+                    retain(db, "announcement", &original)?;
                     snapshot_announced(db, &announcement)?;
                 }
             }

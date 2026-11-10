@@ -715,3 +715,61 @@ async fn an_ordinary_announcement_forgets_the_slot_sizes_it_covers() {
     );
     db.close().await.unwrap();
 }
+
+/// Ben's announcement at slot 1 is refused and Ana's at slot 2 accepted. No
+/// rule reads a refused announcement again, and replaying one against fewer
+/// announcements could accept it, so only Ana's original is kept for the
+/// store's snapshots and for rebuilding history (§16.1).
+#[tokio::test]
+async fn a_refused_announcements_original_is_not_kept() {
+    let store = TestStore::new();
+    let db =
+        store.schema(vec![SyncedTable::new("rows", RowIdentity::SharedKey)], SCHEMA).await.unwrap();
+    let ben = DeviceId(900);
+    TestStore::register(&db, ben, 2);
+    let announce = |slot: u64, accepted: bool| {
+        db.apply_slot::<crate::pending::tests::Record, std::io::Cursor<Vec<u8>>, _>(
+            IncomingSlot {
+                slot: coven_merge::slot(slot),
+                header: SlotHeader {
+                    device: ben,
+                    claim: slot,
+                    author: crate::tests::member(2),
+                    after: slot - 1,
+                },
+                digest: [slot as u8; 32],
+                content: SlotContent::Announcement {
+                    original: coven_format::floor::OriginalSlot {
+                        slot: coven_merge::slot(slot),
+                        object: vec![slot as u8; 10],
+                    },
+                    accepted: accepted.then(|| coven_format::sequence::SnapshotAnnouncement {
+                        snapshot: coven_format::admin::SnapshotId {
+                            audience: Audience::Store,
+                            device: ben,
+                            number: slot,
+                        },
+                        covers: slot - 1,
+                        breaking_version: 0,
+                        purpose: coven_format::sequence::Purpose::Ordinary,
+                        digest: [0; 32],
+                    }),
+                },
+            },
+            crate::test_utils::idle_writers(),
+            || Ok(()),
+        )
+    };
+    announce(1, false).await.unwrap();
+    announce(2, true).await.unwrap();
+    let kept: Vec<_> = db
+        .original_slots()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|original| original.slot.get())
+        .collect();
+    assert_eq!(kept, [2]);
+    assert_eq!(db.applied_slot().await.unwrap(), 2, "the refused slot still counts as applied");
+    db.close().await.unwrap();
+}

@@ -5854,7 +5854,9 @@ consumed without effect, such as refused writes. A snapshot holds:
 A store snapshot also holds the signed admin entries, key copies and
 announcements needed to know who was a member when, which keys exist, and which
 schema raises and resets happened
-([format.md D7](format.md#d7-snapshots)).
+([format.md D7](format.md#d7-snapshots)). It holds only announcements its
+writer accepted. No rule reads a refused announcement again, so no device
+keeps one, and a loader rebuilding history from the snapshot never meets it.
 
 Every snapshot also records, for each device, the greatest claim number it
 includes from that device and the SHA-256 hash of that claim's slot bytes (§5.3).
@@ -5896,10 +5898,12 @@ after it (§16.4), so how often snapshots are taken decides what a restore costs
 What it replays is sealed slots, so that is what a device counts. For each
 audience, it adds up the sealed bytes of the applied slots after that audience's
 newest snapshot that a new device replays for it: every writes slot carrying one
-of its parts and, for the store, every admin, key-copy and announcement slot
-too. It asks for an audience's first snapshot once those slots reach 1 MiB. After
-that, with S the last snapshot's size, it asks for the next one once the slots
-since it reach k × S, with k = 1 today. The gap grows with the library, with no
+of its parts and, for the store, every admin, key-copy and accepted
+announcement slot too. A refused announcement counts nothing: the device keeps
+nothing of it (§16.1), and one is rare and small. It asks for an audience's
+first snapshot once those slots reach 1 MiB. After that, with S the last
+snapshot's size, it asks for the next one once the slots since it reach k × S,
+with k = 1 today. The gap grows with the library, with no
 cap. No size trigger waits for grace.
 
 Counting the parts alone would leave a young store of small writes without a
@@ -5909,7 +5913,7 @@ own envelope ([format.md D9](format.md#d9-sealed-objects)). A library of such
 notes reaches 1 MiB of slots, and its first snapshot, while its parts are still
 below 1 MiB. To count them, a device records each writes slot's sealed size,
 and the audiences its writes carry parts for, as it applies the slot; it
-keeps admin, key-copy and announcement slots whole already. The writes'
+keeps admin, key-copy and accepted announcement slots whole already. The writes'
 headers may be forgotten long before a snapshot covers the slot (§16.7).
 Slots it loaded inside a snapshot instead of reading count nothing; they are
 at or below that snapshot's coverage. Once it applies an ordinary snapshot's
@@ -10857,6 +10861,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_part_leaves` | the leaf hashes of each part this device received whole, for the same writes, so a later snapshot opens the leaves it needs ([format.md D7.5](format.md#d75-write-evidence-section-6)) |
 | `_coven_part_proofs` | each opening a loaded snapshot proved for the same writes, with its leaf hashes, which this device's own later snapshot prunes and carries on ([format.md D7.5](format.md#d75-write-evidence-section-6)) |
 | `_coven_migration_records` | this device's own migration write's row changes, whole, which its marker's slot applies, since the marker carries none (§18.4), until a loaded snapshot replaces them (§18.5) |
+| `_coven_slot_records` | the original signed admin, admission and key-copy slots, and each announcement slot this device accepted, which store snapshots carry and history is rebuilt from when the store opens ([format.md D7.6](format.md#d76-original-slots-sections-7-to-9)). A refused announcement has none (§16.1) |
 | `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists all but the hash (§17.3) |
 | `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored; a move's upload checks against them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |

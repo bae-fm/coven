@@ -38,9 +38,12 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 crate::sequence_apply::retain(db, "admin", &original)?
             }
             SlotContent::KeyCopy(original) => crate::sequence_apply::retain(db, "key", &original)?,
-            SlotContent::Announcement { original, .. } => {
+            SlotContent::Announcement { original, accepted: Some(_) } => {
                 crate::sequence_apply::retain(db, "announcement", &original)?
             }
+            // Refused, or at or below the store snapshot's coverage, where
+            // the snapshot's originals or this device's own are the kept ones.
+            SlotContent::Announcement { accepted: None, .. } => (),
         }
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         applied = incoming.slot.get();
