@@ -160,6 +160,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         );
         let oauth = provider.signs_in_with_oauth();
         let kept = std::sync::Mutex::new(None);
+        let mut _often = None;
         let (result, member) = join_with_response(joining, async {
             waits.wait_for(|waiting| *waiting).await.unwrap();
             let request = owner.next_join_request().await;
@@ -170,7 +171,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             assert_eq!(held.is_some(), oauth, "{provider:?}");
             *kept.lock().unwrap() = held;
             crate::tests::approve(&owner.handle, &request).await;
-            control.check_now();
+            _often = Some(control.check_often(Duration::ZERO));
             request.member
         })
         .await;
@@ -300,10 +301,11 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         &cancel,
         |_| {},
     );
+    let mut _often = None;
     let approve = async {
         assert_eq!(owner.storage.read(&crate::tests::request_path(&invite)).await.unwrap(), bytes);
         crate::tests::approve(&owner.handle, &request).await;
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
@@ -339,11 +341,12 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
         &cancel,
         waiting,
     );
+    let mut _often = None;
     let revoke = async {
         waits.wait_for(|waiting| *waiting).await.unwrap();
         owner.next_join_request().await;
         owner.storage.revoke_access("join@example.com").await.unwrap();
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(joining, revoke).await;
     assert!(
@@ -520,13 +523,14 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
         &cancel,
         |_| {},
     );
+    let mut _often = None;
     let approve = async {
         listing.await.unwrap();
         owner.handle.start_sync().await.unwrap();
         let request = owner.next_join_request().await;
         crate::tests::approve(&owner.handle, &request).await;
         resume.send(()).unwrap();
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(joining, approve).await;
     assert!(

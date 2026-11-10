@@ -1,4 +1,5 @@
-//! Apps asking for idle passes more often while a guard lives (E5).
+//! Apps asking for checks more often while a guard lives: the idle loop's
+//! passes (E5) and a waiting join's checks (§13.2).
 
 use std::{collections::BTreeMap, time::Duration};
 use tokio::sync::watch;
@@ -7,39 +8,42 @@ use tokio::sync::watch;
 pub(crate) const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The intervals apps hold, each with how many guards hold it.
-pub(crate) struct SyncOften(watch::Sender<BTreeMap<Duration, usize>>);
+pub struct SyncOften(watch::Sender<BTreeMap<Duration, usize>>);
 
 impl SyncOften {
-    pub(crate) fn new() -> Self {
+    /// No interval held.
+    pub fn new() -> Self {
         Self(watch::channel(BTreeMap::new()).0)
     }
     /// Hold idle passes at most `interval` apart until the guard drops.
-    pub(crate) fn hold(&self, interval: Duration) -> SyncOftenGuard {
+    pub fn hold(&self, interval: Duration) -> SyncOftenGuard {
         self.0.send_modify(|held| *held.entry(interval).or_default() += 1);
         SyncOftenGuard { held: self.0.clone(), interval }
     }
-    /// The idle wait the loop uses now, and its changes.
-    pub(crate) fn subscribe(&self) -> IdleInterval {
-        IdleInterval(self.0.subscribe())
+    /// The intervals held now, and their changes.
+    pub fn subscribe(&self) -> HeldIntervals {
+        HeldIntervals(self.0.subscribe())
     }
 }
 
-/// The wait between idle passes: the shortest interval held, never longer
-/// than 30 seconds.
-pub(crate) struct IdleInterval(watch::Receiver<BTreeMap<Duration, usize>>);
+/// What the guards hold, as the owner of a wait reads it.
+#[derive(Clone)]
+pub struct HeldIntervals(watch::Receiver<BTreeMap<Duration, usize>>);
 
-impl IdleInterval {
-    pub(crate) fn current(&self) -> Duration {
-        self.0
-            .borrow()
-            .keys()
-            .next()
-            .map_or(IDLE_INTERVAL, |shortest| (*shortest).min(IDLE_INTERVAL))
+impl HeldIntervals {
+    /// The shortest interval held, if any guard lives.
+    pub fn shortest(&self) -> Option<Duration> {
+        self.0.borrow().keys().next().copied()
     }
-    /// Resolves when a guard is taken or dropped. Without the sequence state no
-    /// guard can be taken, and every guard keeps it, so the wait then never
-    /// ends.
-    pub(crate) async fn changed(&mut self) {
+    /// The wait between idle passes: the shortest interval held, never
+    /// longer than 30 seconds. The idle loop caps it; a join's checks do not.
+    pub(crate) fn idle_wait(&self) -> Duration {
+        self.shortest().map_or(IDLE_INTERVAL, |shortest| shortest.min(IDLE_INTERVAL))
+    }
+    /// Resolves when a guard is taken or dropped. Without the owner of the
+    /// holds no guard can be taken, and every guard keeps it, so the wait
+    /// then never ends.
+    pub async fn changed(&mut self) {
         if self.0.changed().await.is_err() {
             std::future::pending::<()>().await;
         }

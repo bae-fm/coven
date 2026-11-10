@@ -124,10 +124,15 @@ connection's wait through offline and answered failures, network reports and
 the person's retry between passes and during them, time passing, the wall
 clock set back and reopening, and compares whether each pass was due and the
 saved failure count with the runner's `evidence` case. A joining device has
-no handle to retry with; its `JoinControl::check_now` ends the approval poll's
-wait the same way, keeping its failure count, and leaves the cooldown, which
-`sequence_join::tests::check_now_ends_the_joins_wait_but_not_a_provider_cooldown`
-checks. The `network_report` tests of the upload and invite owners,
+no handle to retry with; while a `JoinControl::check_often` guard lives, the
+approval poll's wait ends the same way once the shortest interval held has
+passed since the last check, keeping its failure count, and leaves the
+cooldown. `sequence_join::tests::a_held_interval_brings_a_backed_off_joins_check_forward`,
+`dropping_the_guard_returns_the_check_to_the_backoff`,
+`a_guard_taken_after_its_interval_checks_at_once`,
+`a_guard_taken_during_the_wait_shortens_it`,
+`the_shortest_of_several_guards_decides_the_joins_check` and
+`a_provider_cooldown_holds_the_check_a_guard_would_make` check it. The `network_report` tests of the upload and invite owners,
 `files::tests::keep::a_network_report_and_the_persons_retry_end_a_kept_pins_wait`
 for the pins coven keeps, and those in `handle::sync_control::tests` check the
 other Rust owners against these rules.

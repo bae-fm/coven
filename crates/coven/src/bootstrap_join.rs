@@ -6,14 +6,15 @@ use super::*;
 use coven_crypto::ConfirmationNumber;
 use coven_foundation::files::StoreDir;
 use coven_foundation::locks::lock_unpoisoned;
-use coven_sync::{JoinOutcome, JoiningIdentity, NextCheck};
+use coven_sync::{HeldIntervals, JoinOutcome, JoinPoll, JoiningIdentity, Parks};
 
 /// A prepared join request with the provider access its invite grants.
 pub(super) struct Joining {
     identity: JoiningIdentity,
     invitation: coven_storage::StorageInvitation,
-    /// Changes each time the app asks for a check for approval now.
-    check: tokio::sync::watch::Receiver<u64>,
+    /// The intervals the app asks the join to check at.
+    held: HeldIntervals,
+    parks: Parks,
 }
 
 /// Restore or fix the request, then obtain credentials for the invite's
@@ -24,7 +25,8 @@ pub(super) fn prepare_request(
     directory: &StoreDir,
     code: &InviteCode,
     terms: &RequestTerms,
-    check: tokio::sync::watch::Receiver<u64>,
+    held: HeldIntervals,
+    parks: Parks,
 ) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match terms {
         RequestTerms::Given { device_name, joiner } => {
@@ -59,7 +61,7 @@ pub(super) fn prepare_request(
     let data = ConnectionCredentials { location: invitation.location().clone(), credentials };
     // Validation refuses a sign-in without the location's access.
     data.validate().map_err(SyncError::from)?;
-    Ok((Joining { identity, invitation, check }, data, custody))
+    Ok((Joining { identity, invitation, held, parks }, data, custody))
 }
 
 impl Joining {
@@ -148,7 +150,7 @@ impl Joining {
             sync.resend_join(&self.identity).await?;
         }
         let confirmation = self.identity.confirmation();
-        // Each status is shown once, when the next check changes.
+        // Each status is shown once, when it changes.
         let shown = std::sync::Mutex::new(None);
         let show = |next: BootstrapStatus| {
             let mut shown = lock_unpoisoned(&shown);
@@ -159,21 +161,17 @@ impl Joining {
         };
         // The conditions the last check found unmet, shown instead of the wait.
         let mut pending = Vec::new();
+        let _running = self.parks.running();
+        let mut poll = JoinPoll::new(sync, self.held.clone(), self.parks.clone());
         // Once its copies open, in its admission, in this call or an earlier
         // one, its status stays at loading, never going back to waiting
         // (E10). Polls back off 1, 2, 4, … 300 seconds apart; the persisted
         // delay survives reopening and a provider cooldown holds them (§6.7).
         loop {
-            let identity = &self.identity;
-            sync.join_poll_due(&mut self.check, |next_check| {
-                if !identity.opened() {
-                    show(waiting(confirmation, &pending, next_check));
-                }
-            })
-            .await?;
             if !self.identity.opened() {
-                show(waiting(confirmation, &pending, NextCheck::Checking));
+                show(waiting(confirmation, &pending));
             }
+            poll.due().await?;
             match loading(sync, sync.join_outcome(&mut self.identity), status).await? {
                 JoinOutcome::Admitted => {
                     sync.join_poll_settled().await?;
@@ -197,10 +195,9 @@ impl Joining {
 fn waiting(
     confirmation: ConfirmationNumber,
     pending: &[coven_sync::PendingRecord],
-    next_check: NextCheck,
 ) -> BootstrapStatus {
     if pending.is_empty() {
-        BootstrapStatus::WaitingForApproval { confirmation, next_check }
+        BootstrapStatus::WaitingForApproval { confirmation }
     } else {
         BootstrapStatus::Pending(pending.to_vec())
     }

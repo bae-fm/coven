@@ -4944,10 +4944,13 @@ nothing wrong, forever
 ([`refused_syncs_forever`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
 
 **Checking for approval.** Dan's phone checks for his copies on the same doubling
-waits, kept across restarts. Its status says when the next check is, and shows
-his confirmation number. The app can ask for a check now: Dan
-may be on a call with Ana as she approves, and shouldn't sit through a 5-minute
-wait. A provider's cooldown still holds, and the status then says when it ends.
+waits, kept across restarts. Its status shows his confirmation number. While
+the app shows the wait, it can ask for checks every few seconds: Dan may be on
+a call with Ana as she approves, and shouldn't sit through a 5-minute wait.
+The wait is then at most that long from the end of the last check, and a
+check that finds the request still waiting counts toward the doubling as any
+other, so the doubling continues where it was once the screen closes. A
+provider's cooldown still holds every check.
 
 If the request disappears, Dan's phone reads forward again and checks the floor
 before concluding it was declined or expired, because Ana's approval may have

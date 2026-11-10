@@ -433,7 +433,7 @@ async fn serve(
         // after the loop began; an app holding a shorter one moves it (E5).
         let mut interval = sync.state.idle_interval();
         let mut idle_from = sync.clock.elapsed();
-        let mut idle = idle_wait(&sync, idle_from, interval.current());
+        let mut idle = idle_wait(&sync, idle_from, interval.idle_wait());
         loop {
             // The network report ends the connection's and operations'
             // waits for the network, and the person's retry all their waits; each
@@ -557,7 +557,7 @@ async fn serve(
                         if let Err(error) = show(&sync, LastPass::failed(reported(&sync, error))).await { break LoopEnd::on(error.into()).0; }
                     }
                 },
-                () = interval.changed() => idle = idle_wait(&sync, idle_from, interval.current()),
+                () = interval.changed() => idle = idle_wait(&sync, idle_from, interval.idle_wait()),
                 _ = &mut idle, if started && !paused && !pending => pending = true,
                 _ = sync.state.pass_requested(), if started && !paused && !pending => pending = true,
                 // A wait armed outside this loop changes the schedule to wake on.
@@ -658,7 +658,7 @@ async fn serve(
                         }
                     }
                     requests.answer(&outcome);
-                    idle = idle_wait(&sync, idle_from, interval.current());
+                    idle = idle_wait(&sync, idle_from, interval.idle_wait());
                 }
                 never = parks.parked() => match never {},
             }

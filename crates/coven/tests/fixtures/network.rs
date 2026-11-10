@@ -171,7 +171,7 @@ impl Network {
         // Device 0's invite looks for the join's request and the join checks
         // for its approval, each backing off between looks, on held waits:
         // device 0 reads the request in the pass asked for once the join
-        // waits, and Check now runs the check that finds the approval.
+        // waits, and a held check runs the check that finds the approval.
         let invite = crate::tests::invite(
             owner,
             target,
@@ -204,12 +204,14 @@ impl Network {
             },
             &control,
         );
+        // The ask outlasts the response, until the join returns.
+        let mut often = None;
         let (handle, ()) = join_with_response(joining, async {
             waits.wait_for(|waiting| *waiting).await.unwrap();
             self.pass(0).await;
             let request = next_join_request(owner).await;
             approve(owner, &request).await;
-            control.check_now();
+            often = Some(control.check_often(Duration::ZERO));
         })
         .await;
         let handle = handle?.expect("an approved join opens");

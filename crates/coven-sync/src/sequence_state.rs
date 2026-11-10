@@ -131,7 +131,7 @@ impl SequenceState {
         self.often.hold(interval)
     }
     /// The wait between idle passes, and its changes.
-    pub(crate) fn idle_interval(&self) -> crate::sync_often::IdleInterval {
+    pub(crate) fn idle_interval(&self) -> crate::HeldIntervals {
         self.often.subscribe()
     }
     pub(crate) fn set(&self, status: SequenceStatus) {

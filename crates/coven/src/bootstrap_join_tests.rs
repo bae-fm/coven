@@ -359,10 +359,11 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
     owner.close().await;
 }
 
-/// Carol is on a call with Ana as Ana approves: Carol's Check now runs the
-/// next check at once, instead of after the join's wait (§13.2).
+/// Carol watches her waiting screen as Ana approves: the guard her app
+/// holds runs the next check at once, instead of after the join's wait
+/// (§13.2).
 #[tokio::test]
-async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
+async fn a_held_check_finds_an_approval_before_the_joins_wait_ends() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
@@ -375,10 +376,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
         carol_joins(invite.shown_code()),
         "New phone",
         |status| {
-            if matches!(
-                status,
-                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-            ) {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
                 waits.send_replace(true);
             }
         },
@@ -412,6 +410,7 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
         &cancel,
         |_| {},
     );
+    let mut _often = None;
     let approve = async {
         let request = owner.next_join_request().await;
         owner.stop_sync().await;
@@ -457,7 +456,7 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
         assert_eq!(owner.rows().await.iter().filter(|(id, _)| id == "approval").count(), 1);
         owner.handle.start_sync().await.unwrap();
         crate::tests::landed(&owner.handle, Some(binding)).await;
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
@@ -503,9 +502,10 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
     );
     let control = JoinControl::new();
     let resumed = builder.resume_join(owner.directory.id(), |_| {}, &control);
+    let mut _often = None;
     let approve = async {
         crate::tests::approve(&owner.handle, &request).await;
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(resumed, approve).await;
     result.unwrap().unwrap().close().await.unwrap();

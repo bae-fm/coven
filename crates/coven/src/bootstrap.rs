@@ -14,8 +14,8 @@ use coven_foundation::files::{
 use coven_storage::{
     ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageFailure,
 };
-use coven_sync::SequenceSync;
-use std::sync::Arc;
+use coven_sync::{HeldIntervals, Parks, SequenceSync, SyncOften};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
 #[path = "bootstrap_authentication.rs"]
@@ -103,7 +103,8 @@ pub async fn join_with_invite(
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
             terms: RequestTerms::Given { device_name: device_name.into(), joiner },
-            check: control.check.subscribe(),
+            held: control.often.subscribe(),
+            parks: control.parks.clone(),
         },
         on_status,
         &cancel,
@@ -163,7 +164,8 @@ pub(super) async fn resume_join(
         BootstrapRequest::Join {
             code,
             terms: RequestTerms::Saved,
-            check: control.check.subscribe(),
+            held: control.often.subscribe(),
+            parks: control.parks.clone(),
         },
         on_status,
         &cancel,
@@ -184,16 +186,19 @@ fn saved_invite_code(
     Ok(Some(code))
 }
 
-/// The app's hold on a running join: cancel it, or check for approval at once.
+/// The app's hold on a running join: cancel it, or ask it to check for
+/// approval often while the app shows the wait.
 pub struct JoinControl {
     cancel: watch::Sender<bool>,
-    check: watch::Sender<u64>,
+    often: SyncOften,
+    /// Where the join's wait parks, for tests.
+    parks: Parks,
 }
 
 impl JoinControl {
     /// A control no join has used yet.
     pub fn new() -> Self {
-        Self { cancel: watch::channel(false).0, check: watch::channel(0).0 }
+        Self { cancel: watch::channel(false).0, often: SyncOften::new(), parks: Parks::new() }
     }
 
     /// Cancel the join this control was passed to.
@@ -201,10 +206,20 @@ impl JoinControl {
         self.cancel.send_replace(true);
     }
 
-    /// End the join's wait so the next check runs now, keeping its backoff's
-    /// failure count. A provider cooldown still holds (§13.2).
-    pub fn check_now(&self) {
-        self.check.send_modify(|asked| *asked = asked.wrapping_add(1));
+    /// Have the join check for approval at most `interval` after its last
+    /// check ended, until the guard drops; a check already that overdue runs
+    /// at once. With several guards held, the shortest interval wins. Checks
+    /// that find the request waiting still count toward the backoff, and a
+    /// provider cooldown still holds every check (§13.2).
+    pub fn check_often(&self, interval: Duration) -> SyncOftenGuard {
+        self.often.hold(interval)
+    }
+
+    /// Wait until the join's wait parks in a poll begun after this call,
+    /// having seen all the caller did before.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn parked_from_now(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.parks.parked_from_now()
     }
 }
 
@@ -220,8 +235,9 @@ enum BootstrapRequest {
     Join {
         code: InviteCode,
         terms: RequestTerms,
-        /// Changes each time the app asks for a check for approval now.
-        check: watch::Receiver<u64>,
+        /// The intervals the app asks the join to check at.
+        held: HeldIntervals,
+        parks: Parks,
     },
 }
 
@@ -566,9 +582,15 @@ async fn prepare_and_load(
             name.clone(),
             Admission::Restoring,
         ),
-        BootstrapRequest::Join { code, terms, check } => {
-            let (joining, data, sign_in) =
-                join::prepare_request(builder, &directory, code, terms, check.clone())?;
+        BootstrapRequest::Join { code, terms, held, parks } => {
+            let (joining, data, sign_in) = join::prepare_request(
+                builder,
+                &directory,
+                code,
+                terms,
+                held.clone(),
+                parks.clone(),
+            )?;
             (
                 joining.identity(),
                 data,

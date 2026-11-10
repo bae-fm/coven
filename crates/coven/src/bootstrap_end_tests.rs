@@ -71,7 +71,7 @@ async fn a_declined_join_finishes_after_a_failure_at_any_step_of_its_ending() {
             *progress.lock().unwrap() = format!("round {failing}: first resume");
             let ended = install
                 .builder(&owner, owner.recipient())
-                .resume_join(store, check_when_waiting, &control)
+                .resume_join(store, check_when_waiting.clone(), &control)
                 .await;
             install.keychain.fail_operations_after(&[]);
             let failed = ended.is_err();
@@ -79,7 +79,7 @@ async fn a_declined_join_finishes_after_a_failure_at_any_step_of_its_ending() {
                 *progress.lock().unwrap() = format!("round {failing}: second resume");
                 let again = install
                     .builder(&owner, owner.recipient())
-                    .resume_join(store, check_when_waiting, &control)
+                    .resume_join(store, check_when_waiting.clone(), &control)
                     .await;
                 // Once the code is gone nothing lists the join: the leftover
                 // installation is for the next invite to clear.
@@ -260,6 +260,7 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         if takes_back {
             owner.storage.hold_next_access("join@example.com", false, revoking, released).await;
         }
+        let mut _often = None;
         let settle = async {
             waits.wait_for(|waiting| *waiting).await.unwrap();
             let request = owner.next_join_request().await;
@@ -295,7 +296,7 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
                     .await,
                 "{provider:?} {ending}"
             );
-            control.check_now();
+            _often = Some(control.check_often(Duration::ZERO));
         };
         let (result, ()) = join_with_response(joining, settle).await;
         assert!(matches!(result, Ok(None)), "{provider:?} {ending}: {result:?}");

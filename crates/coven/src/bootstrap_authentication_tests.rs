@@ -300,7 +300,7 @@ async fn a_join_records_the_folder_label_once_it_accepted_the_share() {
 /// phone then restarts, with no sign-in and no way to refresh one: the
 /// resumed join starts from the refreshed token, and the joined store keeps
 /// it (§13.2, §20.2). Carol's waits end only when the test moves the clock,
-/// so each check after the first runs when the test asks for it. Ana's are
+/// so each check after the first runs when the test moves it. Ana's are
 /// held too: a backoff of hers passing would move the clock under Carol's
 /// requests and end their stall windows.
 #[tokio::test]
@@ -320,10 +320,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
         carol_joins(invite.shown_code()),
         "Carol's phone",
         |status| {
-            if matches!(
-                status,
-                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-            ) {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
                 waited.send_modify(|waits| *waits += 1);
             }
         },
@@ -331,10 +328,13 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     );
     let refreshed = async {
         waits.wait_for(|waits| *waits >= 1).await.unwrap();
+        // The first check found nothing and the join waits out its backoff.
+        control.parked_from_now().await;
         owner.storage.reject_access_token("access-0").await;
-        control.check_now();
-        // The second wait follows the check that refreshed the token.
-        waits.wait_for(|waits| *waits >= 2).await.unwrap();
+        owner.clock.set(owner.clock.now() + Duration::from_secs(1));
+        // The check that refreshed the token keeps the new one before the
+        // join waits again.
+        control.parked_from_now().await;
     };
     tokio::time::timeout(HANG_GUARD, async {
         tokio::select! {

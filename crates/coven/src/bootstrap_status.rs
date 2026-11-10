@@ -18,8 +18,6 @@ pub enum BootstrapStatus {
     WaitingForApproval {
         /// The number the admin compares before approving.
         confirmation: ConfirmationNumber,
-        /// When the join checks for approval next.
-        next_check: NextCheck,
     },
     /// Loading the store from storage: the scan for this member's keys when
     /// the floor holds none, the floor's snapshots, then the slots after

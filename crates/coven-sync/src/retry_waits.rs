@@ -379,6 +379,7 @@ impl RetryWaits {
 
     /// How long until the subject's own wait is over, cooldown aside; `None`
     /// when it waits on no timer.
+    #[cfg(test)]
     pub(crate) fn remaining(&self, subject: RetrySubject) -> Option<Duration> {
         let elapsed = self.clock.elapsed();
         let state = self.lock();

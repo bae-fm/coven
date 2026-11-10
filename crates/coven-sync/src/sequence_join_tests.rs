@@ -1,5 +1,5 @@
 use crate::sequence_sync::tests::*;
-use crate::{floor_object::FloorObject, JoinOutcome};
+use crate::{floor_object::FloorObject, JoinOutcome, JoinPoll};
 use coven_format::admin::StoreChange;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::clock::HANG_GUARD;
@@ -366,71 +366,171 @@ async fn a_routing_scan_records_no_applied_slot() {
     }
 }
 
-/// What `due` reports as it begins or changes its wait, driving it there;
-/// it must not end first.
-async fn reported_while_waiting(
-    due: &mut std::pin::Pin<Box<impl std::future::Future<Output = Result<(), crate::SyncError>>>>,
-    reported: &mut tokio::sync::mpsc::UnboundedReceiver<crate::NextCheck>,
-) -> crate::NextCheck {
-    tokio::time::timeout(HANG_GUARD, async {
-        tokio::select! {
-            ended = due.as_mut() => panic!("the poll came due: {ended:?}"),
-            next = reported.recv() => next.expect("the wait reports"),
-        }
-    })
-    .await
-    .expect("the wait reports")
+type Due<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), crate::SyncError>> + 'a>>;
+
+/// The poll parks, with everything the test did before seen and no check
+/// due: it has not finished.
+async fn stays_waiting(due: &mut Due<'_>, parks: &crate::Parks) {
+    tokio::select! {
+        biased;
+        ended = due.as_mut() => panic!("the poll came due: {ended:?}"),
+        () = parks.parked_from_now() => (),
+    }
 }
 
-/// Asking to check now ends the join's own wait at once, keeping its failure
-/// count, but not a provider cooldown, which the wait reports instead
-/// (§13.2, §6.7).
-#[tokio::test]
-async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
-    use crate::NextCheck;
+/// A join that polls found waiting until its backoff is 300 seconds: the
+/// time its last check ended, and the failure count it carries.
+async fn backed_off(group: &Group, carol: &JoiningDevice) -> (std::time::SystemTime, u32) {
     use coven_database::RetrySubject;
     use coven_foundation::clock::Clock;
-    let group = Group::shared();
-    let (ana, carol) = waiting(&group).await;
     let sync = &carol.device.sync;
     let wait =
         || async { carol.device.database().retry_wait(RetrySubject::Join).await.unwrap().unwrap() };
-    // Polls that found the request waiting back the join off to 300 seconds.
     while sync.join_poll_waiting().await.is_ok() && wait().await.wait < Duration::from_secs(300) {}
-    let failures = wait().await.failures;
-    let now = group.clock.now();
-    let (asking, mut asked) = tokio::sync::watch::channel(0u64);
-    let (report, mut reported) = tokio::sync::mpsc::unbounded_channel();
-    let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
-        report.send(next).expect("the test hears every report");
-    }));
-    // Once the wait reports, only the fixed clock or asking ends it.
-    assert_eq!(
-        reported_while_waiting(&mut due, &mut reported).await,
-        NextCheck::At(now + Duration::from_secs(300))
-    );
-    asking.send_modify(|asked| *asked += 1);
-    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
-    let ended = wait().await;
-    assert_eq!((ended.failures, ended.wait), (failures, Duration::ZERO));
+    (group.clock.now(), wait().await.failures)
+}
 
-    // The next wait is 300 seconds again; a 600-second cooldown outlasts it.
-    sync.join_poll_waiting().await.unwrap();
-    coven_storage::Cooldown::record(sync.waits.as_ref(), Duration::from_secs(600)).await.unwrap();
-    let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
-        report.send(next).expect("the test hears every report");
-    }));
-    let cooling = NextCheck::CoolingDown(now + Duration::from_secs(600));
-    assert_eq!(reported_while_waiting(&mut due, &mut reported).await, cooling);
-    asking.send_modify(|asked| *asked += 1);
-    // The join's own wait ended; the cooldown still holds the check.
-    assert_eq!(reported_while_waiting(&mut due, &mut reported).await, cooling);
-    assert_eq!(wait().await.wait, Duration::ZERO);
-    group.clock.set(now + Duration::from_secs(600));
-    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
-    for device in [&ana, &carol.device] {
+async fn close_both(ana: &Device, carol: &JoiningDevice) {
+    for device in [ana, &carol.device] {
         device.database().close().await.unwrap();
     }
+}
+
+/// While a guard is held, a waiting join checks within its interval of the
+/// end of its last check, however long the backoff; the check keeps the
+/// failure count, so the doubling continues (§13.2).
+#[tokio::test]
+async fn a_held_interval_brings_a_backed_off_joins_check_forward() {
+    use coven_database::RetrySubject;
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let (last, failures) = backed_off(&group, &carol).await;
+    let often = crate::SyncOften::new();
+    let _guard = often.hold(Duration::from_secs(5));
+    let parks = crate::Parks::new();
+    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut due: Due<'_> = Box::pin(poll.due());
+    group.clock.set(last + Duration::from_secs(4));
+    stays_waiting(&mut due, &parks).await;
+    group.clock.set(last + Duration::from_secs(5));
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
+    let ended = carol.device.database().retry_wait(RetrySubject::Join).await.unwrap();
+    assert!(ended.is_none_or(|ended| (ended.failures, ended.wait) == (failures, Duration::ZERO)));
+    // The check found the request waiting: the doubling goes on from there.
+    sync.join_poll_waiting().await.unwrap();
+    let next = carol.device.database().retry_wait(RetrySubject::Join).await.unwrap().unwrap();
+    assert_eq!((next.failures, next.wait), (failures + 1, Duration::from_secs(300)));
+    close_both(&ana, &carol).await;
+}
+
+/// Dropping the last guard returns the check to the backoff's deadline,
+/// with the failure count as it was (§13.2).
+#[tokio::test]
+async fn dropping_the_guard_returns_the_check_to_the_backoff() {
+    use coven_database::RetrySubject;
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let (last, failures) = backed_off(&group, &carol).await;
+    let often = crate::SyncOften::new();
+    let guard = often.hold(Duration::from_secs(5));
+    let parks = crate::Parks::new();
+    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut due: Due<'_> = Box::pin(poll.due());
+    stays_waiting(&mut due, &parks).await;
+    drop(guard);
+    // The wait takes the drop in before the clock moves.
+    stays_waiting(&mut due, &parks).await;
+    group.clock.set(last + Duration::from_secs(299));
+    stays_waiting(&mut due, &parks).await;
+    let kept = carol.device.database().retry_wait(RetrySubject::Join).await.unwrap().unwrap();
+    assert_eq!(kept.failures, failures);
+    group.clock.set(last + Duration::from_secs(300));
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
+    close_both(&ana, &carol).await;
+}
+
+/// A guard taken after its interval has passed since the last check checks
+/// at once (§13.2).
+#[tokio::test]
+async fn a_guard_taken_after_its_interval_checks_at_once() {
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let (last, _) = backed_off(&group, &carol).await;
+    group.clock.set(last + Duration::from_secs(20));
+    let often = crate::SyncOften::new();
+    let _guard = often.hold(Duration::from_secs(5));
+    let parks = crate::Parks::new();
+    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    tokio::time::timeout(HANG_GUARD, poll.due()).await.unwrap().unwrap();
+    close_both(&ana, &carol).await;
+}
+
+/// Taking a guard while the join waits shortens that wait (§13.2).
+#[tokio::test]
+async fn a_guard_taken_during_the_wait_shortens_it() {
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let (last, _) = backed_off(&group, &carol).await;
+    let often = crate::SyncOften::new();
+    let parks = crate::Parks::new();
+    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut due: Due<'_> = Box::pin(poll.due());
+    group.clock.set(last + Duration::from_secs(6));
+    stays_waiting(&mut due, &parks).await;
+    let _guard = often.hold(Duration::from_secs(5));
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
+    close_both(&ana, &carol).await;
+}
+
+/// With several guards held, the shortest interval decides (§13.2).
+#[tokio::test]
+async fn the_shortest_of_several_guards_decides_the_joins_check() {
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let (last, _) = backed_off(&group, &carol).await;
+    let often = crate::SyncOften::new();
+    let _long = often.hold(Duration::from_secs(30));
+    let _short = often.hold(Duration::from_secs(5));
+    let parks = crate::Parks::new();
+    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut due: Due<'_> = Box::pin(poll.due());
+    group.clock.set(last + Duration::from_secs(4));
+    stays_waiting(&mut due, &parks).await;
+    group.clock.set(last + Duration::from_secs(5));
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
+    close_both(&ana, &carol).await;
+}
+
+/// A provider cooldown still holds the check a guard would make, and the
+/// join's own wait it ended stays ended (§13.2, §6.7).
+#[tokio::test]
+async fn a_provider_cooldown_holds_the_check_a_guard_would_make() {
+    use coven_database::RetrySubject;
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let (last, _) = backed_off(&group, &carol).await;
+    coven_storage::Cooldown::record(sync.waits.as_ref(), Duration::from_secs(600)).await.unwrap();
+    let often = crate::SyncOften::new();
+    let _guard = often.hold(Duration::from_secs(5));
+    let parks = crate::Parks::new();
+    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut due: Due<'_> = Box::pin(poll.due());
+    group.clock.set(last + Duration::from_secs(5));
+    stays_waiting(&mut due, &parks).await;
+    group.clock.set(last + Duration::from_secs(599));
+    stays_waiting(&mut due, &parks).await;
+    let wait = carol.device.database().retry_wait(RetrySubject::Join).await.unwrap();
+    assert!(wait.is_none_or(|wait| wait.wait.is_zero()));
+    group.clock.set(last + Duration::from_secs(600));
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
+    close_both(&ana, &carol).await;
 }
 
 /// Carol's phone shows the number Ana's phone shows with her request: Ana

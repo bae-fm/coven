@@ -4368,6 +4368,9 @@ while let Some(Ok(values)) = lost.next().await {
     return to every 30 seconds. The next idle pass comes `interval` after the
     last pass ended, so taking a guard when that time has passed runs one at
     once. Connection backoff and provider cooldowns still hold every pass.
+    A waiting join takes the same kind of guard from its `JoinControl`
+    (`check_often`), held by the same mechanism; only the idle loop caps the
+    wait at 30 seconds, the join's checks do not.
     Coven sets no lower bound: each idle pass costs its requests, two for a
     quiet one. The request outlives stopping and starting sync, and runs no
     pass while sync is stopped ([§6.7](coven.md#67-waiting-and-retrying)).
@@ -7588,9 +7591,15 @@ pub enum ProviderSignOut {
 - A join that ends without a store removes its kept sign-in, then its code,
   then its installation. A failure part way leaves a join that still lists
   and that the next call ends; a sign-in is never left without its code.
-- While it waits, the join's status gives the next check's time and the
-  confirmation number. `JoinControl::check_now` checks at once,
-  ending the join's wait; a provider cooldown still holds.
+- While it waits, the join's status gives the confirmation number, once, and
+  not again as its checks pass. `JoinControl::check_often(interval)` makes the
+  join check at most `interval` after its last check ended, until the
+  `SyncOftenGuard` it returns drops, such as while a screen shows the wait;
+  with several guards held the shortest wins, and a guard taken when that
+  time has already passed checks at once. A check that finds the request still
+  waiting counts toward the doubling as it does without a guard, so a wait
+  that resumes after the guard drops continues the doubling where it is. A
+  provider cooldown still holds every check.
 - Before `create_invite` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
   relocation, outside this operation.
@@ -8142,11 +8151,9 @@ pub enum BootstrapStatus {
     /// request.
     Connecting,
     /// The request is sent; `confirmation` is the number the admin compares.
-    /// A new status is reported each time the next check changes: `Checking`
-    /// while a check runs, then when the next one is due.
+    /// Reported once, however many checks the wait holds.
     WaitingForApproval {
         confirmation: ConfirmationNumber,
-        next_check: NextCheck,
     },
     /// Loading the store from storage, with loading's steps (§13.4). A
     /// waiting join's scan for its keys is part of its wait; the check in
@@ -8194,17 +8201,6 @@ pub enum LoadStep {
     Reading,
     /// Applying the slots read, one transaction each. Counted in slots.
     Applying,
-}
-
-/// When a waiting join checks for approval next.
-pub enum NextCheck {
-    /// Now: a check is running.
-    Checking,
-    /// At this time, on the join's backoff; `check_now` ends the wait.
-    At(SystemTime),
-    /// The provider asked coven to slow down until this time; `check_now`
-    /// can't end it.
-    CoolingDown(SystemTime),
 }
 
 /// The member's S3 access key: entered on a new device, or held in the
@@ -8437,17 +8433,19 @@ pub async fn join_with_invite(
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
 /// The app's hold on a running join: cancel before the request is sent, or
-/// check for approval at once.
+/// ask it to check for approval often while the app shows the wait.
 pub struct JoinControl { /* private */ }
 
 impl JoinControl {
     pub fn new() -> Self;
     pub fn cancel(&self);
-    /// Ends the join's wait so the next check runs now. The wait keeps its
-    /// failure count, as `retry_now` does for a handle's waits, so a check
-    /// that finds the request still waiting waits the next longer delay. A
-    /// provider cooldown still holds, and the status says when it ends.
-    pub fn check_now(&self);
+    /// While the guard lives, the join's wait between checks is at most the
+    /// shortest interval held, counted from the end of its last check; a
+    /// guard taken after that time checks at once. A check that finds the
+    /// request still waiting counts toward the doubling, so a wait that
+    /// resumes once the guard drops continues it. A provider cooldown still
+    /// holds every check.
+    pub fn check_often(&self, interval: Duration) -> SyncOftenGuard;
 }
 
 impl CovenHandle {
@@ -8726,8 +8724,8 @@ let mut builder = coven.builder()
     .oauth_clients(oauth_clients.clone())
     .oauth_presenter(platform_sign_in_sheet);
 builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
-// The waiting screen shows Carol's number and a countdown to the next check;
-// its Check now button calls control.check_now().
+// The waiting screen shows Carol's number; while it shows, the app holds
+// control.check_often(Duration::from_secs(5)).
 let control = JoinControl::new();
 match join_with_invite(
     builder,

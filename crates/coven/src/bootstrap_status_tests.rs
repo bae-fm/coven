@@ -139,7 +139,7 @@ async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
 /// the scan as loading's first step; the join publishes the store and
 /// reports its loading after (E10, §13.2). Carol's
 /// waits end only when the test moves the clock, so no check runs while
-/// Ana's approval is half written; Check now runs the next one.
+/// Ana's approval is half written; a held check runs the next one.
 #[tokio::test]
 async fn a_join_reports_finding_its_keys_before_it_loads() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -156,10 +156,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
         carol_joins(invite.shown_code()),
         "New phone",
         |status| {
-            if matches!(
-                status,
-                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-            ) {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
                 waits.send_replace(true);
             }
             reported.lock().unwrap().push(status);
@@ -202,7 +199,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
 /// publishing the store and loading it (E10). While it waits, its status
 /// carries the number Ana's phone shows with the request, and when the next
 /// check runs. Carol's waits end only when the test moves the clock, so
-/// Ana approves while the join waits, and Check now runs the next check.
+/// Ana approves while the join waits, and its held check finds the approval.
 #[tokio::test]
 async fn a_join_reports_each_bootstrap_phase_in_order() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -219,10 +216,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         carol_joins(invite.shown_code()),
         "New phone",
         |status| {
-            if matches!(
-                status,
-                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-            ) {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
                 waited.send_replace(true);
             }
             let mut reported = reported.lock().unwrap();
@@ -232,13 +226,14 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         },
         &control,
     );
+    let mut _often = None;
     let approve = async {
         waiting.wait_for(|waited| *waited).await.unwrap();
         // Ana's next pass reads the request.
         owner.pass().await;
         let request = owner.next_join_request().await;
         crate::tests::approve(&owner.handle, &request).await;
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
         request
     };
     let (result, request) = join_with_response(joining, approve).await;
@@ -254,15 +249,11 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         .count();
     assert!(loading > 0, "{reported:?}");
     let waits = &reported[1..reported.len() - loading];
-    assert!(waits.len() >= 2, "{reported:?}");
-    for (index, status) in waits.iter().enumerate() {
-        let BootstrapStatus::WaitingForApproval { confirmation, next_check } = status else {
-            panic!("{status:?} while waiting");
-        };
-        assert_eq!(*confirmation, request.confirmation);
-        // The first check runs at once; then checks and waits alternate.
-        assert_eq!(matches!(next_check, NextCheck::Checking), index % 2 == 0, "{reported:?}");
-    }
+    // The wait is one status, however many checks it holds.
+    let [BootstrapStatus::WaitingForApproval { confirmation }] = waits else {
+        panic!("{reported:?} while waiting");
+    };
+    assert_eq!(*confirmation, request.confirmation);
     // The clock moved only as the test moved it, by Ana's one pass: no wait
     // of hers or Carol's passed on its own.
     assert_eq!(owner.clock.now(), started + Duration::from_secs(1));
@@ -304,12 +295,10 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         read_failures: [(first.clone(), StorageFailure::Network)].into(),
         ..Faults::none()
     };
+    let mut _often = None;
     let approve = async {
         seen.wait_for(|reported| {
-            matches!(
-                reported.last(),
-                Some(BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. })
-            )
+            matches!(reported.last(), Some(BootstrapStatus::WaitingForApproval { .. }))
         })
         .await
         .unwrap();
@@ -320,7 +309,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         assert!(owner.applied().await > before, "the admission landed");
         owner.storage.set_faults(unreadable.clone()).await;
         let asked = owner.storage.request_trace().len();
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
         // The check opens Carol's keys in her admission, then loads from
         // the first slot.
         requested(&owner, asked, &MemoryRequest::Read(first.clone(), None)).await;
@@ -388,12 +377,10 @@ async fn a_waiting_joins_scan_reports_its_wait() {
         &control,
     );
     let request_path = crate::tests::request_path(&invite);
+    let mut _often = None;
     let write_and_check = async {
         seen.wait_for(|reported| {
-            matches!(
-                reported.last(),
-                Some(BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. })
-            )
+            matches!(reported.last(), Some(BootstrapStatus::WaitingForApproval { .. }))
         })
         .await
         .unwrap();
@@ -412,7 +399,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
         owner.pass().await;
         assert!(owner.applied().await > before);
         let asked = owner.storage.request_trace().len();
-        control.check_now();
+        _often = Some(control.check_often(Duration::ZERO));
         // The check reads Ana's slot, finds no copy, and asks whether the
         // request is still there.
         requested(&owner, asked, &MemoryRequest::Read(request_path.clone(), None)).await;

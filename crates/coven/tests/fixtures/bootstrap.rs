@@ -24,6 +24,8 @@ pub(super) struct Owner {
     pub(super) storage: Arc<MemoryStorage>,
     pub(super) clock: Arc<FixedClock>,
     pub(super) code: RestoreCode,
+    /// The joins' checks the test asked for, held until Ana goes.
+    often: std::sync::Mutex<Vec<coven_sync::SyncOftenGuard>>,
 }
 
 impl Owner {
@@ -67,7 +69,7 @@ impl Owner {
         network.sync(0).await;
         // Passes read join requests and approve them; the loop keeps running.
         handle.start_sync().await.unwrap();
-        Self { network, directory, handle, member, storage, clock, code }
+        Self { network, directory, handle, member, storage, clock, code, often: Default::default() }
     }
 
     pub(super) async fn sync(&self) {
@@ -102,13 +104,19 @@ impl Owner {
     }
 
     /// Ana reads the request a join sent, approves it, and `control` asks
-    /// the join to check for that approval now: its waits are held, so its
-    /// next check runs only then or once the test moves the clock.
+    /// the join to check for that approval at once: its waits are held, so
+    /// its next check runs only then or once the test moves the clock. The
+    /// ask lasts until Ana goes.
     pub(super) async fn approve_join(&self, control: &JoinControl) -> MemberId {
         let request = self.next_join_request().await;
         crate::tests::approve(&self.handle, &request).await;
-        control.check_now();
+        self.check_at_once(control);
         request.member
+    }
+
+    fn check_at_once(&self, control: &JoinControl) {
+        let guard = control.check_often(Duration::ZERO);
+        coven_foundation::locks::lock_unpoisoned(&self.often).push(guard);
     }
 
     /// Run `joining` while Ana reads its request, hands it to `before`, and
@@ -124,7 +132,7 @@ impl Owner {
             let request = self.next_join_request().await;
             before(request.clone()).await;
             crate::tests::approve(&self.handle, &request).await;
-            control.check_now();
+            self.check_at_once(control);
             request.member
         })
         .await
@@ -327,7 +335,8 @@ impl Installation {
                 device_name: "New phone".into(),
                 joiner: crate::tests::carol_joins(invite.shown_code()),
             },
-            check: control.check.subscribe(),
+            held: control.often.subscribe(),
+            parks: control.parks.clone(),
         }
     }
 
@@ -528,10 +537,7 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
         carol_joins(invite.shown_code()),
         "Carol's phone",
         |status| {
-            if matches!(
-                status,
-                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-            ) {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
                 waiting.send_replace(true);
             }
         },
@@ -547,16 +553,15 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     .unwrap();
 }
 
-/// A join's status callback that asks it, through `control`, to check now
-/// whenever it waits for its next check, as the app's Check now does: the
-/// held clock never ends a resumed join's saved wait.
-pub(super) fn check_when_waiting(control: &JoinControl) -> impl Fn(BootstrapStatus) + Copy + '_ {
+/// A join's status callback that asks it, through `control`, to check at
+/// once whenever it waits for approval, for as long as the callback lives:
+/// the held clock never ends a resumed join's saved wait.
+pub(super) fn check_when_waiting(control: &JoinControl) -> impl Fn(BootstrapStatus) + Clone + '_ {
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
     move |status| {
-        if matches!(
-            status,
-            BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-        ) {
-            control.check_now();
+        if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
+            let guard = control.check_often(Duration::ZERO);
+            coven_foundation::locks::lock_unpoisoned(&asked).push(guard);
         }
     }
 }

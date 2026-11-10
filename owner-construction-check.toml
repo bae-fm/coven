@@ -497,9 +497,10 @@ ReconfigurableLiveQuery = "Database"
 # for its next result (api.md E4).
 LiveQueryRequests = "ReconfigurableLiveQuery"
 # An app's request for idle passes at most its interval apart, held until it
-# drops (api.md E5), and the sync loop's view of the shortest one held.
+# drops (api.md E5, §13.2), and an owner's view of the shortest one held:
+# the sync loop's, and a waiting join's.
 SyncOftenGuard = "SyncOften"
-IdleInterval = "SyncOften"
+HeldIntervals = "SyncOften"
 # Each change of the sync activity, for the file workers waiting until sync
 # allows their transfers.
 # A provider check's object while permitted, held for the check's scope.
@@ -1535,7 +1536,11 @@ tables = [
 # One sequence state per opened installation, which the store's bootstrap or
 # builder makes and gives to its sequence and storage owners.
 "crates/coven-sync/src/sequence_state.rs" = ["SequenceState::new"]
-# The intervals apps hold for idle passes, one per sequence state, made with it.
+# A join's wait for its next approval poll, reading the intervals the app
+# holds for it (§13.2).
+"crates/coven-sync/src/sequence_join.rs" = ["JoinPoll::new"]
+# The intervals apps hold for idle passes, one per sequence state, made with
+# it, and for a waiting join's checks, one per join control.
 "crates/coven-sync/src/sync_often.rs" = ["SyncOften::new"]
 # One invite expiry per writer handle, connected or not; the handle's
 # storage owner keeps it and stops it as it closes.
@@ -1574,7 +1579,7 @@ tables = [
     # Listing reads each unfinished installation's saved code.
     "unfinished_joins",
     "prepare_and_load",
-    # An app makes one for each join it may cancel or check now (api.md E10).
+    # An app makes one for each join it may cancel or ask to check often (api.md E10).
     "JoinControl::new",
 ]
 "crates/coven/src/bootstrap_restore.rs" = [
@@ -1602,6 +1607,8 @@ tables = [
 ]
 "crates/coven/src/bootstrap_join.rs" = [
     "prepare_request",
+    # The wait for approval reads the intervals the app holds for the join.
+    "Joining::admit",
 ]
 # Restore connects through the builder's held sign-in.
 "crates/coven/src/restore_credentials.rs" = ["restore_connection"]

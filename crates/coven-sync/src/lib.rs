@@ -56,7 +56,7 @@ pub use files::{
 pub use retry_waits::{
     NetworkOwner, PassRequests, RetryAnswer, RetryEffect, RetryOutcome, RetryWaits,
 };
-pub use sync_often::SyncOftenGuard;
+pub use sync_often::{HeldIntervals, SyncOften, SyncOftenGuard};
 
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
@@ -88,7 +88,7 @@ pub use saved_code::{
 pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::NewInvite;
-pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
+pub use sequence_sync::sequence_join::{JoinOutcome, JoinPoll};
 pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
