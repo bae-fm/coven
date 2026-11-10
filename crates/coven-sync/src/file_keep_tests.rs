@@ -197,14 +197,35 @@ async fn a_kept_pins_wait_ends_with_its_request() {
 /// The latest time this platform's clock can name: on Windows long before
 /// Unix's `i64::MAX` seconds past the epoch.
 fn end_of_time() -> SystemTime {
-    let (mut end, mut step) = (SystemTime::UNIX_EPOCH, Duration::MAX);
+    latest_reached(SystemTime::UNIX_EPOCH, |at, step| at.checked_add(step))
+}
+
+/// The latest point `add` reaches from `start`, found by halving the step
+/// until it is zero. A step counts only if it moves the point: Windows'
+/// clock counts 100 ns, so past its end an addition under 100 ns "succeeds"
+/// without moving, and a search that took it as progress never ended.
+fn latest_reached<T: Copy + PartialOrd>(start: T, add: impl Fn(T, Duration) -> Option<T>) -> T {
+    let (mut end, mut step) = (start, Duration::MAX);
     while !step.is_zero() {
-        match end.checked_add(step) {
-            Some(later) => end = later,
-            None => step /= 2,
+        match add(end, step) {
+            Some(later) if later > end => end = later,
+            _ => step /= 2,
         }
     }
     end
+}
+
+/// A clock counting 100 ns ticks to `last`, as Windows' does, adds a step
+/// by dropping its sub-tick part: the search still ends, at the last tick.
+#[test]
+fn the_latest_time_is_found_on_a_clock_of_whole_ticks() {
+    const TICK_NANOS: u128 = 100;
+    let last: u64 = 9_223_372_036_854_775_807 / 1000;
+    let add = |at: u64, step: Duration| {
+        let ticks = u64::try_from(step.as_nanos() / TICK_NANOS).ok()?;
+        at.checked_add(ticks).filter(|later| *later <= last)
+    };
+    assert_eq!(latest_reached(0, add), last);
 }
 
 /// Make the user's file kept here device-only on this device, which ends its
