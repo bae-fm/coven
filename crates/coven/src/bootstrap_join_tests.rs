@@ -618,8 +618,8 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
 
 /// A closed join that Ana declines resumes to `None`, and its saved code and
 /// installation are gone (§13.2). Ana's pass after the decline puts the
-/// marker in the request's place, which the resumed join's first check
-/// finds.
+/// marker in the request's place, which the resumed join finds once it is
+/// asked to check, its saved wait held.
 #[tokio::test]
 async fn a_closed_join_declined_meanwhile_resumes_to_none_and_forgets_its_code() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -632,8 +632,10 @@ async fn a_closed_join_declined_meanwhile_resumes_to_none_and_forgets_its_code()
     owner.pass_now().await;
     assert!(crate::tests::no_request(&owner.storage, &crate::tests::request_path(&invite)).await);
     let control = JoinControl::new();
-    let result =
-        install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
+    let result = install
+        .builder(&owner, owner.recipient())
+        .resume_join(store, check_when_waiting(&control), &control)
+        .await;
     assert!(matches!(result, Ok(None)), "{result:?}");
     assert!(saved_code(&install, store).is_none());
     install.absent(store).await;

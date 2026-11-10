@@ -476,7 +476,7 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
             sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::FullDropbox))
                 .await;
         }
-        let result = builder.resume_join(store, |_| {}, &control).await;
+        let result = builder.resume_join(store, check_when_waiting(&control), &control).await;
         assert!(matches!(result, Ok(None)), "{result:?}");
         install.absent(store).await;
         assert!(saved_code(&install, store).is_none());

@@ -64,11 +64,14 @@ async fn a_declined_join_finishes_after_a_failure_at_any_step_of_its_ending() {
                 revoking = revoked => revoking.unwrap(),
             }
             let control = JoinControl::new();
+            // The stopped join saved the wait before its next check: a
+            // resume that reaches it checks now and finds the marker.
+            let check_when_waiting = check_when_waiting(&control);
             install.keychain.fail_operations_after(&[failing]);
             *progress.lock().unwrap() = format!("round {failing}: first resume");
             let ended = install
                 .builder(&owner, owner.recipient())
-                .resume_join(store, |_| {}, &control)
+                .resume_join(store, check_when_waiting, &control)
                 .await;
             install.keychain.fail_operations_after(&[]);
             let failed = ended.is_err();
@@ -76,7 +79,7 @@ async fn a_declined_join_finishes_after_a_failure_at_any_step_of_its_ending() {
                 *progress.lock().unwrap() = format!("round {failing}: second resume");
                 let again = install
                     .builder(&owner, owner.recipient())
-                    .resume_join(store, |_| {}, &control)
+                    .resume_join(store, check_when_waiting, &control)
                     .await;
                 // Once the code is gone nothing lists the join: the leftover
                 // installation is for the next invite to clear.

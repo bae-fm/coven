@@ -507,12 +507,15 @@ pub(super) fn assert_load_order(loading: &[Progress<LoadStep>]) {
 }
 
 /// Start Carol's join with an invite and stop it while it waits, as when
-/// the app is closed.
+/// the app is closed: once its first check found the request waiting and
+/// saved the wait before the next. That wait ends only as the test moves
+/// the clock or asks a resumed join to check ([`check_when_waiting`]).
 pub(super) async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
     waiting_join_with(install.authenticated_builder(owner, owner.recipient()).await, invite).await;
 }
 
-/// Start Carol's join through `builder` and stop it while it waits.
+/// Start Carol's join through `builder` and stop it while it waits, as
+/// [`waiting_join`] does.
 pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     let (waiting, mut waits) = watch::channel(false);
     let control = JoinControl::new();
@@ -521,7 +524,10 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
         invite.shown_code(),
         "Carol's phone",
         |status| {
-            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
+            if matches!(
+                status,
+                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
+            ) {
                 waiting.send_replace(true);
             }
         },
@@ -535,6 +541,20 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     })
     .await
     .unwrap();
+}
+
+/// A join's status callback that asks it, through `control`, to check now
+/// whenever it waits for its next check, as the app's Check now does: the
+/// held clock never ends a resumed join's saved wait.
+pub(super) fn check_when_waiting(control: &JoinControl) -> impl Fn(BootstrapStatus) + Copy + '_ {
+    move |status| {
+        if matches!(
+            status,
+            BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
+        ) {
+            control.check_now();
+        }
+    }
 }
 
 /// A join's status callback that tells the returned watch once the join
