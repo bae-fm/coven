@@ -198,6 +198,13 @@ pub async fn within<F: Future>(future: F) -> Option<F::Output> {
     tokio::time::timeout(HANG_GUARD, future).await.ok()
 }
 
+/// Block this thread for `HANG_GUARD` of real time: what a test process's
+/// hang report waits out before it prints.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn wait_out_hang_guard() {
+    std::thread::sleep(HANG_GUARD);
+}
+
 /// A clock that returns the instant supplied by a test until it is set again.
 #[cfg(feature = "test-utils")]
 pub struct FixedClock {

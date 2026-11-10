@@ -17,6 +17,10 @@ use std::task::{Context, Poll};
 #[path = "task_location.rs"]
 mod location;
 
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "task_in_flight.rs"]
+mod in_flight;
+
 pub use location::{catching_operation, SourceLocation};
 
 /// Why work apart from its caller gave no result.
@@ -453,8 +457,13 @@ pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
 ) -> CompletingTask<Result<T, E>> {
     let (done, completion) = tokio::sync::oneshot::channel();
     let heard = bugs.clone();
+    #[cfg(any(test, feature = "test-utils"))]
+    let flight = in_flight::Flight::begin(operation, in_flight::State::Task);
     tokio::spawn(async move {
-        if let Err(unheard) = done.send(caught(operation, work).await) {
+        let answer = caught(operation, work).await;
+        #[cfg(any(test, feature = "test-utils"))]
+        drop(flight);
+        if let Err(unheard) = done.send(answer) {
             report_unheard(heard.as_ref(), &unheard);
         }
     });
@@ -482,8 +491,15 @@ pub fn blocking_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
     let heard = bugs.clone();
     // The pool runs the closure to its end once it starts, so the closure
     // answers unless the pool dropped it unstarted.
+    #[cfg(any(test, feature = "test-utils"))]
+    let flight = in_flight::Flight::begin(operation, in_flight::State::Queued);
     tokio::task::spawn_blocking(move || {
-        if let Err(unheard) = done.send(caught_sync(operation, work)) {
+        #[cfg(any(test, feature = "test-utils"))]
+        flight.started();
+        let answer = caught_sync(operation, work);
+        #[cfg(any(test, feature = "test-utils"))]
+        drop(flight);
+        if let Err(unheard) = done.send(answer) {
             report_unheard(heard.as_ref(), &unheard);
         }
     });

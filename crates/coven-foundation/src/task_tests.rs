@@ -518,3 +518,31 @@ fn a_test_sink_dropped_with_a_bug_untaken_fails_the_test() {
     let bugs = HeardBugs::shared();
     report(bugs.as_ref(), &Bug::new("read the tags", "no tags"));
 }
+
+#[tokio::test]
+async fn the_hang_report_names_running_operations_and_the_latest_to_finish() {
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (started, running) = tokio::sync::oneshot::channel();
+    let bugs: BugSinkRef = std::sync::Arc::new(LoggedBugs);
+    let work = blocking_completing("hold the report test's thread", bugs.clone(), move || {
+        started.send(()).unwrap();
+        held.recv().unwrap();
+        Ok::<_, Bug>(())
+    });
+    running.await.unwrap();
+    let during = in_flight::report();
+    assert!(
+        during.contains("hold the report test's thread: running on the blocking pool"),
+        "{during}"
+    );
+    release.send(()).unwrap();
+    work.await.unwrap().unwrap();
+    spawn_completing("finish the report test's task", bugs, async { Ok::<_, Bug>(()) })
+        .await
+        .unwrap()
+        .unwrap();
+    let after = in_flight::report();
+    assert!(!after.contains("hold the report test's thread: running"), "{after}");
+    assert!(after.contains("hold the report test's thread\n"), "{after}");
+    assert!(after.contains("finish the report test's task"), "{after}");
+}

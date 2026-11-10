@@ -1193,6 +1193,14 @@ tables = [
     # enters set and put back: its scope is the thread.
     "ACTIVE",
 ]
+# What a test process's hang report knows of the operations running in it: a
+# list shared by every thread of the process, and the thread that prints it
+# once the hang guard has passed, which lives as long as the process.
+"crates/coven-foundation/src/task_in_flight.rs" = [
+    "FLIGHTS",
+    "with_flights",
+    "Flight::begin",
+]
 # The paths tests wait on file work to reach: a path names one file to the
 # whole process, so the waits on it are the process's.
 "crates/coven-foundation/src/files/reached.rs" = ["WATCHED"]
