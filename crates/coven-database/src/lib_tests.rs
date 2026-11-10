@@ -1,6 +1,6 @@
 use crate::{DatabaseBuilder, DbError, Migration, OpenError, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
-use coven_foundation::files::StoreDirAccess;
+use coven_foundation::files::{StoreDirAccess, StoreLockProbe};
 use coven_foundation::{
     files::{StoreDir, StoreDirectories},
     id_source::{IdSource, SequentialIds, StoreId},

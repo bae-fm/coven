@@ -2,6 +2,7 @@ use super::*;
 use crate::clock::HANG_GUARD;
 use crate::files::StoreDirAccess;
 use crate::files::StoreDirectories;
+use crate::files::StoreLockProbe;
 use crate::id_source::UuidIds;
 use uuid::Uuid;
 

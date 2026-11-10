@@ -1,4 +1,5 @@
 use super::*;
+use crate::files::StoreLockProbe;
 use crate::{
     files::{StoreDirectories, StoreFile},
     id_source::UuidIds,

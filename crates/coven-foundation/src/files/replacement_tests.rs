@@ -1,6 +1,8 @@
 use super::*;
 use crate::clock::HANG_GUARD;
-use crate::files::{FileArea, FileName, StoreDirAccess, StoreDirectories, StoreFile};
+use crate::files::{
+    FileArea, FileName, StoreDirAccess, StoreDirectories, StoreFile, StoreLockProbe,
+};
 use crate::id_source::UuidIds;
 
 struct Fixture {

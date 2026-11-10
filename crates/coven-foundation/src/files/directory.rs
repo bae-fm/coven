@@ -310,6 +310,23 @@ pub enum WriterError {
     File(#[from] FileError),
 }
 
+/// Probes the OS writer lock without waiting, for lifetime assertions in
+/// tests. Production opens take the lock through `StoreDirAccess`.
+#[cfg(any(test, feature = "test-utils"))]
+pub trait StoreLockProbe {
+    /// Take the writer lock, refusing at once when it is held.
+    fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError>;
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl StoreLockProbe for StoreDir {
+    fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
+        let guard = lock::acquire(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
+    }
+}
+
 /// Crate-to-crate operations for coven's owners; not re-exported by the app API.
 pub trait StoreDirAccess: Sized {
     /// The database file's exact path for coven-database to open with SQLite.
@@ -340,9 +357,6 @@ pub trait StoreDirAccess: Sized {
     /// Where a bug in the store's work that nobody waits for goes (E15):
     /// the app's own reporter, which its directories were given.
     fn bugs(&self) -> &BugSinkRef;
-    /// Probe the OS writer lock without waiting, for lifetime assertions in tests.
-    #[cfg(any(test, feature = "test-utils"))]
-    fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError>;
     /// Take the writer lock, awaiting release by a closing instance in this
     /// process. A live instance or another process still refuses immediately.
     fn lock_for_open(
@@ -474,12 +488,6 @@ impl StoreDirAccess for StoreDir {
     }
     fn bugs(&self) -> &BugSinkRef {
         &self.bugs
-    }
-    #[cfg(any(test, feature = "test-utils"))]
-    fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
-        let guard = lock::acquire(&self.path, self.id)?;
-        self.check_published()?;
-        Ok(guard)
     }
     async fn lock_for_open(&self) -> Result<StoreLock, StoreLockError> {
         let guard = lock::acquire_for_open(&self.path, self.id, &self.bugs).await?;
