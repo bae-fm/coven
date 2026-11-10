@@ -608,12 +608,24 @@ async fn daily_snapshots(compare: bool) {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let mut published = Vec::new();
+    // Each announcement's provider upper-bound publication time, for the
+    // model. Read once its slot is stored: retention deletes the slot once
+    // `first` passes it, and the slot's input record with it.
+    let mut published_at = Vec::new();
     let day_seconds = 24 * 60 * 60;
     for day in 0..14usize {
         let announced_at = day as u64 * day_seconds;
         let now = announced_at + 1;
         group.clock.set(UNIX_EPOCH + Duration::from_secs(announced_at));
         let slot = ana.sync.snapshot(Audience::Store).await.unwrap();
+        if compare {
+            let object = ana
+                .sync
+                .immutable_metadata(&ObjectPath::slot(group.store, slot.get().try_into().unwrap()))
+                .await
+                .unwrap();
+            published_at.push(object.stored_at.elapsed_since_epoch() + object.time_resolution);
+        }
         group.clock.set(UNIX_EPOCH + Duration::from_secs(now));
         let mut session = ana.sync.session.lock().await;
         let announcement = session.history.announcements[&slot].clone();
@@ -630,16 +642,7 @@ async fn daily_snapshots(compare: bool) {
         assert_eq!(capture.first.get(), expected, "day {day}");
         if compare {
             let mut snapshots = Vec::new();
-            for (slot, covers, _) in published.iter().rev() {
-                let object = ana
-                    .sync
-                    .immutable_metadata(&ObjectPath::slot(
-                        group.store,
-                        slot.get().try_into().unwrap(),
-                    ))
-                    .await
-                    .unwrap();
-                let latest = object.stored_at.elapsed_since_epoch() + object.time_resolution;
+            for ((slot, covers, _), latest) in published.iter().zip(&published_at).rev() {
                 snapshots.push(
                     json!({"slot":slot.get(),"covers":covers,"announced_at":latest.as_nanos(),
                     "usable":session.history.usable(&session.history.announcements[slot])}),
