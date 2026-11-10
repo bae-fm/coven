@@ -17,7 +17,7 @@ use std::task::{Context, Poll};
 #[path = "task_location.rs"]
 mod location;
 
-pub use location::SourceLocation;
+pub use location::{catching_operation, SourceLocation};
 
 /// Why work apart from its caller gave no result.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -47,6 +47,19 @@ pub struct Bug {
     /// ([`TaskFailed::of_join`]), or one resumed with
     /// `std::panic::resume_unwind` from a panic elsewhere.
     pub location: Option<SourceLocation>,
+    /// Whether the bug showed itself as a panic or code found it.
+    pub kind: BugKind,
+}
+
+/// How a bug showed itself (E15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BugKind {
+    /// Work panicked. The process's panic hook saw the panic begin, so an
+    /// app whose own hook reports every panic has reported this one.
+    Panic,
+    /// Code found state its guarantee rules out, without a panic
+    /// ([`Bug::new`]). No hook saw it: whoever the bug reaches reports it.
+    Found,
 }
 
 impl Bug {
@@ -58,6 +71,7 @@ impl Bug {
             operation,
             message: message.into(),
             location: Some(SourceLocation::of(std::panic::Location::caller())),
+            kind: BugKind::Found,
         }
     }
 }
@@ -195,7 +209,7 @@ pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -
 /// process, so such a function catches here and answers with its own failure
 /// value.
 pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug> {
-    location::catch_located(work).map_err(|(payload, at)| bug_of(operation, payload, at))
+    location::catch_located(operation, work).map_err(|(payload, at)| bug_of(operation, payload, at))
 }
 
 /// Where a bug in work nobody waits for goes (E15): a store's long-lived
@@ -557,7 +571,8 @@ fn bug_of(
     payload: Box<dyn Any + Send>,
     location: Option<SourceLocation>,
 ) -> Bug {
-    let bug = Bug { operation, message: panic_message(payload.as_ref()), location };
+    let bug =
+        Bug { operation, message: panic_message(payload.as_ref()), location, kind: BugKind::Panic };
     if bug.location.is_none() {
         tracing::warn!(
             operation,
@@ -592,7 +607,7 @@ impl<F: Future> Future for Caught<F> {
         let Some(work) = self.work.as_mut() else {
             panic!("{operation} polled after it finished");
         };
-        match location::catch_located(|| work.as_mut().poll(cx)) {
+        match location::catch_located(operation, || work.as_mut().poll(cx)) {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(value)) => {
                 self.work = None;

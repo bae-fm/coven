@@ -47,14 +47,12 @@ impl std::fmt::Display for SourceLocation {
 }
 
 /// What a thread's innermost catch of coven's has seen.
-#[derive(Default)]
 enum Mark {
     /// No catch of coven's is running on this thread.
-    #[default]
     Unmarked,
-    /// One is, and this is where the latest panic inside it began, once one
-    /// has.
-    Catching(Option<SourceLocation>),
+    /// One is, running `operation`, and `location` is where the latest panic
+    /// inside it began, once one has.
+    Catching { operation: &'static str, location: Option<SourceLocation> },
 }
 
 thread_local! {
@@ -68,24 +66,47 @@ thread_local! {
 static CHAINED: Once = Once::new();
 
 /// `work`'s value, or the payload of its panic and where that panic began.
+/// While `work` runs, this catch is the thread's innermost, named
+/// `operation`.
 ///
 /// The location is `None` only for an unwind coven's hook didn't see begin:
 /// one resumed with `std::panic::resume_unwind` from a panic elsewhere, or a
 /// panic after the app replaced the process's hook with one that doesn't call
 /// the hook it replaced.
 pub(crate) fn catch_located<R>(
+    operation: &'static str,
     work: impl FnOnce() -> R,
 ) -> Result<R, (Box<dyn Any + Send>, Option<SourceLocation>)> {
     chain_hook();
-    let outer = swap_mark(Mark::Catching(None));
+    let outer = swap_mark(Mark::Catching { operation, location: None });
     let caught = catch_unwind(AssertUnwindSafe(work));
     // `outer` is `None` once the thread's locals are gone, as its last
     // destructors run: then there is no mark to restore or read.
     let inner = outer.and_then(swap_mark);
     caught.map_err(|payload| match inner {
-        Some(Mark::Catching(location)) => (payload, location),
+        Some(Mark::Catching { location, .. }) => (payload, location),
         Some(Mark::Unmarked) | None => (payload, None),
     })
+}
+
+/// The operation of the innermost catch of coven's running on this thread,
+/// or `None` outside every one: for the app's own panic hook, to say what
+/// the panicking work was doing. A panic a catch inside that work handles
+/// itself, such as a task tokio runs on this thread and catches, still
+/// names it. It never panics, so a hook can call it: a panic inside a hook
+/// ends the process.
+pub fn catching_operation() -> Option<&'static str> {
+    MARK.try_with(|place| {
+        let mark = place.replace(Mark::Unmarked);
+        let operation = match &mark {
+            Mark::Catching { operation, .. } => Some(*operation),
+            Mark::Unmarked => None,
+        };
+        place.set(mark);
+        operation
+    })
+    .ok()
+    .flatten()
 }
 
 /// Put `mark` in this thread's place and return what was there, or `None`
@@ -123,8 +144,8 @@ fn mark_panic(panic: &PanicHookInfo<'_>) {
         reason = "a thread whose locals are gone is exiting, and runs no catch of coven's"
     )]
     let _ = MARK.try_with(|place| {
-        if let Mark::Catching(_) = place.take() {
-            place.set(Mark::Catching(Some(SourceLocation::of(location))));
+        if let Mark::Catching { operation, .. } = place.replace(Mark::Unmarked) {
+            place.set(Mark::Catching { operation, location: Some(SourceLocation::of(location)) });
         }
     });
 }

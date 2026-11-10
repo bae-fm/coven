@@ -9281,6 +9281,18 @@ pub async fn empty_s3_bucket(
   unwinds only on the thread that raised it, so with many threads each
   catch reads only its own thread's panic. A panic outside every catch of
   coven's goes to the app's hook alone.
+- A `Bug`'s `kind` says how it showed itself: `Panic` for work that
+  panicked, `Found` for a bug code found without one (`Bug::new`). An app
+  that reports only the bugs its catches hand it misses a panic on a thread
+  no catch runs on, such as a dependency's own. Every panic passes through
+  the process's panic hook as it begins. So the app can report each panic
+  once, from its own hook, and report only the `Found` bugs its calls and
+  its bug sink hand it. `catching_operation` tells that hook the operation
+  of the innermost catch of coven's on the panicking thread, or `None`
+  outside every catch, so the report says what the work was doing.
+- Ben's app reports panics from its hook. The sync loop's panic, later in
+  this section, reaches his crash reporter from the hook as "the sync loop
+  panicked". The bug sink then hears a `Panic`, and only logs it.
 - `blocking` runs a closure on the blocking pool. `caught` runs a future
   inline and catches a panic in any of its polls: one message of a
   long-lived loop fails with its `Bug`, and the loop serves the next.
@@ -9555,6 +9567,10 @@ Edge cases:
   it.
 - A catch inside another names its own panic. The outer catch's mark is
   kept aside while the inner one runs, and put back as it ends.
+- A panic that work handles itself inside a catch of coven's, such as a
+  task tokio runs and catches on the catch's own thread under `block_on`,
+  never reaches the catch, but `catching_operation` still names the catch
+  as the hook runs.
 - tokio reports an aborted task and a task its runtime dropped the same way.
   `joined` and `TaskFailed::of_join` give `Shutdown` with
   `ShutdownOutcome::Unknown` for both; `blocking` gives
@@ -9608,14 +9624,33 @@ pub struct Bug {
     /// (`TaskFailed::of_join`), or one resumed with
     /// `std::panic::resume_unwind` from a panic elsewhere.
     pub location: Option<SourceLocation>,
+    /// Whether the bug showed itself as a panic or code found it.
+    pub kind: BugKind,
+}
+
+/// How a bug showed itself (E15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BugKind {
+    /// Work panicked. The process's panic hook saw the panic begin, so an
+    /// app whose own hook reports every panic has reported this one.
+    Panic,
+    /// Code found state its guarantee rules out, without a panic
+    /// (`Bug::new`). No hook saw it: whoever the bug reaches reports it.
+    Found,
 }
 
 impl Bug {
     /// The bug code found in `operation` without a panic, such as state a
-    /// `Drop` finds wrong, located where this is called.
+    /// `Drop` finds wrong, located where this is called. Its kind is
+    /// `BugKind::Found`.
     #[track_caller]
     pub fn new(operation: &'static str, message: impl Into<String>) -> Self;
 }
+
+/// The operation of the innermost catch of coven's running on this thread,
+/// or `None` outside every one: for the app's own panic hook, to say what
+/// the panicking work was doing. It never panics, so a hook can call it.
+pub fn catching_operation() -> Option<&'static str>;
 
 /// Where in the code a bug showed itself: the file, line and column of the
 /// panic, or of the code that found the bug and made it. Shown as

@@ -22,7 +22,7 @@ fn panic_site() -> Option<SourceLocation> {
 
 /// The bug `operation` gives once [`panics`] panics in it with `message`.
 fn panicked(operation: &'static str, message: &str) -> Bug {
-    Bug { operation, message: message.to_string(), location: panic_site() }
+    Bug { operation, message: message.to_string(), location: panic_site(), kind: BugKind::Panic }
 }
 
 /// Sets its flag when dropped: the cleanup a caller's work holds.
@@ -105,6 +105,7 @@ async fn a_panic_that_reached_its_join_uncaught_names_no_place() {
             operation: "fill the read-ahead",
             message: "no window 7".to_string(),
             location: None,
+            kind: BugKind::Panic,
         })
     );
 }
@@ -211,6 +212,7 @@ fn a_catch_inside_another_names_its_own_panic() {
                 line: PANIC_AGAIN_LINE,
                 column: 5,
             }),
+            kind: BugKind::Panic,
         })
     );
     let recovered = caught_sync("serve a message", || {
@@ -241,6 +243,42 @@ fn a_panic_on_another_thread_leaves_this_catch_s_place() {
     assert_eq!(failed, Err(panicked("read callback", "buffer gone")));
 }
 
+/// An app's own hook, run as a panic begins, reads the operation of the
+/// innermost catch on the panicking thread: the inner one while it runs, the
+/// outer one once it has ended, and none outside every catch.
+#[test]
+fn a_hook_names_the_innermost_catch_s_operation() {
+    assert_eq!(catching_operation(), None);
+    let outer = caught_sync("serve a message", || {
+        let inner = caught_sync("decode", catching_operation);
+        assert_eq!(inner, Ok(Some("decode")));
+        catching_operation()
+    });
+    assert_eq!(outer, Ok(Some("serve a message")));
+    assert_eq!(catching_operation(), None);
+}
+
+/// A panic that work handles itself inside a catch, as tokio does for a
+/// task it runs on the catch's thread, still finds that catch's operation as
+/// the hook runs.
+#[test]
+fn a_panic_handled_inside_a_catch_names_the_catch_s_operation() {
+    static NAMED: std::sync::Mutex<Vec<Option<&'static str>>> = std::sync::Mutex::new(Vec::new());
+    let earlier = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        if panic_message(panic.payload()) == "a handled panic names its catch" {
+            NAMED.lock().unwrap().push(catching_operation());
+        }
+        earlier(panic);
+    }));
+    let served = caught_sync("serve a message", || {
+        std::panic::catch_unwind(|| -> u8 { panics("a handled panic names its catch") })
+            .unwrap_or(0)
+    });
+    assert_eq!(served, Ok(0));
+    assert_eq!(*NAMED.lock().unwrap(), [Some("serve a message")]);
+}
+
 /// coven's hook runs in front of the one the app set, which still hears
 /// every panic.
 #[test]
@@ -267,6 +305,7 @@ fn a_bug_made_without_a_panic_names_where_it_was_made() {
         bug.location,
         Some(SourceLocation { file: file!().to_string(), line: made_on, column: 15 })
     );
+    assert_eq!(bug.kind, BugKind::Found);
     assert_eq!(
         bug.to_string(),
         "release reserved file names panicked: 2 released names were not reserved"
@@ -308,6 +347,7 @@ async fn a_joined_payload_whose_drop_panics_does_not_unwind() {
             operation: "upload a file",
             message: "a panic whose payload is not text".to_string(),
             location: None,
+            kind: BugKind::Panic,
         })
     );
 }
