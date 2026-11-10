@@ -803,7 +803,7 @@ async fn slots_that_land_while_finding_keys_raise_its_total() {
 }
 
 /// Reads run ahead of the slot being applied. When a slot cannot apply, the
-/// reads already started past it may finish, but the device moves no further
+/// reads already started past it finish, but the device moves no further
 /// than the slot before it, for a device that has the keys and for a restore
 /// that is still finding them (§6.1).
 #[tokio::test]
@@ -826,21 +826,25 @@ async fn reads_already_started_past_a_blocked_slot_move_nothing_past_it() {
 
     let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     for (device, has_keys) in [(&ben, true), (&laptop, false)] {
-        let first = device.sync.pass().await;
+        // The blocked slot's read waits until a read past it has gone out.
+        let (observed, _held) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        device.storage.hold_next_read(path.clone(), observed, resume).await;
+        let mut requests = device.storage.subscribe_requests();
+        let first = device.sync.pass();
+        tokio::pin!(first);
+        while !slot_reads(&device.storage).iter().any(|slot| *slot > blocked) {
+            tokio::select! {
+                result = &mut first => panic!("the pass ended with slot {blocked} held: {result:?}"),
+                changed = requests.changed() => changed.unwrap(),
+            }
+        }
+        release.send(()).unwrap();
+        let first = first.await;
         assert!(
             matches!(&first, Err(SyncError::Damaged(damaged)) if damaged.path == path.as_str()),
             "{first:?}"
         );
-        let read_past = device
-            .storage
-            .request_trace()
-            .into_iter()
-            .filter_map(|request| match request {
-                coven_storage::test_utils::MemoryRequest::Read(path, _) => path.slot_number(),
-                _ => None,
-            })
-            .any(|slot| slot.get() > blocked);
-        assert!(read_past, "the reads in flight finish past the blocked slot");
         let applied = device.database().applied_slot().await.unwrap();
         assert!(applied < blocked, "applied through {applied}, past the blocked slot {blocked}");
         if has_keys {
