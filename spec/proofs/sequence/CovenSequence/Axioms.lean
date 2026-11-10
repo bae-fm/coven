@@ -438,6 +438,7 @@ import SequenceApply
 #print axioms CovenSequence.RestoreRegistration.ended_call_leaves_nothing_unlisted
 #print axioms CovenSequence.RestoreRegistration.failure_keeps_installation
 #print axioms CovenSequence.RestoreRegistration.replaced_restore_stuck
+#print axioms CovenSequence.RestoreRegistration.forgotten_registration_stuck
 #print axioms CovenSequence.FirstInstallation.restore_strands_join
 #print axioms CovenSequence.FirstInstallation.join_strands_restore
 #print axioms CovenSequence.FirstInstallation.cancel_strands_acceptance

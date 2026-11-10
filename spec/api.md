@@ -6093,6 +6093,11 @@ while let Some(result) = status.next().await {
   L below c means absent; equal with the recorded digest means landed; above, or
   equal with another digest, means another copy of this device id;
   the resulting app or admin state is not evidence that a claim landed.
+- A call asking for work the journal already holds, a registration, a reset of
+  the same audience, a removal of the same device or the same access record,
+  runs that operation, as a retry does, even while it waits out its retry; it
+  never journals a second one, whose claim would meet the first's
+  ([§11.4](coven.md#114-crashes-and-waiting)).
 - If validation fails, undo the operation's artifacts and end `Rejected`: a
   call waiting for the operation returns it, and `coven_operations` lists it
   for one an app's write journaled. Failed undo reports both causes and keeps

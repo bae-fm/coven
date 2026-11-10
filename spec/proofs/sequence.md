@@ -1308,7 +1308,11 @@ Without `undo`, a call that fails before the record leaves its installation
 for a later listing to reclaim (`failure_keeps_installation`). Without
 `stops`, counting only a removal as the device gone, a restore whose
 member's keys were replaced after it registered stays listed, and every
-resume fails on every path (`replaced_restore_stuck`).
+resume fails on every path (`replaced_restore_stuck`). Without `reuse`, a
+resume journals a second registration rather than run the one its journal
+holds. Once the first one's task has failed with its claim open, waiting for
+the app to call again, the second's claim meets that open claim and every
+resume fails on every path (`forgotten_registration_stuck`).
 
 [`FirstInstallation`](sequence/CovenSequence/FirstInstallation.lean)
 models one store's unfinished first installation on a device, which a join

@@ -31,6 +31,27 @@ pub(crate) enum Request {
     /// One key copy this device's member owes a current member (§12.1).
     Copy(#[serde(with = "route")] KeyCopyPrefix),
 }
+
+impl Request {
+    /// Whether this journaled request is the work `asked` asks for, so a
+    /// call asking for it again runs this one (§11.4). An installation
+    /// registers once, so every registration is the same work, whatever
+    /// name it carries.
+    pub(crate) fn carries(&self, asked: &Request) -> bool {
+        match (self, asked) {
+            (
+                Self::Change(StoreChange::AddDevice { .. }),
+                Self::Change(StoreChange::AddDevice { .. }),
+            ) => true,
+            (Self::Change(journaled), Self::Change(asked)) => journaled == asked,
+            (Self::Snapshot(journaled), Self::Snapshot(asked)) => {
+                journaled.audience == asked.audience && journaled.purpose == asked.purpose
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) enum OperationStep {
     Preparing,
@@ -216,24 +237,22 @@ impl SequenceSync {
                     return Ok(None);
                 }
             }
-            // Recording a key the journal already records runs that record
-            // now: a second one's claim would meet the first's open claim
-            // (§14.3).
-            if let Request::Change(StoreChange::SetAccess { member: recorded, access }) = &request {
-                if let Some(id) = owner.access_operation(*recorded, access).await? {
-                    owner.retry_operation(id).await?;
-                    return owner
-                        .run_administration(&mut session, &mut ring, &member, id)
-                        .await
-                        .and_then(crate::operation_outcome::into_slot);
-                }
-            }
             let creation = matches!(request, Request::Change(StoreChange::CreateStore { .. }));
-            match owner
-                .start_request(&mut session, &mut ring, &member, request, "operation")
-                .await
-                .and_then(crate::operation_outcome::into_slot)
-            {
+            // Work the journal already holds runs now, even while it waits
+            // for the app to ask again: a second operation for it would meet
+            // the first's open claim, and a claimed entry is final (§11.4).
+            let ran = match owner.journaled(|journaled| journaled.carries(&request)).await? {
+                Some(id) => {
+                    owner.retry_operation(id).await?;
+                    owner.run_administration(&mut session, &mut ring, &member, id).await
+                }
+                None => {
+                    owner
+                        .start_request(&mut session, &mut ring, &member, request, "operation")
+                        .await
+                }
+            };
+            match ran.and_then(crate::operation_outcome::into_slot) {
                 // Another creation claimed slot 1 first (§10).
                 Err(SyncError::Rejected(_)) if creation => {
                     Err(coven_storage::StorageFailure::StoreExists.into())
@@ -353,19 +372,19 @@ impl SequenceSync {
         Ok(true)
     }
 
-    /// Whether a journaled operation already carries `request`'s kind of work.
+    /// The journaled operation whose request `carries` picks, if one runs.
     pub(crate) async fn journaled(
         &self,
         carries: impl Fn(&Request) -> bool,
-    ) -> Result<bool, SyncError> {
+    ) -> Result<Option<OperationId>, SyncError> {
         for record in self.database.operations().await? {
             if record.kind == operation_kind::SEQUENCE
                 && carries(&serde_json::from_slice::<SequenceOperation>(&record.data)?.request)
             {
-                return Ok(true);
+                return Ok(Some(record.id));
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Coven's own work started in a pass: once journaled, its failure is the
@@ -381,7 +400,7 @@ impl SequenceSync {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.state.check()?;
-                if self.journaled(carries).await? {
+                if self.journaled(carries).await?.is_some() {
                     Ok(())
                 } else {
                     Err(error)

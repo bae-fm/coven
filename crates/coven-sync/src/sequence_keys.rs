@@ -178,7 +178,7 @@ impl SequenceSync {
                     if *rotated == audience)
                 };
                 // A journaled rotation resumes under its own backoff.
-                if self.journaled(rotates).await? {
+                if self.journaled(rotates).await?.is_some() {
                     continue;
                 }
                 let result = self.install_key(session, ring, member, audience.clone()).await;

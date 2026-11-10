@@ -178,7 +178,7 @@ impl SequenceSync {
             let sends =
                 |request: &Request| matches!(request, Request::Copy(owed) if *owed == route);
             // A journaled copy resumes under its own backoff.
-            if self.journaled(&sends).await? {
+            if self.journaled(&sends).await?.is_some() {
                 continue;
             }
             let result = self

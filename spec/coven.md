@@ -3707,6 +3707,20 @@ snapshot body is deleted (§16.3).
   a pass, which runs the operation once storage is connected. A record that never
   retries, or only after an update not installed yet, refuses the retry and fails
   the write.
+- **Asking again runs the journaled work.** Ana restores Household on her
+  laptop, and Dropbox refuses the laptop's sign-in as it sends its
+  registration. Nothing is stored, and the registration waits, its claim
+  open, for the app to call again. She signs in and resumes the restore.
+  A second registration would claim beside the first's open claim and fail,
+  on every resume, and the restore would stay listed for good
+  ([`forgotten_registration_stuck`](proofs/sequence/CovenSequence/RestoreRegistration.lean)).
+  So a call that asks for work its journal already holds runs that
+  operation now, as a retry does, and never journals another: the resume
+  sends the first registration's bytes again (§5.1). An installation
+  registers once, so any registration journaled is the one asked for.
+  Asking again to reset an audience, to remove this device or to record an
+  S3 key (§14.3) runs the journaled one the same way. A record that refuses
+  a retry refuses the call too.
 - **Occupied paths.** Preparation that creates objects outside the sequence (a
   snapshot, a join request) uses fixed paths. An occupied one
   counts as this attempt's only under §19.3's complete byte comparison with what
@@ -3757,7 +3771,10 @@ storage, is an operation, held to §11.3 and §11.4:
   undone.
 - **Crashes settle.** After a restart the device reads the journal. Work that
   never reached its point of no return is undone. Work past it settles its
-  claim (§5.1) once the device connects, then finishes.
+  claim (§5.1) once the device connects, then finishes. A call that resumes
+  it, such as `resume_restore` or `resume_deletion`, runs the journaled
+  operation even while it waits out its retry, rather than starting another
+  (§11.4).
 - **Dropped calls keep going,** to the end or to the undo.
 - **Deleting from the device only goes forward.** Deleting a store from the
   device removes this device's keychain entries for it, its directory and
@@ -12775,6 +12792,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A failure part way through forgetting a store's saved entries leaves the store listed, never an unlisted key, and calling again finishes; deleting the code first would strand the key. Replacing a saved entry, writing the first group's copy and then deleting the others, leaves it present and, with copies in several groups, unreadable at every cut, and repeating the change leaves one copy of the new bytes; deleting before the write would leave it absent | `forget_cut_listed`, `forget_finishes`, `code_first_strands`, `replace_cut_present`, `replace_cut_ambiguous`, `replace_finishes`, `delete_then_write_loses` | `proofs/sequence/CovenSequence/SavedEntries.lean` | §13.1 |
 | *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
 | *Body.* A restore whose facts count only a removal stays listed for good once its member's keys are replaced after it registers: every resume fails | `replaced_restore_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1, §14.1 |
+| *Body.* A restore whose resume journals a second registration, rather than run the one its journal holds, stays listed for good once the first one's claim is open and its task has failed: every resume fails | `forgotten_registration_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.4, §13.1 |
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |
 | A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |

@@ -486,6 +486,34 @@ async fn a_deletion_failing_after_its_removal_was_journaled_is_listed_and_resume
     network.close().await;
 }
 
+/// The provider refuses the phone's removal outright: nothing is stored,
+/// and the deletion fails with its removal journaled and claimed, waiting
+/// for the app to call again. `resume_deletion` runs that removal, which
+/// sends it again, rather than journaling a second one whose claim would
+/// meet the first's (§11.4, E1).
+#[tokio::test]
+async fn a_resumed_deletion_runs_the_removal_the_provider_refused() {
+    let mut network = Network::new(2).await;
+    let phone = &network.devices[1];
+    let device = phone.app.store_dir(&phone.store).settings().unwrap().device_id;
+    stopped(phone).await;
+    let slot = std::num::NonZeroU64::new(phone.handle.applied_slot().await + 1).unwrap();
+    let removal = coven_storage::ObjectPath::slot(phone.store, slot);
+    let refused = (coven_storage::StorageFailure::ProviderUnavailable, 503);
+    phone
+        .storage
+        .set_faults(Faults { create_failures: [(removal, refused)].into(), ..Faults::none() })
+        .await;
+    let failed = phone.handle.delete_store(IfUnsent::Refuse).await;
+    phone.storage.set_faults(Faults::none()).await;
+    assert!(matches!(failed, Err(StoreDeletionError::Unfinished(_))), "{failed:?}");
+    network.reopen(phone).resume_deletion(phone.store).await.unwrap();
+    assert!(phone.app.stores().await.unwrap().is_empty());
+    network.devices.remove(1);
+    assert!(removed(&mut network, device).await);
+    network.close().await;
+}
+
 /// The phone's removal applies, and closing its handle fails, as a crash
 /// right after the removal would leave it. The store is recorded as being
 /// deleted: it doesn't open, read only or for use, as a removed store with

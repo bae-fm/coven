@@ -252,6 +252,37 @@ async fn a_resumed_restore_finishes_the_registration_it_journaled() {
     owner.close().await;
 }
 
+/// Ana's laptop sends its registration, and the provider refuses the
+/// laptop's credentials, so nothing is stored and the call fails. The
+/// registration stays journaled with its claim, waiting for the app to call
+/// again. Resuming runs that registration, which sends it again, and
+/// finishes without registering a second time: a second registration's
+/// claim would meet the first's (§13.1, §11.4).
+#[tokio::test]
+async fn a_resumed_restore_finishes_a_registration_whose_credentials_were_refused() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let slot = std::num::NonZeroU64::new(owner.applied().await + 1).unwrap();
+    let path = ObjectPath::slot(owner.directory.id(), slot);
+    owner
+        .storage
+        .set_faults(Faults {
+            create_failures: [(path, (StorageFailure::Authentication, 403))].into(),
+            ..Faults::none()
+        })
+        .await;
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    let ended = restoring(&owner, builder, &cancel).await;
+    assert!(ended.is_err(), "{ended:?}");
+    owner.storage.set_faults(Faults::none()).await;
+    let device = laptop(&install, &owner);
+    assert!(!ana_devices(&owner).await.iter().any(|known| known.id == device));
+    assert_eq!(listed(&install, &owner).await, [owner.directory.id()]);
+    finished(&install, &owner, resume(&install, &owner).await.unwrap()).await;
+    owner.close().await;
+}
+
 /// Ana's laptop registers and its call fails before it learns so. Before
 /// she resumes, her phone replaces her member keys with a pair the laptop
 /// doesn't hold. The laptop's entry stays active in history, but it is gone

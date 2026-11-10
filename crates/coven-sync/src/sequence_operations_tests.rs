@@ -639,6 +639,41 @@ async fn a_preparation_covered_by_a_later_announcement_is_recaptured() {
     }
 }
 
+/// The provider refuses the activation of Ana's reset, after its claim was
+/// journaled, so the call fails and the reset waits for her to ask again.
+/// Asking for the reset again runs that journaled reset, which sends its
+/// activation again, rather than starting a second one whose claim would
+/// meet the first's (§11.4, §19.4).
+#[tokio::test]
+async fn asking_again_for_a_reset_runs_the_journaled_one() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let boundaries = ana.sync.session.lock().await.history.boundaries.len();
+    let prepared = ana.sync.database.applied_slot().await.unwrap();
+    let activation = ObjectPath::slot(group.store, (prepared + 2).try_into().unwrap());
+    group
+        .storage
+        .set_faults(Faults {
+            create_failures: [(activation, (StorageFailure::ProviderUnavailable, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana.sync.reset(Audience::Store).await.is_err());
+    group.storage.set_faults(Faults::none()).await;
+    ana.sync.reset(Audience::Store).await.unwrap();
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert!(ana.sync.database.current_claim().await.unwrap().is_none());
+    let history = ana.sync.session.lock().await.history.clone();
+    assert_eq!(history.boundaries.len(), boundaries + 1);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// A breaking migration journals its raise with the schema; passes publish
 /// it for every audience it captured, and a member that migrated later
 /// takes the published raise instead of raising again (§18.3).
