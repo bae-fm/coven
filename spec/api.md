@@ -1474,7 +1474,7 @@ pub enum DbError {
     /// committed.
     DeviceOnlyUnreferenced { file: FileId },
     /// A pin prepared over a whole copy already kept found that copy gone
-    /// when its write committed it, evicted since: nothing was pinned, and
+    /// when its write committed it, evicted or unpinned since: nothing was pinned, and
     /// preparing again downloads it. A prepare whose partial download the
     /// app's unpin ended meanwhile fails with it too (§17.8).
     PinChanged { file: FileId },
@@ -6641,20 +6641,22 @@ impl CovenWrite<'_> {
     /// Keeps a prepared pin's files whole on this device regardless of the
     /// cache budget, which their bytes don't count toward, as a step of this
     /// write (§4, §17.8): each whole copy
-    /// becomes the file's pinned cache entry, and each copy already kept is
-    /// pinned. A pin prepared in another open store, or in this one before
+    /// becomes the file's pinned cache entry, and each copy already kept
+    /// stays. A pin prepared in another open store, or in this one before
     /// it closed, fails with `PreparedElsewhere`; a file whose record left
     /// its stored bytes since with `NoLongerStored`, keeping nothing; and a
-    /// copy already kept that the budget evicted since, or a download
+    /// copy already kept that the app evicted or unpinned since, or a download
     /// the app's unpin ended, with `PinChanged`, which preparing again
     /// downloads.
     pub fn pin(&self, prepared: PreparedPin) -> Result<(), DbError>;
 
-    /// Stops keeping files, as a step of this write (§4, §17.8): each file's
-    /// pin ends and its namespace is evicted down to its budget in the
-    /// write, and the evicted bytes go once it has committed. A file on one
-    /// device only, or one this device has no record of, has no pin to
-    /// release. A file kept here whose pin coven has not yet made has its
+    /// Stops keeping files and removes their copies from this device, as a
+    /// step of this write (§4, §17.8): every cache entry of each file's
+    /// bytes, the pinned whole copy and any chunks or header, and the
+    /// partial download a pin left, go in the write, and the bytes go once
+    /// it has committed. Nothing else is evicted, whatever room the budget
+    /// has. A later read downloads the file again. A file on one device
+    /// only, or one this device has no record of, has nothing to remove. A file kept here whose pin coven has not yet made has its
     /// pin request ended too: `coven_pin_requests` loses it in this write,
     /// and coven never makes that pin.
     pub fn unpin(&self, files: &[FileId]) -> Result<(), DbError>;

@@ -26,7 +26,10 @@ evicting with it present evicts what evicting without it does
 (`pinned_kept`), nor a file's header while a chunk of the file is cached, and
 another namespace's entries stay (`other_namespace_kept`). Every evicted entry
 was read no later than every unpinned chunk of the namespace that stays
-(`least_recent_first`). Eviction is a function of the entries, so it never
+(`least_recent_first`). The app's unpin removes every entry of the unpinned
+files' bytes (`unpin_removes`) and evicts nothing else, in any namespace
+(`unpin_keeps_others`); no trim follows it, since removing bytes cannot put a
+namespace over its budget. Eviction is a function of the entries, so it never
 fails a read.
 
 [Downloads.lean](io/CovenIO/Downloads.lean) models validated file chunks,

@@ -596,3 +596,27 @@ async fn a_new_file_over_a_moving_file_joins_its_move() {
     assert!(listed(&db).await.is_empty());
     db.close().await.unwrap();
 }
+
+/// Two records over the same stored bytes share one cached copy: unpinning
+/// either removes it, since the cache names the bytes, not the record
+/// (§17.8).
+#[tokio::test]
+async fn unpinning_one_of_two_records_over_the_same_bytes_removes_the_shared_copy() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let photo = stored(&db, b"photo").await;
+    let copy = share_into(&db, 2, CIRCLE, photo).await;
+    assert_ne!(copy, photo);
+    let owner = crate::FileDatabase::new(db.clone());
+    let file = db.file_ref(photo).await.unwrap();
+    let name = coven_foundation::files::FileName::new("whole").unwrap();
+    let reservation = owner.reserve_cache_file(&file, name).await.unwrap();
+    std::fs::write(store.database_path().parent().unwrap().join("cache").join("whole"), b"photo")
+        .unwrap();
+    owner.commit_pin(owner.prepared_pin(vec![reservation], Vec::new()).unwrap()).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    db.write(move |sql| sql.unpin(&[copy])).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert!(!store.database_path().parent().unwrap().join("cache").join("whole").exists());
+    db.close().await.unwrap();
+}

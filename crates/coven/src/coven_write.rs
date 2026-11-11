@@ -85,12 +85,13 @@ impl<'write> CovenWrite<'write> {
         self.sql.cancel_move(id)
     }
 
-    /// Releases the pins on these files' stored bytes, then evicts each of
-    /// their namespaces down to its budget (§17.8). A file this device has
-    /// no record of, or one on one device only, has no pin to release. A
-    /// file kept here whose pin coven has not yet made has its pin request
-    /// ended too: `coven_pin_requests` loses it, and coven never makes that
-    /// pin (§17.8). The evicted bytes go once the write has committed.
+    /// Removes these files' copies from this device: every cache entry of
+    /// their stored bytes, pinned or not, and the partial download a pin
+    /// left (§17.8). Nothing else is evicted. A file this device has no
+    /// record of, or one on one device only, has nothing to remove. A file
+    /// kept here whose pin coven has not yet made has its pin request ended
+    /// too: `coven_pin_requests` loses it, and coven never makes that pin
+    /// (§17.8). The bytes go once the write has committed.
     pub fn unpin(&self, files: &[FileId]) -> Result<(), DbError> {
         self.sql.unpin(files)
     }
@@ -144,11 +145,11 @@ impl<'write> CovenWrite<'write> {
 
     /// Keeps a prepared pin's files whole on this device, regardless of the
     /// cache budget, which their bytes don't count toward (§17.8): each whole copy becomes the file's pinned cache
-    /// entry, and each copy already kept is pinned, all in this write.
+    /// entry, and each copy already kept stays, all in this write.
     /// Files prepared in another open store, or in this one before it
     /// closed, fail with `PreparedElsewhere`; a file whose record left its
     /// stored bytes since with `NoLongerStored`; and a copy already kept
-    /// that was evicted since with `PinChanged`, which preparing again
+    /// that was evicted or unpinned since with `PinChanged`, which preparing again
     /// downloads.
     pub fn pin(&self, prepared: PreparedPin) -> Result<(), DbError> {
         self.sql.pin(prepared)

@@ -234,6 +234,9 @@ pub(crate) fn initial_schema() -> String {
         (_coven_cache, $sql:literal) => {
             sql.push_str(&format!($sql));
         };
+        (_coven_cache_budgets, $sql:literal) => {
+            sql.push_str(&format!($sql));
+        };
         ($table:ident, $sql:literal) => {
             sql.push_str($sql);
         };

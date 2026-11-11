@@ -9,12 +9,15 @@ is cached, since chunks need it for offline opens. Eviction in one namespace
 never touches another. It is a function of the entries, so it never fails a
 read: the read that went over budget commits, and the eviction follows.
 
+An unpin removes the entries of the unpinned files' bytes, and no other.
+
 This mirrors `file_cache::trim_entries`, which orders by the last read and
 then the cache file's name. -/
 
 /-- One cache entry: a cached range of chunks, or a file's header. `space` is
 its namespace, `object` the stored file it is part of, and `name` its cache
-file's name, unique among entries. -/
+file's name, unique among entries. `pinned` marks a pinned whole copy: the
+cache stores no flag, since a whole copy is the pinned one. -/
 structure Entry where
   space : Nat
   name : Nat
@@ -278,5 +281,26 @@ theorem least_recent_first (budget ns : Nat) :
           have ev : evictable es ns y = true := by simp [evictable, ns_, unpinned, chunk]
           exact (oldest_min _ x chosen).2 y (List.mem_filter.mpr ⟨inEs, ev⟩)
         · exact least_recent_first budget ns fuel _ x later y hy ns_ unpinned chunk
+
+/-- §17.8: the app's unpin of stored files, named by their namespace and
+object. It removes every entry of their bytes, pinned whole copy and cached
+chunks and headers alike, and nothing else: no trim follows, since removing
+bytes cannot put a namespace over its budget. -/
+def unpin (targets : List (Nat × Nat)) (es : List Entry) : List Entry :=
+  es.filter fun e => !targets.contains (e.space, e.object)
+
+/-- **Unpinning removes the files' entries.** -/
+theorem unpin_removes (targets : List (Nat × Nat)) (es : List Entry) :
+    ∀ e ∈ unpin targets es, (e.space, e.object) ∉ targets := by
+  intro e he hin
+  simp [unpin] at he
+  exact he.2 hin
+
+/-- **Unpinning evicts nothing else, in any namespace.** -/
+theorem unpin_keeps_others (targets : List (Nat × Nat)) (es : List Entry) :
+    ∀ x ∈ es, (x.space, x.object) ∉ targets → x ∈ unpin targets es := by
+  intro x hx hout
+  simp [unpin]
+  exact ⟨hx, hout⟩
 
 end CovenIO.Budget

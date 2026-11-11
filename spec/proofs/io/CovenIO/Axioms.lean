@@ -206,6 +206,8 @@ import CovenIO
 #print axioms CovenIO.Budget.within_budget_keeps_all
 #print axioms CovenIO.Budget.pinned_crowds_nothing
 #print axioms CovenIO.Budget.least_recent_first
+#print axioms CovenIO.Budget.unpin_removes
+#print axioms CovenIO.Budget.unpin_keeps_others
 #print axioms CovenIO.Retired.member_cutoff_covers
 #print axioms CovenIO.Retired.every_gone_folder_cleaned
 #print axioms CovenIO.Keep.original_only_here

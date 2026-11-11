@@ -53,11 +53,10 @@ impl FileDatabase {
         self.database.write(move |sql| sql.pin(prepared)).await
     }
 
-    /// Whether a checked whole copy of this stored file is kept here, pinned
-    /// or not.
-    pub async fn whole_kept(&self, file: &FileRef) -> Result<bool, DbError> {
+    /// Whether a checked whole copy of this stored file is kept here, pinned.
+    pub async fn kept(&self, file: &FileRef) -> Result<bool, DbError> {
         let file = file.clone();
-        self.read(move |db| super::cache::whole(db, &file)).await
+        self.read(move |db| super::cache::kept(db, &file)).await
     }
 }
 

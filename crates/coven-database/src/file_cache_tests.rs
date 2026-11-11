@@ -8,16 +8,10 @@ pub(crate) fn cached(
     read: i64,
 ) -> Result<usize, crate::DbError> {
     db.internal_execute(
-        "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned)
-         VALUES('files',?1,0,?2,?3,?4,0)",
+        "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read)
+         VALUES('files',?1,0,?2,?3,?4)",
         (object_path, path, size, read),
     )
-}
-
-/// Release every pinned whole copy to the plain cache, as it stood before
-/// it was pinned.
-pub(crate) fn unpin_in_place(db: &crate::sqlite::DatabaseConnection) {
-    db.internal_execute("UPDATE _coven_cache SET pinned=0", []).unwrap();
 }
 
 /// Record a cache range at `path` as being written, as a crash mid-write
@@ -30,9 +24,9 @@ pub(crate) fn writing(db: &crate::sqlite::DatabaseConnection, path: &str) {
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned,checked_hash)
+        "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash)
            SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
-                  65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
+                  65536,i,
                   CASE WHEN (i/64)%4=0 THEN key END FROM fixture;
          INSERT INTO _coven_cache_budgets(namespace,bytes) SELECT 'audience_' || i,counter(1048576) FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes;
          INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
@@ -51,7 +45,7 @@ use crate::{
 use coven_foundation::files::FileName;
 
 /// A stored file of these bytes, referenced by row `8`, beside `stored`'s.
-async fn stored_second(db: &Database, bytes: Vec<u8>) -> FileRef {
+pub(crate) async fn stored_second(db: &Database, bytes: Vec<u8>) -> FileRef {
     let file = db
         .staged_write::<_, _, _, _, DbError>(
             move |batch| Ok(batch.put_file("files", bytes, crate::Place::Cloud)),
@@ -67,7 +61,8 @@ async fn stored_second(db: &Database, bytes: Vec<u8>) -> FileRef {
 }
 
 /// A namespace's `cached` and `pinned` byte counts are the sums of its
-/// entries by `pinned`, read from the entries themselves.
+/// chunks and headers, and of its whole copies, read from the entries
+/// themselves.
 fn counters(db: &Database) -> (i64, i64) {
     db.inspect_writer(|sql| {
         let recorded = (
@@ -81,7 +76,7 @@ fn counters(db: &Database) -> (i64, i64) {
         );
         let sum = |pinned: i64| -> i64 {
             sql.query_row(
-                "SELECT coalesce(sum(size),0) FROM _coven_cache WHERE namespace='files' AND pinned=?1",
+                "SELECT coalesce(sum(size),0) FROM _coven_cache WHERE namespace='files' AND (chunk=-2)=?1",
                 [pinned],
                 |r| r.get(0),
             )
@@ -148,30 +143,6 @@ async fn pinned_bytes_are_counted_apart_from_cached_bytes() {
     db.close().await.unwrap();
 }
 
-/// Pinning a whole copy already cached moves its bytes from `cached` to
-/// `pinned`, so pinning it frees budget (§17.8).
-#[tokio::test]
-async fn pinning_a_cached_copy_moves_its_bytes_out_of_the_budget() {
-    let store = TestStore::new();
-    let db = open(&store, Provenance::AppProvided).await;
-    let file = stored(&db, vec![5; 100]).await;
-    let owner = FileDatabase::new(db.clone());
-    let reservation =
-        owner.reserve_cache_file(&file, FileName::new("whole").unwrap()).await.unwrap();
-    std::fs::write(
-        store.database_path().parent().unwrap().join("cache").join("whole"),
-        b"whole file",
-    )
-    .unwrap();
-    owner.commit_pin(owner.prepared_pin(vec![reservation], Vec::new()).unwrap()).await.unwrap();
-    let (_, size) = counters(&db);
-    db.inspect_writer(|sql| unpin_in_place(sql));
-    assert_eq!(counters(&db), (size, 0));
-    owner.commit_pin(owner.prepared_pin(Vec::new(), vec![file]).unwrap()).await.unwrap();
-    assert_eq!(counters(&db), (0, size));
-    db.close().await.unwrap();
-}
-
 /// Pinned copies don't count toward the budget (§17.8): a namespace whose
 /// pinned bytes are over its budget still caches unpinned bytes up to it, and
 /// trims none of the pinned.
@@ -206,5 +177,29 @@ async fn a_pinned_copy_over_the_budget_crowds_out_no_cached_bytes() {
     owner.cache_range(&other, 1, 1, FileName::new("second").unwrap(), vec![3; 30]).await.unwrap();
     owner.trim_cache("files").await.unwrap();
     assert_eq!(names(&db), ["second", "whole"]);
+    db.close().await.unwrap();
+}
+
+/// Unpinning a file removes its cached chunks and header as well, with no
+/// pin to release (§17.8): the files' copies leave the device, and the
+/// counters follow.
+#[tokio::test]
+async fn unpinning_removes_cached_chunks_and_headers() {
+    use crate::file_write::tests::local_count;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
+    let owner = FileDatabase::new(db.clone());
+    owner.cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11]).await.unwrap();
+    owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
+    db.write(|sql| sql.set_cache_budget("files", 1 << 30)).await.unwrap();
+    assert_eq!(counters(&db), (111, 0));
+    let id = file.id();
+    db.write(move |sql| sql.unpin(&[id])).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(counters(&db), (0, 0));
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    let cache = store.database_path().parent().unwrap().join("cache");
+    assert!(!cache.join("header").exists() && !cache.join("chunk").exists());
     db.close().await.unwrap();
 }

@@ -481,7 +481,6 @@ async fn a_kept_copy_evicted_before_the_write_fails_the_pin() {
     f.files.stop_background_for_counts().await;
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     let id = file.id();
-    f.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
     let requests = f.storage.request_count();
     let prepared = f.files.prepare_pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(f.storage.request_count(), requests, "the kept copy is not downloaded again");
@@ -491,6 +490,31 @@ async fn a_kept_copy_evicted_before_the_write_fails_the_pin() {
     assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(false)]);
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(true)]);
+    f.close().await;
+}
+
+/// Unpinning removes a pinned file's bytes from the device in its write,
+/// with room to spare in the budget (§17.8): the next read fetches from
+/// storage and caches as any read does.
+#[tokio::test]
+async fn an_unpinned_file_leaves_the_device_and_a_read_fetches_it_again() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let bytes = vec![11; CHUNK * 2];
+    let file = f.uploaded("album", bytes.clone()).await;
+    f.files.stop_background_for_counts().await;
+    f.database.write(|sql| sql.set_cache_budget("files", 1 << 30)).await.unwrap();
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    let id = file.id();
+    assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(true)]);
+    f.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
+    assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(false)]);
+    assert_eq!(cache_files(&f), 0, "no byte of the file stays");
+    let requests = f.storage.request_count();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert!(f.storage.request_count() > requests, "the read goes to storage");
+    let requests = f.storage.request_count();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(f.storage.request_count(), requests, "and caches as usual");
     f.close().await;
 }
 

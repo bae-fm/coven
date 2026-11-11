@@ -113,6 +113,37 @@ async fn unpinning_a_file_deletes_its_partial_download() {
     f.close().await;
 }
 
+/// An unpin while a prepare of the file is downloading removes its partial
+/// download and ends the prepare with `PinChanged`, recording nothing, so
+/// nothing of the file stays on the device (§17.8).
+#[tokio::test]
+async fn an_unpin_during_a_prepare_fails_it_and_leaves_nothing() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("album", album()).await;
+    f.files.stop_background_for_counts().await;
+    let id = file.id();
+    let (observed, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_body_at(f.path(&file), REQUEST as u64 + 1, observed, resumed).await;
+    let mut preparing = Box::pin(f.files.prepare_pin(std::slice::from_ref(&file)));
+    tokio::select! {
+        result = &mut preparing => panic!("the download was not held: {:?}", result.err()),
+        held = held => held.unwrap(),
+    }
+    assert!(partial(&f, &file).await.is_some());
+    f.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
+    assert!(partial(&f, &file).await.is_none());
+    resume.send(()).unwrap();
+    let refused = preparing.await.err().expect("the prepare fails");
+    assert!(
+        matches!(refused, FileReadError::Database(DbError::PinChanged { file }) if file == id),
+        "{refused:?}"
+    );
+    assert!(partial(&f, &file).await.is_none());
+    assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(false)]);
+    f.close().await;
+}
+
 /// Once no record here names a file's stored bytes, the partial download of
 /// them goes, as the cached copies do.
 #[tokio::test]

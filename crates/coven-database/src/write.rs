@@ -30,11 +30,12 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.cancel_move(id))
     }
 
-    /// Release the pins on these files' stored bytes, end the pin requests
-    /// coven keeps for them, and evict each of their namespaces down to its
-    /// budget, in this write (§17.8). A file this device has no record of,
-    /// or one on one device only, has no pin to release. The evicted bytes
-    /// go once the write has committed.
+    /// Remove these files' copies from this device in this write: every
+    /// cache entry of their stored bytes, pinned or not, the partial
+    /// download a pin left, and the pin requests coven keeps for them
+    /// (§17.8). Nothing else is evicted. A file this device has no record
+    /// of, or one on one device only, has nothing to remove. The bytes go
+    /// once the write has committed.
     pub fn unpin(
         &self,
         files: &[coven_foundation::id_source::FileId],
@@ -131,11 +132,11 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     }
 
     /// Pin a prepared pin's files in this write (§17.8): each whole copy
-    /// becomes the file's pinned cache entry, and each copy already kept is
-    /// pinned. Files prepared in another open store, or in this one before
+    /// becomes the file's pinned cache entry, and each copy already kept
+    /// stays. Files prepared in another open store, or in this one before
     /// it closed, fail with `PreparedElsewhere`; a file whose record left
     /// its stored bytes since with `NoLongerStored`; and a kept copy evicted
-    /// since with `PinChanged`.
+    /// or unpinned since with `PinChanged`.
     pub fn pin(&self, prepared: crate::PreparedPin) -> Result<(), crate::DbError> {
         self.files.step(|| self.files.pin(prepared))
     }

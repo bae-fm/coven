@@ -7803,10 +7803,11 @@ can't be a step itself.
   of the file runs ends its partial, and the prepare fails with `PinChanged`
   and records nothing. Without the unpin rule, bytes for a pin the app no
   longer wants would stay on disk for good.
-- **A copy already kept is pinned in place.** If a checked whole copy of a file
-  is already in the cache, preparing notes it instead of downloading. If the
-  budget evicts that copy before the write, the write fails with `PinChanged`,
-  and preparing again downloads the file.
+- **A copy already kept is not downloaded again.** If a checked whole copy of a
+  file is already pinned on the device, preparing notes it instead of
+  downloading, and the pin's write keeps it. If the app evicts or unpins that
+  copy before the write, the write fails with `PinChanged`, and preparing
+  again downloads the file.
 - **Download failures belong to the prepare.** A failed download is the stored
   bytes' pending record, as for any pin, and returns to the prepare's caller; a
   download that succeeds clears it.
@@ -7822,12 +7823,17 @@ can't be a step itself.
 
 **Unpinning** is a step of a write (§4). Ben's music app marks an album as no
 longer offline in the same write that unpins its tracks, so the album's row and
-its tracks' pins never disagree. The step releases each file's pin and evicts
-the file's namespace down to its budget, all in that write; the evicted bytes
-go once it has committed and the writer is free (Appendix C.3). A file on one
-device only has no pin to release, nor does one this device has no record of.
-For a file kept here, unpinning also ends the pin request coven keeps for it,
-as described below.
+its tracks' pins never disagree. The step removes each file's copies from this
+device in that write: the pinned whole copy and any cached chunks and header
+alike, and the partial download a pin left. The bytes go once the write has
+committed and the writer is free (Appendix C.3). Nothing else is evicted, and
+room in the budget keeps nothing. Ben unpins an album with 15 GB free in his
+budget, and its tracks leave the phone at once; playing the album again reads
+from storage. Without this, an unpinned album would stay on the phone as
+cache, and Ben could not free the space by unpinning. A file on one device
+only has nothing to remove, nor does one this device has no record of. For a
+file kept here, unpinning also ends the pin request coven keeps for it, as
+described below.
 
 **Kept here.** A file staged for the cloud, or moved to the cloud, can be kept
 here too (`Place::CloudKeptHere`, `MoveFile::AppKeptHere`,
@@ -12958,6 +12964,7 @@ Write-ups explain each model and state its assumptions:
 | A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.7 |
 | A read that succeeds records no condition of its own: one that completes the file settles every condition pending for its bytes, and one that stops short settles all but a refusal, the file unavailable or a required update, which stay as they were until a whole read or a later pin settles them | `read_settles` | `proofs/io/CovenIO/Downloads.lean` | §17.7, §19.1 |
 | Over budget, a namespace evicts its least recently read entries until its unpinned entries are within budget or nothing more may go, and within budget nothing; a pinned entry, a header whose file still has chunks cached, and another namespace's entries stay; a pinned entry crowds nothing out, since evicting with it present evicts what evicting without it does | `within_budget`, `within_budget_keeps_all`, `pinned_kept`, `other_namespace_kept`, `least_recent_first`, `pinned_crowds_nothing` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
+| The app's unpin removes every entry of the unpinned files' bytes, and evicts nothing else in any namespace | `unpin_removes`, `unpin_keeps_others` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
 | A pin's prepare retains and pins nothing and a successful one clears what was pending; only the write committing it keeps the whole file pinned, and only while a record names its stored bytes; bytes no commit takes are never retained | `prepare_retains_nothing`, `prepared_settles`, `commit_pins`, `unnamed_commit_keeps_nothing`, `uncommitted_never_retained` | `proofs/io/CovenIO/Downloads.lean`, `proofs/io/CovenIO/Trace.lean` | §17.8 |
 | Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |
@@ -13112,7 +13119,7 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
 | `DbError::PreparedElsewhere` | a write is given staged files or a prepared pin from another open store, or from this one before it closed | §17.3, §17.8 |
-| `DbError::PinChanged` | a write commits a prepared pin whose already-kept copy was evicted since, or a prepare finds its partial download ended by the app's unpin | §17.8 |
+| `DbError::PinChanged` | a write commits a prepared pin whose already-kept copy was evicted or unpinned since, or a prepare finds its partial download ended by the app's unpin | §17.8 |
 | `DbError::DismissedRowChanged` | a write dismisses a taken-out row and also changes it, or a row its delete cascades to | §8.4 |
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |

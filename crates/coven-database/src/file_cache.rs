@@ -278,8 +278,8 @@ fn publish_range(
         return Ok(false);
     }
     db.internal_execute(
-        "INSERT INTO _coven_cache(namespace,object_path,chunk,chunks,path,size,last_read,pinned)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+        "INSERT INTO _coven_cache(namespace,object_path,chunk,chunks,path,size,last_read)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
         rusqlite::params![
             file.namespace(),
             object_path_of(file)?,
@@ -371,7 +371,7 @@ pub(crate) fn set_budget(
     }
     Ok(())
 }
-/// The namespace's cached bytes: its unpinned entries', which its budget
+/// The namespace's cached bytes: its chunks' and headers', which its budget
 /// counts. Maintained with its cache records.
 pub(crate) fn cached(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
     Ok(db
@@ -402,11 +402,16 @@ pub(crate) fn trim_entries(
     let mut cached = cached(db, namespace)?;
     let mut removed = Vec::new();
     while u64::try_from(cached).map_err(|_| DbError::DamagedDatabase)? > budget {
+        // Only chunks and headers: the budget never counts a whole copy.
+        // The literal is the whole copy's chunk number, which the partial
+        // index `_coven_cache_lru` names, and which the query must repeat
+        // for SQLite to use it.
+        const _: () = assert!(COMPLETE_FILE == -2);
         // Chunks need their header for offline opens. Once the last chunk
         // goes, that header competes on recency with every other entry.
         let next = db.query(
             "SELECT path,size FROM _coven_cache AS candidate
-                 WHERE namespace=?1 AND pinned=0
+                 WHERE namespace=?1 AND chunk>-2
                    AND (chunk!=?2 OR NOT EXISTS(
                        SELECT 1 FROM _coven_cache AS chunks
                        WHERE chunks.namespace=candidate.namespace
@@ -425,9 +430,8 @@ pub(crate) fn trim_entries(
     }
     Ok(removed)
 }
-/// Whether a verified whole cache file of this stored file is kept, pinned
-/// or not.
-pub(super) fn whole(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+/// Whether a pinned, checked whole copy of this file is on the device.
+pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND checked_hash=?3)",
@@ -435,38 +439,8 @@ pub(super) fn whole(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbE
         |r| r.get(0),
     )
 }
-/// Pin a verified whole cache file, if one is kept: its bytes leave the
-/// namespace's cached bytes for its pinned ones. Returns whether one was.
-pub(crate) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
-    let (_, hash) = stored(file)?;
-    Ok(db.internal_execute(
-        "UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND checked_hash=?3",
-        (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
-    )? == 1)
-}
-/// Release a stored file's budget exemption: every entry of its bytes. The
-/// partial download its pin waited on goes too, the app no longer keeping
-/// the file (§17.8).
-pub(crate) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
-    let object = object_path_of(file)?;
-    db.internal_execute(
-        "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND object_path=?2",
-        (file.namespace(), &object),
-    )?;
-    super::partial_pins::remove(db, file.namespace(), &object)?;
-    Ok(())
-}
-/// Whether a pinned, checked whole copy of this file is on the device.
-pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
-    let (_, hash) = stored(file)?;
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",
-        (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
-        |r| r.get(0),
-    )
-}
-/// Publish a written whole file as the file's only cache entry, pinned or
-/// under the budget; older entries become recorded removals in the same
+/// Publish a written whole file as the file's only cache entry, pinned;
+/// older entries become recorded removals in the same
 /// transaction. Its writer wrote the layout the file's size fixes, so that
 /// layout's encrypted size is its size on disk. If no record here names the
 /// file's stored bytes any more, nothing is published, the name's removal
@@ -479,7 +453,6 @@ pub(crate) fn publish(
     db: &DatabaseConnection,
     file: &FileRef,
     name: &FileName,
-    pinned: bool,
 ) -> Result<bool, DbError> {
     let encrypted = coven_format::file::FileHeader::new(file.size()).encrypted_size()?;
     let (_, hash) = stored(file)?;
@@ -500,7 +473,7 @@ pub(crate) fn publish(
     )?;
     // The reservation's cleanup record goes before the row names its bytes.
     crate::file_removals::keep(db, "cache", name.as_str())?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
+    db.internal_execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE])?;
     Ok(true)
 }
 /// Whether a record here names the stored bytes `file` was taken over. The

@@ -173,7 +173,7 @@ pub enum DbError {
         file: coven_foundation::id_source::FileId,
     },
     /// A pin prepared over a whole copy already kept found that copy gone
-    /// when its write committed it, evicted since: nothing was pinned, and
+    /// when its write committed it, evicted or unpinned since: nothing was pinned, and
     /// preparing again downloads it. A prepare whose partial download the
     /// app's unpin ended meanwhile fails with it too (§17.8).
     #[error("the kept copy of file {file} changed since its pin was prepared")]

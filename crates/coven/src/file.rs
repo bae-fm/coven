@@ -41,7 +41,7 @@ impl CovenHandle {
     ) -> LiveQuery<PinProgress, CovenError> {
         self.database.subscribe_pin_progress(files)
     }
-    /// Release pins and apply cache budgets, in a write of its own
+    /// Remove the files' copies from this device, in a write of its own
     /// (`CovenWrite::unpin`).
     pub async fn unpin(&self, files: &[FileId]) -> CovenResult<()> {
         let files = files.to_vec();

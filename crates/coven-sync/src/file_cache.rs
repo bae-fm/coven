@@ -53,7 +53,7 @@ impl Files {
             let prepared: Vec<Result<PreparedFile, FileRef>> = futures_util::stream::iter(current)
                 .map(|file| async move {
                     let work = async {
-                        if self.inner.database.whole_kept(&file).await? {
+                        if self.inner.database.kept(&file).await? {
                             return Ok(Some(PreparedFile::Kept(file.clone())));
                         }
                         Ok(self.inner.download_whole(file.clone()).await?.map(PreparedFile::Copy))

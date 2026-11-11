@@ -832,11 +832,12 @@ async fn a_budget_and_its_eviction_go_with_their_write() {
     db.close().await.unwrap();
 }
 
-/// Unpinning releases a file's whole copy and evicts its namespace down to
-/// the budget in the unpin's own write: the bytes go once it commits, and a
-/// write that fails keeps the pin and every entry (§17.8).
+/// Unpinning removes a file's copies from the device in the unpin's own
+/// write, whatever room the budget has: the pinned whole copy goes, the
+/// other files' entries stay, and the bytes go once it commits. A write that
+/// fails keeps the pin and every entry (§17.8).
 #[tokio::test]
-async fn unpinning_evicts_the_namespace_down_to_its_budget_in_its_write() {
+async fn unpinning_removes_the_files_copies_in_its_write() {
     use crate::file_write::tests::local_count;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
@@ -848,9 +849,11 @@ async fn unpinning_evicts_the_namespace_down_to_its_budget_in_its_write() {
     std::fs::write(cache.join("whole"), b"whole file").unwrap();
     let prepared = owner.prepared_pin(vec![reservation], Vec::new()).unwrap();
     db.write(move |sql| sql.pin(prepared)).await.unwrap();
-    // The pinned copy is over the budget, and pinned, so it stays.
-    db.write(|sql| sql.set_cache_budget("files", 5)).await.unwrap();
-    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    // Another file's cached range, which an unpin of this one leaves alone.
+    let other = super::cache::tests::stored_second(&db, vec![6; 2 * 64 * 1024]).await;
+    owner.cache_range(&other, 0, 1, FileName::new("range").unwrap(), vec![2; 30]).await.unwrap();
+    db.write(|sql| sql.set_cache_budget("files", 1 << 30)).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 2);
     assert_eq!(local_count(&db, "coven_pins"), 1);
     let id = file.id();
     let failed = db
@@ -860,14 +863,15 @@ async fn unpinning_evicts_the_namespace_down_to_its_budget_in_its_write() {
         })
         .await;
     assert!(matches!(failed, Err(DbError::Invariant { .. })));
-    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    assert_eq!(local_count(&db, "_coven_cache"), 2);
     assert_eq!(local_count(&db, "coven_pins"), 1);
     assert!(cache.join("whole").exists());
     db.write(move |sql| sql.unpin(&[id])).await.unwrap();
-    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
     assert_eq!(local_count(&db, "coven_pins"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(!cache.join("whole").exists());
+    assert!(cache.join("range").exists());
     db.close().await.unwrap();
 }
 

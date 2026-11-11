@@ -55,7 +55,7 @@ pub(super) fn source() -> String {
         SELECT f.file FROM _coven_stored_files AS f
         JOIN _coven_cache AS c ON c.namespace=f.namespace
             AND c.object_path=f.object_path AND c.chunk={complete}
-            AND c.pinned=1 AND c.checked_hash=f.hash;
+            AND c.checked_hash=f.hash;
     CREATE TRIGGER _coven_pins_stored_file_added AFTER INSERT ON _coven_stored_files BEGIN ",
     refresh!("SELECT NEW.file"),
     " END;
@@ -69,7 +69,7 @@ pub(super) fn source() -> String {
     CREATE TRIGGER _coven_pins_cached AFTER INSERT ON _coven_cache WHEN NEW.chunk={complete} BEGIN ",
     refresh!(named_by!("NEW")),
     " END;
-    CREATE TRIGGER _coven_pins_cache_changed AFTER UPDATE OF namespace,object_path,chunk,pinned,checked_hash
+    CREATE TRIGGER _coven_pins_cache_changed AFTER UPDATE OF namespace,object_path,chunk,checked_hash
         ON _coven_cache WHEN OLD.chunk={complete} OR NEW.chunk={complete} BEGIN ",
     refresh!(named_by!("OLD")),
     refresh!(named_by!("NEW")),

@@ -41,7 +41,7 @@ async fn pin_stored(db: &crate::Database) -> crate::FileRef {
     let file = stage(db, b"take".to_vec(), true).await.unwrap();
     // Queued, the file is on this device only: it can't be pinned yet.
     let owner = FileDatabase::new(db.clone());
-    assert!(owner.whole_kept(&db.file_ref(file).await.unwrap()).await.is_err());
+    assert!(owner.kept(&db.file_ref(file).await.unwrap()).await.is_err());
     complete_uploads(db).await;
     let file = db.file_ref(file).await.unwrap();
     crate::database::file_database::tests::pin_whole(db, &file, "whole").await.unwrap();
@@ -382,8 +382,8 @@ async fn releases(
     );
     let pins = timed(
         "BEGIN;
-         INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,pinned,checked_hash)
-           SELECT f.namespace, f.object_path, -2, f.object_path, 1, 1, 1, f.hash FROM _coven_stored_files AS f
+         INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash)
+           SELECT f.namespace, f.object_path, -2, f.object_path, 1, 1, f.hash FROM _coven_stored_files AS f
            WHERE CAST(substr(f.object_path,8) AS INTEGER)%120<>1;
          COMMIT;",
     );

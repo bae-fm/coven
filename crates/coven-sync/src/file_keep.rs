@@ -97,7 +97,7 @@ impl FilesInner {
         request: &PinRequest,
         kept: bool,
     ) -> Result<Kept, TransferError> {
-        let prepared = if kept && self.database.whole_kept(file).await? {
+        let prepared = if kept && self.database.kept(file).await? {
             self.database.prepared_pin(Vec::new(), vec![file.clone()])?
         } else {
             let Some(copy) = self.keep(file, request).await? else {
