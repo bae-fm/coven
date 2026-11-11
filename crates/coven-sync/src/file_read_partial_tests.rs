@@ -172,6 +172,25 @@ async fn clearing_the_cache_leaves_a_partial_download() {
     f.close().await;
 }
 
+/// The bytes a stopped pin kept are counted as pinning, apart from the
+/// cache's, until the pin's copy replaces them (§17.8).
+#[tokio::test]
+async fn a_stopped_prepares_bytes_are_counted_as_pinning() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("album", album()).await;
+    f.files.stop_background_for_counts().await;
+    stopped_partway(&f, &file).await;
+    let (_, kept) = partial(&f, &file).await.unwrap();
+    let bytes = f.database.cache_bytes().await.unwrap();
+    assert_eq!(bytes.pinning, kept);
+    assert!(bytes.namespaces.iter().all(|namespace| namespace.pinned == 0));
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    let bytes = f.database.cache_bytes().await.unwrap();
+    assert_eq!(bytes.pinning, 0);
+    assert!(bytes.namespaces.iter().any(|namespace| namespace.pinned > 0));
+    f.close().await;
+}
+
 /// Once no record here names a file's stored bytes, the partial download of
 /// them goes, as the cached copies do.
 #[tokio::test]

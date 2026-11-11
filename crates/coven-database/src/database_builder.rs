@@ -339,6 +339,7 @@ impl DatabaseBuilder {
                 transfers,
                 network,
                 file_tasks: Arc::new(tokio::sync::RwLock::new(())),
+                local_bytes_changes: Arc::new(tokio::sync::watch::channel(0).0),
                 #[cfg(test)]
                 close_waits: Arc::new(Mutex::new(None)),
                 #[cfg(test)]

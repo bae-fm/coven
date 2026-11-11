@@ -7960,6 +7960,25 @@ committed three download ranges. Her first reads and subscriptions show those sa
 parts and ranges, even before storage reconnects. If opening replaced her old
 device (§19.3), both ways of reading the reset notice return that stored notice.
 
+**What the cache holds.** The app shows how much of the device a store takes.
+The cache keeps two byte counts for each declared namespace beside its budget,
+in the statement that changes an entry, so they cannot disagree with the
+entries: `cached`, the bytes of its chunks and headers, which the budget
+counts, and `pinned`, the bytes of its whole copies, which it doesn't.
+Ben's phone has 3 GB of pinned albums and 1 GB of played tracks in a 20 GB
+namespace: `pinned` is 3 GB, `cached` 1 GB. The partial downloads pins left
+are counted apart, as `pinning`, and the store's own files in its directory,
+the database and its journals, the settings, the key files and coven's copies
+of app files, as `library`. One read, `local_bytes`, returns these from a
+single snapshot of the database and a walk of the store's directory. It leaves
+out the cache's folder, since the entries count it, and the archives resets
+kept, which it reports as `before_reset` while there is one (§19.3). A watch
+on it measures once at once, then again after each change to a namespace's
+counters or budget and after each deletion of the archives. A cached read's
+recency and a pin download's growing partial change neither, so they start no
+measurement; a reader slower than the changes gets one measurement of the
+state now ([api.md E8](api.md#e8-files-and-the-cache)).
+
 #### 17.9 Uploads
 
 The staging write queues each file in the same transaction as its record and
@@ -9567,7 +9586,8 @@ laptop in place from her current restore code instead (§13.1).
   directory tree is not atomic, so a failure or an interruption can leave
   an archive part-removed under its name. The call returns the failure to
   its caller and the next call removes what remains; with no archive it
-  succeeds. The store's own files never go.
+  succeeds. The store's own files never go. While an archive is there,
+  `local_bytes` reports its size as `before_reset` (§17.8).
 
 Ana's laptop has uploaded through write 12, but its damaged database may hold
 write 13. Resetting loads the stored history through 12 under a new device id.

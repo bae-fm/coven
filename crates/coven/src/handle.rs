@@ -28,6 +28,9 @@ mod file_cleanup;
 #[path = "handle_discarded_devices.rs"]
 mod discarded_devices;
 
+#[path = "handle_local_bytes.rs"]
+mod local_bytes;
+
 #[path = "handle_device_only.rs"]
 mod device_only;
 

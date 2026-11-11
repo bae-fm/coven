@@ -5766,7 +5766,7 @@ impl CovenHandle {
     /// are never touched. It returns once they are gone. A failure midway
     /// returns its `CovenError::File` and leaves the rest, part of one
     /// perhaps, for the next call, which removes what remains; with none left
-    /// it succeeds.
+    /// it succeeds. While one is there, `local_bytes` reports its size.
     pub async fn delete_discarded_devices(&self) -> CovenResult<()>;
 
     /// This device's pending work, in the order the records arose, as
@@ -6826,6 +6826,58 @@ impl CovenHandle {
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> CovenResult<()>;
     /// A declared namespace's cache budget, in bytes; each evicts on its own.
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
+
+    /// One measurement of what the store keeps on this device (§17.8,
+    /// §19.3): each declared namespace's budget and counters, the partial
+    /// downloads, and the bytes of the store's directory. The counters,
+    /// budgets and partials come from one read of the database; the
+    /// directory is walked after. A failed read or walk is the call's error.
+    pub async fn local_bytes(&self) -> CovenResult<LocalBytes>;
+
+    /// A measurement at once, then a new one after each write that changes a
+    /// namespace's counters or budget, and after each
+    /// `delete_discarded_devices`. Partial downloads are measured with each
+    /// but start none, and neither does a cached read.
+    pub fn subscribe_local_bytes(&self) -> LocalBytesWatch;
+}
+
+/// What a store keeps on this device, in bytes on disk (§17.8, §19.3).
+pub struct LocalBytes {
+    /// Each declared namespace's cache, in declaration order.
+    pub namespaces: Vec<NamespaceBytes>,
+    /// Partial downloads pins left, kept apart from the cache.
+    pub pinning: u64,
+    /// The store's database and its journals, its settings and key files, and
+    /// coven's own copies of files: every file in the store's directory but
+    /// the cache and the archives.
+    pub library: u64,
+    /// The archives resets kept, while there is one.
+    pub before_reset: Option<u64>,
+}
+
+/// One namespace's cache.
+pub struct NamespaceBytes {
+    /// The namespace as declared.
+    pub namespace: String,
+    /// Its budget, declared or since set.
+    pub budget: u64,
+    /// Chunks and headers: what counts toward the budget.
+    pub cached: u64,
+    /// Pinned whole copies.
+    pub pinned: u64,
+}
+
+/// The measurements of `subscribe_local_bytes`.
+pub struct LocalBytesWatch { /* private fields */ }
+
+impl LocalBytesWatch {
+    /// The first measurement at once, then the latest after each change. A
+    /// reader slower than the changes gets one measurement of the state now.
+    /// `None` once the store has closed.
+    pub async fn next(&mut self) -> Option<Result<LocalBytes, DbError>>;
+
+    /// Stops measuring.
+    pub fn cancel(self);
 }
 
 impl FileRef {

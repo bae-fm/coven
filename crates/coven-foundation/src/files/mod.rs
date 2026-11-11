@@ -16,6 +16,7 @@ mod file_reader;
 mod flush_batch;
 mod folder_copy;
 mod layout;
+mod local_bytes;
 mod lock;
 mod lock_registry;
 mod observed_file;
@@ -55,6 +56,7 @@ pub use flush_batch::FlushHook;
 pub use flush_batch::{FlushBatch, Flushed};
 pub use folder_copy::{CopyFolder, CopyPathError, CopyPlan, CopyWriter, MadeFolder, RecordedCopy};
 pub use layout::StoreDirectories;
+pub use local_bytes::DirectoryBytes;
 #[cfg(any(test, feature = "test-utils"))]
 pub use lock::{bootstrap_lock, cache_writes_lock, writer_lock};
 pub use lock::{

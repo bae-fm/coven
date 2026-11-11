@@ -493,6 +493,9 @@ closed_session_types = [
 # the app, which keeps it as long as it follows the results (api.md E4).
 LiveQuery = "Database"
 ReconfigurableLiveQuery = "Database"
+# The measurements of what the store keeps on this device, repeated as the
+# cache's counters, a budget or the archives change (api.md E8).
+LocalBytesWatch = "Database"
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).
 LiveQueryRequests = "ReconfigurableLiveQuery"

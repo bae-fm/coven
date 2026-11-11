@@ -275,6 +275,12 @@ impl StoreDir {
         super::device_reset::delete_archives(&self.path)
     }
 
+    /// What this store's directory holds, in file sizes (§17.8, §19.3): its
+    /// own files, apart from the cache, and the installations resets kept.
+    pub fn local_bytes(&self) -> Result<super::DirectoryBytes, FileError> {
+        super::local_bytes::measure(&self.path, FileArea::Cache.name())
+    }
+
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId {
         self.id

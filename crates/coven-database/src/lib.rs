@@ -176,6 +176,7 @@ pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,
     StagedDigest, UnprovenFiles,
 };
+pub use database::local_bytes::{CacheBytes, LocalBytes, LocalBytesWatch, NamespaceBytes};
 pub use database::{
     closed_sync_facts, discarded_operations, discarded_store_name, read_store_name, Database,
     DatabaseBuilder, Mode, ReadOnly, StagedFiles, Writer,

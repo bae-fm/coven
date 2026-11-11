@@ -115,6 +115,18 @@ file by id, to count or filter its own rows by it, and its local triggers can
 follow it
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 
+## What the device keeps
+
+`handle.local_bytes()` measures what a store takes on the device: for each
+declared namespace its budget, the bytes of its cached chunks and headers
+(`cached`, which the budget counts) and of its pinned files (`pinned`, which it
+doesn't); the partial downloads stopped pins left (`pinning`); the store's own
+files (`library`); and, while a reset's old installation is still there, its
+size (`before_reset`, removed by `handle.delete_discarded_devices()`).
+`handle.subscribe_local_bytes()` gives a measurement at once and a new one
+after each change to a namespace's bytes or budget; reading a cached file or a
+partial download growing starts none.
+
 ## Progress and failures
 
 Pin progress is a [`PinProgress`](rustdoc:struct:coven::PinProgress):

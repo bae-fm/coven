@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex, RwLock};
 #[path = "file_database.rs"]
 pub(crate) mod file_database;
 
+#[path = "database_local_bytes.rs"]
+pub(crate) mod local_bytes;
+
 #[path = "database_mode.rs"]
 mod mode;
 pub use mode::{Mode, ReadOnly, Writer};
@@ -136,6 +139,9 @@ pub struct WriterParts {
     /// coven's views read (§4).
     network: crate::network_facts::NetworkFacts,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
+    /// Counts the changes to the store's directory that its database doesn't
+    /// report, which wake the watch of what the store keeps.
+    local_bytes_changes: Arc<tokio::sync::watch::Sender<u64>>,
     /// Told when a close finds a call holding the open store and waits for
     /// it to end.
     #[cfg(test)]

@@ -79,6 +79,18 @@ impl<'connection> SqlReadContext<'connection> {
         crate::cache_progress::pin_progress(self.database, files, device)
     }
 
+    pub(crate) fn cache_budgets(&self) -> Result<Vec<crate::NamespaceBytes>, DbError> {
+        crate::database::local_bytes::budgets(self.database)
+    }
+
+    /// Every namespace's counters and the partials' sum, in one snapshot.
+    pub(crate) fn cache_bytes(&self) -> Result<(Vec<crate::NamespaceBytes>, u64), DbError> {
+        Ok((
+            crate::database::local_bytes::budgets(self.database)?,
+            crate::database::local_bytes::partials(self.database)?,
+        ))
+    }
+
     pub(crate) fn files_pinned(
         &self,
         files: &[coven_foundation::id_source::FileId],
