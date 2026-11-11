@@ -8,7 +8,7 @@ use crate::{
 use coven_foundation::clock::HANG_GUARD;
 
 /// A stored file of these bytes, referenced by row `7`.
-async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
+pub(crate) async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
     let file = stage(db, bytes, true).await.unwrap();
     complete_uploads(db).await;
     db.file_ref(file).await.unwrap()
@@ -409,45 +409,6 @@ async fn a_cache_file_cut_short_takes_back_its_size() {
     let lost = owner.cached(&file, 1).await.unwrap().unwrap();
     assert_eq!(lost[..3], [1; 3]);
     assert!(lost[3..].iter().all(|byte| *byte == 0));
-    db.close().await.unwrap();
-}
-
-/// The namespace total changes with its cache records in their transaction:
-/// publication, eviction, a failed publication and pinning (Appendix C.3).
-#[tokio::test]
-async fn cache_totals_follow_their_records() {
-    let store = TestStore::new();
-    let db = open(&store, Provenance::AppProvided).await;
-    let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
-    let owner = FileDatabase::new(db.clone());
-    let total = |db: &Database| {
-        db.inspect_writer(|sql| {
-            let recorded = super::cache::total(sql, "files").unwrap();
-            let summed: i64 = sql
-                .query_row(
-                    "SELECT coalesce(sum(size),0) FROM _coven_cache WHERE namespace='files'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(recorded, summed);
-            recorded
-        })
-    };
-    owner.cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11]).await.unwrap();
-    owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
-    assert_eq!(total(&db), 111);
-    // A refused publication commits nothing, the total included.
-    assert!(owner
-        .cache_range(&file, 1, 1, FileName::new("chunk").unwrap(), vec![3; 50])
-        .await
-        .is_err());
-    assert_eq!(total(&db), 111);
-    db.write(|sql| sql.set_cache_budget("files", 1_000)).await.unwrap();
-    assert_eq!(total(&db), 111);
-    let id = file.id();
-    db.write(move |sql| sql.evict_file(id)).await.unwrap();
-    assert_eq!(total(&db), 0);
     db.close().await.unwrap();
 }
 

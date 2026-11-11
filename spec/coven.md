@@ -7743,15 +7743,20 @@ buffer.
 A device caches a stored file when it reads it: the chunks a read fetches stay
 on the device (§17.7). Nothing downloads a file just because its record arrived;
 a file stays whole on a device only when the app pins it. The cache keeps files
-and chunks within a size budget the app declares for each namespace. Each
-namespace evicts on its own ([api.md E8](api.md#e8-files-and-the-cache)). Over
-budget, the least recently used files and chunks go first. Freeing space never
-fails a read. A new budget is a step of a write (§4): the write sets it and
-evicts down to it, and the evicted bytes go once it has committed.
+and chunks within a size budget the app declares for each namespace. Pinned
+files' bytes don't count toward it. Each namespace evicts on its own
+([api.md E8](api.md#e8-files-and-the-cache)). Over budget, the least recently
+used files and chunks go first. Freeing space never fails a read. A new budget
+is a step of a write (§4): the write sets it and evicts down to it, and the
+evicted bytes go once it has committed.
 
-**Pinning** keeps a file whole on the device regardless of the budget, until the
-app unpins it. It comes in two parts. Preparing a pin downloads what each file
-lacks into a whole copy, apart from the cache, and pins nothing. The pin is a
+**Pinning** keeps a file whole on the device regardless of the budget, until
+the app unpins it, and the file's bytes don't count toward the budget. Ben pins
+20 GB of albums in a namespace with a 20 GB budget. The next album he plays from
+the cloud is still cached, up to 20 GB, and nothing pinned goes. Were pinned
+bytes counted, the pins alone would fill the budget and every played track
+would be evicted at once. Pinning comes in two parts. Preparing a pin downloads
+what each file lacks into a whole copy, apart from the cache, and pins nothing. The pin is a
 step of a write (§4), which keeps every prepared file at once. Ben's music app
 prepares an album's pin, then in one write pins its tracks and marks the album
 offline: no state shows the album offline with tracks still to come. The
@@ -12952,7 +12957,7 @@ Write-ups explain each model and state its assumptions:
 | Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.7 |
 | A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.7 |
 | A read that succeeds records no condition of its own: one that completes the file settles every condition pending for its bytes, and one that stops short settles all but a refusal, the file unavailable or a required update, which stay as they were until a whole read or a later pin settles them | `read_settles` | `proofs/io/CovenIO/Downloads.lean` | §17.7, §19.1 |
-| Over budget, a namespace evicts its least recently read entries until it is within budget or nothing more may go, and within budget nothing; a pinned entry, a header whose file still has chunks cached, and another namespace's entries stay | `within_budget`, `within_budget_keeps_all`, `pinned_kept`, `other_namespace_kept`, `least_recent_first` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
+| Over budget, a namespace evicts its least recently read entries until its unpinned entries are within budget or nothing more may go, and within budget nothing; a pinned entry, a header whose file still has chunks cached, and another namespace's entries stay; a pinned entry crowds nothing out, since evicting with it present evicts what evicting without it does | `within_budget`, `within_budget_keeps_all`, `pinned_kept`, `other_namespace_kept`, `least_recent_first`, `pinned_crowds_nothing` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
 | A pin's prepare retains and pins nothing and a successful one clears what was pending; only the write committing it keeps the whole file pinned, and only while a record names its stored bytes; bytes no commit takes are never retained | `prepare_retains_nothing`, `prepared_settles`, `commit_pins`, `unnamed_commit_keeps_nothing`, `uncommitted_never_retained` | `proofs/io/CovenIO/Downloads.lean`, `proofs/io/CovenIO/Trace.lean` | §17.8 |
 | Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |

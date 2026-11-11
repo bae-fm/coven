@@ -17,9 +17,12 @@ never retained (`uncommitted_never_retained`), as a pin's prepare commits none.
 
 [Budget.lean](io/CovenIO/Budget.lean) models a namespace's cache budget as
 `file_cache::trim_entries` enforces it. Over budget, it evicts the least
-recently read entry it may, by last read and then cache file name, until it is
-within budget or nothing more may go (`within_budget`); within budget it evicts
-nothing (`within_budget_keeps_all`). A pinned entry never goes
+recently read entry it may, by last read and then cache file name, until its
+unpinned entries are within budget or nothing more may go (`within_budget`);
+within budget it evicts nothing (`within_budget_keeps_all`). A pinned entry's
+bytes don't count toward the budget, so a pinned entry crowds nothing out:
+evicting with it present evicts what evicting without it does
+(`pinned_crowds_nothing`). A pinned entry never goes
 (`pinned_kept`), nor a file's header while a chunk of the file is cached, and
 another namespace's entries stay (`other_namespace_kept`). Every evicted entry
 was read no later than every unpinned chunk of the namespace that stays

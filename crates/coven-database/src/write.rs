@@ -54,7 +54,8 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     }
 
     /// Set a declared namespace's cache budget and evict its unpinned
-    /// entries down to it, in this write (§17.8). An undeclared namespace
+    /// entries until they are within it, in this write (§17.8). Pinned
+    /// bytes don't count toward the budget. An undeclared namespace
     /// fails with `UndeclaredNamespace`. The evicted bytes go once the write
     /// has committed.
     pub fn set_cache_budget(&self, namespace: &str, bytes: u64) -> Result<(), crate::DbError> {

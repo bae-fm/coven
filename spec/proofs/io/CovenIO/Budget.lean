@@ -1,7 +1,8 @@
 namespace CovenIO.Budget
 
 /-! §17.8: each namespace keeps its cached files and chunks within the budget
-the app declares for it. Over budget, it evicts the least recently read entry
+the app declares for it. Pinned copies don't count toward it: only unpinned
+entries' bytes are measured. Over budget, it evicts the least recently read entry
 it may, then the next, until it is within budget or nothing more may go. A
 pinned entry never goes, and a file's header stays while any chunk of the file
 is cached, since chunks need it for offline opens. Eviction in one namespace
@@ -24,15 +25,18 @@ structure Entry where
   pinned : Bool
   deriving DecidableEq, Repr
 
-/-- The bytes a namespace's entries hold, pinned ones included. -/
+/-- The bytes a namespace's unpinned entries hold: what counts toward its
+budget. A pinned entry's bytes don't. -/
 def used (ns : Nat) (es : List Entry) : Nat :=
-  ((es.filter fun e => e.space == ns).map (·.size)).sum
+  ((es.filter fun e => e.space == ns && !e.pinned).map (·.size)).sum
 
 /-- An entry the budget may evict: in the namespace, unpinned, and not a
-header whose file still has a chunk cached. -/
+header whose file still has a chunk cached. A pinned entry is a whole copy,
+which is neither a header nor a chunk. -/
 def evictable (es : List Entry) (ns : Nat) (e : Entry) : Bool :=
   e.space == ns && !e.pinned &&
-    (!e.header || !es.any fun c => c.space == ns && c.object == e.object && !c.header)
+    (!e.header || !es.any fun c =>
+      c.space == ns && c.object == e.object && !c.header && !c.pinned)
 
 /-- Read earlier, or read at once with the smaller name. -/
 def before (a b : Entry) : Prop :=
@@ -103,6 +107,15 @@ def trim (budget ns : Nat) : Nat → List Entry → List Entry × List Entry
 def evict (budget ns : Nat) (es : List Entry) : List Entry × List Entry :=
   trim budget ns es.length es
 
+theorem trim_step (budget ns fuel : Nat) (es : List Entry) :
+    trim budget ns (fuel + 1) es =
+      if used ns es ≤ budget then (es, []) else
+        match oldest (es.filter (evictable es ns)) with
+        | none => (es, [])
+        | some e =>
+          let rest := trim budget ns fuel (es.erase e); (rest.1, e :: rest.2) := by
+  rw [trim]
+
 theorem trim_kept_sub (budget ns : Nat) :
     ∀ fuel es, ∀ x ∈ (trim budget ns fuel es).1, x ∈ es
   | 0, _, _, h => h
@@ -153,6 +166,75 @@ theorem pinned_kept (budget ns : Nat) :
           intro eq; subst eq
           simp [evictable, pinned] at ev
         exact pinned_kept budget ns fuel _ x ((List.mem_erase_of_ne ne).mpr h) pinned
+
+/-- A pinned entry is not a chunk, so it changes which entries are evictable
+by none. -/
+theorem evictable_pinned_cons (ns : Nat) (p : Entry) (es : List Entry)
+    (pinned : p.pinned = true) (e : Entry) :
+    evictable (p :: es) ns e = evictable es ns e := by
+  simp [evictable, List.any_cons, pinned]
+
+/-- Pinned entries don't count toward the budget. -/
+theorem used_pinned_cons (ns : Nat) (p : Entry) (es : List Entry)
+    (pinned : p.pinned = true) : used ns (p :: es) = used ns es := by
+  simp [used, pinned]
+
+/-- **A pinned entry crowds nothing out.** With room for the steps, evicting
+from a namespace that holds a pinned entry evicts exactly what evicting
+without it does, and keeps the pinned entry. -/
+theorem trim_pinned_crowds_nothing (budget ns : Nat) (p : Entry) (pinned : p.pinned = true) :
+    ∀ fuel es, es.length ≤ fuel →
+      trim budget ns (fuel + 1) (p :: es) =
+        (p :: (trim budget ns fuel es).1, (trim budget ns fuel es).2)
+  | fuel, es, short => by
+    have same : evictable (p :: es) ns = evictable es ns :=
+      funext (evictable_pinned_cons ns p es pinned)
+    have candidates :
+        (p :: es).filter (evictable (p :: es) ns) = es.filter (evictable es ns) := by
+      rw [List.filter_cons, same]
+      simp [evictable, pinned]
+    have lift : ∀ e, e ∈ es → e.pinned = false → (p :: es).erase e = p :: es.erase e := by
+      intro e _ unpinned
+      have ne : (p == e) = false := by
+        cases h : (p == e)
+        · rfl
+        · have : p = e := beq_iff_eq.mp h
+          subst this; simp [pinned] at unpinned
+      exact List.erase_cons_tail (by simp [ne])
+    by_cases under : used ns es ≤ budget
+    · cases fuel <;> simp [trim, used_pinned_cons ns p es pinned, under]
+    · have over : ¬ used ns (p :: es) ≤ budget := by rwa [used_pinned_cons ns p es pinned]
+      cases fuel with
+      | zero =>
+        have empty : es = [] := List.eq_nil_of_length_eq_zero (by omega)
+        subst empty
+        simp [trim, over, candidates, oldest]
+      | succ fuel =>
+        rw [trim_step budget ns (fuel + 1) (p :: es), trim_step budget ns fuel es]
+        simp only [over, under, ite_false, candidates]
+        cases chosen : oldest (es.filter (evictable es ns)) with
+        | none => rfl
+        | some e =>
+          have member := (List.mem_filter.mp (oldest_min _ e chosen).1)
+          have unpinned : e.pinned = false := by
+            have := member.2
+            simp [evictable] at this
+            exact this.1.2
+          dsimp only
+          rw [lift e member.1 unpinned]
+          have shorter : (es.erase e).length ≤ fuel := by
+            have := List.length_erase_of_mem member.1
+            omega
+          have ih := trim_pinned_crowds_nothing budget ns p pinned fuel (es.erase e) shorter
+          simp only [ih]
+
+/-- **A pinned entry crowds nothing out.** Evicting from `p :: es` with `p`
+pinned evicts exactly what evicting from `es` does, and keeps `p`. -/
+theorem pinned_crowds_nothing (budget ns : Nat) (p : Entry) (pinned : p.pinned = true)
+    (es : List Entry) :
+    evict budget ns (p :: es) =
+      (p :: (evict budget ns es).1, (evict budget ns es).2) :=
+  trim_pinned_crowds_nothing budget ns p pinned es.length es (Nat.le_refl _)
 
 /-- **Eviction in one namespace never touches another.** -/
 theorem other_namespace_kept (budget ns : Nat) :

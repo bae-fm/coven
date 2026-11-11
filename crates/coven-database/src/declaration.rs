@@ -254,7 +254,8 @@ impl Namespace {
         &self.kind
     }
 
-    /// The initial cache budget in bytes, as declared, not its current setting.
+    /// The initial cache budget in bytes, as declared, not its current
+    /// setting. Pinned files' bytes don't count toward it.
     pub fn cache_budget(&self) -> u64 {
         self.cache_budget
     }

@@ -104,7 +104,8 @@ impl<'write> CovenWrite<'write> {
     }
 
     /// Sets a declared namespace's cache budget and evicts its unpinned
-    /// files and chunks, least recently read first, down to it (§17.8). An
+    /// files and chunks, least recently read first, until they are within it
+    /// (§17.8). Pinned bytes don't count toward the budget. An
     /// undeclared namespace fails with `UndeclaredNamespace`. The evicted
     /// bytes go once the write has committed.
     pub fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
@@ -142,7 +143,7 @@ impl<'write> CovenWrite<'write> {
     }
 
     /// Keeps a prepared pin's files whole on this device, regardless of the
-    /// cache budget (§17.8): each whole copy becomes the file's pinned cache
+    /// cache budget, which their bytes don't count toward (§17.8): each whole copy becomes the file's pinned cache
     /// entry, and each copy already kept is pinned, all in this write.
     /// Files prepared in another open store, or in this one before it
     /// closed, fail with `PreparedElsewhere`; a file whose record left its

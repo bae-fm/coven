@@ -371,10 +371,11 @@ pub(crate) fn set_budget(
     }
     Ok(())
 }
-/// The namespace's cached bytes, maintained with its cache records.
-pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
+/// The namespace's cached bytes: its unpinned entries', which its budget
+/// counts. Maintained with its cache records.
+pub(crate) fn cached(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
     Ok(db
-        .query("SELECT total FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
+        .query("SELECT cached FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
             r.get::<_, i64>(0)
         })?
         .pop()
@@ -398,9 +399,9 @@ pub(crate) fn trim_entries(
     namespace: &str,
 ) -> Result<Vec<String>, DbError> {
     let budget = budget(db, namespace)?;
-    let mut total = total(db, namespace)?;
+    let mut cached = cached(db, namespace)?;
     let mut removed = Vec::new();
-    while u64::try_from(total).map_err(|_| DbError::DamagedDatabase)? > budget {
+    while u64::try_from(cached).map_err(|_| DbError::DamagedDatabase)? > budget {
         // Chunks need their header for offline opens. Once the last chunk
         // goes, that header competes on recency with every other entry.
         let next = db.query(
@@ -419,7 +420,7 @@ pub(crate) fn trim_entries(
         };
         db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
         crate::file_removals::record_cached(db, &path)?;
-        total -= size;
+        cached -= size;
         removed.push(path);
     }
     Ok(removed)
@@ -434,7 +435,8 @@ pub(super) fn whole(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbE
         |r| r.get(0),
     )
 }
-/// Pin a verified whole cache file, if one is kept. Returns whether one was.
+/// Pin a verified whole cache file, if one is kept: its bytes leave the
+/// namespace's cached bytes for its pinned ones. Returns whether one was.
 pub(crate) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     Ok(db.internal_execute(

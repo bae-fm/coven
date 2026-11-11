@@ -27,20 +27,39 @@ macro_rules! coven_cache_tables {
                 WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
             END;
         ");
-        // Each declared namespace's budget and the cached bytes the cache
-        // records hold, maintained with them so a budget check needs no sum.
-        // Cache records live only in declared namespaces (FileRef validation).
+        // Each declared namespace's budget and the bytes the cache records
+        // hold, kept with them so a budget check needs no sum: `cached` is
+        // the unpinned entries' bytes, which the budget counts, and `pinned`
+        // the pinned entries', which it doesn't. Cache records live only in
+        // declared namespaces (FileRef validation).
         $visit!(_coven_cache_budgets, "
             CREATE TABLE _coven_cache_budgets (
                 namespace TEXT PRIMARY KEY NOT NULL,
                 bytes BLOB NOT NULL CHECK(length(bytes)=8),
-                total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0)
+                cached INTEGER NOT NULL DEFAULT 0 CHECK(cached>=0),
+                pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned>=0)
             ) STRICT, WITHOUT ROWID;
             CREATE TRIGGER _coven_cache_added AFTER INSERT ON _coven_cache BEGIN
-                UPDATE _coven_cache_budgets SET total=total+NEW.size WHERE namespace=NEW.namespace;
+                UPDATE _coven_cache_budgets SET
+                    cached=cached+CASE WHEN NEW.pinned=0 THEN NEW.size ELSE 0 END,
+                    pinned=pinned+CASE WHEN NEW.pinned=1 THEN NEW.size ELSE 0 END
+                WHERE namespace=NEW.namespace;
             END;
             CREATE TRIGGER _coven_cache_removed AFTER DELETE ON _coven_cache BEGIN
-                UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
+                UPDATE _coven_cache_budgets SET
+                    cached=cached-CASE WHEN OLD.pinned=0 THEN OLD.size ELSE 0 END,
+                    pinned=pinned-CASE WHEN OLD.pinned=1 THEN OLD.size ELSE 0 END
+                WHERE namespace=OLD.namespace;
+            END;
+            CREATE TRIGGER _coven_cache_moved AFTER UPDATE OF pinned, size ON _coven_cache BEGIN
+                UPDATE _coven_cache_budgets SET
+                    cached=cached
+                        -CASE WHEN OLD.pinned=0 THEN OLD.size ELSE 0 END
+                        +CASE WHEN NEW.pinned=0 THEN NEW.size ELSE 0 END,
+                    pinned=pinned
+                        -CASE WHEN OLD.pinned=1 THEN OLD.size ELSE 0 END
+                        +CASE WHEN NEW.pinned=1 THEN NEW.size ELSE 0 END
+                WHERE namespace=NEW.namespace;
             END;
         ");
         // A pin's download that stopped, kept apart from the cache: the first

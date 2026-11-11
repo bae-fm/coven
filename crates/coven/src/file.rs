@@ -10,7 +10,7 @@ impl CovenHandle {
         self.files.file_status(file).await
     }
     /// Prepares keeping stored files whole on this device regardless of the
-    /// cache budget (§17.8): downloads what each lacks into a whole copy,
+    /// cache budget, which pinned bytes don't count toward (§17.8): downloads what each lacks into a whole copy,
     /// checked against its content hash, and pins nothing; a write commits
     /// the result with `CovenWrite::pin`. A file only on one device, this
     /// one included while it uploads, is refused with

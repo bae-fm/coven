@@ -405,6 +405,7 @@ mod source {
                 "path",
                 "move",
                 "state",
+                "pinned",
                 "id",
             ]
             .iter()

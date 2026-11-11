@@ -2610,7 +2610,8 @@ impl Namespace {
     /// Whose bytes its files are.
     pub fn kind(&self) -> &Provenance;
 
-    /// The initial cache budget in bytes, as declared, not its current setting.
+    /// The initial cache budget in bytes, as declared, not its current
+    /// setting. Pinned files' bytes don't count toward it.
     pub fn cache_budget(&self) -> u64;
 }
 
@@ -6638,7 +6639,8 @@ pub struct PreparedPin { /* private fields */ }
 
 impl CovenWrite<'_> {
     /// Keeps a prepared pin's files whole on this device regardless of the
-    /// cache budget, as a step of this write (§4, §17.8): each whole copy
+    /// cache budget, which their bytes don't count toward, as a step of this
+    /// write (§4, §17.8): each whole copy
     /// becomes the file's pinned cache entry, and each copy already kept is
     /// pinned. A pin prepared in another open store, or in this one before
     /// it closed, fails with `PreparedElsewhere`; a file whose record left
@@ -6666,7 +6668,8 @@ impl CovenWrite<'_> {
 
     /// Sets a declared namespace's cache budget, in bytes, as a step of this
     /// write (§4, §17.8), and evicts its unpinned files and chunks, least
-    /// recently read first, down to it; the evicted bytes go once the write
+    /// recently read first, until the unpinned ones are within it; pinned
+    /// bytes don't count toward it. The evicted bytes go once the write
     /// has committed. An undeclared namespace fails with
     /// `UndeclaredNamespace`.
     pub fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
@@ -6755,7 +6758,7 @@ impl CovenHandle {
     ) -> Result<(), DeviceOnlyError>;
 
     /// Prepares keeping stored files whole on this device regardless of the
-    /// cache budget (§17.8): downloads what each lacks, up to the download
+    /// cache budget, which pinned bytes don't count toward (§17.8): downloads what each lacks, up to the download
     /// limit at once, into a whole copy checked against its content hash,
     /// or notes a checked whole copy already kept, and pins nothing. A write
     /// keeps them with `CovenWrite::pin`. A file only on one device, this

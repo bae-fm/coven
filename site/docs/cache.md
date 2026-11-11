@@ -33,7 +33,9 @@ a write of its own), and
 opening (`SchemaError::DuplicateNamespace`).
 
 When a namespace is over budget, the least recently used files and chunks go
-first. Freeing space never fails a read.
+first. Freeing space never fails a read. Pinned files don't count toward the
+budget: with 20 GB pinned in a namespace budgeted at 20 GB, the next track
+played from the cloud is still cached, up to 20 GB, and nothing pinned goes.
 
 `sql.evict_file(id)`, a step of the app's write, removes a stored file's
 copies from the cache, pinned or not, and `handle.evict_file(id)` does it in a
@@ -59,7 +61,7 @@ the chorus: only the chunks under the new position are fetched.
 ## Pinning
 
 The cache is evictable. Pinning keeps a file whole on the device whatever the
-budget, until the app unpins it: the gesture for "keep this for the flight".
+budget, until the app unpins it, and its bytes don't count toward the budget: the gesture for "keep this for the flight".
 
 ```rust
 let files = vec![handle.file_ref(track_file).await?];
