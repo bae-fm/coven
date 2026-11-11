@@ -430,6 +430,23 @@ pub(crate) fn trim_entries(
     }
     Ok(removed)
 }
+/// Delete every unpinned entry of a declared namespace, chunks and headers
+/// alike, in the transaction under way; pinned whole copies stay. Each
+/// removed entry's name is recorded for removal, and its bytes go once the
+/// writer is free (Appendix C.3). An undeclared namespace is
+/// `UndeclaredNamespace`.
+pub(crate) fn clear_entries(db: &DatabaseConnection, namespace: &str) -> Result<(), DbError> {
+    budget(db, namespace)?;
+    let paths = db.query(
+        "DELETE FROM _coven_cache WHERE namespace=?1 AND chunk!=?2 RETURNING path",
+        (namespace, COMPLETE_FILE),
+        |r| r.get::<_, String>(0),
+    )?;
+    for path in &paths {
+        crate::file_removals::record_cached(db, path)?;
+    }
+    Ok(())
+}
 /// Whether a pinned, checked whole copy of this file is on the device.
 pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;

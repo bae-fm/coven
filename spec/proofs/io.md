@@ -28,7 +28,9 @@ another namespace's entries stay (`other_namespace_kept`). Every evicted entry
 was read no later than every unpinned chunk of the namespace that stays
 (`least_recent_first`). The app's unpin removes every entry of the unpinned
 files' bytes (`unpin_removes`) and evicts nothing else, in any namespace
-(`unpin_keeps_others`); no trim follows it, since removing bytes cannot put a
+(`unpin_keeps_others`); clearing a namespace's cache leaves it no unpinned entry
+(`clear_empties`), keeps every pinned one (`clear_keeps_pinned`) and every other
+namespace's entries (`clear_other_namespace_kept`); no trim follows it, since removing bytes cannot put a
 namespace over its budget. Eviction is a function of the entries, so it never
 fails a read.
 

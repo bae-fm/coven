@@ -18,8 +18,9 @@ use std::sync::Arc;
 #[path = "file_cache.rs"]
 pub(crate) mod cache;
 pub(crate) use cache::{
-    declare_budgets, kept as cache_kept, object_path, object_path_of, publish as publish_cached,
-    remove_entries as remove_cached, set_budget as set_cache_budget, trim_entries as trim_cached,
+    clear_entries as clear_cached, declare_budgets, kept as cache_kept, object_path,
+    object_path_of, publish as publish_cached, remove_entries as remove_cached,
+    set_budget as set_cache_budget, trim_entries as trim_cached,
 };
 
 /// File queue and cache access, on the store's writer or a read-only

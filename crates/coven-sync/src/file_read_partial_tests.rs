@@ -144,6 +144,34 @@ async fn an_unpin_during_a_prepare_fails_it_and_leaves_nothing() {
     f.close().await;
 }
 
+/// Clearing a namespace's cache leaves the partial download a stopped pin
+/// kept, and the next prepare continues from it (§17.8).
+#[tokio::test]
+async fn clearing_the_cache_leaves_a_partial_download() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("album", album()).await;
+    f.files.stop_background_for_counts().await;
+    stopped_partway(&f, &file).await;
+    let (path, kept) = partial(&f, &file).await.unwrap();
+    f.database.write(|sql| sql.clear_cache("files")).await.unwrap();
+    let (still, size) = partial(&f, &file).await.expect("the partial stays");
+    assert_eq!((still, size), (path.clone(), kept));
+    assert!(path.exists());
+    let before = f.storage.request_trace().len();
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    // The cleared header is read again, and the rest follows the kept bytes.
+    let reads = reads_since(&f, &file, before);
+    let starts: Vec<u64> = reads
+        .iter()
+        .map(|read| match read {
+            MemoryRequest::Read(_, Some(range)) => range.start(),
+            other => panic!("a ranged read: {other:?}"),
+        })
+        .collect();
+    assert_eq!(starts, [0, kept]);
+    f.close().await;
+}
+
 /// Once no record here names a file's stored bytes, the partial download of
 /// them goes, as the cached copies do.
 #[tokio::test]

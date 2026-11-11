@@ -72,6 +72,14 @@ impl FileWrite<'_> {
         Ok(())
     }
 
+    /// Clear a declared namespace's cache: every unpinned file and chunk
+    /// goes, and the pinned whole copies and the partial downloads pins left
+    /// stay. An undeclared namespace fails with `UndeclaredNamespace`. The
+    /// bytes go once the write has committed.
+    pub(crate) fn clear_cache(&self, namespace: &str) -> Result<(), DbError> {
+        crate::database::file_database::clear_cached(self.database, namespace)
+    }
+
     /// Remove a stored file's cached copies, pinned or not, with no storage
     /// operation: every entry of its bytes. A file this device has no record
     /// of, or one on one device only, has none.

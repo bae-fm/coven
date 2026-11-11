@@ -42,6 +42,12 @@ copies from the cache, pinned or not, and `handle.evict_file(id)` does it in a
 write of its own. It never touches storage or a file waiting to upload; a later
 read downloads it again.
 
+`sql.clear_cache("audio")`, also a step of the app's write, removes every
+unpinned file and chunk of a namespace. Pinned copies and the partial downloads
+pins left stay, as does every other namespace; `handle.clear_cache("audio")`
+does it in a write of its own. An undeclared namespace fails with
+`DbError::UndeclaredNamespace`.
+
 Cached bytes last while a record on the device names them. When the last row
 naming a file goes, the write deleting its record removes the file's cached
 copies too, pinned or not. A file several records share, such as a moved row's

@@ -759,6 +759,11 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     }
     assert_eq!(listed, ["preview"]);
     assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
+    // Clearing the namespace's cache leaves the pinned copy, and an
+    // undeclared namespace fails.
+    handle.clear_cache("thumbnails").await.unwrap();
+    assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
+    assert!(handle.clear_cache("missing").await.is_err());
     handle.unpin(&[stored.id()]).await.unwrap();
     assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
     // Deleting the row deletes its file's record, so nothing of it stays

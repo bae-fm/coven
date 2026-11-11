@@ -66,6 +66,12 @@ impl CovenHandle {
     pub async fn evict_file(&self, file: FileId) -> CovenResult<()> {
         self.write(move |write| Ok(write.evict_file(file)?)).await
     }
+    /// Clear a namespace's cache, in a write of its own
+    /// (`CovenWrite::clear_cache`).
+    pub async fn clear_cache(&self, namespace: &str) -> CovenResult<()> {
+        let namespace = namespace.to_owned();
+        self.write(move |write| Ok(write.clear_cache(&namespace)?)).await
+    }
     /// Set and enforce a namespace's independent byte budget, in a write of
     /// its own (`CovenWrite::set_cache_budget`).
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> CovenResult<()> {

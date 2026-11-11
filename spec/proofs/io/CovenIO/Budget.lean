@@ -9,7 +9,8 @@ is cached, since chunks need it for offline opens. Eviction in one namespace
 never touches another. It is a function of the entries, so it never fails a
 read: the read that went over budget commits, and the eviction follows.
 
-An unpin removes the entries of the unpinned files' bytes, and no other.
+An unpin removes the entries of the unpinned files' bytes, and no other. Clearing
+a namespace's cache removes every unpinned entry of the namespace, and no other.
 
 This mirrors `file_cache::trim_entries`, which orders by the last read and
 then the cache file's name. -/
@@ -302,5 +303,32 @@ theorem unpin_keeps_others (targets : List (Nat × Nat)) (es : List Entry) :
   intro x hx hout
   simp [unpin]
   exact ⟨hx, hout⟩
+
+/-- §17.8: the app clears a namespace's cache. Every unpinned entry of the
+namespace goes, headers and chunks alike. -/
+def clear (ns : Nat) (es : List Entry) : List Entry :=
+  es.filter fun e => !(e.space == ns && !e.pinned)
+
+/-- **Clearing leaves no unpinned entry in the namespace.** -/
+theorem clear_empties (ns : Nat) (es : List Entry) :
+    ∀ e ∈ clear ns es, e.space = ns → e.pinned = true := by
+  intro e he hs
+  simp [clear] at he
+  have := he.2
+  cases h : e.pinned
+  · exact absurd hs (by simpa [h] using this)
+  · rfl
+
+/-- **Clearing keeps every pinned entry.** -/
+theorem clear_keeps_pinned (ns : Nat) (es : List Entry) :
+    ∀ x ∈ es, x.pinned = true → x ∈ clear ns es := by
+  intro x hx hp
+  simp [clear, hx, hp]
+
+/-- **Clearing one namespace never touches another.** -/
+theorem clear_other_namespace_kept (ns : Nat) (es : List Entry) :
+    ∀ x ∈ es, x.space ≠ ns → x ∈ clear ns es := by
+  intro x hx hs
+  simp [clear, hx, hs]
 
 end CovenIO.Budget

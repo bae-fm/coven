@@ -96,6 +96,14 @@ impl<'write> CovenWrite<'write> {
         self.sql.unpin(files)
     }
 
+    /// Clears a declared namespace's cache: every unpinned file and chunk
+    /// of it goes (§17.8). Pinned copies, the partial downloads pins left
+    /// and other namespaces stay. The bytes go once the write has
+    /// committed. An undeclared namespace fails with `UndeclaredNamespace`.
+    pub fn clear_cache(&self, namespace: &str) -> Result<(), DbError> {
+        self.sql.clear_cache(namespace)
+    }
+
     /// Removes a stored file's cached copies, pinned or not, without
     /// changing storage or a local original (§17.8). A file this device has
     /// no record of, or one on one device only, has none. The bytes go once

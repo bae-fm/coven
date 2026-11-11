@@ -208,6 +208,9 @@ import CovenIO
 #print axioms CovenIO.Budget.least_recent_first
 #print axioms CovenIO.Budget.unpin_removes
 #print axioms CovenIO.Budget.unpin_keeps_others
+#print axioms CovenIO.Budget.clear_empties
+#print axioms CovenIO.Budget.clear_keeps_pinned
+#print axioms CovenIO.Budget.clear_other_namespace_kept
 #print axioms CovenIO.Retired.member_cutoff_covers
 #print axioms CovenIO.Retired.every_gone_folder_cleaned
 #print axioms CovenIO.Keep.original_only_here

@@ -7895,8 +7895,13 @@ after the app released it, and track 7 would go on downloading.
   files, so a file two rows reference is pinned once.
 
 The app can remove a stored file from the cache, pinned or not, as a step of a
-write (§4); that never touches storage, and the bytes go once the write has
-committed.
+write (§4), and clear a namespace's cache, every unpinned file and chunk, as a
+step of a write. Pinned copies, and the partial downloads pins on the way keep,
+stay. Neither touches storage, and the bytes go once the write has committed.
+Ben clears his music namespace's cache to free the space tracks he has only
+played took: the albums he pinned stay, and a played track downloads again
+when he plays it. A range being written when the write commits is not an entry
+yet, and publishes after the clear as new cache.
 
 **A damaged copy is fetched again.** The cache keeps only bytes that checked,
 so a cached header or chunk that fails its check changed on this device (§19.1).
@@ -12965,6 +12970,7 @@ Write-ups explain each model and state its assumptions:
 | A read that succeeds records no condition of its own: one that completes the file settles every condition pending for its bytes, and one that stops short settles all but a refusal, the file unavailable or a required update, which stay as they were until a whole read or a later pin settles them | `read_settles` | `proofs/io/CovenIO/Downloads.lean` | §17.7, §19.1 |
 | Over budget, a namespace evicts its least recently read entries until its unpinned entries are within budget or nothing more may go, and within budget nothing; a pinned entry, a header whose file still has chunks cached, and another namespace's entries stay; a pinned entry crowds nothing out, since evicting with it present evicts what evicting without it does | `within_budget`, `within_budget_keeps_all`, `pinned_kept`, `other_namespace_kept`, `least_recent_first`, `pinned_crowds_nothing` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
 | The app's unpin removes every entry of the unpinned files' bytes, and evicts nothing else in any namespace | `unpin_removes`, `unpin_keeps_others` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
+| Clearing a namespace's cache leaves it no unpinned entry, keeps every pinned entry, and keeps other namespaces' entries | `clear_empties`, `clear_keeps_pinned`, `clear_other_namespace_kept` | `proofs/io/CovenIO/Budget.lean` | §17.8 |
 | A pin's prepare retains and pins nothing and a successful one clears what was pending; only the write committing it keeps the whole file pinned, and only while a record names its stored bytes; bytes no commit takes are never retained | `prepare_retains_nothing`, `prepared_settles`, `commit_pins`, `unnamed_commit_keeps_nothing`, `uncommitted_never_retained` | `proofs/io/CovenIO/Downloads.lean`, `proofs/io/CovenIO/Trace.lean` | §17.8 |
 | Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |

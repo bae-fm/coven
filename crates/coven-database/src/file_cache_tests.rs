@@ -203,3 +203,74 @@ async fn unpinning_removes_cached_chunks_and_headers() {
     assert!(!cache.join("header").exists() && !cache.join("chunk").exists());
     db.close().await.unwrap();
 }
+
+/// Clearing a namespace's cache removes its unpinned chunks and headers and
+/// leaves its pinned copy and every other namespace alone; the counters
+/// follow and the bytes go once the write has committed (§17.8).
+#[tokio::test]
+async fn clearing_a_namespace_removes_only_its_unpinned_entries() {
+    use crate::file_write::tests::{complete_uploads, local_count, namespaces, tables, SCHEMA};
+    let store = TestStore::new();
+    let mut declared = namespaces(Provenance::AppProvided);
+    declared.push(crate::Namespace::new("other", Provenance::AppProvided, 1 << 30));
+    let db = store
+        .builder(tables(), vec![crate::Migration::addition(1, "files", SCHEMA)])
+        .namespaces(declared)
+        .open()
+        .await
+        .unwrap();
+    let pinned = stored(&db, vec![5; 100]).await;
+    let chunked = stored_second(&db, vec![6; 2 * 64 * 1024]).await;
+    let elsewhere = db
+        .staged_write::<_, _, _, _, DbError>(
+            |batch| Ok(batch.put_file("other", vec![7; 2 * 64 * 1024], crate::Place::Cloud)),
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('9',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    complete_uploads(&db).await;
+    let elsewhere = db.file_ref(elsewhere).await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let cache = store.database_path().parent().unwrap().join("cache");
+    let reservation =
+        owner.reserve_cache_file(&pinned, FileName::new("whole").unwrap()).await.unwrap();
+    std::fs::write(cache.join("whole"), b"whole file").unwrap();
+    owner.commit_pin(owner.prepared_pin(vec![reservation], Vec::new()).unwrap()).await.unwrap();
+    owner
+        .cache_range(&chunked, -1, 1, FileName::new("header").unwrap(), vec![1; 11])
+        .await
+        .unwrap();
+    owner.cache_range(&chunked, 0, 1, FileName::new("chunk").unwrap(), vec![2; 30]).await.unwrap();
+    owner
+        .cache_range(&elsewhere, 0, 1, FileName::new("other").unwrap(), vec![3; 40])
+        .await
+        .unwrap();
+    let (_, pinned_bytes) = counters(&db);
+    assert_eq!(local_count(&db, "_coven_cache"), 4);
+    let failed = db
+        .write(|sql| {
+            sql.clear_cache("files")?;
+            Err::<(), _>(DbError::Invariant { what: "the app gives up" })
+        })
+        .await;
+    assert!(matches!(failed, Err(DbError::Invariant { .. })));
+    assert_eq!(local_count(&db, "_coven_cache"), 4);
+    db.write(|sql| sql.clear_cache("files")).await.unwrap();
+    let left = db.inspect_writer(|sql| {
+        sql.query("SELECT path FROM _coven_cache ORDER BY path", [], |r| r.get::<_, String>(0))
+            .unwrap()
+    });
+    assert_eq!(left, ["other", "whole"]);
+    assert_eq!(counters(&db), (0, pinned_bytes));
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert!(!cache.join("header").exists() && !cache.join("chunk").exists());
+    assert!(cache.join("whole").exists() && cache.join("other").exists());
+    assert!(matches!(
+        db.write(|sql| sql.clear_cache("missing")).await,
+        Err(DbError::UndeclaredNamespace { namespace }) if namespace == "missing"
+    ));
+    db.close().await.unwrap();
+}

@@ -6668,6 +6668,13 @@ impl CovenWrite<'_> {
     /// has no record of, has none.
     pub fn evict_file(&self, file: FileId) -> Result<(), DbError>;
 
+    /// Clears a declared namespace's cache, as a step of this write (§4,
+    /// §17.8): every unpinned file and chunk of the namespace goes. Pinned
+    /// copies and the partial downloads pins left stay, and so does every
+    /// other namespace. The bytes go once the write has committed. An
+    /// undeclared namespace fails with `UndeclaredNamespace`.
+    pub fn clear_cache(&self, namespace: &str) -> Result<(), DbError>;
+
     /// Sets a declared namespace's cache budget, in bytes, as a step of this
     /// write (§4, §17.8), and evicts its unpinned files and chunks, least
     /// recently read first, until the unpinned ones are within it; pinned
@@ -6811,6 +6818,9 @@ impl CovenHandle {
 
     /// `CovenWrite::evict_file`, in a write of its own.
     pub async fn evict_file(&self, file: FileId) -> CovenResult<()>;
+
+    /// `CovenWrite::clear_cache`, in a write of its own.
+    pub async fn clear_cache(&self, namespace: &str) -> CovenResult<()>;
 
     /// `CovenWrite::set_cache_budget`, in a write of its own.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> CovenResult<()>;

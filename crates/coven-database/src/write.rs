@@ -54,6 +54,15 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.evict(file))
     }
 
+    /// Clear a declared namespace's cache in this write (§17.8): every
+    /// unpinned file and chunk goes. Pinned copies, the partial downloads
+    /// pins left and other namespaces stay. An undeclared namespace fails
+    /// with `UndeclaredNamespace`. The bytes go once the write has
+    /// committed.
+    pub fn clear_cache(&self, namespace: &str) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.clear_cache(namespace))
+    }
+
     /// Set a declared namespace's cache budget and evict its unpinned
     /// entries until they are within it, in this write (§17.8). Pinned
     /// bytes don't count toward the budget. An undeclared namespace
