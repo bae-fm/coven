@@ -3,8 +3,8 @@
 
 use crate::task::{Bug, CarriesBug, Shutdown, TaskFailed};
 use crate::{
-    CovenMigrationError, DbError, KeyError, MigrationError, NetworkWatchError, SettingsError,
-    SqliteError, StoreId, StoreLockError, SyncError, WriteFailure,
+    CovenMigrationError, DbError, FileError, KeyError, MigrationError, NetworkWatchError,
+    SettingsError, SqliteError, StoreId, StoreLockError, SyncError, WriteFailure,
 };
 use coven_database::OpenError;
 
@@ -51,6 +51,9 @@ pub enum CovenError {
     /// The directory's settings could not be read.
     #[error(transparent)]
     Settings(SettingsError),
+    /// A file operation in the store's directory failed.
+    #[error(transparent)]
+    File(FileError),
     /// The writer's lock could not be acquired.
     #[error(transparent)]
     Lock(StoreLockError),
@@ -109,6 +112,7 @@ impl CarriesBug for CovenError {
             Self::Sync(error) => error.bug(),
             Self::Key(error) => error.bug(),
             Self::Lock(error) => error.bug(),
+            Self::File(error) => error.bug(),
             Self::Settings(error) => error.bug(),
             Self::Rollback { operation, .. } => operation.bug(),
             Self::FileCleanup { write, failures } => {
@@ -135,6 +139,15 @@ impl From<SettingsError> for CovenError {
         match error {
             SettingsError::Bug(bug) => Self::Bug(bug),
             error => Self::Settings(error),
+        }
+    }
+}
+
+impl From<FileError> for CovenError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
         }
     }
 }

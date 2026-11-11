@@ -1332,6 +1332,9 @@ pub enum CovenError {
     CovenMigration(CovenMigrationError),
     /// The directory's settings could not be read.
     Settings(SettingsError),
+    /// A file operation in the store's directory failed, such as removing
+    /// what resets kept (E5).
+    File(FileError),
     /// The writer's lock could not be acquired.
     Lock(StoreLockError),
     /// A required builder choice was not supplied (E1).
@@ -5755,6 +5758,15 @@ impl CovenHandle {
 
     /// The same pre-built query, including a replacement completed during open.
     pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>>;
+
+    /// Deletes the installations `reset_device` kept in the store's
+    /// directory, one per reset, and syncs the directory (§19.3). Nothing
+    /// reads them once the reset's notice is stored, and the store's own files
+    /// are never touched. It returns once they are gone. A failure midway
+    /// returns its `CovenError::File` and leaves the rest, part of one
+    /// perhaps, for the next call, which removes what remains; with none left
+    /// it succeeds.
+    pub async fn delete_discarded_devices(&self) -> CovenResult<()>;
 
     /// This device's pending work, in the order the records arose, as
     /// `coven_pending` lists them by position, including offline, each with

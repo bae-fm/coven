@@ -9477,7 +9477,8 @@ laptop in place from her current restore code instead (§13.1).
 - **The swap.** Once the registration has applied, coven marks the record as
   swapping. It moves the old local state aside whole, including SQLite's
   journals and local file sources, and keeps it for inspection, not as live
-  state; a restore in place removes it instead (§13.1). Then it moves the new
+  state, until the app deletes it (`delete_discarded_devices`, below); a
+  restore in place removes it instead (§13.1). Then it moves the new
   installation into place and commits its keys and credentials. The store's
   location and passphrase-sealed custody files stay where they are.
 - **Past the record, only forward.** A failure, a cancel or an interruption
@@ -9542,6 +9543,15 @@ laptop in place from her current restore code instead (§13.1).
   preserving its local creation name and its detection runs' records. That
   name must be readable before anything moves, like the other required
   settings. Competing first setups still contend for slot 1 (§10.3).
+- **Deleting what resets kept.** `CovenHandle::delete_discarded_devices`
+  ([api.md E5](api.md#e5-storage-and-sync)) removes every archive, each
+  installation an earlier reset moved aside, then syncs the store's
+  directory. Nothing reads an archive once the reset's notice is in the
+  database, so an archive is data nothing references, not state. Removing a
+  directory tree is not atomic, so a failure or an interruption can leave
+  an archive part-removed under its name. The call returns the failure to
+  its caller and the next call removes what remains; with no archive it
+  succeeds. The store's own files never go.
 
 Ana's laptop has uploaded through write 12, but its damaged database may hold
 write 13. Resetting loads the stored history through 12 under a new device id.

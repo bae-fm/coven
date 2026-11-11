@@ -194,6 +194,43 @@ pub(super) fn discard(directory: &Path, old_device: DeviceId) -> Result<(), File
     Ok(())
 }
 
+/// The archives of earlier resets in the store's directory, by name. Nothing
+/// reads one once its reset's notice is in the database (§19.3).
+pub(super) fn archives(directory: &Path) -> Result<Vec<PathBuf>, FileError> {
+    let entries = fs::read_dir(directory)
+        .map_err(|source| FileError::at("list discarded device archives", directory, source))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|source| FileError::at("list discarded device archives", directory, source))?;
+        if entry.file_name().to_str().is_some_and(|name| name.starts_with(ARCHIVE_PREFIX)) {
+            found.push(entry.path());
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Remove every archive, then sync the directory. Removing a directory tree
+/// is not atomic, so a failure leaves the archive part-removed under its name,
+/// listed by `archives`, and a later call removes the rest.
+pub(super) fn delete_archives(directory: &Path) -> Result<(), FileError> {
+    let archives = archives(directory)?;
+    for archive in &archives {
+        match fs::remove_dir_all(archive) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileError::at("remove discarded device archive", archive, source))
+            }
+        }
+    }
+    if let Some(last) = archives.last() {
+        atomic_file::sync_publication(last)?;
+    }
+    Ok(())
+}
+
 /// Whether an entry stays where it is while installations swap: the custody
 /// files the replacement keeps, the settings, which change last, the swap's
 /// own record and marker, the replacement's area and earlier archives.

@@ -268,6 +268,13 @@ impl StoreDir {
         Ok(())
     }
 
+    /// Remove the installations resets kept in this store's directory
+    /// (§19.3). The store's own files stay. A failure midway leaves the rest
+    /// for the next call; with none left it succeeds.
+    pub fn delete_discarded_devices(&self) -> Result<(), FileError> {
+        super::device_reset::delete_archives(&self.path)
+    }
+
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId {
         self.id

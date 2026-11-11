@@ -25,6 +25,9 @@ mod folders;
 #[path = "handle_file_cleanup.rs"]
 mod file_cleanup;
 
+#[path = "handle_discarded_devices.rs"]
+mod discarded_devices;
+
 #[path = "handle_device_only.rs"]
 mod device_only;
 
