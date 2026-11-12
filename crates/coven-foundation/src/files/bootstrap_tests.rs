@@ -44,7 +44,7 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let directory = pending.directory();
     let device = directory.settings().unwrap().device_id;
     directory.owned_file(StoreFile::Bootstrap).replace(b"fixed request").unwrap();
-    assert!(layout.store_ids().await.unwrap().is_empty());
+    assert!(layout.readable_store_ids().await.unwrap().is_empty());
     // The unfinished first installation lists on its own, so a join under
     // way can be resumed.
     assert_eq!(layout.unfinished_first_installations().await.unwrap(), [id]);
@@ -89,7 +89,7 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     assert_eq!(std::fs::canonicalize(layout.store_dir(&id).database_path()).unwrap(), path);
     assert_eq!(std::fs::read(&path).unwrap(), b"loaded database");
     assert_eq!(directory.settings().unwrap().device_id, device);
-    assert_eq!(layout.store_ids().await.unwrap().len(), 1);
+    assert_eq!(layout.readable_store_ids().await.unwrap().len(), 1);
     assert!(layout.unfinished_first_installations().await.unwrap().is_empty());
     assert!(matches!(
         pending.cancel(),
@@ -135,7 +135,7 @@ async fn cancellation_removes_unpublished_bytes_and_permits_a_new_identity() {
     pending.directory().owned_file(StoreFile::Bootstrap).replace(b"encrypted").unwrap();
     pending.cancel().unwrap();
     pending.cancel().unwrap();
-    assert!(layout.store_ids().await.unwrap().is_empty());
+    assert!(layout.readable_store_ids().await.unwrap().is_empty());
     assert_eq!(lock::store_entries(&temp.path().join("stores")), 0);
     drop(pending);
     let fresh = layout.begin_bootstrap(id, &UuidIds).await.unwrap();

@@ -2069,8 +2069,8 @@ pub enum ReadOnlyOpenError {
 pub enum ListedStore {
     /// Its name and state read.
     Readable(StoreInfo),
-    /// Its replacement record or name can't be read, for `reason`. The app
-    /// shows it as damaged and can offer `discard_store` for it.
+    /// Its settings, replacement record or name can't be read, for `reason`.
+    /// The app shows it as damaged and can offer `discard_store` for it.
     Unreadable { id: StoreId, reason: CovenError },
 }
 
@@ -2349,9 +2349,9 @@ impl Coven {
     ) -> Result<Self, KeyError>;
 
     /// The stores on this device, ordered by id, with their committed names.
-    /// Reads names from their databases. A store whose replacement record or
-    /// name can't be read is listed as `Unreadable` with why; no older name is
-    /// substituted.
+    /// Reads names from their databases. A store whose settings file,
+    /// replacement record or name can't be read is listed as `Unreadable` with
+    /// why; no older name is substituted.
     /// A store whose replacement or deletion is unfinished is listed with the
     /// work that must finish; an unfinished first installation is not listed.
     /// First it finishes every deletion from the device that a cut call left

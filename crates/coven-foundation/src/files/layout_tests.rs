@@ -12,7 +12,7 @@ async fn an_absent_layout_lists_no_stores_without_creating_it() {
         directory.path().join("not-created"),
         crate::task::HeardBugs::shared(),
     );
-    assert!(layout.store_ids().await.unwrap().is_empty());
+    assert!(layout.readable_store_ids().await.unwrap().is_empty());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
@@ -54,9 +54,44 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
     )
     .unwrap();
     assert_eq!(
-        layout.store_ids().await.unwrap(),
+        layout.readable_store_ids().await.unwrap(),
         vec![StoreId(Uuid::from_u128(1)), StoreId(Uuid::from_u128(2)),]
     );
+}
+
+/// A store directory whose settings can't be read stays in the listing, with
+/// why, so the app can list it as unreadable and offer to discard it.
+#[tokio::test]
+async fn a_directory_whose_settings_cant_be_read_is_listed_with_why() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout =
+        StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
+    let _good = layout.create_store_dir(StoreId(Uuid::from_u128(1)), &UuidIds).unwrap();
+    let root = directory.path().join("stores");
+    let missing = root.join(Uuid::from_u128(2).to_string());
+    fs::create_dir(&missing).unwrap();
+    let corrupt = root.join(Uuid::from_u128(3).to_string());
+    fs::create_dir(&corrupt).unwrap();
+    fs::write(corrupt.join(settings::SETTINGS_FILE), b"corrupt").unwrap();
+    let mismatch = root.join(Uuid::from_u128(4).to_string());
+    fs::create_dir(&mismatch).unwrap();
+    settings::write(
+        &mismatch,
+        &StoreSettings {
+            id: StoreId(Uuid::from_u128(5)),
+            device_id: crate::id_source::DeviceId(1),
+        },
+    )
+    .unwrap();
+    let listing = layout.store_listing().await.unwrap();
+    let [good, missing, corrupt, mismatch] = listing.as_slice() else {
+        panic!("every store directory is listed: {listing:?}");
+    };
+    assert_eq!(good.id, StoreId(Uuid::from_u128(1)));
+    assert!(good.settings.is_ok());
+    assert!(matches!(missing.settings, Err(SettingsError::Missing(_))), "{missing:?}");
+    assert!(matches!(corrupt.settings, Err(SettingsError::Corrupt(_))), "{corrupt:?}");
+    assert!(matches!(mismatch.settings, Err(SettingsError::WrongStore { .. })), "{mismatch:?}");
 }
 
 #[tokio::test]
@@ -65,7 +100,7 @@ async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     fs::write(directory.path().join("stores"), b"not a directory").unwrap();
     let layout =
         StoreDirectories::new(directory.path().to_owned(), crate::task::HeardBugs::shared());
-    assert!(matches!(layout.store_ids().await, Err(FileError::Io { .. })));
+    assert!(matches!(layout.readable_store_ids().await, Err(FileError::Io { .. })));
     assert!(matches!(
         layout.create_store_dir(StoreId(Uuid::nil()), &UuidIds),
         Err(DirectoryCreationError::File(_))
@@ -93,5 +128,5 @@ async fn discovery_does_not_follow_directory_or_settings_symlinks() {
         linked_settings.join(settings::SETTINGS_FILE),
     )
     .unwrap();
-    assert_eq!(layout.store_ids().await.unwrap(), vec![id]);
+    assert_eq!(layout.readable_store_ids().await.unwrap(), vec![id]);
 }

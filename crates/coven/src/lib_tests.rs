@@ -1,5 +1,6 @@
 use crate::*;
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::{
     sync::Arc,
@@ -681,4 +682,30 @@ pub(crate) fn readable(entries: Vec<SavedRestoreEntry>) -> Vec<SavedRestoreCode>
             unreadable => panic!("expected a readable saved entry, got {unreadable:?}"),
         })
         .collect()
+}
+
+/// A store whose settings file is truncated stays in the list, unreadable
+/// with why, beside the others; the app can discard it.
+#[tokio::test]
+async fn a_store_whose_settings_are_damaged_is_listed_as_unreadable_beside_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let ids: IdSourceRef = Arc::new(SequentialIds::new());
+    let good = app.create_closed_store("Household", ids.clone()).await.unwrap();
+    let damaged = app.create_closed_store("Work", ids).await.unwrap();
+    let settings = damaged.database_path().parent().unwrap().join("settings.json");
+    std::fs::write(&settings, b"{").unwrap();
+    let listed = app.stores().await.unwrap();
+    assert!(matches!(
+        listed.as_slice(),
+        [
+            ListedStore::Readable(StoreInfo { id: first, .. }),
+            ListedStore::Unreadable { id: second, reason: CovenError::Settings(_) },
+        ] if *first == good.id() && *second == damaged.id()
+    ));
+    app.discard_store(&damaged).await.unwrap();
+    assert_eq!(
+        app.stores().await.unwrap().iter().map(ListedStore::id).collect::<Vec<_>>(),
+        [good.id()]
+    );
 }

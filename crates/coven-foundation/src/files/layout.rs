@@ -15,6 +15,17 @@ use crate::files::{
 use crate::id_source::{IdSource, StoreId};
 use crate::task::BugSinkRef;
 
+/// A store directory as the listing found it, and whether its settings
+/// read (E1).
+#[derive(Debug)]
+pub struct ListedDirectory {
+    /// The store the directory's name gives.
+    pub id: StoreId,
+    /// Why its settings can't be read: missing, corrupt, another store's,
+    /// or not a regular file.
+    pub settings: Result<(), SettingsError>,
+}
+
 /// The stores under `app_dir`, one directory each (E1).
 #[cfg_attr(
     not(feature = "test-utils"),
@@ -84,19 +95,46 @@ impl StoreDirectories {
         self.app_dir.join("stores")
     }
 
-    /// The stores on this device, ordered by id (E1), including those whose
-    /// replacement is unfinished, but no unpublished first installation.
-    /// Only directories with a canonical UUID name and matching valid settings
-    /// are stores. Invalid entries are logged; filesystem failures are errors.
-    pub async fn store_ids(&self) -> Result<Vec<StoreId>, FileError> {
+    /// The store directories on this device, ordered by id (E1), including
+    /// those whose replacement is unfinished, but no unpublished first
+    /// installation, each with whether its settings read. Only directories
+    /// with a canonical UUID name are listed; the settings of one that don't
+    /// read (missing, corrupt, another store's, not a regular file) come back
+    /// as why, so the caller lists the store as unreadable instead of
+    /// losing it. Filesystem failures are errors.
+    pub async fn store_listing(&self) -> Result<Vec<ListedDirectory>, FileError> {
         self.listed(Installations::Published).await
     }
 
     /// The stores whose first installation on this device is unfinished, a
     /// restore or a join that hasn't loaded, ordered by id (§19.1). A store
-    /// whose replacement is unfinished is listed by `store_ids` instead.
+    /// whose replacement is unfinished is listed by `store_listing` instead.
+    /// One whose settings don't read is logged and left out: its first
+    /// installation has nothing to resume.
     pub async fn unfinished_first_installations(&self) -> Result<Vec<StoreId>, FileError> {
-        self.listed(Installations::UnfinishedFirst).await
+        let mut stores = Vec::new();
+        for listed in self.listed(Installations::UnfinishedFirst).await? {
+            match listed.settings {
+                Ok(()) => stores.push(listed.id),
+                Err(error) => tracing::warn!(
+                    store = %listed.id,
+                    error = %error,
+                    "an unfinished first installation has no valid store settings"
+                ),
+            }
+        }
+        Ok(stores)
+    }
+
+    /// The ids `store_listing` lists whose settings read.
+    #[cfg(test)]
+    pub(crate) async fn readable_store_ids(&self) -> Result<Vec<StoreId>, FileError> {
+        Ok(self
+            .store_listing()
+            .await?
+            .into_iter()
+            .filter_map(|listed| listed.settings.ok().map(|()| listed.id))
+            .collect())
     }
 
     /// Lock an unfinished first installation for deletion while no call holds
@@ -157,7 +195,10 @@ impl StoreDirectories {
         .await?
     }
 
-    async fn listed(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
+    async fn listed(
+        &self,
+        installations: Installations,
+    ) -> Result<Vec<ListedDirectory>, FileError> {
         let layout = self.clone();
         let bugs = self.bugs.clone();
         crate::task::blocking_completing("list stores", bugs, move || {
@@ -166,7 +207,7 @@ impl StoreDirectories {
         .await?
     }
 
-    fn list_stores(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
+    fn list_stores(&self, installations: Installations) -> Result<Vec<ListedDirectory>, FileError> {
         let root = self.stores();
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -206,16 +247,17 @@ impl StoreDirectories {
                 tracing::debug!(path = %path.display(), first, "store is not in this listing");
                 continue;
             }
-            match settings::read(&path, id) {
-                Ok(_) => stores.push(id),
+            // A settings file that doesn't read lists its store with why; a
+            // file error or a bug fails the listing.
+            let settings = match settings::read(&path, id) {
+                Ok(_) => Ok(()),
                 Err(SettingsError::File(error)) => return Err(error),
                 Err(SettingsError::Bug(bug)) => return Err(FileError::Bug(bug)),
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), error = %error, "directory has no valid store settings")
-                }
-            }
+                Err(error) => Err(error),
+            };
+            stores.push(ListedDirectory { id, settings });
         }
-        stores.sort();
+        stores.sort_by_key(|listed| listed.id);
         Ok(stores)
     }
 

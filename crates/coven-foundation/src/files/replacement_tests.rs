@@ -68,7 +68,7 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
         assert!(matches!(f.store.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
         load(&replacement);
         assert_eq!(std::fs::read(f.store.database_path()).unwrap(), b"old database");
-        assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+        assert_eq!(f.layout.readable_store_ids().await.unwrap(), [f.store.id()]);
         assert_eq!(f.store.unfinished_replacement().unwrap(), None);
         assert_eq!(replacement.directory().settings().unwrap().device_id, reset.new_device);
         replacement.swap("Household".into()).unwrap();
@@ -91,7 +91,7 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
                 phase: ReplacementPhase::Swapping,
             })
         );
-        assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+        assert_eq!(f.layout.readable_store_ids().await.unwrap(), [f.store.id()]);
         // A replacement under way is the store's, not a first installation.
         assert!(f.layout.unfinished_first_installations().await.unwrap().is_empty());
         let directory = replacement.directory();
@@ -129,7 +129,7 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
         assert!(!f.path.join(".coven-replacement").exists());
         assert_eq!(f.store.unfinished_replacement().unwrap(), None);
         drop(replacement);
-        assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+        assert_eq!(f.layout.readable_store_ids().await.unwrap(), [f.store.id()]);
         assert_eq!(f.store.settings().unwrap().device_id, reset.new_device);
         f.store.lock_exclusive().unwrap();
     }
@@ -209,7 +209,7 @@ async fn a_recorded_replacement_refuses_opens_and_resumes_its_load() {
             phase: ReplacementPhase::Registering,
         })
     );
-    assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+    assert_eq!(f.layout.readable_store_ids().await.unwrap(), [f.store.id()]);
     assert_eq!(std::fs::read(f.store.database_path()).unwrap(), b"old database");
     let before = walk(&f.path);
     assert!(matches!(
@@ -299,7 +299,7 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
     ));
     // Before the marker, only the record keeps the store from listing as
     // finished; it lists with the call that finishes it.
-    assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+    assert_eq!(f.layout.readable_store_ids().await.unwrap(), [f.store.id()]);
     let resumed =
         f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
     assert!(resumed.is_swapped());
@@ -395,7 +395,7 @@ async fn deletion_removes_an_unfinished_swap_once_its_call_stops() {
             0,
             "no lock file named for the store remains"
         );
-        assert!(f.layout.store_ids().await.unwrap().is_empty());
+        assert!(f.layout.readable_store_ids().await.unwrap().is_empty());
         assert!(f.store.lock_for_deletion().unwrap().is_none());
     }
 }

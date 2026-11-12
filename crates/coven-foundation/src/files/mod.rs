@@ -55,7 +55,7 @@ pub use file_reader::FileReader;
 pub use flush_batch::FlushHook;
 pub use flush_batch::{FlushBatch, Flushed};
 pub use folder_copy::{CopyFolder, CopyPathError, CopyPlan, CopyWriter, MadeFolder, RecordedCopy};
-pub use layout::StoreDirectories;
+pub use layout::{ListedDirectory, StoreDirectories};
 pub use local_bytes::DirectoryBytes;
 #[cfg(any(test, feature = "test-utils"))]
 pub use lock::{bootstrap_lock, cache_writes_lock, writer_lock};

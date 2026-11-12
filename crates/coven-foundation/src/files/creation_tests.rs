@@ -84,7 +84,7 @@ fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(layout.store_ids())
+            .block_on(layout.readable_store_ids())
             .unwrap()
             .len(),
         1

@@ -64,10 +64,10 @@ pub enum Unfinished {
 pub enum ListedStore {
     /// Its name and state read.
     Readable(StoreInfo),
-    /// Its replacement record or name can't be read, for `reason`. The app
-    /// shows it as damaged and can offer `discard_store` for it.
+    /// Its settings, replacement record or name can't be read, for `reason`.
+    /// The app shows it as damaged and can offer `discard_store` for it.
     Unreadable {
-        /// The store whose record or name can't be read.
+        /// The store whose settings, record or name can't be read.
         id: StoreId,
         /// Why it can't be read.
         reason: CovenError,
@@ -216,8 +216,8 @@ impl Coven {
     }
 
     /// Stores on this device, ordered by id, with their committed names.
-    /// A store whose replacement record or name can't be read is listed as
-    /// `Unreadable` with why; a listing never substitutes an older name.
+    /// A store whose settings file, replacement record or name can't be read
+    /// is listed as `Unreadable` with why; a listing never substitutes an older name.
     /// A store whose replacement or deletion is unfinished lists with the
     /// work that must finish, so the app can offer to finish it; an
     /// unfinished first installation is not listed. First it finishes every
@@ -242,8 +242,15 @@ impl Coven {
             }
         }
         let mut stores = Vec::new();
-        for id in self.directories.store_ids().await? {
-            stores.push(match self.read_listed(id).await {
+        for listed in self.directories.store_listing().await? {
+            let id = listed.id;
+            // A settings file that doesn't read leaves the store listed,
+            // unreadable, so the app can offer to discard it.
+            let read = match listed.settings {
+                Ok(()) => self.read_listed(id).await,
+                Err(error) => Err(CovenError::from(error)),
+            };
+            stores.push(match read {
                 Ok(info) => ListedStore::Readable(info),
                 Err(error) => {
                     if let Some(bug) = crate::task::CarriesBug::bug(&error) {
