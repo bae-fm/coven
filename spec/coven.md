@@ -8498,14 +8498,28 @@ condition in the session, because a retry must not overwrite a competing floor.
   - On OneDrive the plan names the temporary, and on CloudKit the upload
     record, which the next attempt finds again; a OneDrive session whose start
     reply was lost holds no item and expires (Appendix E.2).
-  - Where an S3 name is shared, a slot or the floor on a profile that completes
-    in place, nothing tells this device's upload from another's. A marked plan
-    there reports `SessionIdentityUnknown`, and the upload is ended once it can
-    never publish (§17.10). An unmarked one goes on. Ben's laptop records the
-    plan of its claim on slot 41, in a store on R2, and a provider cooldown
-    refuses the first part before anything is sent: the plan stays unmarked,
-    and the next pass sends the claim. Without the mark, a claim stopped
-    before its first part could never be sent.
+  - Where an S3 name is shared, a slot or a floor on a profile that completes
+    in place, nothing tells this device's upload from another's, so a marked
+    plan there aborts nothing. It reads its destination instead. Its own
+    session's marker there means its bytes are published. Another object
+    means the name is taken, which its claim or floor write settles as any
+    taken name is settled (§5.1, §16.6). An empty destination leaves one
+    unknown: an upload its start may have begun. The plan doesn't wait on that
+    upload: it starts a fresh session at the same name. The unknown upload can
+    never publish. No record names it, so no device ever sends its completion,
+    and once anything is published at the name, create-once refuses every other
+    completion there. Whoever applies the name then aborts it with the other
+    dead sessions (§17.10). Ben's laptop marks the plan of its claim on slot
+    41, in a store on R2, and the reply to its first part is lost. Its next
+    attempt finds `seq/41` empty, starts a fresh session there and lands the
+    claim; the upload the lost reply began is aborted after Ben's next floor
+    write. An unmarked plan goes on as before: Ben's laptop records the plan of
+    its claim on slot 41, and a provider cooldown refuses the first part before
+    anything is sent: the plan stays unmarked, and the next pass sends the
+    claim. Without the mark, a claim stopped before its first part could never
+    be sent. While the floor is still one replaced object, a floor replacement
+    whose destination still holds the floor the session observed is as good as
+    empty.
   - A Dropbox session's start is itself the request that begins it, and no
     route lists one, so a plan would name nothing there; Dropbox discards the
     session 7 days after it began.
@@ -8772,15 +8786,13 @@ the devices that clean up a gone device's files end its uploads too.
   `seq/41`: each time it writes a floor, which also covers its own sessions a
   crash left, and when it clears a gone device's storage. A claimant still
   running whose session is aborted this way settles its claim as lost, exactly
-  as a refused completion does (Appendix E.10). A floor session can publish
-  only while the floor keeps the revision it observed, so one begun before the
-  current floor was published is dead too, and is ended the same way, where
-  the service is certified to date a session's start in order with
-  publications (Appendix E.6). A session at a slot not yet applied, a floor
-  session begun after the current floor, and every floor session on a service
-  not certified for it, stay. R2 aborts those 7 days after they began; RustFS,
-  Ceph RGW and Versity Gateway keep them until a lifecycle rule the bucket's
-  owner sets ends them.
+  as a refused completion does (Appendix E.10). A session a device began at a
+  slot and lost the id of is one of these: its own next attempt starts fresh
+  beside it (§17.9), and once the slot is applied it is aborted like any
+  other. A session at a slot not yet applied stays. A session at the floor's
+  path stays, since a floor session there may still publish; R2 aborts those 7
+  days after they began, RustFS, Ceph RGW and Versity Gateway keep them until
+  a lifecycle rule the bucket's owner sets ends them.
 - **Several at once.** Ending an upload already ended succeeds, so the laptop
   and Ben's tablet may both do this, and the phone may run on until it reads
   the entry that stopped it.
@@ -12507,9 +12519,14 @@ names none.
   upload of that device ever targets. A shared slot or floor path doesn't
   establish ownership. Ending dead sessions (below) rests on something else:
   not whose a session is, but that it can never publish.
-- At a shared path the native id of a marked record can't be recovered: coven
-  reports `SessionIdentityUnknown` and keeps the journal until provider evidence
-  settles cleanup.
+- At a shared path the native id of a marked record can't be recovered, and
+  nothing tells another claimant's upload from it, so the record aborts
+  nothing there. It reads the destination by status: this session's marker
+  there means published; another object means the name is taken, an
+  occupied path the caller settles (§5.1); an empty one starts a fresh
+  session at the same name, unmarked, without waiting on the upload the
+  lost start may have begun. That upload is dead once anything is published
+  at the name, and ends with the dead sessions below.
 - Aborting never deletes a destination. It ends another claimant's session only
   once that session can never publish (below).
 - Retrying or resuming a record derives the same name, including after multipart
@@ -13471,7 +13488,7 @@ Write-ups explain each model and state its assumptions:
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.9 |
 | An upload going up in parts records only parts the provider holds, so the progress the app is shown is never ahead of them; an attempt counts confirmed only parts the provider holds, its parts going in any order, and the provider holds each part once and publishes every part once, in order, after any crashes, failed attempts, lost replies and expired sessions | `steps_good`, `progress_never_ahead`, `confirmed_held`, `held_nodup`, `published_whole` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | A crash forgets only memory, and every session the provider holds stays; after it, a session the provider still has continues from the parts it holds, and one it expired starts over with a new plan; no step changes the location, key or chunk hashes | `crash_keeps`, `resume_continues`, `expired_starts_over`, `steps_keep_fixed` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
-| A session is begun only once its plan is recorded and marked, and only the step before that request marks a plan; a session begun but never named, after a lost begin reply or a stop before the record, sits at the place of the marked plan the row records, and where that place is the device's own, the attempt's first request, an abort, and the next run that fails nothing each end every such session | `begin_needs_plan`, `only_mark_marks`, `steps_stray_le`, `stray_named`, `open_sweeps`, `abort_sweeps`, `next_run_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
+| A session is begun only once its plan is recorded and marked, and only the step before that request marks a plan; a session begun but never named, after a lost begin reply or a stop before the record, stays beside whatever else is at its place; where that place is the device's own, it sits at the place of the marked plan the row records, and the attempt's first request, an abort, and the next run that fails nothing each end every such session | `begin_needs_plan`, `only_mark_marks`, `steps_stray_le`, `stray_named`, `open_sweeps`, `abort_sweeps`, `next_run_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
 | A plan never marked has nothing at its place, so at any place its attempt goes on from it and its abort forgets it; a begin refused after the mark but before its request goes out unmarks the plan again; a marked plan at a shared place ends nothing: its abort forgets the plan, and its attempt reads the destination and starts a fresh plan when empty, completes on its own bytes, and fails as occupied on another's | `unmarked_resumes`, `unmarked_aborts`, `refusal_unmarks`, `marked_shared_restarts`, `marked_shared_taken_own`, `marked_shared_occupied`, `abort_sweeps` |
 | A session no record names can never publish, so no step publishes anything but the assembly of the named session's parts; once something is published at a place nothing changes it, and a device that applied the place ends every session there without publishing by it | `stray_never_published`, `taken_refuses_others`, `taken_stays`, `end_dead_harmless`, `ended_dead_run_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, §17.10, E.10 | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
 | What a row records is forgotten only by aborting it, which ends the provider's session and, where the place is the device's own, every session begun at its plan's place; an upload retires only once it records nothing, so it retires with no session left; a failed abort keeps the upload queued with what it records, as its failure | `forgotten_by_abort`, `retire_needs_no_session`, `retired_no_session`, `failed_abort_queued` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
