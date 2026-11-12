@@ -96,10 +96,11 @@ spaces only separate fields for reading. Example times are UTC.
 | Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
-| Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite | a would-be member's id, public keys, device name and, for a new person, their name | D8, D9 |
-| Ended invite's marker | `<store>/join-requests/<device>/<invite>`, in the request's place | when it may be deleted | D8 |
+| Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite or pairing | the member id it answers for, public keys, device name and who asks: for a new person, their name | D8, D9 |
+| Pairing's handover | `<store>/join-requests/<device>/<invite>`, in the request's place | the member's id and private pair, sealed to the request's sealing key | D8 |
+| Ended invite's marker | `<store>/join-requests/<device>/<invite>`, in the request's or handover's place | when it may be deleted | D8 |
 | Gone device's marker | `<store>/join-requests/<device>/gone`, beside the device's requests | nothing but its kind and format | D8 |
-| Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
+| Restore code, invite code, pairing code | on paper or a screen, never in storage | what a new device needs to find and open the store, or to ask for it | D13 |
 | Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
 | Location marker | `coven-location`, at the root of a location that holds one store: a Dropbox shared folder, a OneDrive folder, or an S3 bucket | the id of the one store that owns the location, as plain text | D10 |
 
@@ -125,11 +126,12 @@ writes slot Ana won in §5.1:
 - **Sealed objects** wrap frames in encryption and signatures (D9), at paths
   from D10, using the keys and contexts of D11.
 
-Files, codes and markers are the exceptions. A file has its own simpler
-envelope (D12); a code is a frame turned into text (D13); the location marker
-is a store id in plain text, with no envelope at all (D10). An ended invite's
-marker is a kind, a format and a time; a gone device's marker is a kind and a
-format. Neither is sealed (D8).
+Files, codes, markers and handovers are the exceptions. A file has its own
+simpler envelope (D12); a code is a frame turned into text (D13); the location
+marker is a store id in plain text, with no envelope at all (D10). An ended
+invite's marker is a kind, a format and a time; a gone device's marker is a kind
+and a format. Neither is sealed (D8). A pairing's handover is one sealed box,
+with no chunks or signature (D8).
 
 ### Kind numbers
 
@@ -154,6 +156,7 @@ Format 1 uses these:
 | 15 | Snapshot announcement frame | D9 |
 | 16 | Key-copy acknowledgement frame | D9 |
 | 17 | Saved restore code frame | D13 |
+| 18 | Pairing code frame | D13 |
 | 32 | Inner write | D9 |
 | 33 | Sequence slot | D9 |
 | 34 | Snapshot | D9 |
@@ -162,6 +165,7 @@ Format 1 uses these:
 | 38 | File | D12 |
 | 39 | Floor | D9 |
 | 40 | Gone device's marker | D8 |
+| 41 | Pairing's handover | D8 |
 
 A kind not in this table doesn't exist in format 1, and a reader refuses it (D1).
 
@@ -172,7 +176,8 @@ The sections build on each other. Read them in this order:
 1. **The rules every byte follows:** D1, then the primitive values (D2) and
    ordered keys (D3).
 2. **What objects say:** the frame list (D4), then writes (D5), admin entries
-   (D6), snapshots (D7), and the floor and join request (D8).
+   (D6), snapshots (D7), and the floor, the join request and what takes its
+   place (D8).
 3. **How objects are wrapped:** sealed objects (D9), paths (D10), and the keys and
    contexts that seal and sign them (D11).
 4. **The two exceptions:** files (D12) and codes (D13).
@@ -406,6 +411,7 @@ payload. D1 gives the frame's own layout.
 | 15 | Snapshot announcement | D9 |
 | 16 | Key-copy acknowledgement | empty; the box is in D9’s prefix |
 | 17 | Saved restore code | D13 |
+| 18 | Pairing code | D13 |
 
 ---
 
@@ -1540,7 +1546,8 @@ a new device needs.
 
 ### The join request (kind 9)
 
-Dan's phone asks to join by writing a join request (§13.2), which is
+Dan's phone asks to join by writing a join request (§13.2), and Ana's new
+laptop asks to be paired with one of the same layout. It is
 `invite:uuid | member:MemberId | keys:MemberKeys | device:DeviceId |
 device_name:name | joiner:Joiner`:
 
@@ -1553,22 +1560,64 @@ device_name  name
 joiner       u8, then a name for a new person
 ```
 
+- `invite` is the invite's or the pairing's id, which names the request's
+  path (D10).
 - Verify its supplied signing key: the request is signed with the key it
   carries.
-- Require the invite's fixed member id.
+- Require the invite's or pairing's fixed member id.
+- `keys` is the joiner's new pair, which an invite's approval binds to the
+  member. A pairing's is the new device's pair for its handover alone, which
+  nothing binds: approval seals the handover to its `sealing` key.
 - `device` is the joining installation's own id, fixed when the join begins.
-  The approval registers it (D6).
+  An invite's approval registers it (D6); a paired device registers it itself,
+  with its own add-device entry.
 - `joiner` says who asks. Tag 0 is a recovery: the member already has a
   profile, so the request carries no name. Tag 1 is a new person, followed by
   the name they typed, which the admin sees with the request and the app makes
-  their profile with (§13.2). Any other tag is refused. The invite's `kind`
-  fixes which tag a request may carry; the inviting device refuses the other.
+  their profile with (§13.2). Tag 2 is the member's own new device, asking to
+  be paired, with no name. Any other tag is refused. The invite's `kind` fixes
+  whether a request may carry tag 0 or tag 1, and a pairing takes tag 2 alone;
+  the device that made it refuses any other.
+
+### A pairing's handover (kind 41)
+
+When Ana approves her laptop's request, her phone puts the handover in the
+request's place: the same path, created once (§13.2). It carries her member's
+private pair, so it is sealed to the request's sealing key alone, in an
+anonymous box (D11). It is one box with no chunks or final signature: the box
+authenticates every byte, and the pair it carries proves nothing until the
+laptop's loading checks it against history. It is
+`kind:u8 | version:u16 | ephemeral:32 bytes | nonce:24 bytes | ciphertext |
+tag:16 bytes`:
+
+```
+kind         41
+version      u16, the format version
+ephemeral    32 bytes, the box's fresh X25519 public key
+nonce        24 bytes, random
+ciphertext   the sealed plaintext, as long as it
+tag          16 bytes
+```
+
+The plaintext is `member:MemberId | member_keys:bytes`: the member whose pair
+it is, and the pair as D13's restore code holds it, `CVMK 01 | signing seed:32
+bytes | sealing secret:32 bytes`. A handover is 164 bytes.
+
+- Open it with the private half of the request's `sealing` key, which only the
+  asking device holds.
+- Require `member` to be the pairing's member. A pair that isn't that member's
+  current one fails the new device's restore (§13.1).
+- The bytes are fixed when the approving write seals them. A retry of the
+  create repeats them, and an occupied path must hold exactly these bytes.
+- It goes when the pairing ends: the marker of its end replaces it (below), or
+  a gone device's marker sweep deletes it.
 
 ### An ended invite's marker (kind 37)
 
-When an invite ends, the inviting device puts a marker in its request's place
-(§13.2): the same path, created once. It is the only object at a join
-request's path that isn't a request. Like the location marker and a gone
+When an invite or a pairing ends, the device that made it puts a marker in its
+request's place (§13.2): the same path, created once. It replaces the request,
+or a pairing's handover. It is the only object at a join request's path that is
+neither a request nor a handover. Like the location marker and a gone
 device's marker (below), it isn't sealed: it holds no secret. It is eleven
 bytes, `kind:u8 | format:u16 | kept_until:u64`:
 
@@ -1578,10 +1627,11 @@ format       u16, the format version
 kept_until   u64, seconds since the Unix epoch
 ```
 
-- `kept_until` is when the marker may be deleted: a week after the invite's
-  expiry.
-- A joining device that finds a marker at its request's path, when sending or
-  when checking for its request, ends its join as declined.
+- `kept_until` is when the marker may be deleted: a week after the invite's or
+  the pairing's expiry.
+- A joining or pairing device that finds a marker at its request's path, when
+  sending or when checking for its request, ends its join or pairing as
+  declined.
 - *Example.* An invite expiring at 1,700,000,000 leaves
   `25 0001 00000000655D2B80`: 1,700,604,800 is a week later.
 
@@ -1589,8 +1639,8 @@ kept_until   u64, seconds since the Unix epoch
 
 When an admin's device applies the entry that stops another device for good,
 it creates that device's gone marker, once, at
-`<store>/join-requests/<device>/gone`, and then deletes the requests and ended
-invites' markers beside it (§13.2). It is three bytes, `kind:u8 | format:u16`,
+`<store>/join-requests/<device>/gone`, and then deletes the requests, handovers
+and ended invites' markers beside it (§13.2). It is three bytes, `kind:u8 | format:u16`,
 and holds nothing else: its path says which device is gone.
 
 ```
@@ -1600,17 +1650,18 @@ format       u16, the format version
 
 - It is never deleted. A request can be sent to the gone device at any time,
   and no device will ever answer it.
-- A joining device checks for it before sending its request, and while its
-  request waits. Finding it before sending, it sends nothing; finding it
-  beside its waiting request, it deletes the request. Either way its join ends
-  as declined.
+- A joining or pairing device checks for it before sending its request, and
+  while its request waits. Finding it before sending, it sends nothing; finding
+  it beside its waiting request, it deletes the request. Either way its join or
+  pairing ends as declined.
 - *Example.* Every gone device's marker is `28 0001`.
 
 ---
 
 ## D9 Sealed objects
 
-Everything coven stores, except files, is wrapped the same way. The provider
+Everything coven stores, except files, markers and a pairing's handover (D8),
+is wrapped the same way. The provider
 must see only what it needs to route and frame an object. Members must be able to
 check who wrote it before trusting any of it. And a retry must produce the same
 bytes. This section gives that wrapping, the *envelope*, and the slot, inner
@@ -1953,7 +2004,7 @@ provider can't move one object into another's place.
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement; a device gone for good's folders are listed once, for bodies no announcement names (§16.6) |
 | `<store>/files/<device>/<object>` | An uploaded file, by its random object id |
-| `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite, or the marker of its ended invite |
+| `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite or pairing, a pairing's handover in the request's place, or the marker of its end |
 | `<store>/join-requests/<device>/gone` | The marker of a device gone for good, beside its requests; never deleted |
 | `<store>/.coven-uploads/<device>/<session>` | One upload temporary or provider session of the device whose connection staged it; never a published object (§20.6) |
 
@@ -1965,8 +2016,9 @@ numbered 3 is `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/snapshots/store/4242/3`.
 
 - Device ids and numbers are decimal, without leading zeros. `n` starts at 1.
 - An audience is `store` or a circle's UUID.
-- Store, member, circle, invite, attempt and file ids are canonical lowercase
-  hyphenated UUIDs, and so is an upload's `<session>`.
+- Store, member, circle, invite, pairing, attempt and file ids are canonical
+  lowercase hyphenated UUIDs, and so is an upload's `<session>`. A pairing's id
+  takes the invite's place in its paths.
 - A path has only this spelling, and is bound into its encrypted object's
   authentication.
 
@@ -2059,6 +2111,7 @@ the string's length, 8, then the number.
 | `coven/join-request/v1` | a join request's key | below |
 | `coven/confirmation-number/v1` | a join request's confirmation number | below |
 | `coven/sealed-box/v1` | a sealed key's box | below |
+| `coven/handover/v1` | a pairing's handover's box | below |
 | `coven/file-chunk/v1` | a file chunk's associated data | D12 |
 | `coven/kept-value/v1` | a kept record's digest of a value | D7.3 |
 
@@ -2163,21 +2216,23 @@ Each context field is length-prefixed as above.
   deterministic sealing and Ed25519 signing reproduce the complete object byte
   for byte.
 
-This derivation does not apply to snapshots, anonymous boxes, floors or join
-requests. Snapshots and sealed keys keep their originally sealed bytes.
+This derivation does not apply to snapshots, anonymous boxes, floors, join
+requests or handovers. Snapshots, sealed keys and handovers keep their
+originally sealed bytes.
 
 ### Join request keys
 
-An invite's secret derives its join request's key with `coven/join-request/v1`:
+An invite's or a pairing's secret derives its join request's key with
+`coven/join-request/v1`:
 HKDF-SHA256 of the 32-byte secret, with no salt, the context of that label alone
 as its info, and a 32-byte output.
 
 ### Confirmation numbers
 
-Every join request shows a six-digit confirmation number on both phones
+Every join request shows a six-digit confirmation number on both devices
 (§13.2). It is SHA-256 of a context of three strings:
-`coven/confirmation-number/v1`, the invite id's 16 bytes, and the 64 bytes of
-the request's `keys:MemberKeys` encoding. The first 8 bytes of the hash, as a
+`coven/confirmation-number/v1`, the invite's or pairing's id's 16 bytes, and
+the 64 bytes of the request's `keys:MemberKeys` encoding. The first 8 bytes of the hash, as a
 big-endian `u64`, modulo 1,000,000, give the number. It is shown with leading
 zeros as two groups of three digits: `041 778`.
 
@@ -2187,7 +2242,7 @@ invite `0x55` repeated, has the number `181 205`.
 - The invite secret is not an input. Anyone who saw the code has it, so it adds
   nothing a stranger lacks.
 - The number names only the keys, never the device name, which the requester
-  chooses freely.
+  chooses freely. For a pairing it names the pair the handover is sealed to.
 
 ### Sealed keys
 
@@ -2213,6 +2268,21 @@ A sealed audience key in a sequence slot has D9's clear routing prefix and box.
 - It checks the opened audience and key id against its prefix.
 - It checks the SHA-256 of the 32 key bytes against the authorized D6
   introduction. A mismatch is invalid, not another value under that key id.
+
+### Handover keys
+
+A pairing's handover is an anonymous box of its own (D8), sealed the way a key
+copy's is, under its own label so neither can stand in for the other.
+
+- **The shared secret** is X25519 of a fresh ephemeral key and the request's
+  exact `sealing` key. A contribution of all zeros is refused.
+- **The box key** is HKDF-SHA256 of the shared secret, with no salt and a
+  32-byte output. Its info is the context of `coven/handover/v1`; the path;
+  the handover's clear `kind | version`, three bytes; the ephemeral key; and the
+  request's sealing key, in that order. That context is also the associated
+  data of the XChaCha20-Poly1305 seal, under the handover's random nonce.
+- So the box opens only at its own path, for that request's key: it can't be
+  moved to another pairing or opened with another request's key.
 
 ---
 
@@ -2319,10 +2389,10 @@ storage      bytes
 - No store name is encoded. A code written down can't be corrected after a
   rename, so a restoring device learns the name after loading. The copy coven
   saves for the person carries a name beside the code instead (below).
-- A restore code never carries OAuth tokens. It carries an S3 key only when
-  the person's own device shows it to their new device, with the key that
-  device holds (§13.1). The code coven returns to write down, and the copy it
-  saves for the person, carry none.
+- A restore code never carries OAuth tokens. It carries an S3 key only in a
+  restore's record on the device (§13.1). No code coven returns or saves for
+  the person carries one: the key is the person's to keep apart, or in its own
+  saved entry.
 
 ### Saved restore code (kind 17)
 
@@ -2395,6 +2465,41 @@ storage          bytes
   Never merely an active id, another writer's equal pair, or an available key
   copy.
 
+### Pairing code (kind 18)
+
+A pairing code lets the person's new device ask one of their devices for their
+keys (§13.2). It holds no keys: only what the asking device needs to find the
+store and to send a request its showing device can open. It is
+`store:uuid | expires_at:u64 | pairing:uuid | member:MemberId |
+secret:32 bytes | showing:DeviceId | storage:bytes`:
+
+```
+store       uuid
+expires_at  u64
+pairing     uuid
+member      MemberId
+secret      32 bytes
+showing     DeviceId
+storage     bytes
+```
+
+| Field | Rule |
+| --- | --- |
+| `expires_at` | when the pairing ends, 30 minutes after it was made, in whole seconds since the Unix epoch by the showing device's clock: the asking device sends no first request after it (§13.2) |
+| `pairing` | the request's path, in the invite's place (D10) |
+| `member` | the showing device's member, whose pair the handover carries. The signed request must repeat it. |
+| `secret` | the pairing secret, which derives the request's key (D11) |
+| `showing` | the device that made the pairing, under whose id the request goes |
+| `storage` | the code's storage part (below): the store's location, and on S3 whether the key the showing device connects with follows, then the key |
+
+- The code carries no store name: the new device learns it once it has
+  loaded, as a restore does.
+- On S3 one pairing has two codes, the same but for `storage`: the QR code's
+  carries the key, and the one the person copies or shares as text carries
+  none (§13.2). Elsewhere it has one.
+- The asking device's request carries `joiner` tag 2 (D8), and its approval is
+  a handover in the request's place, never an entry (D8).
+
 ### Storage parts
 
 A code's `storage` field tells the new device where the store lives and how it
@@ -2460,6 +2565,7 @@ bits are zero.
 | --- | --- | --- | --- | --- |
 | restore | `s3_key:Option<S3Key>` | nothing | nothing | nothing |
 | invite | `s3_key:S3Key` | nothing | `share_token:Option<text>` | `share_url:text` |
+| pairing | `s3_key:Option<S3Key>` | nothing | nothing | nothing |
 
 `S3Key` is `access_key_id:text | secret_access_key:text`, and neither may be
 empty.
@@ -2483,6 +2589,7 @@ of its frame followed by a CRC-32C of the frame, big-endian.
 | --- | --- |
 | restore | `CVR1-` |
 | invite | `CVI1-` |
+| pairing | `CVP1-` |
 
 - These text envelopes and `CVMK 01` identify their own encoding; the inner frame
   carries storage format 1.
@@ -2514,7 +2621,9 @@ kind, sealed object, file and code. Format 1 includes:
   numbers;
 - a floor with original boxes, announcements and the first kept slot;
 - restore and invite codes with S3 storage parts, which `coven-storage`'s
-  tests decode and reproduce, a saved restore code and signed join requests.
+  tests decode and reproduce, a saved restore code and signed join requests;
+- pairing codes with and without an S3 key, a pairing's request, and a
+  handover sealed to that request's key, which opens only at its own path.
 
 **Decoding.**
 
@@ -2526,7 +2635,7 @@ kind, sealed object, file and code. Format 1 includes:
 
 - Fixture keys and nonces are public test data.
 - `coven-format/fixtures/generate-deterministic.py` calculates every fixture's
-  ciphertext, derivations, confirmation numbers and signatures independently,
+  ciphertext, derivations, confirmation numbers, boxes and signatures independently,
   with Python's hashlib and hmac and libsodium, and a test reruns it and
   compares every byte; Rust then opens them.
 - Mutations must reject changed paths, routing credentials, slot order, authored

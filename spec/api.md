@@ -543,7 +543,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   `StorageFailure::InvalidConfiguration`, its JNI cause kept, where an
   uninitialized verifier would have panicked at the first HTTPS connection.
 - On Android, coven keeps the person's saved restore codes in Google's Block
-  Store ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)), calling
+  Store ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)), calling
   Google Play services through JNI with the context the app gives `ndk-context`
   for the keystore. The app adds
   `com.google.android.gms:play-services-auth-blockstore` to its dependencies,
@@ -4625,7 +4625,7 @@ Dropbox uses the account email; OneDrive uses mail when present, otherwise the
 principal name. Joining and restoring record the member's own label, replacing
 any label in the code. These labels never select a folder, grant access or change
 an upload's destination. S3 has no account label, and coven records none for
-CloudKit ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+CloudKit ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)).
 
 Every connection to a Dropbox shared folder or a OneDrive folder reads
 `folder_label` again, the folder's name and web address as its sign-in reads
@@ -5342,7 +5342,8 @@ pub enum SyncError {
     SecureStorage(KeyError),
     /// Making or checking signed or encrypted bytes failed.
     Crypto(CryptoError),
-    /// The request or invitation is absent, expired, or no longer matches.
+    /// The request, invitation or pairing is absent, expired, or no longer
+    /// matches.
     InvitationChanged,
     /// The member's provider account holds the store, so they can't be
     /// removed and their access can't move to another account (§10.1, §20.9,
@@ -7470,21 +7471,23 @@ pub enum ProviderSignOut {
 
 ### E10 Joining and restore
 
-- A person's new device opens the store from their restore code: scanned
-  as a QR code, typed in, or read from iCloud Keychain on Apple or Block Store
-  on Android ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+- A person's new device gets their member's keys from one of their devices
+  that has the store open, by pairing with it (§13.2, below), or from their
+  restore code: typed in, or read from iCloud Keychain on Apple or Block Store
+  on Android ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)).
 - The restore code contains only the stable member id and current private
   pair, store id and storage location. On S3, the person keeps their access key
   separately, such as in a password manager, and supplies it on the new device,
-  unless the code their own device showed holds it. Dropbox and OneDrive
-  likewise require the person's provider sign-in.
+  unless their saved entry holds it. Dropbox and OneDrive likewise require the
+  person's provider sign-in.
 - A restore code carries no name. Before connecting, a device restoring from
-  a typed or scanned code may show the id, provider and account or location,
+  a typed code may show the id, provider and account or location,
   never a store name; it learns the name only after loading. An invite carries
   the current name copied when it was made and the new person's name; it
   expires at the time fixed when it was made (§13.2).
   `decode_code_info` exposes the same location as a saved entry, so a
-  typed or scanned code can show which account it is for before connecting.
+  typed or scanned code can show which account it is for before connecting. A
+  pairing code carries no name either; it expires 30 minutes after it is made.
 - Coven's saved entry, in iCloud Keychain or Block Store, saves the code with
   the store's name: the last
   name one of the person's devices saw, kept with the slot that set it. Setup,
@@ -7493,7 +7496,7 @@ pub enum ProviderSignOut {
   own name newer than the entry's. An older name never replaces a newer one, a
   rewrite keeps the entry's code, and an absent entry stays absent. A failed
   rewrite fails the sync pass or the opening call
-  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). On Android,
+  ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)). On Android,
   opening also writes the phone's saved entries again, unchanged, so Block
   Store's choice of a cloud copy follows the phone's current screen lock; a
   failed write fails the opening call.
@@ -7504,17 +7507,13 @@ pub enum ProviderSignOut {
   holds no current code (keys replaced, no storage location, or the member
   removed) leaves the entry as it is. A refused keychain read still fails the
   call.
-- A QR scan from one of the person's own devices may supply the S3 key inside
-  the code, because the person controls the showing device. The code to write
-  down, the one `restore_code()` shows, and the saved copy never hold one; the
-  S3 key may be saved in its own entry beside the code.
-- `restore_code_for_transfer()` gives the showing device's app the restore code
-  with the S3 key this device holds now, read from the same custody its
-  connection uses. The app shows it only as a QR code, to the person's own new
-  device, behind the same tap that reveals the code. After a key replacement it
-  holds the new key. On other providers, or with no key, it is `restore_code()`'s.
+- No restore code a person sees holds an S3 key: not the code to write down,
+  not the one `restore_code()` shows, nor the saved copy, beside which the S3
+  key may be saved in its own entry. Only a restore's record on the device
+  holds the key inside its code (§13.1).
 - `decode_code_info` reports `carries_s3_key`, so the new device asks for a key
-  only when the code holds none. Restoring with a code that holds a key and a
+  only when the code holds none: an S3 invite always does, and so does an S3
+  pairing's QR code. Restoring or pairing with a code that holds a key and a
   key supplied beside it fails with `InvalidConfiguration` before bootstrap.
 - `Coven::saved_restore_codes` lists the saved codes of the installation's
   keychain service so the
@@ -7548,7 +7547,7 @@ pub enum ProviderSignOut {
   name, in a device-only keychain entry, then on Dropbox and OneDrive its
   sign-in, in the store's device credentials, where it refreshes from then
   on. From the record on, the restore only goes forward
-  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+  ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)).
   `CovenBuilder::unfinished_restores` lists the restores under way, and
   `resume_restore` finishes one with neither the code nor a new sign-in.
   Cancelling once the record is kept waits for the registration to end,
@@ -7561,7 +7560,7 @@ pub enum ProviderSignOut {
   installation, in that order.
 - A device that still holds the store under member keys another device
   replaced restores in place with `CovenBuilder::restore_device`
-  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). The code must
+  ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)). The code must
   name that store, or the call fails with `CodeError::WrongStore`. The new
   device loads beside the old copy, which stays openable until the restore
   records itself, just before the new device registers; a failure before
@@ -7709,10 +7708,63 @@ pub enum ProviderSignOut {
   member whose account holds the store fails with `SyncError::StoreOwner`
   under another account. After registering, it records a changed account or
   key as the member's access, as setup does.
+- One of the person's devices adds another by pairing
+  ([§13.2](coven.md#132-adding-a-person-invites)): an invite to its own
+  member, whose approval hands over the member's private pair instead of
+  claiming an admission. `CovenHandle::start_pairing` makes one, a write of its
+  own, with or without storage, and returns its id and codes at once: any
+  registered device of an active member may, and a device that isn't fails
+  with `Rejected(NotAllowed)`. Nothing is shared or granted, and no slot is
+  claimed, then or at approval. On S3 the pairing has two codes with one
+  secret: `qr_code` carries the key this device connects with, read from its
+  custody, for the app to show only as a QR code, behind a tap;
+  `shared_code`, the one to copy or share, carries none. On other providers
+  the two are the same text.
+- A pairing lives while the screen showing its code is open: the app calls
+  `end_pairing` when it closes, which ends it if it hasn't ended and forgets
+  it. Opening the store ends and forgets every pairing it finds, left by a
+  closed handle or a crash: no screen can show one then. A pairing also ends
+  when the person declines its request, when its request fails a check, when
+  it expires, 30 minutes after it was made by this device's clock, and when the
+  new device is added: this device
+  applies an add-device entry, by its member, registering the device the
+  request named. Ending puts the marker in the request's or handover's place,
+  in a pass, as an ended invite's does. A stop for good of this device ends
+  and forgets its pairings in the transaction that applies it, leaving their
+  paths to the gone device's marker sweep (§14.1). Nothing lists a device's
+  pairings; `subscribe_pairing` follows one, by its id, from its start until it is
+  forgotten, and reports how it ended until then.
+- While a pairing waits, every pass looks for its request, with no doubling
+  wait: the app holds `sync_often` while the code shows (E5). A request that
+  passes the checks an invite's makes, with `joiner` the member's own device,
+  waits for the person with its confirmation number. `approve_pairing` takes
+  exactly that request, a write of its own, with or without storage: it seals
+  the member's current private pair, as this device holds it, to the
+  request's sealing key, and journals that handover; a pass puts it in the
+  request's place. An expired pairing, or a request the pairing no longer
+  shows, fails with `InvitationChanged`. Once approved, declining fails the
+  same way, and `end_pairing` still ends it.
+- On the new device, `join_with_pairing` holds the whole pairing in one call.
+  It makes its installation, connects with the person's own sign-in, or on S3
+  the key the code carries or the one the app supplies, sends its request
+  with a pair it keeps only in memory, and checks for the handover as a join
+  checks for its admission, `JoinControl::check_often` included. Once the
+  handover opens, it restores from what it carried, exactly as
+  `restore_from_code` does: it loads, checks the pair is the member's current
+  one, records the restore and registers its device with its own add-device
+  entry. From the record on, the call is a restore, and
+  `unfinished_restores` lists it if it stops. Until then nothing it keeps
+  outlives the call: cancelling, dropping or failing it removes its
+  installation, whether or not its request was sent, since approval binds
+  nothing in history. It returns `None` when the pairing ended before its
+  handover opened: declined, closed, expired, refused, or its showing device
+  gone for good. A store whose unfinished installation holds a join's saved
+  code is refused with `StoreLockError::BootstrapPending` before anything
+  changes, as a restore is (§13.4).
 - Each call takes a `CovenBuilder` from the app's `Coven`, plus its code,
   device name, status callback and cancellation receiver, and
-  returns the open `CovenHandle`. Restore also accepts the separately
-  supplied S3 credentials. There is no second app-side open.
+  returns the open `CovenHandle`. Restore and pairing also accept the
+  separately supplied S3 credentials. There is no second app-side open.
   - The builder supplies tables, migrations, custody, clock,
     provider clients, sign-in presenter and file-transfer limits once. Ids
     come from the app's id source, `UuidIds` by default (E1). The app
@@ -7726,8 +7778,8 @@ pub enum ProviderSignOut {
     writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
   - The status callback is called on the task awaiting the call, with each
     phase as it starts: `Opening`, the new installation's open steps;
-    `Connecting`; a join's `WaitingForApproval` or `Pending`; then `Loading`,
-    with each of loading's steps as a `Progress<LoadStep>` (E1,
+    `Connecting`; a join's or a pairing's `WaitingForApproval` or `Pending`;
+    then `Loading`, with each of loading's steps as a `Progress<LoadStep>` (E1,
     [§13.4](coven.md#134-edge-cases-installing-on-the-device)). A check's
     scan for a join's copies is part of its wait and reports no `Loading`.
     A join's keys first open in the approval check that finds its
@@ -7737,7 +7789,9 @@ pub enum ProviderSignOut {
     never comes back: once a join's keys open, it reports no
     `WaitingForApproval` or `Pending` again, in that call or any call that
     resumes it. It records the
-    opened keys with its saved request before it reports `Loading`. A store
+    opened keys with its saved request before it reports `Loading`. A
+    pairing whose handover opens reports a restore's phases from then on,
+    `Loading`, `Registering` and `Committing`, and never waits again. A store
     whose first load stopped part way loads the rest in its passes, which
     report no steps. An app
     that redraws more slowly sees the newest report, as `CovenBuilder::open`'s
@@ -7766,14 +7820,16 @@ pub enum ProviderSignOut {
     the bug, its custody kept for the call that resumes it.
   - Cancellation closes the loading database and removes the unpublished store,
     with a join's kept sign-in and code, without committing final keys or
-    credentials. Dropping a waiting future
-    retains encrypted work for explicit retry. There is no cancellable await
+    credentials. Dropping a waiting join's future retains encrypted work for
+    explicit retry; a pairing's keeps nothing. There is no cancellable await
     between the final cancellation check, custody commitment, publication and
     returning the handle.
   - A restore registers the supplied device name. A join's request carries
     the name and the installation's device id, and the approval's admission
-    registers them (§13.2). Every installation receives its own device id;
-    resuming a pending join keeps that id.
+    registers them (§13.2). A pairing's request carries them too, and the
+    paired device registers them itself, with its own add-device entry. Every
+    installation receives its own device id; resuming a pending join keeps
+    that id.
   - Each loading step logs what it took at info level, so a slow restore shows
     where its time went: opening the database (migrating and optimizing),
     connecting to storage, reading the member's store keys from their copies,
@@ -7808,11 +7864,23 @@ pub enum CodeInfo {
     /// An invite carries the store's name captured when the admin made it
     /// and whether it adds a new person or recovers a member.
     Invite(InviteInfo),
+    /// A pairing code reveals no name either, and holds no keys.
+    Pairing(PairingInfo),
 }
 
 impl CodeInfo {
-    /// The store, member and provider facts shared by either kind.
+    /// The store, member and provider facts shared by every kind.
     pub fn metadata(&self) -> &CodeMetadata;
+}
+
+/// What a pairing code tells before connecting (§13.2).
+pub struct PairingInfo {
+    /// The person's own member id, and the sign-in the new device needs.
+    pub metadata: CodeMetadata,
+    /// When the pairing ends, 30 minutes after it was made, by the showing
+    /// device's clock, to the second: the new device sends no first request
+    /// after it.
+    pub expires_at: SystemTime,
 }
 
 /// What an invite code tells before connecting: as typed or scanned, and as a
@@ -7873,18 +7941,23 @@ pub struct CodeMetadata {
     /// OneDrive's scopes; None for S3 and CloudKit.
     pub oauth_access: Option<OAuthAccess>,
     /// Whether the code holds an S3 key, so the device asks for none: every S3
-    /// invite does, and a restore code the person's own device showed.
+    /// invite does, and an S3 pairing's QR code. No restore code a person
+    /// sees does.
     pub carries_s3_key: bool,
 }
 
-/// The two codes used to open a store on a new device (§13).
+/// The codes used to open a store on a new device (§13).
 pub enum CodeKind {
     /// Holds only the person's member id and private keys, store id and
-    /// location, and on S3 perhaps their key.
+    /// location.
     Restore,
     /// Holds an invite id, chosen member id, secret, initial key id, inviting writer and its
     /// applied slot at invite time; approval is required (§13.2).
     Invite,
+    /// Holds a pairing id, the person's member id, a secret and the showing
+    /// device, and on S3 in its QR code that device's key; no member keys.
+    /// Approval is required (§13.2).
+    Pairing,
 }
 
 /// A scanned or typed code cannot be used for this call (§13, E10).
@@ -8034,13 +8107,46 @@ impl CovenHandle {
     /// it leaves (Appendix F.4).
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
-    /// `restore_code()`'s code holding the S3 key this device holds now, for
-    /// the app to show as a QR code to the person's own new device (§13.1). A
-    /// replaced key gives its replacement. Without a key, on other providers or
-    /// when this device holds none, it is `restore_code()`'s code. A locked
-    /// keychain fails with
+    /// Starts a pairing to add another of this member's devices, in a write of
+    /// its own, with or without storage, and returns its id and codes (§13.2).
+    /// Any registered device of an active member may; one that isn't fails
+    /// with `Rejected(NotAllowed)`. It fixes this device's member, a fresh
+    /// secret and an expiry 30 minutes from now, by this device's clock, and
+    /// shares and claims nothing. On S3, `Pairing::qr_code` carries the key
+    /// this device connects with, read from its custody; one holding no S3
+    /// key fails with `StorageFailure::InvalidConfiguration`, and a locked
+    /// keychain with
     /// SyncError::SecureStorage(KeyError::KeychainTemporarilyUnavailable).
-    pub async fn restore_code_for_transfer(&self) -> Result<String, SyncError>;
+    pub async fn start_pairing(&self) -> Result<Pairing, SyncError>;
+
+    /// The pairing's status, from its start until `end_pairing` forgets it;
+    /// None for a pairing this device never made or has forgotten.
+    pub async fn pairing(&self, pairing: PairingId) -> CovenResult<Option<PairingStatus>>;
+
+    /// The same internal query, live (E4), for the screen that shows the code.
+    pub fn subscribe_pairing(&self, pairing: PairingId) -> LiveQuery<Option<PairingStatus>>;
+
+    /// Approves exactly this checked request, in a write of its own, with or
+    /// without storage: it seals the member's current private pair, as this
+    /// device holds it, to the request's sealing key, and journals that
+    /// handover, which a pass puts in the request's place. It claims no slot.
+    /// A request the pairing no longer shows, or a pairing that has ended or
+    /// expired by now, fails with InvitationChanged.
+    pub async fn approve_pairing(&self, request: &PairingRequest) -> Result<(), SyncError>;
+
+    /// Declines exactly this checked request, in a write of its own, with or
+    /// without storage: the pairing ends as declined, and a pass puts its
+    /// marker in the request's place. A request the pairing no longer shows,
+    /// an approved pairing, and one that has ended or expired, fail with
+    /// InvitationChanged.
+    pub async fn decline_pairing(&self, request: &PairingRequest) -> Result<(), SyncError>;
+
+    /// The screen showing the pairing's code closed: ends the pairing, in a
+    /// write of its own, with or without storage, at whatever stage it is,
+    /// approved included, and forgets it. A pass then puts its marker in the
+    /// place of its request or handover. A pairing that has already ended
+    /// is only forgotten; one already forgotten succeeds and changes nothing.
+    pub async fn end_pairing(&self, pairing: PairingId) -> Result<(), SyncError>;
 
     /// Makes an invite, in a write of its own (`CovenWrite::create_invite`).
     pub async fn create_invite(
@@ -8217,9 +8323,68 @@ pub struct JoinRequest {
     /* private authenticated request record; construct only by receiving a checked request */
 }
 
-/// Six digits naming a request's keys, compared by the admin and the
-/// requester before an invite's request is approved (§13.2). Displays as `041 778`.
+/// Six digits naming a request's keys, compared by the person approving and
+/// the requester before an invite's or a pairing's request is approved
+/// (§13.2). Displays as `041 778`.
 pub struct ConfirmationNumber(pub u32);
+
+/// A pairing's UUID, which names its request's path in an invite's place
+/// (§13.2, format.md D10).
+pub struct PairingId(pub Uuid);
+
+/// A pairing `start_pairing` made: what the screen that adds a device shows.
+pub struct Pairing {
+    pub id: PairingId,
+    /// The code to show as a QR code, behind a tap. On S3 it carries the key
+    /// this device connects with, so the new device asks for none: whoever
+    /// sees it reaches the storage as this member until the key is replaced
+    /// (§14.3).
+    pub qr_code: String,
+    /// The code to copy or share as text. It carries no key; on S3 the new
+    /// device asks the person for theirs. On other providers it is `qr_code`.
+    pub shared_code: String,
+    /// 30 minutes after it was made, by this device's clock.
+    pub expires_at: SystemTime,
+}
+
+/// Where a pairing is (§13.2). The app offers approving and declining only
+/// for a request that is `Waiting`, and ends the pairing when its screen
+/// closes, whatever its status.
+pub enum PairingStatus {
+    /// Waiting for a request, then with the checked request, for the person
+    /// to compare its number and decide.
+    Waiting { request: Option<PairingRequest> },
+    /// The person approved `request`: its handover is on its way to the
+    /// request's place, or there, waiting for the new device to register.
+    Approved { request: PairingRequest },
+    /// The pairing has ended, its marker in place or on its way; the app
+    /// shows how until it ends the pairing and forgets it.
+    Ended(PairingEnd),
+}
+
+/// How a pairing ended (§13.2).
+pub enum PairingEnd {
+    /// This device applied the new device's add-device entry.
+    Added { device: DeviceId, name: String },
+    /// The person declined the request.
+    Declined,
+    /// The request failed a check, such as answering for another member or
+    /// carrying keys history knows.
+    Refused,
+    /// 30 minutes passed by this device's clock first.
+    Expired,
+}
+
+/// A checked pairing request, as `PairingStatus` shows it (§13.2).
+pub struct PairingRequest {
+    pub pairing: PairingId,
+    /// The name the new device gave itself, for the person to check.
+    pub device_name: String,
+    /// Computed from the pairing id and the request's keys; the new device
+    /// shows the same number (format.md D11).
+    pub confirmation: ConfirmationNumber,
+    /* private authenticated request record; construct only by receiving a checked request */
+}
 
 /// The store and member ids, provider location and account, and sign-in requirement. Only an
 /// invite returns a store name, captured when the invite was made.
@@ -8235,7 +8400,8 @@ pub enum BootstrapStatus {
     /// Connecting to storage, accepting provider access and sending a join
     /// request.
     Connecting,
-    /// The request is sent; `confirmation` is the number the admin compares.
+    /// The request is sent; `confirmation` is the number the person
+    /// approving compares: the admin, or for a pairing the person themselves.
     /// Reported once, however many checks the wait holds.
     WaitingForApproval {
         confirmation: ConfirmationNumber,
@@ -8251,7 +8417,8 @@ pub enum BootstrapStatus {
     /// the access it reaches storage with, the registration, whose claim first
     /// reads the slots added since loading, and the recorded access that
     /// follows (§13.1). No count: the claim's reads aren't known until made.
-    /// A join never reports it: its approval registered its device.
+    /// A join never reports it: its approval registered its device. A
+    /// pairing reports it as a restore does.
     Registering,
     /// Keeping the member's keys and the device's credentials in custody and
     /// publishing the store, the last work before the handle opens; for a
@@ -8288,8 +8455,8 @@ pub enum LoadStep {
     Applying,
 }
 
-/// The member's S3 access key: entered on a new device, or held in the
-/// restore code the person's own device showed.
+/// The member's S3 access key: entered on a new device, or held in an S3
+/// pairing's QR code.
 pub struct S3Credentials {
     pub access_key_id: String,
     pub secret_access_key: SecretText,
@@ -8307,10 +8474,10 @@ impl S3Credentials {
     pub fn validate(&self) -> Result<(), StorageError>;
 }
 
-/// Opens the store on a new device from the person's restore code, scanned
-/// or typed. S3 requires a key: the one the code holds, when the person's own
-/// device showed it, or else Some(s3_credentials) entered separately. Other
-/// providers require None; the builder holds its own sign-in when
+/// Opens the store on a new device from the person's restore code, typed in.
+/// S3 requires a key: Some(s3_credentials), entered separately, since no code
+/// a person sees holds one. Other providers require None; the builder holds
+/// its own sign-in when
 /// `oauth_access` is present. A missing S3 key, a second key beside one the
 /// code holds, or credentials for another provider fail before bootstrap with
 /// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration.
@@ -8517,8 +8684,9 @@ pub async fn join_with_invite(
     control: &JoinControl,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
-/// The app's hold on a running join: cancel before the request is sent, or
-/// ask it to check for approval often while the app shows the wait.
+/// The app's hold on a running join or pairing: cancel a join before its
+/// request is sent, or a pairing before its restore records itself, or ask
+/// it to check for approval often while the app shows the wait.
 pub struct JoinControl { /* private */ }
 
 impl JoinControl {
@@ -8532,6 +8700,43 @@ impl JoinControl {
     /// holds every check.
     pub fn check_often(&self, interval: Duration) -> SyncOftenGuard;
 }
+
+/// On the person's new device: asks one of their devices for their keys
+/// with its pairing code, and restores from what it hands over (§13.2). S3
+/// requires a key: the one the code holds, when it is the QR code, or else
+/// Some(s3_credentials), entered separately. Other providers require None,
+/// and the builder holds the person's own sign-in when `oauth_access` is
+/// present. A missing S3 key, a second key beside one the code holds, or
+/// credentials for another provider fail before anything changes with
+/// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration.
+///
+/// It makes the installation, sends the request with a pair it keeps only in
+/// memory, reports `WaitingForApproval` with the confirmation number, and
+/// checks the request's path as a join does, `control.check_often` included.
+/// Once the handover opens, it restores exactly as `restore_from_code` does,
+/// with the code's store, member and location, the pair the handover carried
+/// and the key, reporting `Loading`, `Registering` and `Committing`, and
+/// returns the open store. A pair that isn't the member's current one fails
+/// as an old restore code does, with `SyncError::MemberKeysReplaced`. From
+/// the restore's record on, the call is a restore: dropping or failing it
+/// leaves it for `CovenBuilder::resume_restore`, and cancelling waits for the
+/// registration, then fails with `BootstrapError::RestoreRegistered`. Before
+/// the record, cancelling through `control`, dropping or failing the call
+/// removes the installation, whether or not the request was sent, and
+/// cancelling fails with `BootstrapError::Cancelled`. Returns `None` when
+/// the pairing ended before its handover opened: declined, closed, expired,
+/// refused, or its showing device gone for good, including when it expired
+/// before the request was sent, which then isn't. A store whose unfinished
+/// installation holds a join's saved code is refused with
+/// `StoreLockError::BootstrapPending` before anything changes (§13.4).
+pub async fn join_with_pairing(
+    builder: CovenBuilder,
+    code: &str,
+    s3_credentials: Option<S3Credentials>,
+    device_name: &str,
+    on_status: impl Fn(BootstrapStatus),
+    control: &JoinControl,
+) -> Result<Option<CovenHandle>, BootstrapError>;
 
 impl CovenHandle {
     /// The new person's name the join's request carried, which a store a join
@@ -8654,9 +8859,9 @@ impl OAuthAccess {
   only the status and the OAuth error code, never a description or other
   provider-supplied detail.
 - Refresh and S3 key replacement leave restore codes untouched. Restore
-  codes carry the storage location. The code to write down and the saved
-  copy carry no S3 key; only `restore_code_for_transfer()`'s does (§13.1). No
-  restore code carries OAuth tokens.
+  codes carry the storage location. No restore code a person sees carries an
+  S3 key; only a restore's record does (§13.1). No restore code carries OAuth
+  tokens.
 - Token custody retains the client id and granted access. Refresh uses that
   registered client, including the chosen Dropbox key, and preserves granted
   access only when the provider omits a scope field. A returned scope field is
@@ -8668,18 +8873,77 @@ impl OAuthAccess {
   `AccessNotGranted`. A refresh reply without a new refresh token keeps the
   one it used.
 
-Example, adding Ana's laptop. On her phone:
+Example, adding Ana's laptop by pairing. On her phone, while Add device shows:
 
 ```rust
-// On S3 the code holds the key the phone uses.
-let code = handle.restore_code_for_transfer().await?;
-show_blurred_qr_code(&code);
+let _often = handle.sync_often(Duration::from_secs(5));
+let pairing = handle.start_pairing().await?;
+// On S3 the QR code holds the key the phone uses; the shared code holds none.
+show_blurred_qr_code(&pairing.qr_code);
+offer_to_share(&pairing.shared_code);
+let mut status = handle.subscribe_pairing(pairing.id);
+while let Some(now) = status.next().await {
+    match now? {
+        Some(PairingStatus::Waiting { request: Some(request) }) => {
+            // "Add Ana's laptop?" with the number the laptop shows.
+            if confirm(&request.device_name, &request.confirmation).await {
+                handle.approve_pairing(&request).await?;
+            } else {
+                handle.decline_pairing(&request).await?;
+            }
+        }
+        Some(PairingStatus::Ended(PairingEnd::Added { name, .. })) => show_added(&name),
+        Some(PairingStatus::Ended(_)) => show_ended(),
+        _ => {}
+    }
+    if screen_closed() {
+        break;
+    }
+}
+// Closing the screen ends the pairing, whatever its status.
+handle.end_pairing(pairing.id).await?;
 ```
 
 On the laptop:
 
 ```rust
-let info = decode_code_info(&scanned)?;
+let CodeInfo::Pairing(info) = decode_code_info(&scanned)? else { return wrong_code() };
+let mut builder = coven.builder()
+    .synced_tables(tables())
+    .migrations(migrations())
+    .oauth_clients(oauth_clients.clone())
+    .clock(clock.clone());
+if let Some(access) = info.metadata.oauth_access {
+    builder.authenticate(access).await?;
+}
+// The QR code holds the key; a shared code needs it entered.
+let s3_credentials = match info.metadata.cloud_provider {
+    CloudProvider::S3 if !info.metadata.carries_s3_key => Some(ask_for_s3_access_key().await?),
+    _ => None,
+};
+// The waiting screen shows the number; while it shows, the app holds
+// control.check_often(Duration::from_secs(5)).
+let control = JoinControl::new();
+match join_with_pairing(
+    builder,
+    &scanned,
+    s3_credentials,
+    "Ana’s laptop",
+    |step| show_step(step),
+    &control,
+)
+.await?
+{
+    Some(handle) => show_store(handle),
+    // "This code has ended": Ana opens Add device again for a new one.
+    None => show_ended(),
+}
+```
+
+With no other device at hand, Ana types her restore code instead:
+
+```rust
+let info = decode_code_info(&typed)?;
 let metadata = info.metadata();
 show_provider_location(&metadata.location);
 let mut builder = coven.builder()
@@ -8690,14 +8954,14 @@ let mut builder = coven.builder()
 if let Some(access) = metadata.oauth_access {
     builder.authenticate(access).await?;
 }
-// A code the phone showed holds the key; a typed one needs it entered.
+// No restore code holds an S3 key.
 let s3_credentials = match metadata.cloud_provider {
-    CloudProvider::S3 if !metadata.carries_s3_key => Some(ask_for_s3_access_key().await?),
+    CloudProvider::S3 => Some(ask_for_s3_access_key().await?),
     _ => None,
 };
 let handle = restore_from_code(
     builder,
-    &scanned,
+    &typed,
     s3_credentials,
     "Ana’s laptop",
     |step| show_step(step),

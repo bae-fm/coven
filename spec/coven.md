@@ -1907,13 +1907,14 @@ can have changed.
   connection backoff. App work that arrives during a pass leaves a wake for the
   next one.
 - **An app can ask for idle passes more often** while a screen waits on another
-  device. Ana's laptop shows her restore code for her new phone; until the sheet
-  closes, it asks for a pass every 5 seconds, so it sees the phone's
-  registration within seconds instead of up to half a minute later. The request
-  lasts while the app holds it; with several held, the shortest interval wins,
-  and once the last ends, idle passes return to every 30 seconds. A quiet pass
-  is two requests, so a 5-second interval costs about 24 requests a minute,
-  only while it is held. The cooldown and the backoff still hold every pass
+  device. Ana's laptop shows a pairing code for her new phone (§13.2); until
+  the sheet closes, it asks for a pass every 5 seconds, so it sees the phone's
+  request, and once she approves the phone's registration, within seconds
+  instead of up to half a minute later. The request lasts while the app holds
+  it; with several held, the shortest interval wins, and once the last ends,
+  idle passes return to every 30 seconds. A quiet pass is two requests, so a
+  5-second interval costs about 24 requests a minute, only while it is held.
+  The cooldown and the backoff still hold every pass
   ([api.md E5](api.md#e5-storage-and-sync)).
 - **Bookkeeping doesn't wake it.** Queue and operation bookkeeping never asks for
   another pass. The model checks that this loses no write, even when passes race.
@@ -1922,7 +1923,8 @@ can have changed.
 - **Join requests** are polled as §13.2 describes.
 
 Ana's invite has no join request yet, so polling for one backs off. Once Dan's
-request arrives, waiting for Ana to decide sends no repeated request.
+request arrives, waiting for Ana to decide sends no repeated request. A pairing
+looks for its request in every pass instead, while its code shows (§13.2).
 
 **A slow request is not a failed one.** A request to a provider has no
 deadline. Ana's phone sends a 32 MiB part over a link moving 100 KB/s; it takes
@@ -3733,6 +3735,7 @@ snapshot body is deleted (§16.3).
 | Key rotation, circle creation | keep the new key; claim its copies; claim its introduction (§12.1) |
 | Adding a circle member | supply the circle's earlier keys to them first (§15.7) |
 | Invite | record the fixed target member and the new provider access, then show the code; approving it seals the joiner's copies into the admission itself (§13.2) |
+| Pairing | fix the member, the secret and the codes, then show them; approving seals the member's private pair to the request's key, and the handover takes the request's place. It claims no slot (§13.2) |
 | Older keys for a member | at a pass, for each key held and each current member lacking a copy of it: claim the copy (§12.1) |
 | Replacing one's own keys | pause app writes; confirm the writes queued before the replacement; keep the new pair; claim copies, then the replacement; install custody and refresh the restore code before lifting the pause (§12.3) |
 | Schema raise | confirm captured writes and the raise marker; upload and announce the snapshot; claim the raise (§18.5) |
@@ -3835,6 +3838,8 @@ These calls, and the work passes do for them, follow the rule:
 | Rotating a key, a schema raise, a snapshot, resetting an audience (§11.5, §16, §18, §19.4) | its operation, step by step | the claim of its first copy or announcement |
 | Joining by invite (`join_with_invite`, `resume_join`, §13.2) | the saved request and the invite code on the device, kept before the request may be sent | the request's create: from then on the join ends only by approval, decline or expiry |
 | Restoring on a new device (`restore_from_code`, `restore_from_saved_code`, §13.1) | the restore's record on the device, then its registration's operation | the record, kept just before the registration's claim |
+| Pairing, on the showing device (`start_pairing`, §13.2) | the pairing's operation | none: it claims no slot, and ending it replaces its request or handover with its marker |
+| Pairing, on the new device (`join_with_pairing`, §13.2) | nothing until its restore's record, then the restore's | the record, as a restore's |
 | Replacing this device's installation (`reset_device`, `restore_device`, §19.3) | the replacement's record in the store's directory and its kept entry, then its registration's operation | the record, kept just before the registration's claim |
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
@@ -4183,20 +4188,39 @@ journal files.
 
 A device can only read the store once it holds the store key, and the only way to
 get it is a key copy sealed to its member. A person's new device has to prove it
-is that person. A new person has to be let in by an admin, and the provider must
-let them reach the storage. This section covers both, and what happens when
-someone loses everything.
+is that person: one of their devices vouches for it, or it holds their restore
+code. A new person has to be let in by an admin, and the provider must let them
+reach the storage. This section covers both, and what happens when someone loses
+everything.
 
-#### 13.1 A person's new device: the restore code
+#### 13.1 A person's new device: pairing and the restore code
+
+A new device of Ana's stands in for her once it holds her member's current
+private keys, which get it the store key (§12). It gets them in one of two
+ways:
+
+- **Pairing,** when one of her devices has the store open. That device shows a
+  *pairing code*; the new device asks with it, Ana compares a six-digit number
+  on the two screens and approves, and only then does the showing device hand
+  her keys over, sealed to the new device. A pairing is built from the parts of
+  an invite, so §13.2 covers it, after invites.
+- **Her restore code,** when no such device is at hand: on paper, in iCloud
+  Keychain or Block Store, or typed in.
+
+The two differ in what a stranger can do with them. The pairing code holds no
+keys: whoever photographs the screen or reads a copied code can only ask, and
+Ana sees the request and its number before anything is handed over. The restore
+code holds her keys and never expires, so it opens the store for whoever has it,
+for as long as her keys last. So a device of hers adds another by pairing, and
+never shows the restore code to do it.
 
 A *restore code* holds:
 
 - the member's id and current private signing and sealing keys, which get the
   device the store key (§12);
 - the store's id;
-- the storage location, but never sign-in tokens. On S3 it may also hold the
-  person's access key, but only in the code one of their devices shows their
-  new device (below).
+- the storage location, but never sign-in tokens, and in no code a person sees
+  an S3 key (below).
 
 Coven returns the code at setup and whenever the member's keys are replaced, and
 `restore_code()` shows it again. None of these codes holds a key. Keeping the code
@@ -4205,7 +4229,7 @@ coven tracks no pending task for it.
 
 The code carries no name. Ana writes it down once, and a name on paper would
 be wrong after the first rename, with no way to correct it. So before
-connecting, a typed or scanned code shows only the store's id, the provider and
+connecting, a typed code shows only the store's id, the provider and
 its account or location; the device learns the store's name once it has loaded
 the store. Dropbox and OneDrive show the member's signed-in account label. S3
 shows the bucket and endpoint. CloudKit shows no account: its user discovery
@@ -4215,11 +4239,8 @@ them for the person's own account is unchecked, and coven doesn't call it.
 `decode_code_info` exposes this location, so Ana can tell her personal and
 work accounts apart before connecting.
 
-A new device gets the code in one of four ways:
+A new device gets the code in one of three ways:
 
-- **Scanning** a QR code on one of the person's devices that has the store open.
-  The QR code is blurred until the person taps to show it. Because the person
-  controls both devices, this code may also hold their S3 key (below).
 - **iCloud Keychain,** on Apple platforms. It holds the code with the store's
   name, and may hold the S3 key separately beside it. Coven saves the Keychain
   code after setup, joining, restoring, resetting (§19.3) and member-key
@@ -4410,35 +4431,24 @@ which only an unusually long S3 location makes, fails with
 and keeps no saved entries, as on Linux and Windows.
 
 Storage access is separate. On S3 the person keeps their access key apart, in a
-password manager say, and enters it, unless the scanned code or the saved entry
-supplied it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's
-own account first, through the sign-in presenter the app supplied; coven keeps the
+password manager say, and enters it, unless the saved entry supplied it. On
+Dropbox and OneDrive, the new device asks coven to sign in to the person's own
+account first, through the sign-in presenter the app supplied; coven keeps the
 tokens. A new device on the same Apple account still needs that sign-in.
 
-Say Ana keeps a store on S3. When her phone shows the restore code for her new
-laptop, the app asks coven for `restore_code_for_transfer()`: her restore code
-with the key the phone uses inside it. The laptop scans that one code, and
-`decode_code_info` tells it a key is there, so it restores without asking Ana
-for the key. One code means one checksum: the laptop reads the key and the code
-whole, or neither.
+No restore code a person sees holds an S3 key: not the code Ana writes down, nor
+the one `restore_code()` shows again, nor the saved copy, which keeps the key in
+an entry of its own beside it. So a written-down code never gives anyone storage
+access, and replacing the key changes none of them. Only a restore's own record
+on the device holds the key inside the code (below). A pairing's QR code carries
+the key the showing device uses, so a paired device asks for none (§13.2).
 
-- Only this code holds the key. The code Ana writes down and the saved copy
-  hold none, so a written-down code never gives anyone storage access,
-  and replacing the key changes neither.
-- The app shows this code only to the person's own new device, only as a QR
-  code, and behind the same tap. Anyone who sees it can reach the store's storage
-  as Ana until her key is replaced.
-- It holds the key the phone has now. If Ana's key was replaced (§14.3), it is
-  the replacement her phone installed, not the one she first entered.
-- On Dropbox, OneDrive and iCloud there is no key, and the call returns the code
-  `restore_code()` does: the new device reaches storage through its own sign-in
-  or Apple account.
 - A key entered beside a code that holds one is refused before anything
-  changes. The laptop would have two keys and no way to tell which Ana meant.
-- As every restore does, the laptop saves its code in iCloud Keychain, or a
+  changes. The device would have two keys and no way to tell which Ana meant.
+- As every restore does, the new device saves its code in iCloud Keychain, or a
   phone in Block Store, without the key, and the key in its own entry beside it.
 
-Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then:
+Ana types her restore code on her new laptop and signs in to her Dropbox. Then:
 
 1. It reads the floor and the key copies it carries for Ana, loads the snapshot,
    and applies the slots after it.
@@ -5131,8 +5141,9 @@ for good (§14.1) end its requests. Ben removes Ana's phone while Dan's request
 waits. When Ben's phone, an admin's, applies the removal, it creates the
 phone's *gone marker*, create-once, at `<store>/join-requests/<device>/gone`,
 beside the phone's requests. Then it lists them and deletes everything else
-there: Dan's request, and the markers of the phone's ended invites. Dan's phone
-finds its request gone and ends his join as declined, as for any ended invite.
+there: Dan's request, the markers of the phone's ended invites, and any handover
+of its pairings (below). Dan's phone finds its request gone and ends his join as
+declined, as for any ended invite.
 
 The gone marker is never deleted. Eve scans another of the phone's invites a
 day later. Before sending, her phone finds the marker, sends nothing, and her
@@ -5201,6 +5212,193 @@ in the provider's console (§14.3). An entry of its own after the admission
 would be a second claim, which a removal could refuse after the recovery had
 landed, leaving the recovered member's device on a key history never recorded
 for them.
+
+**Pairing: one of the person's devices adds another.** Ana's phone has
+Household open, and she sets up her new laptop. Showing the laptop her restore
+code would give her keys to whoever else saw the screen, for as long as they
+last (§13.1). So her phone *pairs* the laptop instead: it is an invite to Ana's
+own member, whose approval hands over her keys rather than admitting anyone.
+Ana opens Add device on her phone:
+
+1. Her phone, the *showing device*, makes the pairing, in a write of its own,
+   and shows its *pairing code* as a QR code: the store's location, Ana's
+   member id, the pairing's id and a one-time secret.
+2. The laptop scans it, signs in to Ana's Dropbox, makes a fresh pair of its
+   own, and writes a join request carrying the name "Ana's laptop", encrypted
+   with the key the secret derives and signed with the new pair. It shows the
+   confirmation number, 618 204.
+3. The phone reads the request, checks it, and asks Ana "Add Ana's laptop?"
+   with 618 204. The laptop shows the same number, and Ana approves.
+4. The phone puts the *handover* in the request's place: Ana's private signing
+   and sealing keys, sealed to the sealing key the request carries.
+5. The laptop reads the handover, opens it, and restores from what it holds as
+   from a restore code: it loads Household, checks that the pair is Ana's
+   current one, records the restore and registers itself (§13.1). The phone
+   applies the laptop's registration, and the pairing ends. The phone shows
+   the laptop added.
+
+A pairing shares the invite's parts:
+
+- the code's one-time secret, and the one request path it names, under the
+  showing device's id: `<store>/join-requests/<device>/<pairing id>`;
+- the request, encrypted with the key the secret derives and signed with the
+  pair it carries, and the checks the showing device makes of it: the
+  signature, the member id, who asks, fresh keys and a fresh device id. A
+  request that fails one ends the pairing in the pass that read it, as it ends
+  an invite;
+- the confirmation number, from the pairing's id and the request's two public
+  keys (format.md D11), on both screens;
+- every request waiting for the person's decision. Whoever saw the code may
+  have asked first, so the first request is not always the laptop's;
+- the end: the marker in the request's place, created once, which a request
+  sent late finds; the showing device's gone marker once it is gone for good;
+  and no first request once the pairing has expired by the asking device's
+  clock.
+
+Four things differ, and nothing else:
+
+1. **The target is the showing device's own member.** The pairing fixes the
+   member id of the device that makes it. Ana's own account or key already
+   reaches the storage, so nothing is shared or granted, and no entry records
+   an invite share. No member is added. Any registered device of an active
+   member can pair, not only an admin's.
+2. **Approval hands over the member's keys, and claims no slot.** The showing
+   device seals its member's current private pair to the sealing key the
+   request carries, and puts that handover in the request's place (format.md
+   D8). It is an object of its own, never an entry in history: an admission can
+   be one slot because its copies are sealed to the joiner's own new key, but a
+   handover carries the member's private keys, which have no place in what
+   every device reads.
+3. **The request carries the new device's name, and no person's.** It says
+   who asks: the member's own new device. Its pair is the new device's for this
+   handover alone; it is never bound to a member, and the new device makes no
+   member keys of its own.
+4. **The new device restores.** It opens the handover, loads the store and
+   registers itself with its own add-device entry, as a restore does (§13.1).
+   No other device registers it.
+
+**The pairing lives while its code shows.** Ana's app ends the pairing when she
+closes Add device, with the ending a cancelled invite has: the marker replaces
+whatever is at the request's path, the request or the handover. So nothing
+lists open pairings, and nothing on her list of devices shows one: a pairing
+on no screen would be one Ana could neither see nor end. Nor does a pairing
+outlive its handle. No screen shows it once the handle is gone, so opening the
+store ends every pairing a closed handle or a crash left. A pairing also
+expires 30 minutes after it is made, by the showing device's clock: the marker
+needs a time when it may go, and the asking device a time after which it sends
+no first request.
+
+While the code shows, the app holds `sync_often` at 5 seconds (api.md
+[E5](api.md#e5-storage-and-sync)), and every pass looks for the request. A
+pairing has no doubling wait of its own: Ana stands beside both devices, and a
+wait of minutes would leave her looking at the code.
+
+A pairing that has ended stays readable to the app, with how it ended, until
+Ana closes the screen: added, declined, refused or expired. Closing then only
+forgets it, its storage work done or under way. A stop for good forgets it at
+once, as it ends the device's invites (§14.1).
+
+**Two codes on S3.** On Dropbox, OneDrive and iCloud the new device reaches
+storage through Ana's own sign-in or Apple account, and a pairing has one code.
+On S3 it has two, with one secret. The QR code carries the key the showing
+device connects with, read from its custody when the pairing is made, so the
+new device asks Ana for none. The app shows it only as a QR code, behind a tap:
+whoever sees it reaches the storage as Ana until her key is replaced (§14.3).
+The code Ana copies or shares as text carries no key, and the new device asks
+her for it. Either way, approval hands over no key.
+
+**Approving** is a write of its own, with or without storage. It checks that
+the pairing hasn't expired and waits with exactly the request Ana was shown,
+then seals the handover to that request's sealing key, with the pair this
+device holds, and journals its bytes. A pass then puts it in the request's
+place: it deletes the request and creates the handover, create-once, and
+deletes again a request created in between. The bytes were fixed by the
+write, so a retry creates the same object. Once Ana has approved she can't
+decline, but she can still close the screen, which ends the pairing. Unlike an
+invite's approval, nothing it wrote can land in history later. A handover the
+new device opened has done its work, and one it hasn't is replaced by the
+marker.
+
+**The handover reaches only the approved request's key.** It opens only with
+the private half of the sealing key in the request Ana approved, whose number
+she compared. The laptop makes that pair for this pairing and keeps it only in
+the memory of the call: nothing writes it anywhere. Eve, who saw the code first,
+can send a request of her own, and Ana's phone shows Eve's number, which isn't
+the laptop's, so Ana declines. Eve can open the laptop's request too, since she
+has the secret, but its public keys open nothing sealed to them. And a handover
+no running call holds the key for can't be opened at all: one left in storage
+while the showing device is offline holds nothing anyone can read.
+
+**The handover proves nothing alone.** Whoever saw the code can open the
+laptop's request and seal a handover to its key; on S3 the QR code's key lets
+them write one in its place. So the laptop trusts no pair it opens until
+loading has checked it: the pair must be the code's member's current one in the
+history it loads, as any restore code's must (§13.1, step 2). A pair that isn't
+fails the restore before it records anything.
+
+**The new device's side.** On the laptop, `join_with_pairing` holds the whole
+pairing: until its restore records itself, nothing it keeps outlives the call,
+as for a restore before its record (§13.1). It makes its installation, signs
+in, or on S3 takes the key from the QR code or from Ana, sends its request, and
+checks the request's path on the doubling waits a join uses, every few seconds
+while the app shows the wait (api.md `JoinControl::check_often`). Each check
+finds one of:
+
+- its own request: it waits;
+- the handover: it opens it and restores;
+- the marker, or the showing device's gone marker: the pairing has ended, and
+  the call ends, with nothing left on the laptop;
+- nothing, because the showing device is between a delete and a create, or
+  the laptop's own create never reached storage. While the pairing is open by
+  the laptop's clock it sends its request again, the same bytes, as a join
+  does; a create finds the path taken by anything else. Once the pairing has
+  expired, the call ends.
+
+Once the handover opens, the laptop has what a restore code holds: the code's
+store, member and location, the pair the handover carried, and on S3 the key.
+It loads, checks the pair, and records the restore just before it registers,
+with that code and the key inside it, as any restore does (§13.1). From the
+record on, it is a restore: `unfinished_restores` lists it, `resume_restore`
+finishes it, and nothing about it is a pairing any more.
+
+**Cancelling on the new device.** A join can't be cancelled once its request
+may have been sent: its admission could land after the keys it binds were
+thrown away. A pairing can, at any point before its restore records itself.
+Approval writes nothing in history, so a handover no call opens binds nothing.
+The laptop's cancel removes its installation, as a restore's before its record
+does, and the phone's pairing waits until Ana closes the screen or it expires.
+Dropping the call, or a crash, does the same, leaving only space (§13.4). The
+laptop's handover pair lives only in memory, so a laptop whose app is killed
+while it waits starts over: the code's one path holds its first request, and the
+laptop can't ask with that code again. Ana closes Add device, opens it for a new
+code and scans that.
+
+**Seeing the new device added.** The phone can't tell when the laptop has read
+the handover, so the handover stays until the phone applies the laptop's
+registration: an add-device entry, by Ana's member, registering the device the
+request named. The pairing then ends as added, and the marker replaces the
+handover. The laptop opened the handover before it loaded, so a pairing that
+ends while it loads, closed or expired, takes nothing from it: it registers
+when it has loaded, and Ana's other devices show it.
+
+**Edge cases: pairing.**
+
+- **The showing device stops for good.** Its pairings end in the transaction
+  that applies the stop, as its invites do (§14.1). An admin's device ends its
+  requests as it does any gone device's, the handover with them, and the laptop
+  finds the gone marker.
+- **Ana's keys replaced meanwhile.** A handover holding a pair that history has
+  since replaced fails the laptop's restore with `MemberKeysReplaced`, as an old
+  code does, and Ana pairs again.
+- **A reset of the showing device** carries an open pairing into the new
+  database as it carries an open invite, ended, so the new installation puts its
+  marker in place, under the old device's id.
+- **A request that answers the wrong way.** A request carrying a person's name,
+  or answering as a recovery, fails the pairing's checks, as does one whose keys
+  or device id history knows, and the pairing ends. An invite likewise refuses
+  a request that answers as the member's own device.
+- **Several pairings.** Each Add device screen makes its own, with its own id,
+  secret and path; they never meet.
 
 #### 13.3 Losing everything
 
@@ -5327,8 +5525,10 @@ everything is encrypted.
   A join cancelled before sending first unmounts the Dropbox folder it may
   have mounted (§13.2). A join whose request may have been sent can't be
   cancelled (§13.2), nor a
-  restore whose device may be registered (§13.1). A restore that fails
-  before it records itself removes its installation too. Dropping a
+  restore whose device may be registered (§13.1). A pairing can be cancelled
+  until its restore records itself, whether or not its request was sent
+  (§13.2). A restore that fails before it records itself removes its
+  installation too, and so does a pairing that fails or ends before then. Dropping a
   join that is waiting for approval keeps its encrypted request and saved code,
   so the app can resume it.
 - **One call to an installation.** A device keeps one unfinished installation
@@ -5343,10 +5543,13 @@ everything is encrypted.
   ([`join_strands_restore`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
   So a restore refuses an installation holding a join's saved code, and a join
   one holding a restore's record, with `BootstrapPending`, changing nothing.
-  The app finishes the call under way first.
+  A pairing begins on the installation as a restore does, and is refused the
+  same way. The app finishes the call under way first.
 - **Space a crash left.** An unfinished installation that keeps neither a
   join's saved code nor a restore's record is one a crash or a dropped call
-  left before either could write to storage. `unfinished_joins` and
+  left before either could write to storage, or a pairing's left before its
+  restore recorded itself. A request that pairing sent is the showing
+  device's to end, and binds nothing (§13.2). `unfinished_joins` and
   `unfinished_restores` delete each such installation they find, holding its
   lock: one a call is running on is never touched, and a call beginning on
   it meanwhile is refused with `AlreadyOpen`, as beside any other call
@@ -5401,7 +5604,10 @@ operations, and another device may still make the same change, so reporting
 a refusal would tell the app something false. The same transaction ends
 this device's invites: none of them can finish on a stopped device, and an
 approval under way never expires, so it would stay listed forever. Each leaves
-`coven_invites` with its approval's binding and its pending record (§13.2). To
+`coven_invites` with its approval's binding and its pending record (§13.2). It
+ends and forgets this device's pairings too: the stopped device runs no pass to
+place their markers, and an admin's device deletes what is left under its id
+(§13.2). To
 tell a replacement of its member's keys from its own, a device records each
 pair it holds, and the candidate its own replacement keeps before custody keeps
 it (§12.3).
@@ -9648,9 +9854,9 @@ replaces this device's id, removes the device or its member, or replaces its
 member's keys stops it and tells the app (§14.1). A stop on the evidence above
 is for good too, though no slot applies it: the copy ends at once every
 operation its app journaled that still runs, `Stopped(Copied)`, and every
-invite it made, as §14.1 describes: the other copy may still land them. None
-of them would ever run on the copy, and its app would follow them forever.
-Restoring never rescues the old installation's queue (§13.1).
+invite and pairing it made, as §14.1 describes: the other copy may still land
+them. None of them would ever run on the copy, and its app would follow them
+forever. Restoring never rescues the old installation's queue (§13.1).
 
 **Resetting a device.** The app can reset the device with
 `CovenBuilder::reset_device` ([api.md E1](api.md#e1-opening)). Coven never
@@ -9753,8 +9959,9 @@ laptop in place from her current restore code instead (§13.1).
   began it is still running. An interrupted deletion finishes as any
   deletion from the device does (§11.6).
 - Only owed provider cleanup carries over: owed revocations of account sharing,
-  the old installation's open invites, which become owed cleanup, and the
-  records of S3 detection runs whose leftovers no cleanup has confirmed gone
+  the old installation's open invites and pairings, which become owed
+  cleanup, and the records of S3 detection runs whose leftovers no cleanup has
+  confirmed gone
   (§20.7). They are copied into the new database, with its reset notice,
   before it opens. A
   journal SQLite reports damaged supplies none. Damage elsewhere in the
@@ -10984,6 +11191,9 @@ What they don't cover:
   grace supplies.
   Nor does a model run a device's raise across every audience it read: each
   audience's raise is modelled alone (§18.3).
+- **Pairing.** No model covers a pairing (§13.2): its stages on the showing
+  device, its ending when its screen closes, or that its handover opens only
+  with the approved request's key. Tests check them against the Rust.
 - **What a stopped device sends.** The model proves a stopped device takes no
   apply or reload step (§5.4). The restriction on sending, its bootstrap
   join-request exception, and recovery once the cause clears are outside the model.
@@ -11475,8 +11685,9 @@ A member's keys are two key pairs, kept together:
 | Signing slots | Ed25519 |
 | Sealing a key to a member | anonymous sealed box: X25519 with XChaCha20-Poly1305 |
 | Keys for each purpose | HKDF-SHA256 from the store key or a circle's key, with separate labels for encryption and authorship |
-| A join request's key | HKDF-SHA256 from the invite secret, with its own label |
-| A confirmation number | SHA-256 of a label, the invite id and the request's two public keys, reduced to six digits |
+| A join request's key | HKDF-SHA256 from the invite or pairing secret, with its own label |
+| A confirmation number | SHA-256 of a label, the invite or pairing id and the request's two public keys, reduced to six digits |
+| Sealing a pairing's handover | anonymous sealed box to the request's sealing key: X25519 with XChaCha20-Poly1305, with its own label |
 | Key introductions | SHA-256 of the key's exact 32 bytes, with a random key id |
 | Slot signatures | over the path and a SHA-256 hash of every preceding byte |
 | A file | a random key of its own; its storage name is a random object id (§17.5) |
@@ -11528,7 +11739,8 @@ identifiers let a reader choose the key before opening the encrypted contents.
 | Admission | the common slot prefix; each copy's audience, copied key id, recipient member, exact public sealing key and box, in key order | each key, inside a box sealed to the new member alone, bound to its index; the entry admitting the member and registering their device, under a store key the copies carry |
 | Any slot | the common slot prefix | its device and claim number, under the store key |
 | Writes slot | the common slot prefix | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
-| Join request, `<store>/join-requests/<device>/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
+| Join request, `<store>/join-requests/<device>/<invite id>` | the path | everything, under a key derived from the invite or pairing secret; signed with the pair the request carries |
+| A pairing's handover, at its request's path | the path, and the box's ephemeral key | the member's id and private pair, inside a box sealed to the request's sealing key alone |
 | Ended invite's marker, at its request's path | the path, and when the marker may be deleted | nothing: it holds no secret |
 | Gone device's marker, `<store>/join-requests/<device>/gone` | the path, which names the device gone for good | nothing: it holds no secret |
 
@@ -13382,7 +13594,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
-| `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
+| `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code, or a pairing's handover holding a replaced pair, is used | §12.3, §13.1, §13.2, §14.1 |
 | `NotAdmitted` | a joined store read to the end of the sequence with its pair bound nowhere in its history: the admission that published it was refused; the store stops for good | §13.2, §14.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
 | `SyncError::WorkerFailed` | the sync loop, a connection attempt or the upload worker ended on a panic, the sync loop ended on a bug in its own work, or the upload run serving a retry failed on a bug, which the bug sink heard; the retries and calls that waited on that work fail with it | api.md E15 |
