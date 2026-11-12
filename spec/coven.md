@@ -3733,6 +3733,7 @@ snapshot body is deleted (§16.3).
 | Operation | Preparation, in order |
 |---|---|
 | Key rotation, circle creation | keep the new key; claim its copies; claim its introduction (§12.1) |
+| Removing a circle member | keep the circle's new key; claim its copies to the members who remain; claim the removal, which introduces the key (§15.8) |
 | Adding a circle member | supply the circle's earlier keys to them first (§15.7) |
 | Invite | record the fixed target member and the new provider access, then show the code; approving it seals the joiner's copies into the admission itself (§13.2) |
 | Pairing | fix the member, the secret and the codes, then show them; approving seals the member's private pair to the request's key, and the handover takes the request's place. It claims no slot (§13.2) |
@@ -3925,9 +3926,10 @@ the audience, the key's id, the recipient member and the exact sealing key it is
 sealed to. That is how Dan finds his copy before he holds any key.
 
 A new audience key is *introduced* by an admin entry naming the key's random id
-and a SHA-256 hash of its exact 32 bytes. Store creation and rotations introduce
-keys; removals carry none. The introduction's fields are encrypted like the rest
-of the entry.
+and a SHA-256 hash of its exact 32 bytes. Store creation, circle creation,
+rotations and a circle member's removal introduce keys; every other removal
+carries none. The introduction's fields are encrypted like the rest of the
+entry.
 
 **Copies come first, then the introduction.** An operation claims every copy the
 key needs before it claims the introduction, so by the time a key is in use,
@@ -4058,6 +4060,9 @@ the slots this device has applied:
 If no key is usable, the device waits for a new key from another member, or
 rotates one itself through an operation (§11). Only a member of the audience can
 rotate its key: an admin outside a circle can't.
+
+Removing Ben from Gifts alone is different: the removal entry introduces the
+new Gifts key itself, so no write waits for a later rotation (§15.8).
 
 Carol, an admin outside Gifts, removes Ben from the store. Ben had copies of the
 store key and the Gifts key. Ana is still in Gifts, so her next pass rotates the
@@ -5991,8 +5996,8 @@ deleted.
 Each circle has its own key, introduced and copied like the store key (§12.1).
 Each copy is sealed to a member's current sealing key, never a retired one, and
 authenticates both the member id and that sealing key. Copies are slots whose
-routing names the circle, the key id and the recipient. The key is replaced
-whenever someone leaves the circle (§15.8).
+routing names the circle, the key id and the recipient. The entry that removes
+a member from the circle introduces the circle's replacement key (§15.8).
 
 Everyone in the store can see that a circle exists, who is in it, who writes to
 it, when, and how much. Only its members read what it says.
@@ -6050,9 +6055,21 @@ until the rebuild commits, as during any load.
 
 #### 15.8 Leaving a circle
 
-Ana removes Ben from Gifts with an admin operation. That slot changes Gifts'
-membership. Its remaining members replace any key Ben was sent before writing new
-Gifts data (§12.2). Ben keeps the rows and keys he already had.
+Ana removes Ben from Gifts with an admin operation. The removal replaces
+Gifts' key in the same entry: Ana makes a new Gifts key, claims a copy of it for
+each member who stays, then claims the removal, whose entry removes Ben and
+introduces that key. The copies sit below the entry (§12.1), none is routed to
+Ben, and the entry either lands whole or not at all. So from the slot that
+removes Ben, the newest usable Gifts key is one he never held, and every Gifts
+write made after it, by Ana or any member who has read it, is sealed with that
+key. Ben keeps the rows and keys he already had.
+([`leave_selects_new_key`](proofs/sequence/CovenSequence/CopyOrder.lean))
+
+**A member can't remove themselves while others stay.** The entry's new key is
+made by whoever writes it, so a member removing themselves would know the key
+meant to shut them out. The removal fails with `Rejected(NotAllowed)`, and
+another member removes them. A member who is the circle's last one can leave:
+the circle is deleted (below).
 
 **Edits made before he read the removal still count.** Removal from a circle
 doesn't remove Ben's device or member from the store. He may still send Gifts
@@ -13288,6 +13305,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation's slot 2 is the exception §12.1 names | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
 | A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
+| *Body.* Removing a member from a circle introduces the circle's replacement key in the same entry, with its copies below it to the readers who remain: the removed member no longer reads the circle, the key is the first-attempt choice of a remaining writer holding it, and no copy of it is routed to the removed member | `leave_selects_new_key` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §15.8 |
 | *Body.* Every key a slot needs is introduced by that slot, so a copy of it found above the slot is checked against an applied commitment. Publishing the copies an audience still needs, as a member's pass does, gives each current reader a copy of every key introduced for it; then a stopped reader that scans through them finds a copy of every key its stop needs | `need_introduced`, `stuck_scan_finds_copy`, `owed_complete` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §5.4, §12.1 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
 | A replacement applies only while the pair it expects is current; once one applies, its member never has the replaced pair again, so a competing replacement, and every retry of it, is refused at every later slot | `replaced_never_current`, `competing_replacement_refused` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §10.4, §11.2, §12.3 |

@@ -897,7 +897,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 7 | Rename circle | `circle:uuid \| name:name` |
 | 8 | Delete circle | `circle:uuid` |
 | 9 | Add circle member | `circle:uuid \| member:MemberId` |
-| 10 | Remove circle member | `circle:uuid \| member:MemberId` |
+| 10 | Remove circle member | `circle:uuid \| member:MemberId \| key:uuid \| key_hash:32 bytes`; the key is the circle's replacement, introduced by this entry |
 | 11 | Raise schema | `version:u32 \| announcement:Slot` |
 | 13 | Reset | `announcement:Slot` |
 | 14 | Set access | `member:MemberId \| access:MemberAccess` |
@@ -1002,6 +1002,10 @@ one (§15.5, §16.3).
 its exact 32 bytes. Both are inside the encryption.
 
 - Rotation changes no membership. Its author must belong to that audience.
+- Remove-circle-member's key is the circle's replacement. The copies of it
+  name only the members who stay, and sit in key copy slots below the entry
+  (D11). Its author may be the member removed only when no other member stays,
+  since the author makes the key.
 - Successive rotations take effect in slot order.
 
 **Raises and resets.**

@@ -9419,8 +9419,10 @@ impl CovenWrite<'_> {
         member: &MemberId,
     ) -> Result<Option<OperationId>, SyncError>;
 
-    /// Removes someone with one entry; remaining members rotate exposed keys
-    /// in a later pass (§15.8).
+    /// Removes someone and replaces the circle's key in the same entry, with
+    /// a copy of the new key for each member who stays (§15.8). A member
+    /// removing themselves while others stay fails with
+    /// `Rejected(NotAllowed)`.
     pub fn remove_circle_member(
         &self,
         circle: CircleId,

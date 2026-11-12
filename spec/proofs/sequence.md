@@ -345,6 +345,18 @@ before it, a slot below carries a copy to the member's current sealing key.
   recovery of a reader comes from another reader. That holds of the store, so
   a store key's copy is always first, an admitted member's in its admission;
   for a circle it is the premise of `copy_precedes_need_inside`.
+- `leave_selects_new_key`: the entry that removes a member from a circle
+  introduces the circle's replacement key, and the copies it requires sit below
+  it, to the readers who remain (`required`'s `leaveCircle` case; an entry whose
+  author is the member removed is legal only when no other reader remains).
+  Take a followed history, a slot whose entry removes `m` from circle `a` and
+  introduces `key`, `key` unused before it, every copy of it below the slot
+  routed to a reader who remains, and a remaining writer holding its material.
+  Then `m` no longer reads `a`, `key` is that writer's first-attempt choice at
+  the slot, and no copy of `key` is routed to `m` under any sealing key it
+  retains. So no circle write after the removal is sealed with a key `m` holds.
+  The premises about copies are what the sender follows (`required`); the model
+  does not stop another member from sending a copy of an unintroduced key.
 - `races_follow`, `races_keep_order`, `stale_rotation_illegal`
   ([`CopyOrderExamples`](sequence/CovenSequence/CopyOrderExamples.lean)): Ben
   rotates the store key while Ana admits Dan, and Dan replaces his keys among
