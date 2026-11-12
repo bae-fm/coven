@@ -6530,7 +6530,10 @@ The rules:
   deleted is below the store's version, retention keeps the store's newest
   ordinary snapshot at or below the circle's version, and `first` moves no
   further than its coverage plus one; with no such snapshot, `first` stays
-  at 1.
+  at 1. It keeps too the bodies of the store's raises and resets after that
+  snapshot, through the slot before the store's raise past the circle's
+  version: the rebuild replays them, and a body deleted once the floor covers
+  its entry would stop it.
   Garden is at version 1, and Ben raised the store to version 2 at slot 300.
   The store's version 1 snapshot announced at slot 241, covering 240, stays,
   and `first` stays at or below 241, until Garden is raised or deleted. Without
@@ -6538,7 +6541,12 @@ The rules:
   and the slots after it, stay in storage under the rule
   ([`first_spares_rebuild_store`, `floor_within_caps_spares_rebuild`](proofs/sequence/CovenSequence/Retention.lean)),
   and a rebuild finds the snapshot's state and every slot after its coverage
-  ([`rebuild_store_start`](proofs/sequence/CovenSequence/Retention.lean)). Garden's own
+  ([`rebuild_store_start`](proofs/sequence/CovenSequence/Retention.lean)). With
+  those bodies, the rebuild reaches the circle's rebuild slot and the store's
+  input slot even though the floor names a later store snapshot, and gets the
+  circle's raise body
+  ([`reaches_target_kept`](proofs/sequence/CovenSequence/Reader.lean),
+  [`rebuilt_body_from_kept`](proofs/sequence/CovenSequence/CircleRaise.lean)). Garden's own
   history needs no such rule: until it's raised, no device snapshots Garden
   past slot 299, since the old app stops at the store's raise and the new one
   takes no ordinary snapshot of an audience below its version (§16.2).
@@ -13118,6 +13126,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A circle no slot has touched holds its initial rows, which are its raise body when migrating leaves an empty audience empty | `untouched_rows`, `fresh_raise_body` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A device that started reading a circle after migrating holds only converted parts, not the migrated rows a raise covering them must carry | `joiner_cannot_raise` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A device that rebuilds a circle, reading the circle's rows and the store's from storage and migrating a view of just those two, gets the raise body prepared at the rebuild slot, because a migration's result for a circle depends only on its rows and the store's | `rebuilt_body_honest` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A reader of the store that starts at a kept snapshot's coverage, below the floor's name, reaches any target when every slot after it is kept and the bodies of the store's raises and resets up to the target are in storage | `reaches_target_kept` | `proofs/sequence/CovenSequence/Reader.lean` | §16.6, §18.3 |
+| *Body.* A rebuild from the kept store snapshot and the kept bodies, with a sound circle reader, migrates a view of just the circle's rows and the store's to the circle's raise body | `rebuilt_body_from_kept` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §16.6, §18.3 |
 | *Body.* A raise prepared at the rebuild slot with the rebuilt body, with no other raise, reset or larger announcement of the circle since, applies, and its rows are that body with the later parts converted | `rebuilt_raise_counted` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A migration that reads a second circle gives a member of both circles and a rebuilder of one other bodies at the same coverage, which is why a breaking migration may read only its audience's rows and the store's | `cross_read_rebuild_differs` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.1 |
 | *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
@@ -13159,7 +13169,7 @@ Write-ups explain each model and state its assumptions:
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | A slot deletion that fails leaves storage good and holds no later floor write back: each deletion is a storage step of its own, and a floor write takes no premise on the slots below `first` | `store_good`, `stores_good` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
-| *Body.* Storage keeps what a rebuild reads: for each circle that is not deleted and is below the store's version, the store's newest ordinary snapshot at a version of at most the circle's, with its state, and the first kept slot at most the slot after its coverage (1 with none). `first` held back by the circles' caps meets the floor write's rules, never moves back while within the caps, and is the ordinary choice when no cap binds; a floor within the caps and a body deletion that spares the snapshot keep storage good. A rebuild finds a sound store reader at the snapshot's coverage and every slot after it | `first_spares_rebuild_store`, `floor_write_spared`, `floor_within_caps_spares_rebuild`, `rebuild_store_start`, `store_good` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6, §18.3 |
+| *Body.* Storage keeps what a rebuild reads: for each circle that is not deleted and is below the store's version, the store's newest ordinary snapshot at a version of at most the circle's, with its state, and the first kept slot at most the slot after its coverage (1 with none). `first` held back by the circles' caps meets the floor write's rules, never moves back while within the caps, and is the ordinary choice when no cap binds; a floor within the caps and a body deletion that spares the snapshot keep storage good. Storage also keeps the bodies of the store's raises and resets after that snapshot, through the slot before the store's raise past the circle's version, and a body deletion that spares them keeps storage good. A rebuild finds a sound store reader at the snapshot's coverage and every slot after it | `first_spares_rebuild_store`, `floor_write_spared`, `floor_within_caps_spares_rebuild`, `rebuild_store_start`, `store_good` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6, §18.3 |
 | Under any interleaving of storage and device steps, a device can still reach the full state at the end of the sequence | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
 | Correctness needs no grace: the storage model's floor write waits for none, so storage stays good and a device can still reach the end of the sequence whatever grace retention waited | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
 | Model premise: the floor names ordinary snapshots; prepared snapshots load at their raise or reset entries | (model premise) | `proofs/sequence/CovenSequence/Retention.lean` | §16.3, §16.6 |

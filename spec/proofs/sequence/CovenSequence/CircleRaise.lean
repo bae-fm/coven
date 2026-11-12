@@ -103,6 +103,44 @@ theorem rebuilt_body_honest {st : Store S} {seq : Nat → Slot S} (g : Good R st
       simp [rebuildView, raiseView, same, hA, okA'.rows, posA]
     · simp [rebuildView, raiseView, same, okS'.rows, posS]
 
+/-- **A rebuild from the kept store snapshot gets the honest body.** The store
+side starts from `rebuild_store_start`'s reader, at the coverage `cs` of the
+store snapshot retention keeps, below the floor's name for the store if need be,
+and replays the store's raises and resets after it from the bodies retention
+keeps (`RebuildKept`), up to the store's input slot, which is no later than the
+slot before the store's raise past the circle's version. The circle side starts
+from any sound reader up to the rebuild slot `c`. Migrating a view of just those
+two audiences' rows gives the raise body prepared at `c`. -/
+theorem rebuilt_body_from_kept {st : Store S} {seq : Nat → Slot S} (g : Good R st seq)
+    {A : S.Aud} (need : NeedsRebuild R seq st.head A) {a cs : Nat} {q : S.Path}
+    (snap : RebuildSnapshot R seq st.head A a cs q) (v c : Nat) (p : S.Path)
+    (head : c ≤ st.head) (floorA : st.floor.covers A ≤ c)
+    (dA : Reader S) (okA : ReaderOk R st seq A dA) (startA : dA.pos ≤ c)
+    (after : cs ≤ inputSlot R seq A c R.store)
+    (before : inputSlot R seq A c R.store ≤ storeBefore R seq (audAt R seq A st.head).version st.head) :
+    ∃ rA rS dS : Reader S, ReaderOk R st seq R.store dS ∧ dS.pos = cs ∧
+      ReadSteps R A true st dA rA ∧ rA.pos = c ∧
+      ReadSteps R R.store true st dS rS ∧ rS.pos = inputSlot R seq A c R.store ∧
+      R.migrate v (rebuildView R A rA.rows rS.rows) A =
+        preparedRows R (.raise v) p (raiseView R seq A c) A := by
+  obtain ⟨dS, okS, posS0, _, _⟩ := rebuild_store_start R g need snap
+  obtain ⟨_, hstart, bodies⟩ := (g.rebuild_kept A need).1 a cs q snap
+  obtain ⟨ha1, _, ⟨au, w, hs, _⟩, happ⟩ := snap.1
+  have inputLe := inputSlot_le R seq A c R.store
+  obtain ⟨rA, runA, posA, okA'⟩ := reaches_target R g A c head floorA dA okA startA
+  obtain ⟨rS, runS, posS, okS'⟩ := reaches_target_kept R g R.store (target := inputSlot R seq A c R.store)
+    (cs := cs) (by omega) hstart ⟨a, au, w, q, ha1, hs, happ⟩
+    (fun r au v c p h1 h2 => bodies r au v c p h1 (Nat.le_trans h2 before)) dS okS
+    (by omega) (by omega)
+  refine ⟨rA, rS, dS, okS, posS0, runA, posA, runS, posS, ?_⟩
+  apply R.migrate_reads
+  · have : inputSlot R seq A c A = c := by simp [inputSlot]
+    simp [rebuildView, raiseView, this, okA'.rows, posA]
+  · by_cases same : R.store = A
+    · have hA : inputSlot R seq A c A = c := by simp [inputSlot]
+      simp [rebuildView, raiseView, same, hA, okA'.rows, posA]
+    · simp [rebuildView, raiseView, same, okS'.rows, posS]
+
 /-- **A rebuilt raise counts.** A raise of `A` to `v`, prepared at coverage `c`
 and landing at slot `k + 1` with `A` having had no other raise or reset since
 `c` and no announcement covering more than `c`, by an active device allowed to

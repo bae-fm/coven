@@ -590,7 +590,10 @@ storage meanwhile:
   at most the slot after its coverage, or at most 1 when history holds none
   (`RebuildKept`). A claim takes the same premise about the head it lands at,
   as it does for a body; a floor write takes it for its `first`; a body
-  deletion takes it for the body it deletes. `store_good` keeps it.
+  deletion takes it for the body it deletes. `store_good` keeps it. It also
+  holds the bodies of the store's raises and resets after the snapshot, through
+  the slot before the store's raise past the circle's version, which the
+  rebuild replays; a body deletion must spare them.
   `rebuild_store_start` reads it back: a rebuild finds a sound store reader at
   the snapshot's coverage, its body, and every slot after.
 - **Uploads:** a body uploaded to a fresh path.
@@ -891,6 +894,13 @@ at the slot before the store's raise past `A`'s version when that comes first
   and migrates a view holding just those two, every other audience at its
   initial rows, gets exactly the raise body prepared at that coverage. This is
   `migrate_reads` and the reader's soundness.
+- `reaches_target_kept` (Reader.lean), `rebuilt_body_from_kept`: a reader of
+  the store that starts at a kept snapshot's coverage reaches any target below
+  the floor's name, given the kept slots and the bodies of the store's raises
+  and resets after it. A rebuild from `rebuild_store_start`'s reader and a
+  sound circle reader then migrates a view of just those two audiences to the
+  raise body, with the store's input slot no later than the slot before the
+  store's raise past the circle's version.
 - `rebuilt_raise_counted`: a raise to a higher version, prepared at the
   rebuilt body's coverage and landing with no raise, reset or announcement
   covering more than it between, by an active device allowed to raise, is
@@ -2178,10 +2188,7 @@ they do not replace the separate byte-format, merge or queue tests.
   matching entries. Direct floor loading of a prepared body is not modelled.
 - A claim lands only when storage holds what rebuilds read once its slot is
   applied (`StoreStep.claim`'s `hrebuild`), as it lands only with its
-  preparation body present. The model keeps the store snapshot a rebuild
-  starts from and the slots after it, not the bodies of store raises or resets
-  between that snapshot and the rebuild slot, which `deleteBody` may delete
-  once the floor covers them.
+  preparation body present.
 - Admin slots and key copies are readable by every member device. So are a
   slot's device, claim number and each part's audience: they are sealed under
   the store key, which every member holds. Public observations include slot

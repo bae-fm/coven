@@ -63,7 +63,11 @@ inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
       (hraise : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
         r ≤ st.floor.covers A)
       (hrebuild : ∀ A a cs q, NeedsRebuild R seq st.head A → RebuildSnapshot R seq st.head A a cs q →
-        p ≠ q) :
+        p ≠ q)
+      (hreplay : ∀ A a cs q r au v c q', NeedsRebuild R seq st.head A →
+        RebuildSnapshot R seq st.head A a cs q → cs < r →
+        r ≤ storeBefore R seq (audAt R seq A st.head).version st.head →
+        seq r = .boundary au R.store v c q' → AppliedTo R seq R.store r → p ≠ q') :
       StoreStep seq st { st with body := fun q => if q = p then none else st.body q }
   | upload (st : Store S) (p : S.Path) (b : Ledger S × AudLedger S × S.Rows) (hp : st.body p = none)
       (hfree : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → ¬ AppliedTo R seq A r) :
@@ -131,8 +135,8 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
       hle, hhead, hbody, hann, fun A r au v c p h1 h2 h3 h4 =>
         ⟨fun hlt => (g.boundary_body A r au v c p h1 h2 h3 h4).1 (by have := hcov A; simp only at hlt; omega),
          (g.boundary_body A r au v c p h1 h2 h3 h4).2⟩, fun A need => ?_⟩
-    exact ⟨fun a cs p snap => ⟨((g.rebuild_kept A need).1 a cs p snap).1, hspare A a cs p need snap⟩,
-      hnone A need⟩
+    exact ⟨fun a cs p snap => ⟨((g.rebuild_kept A need).1 a cs p snap).1, hspare A a cs p need snap,
+      ((g.rebuild_kept A need).1 a cs p snap).2.2⟩, hnone A need⟩
   | delete i hi =>
     refine ⟨g.first_genuine, g.first_out, fun j hj => ?_, fun j hj => ?_, g.start_le, g.covers_le,
       g.floor_body, g.floor_announced, g.boundary_body, g.rebuild_kept⟩
@@ -142,7 +146,7 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
     · simp only at hj ⊢
       have : j ≠ i := by omega
       simp only [this, ite_false]; exact g.kept_genuine j hj
-  | deleteBody p hp hraise hrebuild =>
+  | deleteBody p hp hraise hrebuild hreplay =>
     refine ⟨g.first_genuine, g.first_out, g.slot_out, g.kept_genuine, g.start_le, g.covers_le,
       fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ⟨fun hlt => ?_, fun L' P' rows hb => ?_⟩,
       fun A need => ?_⟩
@@ -156,7 +160,10 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
     · refine ⟨fun a cs q snap => ?_, (g.rebuild_kept A need).2⟩
       have kept := (g.rebuild_kept A need).1 a cs q snap
       have ne : q ≠ p := fun h => hrebuild A a cs q need snap h.symm
-      exact ⟨by simp only [ne, ite_false]; exact kept.1, kept.2⟩
+      refine ⟨by simp only [ne, ite_false]; exact kept.1, kept.2.1, fun r au v c q' h1 h2 h3 h4 => ?_⟩
+      obtain ⟨L', P', hb⟩ := kept.2.2 r au v c q' h1 h2 h3 h4
+      have ne' : q' ≠ p := fun h => hreplay A a cs q r au v c q' need snap h1 h2 h3 h4 h.symm
+      exact ⟨L', P', by simp only [ne', ite_false]; exact hb⟩
   | upload p b hp hfree =>
     refine ⟨g.first_genuine, g.first_out, g.slot_out, g.kept_genuine, g.start_le, g.covers_le,
       fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ?_, fun A need => ?_⟩
@@ -168,7 +175,10 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
     · refine ⟨fun a cs q snap => ?_, (g.rebuild_kept A need).2⟩
       have kept := (g.rebuild_kept A need).1 a cs q snap
       have hne : q ≠ p := by intro he; subst he; rw [hp] at kept; cases kept.1
-      exact ⟨by simp only [hne, ite_false]; exact kept.1, kept.2⟩
+      refine ⟨by simp only [hne, ite_false]; exact kept.1, kept.2.1, fun r au v c q' h1 h2 h3 h4 => ?_⟩
+      obtain ⟨L', P', hb⟩ := kept.2.2 r au v c q' h1 h2 h3 h4
+      have hne' : q' ≠ p := by intro he; subst he; rw [hp] at hb; cases hb
+      exact ⟨L', P', by simp only [hne', ite_false]; exact hb⟩
 
 /-- **Storage steps keep every sound reader sound**: its buffered records
 were checked against a floor that only moves forward. -/
@@ -227,7 +237,7 @@ theorem rebuild_store_start {st : Store S} {seq : Nat → Slot S} (g : Good R st
     (snap : RebuildSnapshot R seq st.head A a cs p) :
     ∃ d : Reader S, ReaderOk R st seq R.store d ∧ d.pos = cs ∧
       st.body p = some (d.ledger, d.aud, d.rows) ∧ st.floor.start ≤ d.pos + 1 := by
-  obtain ⟨hbody, hstart⟩ := (g.rebuild_kept A need).1 a cs p snap
+  obtain ⟨hbody, hstart, _⟩ := (g.rebuild_kept A need).1 a cs p snap
   obtain ⟨ha1, hahead, ⟨au, w, hs, _⟩, ⟨_, valid⟩⟩ := snap.1
   rw [hs] at valid
   simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid

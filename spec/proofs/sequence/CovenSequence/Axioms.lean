@@ -199,7 +199,9 @@ import SequenceApply
 #print axioms CovenSequence.CircleRaise.below_refused_until_raised
 #print axioms CovenSequence.CircleRaise.joiner_cannot_raise
 #print axioms CovenSequence.CircleRaise.rebuilt_body_honest
+#print axioms CovenSequence.CircleRaise.rebuilt_body_from_kept
 #print axioms CovenSequence.CircleRaise.rebuilt_raise_counted
+#print axioms CovenSequence.reaches_target_kept
 #print axioms CovenSequence.CircleRaise.cross_read_rebuild_differs
 #print axioms CovenSequence.CircleLifecycle.name_is_latest_rename
 #print axioms CovenSequence.CircleLifecycle.deleted_target_refused

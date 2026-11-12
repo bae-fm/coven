@@ -184,13 +184,18 @@ def NeedsRebuild (seq : Nat → Slot S) (head : Nat) (A : S.Aud) : Prop :=
 
 /-- **Storage keeps what a rebuild reads** (coven.md §16.6): for each circle
 that needs a rebuild, the store snapshot it starts from is in storage with its
-state, and the first kept slot is no later than the slot after it, or at 1
-when there is none. -/
+state, the first kept slot is no later than the slot after it, and the bodies
+of the store's raises and resets after the snapshot, through the slot before
+the store's raise past the circle's version, are in storage too; with no such
+snapshot, the first kept slot is at 1. -/
 def RebuildKept (seq : Nat → Slot S) (head : Nat)
     (body : S.Path → Option (Ledger S × AudLedger S × S.Rows)) (start : Nat) : Prop :=
   ∀ A, NeedsRebuild R seq head A →
     (∀ a cs p, RebuildSnapshot R seq head A a cs p →
-      body p = some (stateAt R seq R.store cs) ∧ start ≤ cs + 1) ∧
+      body p = some (stateAt R seq R.store cs) ∧ start ≤ cs + 1 ∧
+      ∀ r au v c q, cs < r → r ≤ storeBefore R seq (audAt R seq A head).version head →
+        seq r = .boundary au R.store v c q → AppliedTo R seq R.store r →
+        ∃ L' P', body q = some (L', P', preparedRows R v q (raiseView R seq R.store c) R.store)) ∧
     ((¬ ∃ a cs p, RebuildSnapshot R seq head A a cs p) → start ≤ 1)
 
 /-- A store with no circle has nothing to rebuild. -/
@@ -528,6 +533,112 @@ theorem reaches_target {st : Store S} {seq : Nat → Slot S} (g : Good R st seq)
       have bound' : d'.pos ≤ target := by
         cases hs <;> simp only [fetched_pos] at * <;> omega
       obtain ⟨d'', run, hp, hok⟩ := ih (target - d'.pos) (by omega) d' rfl hd' bound'
+      exact ⟨d'', ReadSteps.trans R run1 (ReadSteps.step hs run), hp, hok⟩
+
+/-! ## Reading from a kept snapshot below the floor -/
+
+/-- A boundary of `A` at slot `r` covers a snapshot of `A` that was announced
+and applied, when that snapshot's coverage is before `r`. -/
+theorem cover_le_boundary (seq : Nat → Slot S) (A : S.Aud) {a' cs : Nat} {au' : S.Dev} {w' : Nat}
+    {p' : S.Path} (ha1 : 1 ≤ a') (has : seq a' = .snapshot au' A cs w' p')
+    (haapp : AppliedTo R seq A a') {r : Nat} {au : S.Dev} {v : Boundary} {c : Nat} {p : S.Path}
+    (hr : 1 ≤ r) (hs : seq r = .boundary au A v c p) (happ : AppliedTo R seq A r)
+    (before : cs < r) : cs ≤ c := by
+  by_cases hlt : a' < r
+  · have h1 := announced_maxCover R seq A ha1 has haapp
+    have h2 := maxCover_mono R seq A a' (r - 1) (by omega)
+    have h3 := happ.2
+    rw [hs] at h3
+    simp [audValid] at h3
+    omega
+  · have hne : a' ≠ r := by intro he; rw [he, hs] at has; cases has
+    have hlr := boundary_lastBoundary R seq A hr hs happ
+    have hmono := lastBoundary_mono R seq A r (a' - 1) (by omega)
+    have hsv := haapp.2
+    rw [has] at hsv
+    simp [audValid] at hsv
+    omega
+
+/-- **Progress from a kept snapshot.** A sound reader of `A` at or after the
+coverage `cs` of an announced snapshot, with every slot after `cs` kept and the
+body of every raise or reset of `A` up to `target` in storage, steps forward by
+one slot, whatever the floor names. -/
+theorem read_progress_kept {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S.Aud}
+    {d : Reader S} (hd : ReaderOk R st seq A d) {target cs : Nat} (hlt : d.pos < target)
+    (htarget : target ≤ st.head) (hstart : st.floor.start ≤ cs + 1) (hcs : cs ≤ d.pos)
+    (snap : ∃ a' au' w' p', 1 ≤ a' ∧ seq a' = .snapshot au' A cs w' p' ∧ AppliedTo R seq A a')
+    (bodies : ∀ r au v c p, cs < r → r ≤ target → seq r = .boundary au A v c p →
+      AppliedTo R seq A r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A)) :
+    ∃ lo n d', ReadStep R true A true st (fetched st d lo n) d' ∧ d'.pos = d.pos + 1 := by
+  have hslot : ∀ i, cs < i → i ≤ st.head → st.slot i = some (seq i) := by
+    intro i h1 h2
+    rw [g.kept_genuine i (by omega), g.first_genuine i (by omega) h2]
+  have plain : (∀ au v c p, seq (d.pos + 1) = .boundary au A v c p →
+      audValid R d.ledger d.aud (d.pos + 1) A (seq (d.pos + 1)) = false) →
+      ∃ lo n d', ReadStep R true A true st (fetched st d lo n) d' ∧ d'.pos = d.pos + 1 := by
+    intro hnr
+    refine ⟨d.pos + 1, 1, _, ReadStep.apply (fetched st d (d.pos + 1) 1) (seq (d.pos + 1)) ?_ ?_ ?_
+      (fun _ => rfl), by simp⟩
+    · rw [fetched_pos, fetched_buf_in st d (Nat.le_refl _) (by omega)]
+      exact hslot _ (by omega) (by omega)
+    · rw [fetched_pos]; omega
+    · simpa using hnr
+  cases hs : seq (d.pos + 1) with
+  | boundary au a v c p =>
+    by_cases hva : a = A ∧ audValid R d.ledger d.aud (d.pos + 1) A (.boundary au a v c p) = true
+    · obtain ⟨rfl, hv⟩ := hva
+      have happ : AppliedTo R seq a (d.pos + 1) := by
+        refine ⟨by rw [hs]; simp [touches], ?_⟩
+        simp only [Nat.add_sub_cancel]; rw [hs, ← hd.ledger, ← hd.aud]; exact hv
+      obtain ⟨L', P', hb⟩ := bodies (d.pos + 1) au v c p (by omega) (by omega) hs happ
+      obtain ⟨a', au', w', p', ha1, has, haapp⟩ := snap
+      have hcov : cs ≤ c := cover_le_boundary R seq a ha1 has haapp (by omega) hs happ (by omega)
+      have hc : c < d.pos + 1 := by simp [audValid] at hv; omega
+      refine ⟨c + 1, d.pos + 1 - c, _,
+        ReadStep.boundary (fetched st d (c + 1) (d.pos + 1 - c)) au v c p ?_ ?_ (by simpa using hv) rfl
+          L' P' _ hb seq ?_, by simp⟩
+      · rw [fetched_pos, fetched_buf_in st d (by omega) (by omega), hslot _ (by omega) (by omega), hs]
+      · rw [fetched_pos]; omega
+      · intro i h1 h2
+        rw [fetched_pos] at h2
+        rw [fetched_buf_in st d (by omega) (by omega)]
+        exact ⟨hslot i (by omega) (by omega), by omega⟩
+    · apply plain
+      intro au' v' c' p' he
+      rw [hs] at he
+      cases he
+      rw [hs]
+      cases h : audValid R d.ledger d.aud (d.pos + 1) A (.boundary au A v c p)
+      · rfl
+      · exact absurd ⟨rfl, h⟩ hva
+  | _ =>
+    apply plain
+    intro _ _ _ _ he; rw [hs] at he; cases he
+
+/-- **A target is reachable from a kept snapshot.** The reader of `A` at or
+after the coverage `cs` of an announced snapshot reaches `target`, even
+below the floor's name for `A`, when every slot after `cs` is kept and the body
+of every raise or reset of `A` after `cs`, through `target`, is in storage. -/
+theorem reaches_target_kept {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) (A : S.Aud)
+    {target cs : Nat} (head : target ≤ st.head) (hstart : st.floor.start ≤ cs + 1)
+    (snap : ∃ a' au' w' p', 1 ≤ a' ∧ seq a' = .snapshot au' A cs w' p' ∧ AppliedTo R seq A a')
+    (bodies : ∀ r au v c p, cs < r → r ≤ target → seq r = .boundary au A v c p →
+      AppliedTo R seq A r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A)) :
+    ∀ (d : Reader S), ReaderOk R st seq A d → cs ≤ d.pos → d.pos ≤ target →
+      ∃ d', ReadSteps R A true st d d' ∧ d'.pos = target ∧ ReaderOk R st seq A d' := by
+  intro d
+  generalize hn : target - d.pos = n
+  induction n using Nat.strongRecOn generalizing d with
+  | ind n ih =>
+    intro hd hcs bound
+    by_cases heq : d.pos = target
+    · exact ⟨d, ReadSteps.refl d, heq, hd⟩
+    · obtain ⟨lo, k, d', hs, hpos⟩ :=
+        read_progress_kept R g hd (by omega : d.pos < target) head hstart hcs snap bodies
+      have run1 := fetch_run R A true st d lo k
+      have hd1 := reads_ok R g hd run1
+      have hd' := read_ok R g hd1 hs
+      obtain ⟨d'', run, hp, hok⟩ := ih (target - d'.pos) (by omega) d' rfl hd' (by omega) (by omega)
       exact ⟨d'', ReadSteps.trans R run1 (ReadSteps.step hs run), hp, hok⟩
 
 /-- **Every reader with its key reaches the head.** -/
