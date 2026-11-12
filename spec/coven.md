@@ -5825,6 +5825,12 @@ writes (§12.2).
 
 A newly made circle has no earlier parts, so its first members load nothing.
 
+Gifts may be at an older schema version than Dan's app: his app ran a breaking
+migration (§18) that nobody has raised Gifts to yet. His laptop can't load
+Gifts' rows in their old shape, so it rebuilds Gifts at its version, migrates
+it, and raises it (§18.3). Writes into Gifts fail with `AudienceReloading`
+until the rebuild commits, as during any load.
+
 #### 15.8 Leaving a circle
 
 Ana removes Ben from Gifts with an admin operation. That slot changes Gifts'
@@ -6393,7 +6399,10 @@ empty start: the floor supplies the required snapshot instead.
 
 Then each audience is rebuilt from its eligible queued writes. With good storage
 and every audience's key, all of them can be loaded to any target between the
-selected floor snapshots' coverage and the end of the sequence.
+selected floor snapshots' coverage and the end of the sequence. A newly
+readable circle below the version of the newest breaking migration the device
+has run can't be loaded in its old shape; the device rebuilds it at the
+circle's own version and migrates it instead (§18.3).
 
 #### 16.6 Deleting history
 
@@ -6407,7 +6416,8 @@ A floor write makes two choices for each introduced audience:
   §16.3), however new. A new device starts there (§16.4).
 - **What bounds `first`:** the newest such snapshot that has also passed grace.
   `first` moves to their least coverage plus one, and stays where it is while
-  any audience has none. It never moves back.
+  any audience has none. It never moves back. A circle below the store's
+  version holds it back too (below).
 
 The name always covers at least as much as the snapshot past grace, because
 coverage never decreases from one announcement to the next. So the floor still
@@ -6514,6 +6524,20 @@ The rules:
   announced at or above `first` until a newer applicable snapshot has passed
   grace by this device's clock, covers at least as much and keeps the needed
   evidence. Newer announcements do not extend that wait.
+- **A circle below the store's version keeps the store's history at its
+  version.** A member who starts reading such a circle rebuilds it from the
+  store's rows at the circle's version (§18.3). So while a circle that isn't
+  deleted is below the store's version, retention keeps the store's newest
+  ordinary snapshot at or below the circle's version, and `first` moves no
+  further than its coverage plus one; with no such snapshot, `first` stays
+  at 1.
+  Garden is at version 1, and Ben raised the store to version 2 at slot 300.
+  The store's version 1 snapshot announced at slot 241, covering 240, stays,
+  and `first` stays at or below 241, until Garden is raised or deleted. Without
+  this, Dan, added to Garden a month later, couldn't rebuild it. Garden's own
+  history needs no such rule: until it's raised, no device snapshots Garden
+  past slot 299, since the old app stops at the store's raise and the new one
+  takes no ordinary snapshot of an audience below its version (§16.2).
 - **Each device deletes its own snapshots.** Once the protections above no
   longer keep one of its announced snapshots, the device deletes the body. A
   body whose announcement it has forgotten it finds by listing its own
@@ -6765,11 +6789,16 @@ bodies.
   retention reads its publication time (§16.6), or a journaled floor write
   names it and copies its original slot. A floor write journaled before
   another device's floor moved `first` past its names still copies them.
+- **A rebuild reads it.** It is the store's newest ordinary announcement at
+  or below the version of a circle that isn't deleted and is below the
+  store's version. A member who starts reading that circle rebuilds it from that
+  snapshot, which retention keeps (§16.6, §18.3).
 
 Every other announcement is forgotten: no applied raise or reset names it,
 another of its audience covers more, an ordinary one of its audience is
-newer, its slot is below `first`, and no journaled floor write names it. A
-device forgets in its retention, after reading the floor and writing its own.
+newer, its slot is below `first`, no journaled floor write names it, and no
+rebuild reads it. A device forgets in its retention, after reading the floor
+and writing its own.
 
 **Every device still agrees.** A device that forgot an announcement accepts and
 refuses exactly what one holding it does (Appendix G.5). Each
@@ -8555,8 +8584,9 @@ migration into one of two kinds by comparing the schema before and after:
   an index, constraint or trigger to an existing table, or changing rows. It
   raises the store's schema version.
 
-This section covers how coven tells them apart (§18.1), additions (§18.2), raising
-the version (§18.3), the write a migration makes (§18.4), the migrating device's
+This section covers how coven tells them apart and what a breaking migration may
+read (§18.1), additions (§18.2), raising the version and who raises each circle
+(§18.3), the write a migration makes (§18.4), the migrating device's
 own queue (§18.5), late writes in the old shape (§18.6), lost values across a
 migration (§18.7), two devices raising at once (§18.8), and coven's own schema and
 format (§18.9).
@@ -8592,6 +8622,26 @@ data. Deciding by the rows a device happens to hold makes devices disagree
 The app also declares each migration's kind, and coven refuses a migration whose
 declared kind disagrees with the kind found here (§18.3).
 
+**What a breaking migration reads.** A breaking migration's changes to a
+circle's rows must come only from that circle's rows and the store's, as they
+stood before the migration. Its changes to the store's rows must come only
+from the store's. Every member of a circle reads both, so each of them,
+running the migration, makes the same rows: that is what lets any member
+raise the circle (§18.3).
+
+Ana's version 2 adds `pins.note_title` and fills each pin's from the note it
+points at. Gifts' pin 3 points at store note 42 (§15.3), so its title comes
+from the store: allowed. Storing on pin 3 how many Garden pins also point at
+note 42 is refused: Ben, in Gifts but not in Garden, would count differently
+than Ana. So is filling a store row from Gifts: Carol, outside Gifts, would
+make other store rows than Ana, and Ana's raise would carry Gifts' rows to
+her. Filling rows from a local table, or from what coven's views show of this
+device, is refused too: no other device holds those. A value that depends on
+what each member can read, such as how often a song was played across every
+circle a member reads, is worked out when it's shown, not stored.
+
+Coven checks the rule as the migration runs (§18.3).
+
 #### 18.2 Additions
 
 Writes from devices on older versions still apply everywhere; they just don't set
@@ -8624,6 +8674,13 @@ no safe default:
 
 Neither choice ever changes an upload record.
 
+A breaking migration also gives the synced tables its schema starts from: the
+declarations the app gave for the version before it. If version 2 makes
+`notes` owner-only, the tables version 2 starts from declare `notes` without
+`owner_only()`. The app's other declarations describe only its newest version,
+and a device that rebuilds a circle at an older one (below) declares these
+there.
+
 **Running migrations.** An update runs every pending migration in one
 transaction. Coven then checks the final schema against the schema rules (§9,
 Appendix A) and the tables the app declares, which describe only the newest
@@ -8636,6 +8693,13 @@ and migration 2 renames `id` to `note_id`: only the final schema has to match
 `key_columns(["note_id"])`. Reopening the database checks the kinds declared for
 earlier migrations against the kinds they committed with.
 
+The tables a breaking migration starts from are checked the same way, against
+the schema the run has reached just before that migration's statements. On a
+device that last ran the version before it, they must also match the
+declarations it opened with then, since the owner and file reference
+declarations aren't in SQLite's schema (§18.1). A rule that fails there fails
+the run as it would on the final schema.
+
 Declaring the kind, and the choice for old writes, means late old writes are
 never lost without the app having chosen it: a breaking change the app took for an
 addition would otherwise drop them silently. The model refuses a breaking
@@ -8644,6 +8708,34 @@ commits no part of the run when either happens
 ([`undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch`](proofs/queue/CovenQueue/ConversionChain.lean)).
 The same check requires `addition` for a local-only migration
 ([`local_only_requires_addition`](proofs/queue/CovenQueue/ConversionChain.lean)).
+
+**Checking what a breaking migration reads.** A run with a breaking migration
+is checked against §18.1's rule before anything commits. Coven runs the same
+migrations again, once per audience the device reads, each time in a database
+of its own holding only that audience's rows and the store's as they were
+before the run, with the local tables empty and coven's views showing nothing
+of this device. It runs the store alone, then each circle with the store.
+After each run, the audience's rows must equal its rows after the real run,
+and so must the store's. A difference fails the open with
+`DbError::MigrationReadsAcross { table, audience }`, naming a table whose rows
+in that audience differ, and nothing commits. Had Ana's version 2 stored on
+each Gifts pin how many Garden pins point at the same note (§18.1), her phone,
+which reads both circles, would get other counts on the run without Garden,
+and her open would fail.
+
+The check reads this device's own rows, so it finds a read only where it
+changes something here. Ben's laptop, outside Garden, runs the same migration
+and passes, and so would Dan's phone, in both circles, if no Garden pin
+pointed at a Gifts pin's note. That is enough: whatever passes, every raise
+body is the rows the per-audience run makes. A device whose real run makes
+other rows refuses, and a device that rebuilds a circle (below) runs the
+migration over exactly that circle and the store. A migration whose
+SQL answers differently each run, such as one using `random()`, fails too.
+Coven can't take the rule on the app's word, and can't find which rows a
+statement read: tracking the tables it reads would refuse the many migrations
+that read only their own audience's rows of a table every audience shares.
+The check costs one more run of the migrations per audience the device
+reads, each over the store's rows.
 
 **The raise.** A breaking change raises the store's schema version, which every
 device shares. Whichever device's app updates first makes the raise, whoever's
@@ -8655,9 +8747,10 @@ device it is.
 4. It claims the raise: one admin entry per audience it raises to the new
    version, the store's own entry raising the store.
 
-For a circle it can't read, the first device of one of that circle's members to
-update writes the circle's snapshot at the new version, with an entry raising the
-circle. The circle's other devices reload from that one.
+For a circle it can't read, a device of one of that circle's members writes
+the circle's snapshot at the new version, with an entry raising the circle:
+the first to update, or one whose member joins the circle after updating
+(below). The circle's other devices reload from that one.
 
 A raise must increase the current version: the last one raised to, or for a
 circle never raised, its base (§15.5). An operation that finds the version it
@@ -8699,17 +8792,73 @@ raise body
 device's later writes wait for that raise as they wait for a migration's.
 
 A device that starts reading a circle with history after it migrated never held
-the circle's rows at the circle's version, so it can't make the raise body: once
-a snapshot covers a part of the circle, the raise must cover that part too, and
-the device holds the part only as it converted it on reading
-([`joiner_cannot_raise`](proofs/sequence/CovenSequence/CircleRaise.lean)). It
-doesn't raise the circle, and every device would refuse its snapshots of it
+the circle's rows at the circle's version. Converting each part as it reads it
+doesn't make the raise body: once a snapshot covers a part of the circle, the
+raise must cover that part too, and its body is the circle's rows migrated, not
+the part converted
+([`joiner_cannot_raise`](proofs/sequence/CovenSequence/CircleRaise.lean)).
+Until something raises the circle, every device refuses its snapshots of the
+circle at the newer version
 ([`below_refused_until_raised`](proofs/sequence/CovenSequence/CircleRaise.lean)).
-A member who held the circle raises it when their app updates, which the store's
-raise makes them do. Ben's app migrates while he reads only the store; Ana, on
-the old app, adds him to Garden; Ben raises nothing for Garden, and Ana's update
-raises it, after which Ben reloads Garden from her raise. A circle whose members
-who held it have all left keeps its version: nothing raises it.
+So the device *rebuilds* the circle: it makes the circle's rows at the
+circle's own version from storage, as a member on the old app holds them, and
+migrates them itself. It starts once its migration write's marker has a slot
+(§18.4); until the rebuild commits, it passes the circle's parts unopened, as
+it did before it could read the circle, and goes on applying the rest of the
+store.
+
+1. In a database of its own, it runs the app's migrations up to the version
+   before the first breaking migration past the circle's version, and declares
+   there the tables that breaking migration starts from (above).
+2. It loads the circle's newest usable snapshot and the store's newest
+   ordinary snapshot at or below the circle's version, or starts either empty
+   where history holds none (§16.5). It applies the slots after them up to the
+   *rebuild slot*: the slot the device has applied, or, if the store was
+   raised past the circle's version before that, the slot before the store's
+   raise. Past it, the store has no rows at the circle's version.
+3. It runs the breaking migrations over that database, checked as any run is.
+4. It takes the circle's migrated rows as its own, holding the circle as a
+   member who held it through the rebuild slot and then migrated would. Cells
+   the migration changed are set by this device's migration write (§18.4).
+   The circle's parts after the rebuild slot apply as late writes (§18.6),
+   and the rebuild commits.
+5. It captures the circle, as a migration captures what it read (§18.5), and
+   raises it with its other captures.
+
+Ben's app migrates to version 2 while he reads only Household's store, and his
+raise of the store waits for his queued writes to land. Ana, on the old app,
+adds him to Garden at slot 70. Ben's laptop passes Garden's parts unopened
+until his migration marker lands at slot 72. With slot 74 applied, it loads
+Garden's version 1 snapshot covering 60 and the store's version 1 snapshot
+covering 55 into a database of its own at version 1, applies slots 56 to 74
+there, runs version 2, and holds Garden at version 2. It raises Garden
+alongside the store. Ana's update later finds Garden raised and loads Ben's
+raise; had hers come first, Ben's laptop would load hers (§18.8). No member
+waits for another to update, and a circle whose members who held it have all
+left is raised by any member who reads it.
+
+The rebuilt rows are the ones every member who held the circle through the
+rebuild slot makes: the migration's changes to the circle come only from the
+circle's rows and the store's (§18.1), the check holds every device to that,
+and the rebuild starts from exactly those rows.
+
+**Edge cases of a rebuild.**
+
+- **Writes into the circle.** Until the rebuild commits, they fail with
+  `AudienceReloading`, as during any load (§16.5). After it, they wait for the
+  circle's raise, as writes made after a migration do (§18.5).
+- **A store below the circle's version.** A circle's base can be ahead of the
+  store's version, when its maker's app had migrated and the store's raise
+  hadn't gone out yet. The rebuild then migrates the store alone up to the
+  circle's version before loading the circle: the store's changes come only
+  from the store (§18.1).
+- **History it needs.** Retention keeps the store's snapshot at the circle's
+  version, and the slots after it, while the circle is below the store's
+  version (§16.6). A missing body, slot or key makes the device wait and say
+  why, as any load does (§16.2, §19.1).
+- **Nothing stays behind.** The rebuild's database goes when the rebuild
+  commits or fails. A failed rebuild changes nothing, and the next pass starts
+  it again.
 
 **Devices on an older app.** An older app can't apply an audience's newer schema.
 It records `UpdateRequired` and stops at that slot under §5's rule for stuck
@@ -8786,6 +8935,17 @@ at version 2 or later, as any device that ran the breaking step does. The
 store's creator, whose state is its own, makes its migration write as any
 device does.
 
+**A rebuilt circle's changes join the device's migration write.** A device
+that rebuilds a circle (§18.3) puts what the migration changed in the circle
+into its migration write of its newest breaking version, as if the circle had
+been in its database when it migrated. The rebuild starts only once that
+write's marker has a slot, so the rebuilt circle's snapshots cover it and the
+changes count at once. Ben's marker landed at slot 72, and his rebuild of
+Garden sets Garden's changed cells by that write, so his raise of Garden waits
+for no other marker. A device with no migration write, such as Carol's phone
+that joined with its app already at version 2, queues one for the rebuild: an
+empty marker, as migrating queues (§18.5).
+
 #### 18.5 The migrating device's own queue
 
 When Ana's phone migrates, its queue may already hold writes made at the old
@@ -8820,7 +8980,8 @@ it are new-version writes and wait behind it.
   raise, the part counts wherever it lands
   ([`waiting_part_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
   Ben's app reached version 2 before Ana added him to Garden, which nobody had
-  raised; his pin in Garden waits until Ana's update raises it (§18.3). A pass
+  raised; his laptop rebuilds Garden and raises it (§18.3), and his pin in
+  Garden waits for that raise, or for Ana's if hers lands first. A pass
   decides what it sends from the slots it applied before reading, so the pass
   that applies the raise sends the pin on the next one.
 - **A deleted circle holds no write.** Nobody can raise it, so it stays at
@@ -8898,6 +9059,10 @@ If another device claims the
 version first, Ana's phone loads that announced state and judges the uncovered
 writes the way every receiver does (§18.6). Its local migration's results never
 become shared lost values.
+
+Every audience a migrated device reads below its version has a capture to
+judge by: one it read when it migrated, a circle its member made later, or one
+it rebuilt (§18.3). So a received part never waits for this device's raise.
 
 #### 18.6 Late writes in the old shape
 
@@ -9064,6 +9229,13 @@ snapshot, and undoes its own unused work. Its announced snapshot, never activate
 by an admin entry, is still its operation's to clean up: once the device checks
 again and finds the raise taken, it deletes the body. The announcement stays in
 history and supplies no usable snapshot (§16.3). The losing device publishes no entry.
+
+A device that rebuilt a circle races the same way. Ben rebuilds Garden while
+Ana's update captures it, and both prepare Garden's raise to version 2.
+Whichever claim lands first is established, and the other device loads it as
+any member does. Their bodies may differ, since each covers what its device
+had applied when it prepared, but each is one a member who held the circle
+makes (§18.3, §18.5), and every device loads the same one.
 
 Writes the losing device made after migrating can be built on its migration
 write. Ana's migration sets every note's title, and before Ben's raise is
@@ -13138,6 +13310,7 @@ maps them are with each provider in Appendix E.
 | `DbError::VersionChangeRefused` | a collation or function a CHECK, generated column or synced unique index uses has a new version; the writable open fails and changes nothing | §4 |
 | `DbError::VersionNotRebuilt` | a read-only open registers another version of a collation or function than the store's indexes were built with | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
+| `DbError::MigrationReadsAcross { table, audience }` | a breaking run's rows of `table` in `audience` differ from the same migrations run over only that audience's rows and the store's: they came from another circle, a local table or this device's own state; nothing commits | §18.1, §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it, and the other is refused on it | §13.4 |
 | `ReplacementUnfinished` | a reset or restore in place swapped the new installation in but did not finish; names the call that finishes it, and refuses the other | §13.1, §19.3 |

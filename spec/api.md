@@ -1572,6 +1572,11 @@ pub enum DbError {
     Snapshot(SnapshotError),
     /// The declared migration kind disagrees with its runtime classification (E13).
     MigrationKindMismatch { version: u32 },
+    /// A breaking run's rows of `table` in `audience` differ from the same
+    /// migrations run over only that audience's rows and the store's: they
+    /// came from another circle, a local table or this device's own state
+    /// (§18.1, §18.3, E13).
+    MigrationReadsAcross { table: String, audience: Audience },
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     MigrationReference { table: String, column: String },
     /// A converted row names the same column twice.
@@ -1811,8 +1816,6 @@ pub enum WriteWait {
     Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
-    /// This device's breaking migration awaits its raise and reload.
-    SchemaPublication(u32),
     /// The audience's reload has not committed its replacement data.
     Reload(Audience),
 }
@@ -9182,6 +9185,15 @@ pub struct CircleMemberInfo {
 - Constructors declare the kind: `addition` or `breaking` for SQL,
   `addition_with` or `breaking_with` for code. Breaking constructors require
   `OldWrites::Convert(f)` or `OldWrites::Drop`; there is no implicit choice.
+- Breaking constructors also take the synced tables the migration's schema
+  starts from: the declarations the app gave for the version before it. The
+  builder's `synced_tables` describe only the newest version; a device that
+  rebuilds a circle below its version declares these at the older one
+  (§18.3). Coven checks them against the schema the run has reached just
+  before the migration's statements, under the same rules as the newest
+  declarations, and, on a device that last opened at the version before it,
+  against the declarations it opened with; a failed check fails the run as
+  `MigrationError::Failed` for that migration.
   `Convert` handles eligible received late ordinary changes in version and
   causal order (§18.6;
   [`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
@@ -9218,6 +9230,15 @@ pub struct CircleMemberInfo {
   `DbError::MigrationKindMismatch { version }` and rolls back the whole batch;
   local-only changes accept `addition`. Reopening checks historical declarations
   against committed classifications before running new migrations.
+- A breaking migration's changes to a circle's rows come only from that
+  circle's rows and the store's, and its changes to the store's rows only from
+  the store's: not from another circle, a local table, or coven's views of
+  this device (§18.1). Before a run with a breaking migration commits, coven
+  runs its migrations again per audience the device reads, over only that
+  audience's rows and the store's, and compares (§18.3). A difference rolls
+  the whole run back and fails as `MigrationError::Failed` for the run's
+  newest migration, with the source
+  `DbError::MigrationReadsAcross { table, audience }`.
 - A converter sees only the values a change writes, or for a delete the cells
   it removes: an update carries no value it replaced (format D5.5), so a column
   a conversion adds to an update needs only the value it writes. A conversion
@@ -9242,8 +9263,22 @@ impl Migration {
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 
-    pub fn breaking(version: u32, name: &'static str, sql: &'static str, old_writes: OldWrites) -> Self;
-    pub fn breaking_with<F>(version: u32, name: &'static str, f: F, old_writes: OldWrites) -> Self
+    /// `starts_from`: the synced tables as the app declared them on the
+    /// version before this one (§18.3).
+    pub fn breaking(
+        version: u32,
+        name: &'static str,
+        sql: &'static str,
+        old_writes: OldWrites,
+        starts_from: Vec<SyncedTable>,
+    ) -> Self;
+    pub fn breaking_with<F>(
+        version: u32,
+        name: &'static str,
+        f: F,
+        old_writes: OldWrites,
+        starts_from: Vec<SyncedTable>,
+    ) -> Self
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 }
@@ -9325,7 +9360,10 @@ fn migrations() -> Vec<Migration> {
                     change.rename_column("title", "name");
                 }
                 Ok(())
-            }))),
+            })),
+            // The tables as version 1 declared them; renaming a column that
+            // isn't a key, audience or file column leaves them as they are.
+            tables()),
     ]
 }
 ```
