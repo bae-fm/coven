@@ -12222,6 +12222,10 @@ feature. Ceph RGW 20.2.4 fails the versioned races. The builds and dates are in
   and on multipart completion, keeping bytes and times, and their multipart
   `Last-Modified` fell between the completion markers. So they use conditional
   completion without a copy.
+  Ceph RGW's `CopyObject` accepted an occupied name under every copy condition
+  detection tried (`CopyPublication … taken=accepted preserved=false`, [full
+  battery](storage-certification.md#ceph-rgw-2024)), so Ceph RGW can't publish by
+  copy; it keeps conditional completion.
 - **SeaweedFS 4.48** refuses occupied names one request at a time too, but not
   under concurrency: two racing conditional completions of one name both
   succeed, and in an unversioned bucket a conditional PUT racing a conditional

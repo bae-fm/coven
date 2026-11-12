@@ -187,6 +187,37 @@ observations are kept as recorded. The suite printed each requirement line with
 `§4`, the number the provider contract had before the spec was renumbered; it is
 now §20, and new runs print `§20`. The recorded lines are kept as printed.
 
+### RustFS 1.0.4 with copy publication, 2026-11-06
+
+A trial of publishing RustFS's large uploads by copy, not a certification of a
+shipped profile. The run used RustFS 1.0.4 (container image `22826c1475c8`,
+digest `sha256:6be0def183a9…`, built 2026-10-25) in a local container, suite
+7, with the `RustFs` entry edited locally to
+`copy_publication: Multipart(IfNoneMatch)` for the run and reverted after.
+
+- Every race passed with copy publication: concurrent create with 2 and 8
+  writers, concurrent multipart publication with 2 and 8, a single request
+  racing a multipart publication, and the replacement race. Copy kept one
+  winner under concurrency.
+- The setup safety check, detection, reads, listings, status, deletion, the
+  timestamp checks and the copy reply observation passed.
+- `create_once_multipart`, `partial_uploads_hidden` and `multipart_resume`
+  failed, all at `s3_live_tests.rs:801`, `assert!(stale.is_complete())`: a
+  stale recording of a copy-published upload, resumed after publication, was
+  not recognised as complete. The cause is undiagnosed.
+- Standing unchanged: RustFS keeps conditional completion
+  (`S3CopyPublication::Never`) and its 1.0.2 certification.
+
+```text
+certification suite=7 FAIL
+thread 'providers::s3::tests::live_tests::s3_certification' panicked at crates/coven-storage/src/providers/s3_live_tests.rs:801:9:
+assertion failed: stale.is_complete()
+§20 create_once_multipart, partial_uploads_hidden, multipart_resume assertion_failed
+§20 create_once_multipart FAIL cleanup=PASS
+§20 partial_uploads_hidden FAIL cleanup=PASS
+§20 multipart_resume FAIL cleanup=PASS
+```
+
 ### Suite 6, 2026-10-28
 
 Suite 6 adds the copy reply observation
