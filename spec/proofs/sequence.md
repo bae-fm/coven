@@ -1312,25 +1312,30 @@ counterexample for each way it left a claim open for good:
   and the invite never ends.
 
 [`AccessKeyReplacement`](sequence/CovenSequence/AccessKeyReplacement.lean)
-models a member replacing their S3 key A with B on their own device (§14.3):
+models a member's device taking a new S3 key B in place of A (§14.3):
 custody's key, a keychain entry, and the key history records, an admin entry
 the device journals and claims. The keychain and the journal share no
-transaction, so a crash can come between any two steps. Under `Rules.correct`
-the call keeps B apart in custody, journals `SetAccess` for B, and connects
-with B only once history records it; settling swaps a kept key history
-records in and lets go of one nothing journals or records:
+transaction, so the device can be killed between any two steps, and the person
+can delete A in the provider's console at any time. Under `Rules.correct` the
+call journals the entry for B, takes B in custody, and the entry is claimed
+with B; an entry that runs while custody holds A ends without claiming:
 
-- `custody_never_ahead`: in every reachable state, custody connects with B
-  only once history records B.
-- `replacement_settles`: from every reachable state, coven's own steps, the claim landing
-  or refused and settling, end with nothing journaled, no key kept apart, and
-  custody on the key history records.
+- `custody_has_record_or_entry`: in every reachable state, custody holds B
+  only where history records B or an entry for B is journaled.
+- `record_follows_custody`: history records B only where custody holds B.
+- `coven_settles`: from every reachable state, coven's own steps, the claim
+  landing or the entry ending without claiming, end with no entry journaled
+  and custody on the key history records.
+- `retry_finishes`: from every reachable state, a call with B journals the
+  entry unless one is journaled or recorded, takes B, and the claim lands;
+  this assumes the claim lands, as the other models do.
 
-`Rules.before`, which committed B to custody first, has a counterexample:
+`Rules.keptApart`, which held B back until history recorded it and claimed with
+A, has a counterexample:
 
-- `custody_first_strands`: a crash right after the commit leaves custody on
-  B, history on A and nothing journaled, and no step of coven's own changes
-  it.
+- `kept_apart_strands`: A is deleted in the console after the entry is
+  journaled; nothing is then enabled, so history never records B and
+  custody never takes it.
 
 [`JoinStatus`](sequence/CovenSequence/JoinStatus.lean) models what a waiting
 join reports across its checks and across the calls that resume it: a call

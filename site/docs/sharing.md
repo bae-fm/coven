@@ -402,12 +402,13 @@ account's admin access. `guided_access_key()` fills in what the console needs:
 the store's bucket and the member policy.
 
 ```rust
-handle.replace_access_key(new_key_id, new_secret).await?;
+handle.use_access_key(new_key_id, new_secret).await?;
 ```
 
-To replace their key, a member makes a new one in the console and gives it to a
-device they keep, which installs it and records it. The restore code doesn't
-change. Their other devices take the new key with `update_credentials`.
+To replace their key, or when it stops being accepted, a member makes a new one
+in the console and gives it to a device they keep, which connects with it and
+records it. The restore code doesn't change. Their other devices take the new
+key with the same call.
 
 When a key stops being used, because it was replaced, its member was removed, or
 its invite ended, coven forgets it and keeps no notice. The app should name the

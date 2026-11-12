@@ -1,22 +1,29 @@
 /-!
-# Replacing a member's S3 key on their own device
+# Using a new S3 key on a member's own device
 
-Dan replaces his S3 key A with B, which he made in the provider's console
-(§14.3). Two things change: the key this device's custody connects with, a
-keychain entry, and the key the store's history records as Dan's, an admin
-entry the device journals and claims (`SetAccess`). The keychain and the
-journal share no transaction, so a crash can come between any two steps.
+Dan's S3 key A stops serving him, or he replaces it, and he gives his device a
+key B he made in the provider's console (§14.3). Two things change: the key
+this device's custody connects with, a keychain entry, and the key the store's
+history records as Dan's, an admin entry the device journals and claims
+(`SetAccess`). The keychain and the journal share no transaction, so the
+device can be killed between any two steps.
 
-History is what the app reads to tell Ana which key to delete when she
-removes Dan. Custody must never connect with a key history doesn't record:
-the person would delete the recorded one, and the other would keep
-reaching the store.
+History is what the app reads to tell Ana which key to delete when she removes
+Dan. Whether a key reaches storage is the provider's business: B is live from
+the moment Dan makes it, whether or not a device uses it, and A may be deleted
+in the console at any time.
 
-`Rules.correct` keeps B apart in custody first (`keep`), journals it, and
-connects with B only once history records it (`swap`); a kept key with no
-journal row and no record goes (`drop`). `Rules.custodyFirst`, as before,
-commits B to custody, then journals it: a crash between the two leaves
-custody on B, history on A, and nothing journaled, for good.
+`Rules.correct` journals the entry that records B first, then takes B into
+custody, and claims the entry with B. An entry that runs while custody still
+holds A is an install that never happened: it ends without claiming
+(`rollback`). So no reachable state has custody on B without history on B or
+an entry journaled for B, and an entry left by a kill ends in coven's own
+passes either way.
+`Rules.keptApart` holds B back until history records it and claims with A: once
+A is deleted in the console, no claim can land and B is never used.
+
+A claim history refuses is left out: it happens only once Dan's removal has
+applied, when no access record is read.
 -/
 namespace CovenSequence.AccessKeyReplacement
 
@@ -24,62 +31,56 @@ namespace CovenSequence.AccessKeyReplacement
 structure World where
   /-- The key custody connects with. -/
   custody : Bool
-  /-- Custody keeps B apart, not yet connecting with it. -/
-  kept : Bool
   /-- The journal runs `SetAccess` for B. -/
   row : Bool
   /-- History records B as the member's key. -/
   history : Bool
+  /-- The provider still accepts A. -/
+  oldLive : Bool
   deriving DecidableEq, Repr
 
-def start : World := ⟨false, false, false, false⟩
+def start : World := ⟨false, false, false, true⟩
 
 structure Rules where
-  custodyFirst : Bool
+  /-- The entry is journaled first, B is taken at once, and the entry is
+  claimed with B. -/
+  atOnce : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨false⟩
-def Rules.before : Rules := ⟨true⟩
+def Rules.correct : Rules := ⟨true⟩
+def Rules.keptApart : Rules := ⟨false⟩
 
 inductive Act where
-  /-- The call keeps B apart in custody. -/
-  | keep
-  /-- The call commits B as the key custody connects with. -/
-  | commit
   /-- The call journals `SetAccess` for B. -/
   | journal
+  /-- Custody connects with B. -/
+  | install
   /-- The claim lands: history records B, and the operation ends. -/
   | land
-  /-- The operation ends refused, recording nothing. -/
-  | refuse
-  /-- Settling connects with the kept key history records. -/
-  | swap
-  /-- Settling lets go of a kept key nothing journals or records. -/
-  | drop
+  /-- The entry runs while custody still holds A: it ends without claiming. -/
+  | rollback
+  /-- The person deletes A in the provider's console. -/
+  | consoleDelete
   deriving DecidableEq, Repr
 
 def enabled (R : Rules) (w : World) : Act → Bool
-  | .keep => !R.custodyFirst && !w.custody && !w.kept && !w.row && !w.history
-  | .commit => R.custodyFirst && !w.custody && !w.row && !w.history
-  | .journal =>
-    !w.row && !w.history && (if R.custodyFirst then w.custody else w.kept)
-  | .land | .refuse => w.row
-  | .swap => !R.custodyFirst && w.kept && w.history
-  | .drop => !R.custodyFirst && w.kept && !w.row && !w.history
+  | .journal => !w.row && !w.history && (!R.atOnce || !w.custody)
+  | .install => if R.atOnce then w.row && !w.custody else w.history && !w.custody
+  | .land => w.row && (if R.atOnce then w.custody else w.oldLive)
+  | .rollback => R.atOnce && w.row && !w.custody
+  | .consoleDelete => w.oldLive
 
 def act (w : World) : Act → World
-  | .keep => { w with kept := true }
-  | .commit => { w with custody := true }
   | .journal => { w with row := true }
+  | .install => { w with custody := true }
   | .land => { w with row := false, history := true }
-  | .refuse => { w with row := false }
-  | .swap => { w with custody := true, kept := false }
-  | .drop => { w with kept := false }
+  | .rollback => { w with row := false }
+  | .consoleDelete => { w with oldLive := false }
 
 /-- What coven does on its own once the call is gone: its passes run the
-journal, and settling looks at custody beside history. -/
+journal. Nothing of coven's looks at custody beside history. -/
 def coven : Act → Bool
-  | .land | .refuse | .swap | .drop => true
+  | .land | .rollback => true
   | _ => false
 
 inductive Steps (R : Rules) : World → World → Prop
@@ -107,14 +108,13 @@ theorem key_trace_steps (R : Rules) :
 
 /-- What holds of every world the correct order reaches. -/
 def Inv (w : World) : Prop :=
-  (w.custody = true → w.history = true) ∧ (w.row = true → w.kept = true) ∧
-    (w.history = true → w.custody = true ∨ w.kept = true) ∧
-    (w.custody = true → w.kept = false) ∧ (w.row = true → w.history = false)
+  (w.custody = true → w.history = true ∨ w.row = true) ∧ (w.history = true → w.custody = true) ∧
+    (w.row = true → w.history = false)
 
 theorem key_inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct w a = true) :
     Inv (act w a) := by
-  obtain ⟨c, k, r, h⟩ := w
-  cases a <;> cases c <;> cases k <;> cases r <;> cases h <;>
+  obtain ⟨c, r, h, o⟩ := w
+  cases a <;> cases c <;> cases r <;> cases h <;> cases o <;>
     simp_all [Inv, act, enabled, Rules.correct]
 
 theorem key_reachable_inv {w w' : World} (h : Steps Rules.correct w w') (inv : Inv w) : Inv w' := by
@@ -122,37 +122,60 @@ theorem key_reachable_inv {w w' : World} (h : Steps Rules.correct w w') (inv : I
   | refl => exact inv
   | step a e _ ih => exact ih (key_inv_step _ a inv e)
 
-/-- Custody connects with B only once history records it: in every world
-the correct order reaches, crashes between any two steps included. -/
-theorem custody_never_ahead {w : World} (h : Reachable Rules.correct w) (b : w.custody = true) :
-    w.history = true :=
+/-- In every world the correct order reaches, kills between any two steps
+included, custody holds B only where history records B or an entry is
+journaled for B. -/
+theorem custody_has_record_or_entry {w : World} (h : Reachable Rules.correct w)
+    (b : w.custody = true) : w.history = true ∨ w.row = true :=
   (key_reachable_inv h (by simp [Inv, start])).1 b
 
-/-- The steps settling takes from `w`: the journaled claim, then the kept
-key, swapped in once recorded or let go. -/
-def settling (w : World) : List Act :=
-  (if w.row then [.land] else []) ++
-    (if w.kept && (w.row || w.history) then [.swap] else if w.kept then [.drop] else [])
+/-- History records B only where custody connects with B. -/
+theorem record_follows_custody {w : World} (h : Reachable Rules.correct w)
+    (b : w.history = true) : w.custody = true :=
+  (key_reachable_inv h (by simp [Inv, start])).2.1 b
 
-/-- From every reachable world, coven's own steps end with no operation
-journaled, no key kept apart, and custody on the key history records. -/
-theorem replacement_settles {w : World} (h : Reachable Rules.correct w) :
+/-- The steps coven's own passes take from `w`: a journaled entry claims
+when custody holds B, and ends without claiming when it holds A. -/
+def settling (w : World) : List Act :=
+  if w.row then (if w.custody then [.land] else [.rollback]) else []
+
+/-- From every reachable world, coven's own steps end with no entry journaled
+and custody on the key history records. -/
+theorem coven_settles {w : World} (h : Reachable Rules.correct w) :
     (settling w).all coven = true ∧
       ∃ w', trace Rules.correct w (settling w) = some w' ∧
-        w'.row = false ∧ w'.kept = false ∧ w'.custody = w'.history := by
+        w'.row = false ∧ w'.custody = w'.history := by
   have inv := key_reachable_inv h (by simp [Inv, start])
-  obtain ⟨c, k, r, hi⟩ := w
-  cases c <;> cases k <;> cases r <;> cases hi <;>
+  obtain ⟨c, r, hi, o⟩ := w
+  cases c <;> cases r <;> cases hi <;> cases o <;>
     simp_all [Inv, settling, trace, enabled, act, coven, Rules.correct]
 
-/-- *Before.* Committing B to custody first: a crash right after leaves
-custody on B, history on A and nothing journaled, and no step of coven's
-own changes that. -/
-theorem custody_first_strands :
-    ∃ w, trace Rules.before start [.commit] = some w ∧ w.custody = true ∧
-      w.history = false ∧ ∀ a, coven a = true → enabled Rules.before w a = false := by
+/-- The steps the call takes on a retry from `w`: it journals the entry when
+none is journaled or recorded, takes B, and the claim lands. -/
+def retrying (w : World) : List Act :=
+  (if w.row || w.history then [] else [.journal]) ++ (if w.custody then [] else [.install]) ++
+    (if w.history then [] else [.land])
+
+/-- From every reachable world, a call with B journals the entry unless one is
+journaled or recorded, takes B, and the claim, coven's own step, lands:
+history records B, custody holds B, and nothing stays journaled. This assumes
+the claim lands, as the other models do. -/
+theorem retry_finishes {w : World} (h : Reachable Rules.correct w) :
+    ∃ w', trace Rules.correct w (retrying w) = some w' ∧
+      w'.row = false ∧ w'.history = true ∧ w'.custody = true := by
+  have inv := key_reachable_inv h (by simp [Inv, start])
+  obtain ⟨cu, r, hi, o⟩ := w
+  cases cu <;> cases r <;> cases hi <;> cases o <;>
+    simp_all [Inv, retrying, trace, enabled, act, Rules.correct]
+
+/-- *Before.* Keeping B apart until history records it, and claiming with A:
+if the person deletes A in the console before the claim lands, nothing is
+enabled, so history never records B and custody never takes it. -/
+theorem kept_apart_strands :
+    ∃ w, trace Rules.keptApart start [.journal, .consoleDelete] = some w ∧
+      w.history = false ∧ w.custody = false ∧ ∀ a, enabled Rules.keptApart w a = false := by
   refine ⟨_, rfl, rfl, rfl, ?_⟩
   intro a
-  cases a <;> simp [coven, enabled, act, Rules.before, start]
+  cases a <;> simp [enabled, act, Rules.keptApart, start]
 
 end CovenSequence.AccessKeyReplacement

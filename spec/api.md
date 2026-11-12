@@ -5323,10 +5323,6 @@ pub enum SyncError {
     /// and its device never became a member. Syncing stops for good (§13.2,
     /// §14.1).
     NotAdmitted,
-    /// A replacement of this member's S3 key by another key is still under
-    /// way: its id isn't recorded yet, or custody doesn't connect with it
-    /// yet (§14.3). Retrying with that key finishes it.
-    ReplacementPending { access_key_id: String },
     /// Another copy uses this device's id; this one sends nothing more.
     /// Nothing is recorded; `reset_device` is the app's option (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
@@ -7209,9 +7205,9 @@ match stream.read_at(resume_at, 256 * 1024).await {
   S3 replacement for another member. Authority uses the author's role in the
   state immediately preceding its slot.
   To replace their S3 key, the person makes a new one in the provider's
-  console (§14.3): `replace_access_key` installs it on one device and records
+  console (§14.3): `use_access_key` installs it on one device and records
   it. Each of the member's other devices needs the new key from the person,
-  through `update_credentials`.
+  through `use_access_key` too.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
   Replacement invites provide approval/bootstrap (E10), subject to provider
@@ -7285,32 +7281,31 @@ impl CovenHandle {
         keys: MemberPublicKeys,
     ) -> Result<Option<OperationId>, SyncError>;
 
-    /// On S3: switches this member to a key supplied through §20.10's admin-access
-    /// or console path and records the new key's id in an admin entry (§10).
-    /// The restore code does not change. They keep the key separately,
-    /// update their other devices with update_credentials, and delete the
-    /// old key in the provider's console; coven forgets it (§14.3).
-    /// Requires connected storage. Custody keeps the new key apart, and the
-    /// connection uses the old one, until the entry lands; then this device
-    /// connects with the new key. A failed or uncertain claim stays
-    /// journaled, and passes retry it; retrying with the same key runs that
-    /// entry at once, without waiting out its retry wait, and returns its
-    /// result. Another key fails with `ReplacementPending` until it ends.
-    /// An invalidated operation settles any uncertain claim before undo (§11).
-    /// Once this member's removal applies, returns Removed and saves nothing.
-    pub async fn replace_access_key(
-        &self,
-        access_key_id: String,
-        secret_access_key: SecretText,
-    ) -> Result<(), SyncError>;
-
-    /// On a device that already has the store open: takes this member's S3
-    /// key directly. The member identity, location and restore code do not
-    /// change. A disconnected handle keeps the credentials for its next
-    /// connection; a connected handle also replaces its provider's credentials.
-    /// Once this member's removal applies, returns Removed and saves nothing:
-    /// the key would return to the saved entries the removal emptied (§14.1).
-    pub async fn update_credentials(
+    /// On S3: this device connects with a key the person made in the
+    /// provider's console (§20.10, §14.3), whatever the reason: a
+    /// replacement, or a key that stopped being accepted. The call journals
+    /// the admin entry that sets this member's access record to the key
+    /// (§10), takes the key in custody and the connection, and claims the
+    /// entry with it; when the record already names the key, nothing is
+    /// journaled. Without a connection the call connects with the new key
+    /// first, and fails, changing nothing, if it can't. The member identity,
+    /// location and restore code do not change. The person keeps the key for
+    /// their other devices, calls this on each, and deletes the old key in the
+    /// provider's console; coven forgets it (§14.3).
+    /// The entry is journaled before the key is taken, and runs only while
+    /// the connection holds the key: a device killed in between ends the
+    /// entry without claiming, and keeps the old key and record. A call that
+    /// fails taking the key ends its entry and fails with that error. A
+    /// failed or uncertain claim stays journaled with the key taken, and
+    /// passes retry it; calling again with the same key runs that entry at
+    /// once, without waiting out its retry wait, and returns its result.
+    /// While another key's claim is uncertain, the call first runs that
+    /// entry at once, and fails, taking nothing, if it still fails. An
+    /// invalidated operation settles any uncertain claim before
+    /// undo (§11). Once this member's removal applies, returns Removed and
+    /// saves nothing: the key would return to the saved entries the removal
+    /// emptied (§14.1).
+    pub async fn use_access_key(
         &self,
         access_key_id: String,
         secret_access_key: SecretText,
@@ -9847,7 +9842,7 @@ so such a call ends with a `Shutdown` in its error instead of a panic.
   what the call would change may be changed in part. Closing a store or a
   read-only handle, `create_store`, storage setup, unlocking store keys,
   `forget_store_keys`, `replace_member_keys`,
-  `replace_access_key` and `update_credentials` run as their own task. Their
+  `use_access_key` run as their own task. Their
   caller reads the state again before relying on it: whether the store is
   listed, or what `storage_config` and the key state say.
 - The error that carries the `Shutdown` is the call's own:
