@@ -216,7 +216,14 @@ import CovenStorage
 #print axioms CovenStorage.UploadSession.steps_stray_le
 #print axioms CovenStorage.UploadSession.open_sweeps
 #print axioms CovenStorage.UploadSession.unmarked_resumes
-#print axioms CovenStorage.UploadSession.marked_shared_never
+#print axioms CovenStorage.UploadSession.marked_shared_restarts
+#print axioms CovenStorage.UploadSession.marked_shared_taken_own
+#print axioms CovenStorage.UploadSession.marked_shared_occupied
+#print axioms CovenStorage.UploadSession.stray_never_published
+#print axioms CovenStorage.UploadSession.taken_refuses_others
+#print axioms CovenStorage.UploadSession.taken_stays
+#print axioms CovenStorage.UploadSession.end_dead_harmless
+#print axioms CovenStorage.UploadSession.ended_dead_run_sweeps
 #print axioms CovenStorage.UploadSession.abort_sweeps
 #print axioms CovenStorage.UploadSession.unmarked_aborts
 #print axioms CovenStorage.UploadSession.refusal_unmarks

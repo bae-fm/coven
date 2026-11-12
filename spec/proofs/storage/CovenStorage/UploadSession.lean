@@ -19,10 +19,17 @@ because the reply was lost or the process stopped first, is a stray there,
 behind a marked plan. Where the place is the device's own, the upload's next
 attempt, or the abort of an upload no file waits for, ends every stray there
 before anything else. Where it is shared, nothing tells a stray from another
-device's session, so a marked plan there fails for good; an unmarked one has
-nothing at its place, and resumes or is forgotten anywhere. A begin refused
-before its request goes out, as when the publication gate closes after the
-part's admission, began nothing, and its failure leaves the plan unmarked. -/
+device's session, so a marked plan there aborts nothing: it reads its
+destination instead. Something published there means the name is taken, by
+this upload's own bytes or another's; an empty destination starts a fresh
+session at the same name, without waiting on the stray its lost start may
+have begun. A stray can never publish, because no record names it, so no
+device sends its completion, and once the name is taken create-once refuses
+every other completion; whoever applies the name ends it with the other dead
+sessions. An unmarked plan has nothing at its place, and resumes or is
+forgotten anywhere. A begin refused before its request goes out, as when the
+publication gate closes after the part's admission, began nothing, and its
+failure leaves the plan unmarked. -/
 namespace CovenStorage.UploadSession
 
 /-- api.md E5: how a storage failure clears, which says when an upload retries
@@ -129,13 +136,16 @@ inductive Attempt where
 /-- The provider's live session, the parts it holds, and the sessions it began
 at the plan's place that the row never named; the published object's parts;
 the queue row, gone once the upload completes or retires; whether completion
-switched the files to the stored location; and the attempt. -/
+switched the files to the stored location; and the attempt. `taken` says
+something is published at the upload's place, this upload's own bytes or
+another's: only a shared place has another's. -/
 structure State where
   total : Nat
   fixed : Fixed
   session : Option (List Nat)
   stray : Nat
   published : Option (List Nat)
+  taken : Bool
   row : Option Row
   stored : Bool
   attempt : Attempt
@@ -148,6 +158,7 @@ def initial (total : Nat) (fixed : Fixed) : State where
   session := none
   stray := 0
   published := none
+  taken := false
   row := some ⟨true, .none, none, .ready⟩
   stored := false
   attempt := .idle
@@ -179,8 +190,11 @@ inductive Step where
   with none to resume (none recorded, an expired one, or only a plan), record
   the plan of a new one, unmarked. A marked plan may have begun a session:
   where the place is the device's own, every session there is ended first;
-  where it is shared, nothing tells this upload's from another's, and the
-  attempt fails for good. -/
+  where it is shared, nothing tells this upload's from another's, so the
+  request reads the destination instead. Nothing published there records a
+  fresh plan beside whatever the lost start began; this upload's own bytes
+  published there complete it; another's make the name occupied, which fails
+  the attempt for the caller to settle. -/
   | open_
   /-- Mark the plan, before the request that may begin its session. -/
   | mark
@@ -221,10 +235,17 @@ inductive Step where
   session or every session at its plan's place, then forget it; `some c`
   fails with class `c`. An unmarked plan has nothing at its place, so its
   abort sends nothing and only forgets it; a marked one at a shared place
-  fails for good, sending nothing. -/
+  ends nothing, as nothing tells a stray from another device's session, and
+  forgets the plan. -/
   | abort (result : Option Class)
   /-- Retire an upload no file waits for and with nothing recorded. -/
   | retire
+  /-- Another device publishes at a shared place: the name is taken. -/
+  | rival
+  /-- A device that applied the taken place ends every session there, as
+  Appendix E.10 says: the strays, and this upload's own session if its bytes
+  are not the ones published. -/
+  | endDead
   /-- The retry delay passes. -/
   | elapse
   /-- Credentials or the connection change. -/
@@ -249,9 +270,11 @@ def replan (s : State) (r : Row) : State :=
 the device owns, where each is this upload's. -/
 def sweep (s : State) : State := { s with stray := 0 }
 
-/-- Forget what the row records, having ended its session and every stray. -/
+/-- Forget what the row records, having ended its session and, where the
+place is the device's own, every stray. -/
 def forget (s : State) (r : Row) : State :=
-  { s with session := none, stray := 0, row := some { r with recorded := .none } }
+  { s with session := none, stray := if s.fixed.owned then 0 else s.stray,
+           row := some { r with recorded := .none } }
 
 /-- What a stopped attempt leaves at the provider: a session it began that its
 row doesn't name yet is a stray at the plan's place. -/
@@ -275,8 +298,14 @@ def Step.apply (s : State) : Step → State
         match s.session, s.published with
         | some held, _ => { s with attempt := .holding held }
         | none, some _ => { s with attempt := .holding (List.range s.total) }
-        | none, none => replan s r
-      | .plan true => if s.fixed.owned then replan (sweep s) r else failWith s .never
+        | none, none => if s.taken then failWith s .never else replan s r
+      | .plan true =>
+        if s.fixed.owned then replan (sweep s) r
+        else if s.taken then
+          match s.published with
+          | some _ => { s with attempt := .holding (List.range s.total) }
+          | none => failWith s .never
+        else replan s r
       | _ => replan s r
     | _, _ => s
   | .mark =>
@@ -328,15 +357,18 @@ def Step.apply (s : State) : Step → State
       match r.recorded with
       | .session m =>
         if covers s.total m then
-          match s.session, s.published with
-          | some held, _ =>
-            if replied then
-              { s with session := none, published := some (assemble s.total held),
-                       attempt := .finished }
-            else failWith { s with session := none, published := some (assemble s.total held) }
-              .automatic
-          | none, some _ => { s with attempt := .finished }
-          | none, none => failWith s .automatic
+          if s.taken = true ∧ s.published = none then failWith s .never
+          else
+            match s.session, s.published with
+            | some held, none =>
+              if replied then
+                { s with session := none, published := some (assemble s.total held),
+                         taken := true, attempt := .finished }
+              else failWith { s with session := none, published := some (assemble s.total held),
+                                     taken := true }
+                .automatic
+            | _, some _ => { s with session := none, attempt := .finished }
+            | none, none => failWith s .automatic
         else s
       | _ => s
     | _, _ => s
@@ -356,8 +388,8 @@ def Step.apply (s : State) : Step → State
     match s.row, s.attempt with
     | some r, .idle =>
       if r.waited = false ∧ r.recorded ≠ Record.none ∧ r.wait = .ready then
-        if r.recorded = .plan false then forget s r
-        else if r.recorded = .plan true ∧ s.fixed.owned = false then failWith s .never
+        if r.recorded = .plan false ∨ (r.recorded = .plan true ∧ s.fixed.owned = false) then
+          forget s r
         else
           match result with
           | none => forget s r
@@ -369,6 +401,8 @@ def Step.apply (s : State) : Step → State
     | some r, .idle =>
       if r.waited = false ∧ r.recorded = Record.none then { s with row := none } else s
     | _, _ => s
+  | .rival => if s.fixed.owned = false then { s with taken := true } else s
+  | .endDead => if s.taken then { s with stray := 0, session := none } else s
   | .elapse => { s with row := s.row.map (·.ending .backoff) }
   | .connect => { s with row := s.row.map (·.ending .connection) }
 
@@ -381,10 +415,13 @@ part once, never one the file lacks; the published object is every part in
 order; the parts an attempt holding a session counts confirmed are ones the
 provider holds, each once; the recorded parts are ones the provider holds,
 each once; a live provider session is one the row names, or one the attempt
-holds that the row names by its marked plan's place; every stray sits at the
-place of the marked plan the row records; a planned attempt holds no session
-yet, and its row records a plan; no stray outlasts an attempt's first
-request; and a finished attempt holds no session. -/
+holds that the row names by its marked plan's place; where the place is the
+device's own, every stray sits at the place of the marked plan the row records
+(at a shared place a stray needs no plan behind it: it is beside whatever else
+is there); a planned attempt holds no session yet, and its row records a plan;
+where the place is the device's own, no stray outlasts an attempt's first
+request; a finished attempt holds no session; and a published object makes
+the name taken. -/
 structure Good (s : State) : Prop where
   nodup : ∀ held, s.session = some held → held.Nodup
   bounded : ∀ held, s.session = some held → ∀ i ∈ held, i < s.total
@@ -396,10 +433,11 @@ structure Good (s : State) : Prop where
   listed : ∀ r m, s.row = some r → r.recorded = .session m → m.Nodup
   accounted : ∀ held, s.session = some held → ∃ r, s.row = some r ∧
     (r.recorded.isSession = true ∨ (r.recorded = .plan true ∧ ∃ c, s.attempt = .holding c))
-  named : 0 < s.stray → ∃ r, s.row = some r ∧ r.recorded = .plan true
+  named : s.fixed.owned = true → 0 < s.stray → ∃ r, s.row = some r ∧ r.recorded = .plan true
   planned : s.attempt = .planned → s.session = none ∧ ∃ r, s.row = some r ∧ r.recorded.isPlan = true
-  swept : s.attempt.opened = true → s.stray = 0
+  swept : s.attempt.opened = true → s.fixed.owned = true → s.stray = 0
   finished : s.attempt = .finished → s.session = none
+  taken : s.published.isSome = true → s.taken = true
 
 theorem initial_good (total : Nat) (fixed : Fixed) : Good (initial total fixed) := by
   constructor <;> simp [initial]
@@ -465,9 +503,10 @@ theorem failWith_good_of (s : State) (c : Class)
       ∀ i ∈ m, i ∈ held)
     (ls : ∀ r m, s.row = some r → r.recorded = .session m → m.Nodup)
     (a : ∀ held, s.session = some held → ∃ r, s.row = some r ∧ r.recorded.isSession = true)
-    (nm : 0 < s.stray → ∃ r, s.row = some r ∧ r.recorded = .plan true) :
+    (nm : s.fixed.owned = true → 0 < s.stray → ∃ r, s.row = some r ∧ r.recorded = .plan true)
+    (tk : s.published.isSome = true → s.taken = true) :
     Good (failWith s c) := by
-  refine ⟨nd, b, w, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨nd, b, w, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, tk⟩
   · intro k held h; simp [failWith] at h
   · intro k h; simp [failWith] at h
   · intro r m held hr hm hs
@@ -479,8 +518,8 @@ theorem failWith_good_of (s : State) (c : Class)
   · intro held hs
     obtain ⟨r, hr, hrec⟩ := a held hs
     exact ⟨_, (failWith_row s c _).2 ⟨r, hr, rfl⟩, Or.inl hrec⟩
-  · intro h
-    obtain ⟨r, hr, hp⟩ := nm h
+  · intro ho h
+    obtain ⟨r, hr, hp⟩ := nm ho h
     exact ⟨_, (failWith_row s c _).2 ⟨r, hr, rfl⟩, hp⟩
   · intro h; simp [failWith] at h
   · intro h; simp [failWith] at h
@@ -499,7 +538,7 @@ theorem named_session (s : State) (g : Good s) (free : ∀ c, s.attempt ≠ .hol
 theorem failWith_good (s : State) (c : Class) (g : Good s)
     (a : ∀ held, s.session = some held → ∃ r, s.row = some r ∧ r.recorded.isSession = true) :
     Good (failWith s c) :=
-  failWith_good_of s c g.nodup g.bounded g.whole g.recorded g.listed a g.named
+  failWith_good_of s c g.nodup g.bounded g.whole g.recorded g.listed a g.named g.taken
 
 @[simp] theorem ending_recorded (r : Row) (w : Wait) : (r.ending w).recorded = r.recorded := by
   unfold Row.ending; split <;> rfl
@@ -514,8 +553,8 @@ theorem ending_failure (r : Row) (w : Wait) : (r.ending w).failure = r.failure :
 invariant: none of it reads them. -/
 theorem rows_good (s : State) (f : Row → Row) (g : Good s)
     (keep : ∀ r, (f r).recorded = r.recorded) : Good { s with row := s.row.map f } := by
-  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin⟩ := g
-  refine ⟨nd, b, w, hh, dc, ?_, ?_, ?_, ?_, ?_, sw, fin⟩
+  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, tk⟩ := g
+  refine ⟨nd, b, w, hh, dc, ?_, ?_, ?_, ?_, ?_, sw, fin, tk⟩
   · intro r m held hr hm hs
     cases h : s.row with
     | none => simp [h] at hr
@@ -535,8 +574,8 @@ theorem rows_good (s : State) (f : Row → Row) (g : Good s)
   · intro held hs
     obtain ⟨r, hr, hrec⟩ := a held hs
     exact ⟨f r, by simp [hr], by rw [keep]; exact hrec⟩
-  · intro h
-    obtain ⟨r, hr, hp⟩ := nm h
+  · intro ho h
+    obtain ⟨r, hr, hp⟩ := nm ho h
     exact ⟨f r, by simp [hr], by rw [keep]; exact hp⟩
   · intro h
     obtain ⟨gone, r, hr, hp⟩ := pl h
@@ -546,16 +585,19 @@ theorem rows_good (s : State) (f : Row → Row) (g : Good s)
 live. -/
 theorem replan_good (s : State) (r : Row)
     (w : ∀ ps, s.published = some ps → ps = List.range s.total) (gone : s.session = none)
-    (clean : s.stray = 0) : Good (replan s r) := by
-  refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp [replan, gone, clean]
-  rintro r' m rfl h; simp at h
+    (clean : s.fixed.owned = true → s.stray = 0) (tk : s.published.isSome = true → s.taken = true) :
+    Good (replan s r) := by
+  refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, tk⟩ <;> simp [replan, gone]
+  · rintro r' m rfl h; simp at h
+  all_goals first | exact clean ‹_› | (intro ho; exact clean ho) | skip
 
 /-- Only a marked plan has strays at its place. -/
 theorem clean_of (s : State) (g : Good s) (r : Row) (hr : s.row = some r)
-    (h : r.recorded ≠ .plan true) : s.stray = 0 := by
+    (h : r.recorded ≠ .plan true) : s.fixed.owned = true → s.stray = 0 := by
+  intro ho
   rcases Nat.eq_zero_or_pos s.stray with z | p
   · exact z
-  · obtain ⟨r', hr', hp⟩ := g.named p
+  · obtain ⟨r', hr', hp⟩ := g.named ho p
     rw [hr] at hr'; cases hr'; exact absurd hp h
 
 /-- Forgetting what the row records keeps the invariant with no attempt. -/
@@ -563,17 +605,19 @@ theorem forget_good (s : State) (r : Row) (g : Good s) (idle : s.attempt = .idle
     Good (forget s r) :=
   ⟨by simp [forget], by simp [forget], g.whole, by simp [forget], by simp [idle, forget],
     by simp [forget], by simp [forget]; rintro r' m rfl h; simp at h, by simp [forget],
-    by simp [forget],
-    by simp [forget, idle], by simp [forget], by simp [forget, idle]⟩
+    fun ho h => by
+      have ho' : s.fixed.owned = true := ho
+      simp [forget, ho'] at h,
+    by simp [forget, idle], fun hop _ => by simp [forget, idle] at hop, by simp [forget, idle],
+    g.taken⟩
 
 /-- Recording the parts an attempt holds keeps what the invariant says of the
 row: they are held, each once. -/
 theorem record_good (s : State) (g : Good s) (r : Row) (c : List Nat)
     (hat : s.attempt = .holding c) :
     Good { s with row := some { r with recorded := .session c } } := by
-  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin⟩ := g
-  have clean : s.stray = 0 := sw (by simp [hat])
-  refine ⟨nd, b, w, hh, dc, ?_, ?_, ?_, ?_, ?_, sw, fin⟩
+  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, tk⟩ := g
+  refine ⟨nd, b, w, hh, dc, ?_, ?_, ?_, ?_, ?_, sw, fin, tk⟩
   · intro r' m held hr' hm hs
     simp at hr'; subst hr'; simp at hm; subst hm
     exact hh _ held hat hs
@@ -581,19 +625,39 @@ theorem record_good (s : State) (g : Good s) (r : Row) (c : List Nat)
     simp at hr'; subst hr'; simp at hm; subst hm
     exact dc _ hat
   · intro held _; exact ⟨_, rfl, Or.inl (by simp)⟩
-  · intro h; simp [clean] at h
+  · intro ho h; simp [sw (by simp [hat]) ho] at h
   · intro h; simp [hat] at h
 
+/-- Holding every part of an object the name already has, with no session
+live, keeps the invariant. -/
+theorem holding_range_good (s : State) (g : Good s) (gone : s.session = none)
+    (clean : s.fixed.owned = true → s.stray = 0) :
+    Good { s with attempt := .holding (List.range s.total) } := by
+  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, tk⟩ := g
+  refine ⟨nd, b, w, ?_, ?_, rc, ls, ?_, nm, by simp, fun _ ho => clean ho, by simp, tk⟩
+  · intro c held' _ hs'; rw [gone] at hs'; cases hs'
+  · intro c ha; simp at ha; subst ha; exact List.nodup_range
+  · intro held' hs'; rw [gone] at hs'; cases hs'
+
+/-- A completion that finds its bytes already published ends the attempt with
+no session. -/
+theorem finish_published_good (s : State) (g : Good s) (hp : s.published.isSome = true)
+    (clean : s.fixed.owned = true → s.stray = 0) :
+    Good { s with session := none, attempt := .finished } := by
+  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, tk⟩ := g
+  refine ⟨by simp, by simp, w, by simp, by simp, by simp, ls, by simp, nm, by simp,
+    fun _ ho => clean ho, by simp, tk⟩
+
 theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := by
-  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin⟩ := g
-  have g : Good s := ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin⟩
+  obtain ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, tk⟩ := g
+  have g : Good s := ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, tk⟩
   cases st with
   | start forced =>
     simp only [Step.apply]
     split
     · rename_i r hr hat
       split
-      · refine ⟨nd, b, w, by simp, by simp, rc, ls, ?_, nm, by simp, by simp, by simp⟩
+      · refine ⟨nd, b, w, by simp, by simp, rc, ls, ?_, nm, by simp, by simp, by simp, tk⟩
         intro held hs
         obtain ⟨r', hr', h⟩ := a held hs
         refine ⟨r', hr', ?_⟩
@@ -624,7 +688,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             have e : Step.open_.apply s = { s with attempt := .holding held } := by
               simp [Step.apply, hr, hat, hrec, hs]
             rw [e]
-            refine ⟨nd, b, w, ?_, ?_, rc, ls, ?_, nm, by simp, by simp [clean], by simp⟩
+            refine ⟨nd, b, w, ?_, ?_, rc, ls, ?_, nm, by simp, fun _ ho => clean ho, by simp, tk⟩
             · intro c held' ha hs'
               simp at ha; rw [hs] at hs'; cases hs'; subst ha; intro i hi; exact hi
             · intro c ha; simp at ha; subst ha; exact nd held hs
@@ -635,29 +699,43 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
               have e : Step.open_.apply s = { s with attempt := .holding (List.range s.total) } := by
                 simp [Step.apply, hr, hat, hrec, hs, hp]
               rw [e]
-              refine ⟨nd, b, w, ?_, ?_, rc, ls, ?_, nm, by simp, by simp [clean], by simp⟩
-              · intro c held' _ hs'; rw [hs] at hs'; cases hs'
-              · intro c ha; simp at ha; subst ha; exact List.nodup_range
-              · intro held' hs'; rw [hs] at hs'; cases hs'
+              exact holding_range_good s g hs clean
             | none =>
-              simp only [Step.apply, hr, hat, hrec, hs, hp]
-              exact replan_good s r w hs clean
+              by_cases ht : s.taken = true
+              · simp only [Step.apply, hr, hat, hrec, hs, hp, ht, ite_true]
+                exact failWith_good s _ g plain
+              · simp only [Step.apply, hr, hat, hrec, hs, hp, ht, ite_false]
+                exact replan_good s r w hs clean tk
         | plan started =>
           cases started with
           | true =>
             cases ho : s.fixed.owned with
             | true =>
               simp only [Step.apply, hr, hat, hrec, ho, ite_true]
-              exact replan_good (sweep s) r w (gone (by simp [hrec])) rfl
+              exact replan_good (sweep s) r w (gone (by simp [hrec])) (fun _ => rfl) tk
             | false =>
-              simp only [Step.apply, hr, hat, hrec, ho]
-              exact failWith_good s _ g plain
+              by_cases ht : s.taken = true
+              · cases hp : s.published with
+                | some ps =>
+                  have e : Step.open_.apply s =
+                      { s with attempt := .holding (List.range s.total) } := by
+                    simp [Step.apply, hr, hat, hrec, ho, ht, hp]
+                  rw [e]
+                  exact holding_range_good s g (gone (by simp [hrec]))
+                    (fun h => by rw [ho] at h; cases h)
+                | none =>
+                  simp only [Step.apply, hr, hat, hrec, ho, ht, hp, ite_true, Bool.false_eq_true,
+                    ite_false]
+                  exact failWith_good s _ g plain
+              · simp only [Step.apply, hr, hat, hrec, ho, ht, Bool.false_eq_true, ite_false]
+                exact replan_good s r w (gone (by simp [hrec]))
+                  (fun h => by rw [ho] at h; cases h) tk
           | false =>
             simp only [Step.apply, hr, hat, hrec]
-            exact replan_good s r w (gone (by simp [hrec])) (clean_of s g r hr (by simp [hrec]))
+            exact replan_good s r w (gone (by simp [hrec])) (clean_of s g r hr (by simp [hrec])) tk
         | none =>
           simp only [Step.apply, hr, hat, hrec]
-          exact replan_good s r w (gone (by simp [hrec])) (clean_of s g r hr (by simp [hrec]))
+          exact replan_good s r w (gone (by simp [hrec])) (clean_of s g r hr (by simp [hrec])) tk
       | _ => simpa [Step.apply, hr, hat] using g
   | mark =>
     cases hr : s.row with
@@ -667,19 +745,19 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
       | planned =>
         obtain ⟨gone, r', hr', hplan⟩ := pl hat
         rw [hr] at hr'; cases hr'
-        have clean : s.stray = 0 := sw (by simp [hat])
+        have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
         cases hrec : r.recorded with
         | plan started =>
           have e : Step.mark.apply s = { s with row := some { r with recorded := .plan true } } := by
             simp [Step.apply, hr, hat, hrec]
           rw [e]
-          refine ⟨nd, b, w, hh, dc, ?_, ?_, ?_, ?_, ?_, sw, fin⟩
+          refine ⟨nd, b, w, hh, dc, ?_, ?_, ?_, ?_, ?_, sw, fin, tk⟩
           · intro r'' m held hr'' hm _
             simp at hr''; subst hr''; simp at hm
           · intro r'' m hr'' hm
             simp at hr''; subst hr''; simp at hm
           · intro held hs; rw [gone] at hs; cases hs
-          · intro h; simp [clean] at h
+          · intro ho h; simp [clean ho] at h
           · intro _; exact ⟨gone, _, rfl, by simp⟩
         | none => simp [hrec] at hplan
         | session _ => simp [hrec] at hplan
@@ -692,12 +770,12 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
       | planned =>
         obtain ⟨gone, r', hr', _⟩ := pl hat
         rw [hr] at hr'; cases hr'
-        have clean : s.stray = 0 := sw (by simp [hat])
+        have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
         by_cases hplan : r.recorded = .plan true
         · cases replied with
           | true =>
             simp only [Step.apply, hr, hat, hplan, ite_true]
-            refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, by simp, by simp [clean], by simp⟩
+            refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, by simp, fun _ ho => clean ho, by simp, tk⟩
             · intro held h; simp at h; subst h; exact List.nodup_nil
             · intro held h; simp at h; subst h; simp
             · intro c held ha h; simp at ha; subst ha; simp
@@ -707,7 +785,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             · intro r'' m hr'' hm
               simp at hr''; subst hr''; rw [hplan] at hm; cases hm
             · intro held _; exact ⟨r, by simp, Or.inr ⟨hplan, [], rfl⟩⟩
-            · intro _; exact ⟨r, by simp, hplan⟩
+            · intro _ _; exact ⟨r, by simp, hplan⟩
           | false =>
             simp only [Step.apply, hr, hat, hplan]
             apply failWith_good_of
@@ -718,7 +796,8 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             · intro r'' m hr'' hm
               simp at hr''; subst hr''; rw [hplan] at hm; cases hm
             · intro held h; simp [gone] at h
-            · intro _; exact ⟨r, by simp, hplan⟩
+            · intro _ _; exact ⟨r, by simp, hplan⟩
+            · exact tk
         · simp only [Step.apply, hr, hat, hplan, ite_false]
           exact g
       | _ => simpa [Step.apply, hr, hat] using g
@@ -729,7 +808,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
       cases hat : s.attempt with
       | planned =>
         obtain ⟨gone, _⟩ := pl hat
-        have clean : s.stray = 0 := sw (by simp [hat])
+        have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
         by_cases hplan : r.recorded = .plan true
         · simp only [Step.apply, hr, hat, hplan, ite_true]
           apply failWith_good_of
@@ -739,7 +818,8 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
           · intro r'' m held _ _ h; simp [gone] at h
           · intro r'' m hr'' hm; simp at hr''; subst hr''; simp at hm
           · intro held h; simp [gone] at h
-          · intro h; simp [clean] at h
+          · intro ho h; simp [clean ho] at h
+          · exact tk
         · simp only [Step.apply, hr, hat, hplan, ite_false]
           exact g
       | _ => simpa [Step.apply, hr, hat] using g
@@ -747,9 +827,10 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
     cases hat : s.attempt with
     | planned =>
       obtain ⟨gone, _⟩ := pl hat
-      have clean : s.stray = 0 := sw (by simp [hat])
+      have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
       simp only [Step.apply, hat]
-      refine ⟨nd, b, w, by simp, by simp, rc, ls, ?_, by simp [clean], by simp, by simp, by simp⟩
+      refine ⟨nd, b, w, by simp, by simp, rc, ls, ?_, fun ho h => by simp [clean ho] at h,
+        by simp, by simp, by simp, tk⟩
       intro held hs; rw [gone] at hs; cases hs
     | _ => simpa [Step.apply, hat] using g
   | record =>
@@ -769,7 +850,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
     | some r =>
       cases hat : s.attempt with
       | holding c =>
-        have clean : s.stray = 0 := sw (by simp [hat])
+        have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
         cases hs : s.session with
         | some held =>
           simp only [Step.apply, hr, hat, hs]
@@ -794,7 +875,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             cases reply with
             | confirmed =>
               dsimp only
-              refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, by simp, by simp [clean], by simp⟩
+              refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, by simp, fun _ ho => clean ho, by simp, tk⟩
               · intro held' h; simp at h; subst h; exact receive_nodup held i held_nd
               · intro held' h; simp at h; subst h; exact bound
               · intro c' held' ha h
@@ -816,10 +897,10 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
                 rcases h with h | ⟨hp, _⟩
                 · exact Or.inl h
                 · exact Or.inr ⟨hp, c ++ [i], rfl⟩
-              · intro h; simp [clean] at h
+              · intro ho h; simp [clean ho] at h
             | lost =>
               dsimp only
-              refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+              refine ⟨?_, ?_, w, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, tk⟩
               · intro held' h; simp at h; subst h; exact receive_nodup held i held_nd
               · intro held' h; simp at h; subst h; exact bound
               · intro c' held' ha h
@@ -834,9 +915,9 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
                 obtain ⟨r', hr', h⟩ := acc
                 cases hr'
                 exact ⟨r, rfl, h⟩
-              · intro h; simp [clean] at h
+              · intro ho h; simp [clean ho] at h
               · intro h; simp at h
-              · intro _; exact clean
+              · intro _ ho; exact clean ho
               · intro h; simp at h
           · exact g
         | none =>
@@ -850,7 +931,8 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             · intro r' m hr' hm
               simp at hr'; subst hr'; simp at hm; subst hm; exact dc _ hat
             · intro held h; simp at h
-            · intro h; simp [clean] at h
+            · intro ho h; simp [clean ho] at h
+            · exact tk
           · exact g
       | _ => simpa [Step.apply, hr, hat] using g
   | finish replied =>
@@ -859,7 +941,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
     | some r =>
       cases hat : s.attempt with
       | holding c =>
-        have clean : s.stray = 0 := sw (by simp [hat])
+        have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
         cases hrec : r.recorded with
         | session m =>
           simp only [Step.apply, hr, hat, hrec]
@@ -868,34 +950,40 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             have plain : ∀ held, s.session = some held →
                 ∃ r, s.row = some r ∧ r.recorded.isSession = true :=
               fun _ _ => ⟨r, hr, by simp [hrec]⟩
-            cases hs : s.session with
-            | some held =>
-              have whole : assemble s.total held = List.range s.total :=
-                assemble_whole s.total held fun i hi =>
-                  rc r m held hr hrec hs i (covers_mem s.total m all i hi)
-              simp only
-              split
-              · refine ⟨by simp, by simp, ?_, by simp, by simp, by simp, fun r' m hr' hm => ls r' m (by rw [hr]; simpa using hr') hm, by simp, ?_, by simp,
-                  ?_, by simp⟩
-                · intro ps h; simp at h; subst h; exact whole
-                · intro h; simp [clean] at h
-                · intro _; simpa using clean
-              · apply failWith_good_of <;> try simp
-                · exact whole
-                · exact fun r' m hr' hm => ls r' m (by rw [hr]; simpa using hr') hm
-                · intro h; simp [clean] at h
-            | none =>
+            split
+            · exact failWith_good s _ g plain
+            · rename_i ht
               cases hp : s.published with
               | some ps =>
-                simp only
-                refine ⟨by simp, by simp, ?_, by simp, by simp, by simp, fun r' m hr' hm => ls r' m (by rw [hr]; simpa using hr') hm, by simp, ?_,
-                  by simp, ?_, by simp⟩
-                · intro ps' h; simp at h; subst h; exact w ps hp
-                · intro h; simp [clean] at h
-                · intro _; simpa using clean
+                cases hs : s.session with
+                | some held =>
+                  simp only []
+                  rw [← hp, ← hr]
+                  exact finish_published_good s g (by simp [hp]) clean
+                | none =>
+                  simp only []
+                  rw [← hp, ← hr]
+                  exact finish_published_good s g (by simp [hp]) clean
               | none =>
-                simp only
-                exact failWith_good s _ g plain
+                cases hs : s.session with
+                | some held =>
+                  have whole : assemble s.total held = List.range s.total :=
+                    assemble_whole s.total held fun i hi =>
+                      rc r m held hr hrec hs i (covers_mem s.total m all i hi)
+                  simp only [hs, hp]
+                  split
+                  · refine ⟨by simp, by simp, ?_, by simp, by simp, by simp, fun r' m hr' hm => ls r' m (by rw [hr]; simpa using hr') hm, by simp, ?_, by simp,
+                      ?_, by simp, by simp⟩
+                    · intro ps h; simp at h; subst h; exact whole
+                    · intro ho h; simp [clean ho] at h
+                    · intro _ ho; simpa using clean ho
+                  · apply failWith_good_of <;> try simp
+                    · exact whole
+                    · exact fun r' m hr' hm => ls r' m (by rw [hr]; simpa using hr') hm
+                    · intro ho h; simp [clean ho] at h
+                | none =>
+                  simp only [hs, hp]
+                  exact failWith_good s _ g plain
           · exact g
         | _ => simpa [Step.apply, hr, hat, hrec] using g
       | _ => simpa [Step.apply, hr, hat] using g
@@ -904,9 +992,9 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
     split
     · rename_i r hr hat
       have none := fin hat
-      have clean : s.stray = 0 := sw (by simp [hat])
+      have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
       exact ⟨by simp [none], by simp [none], w, by simp, by simp, by simp, by simp, by simp [none],
-        by simp [clean], by simp, by simp, by simp⟩
+        fun ho h => by simp [clean ho] at h, by simp, by simp, by simp, tk⟩
     · exact g
   | fail c =>
     cases hat : s.attempt with
@@ -918,7 +1006,7 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
       exact failWith_good s c g (named_session s g (by simp [hat]))
     | holding k =>
       simp only [Step.apply, hat]
-      have clean : s.stray = 0 := sw (by simp [hat])
+      have clean : s.fixed.owned = true → s.stray = 0 := sw (by simp [hat])
       apply failWith_good_of
       · exact nd
       · exact b
@@ -938,7 +1026,8 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
       · intro held hs
         obtain ⟨r₀, hr₀, _⟩ := a held hs
         exact ⟨{ r₀ with recorded := .session k }, by simp [hr₀], by simp⟩
-      · intro h; simp [clean] at h
+      · intro ho h; simp [clean ho] at h
+      · exact tk
     | _ => simpa [Step.apply, hat] using g
   | crash =>
     simp only [Step.apply]
@@ -949,24 +1038,25 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
         cases h : s.session with
         | none => rfl
         | some held => obtain ⟨r, hr', _⟩ := a held h; rw [hr] at hr'; cases hr'
-      have hst : s.stray = 0 := by
+      have hst : s.fixed.owned = true → s.stray = 0 := by
+        intro ho
         rcases Nat.eq_zero_or_pos s.stray with h | h
         · exact h
-        · obtain ⟨r, hr', _⟩ := nm h; rw [hr] at hr'; cases hr'
+        · obtain ⟨r, hr', _⟩ := nm ho h; rw [hr] at hr'; cases hr'
       simp only
       exact ⟨by simp [hs], by simp [hs], w, by simp, by simp, by simp [hs], by simp, by simp [hs],
-        by simp [hst], by simp, by simp, by simp⟩
+        fun ho h => by simp [hst ho] at h, by simp, by simp, by simp, tk⟩
     | some r =>
       cases hs : s.session with
       | none =>
         simp only [hs]
         refine ⟨by simp, by simp, w, by simp, by simp, by simp, ?_, by simp, ?_, by simp,
-          by simp, by simp⟩
+          by simp, by simp, tk⟩
         · intro r' m hr' hm
           simp at hr'; subst hr'; simp at hm
           exact ls r m hr hm
-        · intro h
-          obtain ⟨r', hr', hp⟩ := nm h
+        · intro ho h
+          obtain ⟨r', hr', hp⟩ := nm ho h
           rw [hr] at hr'; cases hr'
           exact ⟨_, rfl, by simp [hp]⟩
       | some held =>
@@ -974,12 +1064,12 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
         split
         · rename_i hp
           refine ⟨by simp, by simp, w, by simp, by simp, by simp, ?_, by simp, ?_, by simp,
-            by simp, by simp⟩
+            by simp, by simp, tk⟩
           · intro r' m hr' hm
             simp at hr'; subst hr'; simp [hp] at hm
-          · intro _; exact ⟨_, rfl, by simp [hp]⟩
+          · intro _ _; exact ⟨_, rfl, by simp [hp]⟩
         · rename_i hp
-          refine ⟨?_, ?_, w, by simp, by simp, ?_, ?_, ?_, ?_, by simp, by simp, by simp⟩
+          refine ⟨?_, ?_, w, by simp, by simp, ?_, ?_, ?_, ?_, by simp, by simp, by simp, tk⟩
           · intro held' h; simp [hs] at h; subst h; exact nd _ hs
           · intro held' h; simp [hs] at h; subst h; exact b _ hs
           · intro r' m held' hr' hm h
@@ -995,14 +1085,14 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             rcases h₀ with h₁ | ⟨h₂, _⟩
             · simpa using h₁
             · exact absurd h₂ hp
-          · intro h
-            obtain ⟨r', hr', hp'⟩ := nm h
+          · intro ho h
+            obtain ⟨r', hr', hp'⟩ := nm ho h
             rw [hr] at hr'; cases hr'
             exact absurd hp' hp
   | expire =>
     simp only [Step.apply]
     exact ⟨by simp, by simp, w, by simp, dc, by simp, ls, by simp, by simp,
-      fun h => ⟨rfl, (pl h).2⟩, by simp, by simp⟩
+      fun h => ⟨rfl, (pl h).2⟩, by simp, by simp, tk⟩
   | abandon =>
     simp only [Step.apply]
     exact rows_good s (fun r => { r with waited := false }) g (fun _ => rfl)
@@ -1014,11 +1104,9 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
       split
       · split
         · exact forget_good s r g hat
-        · split
-          · exact failWith_good s _ g plain
-          · cases result with
-            | none => exact forget_good s r g hat
-            | some c => exact failWith_good s c g plain
+        · cases result with
+          | none => exact forget_good s r g hat
+          | some c => exact failWith_good s c g plain
       · exact g
     · exact g
   | retire =>
@@ -1036,14 +1124,27 @@ theorem apply_good (s : State) (st : Step) (g : Good s) : Good (st.apply s) := b
             rcases h with h | ⟨h, _⟩
             · simp [guard.2] at h
             · rw [guard.2] at h; cases h
-        have clean : s.stray = 0 := by
+        have clean : s.fixed.owned = true → s.stray = 0 := by
+          intro ho
           rcases Nat.eq_zero_or_pos s.stray with h | h
           · exact h
-          · obtain ⟨r', hr', hp⟩ := nm h
+          · obtain ⟨r', hr', hp⟩ := nm ho h
             rw [hr] at hr'; cases hr'; rw [guard.2] at hp; cases hp
         exact ⟨by simp [none], by simp [none], w, by simp [none], by simp [hat], by simp, by simp,
-          by simp [none], by simp [clean], by simp [hat], by simp [clean], by simp [none]⟩
+          by simp [none], fun ho h => by simp [clean ho] at h, by simp [hat], fun _ ho => clean ho,
+          by simp [none], tk⟩
       · exact g
+    · exact g
+  | rival =>
+    simp only [Step.apply]
+    split
+    · exact ⟨nd, b, w, hh, dc, rc, ls, a, nm, pl, sw, fin, fun _ => rfl⟩
+    · exact g
+  | endDead =>
+    simp only [Step.apply]
+    split
+    · exact ⟨by simp, by simp, w, by simp, dc, by simp, ls, by simp, by simp,
+        fun h => ⟨rfl, (pl h).2⟩, by simp, by simp, tk⟩
     · exact g
   | elapse =>
     simp only [Step.apply]
@@ -1118,7 +1219,7 @@ yet as a stray. -/
 theorem crash_keeps (s : State) :
     (Step.crash.apply s).published = s.published ∧ (Step.crash.apply s).progress = s.progress ∧
       (Step.crash.apply s).live = s.live := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   cases row <;> cases session <;> simp [Step.apply, strand, State.progress, State.live] <;>
     (try split) <;> simp_all <;> omega
 
@@ -1136,9 +1237,9 @@ a new one, recorded before the provider begins it; the location, key and
 chunk hashes stay. -/
 theorem expired_starts_over (s : State) (r : Row) (m : List Nat)
     (hr : s.row = some r) (hat : s.attempt = .started) (hrec : r.recorded = .session m)
-    (gone : s.session = none) (unpublished : s.published = none) :
+    (gone : s.session = none) (unpublished : s.published = none) (open_name : s.taken = false) :
     Step.open_.apply s = replan s r := by
-  simp [Step.apply, hr, hat, hrec, gone, unpublished]
+  simp [Step.apply, hr, hat, hrec, gone, unpublished, open_name]
 
 theorem apply_fixed (s : State) (st : Step) :
     (st.apply s).fixed = s.fixed ∧ (st.apply s).total = s.total := by
@@ -1176,7 +1277,7 @@ unmarked. -/
 theorem only_mark_marks (s : State) (st : Step) (r r' : Row) (hr : s.row = some r)
     (unmarked : r.recorded ≠ .plan true) (after : (st.apply s).row = some r')
     (marked : r'.recorded = .plan true) : st = .mark ∧ s.attempt = .planned := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   simp only at hr; subst hr
   have unmarked' : r.recorded = .none ∨ r.recorded = .plan false ∨ ∃ m, r.recorded = .session m := by
     cases hrc : r.recorded with
@@ -1202,11 +1303,11 @@ theorem refusal_unmarks (s : State) (r : Row) (c : Class) (hr : s.row = some r)
                                     wait := c.wait } } := by
   simp [Step.apply, hr, hat, marked, failWith]
 
-/-- Every stray sits at the place of the marked plan the row records, so the
-row finds it again. -/
-theorem stray_named (s : State) (g : Good s) (h : 0 < s.stray) :
+/-- Where the place is the device's own, every stray sits at the place of the
+marked plan the row records, so the row finds it again. -/
+theorem stray_named (s : State) (g : Good s) (owned : s.fixed.owned = true) (h : 0 < s.stray) :
     ∃ r, s.row = some r ∧ r.recorded = .plan true :=
-  g.named h
+  g.named owned h
 
 /-- The steps that can leave a stray: a lost begin reply, and a crash, which
 strands a session the attempt began that its row doesn't name yet. A failure
@@ -1219,7 +1320,7 @@ def Step.strands : Step → Bool
 theorem apply_stray_le (s : State) (st : Step) (h : st.strands = false) :
     (st.apply s).stray ≤ s.stray := by
   cases st <;> simp only [Step.strands] at h <;> simp only [Step.apply] <;> (repeat' split) <;>
-    simp_all [failWith, replan, sweep, forget]
+    simp_all [failWith, replan, sweep, forget] <;> (try (split <;> omega))
 
 theorem steps_stray_le (s : State) (steps : List Step) (h : ∀ st ∈ steps, st.strands = false) :
     (runSteps s steps).stray ≤ s.stray := by
@@ -1241,14 +1342,14 @@ theorem open_sweeps (s : State) (g : Good s) (r : Row) (hr : s.row = some r)
     cases started with
     | true => simp [Step.apply, hr, hat, hrec, owned, replan, sweep]
     | false =>
-      have clean := clean_of s g r hr (by simp [hrec])
+      have clean := clean_of s g r hr (by simp [hrec]) owned
       simp [Step.apply, hr, hat, hrec, replan, clean]
   | session m =>
-    have clean := clean_of s g r hr (by simp [hrec])
-    cases hs : s.session <;> cases hp : s.published <;>
-      simp [Step.apply, hr, hat, hrec, hs, hp, replan, clean]
+    have clean := clean_of s g r hr (by simp [hrec]) owned
+    cases hs : s.session <;> cases hp : s.published <;> cases ht : s.taken <;>
+      simp [Step.apply, hr, hat, hrec, hs, hp, ht, replan, clean, failWith]
   | none =>
-    have clean := clean_of s g r hr (by simp [hrec])
+    have clean := clean_of s g r hr (by simp [hrec]) owned
     simp [Step.apply, hr, hat, hrec, replan, clean]
 
 /-- §17.9, E.10: a plan never marked has nothing at its place, so its attempt
@@ -1259,30 +1360,52 @@ theorem unmarked_resumes (s : State) (r : Row) (hr : s.row = some r)
   simp [Step.apply, hr, hat, unmarked]
 
 /-- E.10: at a shared place, a marked plan may have begun a session nothing
-tells from another device's, so its attempt fails, never to retry. -/
-theorem marked_shared_never (s : State) (r : Row) (hr : s.row = some r)
+tells from another device's, so its attempt reads the destination instead of
+aborting anything. Finding it empty, it goes on with a fresh unmarked plan at
+the same name, never failing for good, and the strays stay. -/
+theorem marked_shared_restarts (s : State) (r : Row) (hr : s.row = some r)
     (hat : s.attempt = .started) (marked : r.recorded = .plan true)
-    (shared : s.fixed.owned = false) : Step.open_.apply s = failWith s .never := by
-  simp [Step.apply, hr, hat, marked, shared]
+    (shared : s.fixed.owned = false) (empty : s.taken = false) :
+    Step.open_.apply s = replan s r ∧ (Step.open_.apply s).stray = s.stray ∧
+      (Step.open_.apply s).row = some { r with recorded := .plan false } ∧
+      (Step.open_.apply s).attempt = .planned := by
+  simp [Step.apply, hr, hat, marked, shared, empty, replan]
 
-/-- An abort that moves either ends the upload's session and every stray, or,
-for a marked plan at a shared place, fails never to retry, ending nothing. -/
+/-- E.10: finding its own bytes published at the shared name, a marked plan's
+attempt completes. -/
+theorem marked_shared_taken_own (s : State) (r : Row) (hr : s.row = some r)
+    (hat : s.attempt = .started) (marked : r.recorded = .plan true)
+    (shared : s.fixed.owned = false) (taken : s.taken = true) (own : s.published.isSome = true) :
+    (Step.open_.apply s).attempt = .holding (List.range s.total) := by
+  cases hp : s.published with
+  | none => simp [hp] at own
+  | some _ => simp [Step.apply, hr, hat, marked, shared, taken, hp]
+
+/-- E.10: finding another object at the shared name, a marked plan's attempt
+fails as occupied, for the caller to settle. -/
+theorem marked_shared_occupied (s : State) (r : Row) (hr : s.row = some r)
+    (hat : s.attempt = .started) (marked : r.recorded = .plan true)
+    (shared : s.fixed.owned = false) (taken : s.taken = true) (rival : s.published = none) :
+    Step.open_.apply s = failWith s .never := by
+  simp [Step.apply, hr, hat, marked, shared, taken, rival]
+
+/-- An abort that moves ends the upload's session, and, where the place is the
+device's own, every stray; at a shared place the strays stay, as nothing tells
+them from another device's sessions. -/
 theorem abort_sweeps (s : State) (moved : (Step.abort none).apply s ≠ s) :
-    (((Step.abort none).apply s).session = none ∧ ((Step.abort none).apply s).stray = 0) ∨
-      (s.fixed.owned = false ∧ ∃ r, s.row = some r ∧ r.recorded = .plan true ∧
-        (Step.abort none).apply s = failWith s .never) := by
+    ((Step.abort none).apply s).session = none ∧
+      (s.fixed.owned = true → ((Step.abort none).apply s).stray = 0) := by
   cases hr : s.row with
   | none => simp [Step.apply, hr] at moved
   | some r =>
     cases hat : s.attempt with
     | idle =>
       by_cases guard : r.waited = false ∧ r.recorded ≠ Record.none ∧ r.wait = .ready
-      · by_cases unmarked : r.recorded = .plan false
-        · left; simp [Step.apply, hr, hat, guard, unmarked, forget]
-        · by_cases shared : r.recorded = .plan true ∧ s.fixed.owned = false
-          · right
-            exact ⟨shared.2, r, rfl, shared.1, by simp [Step.apply, hr, hat, guard, shared]⟩
-          · left; simp [Step.apply, hr, hat, guard, unmarked, shared, forget]
+      · by_cases cond : r.recorded = .plan false ∨ (r.recorded = .plan true ∧ s.fixed.owned = false)
+        · simp [Step.apply, hr, hat, guard, cond, forget]
+          intro ho hf; rw [ho] at hf; cases hf
+        · simp [Step.apply, hr, hat, guard, cond, forget]
+          intro ho hf; rw [ho] at hf; cases hf
       · simp [Step.apply, hr, hat, guard] at moved
     | _ => simp [Step.apply, hr, hat] at moved
 
@@ -1299,23 +1422,24 @@ theorem unmarked_aborts (s : State) (r : Row) (result : Option Class) (hr : s.ro
 /-- §17.9: an upload retires with no session left at the provider, named or
 stray. -/
 theorem retired_no_session (s : State) (g : Good s) (gone : s.row = none) :
-    s.session = none ∧ s.stray = 0 := by
+    s.session = none ∧ (s.fixed.owned = true → s.stray = 0) := by
   constructor
   · cases hs : s.session with
     | none => rfl
     | some held =>
       obtain ⟨r, hr, _⟩ := g.accounted held hs
       rw [gone] at hr; cases hr
-  · rcases Nat.eq_zero_or_pos s.stray with h | h
+  · intro ho
+    rcases Nat.eq_zero_or_pos s.stray with h | h
     · exact h
-    · obtain ⟨r, hr, _⟩ := g.named h
+    · obtain ⟨r, hr, _⟩ := g.named ho h
       rw [gone] at hr; cases hr
 
 /-- Only a retire removes the row of an upload no file waits for, and only
 once it records nothing. -/
 theorem retire_needs_no_session (s : State) (r : Row) (hr : s.row = some r)
     (gone : (Step.retire.apply s).row = none) : r.waited = false ∧ r.recorded = .none := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   simp only at hr; subst hr
   cases attempt <;> simp [Step.apply] at gone
   split at gone
@@ -1323,12 +1447,14 @@ theorem retire_needs_no_session (s : State) (r : Row) (hr : s.row = some r)
   · simp at gone
 
 /-- §17.9: what a row records is forgotten only by aborting it, which ends the
-provider's session and every stray first. -/
+provider's session and, where the place is the device's own, every stray
+first. -/
 theorem forgotten_by_abort (s : State) (st : Step) (r r' : Row)
     (hr : s.row = some r) (hrec : r.recorded ≠ .none)
     (after : (st.apply s).row = some r') (forgot : r'.recorded = .none) :
-    (∃ result, st = .abort result) ∧ (st.apply s).session = none ∧ (st.apply s).stray = 0 := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+    (∃ result, st = .abort result) ∧ (st.apply s).session = none ∧
+      (s.fixed.owned = true → (st.apply s).stray = 0) := by
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   simp only at hr; subst hr
   cases hrc : r.recorded
   · exact absurd hrc hrec
@@ -1391,7 +1517,7 @@ theorem wait_ends (s : State) (st : Step) (r r' : Row) (hr : s.row = some r)
     (waiting : r.wait ≠ .ready) (after : (st.apply s).row = some r') (ended : r'.wait = .ready) :
     (r.wait = .backoff ∧ st = .elapse) ∨
       (r.wait = .connection ∧ (st = .connect ∨ st = .crash)) := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   simp only at hr; subst hr
   cases hw : r.wait <;> cases st <;> cases attempt <;> cases session <;> cases published <;>
     simp [Step.apply, failWith, Row.ending, replan, strand, hw] at after waiting ⊢ <;>
@@ -1407,7 +1533,7 @@ theorem never_stays (s : State) (st : Step) (r : Row) (hr : s.row = some r)
     (st.apply s).attempt = .idle ∧ (st.apply s).published = s.published ∧
       ((st.apply s).row = none ∨ ∃ r', (st.apply s).row = some r' ∧ r'.wait = .forever ∧
         r'.recorded = r.recorded ∧ r'.failure = r.failure) := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   simp only at hr idle; subst hr idle
   cases st <;> simp [Step.apply, Row.ending, forever, Wait.due, strand] <;> (repeat' split) <;>
     simp_all
@@ -1416,9 +1542,9 @@ theorem never_stays (s : State) (st : Step) (r : Row) (hr : s.row = some r)
 publishes anything for it. -/
 theorem gone_stays (s : State) (st : Step) (gone : s.row = none) :
     (st.apply s).row = none ∧ (st.apply s).published = s.published := by
-  obtain ⟨total, fixed, session, stray, published, row, stored, attempt⟩ := s
+  obtain ⟨total, fixed, session, stray, published, taken, row, stored, attempt⟩ := s
   simp only at gone; subst gone
-  cases st <;> cases attempt <;> simp [Step.apply, failWith, strand]
+  cases st <;> cases attempt <;> simp [Step.apply, failWith, strand] <;> (try split) <;> simp
 
 theorem gone_steps (s : State) (steps : List Step) (gone : s.row = none) :
     (runSteps s steps).row = none ∧ (runSteps s steps).published = s.published := by
@@ -1526,17 +1652,24 @@ def openedPlan (s : State) (fault : Fault) : List Step :=
   | .holding _ => .record :: partsPlan (Step.record.apply s) fault
   | _ => []
 
-/-- Whether opening or aborting what the row records sends a request: not for
-an unmarked plan, with nothing at its place, nor for a marked one at a shared
-place, which fails for good. -/
-def Record.requested (owned : Bool) : Record → Bool
+/-- Whether opening what the row records sends a request: not for an unmarked
+plan, with nothing at its place; a marked plan reads its destination, at a
+shared place as at the device's own. -/
+def Record.requested : Record → Bool
+  | .plan false => false
+  | _ => true
+
+/-- Whether aborting what the row records sends a request: not for an unmarked
+plan, with nothing at its place, nor for a marked one at a shared place, which
+ends nothing and forgets the plan. -/
+def Record.aborts (owned : Bool) : Record → Bool
   | .plan false => false
   | .plan true => owned
   | _ => true
 
 /-- The steps of an attempt that has just started. -/
 def attemptPlan (s : State) (fault : Fault) : List Step :=
-  if s.row.all (·.recorded.requested s.fixed.owned) then
+  if s.row.all (·.recorded.requested) then
     match fault with
     | .fail c => [.fail c]
     | _ =>
@@ -1555,7 +1688,7 @@ def plan (s : State) (forced : Bool) (fault : Fault) : List Step :=
           .start forced :: attemptPlan ((Step.start forced).apply s) fault
         else []
       else if r.recorded ≠ Record.none ∧ r.wait = .ready then
-        (if r.recorded.requested s.fixed.owned then
+        (if r.recorded.aborts s.fixed.owned then
           (if fault = .expire then [.expire] else []) ++
             [.abort (match fault with | .fail c => some c | _ => none)]
         else [.abort none]) ++ [.retire]
@@ -1642,22 +1775,18 @@ theorem plan_none_keep (s : State) (forced : Bool) : ∀ st ∈ plan s forced .n
 /-- §17.9: whatever a cut begin left, where the place is the device's own,
 or the plan unmarked, the upload's next run on a provider that fails nothing
 ends it: with a file waiting, its first request ends every stray; with none,
-its abort does. At a shared place a marked plan's strays stay: they are
-another device's to tell apart from its own, and each is ended once it can
-never publish (§17.10). -/
+its abort does. At a shared place the strays stay: they are another device's
+to tell apart from its own, and each is ended once its name is taken
+(`endDead`, §17.10). -/
 theorem next_run_sweeps (s : State) (g : Good s) (forced : Bool) (r : Row)
     (hr : s.row = some r) (idle : s.attempt = .idle) (ready : r.wait = .ready)
-    (sweeps : s.fixed.owned = true ∨ r.recorded ≠ .plan true) :
+    (owned : s.fixed.owned = true) :
     (run s forced .none).stray = 0 := by
   rcases Nat.eq_zero_or_pos s.stray with h0 | hpos
   · have := steps_stray_le s (plan s forced .none) (plan_none_keep s forced)
     unfold run; omega
-  · obtain ⟨r', hr', hplan⟩ := g.named hpos
+  · obtain ⟨r', hr', hplan⟩ := g.named owned hpos
     rw [hr] at hr'; cases hr'
-    have owned : s.fixed.owned = true := by
-      rcases sweeps with o | m
-      · exact o
-      · exact absurd hplan m
     cases hw : r.waited with
     | false =>
       simp [run, plan, hr, idle, hw, ready, hplan, owned, Record.requested, runSteps, Step.apply,
@@ -1666,7 +1795,7 @@ theorem next_run_sweeps (s : State) (g : Good s) (forced : Bool) (r : Row)
       have opened : plan s forced .none = Step.start forced :: Step.open_ ::
           openedPlan (Step.open_.apply ((Step.start forced).apply s)) .none := by
         simp [plan, hr, idle, hw, ready, Wait.due, attemptPlan, Step.apply, hplan, owned,
-          Record.requested, runSteps]
+          Record.requested, Record.aborts, runSteps]
       have swept : (Step.open_.apply ((Step.start forced).apply s)).stray = 0 :=
         open_sweeps _ (apply_good s _ g) r (by simp [Step.apply, hr, idle, hw, ready, Wait.due])
           (by simp [Step.apply, hr, idle, hw, ready, Wait.due])
@@ -1677,5 +1806,46 @@ theorem next_run_sweeps (s : State) (g : Good s) (forced : Bool) (r : Row)
       rw [opened]
       show (runSteps (Step.open_.apply ((Step.start forced).apply s)) _).stray = 0
       omega
+
+/-- E.10: once the name is taken, a device that applied it ends every session
+there, the strays and this upload's own if its bytes are not the ones
+published; what is published does not change. -/
+theorem end_dead_harmless (s : State) :
+    (Step.endDead.apply s).published = s.published ∧
+      (s.taken = true → (Step.endDead.apply s).stray = 0) := by
+  simp only [Step.apply]
+  split <;> simp_all
+
+/-- E.10: after the name is taken, no strays remain once the next run is
+done: a device that applied the name ends them, and the run adds none. -/
+theorem ended_dead_run_sweeps (s : State) (forced : Bool) (taken : s.taken = true) :
+    (run (Step.endDead.apply s) forced .none).stray = 0 := by
+  have z := (end_dead_harmless s).2 taken
+  have := steps_stray_le (Step.endDead.apply s) (plan (Step.endDead.apply s) forced .none)
+    (plan_none_keep _ forced)
+  unfold run; omega
+
+/-- E.10: once something is published at a place, no step changes what is
+published there: a completion there is refused. -/
+theorem taken_refuses_others (s : State) (st : Step) (taken : s.taken = true) :
+    (st.apply s).published = s.published := by
+  cases st <;> simp only [Step.apply, strand] <;> (repeat' split) <;>
+    simp_all [failWith, replan, forget, sweep]
+
+theorem taken_stays (s : State) (st : Step) (taken : s.taken = true) :
+    (st.apply s).taken = true := by
+  cases st <;> simp only [Step.apply, strand] <;> (repeat' split) <;>
+    simp_all [failWith, replan, forget, sweep]
+
+/-- E.10, the decision's theorem: the published object is the assembly of the
+parts of the session the row names, and no step publishes anything else. A
+stray's parts are never published: no step publishes from one. -/
+theorem stray_never_published (s : State) (st : Step)
+    (changed : (st.apply s).published ≠ s.published) :
+    ∃ r m held, s.row = some r ∧ r.recorded = .session m ∧ s.session = some held ∧
+      covers s.total m = true ∧ s.published = none ∧
+      (st.apply s).published = some (assemble s.total held) := by
+  cases st <;> simp only [Step.apply, strand] at changed ⊢ <;> (repeat' split at changed) <;>
+    simp_all [failWith, replan, forget, sweep]
 
 end CovenStorage.UploadSession

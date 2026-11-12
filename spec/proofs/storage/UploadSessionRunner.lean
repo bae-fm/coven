@@ -55,6 +55,8 @@ private def step (s : State) (event : Json) : Except String State := do
   | "elapse" => pure (Step.elapse.apply s)
   | "connect" => pure (Step.connect.apply s)
   | "reopen" => pure (Step.crash.apply s)
+  | "taken" => pure (Step.rival.apply s)
+  | "end_dead" => pure (Step.endDead.apply s)
   | other => throw s!"unknown event {other}"
 
 /-- One case: the file's parts, whether its place is the device's own, and

@@ -317,19 +317,29 @@ before its request goes out, as when the publication gate closes after the
 part's admission, began nothing, so its failure unmarks the plan again
 (`refusal_unmarks`). A session begun whose name the row never
 recorded, because the begin's reply was lost or the process stopped before the
-record, is a stray, and only those steps leave one (`steps_stray_le`). Every
-stray sits at the place of the marked plan the row still records
-(`stray_named`). Where that place is the device's own, the attempt's first
+record, is a stray, and only those steps leave one (`steps_stray_le`). Where
+the place is the device's own, every stray sits at the place of the marked plan
+the row still records (`stray_named`), and the attempt's first
 request ends them all before anything else (`open_sweeps`), as does the abort
 of an upload no file waits for (`abort_sweeps`), and the upload's next run on a
 provider that fails nothing leaves none (`next_run_sweeps`). An unmarked plan
 has nothing at its place, so wherever it is, the attempt goes on from it
 (`unmarked_resumes`) and the abort forgets it (`unmarked_aborts`). A marked
 plan at a shared place may have begun a session nothing tells from another
-device's: the attempt fails, never to retry (`marked_shared_never`), and so
-does the abort (`abort_sweeps`). What a row records is forgotten only by
-aborting it,
-which ends the provider's session and every stray first
+device's, so it ends nothing there: its abort forgets the plan and keeps the
+strays (`abort_sweeps`), and its attempt reads the destination instead. Finding
+it empty, the attempt goes on with a fresh unmarked plan at the same name,
+beside the stray (`marked_shared_restarts`); finding its own bytes published,
+it completes (`marked_shared_taken_own`); finding another object, it fails as
+occupied for the caller to settle (`marked_shared_occupied`). The stray can
+never publish: a step changes what is published only by assembling the parts of
+the session the row names (`stray_never_published`), and once something is
+published at the place, no step changes it (`taken_refuses_others`,
+`taken_stays`). A device that applied the taken name ends every session there
+and publishes nothing by it (`end_dead_harmless`), so the next run leaves none
+(`ended_dead_run_sweeps`). What a row records is forgotten only by aborting it,
+which ends the provider's session, and where the place is the device's own,
+every stray, first
 (`forgotten_by_abort`), and an upload retires only once it records nothing
 (`retire_needs_no_session`), so it retires with no session left at the
 provider, named or stray (`retired_no_session`). A failed abort keeps the
