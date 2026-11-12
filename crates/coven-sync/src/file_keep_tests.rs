@@ -407,6 +407,48 @@ async fn a_damaged_copy_falls_back_to_downloading_the_kept_pin() {
     f.close().await;
 }
 
+/// Coven's copy is damaged: the file's pin records why while the download
+/// that replaces it runs, and the pin made by the download clears the record.
+#[tokio::test]
+async fn a_damaged_copy_is_recorded_against_the_file_while_it_downloads() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    let bytes = vec![50; CHUNK + 1];
+    let file = kept_app_file(&f, "kept", bytes.clone()).await;
+    f.drain().await;
+    let request = f.files.inner.database.pin_requests().await.unwrap().remove(0);
+    let copy = request.copy.expect("an app file's request keeps coven's copy");
+    let path =
+        f.directory.area_path(coven_foundation::files::FileArea::AppProvided).join(copy.as_str());
+    std::fs::write(&path, vec![51; bytes.len()]).unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    f.storage.gate_reads(gate.clone()).await;
+    let inner = f.files.inner.clone();
+    let keeping = tokio::spawn(async move { inner.keep_pinned().await });
+    let recorded = tokio::time::timeout(coven_foundation::clock::HANG_GUARD, async {
+        loop {
+            let records = keep_records(&f).await;
+            if !records.is_empty() {
+                break records;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the damaged copy is recorded while the download waits");
+    assert!(matches!(
+        recorded.as_slice(),
+        [crate::PendingRecord { subject: crate::PendingSubject::Keep { file: named }, .. }]
+            if *named == file
+    ));
+    assert!(!pinned(&f, file).await);
+    gate.add_permits(16);
+    keeping.await.unwrap().unwrap();
+    assert!(pinned(&f, file).await);
+    assert!(keep_records(&f).await.is_empty());
+    f.close().await;
+}
+
 /// A pin coven keeps waits as an upload does (§6.7): a network report ends
 /// a wait whose attempt got no provider response and leaves one a provider
 /// answered, which the person's retry ends.

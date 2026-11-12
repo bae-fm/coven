@@ -3,8 +3,8 @@
 //! for one, so coven makes it, resuming after a restart, and its failures
 //! retry under the shared backoff (§6.7). An app file's cache copy is made
 //! from coven's own copy, checked against the hashes its staging recorded,
-//! with no request to storage; if that fails, or for a user's file, the pin
-//! downloads from storage. A user's original is never read for the cache.
+//! with no request to storage; if that fails, its failure is recorded against
+//! the file and the pin downloads from storage, as it does for a user's file. A user's original is never read for the cache.
 
 use super::file_error::{FileReadError, TransferError};
 use super::file_failure::{stored, FileFailure};
@@ -123,11 +123,12 @@ impl FilesInner {
                         ..
                     })),
                 ) => return Err(error),
+                // Coven's copy is bad: record why against the file, as a
+                // failed download is, then download instead. The pin
+                // ending the request clears the record; a download that
+                // fails replaces it.
                 Err(error) => {
-                    tracing::warn!(
-                        file = %file.id(),
-                        "keeping a file from coven's copy failed, so it downloads: {error}"
-                    );
+                    self.keep_failed(request, error).await.map_err(FileReadError::from)?;
                     self.database.drop_pin_copy(request.id).await?;
                 }
             }
