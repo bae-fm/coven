@@ -435,6 +435,33 @@ async fn a_reset_stopped_after_registering_is_finished_by_resuming() {
     assert_eq!(f.app.readable_stores().await[0].unfinished, None);
 }
 
+/// A connected reset stopped after its record keeps the device name it was
+/// given in the keychain. With that entry lost, resuming refuses, as a
+/// restore's resume does, and registers nothing: the fresh device is never
+/// registered under an empty name.
+#[tokio::test]
+async fn resuming_a_connected_reset_whose_kept_record_is_lost_is_refused() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    f.handle.close().await.unwrap();
+    let store = f.directory.id();
+    assert!(matches!(
+        reopen(&f)
+            .interrupt_after_registering()
+            .reset_device(store, "Restored phone", |_| ())
+            .await,
+        Err(BootstrapError::Cancelled)
+    ));
+    custody(&f).delete_replacement_record().unwrap();
+    let (_, cancel) = watch::channel(false);
+    assert!(matches!(
+        reopen(&f).resume_replacement(store, |_| (), &cancel).await,
+        Err(BootstrapError::NoUnfinishedReplacement(named)) if named == store
+    ));
+    assert!(f.directory.unfinished_replacement().unwrap().is_some());
+}
+
 /// A reset that fails while its new device loads changes nothing: the store
 /// opens as before, and the next reset continues the load (§19.3).
 #[tokio::test]

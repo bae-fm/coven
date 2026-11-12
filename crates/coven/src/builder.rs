@@ -456,7 +456,8 @@ impl CovenBuilder {
     /// what the replacement kept on the device, with neither the code nor a
     /// new sign-in (§19.3). On Dropbox and OneDrive it connects through the
     /// kept sign-in, or a sign-in this builder holds once it grants the
-    /// location's access. A store with no replacement under way fails with
+    /// location's access. A store with no replacement under way, or a
+    /// connected reset whose kept device name is gone, fails with
     /// `BootstrapError::NoUnfinishedReplacement`.
     pub async fn resume_replacement(
         self,

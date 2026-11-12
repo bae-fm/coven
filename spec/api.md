@@ -8004,7 +8004,8 @@ pub enum BootstrapError {
     /// device: none recorded itself here, or it has ended.
     NoUnfinishedRestore(StoreId),
     /// `resume_replacement` found no replacement of this device's
-    /// installation of the store past its record.
+    /// installation of the store past its record, or a connected reset
+    /// whose kept record is gone.
     NoUnfinishedReplacement(StoreId),
     /// The code cannot be used.
     Code(CodeError),
@@ -8547,8 +8548,9 @@ impl CovenBuilder {
     /// or a sign-in this builder holds once it grants the location's access;
     /// with neither, or a kept one the provider refuses even after its one
     /// refresh, it fails with `OAuthError::Reauthorize` and the replacement
-    /// stays unfinished. A store with no replacement past its record fails
-    /// with `BootstrapError::NoUnfinishedReplacement`.
+    /// stays unfinished. A store with no replacement past its record, or a
+    /// connected reset whose kept device name is gone, fails with
+    /// `BootstrapError::NoUnfinishedReplacement`.
     pub async fn resume_replacement(
         self,
         store: StoreId,

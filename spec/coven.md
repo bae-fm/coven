@@ -9965,8 +9965,10 @@ laptop in place from her current restore code instead (§13.1).
   kept entry and the new installation.
 - **Resuming.** `CovenBuilder::resume_replacement` finishes a replacement past
   its record from what it kept, with neither the code nor a new sign-in;
-  calling `reset_device` or `restore_device` again finishes it too. There is
-  no separate recovery journal.
+  calling `reset_device` or `restore_device` again finishes it too. A connected
+  reset whose kept record is gone is refused with `NoUnfinishedReplacement`, as
+  a restore's is, not finished under an empty device name. There is no separate
+  recovery journal.
 - **Only the call that began it finishes it.** The record also names that
   call, `reset_device` or `restore_device` (§13.1), and the store's name as the
   new installation loaded it. Opening fails with `ReplacementUnfinished`,

@@ -95,7 +95,8 @@ pub(crate) async fn restore_device(
 
 /// Finish a replacement past its record from what it kept
 /// (`CovenBuilder::resume_replacement`): a reset from the store's own
-/// custody and the device name it kept, a restore from the code and name it
+/// custody and the device name it kept (a connected reset whose record is
+/// gone is refused, as a restore's is), a restore from the code and name it
 /// kept, its S3 key inside the code, and its sign-in in the store's device
 /// credentials or the builder's.
 pub(crate) async fn resume_replacement(
@@ -112,9 +113,18 @@ pub(crate) async fn resume_replacement(
         .ok_or(BootstrapError::NoUnfinishedReplacement(store))?;
     let kept = StoreKeychain::new(builder.keychain()?, store).replacement_record()?;
     match record.by {
-        // An unconnected reset registers nothing, so it keeps no name.
         ReplacedBy::Reset => {
-            let name = kept.map(|(_, name)| name).unwrap_or_default();
+            // An unconnected reset registers nothing, so it keeps no name
+            // and ignores the one it is given. A connected reset keeps its
+            // record before it registers: a missing one is lost, and the
+            // fresh device is not registered under an empty name.
+            let connected =
+                coven_storage::recorded_config(&directory).map_err(SyncError::from)?.is_some();
+            let name = match (connected, kept) {
+                (false, _) => String::new(),
+                (true, Some((_, name))) => name,
+                (true, None) => return Err(BootstrapError::NoUnfinishedReplacement(store)),
+            };
             Box::pin(reset::reset_device(builder, store, &name, status)).await
         }
         ReplacedBy::Restore => {

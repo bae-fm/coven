@@ -31,7 +31,8 @@ pub enum BootstrapError {
     #[error("no restore is under way for store {0}")]
     NoUnfinishedRestore(StoreId),
     /// No replacement of this device's installation of the store is under
-    /// way past its record: none recorded itself, or it has finished.
+    /// way past its record: none recorded itself, or it has finished, or a
+    /// connected reset's kept record is gone.
     #[error("no replacement is under way for store {0}")]
     NoUnfinishedReplacement(StoreId),
     /// The code cannot be used for this operation.
