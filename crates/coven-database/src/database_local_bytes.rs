@@ -44,7 +44,7 @@ pub struct LocalBytes {
 }
 
 fn unsigned(value: i64) -> Result<u64, DbError> {
-    u64::try_from(value).map_err(|_| DbError::DamagedDatabase)
+    u64::try_from(value).map_err(|_negative| DbError::DamagedDatabase)
 }
 
 /// Every namespace's budget and counters, by name.
@@ -131,10 +131,10 @@ impl Database {
     pub async fn local_bytes(&self) -> Result<LocalBytes, DbError> {
         let cache = self.cache_bytes().await?;
         let directory = self.call(|open| Ok::<_, DbError>(open.access.directory.clone())).await?;
-        let walked = coven_foundation::task::blocking("measure the store's directory", move || {
-            directory.local_bytes()
+        let walked = super::call::process(&self.bugs, move || {
+            directory.local_bytes().map_err(DbError::from)
         })
-        .await??;
+        .await?;
         Ok(LocalBytes {
             namespaces: cache.namespaces,
             pinning: cache.pinning,

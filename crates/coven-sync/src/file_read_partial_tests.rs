@@ -134,7 +134,7 @@ async fn an_unpin_during_a_prepare_fails_it_and_leaves_nothing() {
     f.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
     assert!(partial(&f, &file).await.is_none());
     resume.send(()).unwrap();
-    let refused = preparing.await.err().expect("the prepare fails");
+    let refused = preparing.await.expect_err("the prepare fails");
     assert!(
         matches!(refused, FileReadError::Database(DbError::PinChanged { file }) if file == id),
         "{refused:?}"

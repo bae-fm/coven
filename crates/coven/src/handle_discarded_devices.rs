@@ -12,10 +12,12 @@ impl CovenHandle {
     /// it succeeds.
     pub async fn delete_discarded_devices(&self) -> CovenResult<()> {
         let directory = self.directory.clone();
-        let result = crate::task::blocking("delete the discarded devices", move || {
-            directory.delete_discarded_devices()
-        })
-        .await;
+        let bugs = self.database.bugs().clone();
+        let result =
+            crate::task::blocking_completing("delete the discarded devices", bugs, move || {
+                directory.delete_discarded_devices()
+            })
+            .await;
         // Whatever it removed before a failure changes what the store keeps.
         self.database.local_bytes_changed();
         result??;

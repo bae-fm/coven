@@ -1691,6 +1691,9 @@ tables = [
     "CovenHandle::leaving",
     "CovenHandle::forget_deletion",
 ]
+# Deleting the discarded installations runs on the blocking pool to its end,
+# even once its caller stops waiting; then its bug goes to the app's sink (E15).
+"crates/coven/src/handle_discarded_devices.rs" = ["CovenHandle::delete_discarded_devices"]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
     # A completed sign-in becomes this session's custody.
