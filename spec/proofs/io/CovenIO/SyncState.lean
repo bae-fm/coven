@@ -123,7 +123,7 @@ inductive Failure
   | regionMismatch | storeExists | clockSkew | ownLocationRequired | quotaExceeded
   | rateLimited | invalidConfiguration | refused | protocol | invalidPath
   | invalidRange | notStoreOwner | inviteeIsStoreOwner | sharingRefused | accountIdUnavailable
-  | invitationMismatch | sessionMismatch | sessionExpired | sessionIdentityUnknown
+  | invitationMismatch | sessionMismatch | sessionExpired
   | invalidPart | singleRequestTooLarge | copyTooLarge | encoding | file
   | memberKeysMissing | bug
   deriving DecidableEq, Repr

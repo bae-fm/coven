@@ -13679,7 +13679,6 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Failed(LocalFailure::Bug)` | coven's own code broke its rule or panicked; the work retries under backoff and fails again until the bug is fixed | api.md E15 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
-| `SessionIdentityUnknown` | an S3 upload session at a shared path may have started an upload whose native id it lost | E.10 |
 
 Which sync state each fact names (§19.1). With several, the state is the first
 of removed, device needs reset, update needed, signed out, no access, folder

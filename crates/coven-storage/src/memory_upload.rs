@@ -251,12 +251,17 @@ impl MemoryProvider {
             if started != PlanStart::MayHaveStarted {
                 return Ok(());
             }
-            if !owns_name(session) {
-                return Err(StorageFailure::SessionIdentityUnknown.into());
-            }
             publication.check()?;
             self.before(MemoryRequest::Other("resume_upload")).await?;
-            end_planned(&mut *self.state.lock().await, session);
+            let mut state = self.state.lock().await;
+            if owns_name(session) {
+                end_planned(&mut state, session);
+            } else {
+                // A shared name aborts nothing: its destination decides. A
+                // plan finding it empty starts fresh beside the stray its lost
+                // start may have begun, which can never publish.
+                check_target(&state, session.target())?;
+            }
             session.state = SessionState::MemoryPlanned { started: PlanStart::Unstarted };
             return Ok(());
         }
@@ -297,7 +302,7 @@ impl MemoryProvider {
             // A restored marked plan resumes first, and one whose start this
             // process sent may have started a session already.
             if *started == PlanStart::MayHaveStarted {
-                return Err(StorageFailure::SessionIdentityUnknown.into());
+                return Err(StorageFailure::SessionMismatch.into());
             }
             // Until it settles, the start may go out at any moment.
             *started = PlanStart::MayHaveStarted;
@@ -491,11 +496,8 @@ impl MemoryProvider {
         if let SessionState::MemoryPlanned { started } = session.state {
             // A plan whose first part was never sent has nothing to end
             // (Appendix E.10).
-            if started != PlanStart::MayHaveStarted {
+            if started != PlanStart::MayHaveStarted || !owns_name(session) {
                 return Ok(());
-            }
-            if !owns_name(session) {
-                return Err(StorageFailure::SessionIdentityUnknown.into());
             }
         }
         publication.check()?;

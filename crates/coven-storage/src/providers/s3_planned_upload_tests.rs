@@ -18,10 +18,13 @@ fn planned_path() -> ObjectPath {
     ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)
 }
 
-/// A restored shared-path session without its native ID cannot claim any
-/// upload.
+/// A restored marked plan at a shared slot cannot tell its stray upload from
+/// another claimant's, so it asks nothing about uploads and aborts nothing. It
+/// reads the slot instead; finding it empty, it starts fresh beside the stray.
+/// The stray can never publish, since no record names it, and once the slot is
+/// published create-once refuses every other completion (Appendix E.10).
 #[tokio::test]
-async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_reinitiation() {
+async fn a_marked_plan_at_a_shared_slot_starts_fresh_beside_its_stray() {
     for lost in ["initiation", "part"] {
         let (_server, storage, state) = planned_fixture().await;
         let path = planned_path();
@@ -48,28 +51,86 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
         );
         let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
         let before = state.lock().unwrap().requests.len();
-        assert_eq!(
-            storage.abort_upload(&restored).await.unwrap_err().failure(),
-            StorageFailure::SessionIdentityUnknown
-        );
+        storage.abort_upload(&restored).await.unwrap();
         assert_eq!(
             storage.upload_part(&mut restored, b"ours").await.unwrap_err().failure(),
-            StorageFailure::SessionIdentityUnknown
+            StorageFailure::SessionMismatch
         );
-        assert_eq!(state.lock().unwrap().requests.len(), before);
+        assert_eq!(state.lock().unwrap().requests.len(), before, "nothing asked of the slot");
+        storage.resume_upload(&mut restored).await.unwrap();
+        {
+            let state = state.lock().unwrap();
+            let requests = &state.requests[before..];
+            assert_eq!(requests.len(), 1, "{requests:?}");
+            assert_eq!(requests[0].0, Method::HEAD);
+            assert_eq!(requests[0].1.path(), format!("/bucket/{}", path.as_str()));
+            assert_eq!(state.uploads.len(), 2, "the peer's upload and the stray remain");
+        }
+        storage.upload_part(&mut restored, b"ours").await.unwrap();
+        assert_eq!(state.lock().unwrap().uploads.len(), 3);
+        storage.finish_upload(&mut restored).await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap(), b"ours");
         assert_eq!(
-            storage.resume_upload(&mut restored).await.unwrap_err().failure(),
-            StorageFailure::SessionIdentityUnknown
+            storage.finish_upload(&mut other).await.unwrap_err().failure(),
+            StorageFailure::AlreadyExists
         );
-        assert_eq!(restored.encode().unwrap().as_bytes(), recorded.as_bytes());
-        assert_eq!(state.lock().unwrap().uploads.len(), 2);
-        storage.finish_upload(&mut other).await.unwrap();
-        assert_eq!(storage.read(&path).await.unwrap(), b"peer");
-        assert_eq!(
-            storage.resume_upload(&mut restored).await.unwrap_err().failure(),
-            StorageFailure::SessionIdentityUnknown
-        );
-        assert_eq!(state.lock().unwrap().uploads.len(), 1);
+        assert_eq!(storage.read(&path).await.unwrap(), b"ours");
+    }
+}
+
+/// A restored marked plan at a shared slot that finds another object there
+/// returns the slot as taken, which its claim settles (Appendix E.10).
+#[tokio::test]
+async fn a_marked_plan_finding_another_object_at_its_shared_slot_finds_it_taken() {
+    let (_server, storage, state) = planned_fixture().await;
+    let path = planned_path();
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    let permit = storage.admit_part(&mut upload, b"ours").unwrap();
+    let recorded = upload.encode().unwrap();
+    state.lock().unwrap().lose_initiation_reply = true;
+    storage.send_part(permit, &mut upload, &ByteProgress::unread()).await.unwrap_err();
+    storage.create(&path, b"peer").await.unwrap();
+    let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+    let before = state.lock().unwrap().requests.len();
+    assert_eq!(
+        storage.resume_upload(&mut restored).await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
+    assert_eq!(state.lock().unwrap().requests.len(), before + 1);
+    assert_eq!(storage.read(&path).await.unwrap(), b"peer");
+}
+
+/// A marked floor replacement whose start's reply was lost starts fresh while
+/// the floor still has the revision it observed, and conflicts once the floor
+/// has changed, which retention settles by reading the floor (§16.6).
+#[tokio::test]
+async fn a_marked_floor_replacement_starts_fresh_only_while_the_floor_is_unchanged() {
+    for changed in [false, true] {
+        let (_server, storage, state) = planned_fixture().await;
+        let floor = ObjectPath::floor(STORE_ID);
+        storage.create(&floor, b"old").await.unwrap();
+        let previous = storage.status(&floor).await.unwrap().unwrap();
+        let mut upload = storage.begin_replace(&previous, 4).await.unwrap();
+        let permit = storage.admit_part(&mut upload, b"next").unwrap();
+        let recorded = upload.encode().unwrap();
+        state.lock().unwrap().lose_initiation_reply = true;
+        storage.send_part(permit, &mut upload, &ByteProgress::unread()).await.unwrap_err();
+        if changed {
+            storage.replace(&previous, b"newer").await.unwrap();
+        }
+        let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+        if changed {
+            assert_eq!(
+                storage.resume_upload(&mut restored).await.unwrap_err().failure(),
+                StorageFailure::Conflict
+            );
+            assert_eq!(storage.read(&floor).await.unwrap(), b"newer");
+            continue;
+        }
+        storage.resume_upload(&mut restored).await.unwrap();
+        storage.upload_part(&mut restored, b"next").await.unwrap();
+        storage.finish_upload(&mut restored).await.unwrap();
+        assert_eq!(storage.read(&floor).await.unwrap(), b"next");
     }
 }
 
@@ -191,10 +252,10 @@ async fn a_start_refused_as_it_goes_out_unmarks_its_plan() {
         gate.0.store(false, std::sync::atomic::Ordering::SeqCst);
         if went_out {
             assert_eq!(failed.unwrap_err().failure(), StorageFailure::Network);
-            assert_eq!(
-                storage.resume_upload(&mut restored).await.unwrap_err().failure(),
-                StorageFailure::SessionIdentityUnknown
-            );
+            storage.resume_upload(&mut restored).await.unwrap();
+            storage.upload_part(&mut restored, b"data").await.unwrap();
+            storage.finish_upload(&mut restored).await.unwrap();
+            assert_eq!(storage.read(&path).await.unwrap(), b"data");
             continue;
         }
         assert_eq!(failed.unwrap_err().failure(), StorageFailure::CatchUpRequired);

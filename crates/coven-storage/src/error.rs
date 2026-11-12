@@ -84,8 +84,6 @@ pub enum StorageFailure {
     SessionMismatch,
     /// The recorded upload expired or a publication conflict invalidated it.
     SessionExpired,
-    /// The native id of an unresolved S3 initiation cannot be proven to belong to this session.
-    SessionIdentityUnknown,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
     /// A buffered floor replacement exceeds this provider's single-request limit.

@@ -1,5 +1,7 @@
 use crate::sequence_sync::sequence_reload::tests::stored_floor;
 use crate::sequence_sync::tests::*;
+use crate::SyncError;
+use coven_foundation::clock::Clock;
 use coven_storage::{
     test_utils::{Faults, MemoryRequest},
     ObjectPath, Storage,
@@ -912,5 +914,53 @@ async fn a_floor_landing_after_a_newer_snapshot_passed_grace_keeps_the_bodies_it
                 .unwrap();
         assert!(group.storage.status(&path).await.unwrap().is_some(), "the floor names {path:?}");
     }
+    ana.database().close().await.unwrap();
+}
+
+/// Ana's large note goes up in parts as the claim of the next slot, and the
+/// reply to its first part's start is lost: the claim's recording marks a plan
+/// that never names the upload the start began. On a profile that completes
+/// in place nothing tells that upload from another claimant's, so the next
+/// pass reads the slot, finds it empty and starts a fresh session there; the
+/// claim lands. The upload the lost reply began can never publish, and the
+/// pass that writes the next floor ends it with the other sessions at applied
+/// slots (§17.9, §17.10, Appendix E.10).
+#[tokio::test]
+async fn a_claim_whose_start_reply_was_lost_starts_fresh_and_its_stray_is_ended() {
+    use coven_merge::Audience;
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let slot = ana.database().applied_slot().await.unwrap() + 1;
+    let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
+    let title: &'static str = Box::leak("x".repeat(1000).into_boxed_str());
+    insert(ana.database(), "big", title).await;
+
+    ana.storage.set_faults(Faults { lose_initiation_reply: true, ..Faults::none() }).await;
+    let lost = ana.sync.pass().await.unwrap_err();
+    assert!(
+        matches!(&lost, SyncError::Storage(error)
+            if error.failure() == coven_storage::StorageFailure::Network),
+        "{lost:?}"
+    );
+    assert_eq!(group.storage.unfinished_uploads().await.len(), 1, "the stray");
+    assert!(group.storage.status(&path).await.unwrap().is_none());
+
+    group.clock.set(group.clock.now() + std::time::Duration::from_secs(600));
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    assert_eq!(ana.database().applied_slot().await.unwrap(), slot);
+    assert_eq!(rows(ana.database()).await, [("big".into(), title.into())]);
+    assert_eq!(group.storage.unfinished_uploads().await.len(), 1, "the stray stays until a floor");
+
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&ObjectPath::floor(group.store)).await.unwrap().is_some());
+    assert!(group.storage.unfinished_uploads().await.is_empty(), "the floor write ended it");
     ana.database().close().await.unwrap();
 }

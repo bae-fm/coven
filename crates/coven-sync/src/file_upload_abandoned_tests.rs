@@ -296,6 +296,7 @@ mod sessions {
         clock: Arc<FixedClock>,
         file: FileRef,
         location: FileLocation,
+        owned: bool,
     }
 
     impl Device {
@@ -315,7 +316,7 @@ mod sessions {
             }
             let item = f.files.inner.database.uploads().await.unwrap().remove(0);
             assert_eq!(parts(item.bytes_total), PARTS);
-            Self { f, clock, file, location }
+            Self { f, clock, file, location, owned }
         }
 
         /// The process stops and the store opens again.
@@ -532,7 +533,11 @@ mod sessions {
                 })
             });
             let unfinished = self.f.storage.unfinished_uploads().await;
-            assert!(unfinished.len() <= 1, "{unfinished:?}");
+            // At the device's own place every session is ended before another
+            // starts. At a shared place a fresh session starts beside the
+            // strays that earlier lost starts left, so any number may stand
+            // beside the live one (Appendix E.10).
+            assert!(!self.owned || unfinished.len() <= 1, "{unfinished:?}");
             let mut session = upload
                 .and_then(|upload| upload.session.as_ref())
                 .map(|bytes| UploadSession::decode(bytes.as_bytes()).unwrap());
@@ -599,6 +604,9 @@ mod sessions {
             vec![after(0, "crash"), plain()],
             vec![after(0, "crash"), event("delete"), plain()],
             vec![losing_begin(), plain(), elapse(), plain()],
+            // At a shared place each lost start leaves a stray beside the
+            // fresh session that follows it.
+            vec![losing_begin(), elapse(), losing_begin(), elapse(), plain()],
             vec![losing_begin(), event("delete"), elapse(), plain()],
             // An expired session starts over from its first part.
             vec![after(2, "crash"), expiring()],
@@ -652,7 +660,8 @@ mod sessions {
             // The next run's first request is the start. Refused, or its
             // reply lost, it leaves the plan marked: at the device's own
             // place the next attempt, or the abort, ends what is there; at a
-            // shared one each fails, never to retry.
+            // shared one the attempt reads the destination and starts fresh
+            // beside it, and the abort only forgets the plan.
             vec![pausing(), failing("automatic"), elapse(), plain()],
             vec![pausing(), failing("automatic"), event("delete"), elapse(), plain()],
             vec![pausing(), losing_begin(), elapse(), plain()],

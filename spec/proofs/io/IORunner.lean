@@ -348,7 +348,6 @@ private def failures : List (String × CovenIO.SyncState.Failure) := [
     ("invitationMismatch", .invitationMismatch),
     ("sessionMismatch", .sessionMismatch),
     ("sessionExpired", .sessionExpired),
-    ("sessionIdentityUnknown", .sessionIdentityUnknown),
     ("invalidPart", .invalidPart),
     ("singleRequestTooLarge", .singleRequestTooLarge),
     ("copyTooLarge", .copyTooLarge),

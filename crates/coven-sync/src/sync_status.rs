@@ -233,7 +233,6 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         | InvitationMismatch
         | SessionMismatch
         | SessionExpired
-        | SessionIdentityUnknown
         | InvalidPart
         | SingleRequestTooLarge { .. }
         | CopyTooLarge { .. }

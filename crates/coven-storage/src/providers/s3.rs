@@ -578,12 +578,7 @@ impl ProviderOps for S3Storage {
                 }
                 return Ok(());
             }
-            return self.completed(session).await.map_err(|error| match error.failure() {
-                StorageFailure::SessionExpired | StorageFailure::AlreadyExists => {
-                    StorageFailure::SessionIdentityUnknown.with_source(error)
-                }
-                _ => error,
-            });
+            return self.restart_shared_plan(session).await;
         }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
         let mut marker = None;
@@ -667,7 +662,7 @@ impl ProviderOps for S3Storage {
             // A restored marked plan resumes first, and one whose start this
             // process sent may have started an upload already.
             if *started == PlanStart::MayHaveStarted {
-                return Err(StorageFailure::SessionIdentityUnknown.into());
+                return Err(StorageFailure::SessionMismatch.into());
             }
             // Until it settles, the start may go out at any moment.
             *started = PlanStart::MayHaveStarted;
@@ -787,6 +782,11 @@ impl ProviderOps for S3Storage {
         if let SessionState::S3Planned { started, .. } = session.state {
             // Nothing is at the name of a plan whose first part was never sent.
             if started != PlanStart::MayHaveStarted {
+                return Ok(());
+            }
+            // At a shared name nothing tells a stray from another device's
+            // upload: the plan ends nothing and is forgotten (Appendix E.10).
+            if !self.owns_session_key(session) {
                 return Ok(());
             }
             let aborted = self.abort_initiated(publication, session).await;

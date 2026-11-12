@@ -47,7 +47,10 @@ recording without its native upload ID, whose first part may have started an
 upload whose reply was lost or never recorded, recovers or aborts by aborting
 every upload at its name, only where that name is its own: its private staging
 path, or a destination in its device's file or snapshot folders. At a shared
-destination it returns `SessionIdentityUnknown` and retains the recording. It
+destination it aborts nothing and lists nothing: it reads the destination. Its
+own marker there means its bytes are published; another object is
+`AlreadyExists`; an empty destination starts a fresh session at the same name,
+beside the upload the lost start may have begun, which can never publish. It
 never aborts another claimant’s upload.
 OneDrive records a temporary UUID under `<store>/.coven-uploads/<device>/`, uploads there,
 then publishes with a conflict-refusing server-side copy and waits for its monitor.

@@ -709,20 +709,11 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     assert_eq!(connected.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     let mut resumed = UploadSession::decode(recording.as_bytes()).unwrap();
     let copy = connected.provider().settings.copy_publication.multipart().is_some();
-    if copy {
-        // A private staging name identifies the initiation this journal owns.
-        connected.resume_upload(&mut resumed).await.unwrap();
-        assert_eq!(resumed.confirmed_bytes(), 0);
-    } else {
-        // A shared slot cannot identify which unfinished initiation is ours.
-        assert_eq!(
-            connected.resume_upload(&mut resumed).await.unwrap_err().failure(),
-            StorageFailure::SessionIdentityUnknown
-        );
-        resumed = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
-        connected.resume_upload(&mut resumed).await.unwrap();
-        assert_eq!(resumed.confirmed_bytes(), part_size as u64);
-    }
+    // A recording without its native id starts fresh: a private staging name
+    // identifies the initiation this journal owns, and a shared slot is read
+    // instead of asking about uploads.
+    connected.resume_upload(&mut resumed).await.unwrap();
+    assert_eq!(resumed.confirmed_bytes(), 0);
     let confirmed = resumed.confirmed_bytes() as usize;
     for part in bytes[confirmed..].chunks(part_size) {
         connected.upload_part(&mut resumed, part).await.unwrap();

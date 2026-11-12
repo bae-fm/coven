@@ -450,7 +450,6 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
         | InviteeIsStoreOwner
         | InvitationMismatch
         | SessionMismatch
-        | SessionIdentityUnknown
         | InvalidPart
         | SingleRequestTooLarge { .. }
         | CopyTooLarge { .. }
