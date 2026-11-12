@@ -69,6 +69,10 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the table holds one row"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>
     Some("the view lists every pending record"),
+("database_local_bytes.rs", "SELECT namespace,bytes,cached,pinned FROM _coven_cache_budgets ORDER BY namespace", "_coven_cache_budgets") =>
+    Some("every namespace's budget and counters, one row per namespace the app declared"),
+("database_local_bytes.rs", "SELECT coalesce(sum(size),0) FROM _coven_cache_partials", "_coven_cache_partials") =>
+    Some("the sum over every partial download, which is the figure asked for"),
 ("operation.rs", "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation", "_coven_app_operations") =>
     Some("only once this device's removal applies, ending every operation the app's writes journaled that still runs"),
 ("operation.rs", "SELECT EXISTS(SELECT 1 FROM _coven_held_keys)", "_coven_held_keys") =>
