@@ -136,6 +136,13 @@ pub(super) async fn unfinished_joins(
                 }
                 .into())
             }
+            CodeInfo::Pairing(_) => {
+                return Err(CodeError::WrongKind {
+                    expected: CodeKind::Invite,
+                    actual: CodeKind::Pairing,
+                }
+                .into())
+            }
         };
         CodeError::require_store(store, info.metadata.store_id)?;
         joins.push(info);

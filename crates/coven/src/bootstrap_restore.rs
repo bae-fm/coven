@@ -241,6 +241,13 @@ pub(crate) async fn unfinished_restores(
                 }
                 .into())
             }
+            CodeInfo::Pairing(_) => {
+                return Err(CodeError::WrongKind {
+                    expected: CodeKind::Restore,
+                    actual: CodeKind::Pairing,
+                }
+                .into())
+            }
         };
         CodeError::require_store(store, metadata.store_id)?;
         restores.push(metadata);

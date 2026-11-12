@@ -117,7 +117,7 @@ pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageCheckError};
 pub use coven_sync::{
     decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, InviteKind, Joiner,
-    UnreadableSavedCode,
+    PairingInfo, UnreadableSavedCode,
 };
 pub use coven_sync::{
     Circle, CircleMemberInfo, CutOffRefusal, DamagedObject, DeviceIdEvidence, DeviceInfo,

@@ -1,5 +1,6 @@
 use super::*;
 use coven_crypto::{InviteSecret, SecretBytes, SecretText};
+use coven_format::codes::PairingCode;
 use coven_foundation::id_source::{DeviceId, InviteId, KeyId};
 use coven_storage::{RestoreStorage, S3Credentials, StorageConfig, StorageInvitation};
 
@@ -35,6 +36,85 @@ fn invite(storage: InviteStorage) -> InviteCode {
         read_through: 12,
         storage: storage.encode().unwrap(),
     }
+}
+
+fn pairing(storage: RestoreStorage) -> PairingCode {
+    PairingCode {
+        store: StoreId(uuid::Uuid::from_u128(1)),
+        expires_at: 1_800,
+        pairing: InviteId(uuid::Uuid::from_u128(5)),
+        member: MemberId(uuid::Uuid::from_u128(6)),
+        secret: InviteSecret::generate().unwrap(),
+        showing: DeviceId(4),
+        storage: storage.encode().unwrap(),
+    }
+}
+
+#[test]
+fn a_pairing_code_says_whether_it_carries_the_s3_key() {
+    let qr = pairing(RestoreStorage { location: location(), s3_key: Some(credentials()) });
+    let shared = pairing(RestoreStorage::location_only(location()));
+    let info = decode_code_info(&qr.to_text().unwrap()).unwrap();
+    assert!(info.metadata().carries_s3_key);
+    assert_eq!(info.metadata().location, location());
+    assert_eq!(info.metadata().member, qr.member);
+    assert_eq!(info.metadata().store_id, qr.store);
+    assert!(!format!("{info:?}").contains("secret"));
+    let info = decode_code_info(&shared.to_text().unwrap()).unwrap();
+    assert!(!info.metadata().carries_s3_key);
+    assert_eq!(info.metadata().cloud_provider, CloudProvider::S3);
+    assert!(matches!(info, CodeInfo::Pairing(_)), "reported as a pairing: {info:?}");
+}
+
+#[test]
+fn a_pairing_code_reports_its_end_and_a_dropbox_location_with_its_sign_in() {
+    let dropbox = StorageConfig::Dropbox {
+        account_label: Some("ana@example.com".into()),
+        location: coven_storage::DropboxLocation::AppFolder,
+        folder_label: None,
+    };
+    let code = pairing(RestoreStorage::location_only(dropbox.clone()));
+    let info = decode_code_info(&code.to_text().unwrap()).unwrap();
+    assert_eq!(info.metadata().location, dropbox);
+    assert_eq!(
+        info.metadata().oauth_access,
+        Some(OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder))
+    );
+    assert!(!info.metadata().carries_s3_key);
+    let CodeInfo::Pairing(info) = info else { panic!("not a pairing") };
+    assert_eq!(info.expires_at, std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800));
+}
+
+#[test]
+fn a_pairing_code_is_neither_a_restore_nor_an_invite_code() {
+    let text = pairing(RestoreStorage::location_only(location())).to_text().unwrap();
+    let Err(CodeError::WrongKind { expected: CodeKind::Restore, actual }) =
+        read_restore_code(&text)
+    else {
+        panic!("a pairing code read as a restore code")
+    };
+    assert_eq!(actual, CodeKind::Pairing);
+    let Err(CodeError::WrongKind { expected: CodeKind::Invite, actual }) = read_invite_code(&text)
+    else {
+        panic!("a pairing code read as an invite code")
+    };
+    assert_eq!(actual, CodeKind::Pairing);
+    let pairing_read = read_pairing_code(&text).unwrap();
+    assert_eq!(pairing_read.showing, DeviceId(4));
+    let restore = RestoreCode {
+        store: StoreId(uuid::Uuid::from_u128(1)),
+        member: MemberId(uuid::Uuid::from_u128(1)),
+        member_keys: coven_crypto::MemberKeys::generate().unwrap(),
+        storage: RestoreStorage::location_only(location()).encode().unwrap(),
+    }
+    .to_text()
+    .unwrap();
+    assert!(matches!(
+        read_pairing_code(&restore),
+        Err(CodeError::WrongKind { expected: CodeKind::Pairing, actual: CodeKind::Restore })
+    ));
+    let truncated = &text[..text.len() - 1];
+    assert!(matches!(decode_code_info(truncated), Err(CodeError::Invalid)));
 }
 
 #[test]
@@ -162,6 +242,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                     kind: InviteKind::NewPerson,
                     expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400),
                 }),
+                CodeKind::Pairing => unreachable!("this loop reads a restore and an invite"),
             }
         });
         assert!(!format!("{:?}", decode_code_info(text).unwrap()).contains("secret"));

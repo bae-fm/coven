@@ -1,10 +1,10 @@
 //! Checked code metadata used by bootstrap (E10).
 
-use coven_format::codes::{InviteCode, InviteKind, RestoreCode};
+use coven_format::codes::{InviteCode, InviteKind, PairingCode, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
 use coven_storage::{CloudProvider, InviteStorage, OAuthAccess, RestoreStorage, StorageConfig};
 
-/// The two codes that can open a store on a new device.
+/// The three codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
     /// This person's member id and current private pair, store id and
@@ -13,6 +13,9 @@ pub enum CodeKind {
     /// A one-time request carrying the chosen member id, initial key,
     /// inviting writer and its published key-copy number; approval is required.
     Invite,
+    /// A one-time request from the person's own new device, to a device of
+    /// theirs that shows the code; it holds no keys and approval is required.
+    Pairing,
 }
 
 /// Code metadata safe for presentation before opening the store.
@@ -23,15 +26,29 @@ pub enum CodeInfo {
     /// An invite carries the store's name captured when the admin made it
     /// and whether it adds a new person or recovers a member.
     Invite(InviteInfo),
+    /// A pairing code reveals no name either, and holds no keys.
+    Pairing(PairingInfo),
 }
 
 impl CodeInfo {
-    /// The store id, member and provider facts carried by either kind of code.
+    /// The store id, member and provider facts carried by every kind of code.
     pub fn metadata(&self) -> &CodeMetadata {
         match self {
-            Self::Restore(metadata) | Self::Invite(InviteInfo { metadata, .. }) => metadata,
+            Self::Restore(metadata)
+            | Self::Invite(InviteInfo { metadata, .. })
+            | Self::Pairing(PairingInfo { metadata, .. }) => metadata,
         }
     }
+}
+
+/// What a pairing code tells before connecting (§13.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairingInfo {
+    /// The person's own member id, and the sign-in the new device needs.
+    pub metadata: CodeMetadata,
+    /// When the pairing ends, by the showing device's clock, to the second:
+    /// the new device sends no first request after it.
+    pub expires_at: std::time::SystemTime,
 }
 
 /// What an invite code tells before connecting: as typed or scanned, and as a
@@ -54,13 +71,13 @@ pub struct InviteInfo {
     pub expires_at: std::time::SystemTime,
 }
 
-/// Store, member and provider facts shared by both code kinds.
+/// Store, member and provider facts shared by every code kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeMetadata {
     /// The shared store's identity.
     pub store_id: StoreId,
-    /// The stable member id either kind of code fixes: the restoring
-    /// person's own, or the one the invite's admin chose (§13).
+    /// The stable member id every kind of code fixes: the restoring or
+    /// pairing person's own, or the one the invite's admin chose (§13).
     pub member: MemberId,
     /// The storage provider.
     pub cloud_provider: CloudProvider,
@@ -69,8 +86,8 @@ pub struct CodeMetadata {
     /// The sign-in required by this code; S3 and CloudKit do not use OAuth.
     pub oauth_access: Option<OAuthAccess>,
     /// Whether the code carries an S3 key, so the device asks for none: an S3
-    /// invite always does, and a restore code when the person's own device
-    /// put the key it holds in it (§13.1).
+    /// invite always does, and so does an S3 pairing's QR code. No restore
+    /// code a person sees does (§13.1).
     pub carries_s3_key: bool,
 }
 
@@ -78,7 +95,7 @@ pub struct CodeMetadata {
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum CodeError {
     /// Encoding, checksum or provider payload validation failed.
-    #[error("invalid restore or invite code")]
+    #[error("invalid restore, invite or pairing code")]
     Invalid,
     /// A valid code names the other operation.
     #[error("expected {expected:?} code, received {actual:?}")]
@@ -140,6 +157,10 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
             kind: code.kind,
             expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
         }),
+        DecodedCode::Pairing(code) => CodeInfo::Pairing(PairingInfo {
+            metadata: metadata(code.store, code.member),
+            expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
+        }),
     })
 }
 
@@ -148,9 +169,8 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
 pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
     match decode(code)?.0 {
         DecodedCode::Restore(code) => Ok(code),
-        DecodedCode::Invite(_) => {
-            Err(CodeError::WrongKind { expected: CodeKind::Restore, actual: CodeKind::Invite })
-        }
+        DecodedCode::Invite(_) => wrong_kind(CodeKind::Restore, CodeKind::Invite),
+        DecodedCode::Pairing(_) => wrong_kind(CodeKind::Restore, CodeKind::Pairing),
     }
 }
 
@@ -158,15 +178,28 @@ pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
 pub fn read_invite_code(code: &str) -> Result<InviteCode, CodeError> {
     match decode(code)?.0 {
         DecodedCode::Invite(code) => Ok(code),
-        DecodedCode::Restore(_) => {
-            Err(CodeError::WrongKind { expected: CodeKind::Invite, actual: CodeKind::Restore })
-        }
+        DecodedCode::Restore(_) => wrong_kind(CodeKind::Invite, CodeKind::Restore),
+        DecodedCode::Pairing(_) => wrong_kind(CodeKind::Invite, CodeKind::Pairing),
     }
+}
+
+/// Decode a pairing code for the new device after validating provider admission.
+pub fn read_pairing_code(code: &str) -> Result<PairingCode, CodeError> {
+    match decode(code)?.0 {
+        DecodedCode::Pairing(code) => Ok(code),
+        DecodedCode::Restore(_) => wrong_kind(CodeKind::Pairing, CodeKind::Restore),
+        DecodedCode::Invite(_) => wrong_kind(CodeKind::Pairing, CodeKind::Invite),
+    }
+}
+
+fn wrong_kind<T>(expected: CodeKind, actual: CodeKind) -> Result<T, CodeError> {
+    Err(CodeError::WrongKind { expected, actual })
 }
 
 enum DecodedCode {
     Restore(RestoreCode),
     Invite(InviteCode),
+    Pairing(PairingCode),
 }
 
 #[expect(
@@ -189,6 +222,12 @@ fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool), CodeError> {
                 InviteStorage::S3 { invitation, .. } => (invitation, true),
             };
         Ok((DecodedCode::Invite(code), invitation.location().clone(), carries_s3_key))
+    } else if text.starts_with(PairingCode::TEXT_PREFIX) {
+        let code = PairingCode::from_text(text).map_err(|_| CodeError::Invalid)?;
+        let storage =
+            RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
+        let carries_s3_key = storage.s3_key.is_some();
+        Ok((DecodedCode::Pairing(code), storage.location, carries_s3_key))
     } else {
         Err(CodeError::Invalid)
     }

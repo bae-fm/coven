@@ -437,7 +437,7 @@ async fn the_key_in_the_transfer_code_is_the_one_this_device_uses_now() {
         let mut written = decode_code_info(&code).unwrap();
         match &mut written {
             CodeInfo::Restore(metadata) => metadata.carries_s3_key = true,
-            CodeInfo::Invite(_) => panic!("a restore code"),
+            CodeInfo::Invite(_) | CodeInfo::Pairing(_) => panic!("a restore code"),
         }
         written
     });
