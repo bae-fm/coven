@@ -105,6 +105,13 @@ def managed (s : State M C) (c : C) (author : M) (act : Circle M → Outcome M C
     if (s.deleted c).isSome then .refused .goneCircle
     else if author ∈ x.members then act x else .refused .notAllowed
 
+/-- Whether `author` may take `m` out of a circle with members `x`. The entry
+introduces the circle's new key, which its author makes: a member removing
+themselves while others stay would know the key meant to shut them out
+(§15.8). -/
+def mayLeave (author m : M) (x : Circle M) : Bool :=
+  !(decide (m = author) && decide (1 < x.members.length))
+
 def changeEffect (s : State M C) (k : Nat) (author : M) (change : Change M C) : Outcome M C :=
   if s.standing author ≠ .active then .refused .notAllowed else
   match change with
@@ -121,7 +128,9 @@ def changeEffect (s : State M C) (k : Nat) (author : M) (change : Change M C) : 
     else if m ∈ x.members then .unchanged
     else .applied (s.set c { x with members := x.members ++ [m] })
   | .remove c m => managed s c author fun x =>
-    if m ∈ x.members then .applied (s.leave k m (· == c)) else .unchanged
+    if m ∈ x.members then
+      if mayLeave author m x then .applied (s.leave k m (· == c)) else .refused .notAllowed
+    else .unchanged
 
 def removalEffect (s : State M C) (k : Nat) (m : M) : Outcome M C :=
   match s.standing m with
@@ -278,8 +287,11 @@ theorem effect_names (s : State M C) (k : Nat) (e : Entry M C) (c : C) :
           · simp [effect, changeEffect, managed, active, h, gone, Names]
           · by_cases member : a ∈ x.members
             · by_cases leaves : m ∈ x.members
-              · simp [naming, effect, changeEffect, managed, active, h, gone, member, leaves,
-                  Names, leave_name]
+              · by_cases may : mayLeave a m x = true
+                · simp [naming, effect, changeEffect, managed, active, h, gone, member, leaves,
+                    may, Names, leave_name]
+                · simp [naming, effect, changeEffect, managed, active, h, gone, member, leaves,
+                    may, Names]
               · simp [naming, effect, changeEffect, managed, active, h, gone, member, leaves,
                   Names]
             · simp [effect, changeEffect, managed, active, h, gone, member, Names]
@@ -473,7 +485,9 @@ theorem effect_moves (s : State M C) (k : Nat) (e : Entry M C) (next : State M C
           · cases applied
           · split at applied
             · split at applied
-              · cases applied; exact leave_moves s k m _ c
+              · split at applied
+                · cases applied; exact leave_moves s k m _ c
+                · cases applied
               · cases applied
             · cases applied
 
@@ -557,11 +571,13 @@ theorem leaving_deletes (s : State M C) (k : Nat) (a m : M) (c : C) (x : Circle 
     · rename_i live
       split at applied
       · split at applied
-        · rename_i member
-          cases applied
-          have live : s.deleted c = none := by simpa using live
-          rw [leave_deleted]
-          simp [live, made, emptied, List.isEmpty_iff, erase_nil_iff (List.ne_nil_of_mem member)]
+        · split at applied
+          · rename_i member _
+            cases applied
+            have live : s.deleted c = none := by simpa using live
+            rw [leave_deleted]
+            simp [live, made, emptied, List.isEmpty_iff, erase_nil_iff (List.ne_nil_of_mem member)]
+          · cases applied
         · cases applied
       · cases applied
 

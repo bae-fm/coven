@@ -527,7 +527,9 @@ already in place, or gives the state its slot commits; the refusals are
 `NotAllowed` and `TargetGone` naming the circle or the member, in the order
 `checked_change` makes them. A removal's admin authority is `Authority`'s, and
 the author's device acting for the author is §10's check, so the model takes
-the author's standing alone.
+the author's standing alone. A removal from a circle introduces the circle's new
+key (§15.8), which its author makes, so a member removing themselves while
+others stay is refused as `NotAllowed` (`mayLeave`).
 
 - `name_is_latest_rename`: a circle's name is its creation's, then each valid
   rename's in slot order. A refused rename, by someone outside the circle or

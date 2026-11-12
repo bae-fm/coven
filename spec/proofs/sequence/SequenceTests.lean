@@ -676,7 +676,7 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField refused ["6","shared"] (toJson false)
   rejects (case ["wave"])
 
--- Ben (2) makes Gifts and adds Cy (3); Cy renames it. Ben leaves, and the
+-- Ben (2) makes Gifts and adds Cy (3); Cy renames it. Cy removes Ben, and the
 -- store's removal of Cy, its last member, deletes it at slot 5. After that a
 -- rename by Ben, who is still in the store, an addition by Ana (1) and making
 -- a circle under its id find it gone; Cy, removed, is refused before that, and
@@ -689,7 +689,7 @@ def keyCase (slots held current : List Json) : Json := json% {
     entry "create" 2 1 [("name", toJson "Gifts")],
     entry "add" 2 1 [("member", toJson 3)],
     entry "rename" 3 1 [("name", toJson "Presents")],
-    entry "remove" 2 1 [("member", toJson 2)],
+    entry "remove" 3 1 [("member", toJson 2)],
     json% {"kind": "removeMember", "member": 3},
     entry "rename" 2 1 [("name", toJson "Again")],
     entry "add" 1 1 [("member", toJson 2)],
@@ -710,6 +710,21 @@ def keyCase (slots held current : List Json) : Json := json% {
     checkField out (slots ++ [toString i, "outcome"]) (toJson outcome)
   checkField out (slots ++ ["9", "circles"])
     (json% [[1, {"name": "Presents", "members": [], "deleted": 5}]])
+  -- A member can't remove themselves while others stay: the removal's new key
+  -- would be one they made. Left alone, they can.
+  let selfLeave ← run (json% {"kind": "circleLifecycle", "people": [1, 2, 3], "active": [1, 2, 3],
+    "circles": [1], "histories": [[
+      {"kind": "create", "author": 2, "circle": 1, "name": "Gifts"},
+      {"kind": "add", "author": 2, "circle": 1, "member": 3},
+      {"kind": "remove", "author": 2, "circle": 1, "member": 2},
+      {"kind": "remove", "author": 3, "circle": 1, "member": 2},
+      {"kind": "remove", "author": 3, "circle": 1, "member": 3}]]})
+  checkField selfLeave ["0", "2", "outcome"] (toJson "notAllowed")
+  checkField selfLeave ["0", "2", "circles"]
+    (json% [[1, {"name": "Gifts", "members": [2, 3], "deleted": null}]])
+  checkField selfLeave ["0", "3", "outcome"] (toJson "applied")
+  checkField selfLeave ["0", "4", "circles"]
+    (json% [[1, {"name": "Gifts", "members": [], "deleted": 5}]])
   rejects (json% {"kind": "circleLifecycle", "people": [1], "active": [1], "circles": [1],
     "histories": [[{"kind": "add", "author": 1, "circle": 1, "member": 2}]]})
 
