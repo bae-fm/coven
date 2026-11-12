@@ -194,11 +194,19 @@ import CovenStorage
 #print axioms CovenStorage.CopyPublication.Recorded.initiation_reply_loss_keeps_identity
 #print axioms CovenStorage.CopyPublication.Recorded.unrecorded_initiation_strands
 
-#print axioms CovenStorage.FloorUpload.receive_preserves_condition
-#print axioms CovenStorage.FloorUpload.incomplete_keeps_floor
 #print axioms CovenStorage.FloorUpload.stale_keeps_floor
 #print axioms CovenStorage.FloorUpload.stored_whole
 #print axioms CovenStorage.FloorUpload.one_winner
+#print axioms CovenStorage.FloorPointer.steps_good
+#print axioms CovenStorage.FloorPointer.reachable_good
+#print axioms CovenStorage.FloorPointer.pointer_names_published
+#print axioms CovenStorage.FloorPointer.named_body_kept
+#print axioms CovenStorage.FloorPointer.delete_keeps_pointer
+#print axioms CovenStorage.FloorPointer.refused_replace_keeps_pointer
+#print axioms CovenStorage.FloorPointer.one_pointer_winner
+#print axioms CovenStorage.FloorPointer.late_create_unread
+#print axioms CovenStorage.FloorPointer.pointer_moves_to_journaled
+#print axioms CovenStorage.FloorPointer.delete_own_unnamed
 
 #print axioms CovenStorage.UploadSession.steps_good
 #print axioms CovenStorage.UploadSession.reachable_good

@@ -14,5 +14,6 @@ import CovenStorage.RowAuthorship
 import CovenStorage.CellProof
 import CovenStorage.CopyPublication
 import CovenStorage.FloorUpload
+import CovenStorage.FloorPointer
 import CovenStorage.UploadSession
 import CovenStorage.ProviderAccess

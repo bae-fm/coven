@@ -1,9 +1,9 @@
 import CovenStorage.Objects
 
-/-! Conditional publication of one floor. Native staging is invisible; a provider
-may commit with its last part or with a separate completion request. Both are
-represented by `publish`, after all bytes have arrived. Atomic comparison with
-the observed revision is a provider premise, not a theorem about its service. -/
+/-! Conditional replacement of the floor pointer, one request. The pointer is a
+small record: it fits one provider request, so there are no parts and no staging
+to model. Atomic comparison with the observed revision is a provider premise,
+not a theorem about its service. -/
 namespace CovenStorage.FloorUpload
 
 structure Store where
@@ -21,49 +21,35 @@ def Condition.holds (condition : Condition) (store : Store) : Bool :=
   | .absent => store.bytes.isNone
   | .observed revision => store.bytes.isSome && store.revision == revision
 
-structure Upload where
+/-- A pointer write: the condition its writer read the floor under, and its
+complete bytes. -/
+structure Write where
   condition : Condition
-  total : Nat
-  received : Bytes
+  bytes : Bytes
   deriving DecidableEq, Repr
-
-/-- Receiving more bytes preserves the original publication condition. -/
-def receive (upload : Upload) (part : Bytes) : Upload :=
-  { upload with received := upload.received ++ part }
 
 inductive Outcome where
   | stored
-  | incomplete
   | conflict
   deriving DecidableEq, Repr
 
-/-- The complete bytes become the one floor only while the original condition
-holds. A fresh revision prevents a later retry from replacing another write. -/
-def publish (store : Store) (upload : Upload) : Store × Outcome :=
-  if upload.total = 0 ∨ upload.received.length ≠ upload.total then (store, .incomplete)
-  else if upload.condition.holds store then
-    (⟨store.revision + 1, some upload.received⟩, .stored)
+/-- The bytes become the one pointer only while the condition holds. A fresh
+revision prevents a later retry from replacing another write. -/
+def publish (store : Store) (write : Write) : Store × Outcome :=
+  if write.bytes = [] then (store, .conflict)
+  else if write.condition.holds store then
+    (⟨store.revision + 1, some write.bytes⟩, .stored)
   else (store, .conflict)
 
-theorem receive_preserves_condition (upload : Upload) (part : Bytes) :
-    (receive upload part).condition = upload.condition := rfl
+theorem stale_keeps_floor (store : Store) (write : Write) (nonempty : write.bytes ≠ [])
+    (stale : write.condition.holds store = false) :
+    publish store write = (store, .conflict) := by
+  simp [publish, nonempty, stale]
 
-theorem incomplete_keeps_floor (store : Store) (upload : Upload)
-    (incomplete : upload.received.length ≠ upload.total) :
-    publish store upload = (store, .incomplete) := by
-  simp [publish, incomplete]
-
-theorem stale_keeps_floor (store : Store) (upload : Upload)
-    (complete : upload.received.length = upload.total) (nonempty : upload.total ≠ 0)
-    (stale : upload.condition.holds store = false) :
-    publish store upload = (store, .conflict) := by
-  simp [publish, complete, nonempty, stale]
-
-theorem stored_whole (store : Store) (upload : Upload)
-    (stored : (publish store upload).2 = .stored) :
-    upload.received.length = upload.total ∧ upload.total ≠ 0 ∧
-      upload.condition.holds store = true ∧
-      (publish store upload).1.bytes = some upload.received := by
+theorem stored_whole (store : Store) (write : Write)
+    (stored : (publish store write).2 = .stored) :
+    write.bytes ≠ [] ∧ write.condition.holds store = true ∧
+      (publish store write).1.bytes = some write.bytes := by
   unfold publish at stored ⊢
   split
   · simp_all
@@ -72,20 +58,20 @@ theorem stored_whole (store : Store) (upload : Upload)
     · simp_all
 
 /-- Once one writer succeeds, the same absent/revision condition cannot succeed
-again, regardless of the second writer's bytes or transfer progress. -/
-theorem one_winner (store : Store) (first second : Upload)
+again, regardless of the second writer's bytes. -/
+theorem one_winner (store : Store) (first second : Write)
     (same : second.condition = first.condition)
     (stored : (publish store first).2 = .stored) :
     (publish (publish store first).1 second).2 ≠ .stored := by
-  have allowed := (stored_whole store first stored).2.2.1
-  have after : (publish store first).1 = ⟨store.revision + 1, some first.received⟩ := by
+  have allowed := (stored_whole store first stored).2.1
+  have after : (publish store first).1 = ⟨store.revision + 1, some first.bytes⟩ := by
     unfold publish at stored ⊢
     split <;> simp_all
   rw [after]
   unfold publish
   split
   · simp
-  · have refused : second.condition.holds ⟨store.revision + 1, some first.received⟩ = false := by
+  · have refused : second.condition.holds ⟨store.revision + 1, some first.bytes⟩ = false := by
       rw [same]
       cases hc : first.condition with
       | absent => simp [Condition.holds]

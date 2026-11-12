@@ -52,21 +52,42 @@ setup pass, and `reconnect_refuses_other` refuses another store at a claimed
 location. `createRunner` compares setup and reconnect with the S3, Dropbox and
 OneDrive adapters' request-level tests.
 
-## Conditional floor uploads
+## The floor pointer
 
-[FloorUpload.lean](storage/CovenStorage/FloorUpload.lean) models the floor as one
-object with a revision. Each upload retains either an absent-path condition or
-the revision it originally observed. Receiving parts cannot change that condition.
-Incomplete or stale publication leaves the floor unchanged; successful publication
-stores the whole object. Two uploads sharing one condition cannot both publish.
+[FloorUpload.lean](storage/CovenStorage/FloorUpload.lean) models the floor pointer
+as one small record with a revision, replaced in one request. Each write retains
+either an absent-path condition or the revision its writer observed. A stale
+replacement leaves the pointer unchanged; a successful one stores the whole
+record. Two writes sharing one condition cannot both succeed (`stale_keeps_floor`,
+`stored_whole`, `one_winner`). The model assumes atomic comparison at
+replacement and a fresh revision for new pointer bytes. It does not prove a
+provider's implementation. `floorUploadRunner` compares production storage calls
+with the model through `COVEN_FLOOR_UPLOAD_LEAN`.
 
-The model assumes invisible staging, atomic comparison at publication and a fresh
-revision for new floor bytes. It does not prove a provider's implementation or
-local journal persistence. `floorUploadRunner` compares interleaved production
-storage calls, including serialized session restoration, with the model through
-`COVEN_FLOOR_UPLOAD_LEAN`. Native request tests check the provider conditions;
-sequence tests check that failed parts, uncertain replies and failed cleanup
-retain the journal and prevent early slot deletion.
+[FloorPointer.lean](storage/CovenStorage/FloorPointer.lean) models the pointer
+with the bodies it names. Each body is created once at a name of its writer's own
+(`floors/<device>/<n>`), and a device never uses a number twice. A device
+journals a floor write before it replaces the pointer, deletes a body only once
+the pointer no longer names it and no journaled write names it, and a device gone
+for good has its bodies cleared by another. The pointer always names a body in
+storage (`pointer_names_published`, `steps_good`), no step removes the body it
+names (`named_body_kept`), and deleting a body never moves it
+(`delete_keeps_pointer`). A replacement refused because the pointer moved first
+leaves it as it was (`refused_replace_keeps_pointer`), so its writer deletes its
+own new body without touching anything named (`delete_own_unnamed`); of two
+replacements under one observed revision only one moves the pointer
+(`one_pointer_winner`). A deleted name is empty again, and a delayed create can
+recreate a body there; nothing reads it, because readers follow the pointer
+(`late_create_unread`) and the pointer moves only to a body its writer journaled
+(`pointer_moves_to_journaled`). A body upload no record names is a stray at a
+name only its device looks at, which the upload session's sweep ends
+(`open_sweeps`, [UploadSession.lean](storage/CovenStorage/UploadSession.lean)).
+`floorPointerRunner` compares the memory provider's body creates, conditional
+pointer replacements and deletes with the model.
+
+Native request tests check the provider conditions; sequence tests check that
+failed uploads, uncertain replies and failed cleanup retain the journal and
+prevent early slot deletion.
 
 ## Files
 
