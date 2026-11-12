@@ -792,6 +792,10 @@ impl FixedClock {
     /// Set the time every subsequent read returns, including a backward jump.
     pub fn set(&self, now: SystemTime);
 
+    /// Move the time forward by exactly `by`: elapsed time gains `by` whole,
+    /// whatever resolution the platform's `SystemTime` has.
+    pub fn advance(&self, by: Duration);
+
     /// How many deadlines and waits have begun on this clock so far.
     pub fn sleeps_begun(&self) -> u64;
 
@@ -802,8 +806,8 @@ impl FixedClock {
         -> impl Future<Output = (u64, Duration)> + Send + 'static;
 }
 
-/// A `FixedClock` whose backoffs pass as the code arms them: `wait_out` moves
-/// the fixed clock to the wait's end. Deadlines and idle intervals end only
+/// A `FixedClock` whose backoffs pass as the code arms them: `wait_out` advances
+/// the fixed clock by the wait. Deadlines and idle intervals end only
 /// when the test moves the clock, as does every wait once held.
 #[cfg(feature = "test-utils")]
 pub struct PollingClock(/* private */);

@@ -212,6 +212,10 @@ pub struct FixedClock {
     /// How many sleeps have begun, and the latest one's deadline by
     /// `elapsed`.
     sleeps: tokio::sync::watch::Sender<(u64, Duration)>,
+    /// The resolution of the wall time, as Windows' 100 ns `SystemTime`
+    /// truncates what it is given; tests set it to run that rounding anywhere.
+    #[cfg(test)]
+    wall_tick: Duration,
 }
 
 #[cfg(feature = "test-utils")]
@@ -227,16 +231,49 @@ impl FixedClock {
         Self {
             time: tokio::sync::watch::channel(FixedTime { wall: now, elapsed: Duration::ZERO }).0,
             sleeps: tokio::sync::watch::channel((0, Duration::ZERO)).0,
+            #[cfg(test)]
+            wall_tick: Duration::ZERO,
         }
+    }
+
+    /// A clock whose wall times round down to whole `tick`s past the epoch.
+    #[cfg(test)]
+    fn with_wall_tick(now: SystemTime, tick: Duration) -> Self {
+        Self { wall_tick: tick, ..Self::new(now) }
+    }
+
+    /// `wall` as the platform's `SystemTime` keeps it.
+    fn representable(&self, wall: SystemTime) -> SystemTime {
+        #[cfg(test)]
+        if !self.wall_tick.is_zero() {
+            let since = wall.duration_since(std::time::UNIX_EPOCH).expect("times follow the epoch");
+            let tick = self.wall_tick.as_nanos();
+            let nanos = since.as_nanos() / tick * tick;
+            return std::time::UNIX_EPOCH
+                + Duration::from_nanos(u64::try_from(nanos).expect("test times fit"));
+        }
+        wall
     }
 
     /// Set the time every subsequent read returns, including a backward jump.
     pub fn set(&self, now: SystemTime) {
+        let now = self.representable(now);
         self.time.send_modify(|time| {
             if let Ok(elapsed) = now.duration_since(time.wall) {
                 time.elapsed += elapsed;
             }
             time.wall = now;
+        });
+    }
+
+    /// Move the time forward by exactly `by`, as sleeping that long would:
+    /// elapsed time gains `by` whole, though the wall time can only land on
+    /// a time the platform's `SystemTime` holds (Windows keeps 100 ns steps,
+    /// so a `set` to a sum with finer nanoseconds would fall short of `by`).
+    pub fn advance(&self, by: Duration) {
+        self.time.send_modify(|time| {
+            time.elapsed += by;
+            time.wall = self.representable(time.wall + by);
         });
     }
 

@@ -67,7 +67,7 @@ impl Clock for PollingClock {
         Box::pin(async move {
             let left = end.saturating_sub(clock.elapsed());
             if !left.is_zero() {
-                clock.set(clock.now() + left);
+                clock.advance(left);
             }
             woken.await;
         })

@@ -167,3 +167,32 @@ fn nextest_ends_a_test_a_period_after_the_hang_guard_fires() {
         "nextest ends a test at {terminate:?}, which leaves the {HANG_GUARD:?} hang guard too little time to report"
     );
 }
+
+/// Windows' `SystemTime` keeps 100 ns steps, so a wall time `now + left` with
+/// finer nanoseconds lands short; the polling clock's wait must still reach
+/// its end. The clock here rounds its wall times to 100 ns on any platform.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn a_polling_wait_with_sub_tick_nanoseconds_reaches_its_end_on_a_coarse_wall_clock() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let fixed = Arc::new(FixedClock::with_wall_tick(
+        UNIX_EPOCH + Duration::from_secs(100),
+        Duration::from_nanos(100),
+    ));
+    let clock = PollingClock::new(fixed.clone());
+    let wait = Duration::from_nanos(1_234_567_891);
+    within(clock.wait_out(wait)).await.expect("the wait ends");
+    assert_eq!(fixed.elapsed(), wait);
+    assert_eq!(clock.waited(), vec![wait]);
+}
+
+#[cfg(feature = "test-utils")]
+#[test]
+fn advancing_a_fixed_clock_adds_the_exact_duration_to_elapsed() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let fixed = FixedClock::with_wall_tick(UNIX_EPOCH, Duration::from_nanos(100));
+    fixed.advance(Duration::from_nanos(150));
+    fixed.advance(Duration::from_nanos(150));
+    assert_eq!(fixed.elapsed(), Duration::from_nanos(300));
+    assert_eq!(fixed.now(), UNIX_EPOCH + Duration::from_nanos(200));
+}
