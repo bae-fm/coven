@@ -14,7 +14,11 @@ What happens to storage while devices read it:
   audience's snapshot is validly announced with its body stored, and the
   first kept slot is covered by every audience's snapshot;
 - retention deletes slots below the first kept slot, and snapshot bodies no
-  floor names and no raise or reset above the floor needs;
+  floor names and no raise or reset above the floor needs, and none that a
+  rebuild of a circle below the store's version starts from;
+- the first kept slot is no later than the slot after the store snapshot such
+  a rebuild starts from (`floor_within_caps_spares_rebuild`,
+  `Retention.first_spares_rebuild_store`);
 - a snapshot body is uploaded to a fresh path no applied raise or reset names.
 
 There is no separate step that advertises a floor before it takes effect:
@@ -33,7 +37,8 @@ inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
         AppliedTo R seq A (st.head + 1) →
         ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A))
       (hbody : ∀ A au v c p, seq (st.head + 1) = .boundary au A v c p → AppliedTo R seq A (st.head + 1) →
-        ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A)) :
+        ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A))
+      (hrebuild : RebuildKept R seq (st.head + 1) st.body st.floor.start) :
       StoreStep seq st
         { st with
           slot := fun i => if i = st.head + 1 then some (seq (st.head + 1)) else st.slot i
@@ -46,13 +51,19 @@ inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
       (hhead : ∀ A, F.covers A ≤ st.head)
       (hann : ∀ A, F.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ st.head ∧
         seq a = .snapshot au A (F.covers A) w (F.path A) ∧ AppliedTo R seq A a)
-      (hbody : ∀ A, st.body (F.path A) = some (stateAt R seq A (F.covers A))) :
+      (hbody : ∀ A, st.body (F.path A) = some (stateAt R seq A (F.covers A)))
+      (hspare : ∀ A a cs p, NeedsRebuild R seq st.head A → RebuildSnapshot R seq st.head A a cs p →
+        F.start ≤ cs + 1)
+      (hnone : ∀ A, NeedsRebuild R seq st.head A →
+        (¬ ∃ a cs p, RebuildSnapshot R seq st.head A a cs p) → F.start ≤ 1) :
       StoreStep seq st { st with floor := F }
   | delete (st : Store S) (i : Nat) (hi : i < st.floor.start) :
       StoreStep seq st { st with slot := fun j => if j = i then none else st.slot j }
   | deleteBody (st : Store S) (p : S.Path) (hp : ∀ A, p ≠ st.floor.path A)
       (hraise : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
-        r ≤ st.floor.covers A) :
+        r ≤ st.floor.covers A)
+      (hrebuild : ∀ A a cs q, NeedsRebuild R seq st.head A → RebuildSnapshot R seq st.head A a cs q →
+        p ≠ q) :
       StoreStep seq st { st with body := fun q => if q = p then none else st.body q }
   | upload (st : Store S) (p : S.Path) (b : Ledger S × AudLedger S × S.Rows) (hp : st.body p = none)
       (hfree : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → ¬ AppliedTo R seq A r) :
@@ -69,10 +80,10 @@ theorem store_mono {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
 theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R seq st st')
     (g : Good R st seq) : Good R st' seq := by
   cases s with
-  | claim hprepared hbody =>
+  | claim hprepared hbody hrebuild =>
     refine ⟨fun i h1 h2 => ?_, fun i hi => ?_, fun i hi => ?_, fun i hi => ?_, g.start_le,
       fun A => by simp only; have := g.covers_le A; omega, g.floor_body, fun A => ?_,
-      fun A r au v c p h1 h2 h3 h4 => ?_⟩
+      fun A r au v c p h1 h2 h3 h4 => ?_, hrebuild⟩
     · simp only at h2 ⊢
       by_cases hi : i = st.head + 1
       · simp [hi]
@@ -102,7 +113,7 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
       · exact g.boundary_body A r au v c p h1 (by omega) h3 h4
   | create i x hi hih =>
     refine ⟨g.first_genuine, g.first_out, fun j hj => ?_, fun j hj => ?_, g.start_le, g.covers_le,
-      g.floor_body, g.floor_announced, g.boundary_body⟩
+      g.floor_body, g.floor_announced, g.boundary_body, g.rebuild_kept⟩
     · simp only at hj ⊢
       by_cases hji : j = i
       · subst hji; omega
@@ -115,23 +126,26 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
         have hs : st.slot j = some (seq j) := hk.trans hf
         rw [Claim.create_self_some _ hs, hf]
       · rw [Claim.create_other _ hji]; exact hk
-  | writeFloor F hstart hcov hle hhead hann hbody =>
-    exact ⟨g.first_genuine, g.first_out, g.slot_out, fun j hj => g.kept_genuine j (by simp only at hj; omega),
+  | writeFloor F hstart hcov hle hhead hann hbody hspare hnone =>
+    refine ⟨g.first_genuine, g.first_out, g.slot_out, fun j hj => g.kept_genuine j (by simp only at hj; omega),
       hle, hhead, hbody, hann, fun A r au v c p h1 h2 h3 h4 =>
         ⟨fun hlt => (g.boundary_body A r au v c p h1 h2 h3 h4).1 (by have := hcov A; simp only at hlt; omega),
-         (g.boundary_body A r au v c p h1 h2 h3 h4).2⟩⟩
+         (g.boundary_body A r au v c p h1 h2 h3 h4).2⟩, fun A need => ?_⟩
+    exact ⟨fun a cs p snap => ⟨((g.rebuild_kept A need).1 a cs p snap).1, hspare A a cs p need snap⟩,
+      hnone A need⟩
   | delete i hi =>
     refine ⟨g.first_genuine, g.first_out, fun j hj => ?_, fun j hj => ?_, g.start_le, g.covers_le,
-      g.floor_body, g.floor_announced, g.boundary_body⟩
+      g.floor_body, g.floor_announced, g.boundary_body, g.rebuild_kept⟩
     · simp only; by_cases h : j = i
       · simp [h]
       · simp only [h, ite_false]; exact g.slot_out j hj
     · simp only at hj ⊢
       have : j ≠ i := by omega
       simp only [this, ite_false]; exact g.kept_genuine j hj
-  | deleteBody p hp hraise =>
+  | deleteBody p hp hraise hrebuild =>
     refine ⟨g.first_genuine, g.first_out, g.slot_out, g.kept_genuine, g.start_le, g.covers_le,
-      fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ⟨fun hlt => ?_, fun L' P' rows hb => ?_⟩⟩
+      fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ⟨fun hlt => ?_, fun L' P' rows hb => ?_⟩,
+      fun A need => ?_⟩
     · simp only [Ne.symm (hp A), ite_false]; exact g.floor_body A
     · by_cases hq : q = p
       · subst hq; have := hraise A r au v c h1 h2 h3 h4; simp only at hlt; omega
@@ -139,14 +153,22 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
     · by_cases hq : q = p
       · subst hq; simp at hb
       · simp only [hq, ite_false] at hb; exact (g.boundary_body A r au v c q h1 h2 h3 h4).2 L' P' rows hb
+    · refine ⟨fun a cs q snap => ?_, (g.rebuild_kept A need).2⟩
+      have kept := (g.rebuild_kept A need).1 a cs q snap
+      have ne : q ≠ p := fun h => hrebuild A a cs q need snap h.symm
+      exact ⟨by simp only [ne, ite_false]; exact kept.1, kept.2⟩
   | upload p b hp hfree =>
     refine ⟨g.first_genuine, g.first_out, g.slot_out, g.kept_genuine, g.start_le, g.covers_le,
-      fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ?_⟩
+      fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ?_, fun A need => ?_⟩
     · have hne : st.floor.path A ≠ p := by
         intro he; have := g.floor_body A; rw [he, hp] at this; cases this
       simp only [hne, ite_false]; exact g.floor_body A
     · have hne : q ≠ p := by intro he; subst he; exact hfree A r au v c h1 h2 h3 h4
       simp only [hne, ite_false]; exact g.boundary_body A r au v c q h1 h2 h3 h4
+    · refine ⟨fun a cs q snap => ?_, (g.rebuild_kept A need).2⟩
+      have kept := (g.rebuild_kept A need).1 a cs q snap
+      have hne : q ≠ p := by intro he; subst he; rw [hp] at kept; cases kept.1
+      exact ⟨by simp only [hne, ite_false]; exact kept.1, kept.2⟩
 
 /-- **Storage steps keep every sound reader sound**: its buffered records
 were checked against a floor that only moves forward. -/
@@ -166,6 +188,51 @@ theorem stores_good {seq : Nat → Slot S} {st st' : Store S} (run : StoreSteps 
   induction run with
   | refl => exact g
   | step s _ ih => exact ih (store_good R s g)
+
+/-- What holds the first kept slot back for the circle `A` that needs a
+rebuild: the coverage plus one of the store snapshot its rebuild starts from,
+or 1 when history holds none. -/
+def RebuildCap (seq : Nat → Slot S) (head : Nat) (A : S.Aud) (cap : Nat) : Prop :=
+  (∃ a cs p, RebuildSnapshot R seq head A a cs p ∧ cap = cs + 1) ∨
+    ((¬ ∃ a cs p, RebuildSnapshot R seq head A a cs p) ∧ cap = 1)
+
+/-- Every circle that needs a rebuild has a cap. -/
+theorem rebuild_cap_exists (seq : Nat → Slot S) (head : Nat) (A : S.Aud) :
+    ∃ cap, RebuildCap R seq head A cap := by
+  by_cases h : ∃ a cs p, RebuildSnapshot R seq head A a cs p
+  · obtain ⟨a, cs, p, snap⟩ := h
+    exact ⟨cs + 1, Or.inl ⟨a, cs, p, snap, rfl⟩⟩
+  · exact ⟨1, Or.inr ⟨h, rfl⟩⟩
+
+/-- **A first kept slot within every cap spares what rebuilds read.** A floor
+whose first kept slot is at most the cap of each circle that needs a rebuild
+leaves the store snapshot each starts from, and the slots after it, in
+storage: it meets the premises `StoreStep.writeFloor` takes about rebuilds.
+`Retention.sparedFirst` is a first kept slot of that kind. -/
+theorem floor_within_caps_spares_rebuild (seq : Nat → Slot S) (head : Nat) (F : Floor S)
+    (spared : ∀ A cap, NeedsRebuild R seq head A → RebuildCap R seq head A cap → F.start ≤ cap) :
+    (∀ A a cs p, NeedsRebuild R seq head A → RebuildSnapshot R seq head A a cs p →
+      F.start ≤ cs + 1) ∧
+    (∀ A, NeedsRebuild R seq head A → (¬ ∃ a cs p, RebuildSnapshot R seq head A a cs p) →
+      F.start ≤ 1) :=
+  ⟨fun A a cs p need snap => spared A (cs + 1) need (Or.inl ⟨a, cs, p, snap, rfl⟩),
+   fun A need none => spared A 1 need (Or.inr ⟨none, rfl⟩)⟩
+
+/-- **A circle that needs a rebuild finds the store snapshot to start from.**
+In good storage, the snapshot it starts from is in storage with its state,
+read as a sound reader of the store at its coverage, and every slot after the
+coverage is still kept. -/
+theorem rebuild_store_start {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S.Aud}
+    (need : NeedsRebuild R seq st.head A) {a cs : Nat} {p : S.Path}
+    (snap : RebuildSnapshot R seq st.head A a cs p) :
+    ∃ d : Reader S, ReaderOk R st seq R.store d ∧ d.pos = cs ∧
+      st.body p = some (d.ledger, d.aud, d.rows) ∧ st.floor.start ≤ d.pos + 1 := by
+  obtain ⟨hbody, hstart⟩ := (g.rebuild_kept A need).1 a cs p snap
+  obtain ⟨ha1, hahead, ⟨au, w, hs, _⟩, ⟨_, valid⟩⟩ := snap.1
+  rw [hs] at valid
+  simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid
+  refine ⟨⟨cs, ledgerAt R seq cs, audAt R seq R.store cs, rowsAt R seq R.store cs, fun _ => none⟩,
+    ⟨rfl, rfl, rfl, (by show cs ≤ st.head; omega), fun i x hb _ => by simp at hb⟩, rfl, hbody, hstart⟩
 
 /-- **The claimant's floor check.** A claimant that saw its bytes `x` at slot
 `i`, and then, after any storage steps, reads a floor whose first kept slot is
@@ -425,6 +492,63 @@ def floorFirst (current : Nat) (mature : List (Option Nat)) : Nat :=
   | some first => max current first
   | none => current
 
+theorem current_le_floorFirst (current : Nat) (mature : List (Option Nat)) :
+    current ≤ floorFirst current mature := by
+  unfold floorFirst
+  split <;> omega
+
+/-- `first` held back for the circles that need a rebuild: no further than any
+circle's cap (`CovenSequence.RebuildCap`), the coverage plus one of the store
+snapshot its rebuild starts from. -/
+def sparedFirst (current : Nat) (mature : List (Option Nat)) (caps : List Nat) : Nat :=
+  caps.foldl min (floorFirst current mature)
+
+theorem foldl_min_le_init (caps : List Nat) : ∀ init, caps.foldl min init ≤ init := by
+  induction caps with
+  | nil => intro init; exact Nat.le_refl _
+  | cons c rest ih =>
+    intro init
+    exact Nat.le_trans (ih (min init c)) (Nat.min_le_left _ _)
+
+theorem foldl_min_le_mem (caps : List Nat) : ∀ init {c : Nat}, c ∈ caps → caps.foldl min init ≤ c := by
+  induction caps with
+  | nil => intro init c h; simp at h
+  | cons x rest ih =>
+    intro init c h
+    rcases List.mem_cons.mp h with rfl | h
+    · exact Nat.le_trans (foldl_min_le_init rest _) (Nat.min_le_right _ _)
+    · exact ih (min init x) h
+
+theorem le_foldl_min (caps : List Nat) : ∀ init m, m ≤ init → (∀ c ∈ caps, m ≤ c) →
+    m ≤ caps.foldl min init := by
+  induction caps with
+  | nil => intro init m h _; exact h
+  | cons x rest ih =>
+    intro init m h hc
+    exact ih (min init x) m (Nat.le_min.mpr ⟨h, hc x List.mem_cons_self⟩)
+      (fun c hc' => hc c (List.mem_cons_of_mem _ hc'))
+
+theorem foldl_min_eq_init (caps : List Nat) : ∀ init, (∀ c ∈ caps, init ≤ c) →
+    caps.foldl min init = init := by
+  intro init h
+  exact Nat.le_antisymm (foldl_min_le_init caps init)
+    (le_foldl_min caps init init (Nat.le_refl _) h)
+
+/-- **`first` spares the store snapshots rebuilds start from.** Held back by
+the caps, `first` is no further than any cap or than the floor's choice
+without them, never moves back while the current `first` is within every cap
+(the rebuild snapshots stay), and is the floor's choice when no cap binds. -/
+theorem first_spares_rebuild_store (current : Nat) (mature : List (Option Nat)) (caps : List Nat)
+    (within : ∀ c ∈ caps, current ≤ c) :
+    sparedFirst current mature caps ≤ floorFirst current mature ∧
+    (∀ c ∈ caps, sparedFirst current mature caps ≤ c) ∧
+    current ≤ sparedFirst current mature caps ∧
+    ((∀ c ∈ caps, floorFirst current mature ≤ c) →
+      sparedFirst current mature caps = floorFirst current mature) :=
+  ⟨foldl_min_le_init caps _, fun _ hc => foldl_min_le_mem caps _ hc,
+   le_foldl_min caps _ _ (current_le_floorFirst current mature) within,
+   fun h => foldl_min_eq_init caps _ h⟩
+
 /-- **The combined floor meets `StoreStep.writeFloor`'s rules.** Name each
 audience's newest applicable snapshot and set `first` by `floorFirst` from the
 snapshots past grace. If the current floor's `first` is covered by its own
@@ -462,6 +586,28 @@ theorem floor_write_rules (relevant : List Aud) (catalog : Aud → List Snapshot
         subst this
         omega
     · omega
+
+/-- **The floor with `first` held back still meets its rules.** Holding `first`
+back for rebuilds, within every cap, moves it no further than the floor's
+choice, so it never moves back, and every name still covers the new
+`first - 1`. -/
+theorem floor_write_spared (relevant : List Aud) (catalog : Aud → List Snapshot)
+    (usable : Aud → Snapshot → Bool) (grace time current : Nat) (covers : Aud → Nat)
+    (caps : List Nat) (within : ∀ c ∈ caps, current ≤ c)
+    (ordered : ∀ a ∈ relevant,
+      (catalog a).Pairwise (fun newer older => older.covers ≤ newer.covers))
+    (kept : ∀ a ∈ relevant, current ≤ covers a + 1)
+    (named : ∀ a ∈ relevant, ∃ s, newest (catalog a) (usable a) = some s ∧ covers a ≤ s.covers) :
+    current ≤ sparedFirst current (selectedCoverage relevant catalog usable grace time) caps ∧
+    ∀ a ∈ relevant, ∃ s, newest (catalog a) (usable a) = some s ∧ covers a ≤ s.covers ∧
+      sparedFirst current (selectedCoverage relevant catalog usable grace time) caps ≤ s.covers + 1 := by
+  obtain ⟨_, hnames⟩ :=
+    floor_write_rules relevant catalog usable grace time current covers ordered kept named
+  obtain ⟨hle, _, hcur, _⟩ := first_spares_rebuild_store current
+    (selectedCoverage relevant catalog usable grace time) caps within
+  refine ⟨hcur, fun a ha => ?_⟩
+  obtain ⟨s, hs, hcov, hf⟩ := hnames a ha
+  exact ⟨s, hs, hcov, by omega⟩
 
 end Floor
 

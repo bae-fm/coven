@@ -676,6 +676,7 @@ theorem lostStore_good : Good adminRules lostStore lostSeq where
     have h2 : r ≤ 2 := h2
     have : r = 1 ∨ r = 2 := by omega
     rcases this with rfl | rfl <;> simp [lostSeq] at hs
+  rebuild_kept := rebuildKept_of_only_store _ _ _ _ _ fun A => by cases A; rfl
 
 open CovenSequence in
 /-- **Counterexample: settling against the applied prefix refuses an honest

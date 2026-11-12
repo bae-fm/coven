@@ -117,6 +117,7 @@ theorem retained_good : Good rules retained history := by
       | (split at boundary <;> first
           | contradiction
           | (split at boundary <;> contradiction))
+  · exact rebuildKept_of_only_store _ _ _ _ _ fun A => by cases A; rfl
 
 theorem approval_is_kept :
     retained.slot 14 = some (.admin false (.admit true .member true)) ∧

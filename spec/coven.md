@@ -6534,7 +6534,11 @@ The rules:
   Garden is at version 1, and Ben raised the store to version 2 at slot 300.
   The store's version 1 snapshot announced at slot 241, covering 240, stays,
   and `first` stays at or below 241, until Garden is raised or deleted. Without
-  this, Dan, added to Garden a month later, couldn't rebuild it. Garden's own
+  this, Dan, added to Garden a month later, couldn't rebuild it. The snapshot,
+  and the slots after it, stay in storage under the rule
+  ([`first_spares_rebuild_store`, `floor_within_caps_spares_rebuild`](proofs/sequence/CovenSequence/Retention.lean)),
+  and a rebuild finds the snapshot's state and every slot after its coverage
+  ([`rebuild_store_start`](proofs/sequence/CovenSequence/Retention.lean)). Garden's own
   history needs no such rule: until it's raised, no device snapshots Garden
   past slot 299, since the old app stops at the store's raise and the new one
   takes no ordinary snapshot of an audience below its version (§16.2).
@@ -6792,7 +6796,9 @@ bodies.
 - **A rebuild reads it.** It is the store's newest ordinary announcement at
   or below the version of a circle that isn't deleted and is below the
   store's version. A member who starts reading that circle rebuilds it from that
-  snapshot, which retention keeps (§16.6, §18.3).
+  snapshot, which retention keeps (§16.6, §18.3). It is never forgotten while the
+  circle stays below the store
+  ([`rebuild_announcement_kept`](proofs/sequence/CovenSequence/Announcements.lean)).
 
 Every other announcement is forgotten: no applied raise or reset names it,
 another of its audience covers more, an ordinary one of its audience is
@@ -6801,7 +6807,8 @@ rebuild reads it. A device forgets in its retention, after reading the floor
 and writing its own.
 
 **Every device still agrees.** A device that forgot an announcement accepts and
-refuses exactly what one holding it does (Appendix G.5). Each
+refuses exactly what one holding it does, whatever the reasons it keeps one
+(Appendix G.5). Each
 audience's greatest coverage stays, so a new announcement meets the same
 check. A raise or reset naming a forgotten announcement is refused either
 way: another announcement of the audience covers more. A device rebuilds its
@@ -13135,6 +13142,7 @@ Write-ups explain each model and state its assumptions:
 | A device that forgets the announcements no rule reads accepts or refuses every later announcement, and applies or refuses every later raise or reset, as a device holding all of them does, however entries and forgetting interleave; rebuilding history from the original slots it keeps, with no refused announcement among them, gives the history it holds | `answer_same`, `agree_forget`, `rebuilt_same`, `filtered_replay`, `forgettable_of_passed` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.1, §16.8 |
 | An older raise announcement matched in coverage by a newer ordinary one can still be activated, so forgetting it would change a raise's answer; it is never forgettable | `equal_coverage_kept` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.8 |
 | What a reader loads is never forgettable: a floor written from a `first` at least the device's names announcements at or after it, and an audience's newest and newest usable announcements stay. A listing deletes no body a kept announcement or an open operation names, and every other body it lists | `floor_names_kept`, `newest_kept`, `listing_spares`, `listing_finds_superseded` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.6, §16.8, §17.10 |
+| *Body.* The announcement a rebuild starts from, the store's newest ordinary one at or below the version of a circle that is below the store and not deleted, is never forgettable, whatever the first kept slot and the journaled captures say; the theorems about forgetting hold for any rebuild slots, so keeping it changes no answer | `rebuild_announcement_kept` | `proofs/sequence/CovenSequence/Announcements.lean` | §16.8 |
 | Settling a lost floor reply: a landed write is always confirmed, at the `first` of the floor read, which can be past its own; a write not confirmed did not land; the deletions a confirmed verdict makes are storage steps then and after any later storage steps | `landed_confirms`, `unconfirmed_not_landed`, `confirmed_deletes`, `moved_floor_confirms` | `proofs/sequence/CovenSequence/RetentionConfirm.lean` | §16.6 |
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
@@ -13151,6 +13159,7 @@ Write-ups explain each model and state its assumptions:
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | A slot deletion that fails leaves storage good and holds no later floor write back: each deletion is a storage step of its own, and a floor write takes no premise on the slots below `first` | `store_good`, `stores_good` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
+| *Body.* Storage keeps what a rebuild reads: for each circle that is not deleted and is below the store's version, the store's newest ordinary snapshot at a version of at most the circle's, with its state, and the first kept slot at most the slot after its coverage (1 with none). `first` held back by the circles' caps meets the floor write's rules, never moves back while within the caps, and is the ordinary choice when no cap binds; a floor within the caps and a body deletion that spares the snapshot keep storage good. A rebuild finds a sound store reader at the snapshot's coverage and every slot after it | `first_spares_rebuild_store`, `floor_write_spared`, `floor_within_caps_spares_rebuild`, `rebuild_store_start`, `store_good` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6, §18.3 |
 | Under any interleaving of storage and device steps, a device can still reach the full state at the end of the sequence | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
 | Correctness needs no grace: the storage model's floor write waits for none, so storage stays good and a device can still reach the end of the sequence whatever grace retention waited | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
 | Model premise: the floor names ordinary snapshots; prepared snapshots load at their raise or reset entries | (model premise) | `proofs/sequence/CovenSequence/Retention.lean` | §16.3, §16.6 |

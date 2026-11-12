@@ -123,6 +123,7 @@ theorem compactStore_good : Good adminRules compactStore compactSeq where
     have h2 : r ≤ 3 := h2
     have : r = 1 ∨ r = 2 ∨ r = 3 := by omega
     rcases this with rfl | rfl | rfl <;> simp [compactSeq] at hs
+  rebuild_kept := rebuildKept_of_only_store _ _ _ _ _ fun A => by cases A; rfl
 
 /-- **Counterexample: reading forward from the device's history past a moved
 floor.** In a store in good order, a device that has applied slot 1 reads the

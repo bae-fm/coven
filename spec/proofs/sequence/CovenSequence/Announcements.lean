@@ -4,7 +4,7 @@ import CovenSequence.Retention
 # Which announcements a device keeps
 
 Each device keeps the snapshot announcements it accepted, and the original slot
-of each, from which it rebuilds them when it opens. Rules read four kinds:
+of each, from which it rebuilds them when it opens. Rules read five kinds:
 
 - one a raise or reset entry applied names (`History.accept_admin`);
 - the newest of its audience, and every one newer than the audience's newest
@@ -13,7 +13,10 @@ of each, from which it rebuilds them when it opens. Rules read four kinds:
 - one at the audience's greatest coverage: acceptance and a raise or reset
   entry are checked against it;
 - one at or after the floor's first kept slot, or named by a journaled floor
-  capture: retention reads those.
+  capture: retention reads those;
+- the store's newest ordinary one at or below the version of a circle that is
+  below the store and not deleted: a member who starts reading that circle
+  rebuilds it from that snapshot (`rebuild_announcement_kept`).
 
 Every other one is `forgettable`. A device forgets them: their original slots
 and their place in its history go, and a refused announcement's original is
@@ -150,15 +153,18 @@ def rebuild (C : Checks Aud) (es : List (Entry Aud)) : History Aud :=
 
 /-- An announcement no rule reads any more: no applied raise or reset names
 it, another of its audience covers more, its slot is below the floor's first
-kept slot `first`, an ordinary one of its audience is newer, and no journaled
-floor capture names it (`journal`; a capture names only ordinary ones). -/
-def forgettable (first : Nat) (journal : List Nat) (h : History Aud)
+kept slot `first`, an ordinary one of its audience is newer, no journaled
+floor capture names it (`journal`; a capture names only ordinary ones), and no
+rebuild reads it (`rebuilds`: the slots of the store's ordinary announcements
+the circles that need a rebuild start from, `rebuildReads`). -/
+def forgettable (first : Nat) (journal rebuilds : List Nat) (h : History Aud)
     (r : Announcement Aud) : Bool :=
   h.bounds.all (fun b => b.named.slot != r.slot) &&
     h.anns.any (fun p => p.aud == r.aud && decide (r.covers < p.covers)) &&
     decide (r.slot < first) &&
     h.anns.any (fun o => o.aud == r.aud && o.purpose == .ordinary && decide (r.slot < o.slot)) &&
-    !(r.purpose == .ordinary && journal.contains r.slot)
+    !(r.purpose == .ordinary && journal.contains r.slot) &&
+    !(r.purpose == .ordinary && rebuilds.contains r.slot)
 
 /-- The history without the announcements `F` forgets. -/
 def without (F : Announcement Aud → Bool) (h : History Aud) : History Aud :=
@@ -173,7 +179,7 @@ def survives (F : Announcement Aud → Bool) : Entry Aud → Bool
 at the floor's `first` and the journaled captures' names. -/
 inductive Event (Aud : Type) where
   | entry (x : Entry Aud)
-  | forget (first : Nat) (journal : List Nat)
+  | forget (first : Nat) (journal rebuilds : List Nat)
 
 /-- A device's history and the originals it stores, in slot order. -/
 structure Device (Aud : Type) where
@@ -183,8 +189,8 @@ structure Device (Aud : Type) where
 def Device.next (C : Checks Aud) (d : Device Aud) : Event Aud → Device Aud
   | .entry x =>
     ⟨step C d.history x, if stores C d.history x then d.stored ++ [x] else d.stored⟩
-  | .forget first journal =>
-    let F := forgettable first journal d.history
+  | .forget first journal rebuilds =>
+    let F := forgettable first journal rebuilds d.history
     ⟨without F d.history, d.stored.filter (survives F)⟩
 
 def Device.empty : Device Aud := ⟨History.empty, []⟩
@@ -192,7 +198,7 @@ def Device.empty : Device Aud := ⟨History.empty, []⟩
 def entriesOf : List (Event Aud) → List (Entry Aud)
   | [] => []
   | .entry x :: rest => x :: entriesOf rest
-  | .forget _ _ :: rest => entriesOf rest
+  | .forget _ _ _ :: rest => entriesOf rest
 
 /-- Entries arrive in slot order, each at its own slot. -/
 def Increasing (es : List (Entry Aud)) : Prop :=
@@ -215,14 +221,15 @@ theorem boundsAtMost_iff {bounds : List (Boundary Aud)} {A : Aud} {c : Nat} :
   exact ⟨fun h b hb ha => (h b hb).resolve_left (Classical.not_not.mpr ha),
     fun h b hb => (Classical.em (b.named.aud = A)).elim (fun ha => Or.inr (h b hb ha)) Or.inl⟩
 
-theorem forgettable_iff {first : Nat} {journal : List Nat} {h : History Aud}
+theorem forgettable_iff {first : Nat} {journal rebuilds : List Nat} {h : History Aud}
     {r : Announcement Aud} :
-    forgettable first journal h r = true ↔
+    forgettable first journal rebuilds h r = true ↔
       (∀ b ∈ h.bounds, b.named.slot ≠ r.slot) ∧
       (∃ p ∈ h.anns, p.aud = r.aud ∧ r.covers < p.covers) ∧
       r.slot < first ∧
       (∃ o ∈ h.anns, o.aud = r.aud ∧ o.purpose = .ordinary ∧ r.slot < o.slot) ∧
-      (r.purpose ≠ .ordinary ∨ r.slot ∉ journal) := by
+      (r.purpose ≠ .ordinary ∨ r.slot ∉ journal) ∧
+      (r.purpose ≠ .ordinary ∨ r.slot ∉ rebuilds) := by
   simp [forgettable, List.all_eq_true, List.any_eq_true, and_assoc]
 
 /-! ## Finding an announcement by its slot -/
@@ -401,21 +408,21 @@ theorem agree_step (C : Checks Aud) {H G : History Aud} (agree : Agree H G) (e :
 /-- Forgetting keeps the agreement: an announcement at its audience's greatest
 coverage is never forgettable, and a forgotten one is passed by another. -/
 theorem agree_forget {H G : History Aud} (agree : Agree H G) (first : Nat)
-    (journal : List Nat) : Agree (without (forgettable first journal H) H) G := by
+    (journal rebuilds : List Nat) : Agree (without (forgettable first journal rebuilds H) H) G := by
   refine ⟨agree.bounds, (List.filter_sublist).trans agree.sub, agree.ordered,
     fun p hp => ?_, fun r hr hn => ?_⟩
   · obtain ⟨q, hq, hqa, hle⟩ := agree.dominated p hp
     obtain ⟨m, hm, hma, hqm, hall⟩ := exists_greatest hq
-    have kept : forgettable first journal H m = false := by
-      cases hf : forgettable first journal H m with
+    have kept : forgettable first journal rebuilds H m = false := by
+      cases hf : forgettable first journal rebuilds H m with
       | false => rfl
       | true =>
         obtain ⟨_, ⟨p', hp', hpa', hlt⟩, _⟩ := forgettable_iff.mp hf
         have := hall p' hp' (hpa'.trans hma); omega
     exact ⟨m, List.mem_filter.mpr ⟨hm, by simp [kept]⟩, hma.trans hqa, Nat.le_trans hle hqm⟩
   · by_cases hrH : r ∈ H.anns
-    · have hf : forgettable first journal H r = true := by
-        cases hf : forgettable first journal H r with
+    · have hf : forgettable first journal rebuilds H r = true := by
+        cases hf : forgettable first journal rebuilds H r with
         | true => rfl
         | false => exact absurd (List.mem_filter.mpr ⟨hrH, by simp [hf]⟩) hn
       obtain ⟨_, ⟨p, hp, hpa, hlt⟩, _⟩ := forgettable_iff.mp hf
@@ -436,10 +443,10 @@ theorem agree_events (C : Checks Aud) : ∀ (events : List (Event Aud)) (d : Dev
     rcases step_anns C G x p hp with hp' | hs
     · exact fresh p hp' e (List.mem_cons_of_mem _ he)
     · rw [hs]; exact increasing.1 e he
-  | .forget first journal :: rest, d, G, agree, fresh, increasing => by
+  | .forget first journal rebuilds :: rest, d, G, agree, fresh, increasing => by
     simp only [entriesOf] at increasing fresh ⊢
     simp only [List.foldl_cons]
-    exact agree_events C rest _ G (agree_forget agree first journal) fresh increasing
+    exact agree_events C rest _ G (agree_forget agree first journal rebuilds) fresh increasing
 
 /-- **A device that forgets answers every later entry as one that holds
 everything.** After any run of entries and forgetting, a device's history
@@ -652,7 +659,7 @@ theorem forgettable_of_passed {H V : History Aud} (soundH : Sound H) {first : Na
     (hbounds : boundsAtMost V.bounds r.aud r.covers = true)
     (hpurpose : r.purpose = x.kind.purpose)
     (hMa : M.aud = r.aud) (hMc : r.covers < M.covers)
-    (hF : forgettable first journal H M = true) : forgettable first journal H r = true := by
+    (hF : forgettable first journal rebuilds H M = true) : forgettable first journal rebuilds H r = true := by
   obtain ⟨_, _, hMfirst, ⟨o, ho, hoa, hop, hos⟩, _⟩ := forgettable_iff.mp hF
   have older : r.slot < M.slot := by
     rcases Nat.lt_trichotomy r.slot M.slot with h | h | h
@@ -660,8 +667,10 @@ theorem forgettable_of_passed {H V : History Aud} (soundH : Sound H) {first : Na
     · have := slot_inj soundH.ordered hrH hMH h; subst this; omega
     · have := soundH.monotone r hrH M hMH hMa h; omega
   have hrbelow := soundH.below r hrH
+  have notOrdinary : r.purpose ≠ .ordinary := by
+    rw [hpurpose]; cases x.kind <;> simp [Kind.purpose]
   refine forgettable_iff.mpr ⟨fun b hb heq => ?_, ⟨M, hMH, hMa, hMc⟩, by omega,
-    ⟨o, ho, hoa.trans hMa, hop, by omega⟩, Or.inl ?_⟩
+    ⟨o, ho, hoa.trans hMa, hop, by omega⟩, Or.inl notOrdinary, Or.inl notOrdinary⟩
   · obtain ⟨hbn, hbs⟩ := soundH.named b hb
     have hbr : b.named = r := slot_inj soundH.ordered hbn hrH heq
     have early : b.entry ≤ M.slot := by
@@ -671,7 +680,6 @@ theorem forgettable_of_passed {H V : History Aud} (soundH : Sound H) {first : Na
       rw [hbr] at this; omega
     have := boundsAtMost_iff.mp hbounds b (prefixBounds b hb (by omega)) (by rw [hbr])
     rw [hbr] at hbs; omega
-  · rw [hpurpose]; cases x.kind <;> simp [Kind.purpose]
 
 theorem coverAtMost_filter (F : Announcement Aud → Bool) {anns : List (Announcement Aud)}
     {A : Aud} {c : Nat} (h : coverAtMost anns A c = true) :
@@ -681,20 +689,20 @@ theorem coverAtMost_filter (F : Announcement Aud → Bool) {anns : List (Announc
 /-- One raise or reset replayed without the forgettable announcements gets the
 answer it gets with them. -/
 theorem activation_filtered (C : Checks Aud) {H V : History Aud} (soundH : Sound H)
-    (soundV : Sound V) (first : Nat) (journal : List Nat) (x : Activation)
+    (soundV : Sound V) (first : Nat) (journal rebuilds : List Nat) (x : Activation)
     (sub : ∀ a ∈ V.anns, a ∈ H.anns) (below : Below V x.slot)
     (prefixBounds : ∀ b ∈ H.bounds, b.entry < x.slot → b ∈ V.bounds)
     (later : ∀ b ∈ (step C V (.activate x)).bounds, b ∈ H.bounds) :
-    activation C (without (forgettable first journal H) V) x = activation C V x := by
-  have lookup := named_sublist (List.filter_sublist (p := fun r => !(forgettable first journal H) r) (l := V.anns))
+    activation C (without (forgettable first journal rebuilds H) V) x = activation C V x := by
+  have lookup := named_sublist (List.filter_sublist (p := fun r => !(forgettable first journal rebuilds H) r) (l := V.anns))
     soundV.ordered x
   unfold activation
   cases hV : named V.anns x with
-  | none => rw [show named (without (forgettable first journal H) V).anns x = none from lookup.1 hV]; rfl
+  | none => rw [show named (without (forgettable first journal rebuilds H) V).anns x = none from lookup.1 hV]; rfl
   | some r =>
     have hrV := (named_spec hV).1
-    by_cases hF : (forgettable first journal H) r = true
-    · have hnone : named (without (forgettable first journal H) V).anns x = none :=
+    by_cases hF : (forgettable first journal rebuilds H) r = true
+    · have hnone : named (without (forgettable first journal rebuilds H) V).anns x = none :=
         (lookup.2 r hV).2 fun h => by simp [hF] at h
       rw [hnone]
       by_cases hact : activates C V x r = true
@@ -706,18 +714,18 @@ theorem activation_filtered (C : Checks Aud) {H V : History Aud} (soundH : Sound
         have unnamed := (forgettable_iff.mp hF).1 _ (later _ hb)
         exact unnamed rfl
       · simp [hact]
-    · have hkept : r ∈ (without (forgettable first journal H) V).anns := List.mem_filter.mpr ⟨hrV, by simp [hF]⟩
-      have hsome : named (without (forgettable first journal H) V).anns x = some r :=
+    · have hkept : r ∈ (without (forgettable first journal rebuilds H) V).anns := List.mem_filter.mpr ⟨hrV, by simp [hF]⟩
+      have hsome : named (without (forgettable first journal rebuilds H) V).anns x = some r :=
         (lookup.2 r hV).1 hkept
       rw [hsome, Option.bind_some]
-      have same : activates C (without (forgettable first journal H) V) x r = activates C V x r := by
+      have same : activates C (without (forgettable first journal rebuilds H) V) x r = activates C V x r := by
         cases hact : activates C V x r with
         | true =>
           obtain ⟨_, _, hcov, _⟩ := activates_spec hact
           simp only [activates, Bool.and_eq_true] at hact ⊢
-          exact ⟨⟨hact.1.1, coverAtMost_filter (forgettable first journal H) hcov⟩, hact.2⟩
+          exact ⟨⟨hact.1.1, coverAtMost_filter (forgettable first journal rebuilds H) hcov⟩, hact.2⟩
         | false =>
-          cases hK : activates C (without (forgettable first journal H) V) x r with
+          cases hK : activates C (without (forgettable first journal rebuilds H) V) x r with
           | false => rfl
           | true =>
             exfalso
@@ -737,8 +745,8 @@ theorem activation_filtered (C : Checks Aud) {H V : History Aud} (soundH : Sound
                 fun p hp hpa => Nat.le_of_not_lt fun hlt => hno ⟨p, hp, hpa, hlt⟩
               rw [this] at hcovV; cases hcovV
             obtain ⟨M, hMV, hMa, hMc⟩ := hex
-            have hMF : (forgettable first journal H) M = true := by
-              cases hm : (forgettable first journal H) M with
+            have hMF : (forgettable first journal rebuilds H) M = true := by
+              cases hm : (forgettable first journal rebuilds H) M with
               | true => rfl
               | false =>
                 have := coverAtMost_iff.mp hcovK M (List.mem_filter.mpr ⟨hMV, by simp [hm]⟩) hMa
@@ -755,13 +763,13 @@ forgettable in the replay's result `H` are dropped accepts each remaining
 announcement and gives each raise or reset its answer, so it ends at `H`
 without them. -/
 theorem filtered_replay (C : Checks Aud) {H : History Aud} (soundH : Sound H) (first : Nat)
-    (journal : List Nat) : ∀ (rest : List (Entry Aud)) (V : History Aud),
+    (journal rebuilds : List Nat) : ∀ (rest : List (Entry Aud)) (V : History Aud),
       rest.foldl (step C) V = H → Sound V → Increasing rest →
       (∀ e ∈ rest, Below V e.slot) → AllAccepted C V rest →
-      (rest.filter (survives (forgettable first journal H))).foldl (step C)
-          (without (forgettable first journal H) V) = without (forgettable first journal H) H ∧
-        AllAccepted C (without (forgettable first journal H) V)
-          (rest.filter (survives (forgettable first journal H)))
+      (rest.filter (survives (forgettable first journal rebuilds H))).foldl (step C)
+          (without (forgettable first journal rebuilds H) V) = without (forgettable first journal rebuilds H) H ∧
+        AllAccepted C (without (forgettable first journal rebuilds H) V)
+          (rest.filter (survives (forgettable first journal rebuilds H)))
   | [], V, hH, _, _, _, _ => by subst hH; exact ⟨rfl, trivial⟩
   | e :: rest, V, hH, soundV, increasing, below, accepted => by
     rw [Increasing, List.pairwise_cons] at increasing
@@ -772,21 +780,21 @@ theorem filtered_replay (C : Checks Aud) {H : History Aud} (soundH : Sound H) (f
     cases e with
     | announce a =>
       obtain ⟨ha, accepted'⟩ := accepted
-      have ih := filtered_replay C soundH first journal rest _ hH' soundV' increasing.2 below'
+      have ih := filtered_replay C soundH first journal rebuilds rest _ hH' soundV' increasing.2 below'
         accepted'
-      by_cases hF : forgettable first journal H a = true
-      · have hsame : without (forgettable first journal H) (step C V (.announce a)) =
-            without (forgettable first journal H) V := by
+      by_cases hF : forgettable first journal rebuilds H a = true
+      · have hsame : without (forgettable first journal rebuilds H) (step C V (.announce a)) =
+            without (forgettable first journal rebuilds H) V := by
           simp [without, step, ha, hF]
         simp only [List.filter_cons, survives, hF, Bool.not_true, Bool.false_eq_true, ite_false]
         rw [← hsame]
         exact ih
-      · have hK : accepts C (without (forgettable first journal H) V) a = true := by
+      · have hK : accepts C (without (forgettable first journal rebuilds H) V) a = true := by
           obtain ⟨hlt, hcov, hbd⟩ := accepts_spec ha
           simp only [accepts, Bool.and_eq_true, decide_eq_true_eq] at ha ⊢
           exact ⟨⟨⟨hlt, coverAtMost_filter _ hcov⟩, hbd⟩, ha.2⟩
-        have hstep : step C (without (forgettable first journal H) V) (.announce a) =
-            without (forgettable first journal H) (step C V (.announce a)) := by
+        have hstep : step C (without (forgettable first journal rebuilds H) V) (.announce a) =
+            without (forgettable first journal rebuilds H) (step C V (.announce a)) := by
           simp only [step, hK, ha, ite_true]
           simp [without, hF]
         simp only [List.filter_cons, survives, hF, Bool.not_false, ite_true, List.foldl_cons]
@@ -795,7 +803,7 @@ theorem filtered_replay (C : Checks Aud) {H : History Aud} (soundH : Sound H) (f
         · show AllAccepted C (step C _ (.announce a)) _
           rw [hstep]; exact ih.2
     | activate x =>
-      have ih := filtered_replay C soundH first journal rest _ hH' soundV' increasing.2 below'
+      have ih := filtered_replay C soundH first journal rebuilds rest _ hH' soundV' increasing.2 below'
         accepted
       have sub : ∀ a ∈ V.anns, a ∈ H.anns := fun a h => hH ▸ (fold_mono C _ V).1 a h
       have later : ∀ b ∈ (step C V (.activate x)).bounds, b ∈ H.bounds :=
@@ -808,10 +816,10 @@ theorem filtered_replay (C : Checks Aud) {H : History Aud} (soundH : Sound H) (f
           · change b.entry = x.slot at hs; omega
           · have h2 : x.slot < e'.slot := increasing.1 e' he''
             omega
-      have hact := activation_filtered C soundH soundV first journal x sub
+      have hact := activation_filtered C soundH soundV first journal rebuilds x sub
         (below _ List.mem_cons_self) prefixBounds later
-      have hstep : step C (without (forgettable first journal H) V) (.activate x) =
-          without (forgettable first journal H) (step C V (.activate x)) := by
+      have hstep : step C (without (forgettable first journal rebuilds H) V) (.activate x) =
+          without (forgettable first journal rebuilds H) (step C V (.activate x)) := by
         simp only [step, hact]
         split <;> rfl
       simp only [List.filter_cons, survives, ite_true, List.foldl_cons]
@@ -860,14 +868,14 @@ theorem rebuilds_events (C : Checks Aud) : ∀ (events : List (Event Aud)) (d : 
         · rw [List.mem_singleton.mp he]; exact increasing.1 x' hx'
       · simp only [Device.next, hs]
         exact fun e he x' hx' => fresh e he x' (List.mem_cons_of_mem _ hx')
-  | .forget first journal :: rest, d, r, fresh, increasing => by
+  | .forget first journal rebuilds :: rest, d, r, fresh, increasing => by
     simp only [entriesOf] at increasing fresh
     simp only [List.foldl_cons]
     have soundH : Sound d.history := r.history ▸
       sound_fold C d.stored History.empty sound_empty (fun _ _ => below_empty _) r.increasing
-    have replay := filtered_replay C soundH first journal d.stored History.empty r.history
+    have replay := filtered_replay C soundH first journal rebuilds d.stored History.empty r.history
       sound_empty r.increasing (fun _ _ => below_empty _) r.accepted
-    exact rebuilds_events C rest (Device.next C d (.forget first journal))
+    exact rebuilds_events C rest (Device.next C d (.forget first journal rebuilds))
       ⟨replay.1, replay.2, r.increasing.sublist List.filter_sublist⟩
       (fun e he x hx => fresh e (List.mem_filter.mp he).1 x hx) increasing
 
@@ -899,14 +907,14 @@ more. -/
 theorem equal_coverage_kept :
     (activation openChecks ⟨[ordinaryAt60, raiseAt50], []⟩ ⟨120, 50, .raise 2⟩).isSome = true ∧
     (activation openChecks ⟨[ordinaryAt60], []⟩ ⟨120, 50, .raise 2⟩).isSome = false ∧
-    forgettable 100 [] ⟨[ordinaryAt60, raiseAt50], []⟩ raiseAt50 = false := by
+    forgettable 100 [] [] ⟨[ordinaryAt60, raiseAt50], []⟩ raiseAt50 = false := by
   decide
 
 /-! ## What a reader loads stays -/
 
-theorem kept_of_forgettable_false {first : Nat} {journal : List Nat} {h : History Aud}
-    {r : Announcement Aud} (hr : r ∈ h.anns) (kept : forgettable first journal h r = false) :
-    r ∈ (without (forgettable first journal h) h).anns :=
+theorem kept_of_forgettable_false {first : Nat} {journal rebuilds : List Nat} {h : History Aud}
+    {r : Announcement Aud} (hr : r ∈ h.anns) (kept : forgettable first journal rebuilds h r = false) :
+    r ∈ (without (forgettable first journal rebuilds h) h).anns :=
   List.mem_filter.mpr ⟨hr, by simp [kept]⟩
 
 /-- **A floor names announcements at or after `first`.** A floor write, the
@@ -956,15 +964,15 @@ audience, which a circle reload starts from, and the newest usable one, which
 a snapshot request and the floor name, are never forgettable: no ordinary one
 of the audience is newer. Usable means ordinary, or named by an applied raise
 or reset. -/
-theorem newest_kept {first : Nat} {journal : List Nat} {h : History Aud}
+theorem newest_kept {first : Nat} {journal rebuilds : List Nat} {h : History Aud}
     (ordered : Ordered h.anns) (A : Aud) (usable : Announcement Aud → Bool)
     (ordinary : ∀ a, a.purpose = .ordinary → usable a = true)
     (activated : ∀ a, usable a = true → a.purpose ≠ .ordinary →
       ∃ b ∈ h.bounds, b.named.slot = a.slot) {r : Announcement Aud}
     (newest : h.anns.find? (fun a => a.aud == A) = some r ∨
       h.anns.find? (fun a => a.aud == A && usable a) = some r) :
-    forgettable first journal h r = false := by
-  cases hf : forgettable first journal h r with
+    forgettable first journal rebuilds h r = false := by
+  cases hf : forgettable first journal rebuilds h r with
   | false => rfl
   | true =>
     obtain ⟨unnamed, _, _, ⟨o, ho, hoa, hop, hos⟩, _⟩ := forgettable_iff.mp hf
@@ -979,6 +987,42 @@ theorem newest_kept {first : Nat} {journal : List Nat} {h : History Aud}
         omega
       · obtain ⟨b, hb, hbs⟩ := activated r hspec.2 hrp
         exact absurd hbs (unnamed b hb)
+
+/-! ## What a rebuild reads stays -/
+
+/-- The slots of the announcements the rebuilds read: for each circle that is
+below the store and not deleted, at version `v` (`circles` lists these), the
+store's newest ordinary announcement whose body is at a version of at most `v`
+(`version a` is the version of `a`'s body). -/
+def rebuildReads (store : Aud) (version : Announcement Aud → Nat) (circles : List Nat)
+    (h : History Aud) : List Nat :=
+  circles.filterMap fun v =>
+    (h.anns.find? fun a => a.aud == store && a.purpose == .ordinary && decide (version a ≤ v)).map
+      (·.slot)
+
+/-- **The announcement a rebuild starts from stays.** While a circle at version
+`v` is below the store and not deleted, the store's newest ordinary
+announcement at a version of at most `v` is never forgettable, whatever the
+first kept slot and the journaled captures say: a member who starts reading
+the circle rebuilds it from that snapshot (coven.md §18.3). Once the circle is
+raised or deleted, it leaves `circles` and the reason lapses. -/
+theorem rebuild_announcement_kept {first : Nat} {journal : List Nat} {h : History Aud}
+    (store : Aud) (version : Announcement Aud → Nat) (circles : List Nat) {v : Nat}
+    (below : v ∈ circles) {r : Announcement Aud}
+    (found : h.anns.find? (fun a => a.aud == store && a.purpose == .ordinary &&
+      decide (version a ≤ v)) = some r) :
+    forgettable first journal (rebuildReads store version circles h) h r = false := by
+  cases hf : forgettable first journal (rebuildReads store version circles h) h r with
+  | false => rfl
+  | true =>
+    obtain ⟨_, _, _, _, _, hr⟩ := forgettable_iff.mp hf
+    have hspec := List.find?_some found
+    simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hspec
+    have mem : r.slot ∈ rebuildReads store version circles h :=
+      List.mem_filterMap.mpr ⟨v, below, by simp [found]⟩
+    rcases hr with hne | hnot
+    · exact absurd hspec.1.2 hne
+    · exact absurd mem hnot
 
 /-! ## Listing snapshot folders -/
 

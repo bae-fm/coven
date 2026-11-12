@@ -27,7 +27,8 @@ at or above the first kept slot every record is genuine; every audience's
 snapshot covers the slot before the first kept slot; each audience's floor
 snapshot was validly announced and its body is the state it covers; a valid
 boundary's body, if present, holds its prepared rows, and it is present
-while the floor has not covered the boundary.
+while the floor has not covered the boundary; and storage keeps what a rebuild
+of each circle below the store's version reads (`RebuildKept`).
 -/
 
 namespace CovenSequence
@@ -157,6 +158,47 @@ theorem ReadSteps.trans {A : S.Aud} {key : Bool} {st : Store S} {d d' d'' : Read
   | refl => exact h₂
   | step s _ ih => exact ReadSteps.step s (ih h₂)
 
+/-- Slot `a` announces an applied ordinary snapshot of the store, covering `cs`,
+body at `path`, at a version of at most `v`. -/
+def StoreSnapshotAt (seq : Nat → Slot S) (head v a cs : Nat) (path : S.Path) : Prop :=
+  1 ≤ a ∧ a ≤ head ∧ (∃ au w, seq a = .snapshot au R.store cs w path ∧ w ≤ v) ∧
+    AppliedTo R seq R.store a
+
+/-- The store snapshot a rebuild of the circle `A` starts from (coven.md
+§18.3): the newest applied ordinary store snapshot at a version of at most
+`A`'s. -/
+def RebuildSnapshot (seq : Nat → Slot S) (head : Nat) (A : S.Aud) (a cs : Nat) (path : S.Path) :
+    Prop :=
+  StoreSnapshotAt R seq head (audAt R seq A head).version a cs path ∧
+    ∀ a' cs' path', StoreSnapshotAt R seq head (audAt R seq A head).version a' cs' path' → a' ≤ a
+
+/-- Some device may still raise `A`: it isn't deleted (coven.md §15.9). -/
+def Raisable (seq : Nat → Slot S) (A : S.Aud) (head : Nat) : Prop :=
+  ∃ d kind, R.boundaryAllowed (ledgerAt R seq head) d A kind = true
+
+/-- A circle a member may start reading and rebuild: not deleted, and below the
+store's version, so its rows at its own version are no device's current ones. -/
+def NeedsRebuild (seq : Nat → Slot S) (head : Nat) (A : S.Aud) : Prop :=
+  A ≠ R.store ∧ Raisable R seq A head ∧
+    (audAt R seq A head).version < (audAt R seq R.store head).version
+
+/-- **Storage keeps what a rebuild reads** (coven.md §16.6): for each circle
+that needs a rebuild, the store snapshot it starts from is in storage with its
+state, and the first kept slot is no later than the slot after it, or at 1
+when there is none. -/
+def RebuildKept (seq : Nat → Slot S) (head : Nat)
+    (body : S.Path → Option (Ledger S × AudLedger S × S.Rows)) (start : Nat) : Prop :=
+  ∀ A, NeedsRebuild R seq head A →
+    (∀ a cs p, RebuildSnapshot R seq head A a cs p →
+      body p = some (stateAt R seq R.store cs) ∧ start ≤ cs + 1) ∧
+    ((¬ ∃ a cs p, RebuildSnapshot R seq head A a cs p) → start ≤ 1)
+
+/-- A store with no circle has nothing to rebuild. -/
+theorem rebuildKept_of_only_store (seq : Nat → Slot S) (head : Nat)
+    (body : S.Path → Option (Ledger S × AudLedger S × S.Rows)) (start : Nat)
+    (only : ∀ A : S.Aud, A = R.store) : RebuildKept R seq head body start :=
+  fun A need => absurd (only A) need.1
+
 /-- Storage as claims, stale creates and retention keep it, for the claimed
 sequence `seq`. -/
 structure Good (st : Store S) (seq : Nat → Slot S) : Prop where
@@ -174,6 +216,7 @@ structure Good (st : Store S) (seq : Nat → Slot S) : Prop where
   boundary_body : ∀ A r au v c p, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
     (st.floor.covers A < r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A)) ∧
     (∀ L' P' rows, st.body p = some (L', P', rows) → rows = preparedRows R v p (raiseView R seq A c) A)
+  rebuild_kept : RebuildKept R seq st.head st.body st.floor.start
 
 /-- A reader of `A` holds the state of the prefix it applied, and every buffered
 record at or above the first kept slot is genuine. -/

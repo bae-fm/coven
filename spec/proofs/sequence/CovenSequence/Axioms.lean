@@ -373,6 +373,10 @@ import SequenceApply
 #print axioms CovenSequence.Retention.immature_replacements_keep_body
 #print axioms CovenSequence.Retention.newest_covers_chosen
 #print axioms CovenSequence.Retention.floor_write_rules
+#print axioms CovenSequence.Retention.first_spares_rebuild_store
+#print axioms CovenSequence.Retention.floor_write_spared
+#print axioms CovenSequence.floor_within_caps_spares_rebuild
+#print axioms CovenSequence.rebuild_store_start
 #print axioms CovenSequence.Retention.fresh_head_starves
 #print axioms CovenSequence.Retention.daily_coverage_precedes_announcement
 #print axioms CovenSequence.Retention.daily_announcements_starve
@@ -528,6 +532,7 @@ import SequenceApply
 #print axioms CovenSequence.Announcements.agree_forget
 #print axioms CovenSequence.Announcements.equal_coverage_kept
 #print axioms CovenSequence.Announcements.floor_names_kept
+#print axioms CovenSequence.Announcements.rebuild_announcement_kept
 #print axioms CovenSequence.Announcements.newest_kept
 #print axioms CovenSequence.Announcements.listing_spares
 #print axioms CovenSequence.Announcements.listing_finds_superseded

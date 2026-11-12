@@ -581,7 +581,18 @@ storage meanwhile:
   stored, and the first kept slot is covered by every introduced audience's
   snapshot, including idle and deleted circles.
 - **Deletion:** retention then deletes slots below the first kept slot, and
-  bodies no floor names and no raise or reset above the floor needs.
+  bodies no floor names and no raise or reset above the floor needs, and none
+  a rebuild starts from.
+- **Rebuilds:** a circle that is not deleted and is below the store's version
+  (`NeedsRebuild`) is rebuilt from the store's newest ordinary snapshot at a
+  version of at most its own (`RebuildSnapshot`). `Good` holds that this
+  snapshot's body is in storage with its state and that the first kept slot is
+  at most the slot after its coverage, or at most 1 when history holds none
+  (`RebuildKept`). A claim takes the same premise about the head it lands at,
+  as it does for a body; a floor write takes it for its `first`; a body
+  deletion takes it for the body it deletes. `store_good` keeps it.
+  `rebuild_store_start` reads it back: a rebuild finds a sound store reader at
+  the snapshot's coverage, its body, and every slot after.
 - **Uploads:** a body uploaded to a fresh path.
 
 `floorStart` takes one optional coverage per introduced audience.
@@ -609,6 +620,16 @@ snapshot past grace. `floor_write_rules` shows the combined floor meets
 `StoreStep.writeFloor`'s premises on `first` and coverage: neither moves back,
 and every name covers `first - 1`. So `store_good` and the reader theorems apply
 to a floor whose names are fresh while `first` lags.
+
+`sparedFirst` holds `first` back for the circles that need a rebuild: no
+further than each circle's cap, the coverage plus one of its rebuild snapshot
+(`RebuildCap`, 1 with none). `Retention.first_spares_rebuild_store`: it is no
+further than any cap or than `floorFirst`, never moves back while the current
+`first` is within every cap, and is `floorFirst` when no cap binds.
+`floor_write_spared`: held back so, the floor still meets `floor_write_rules`'
+conclusions. `floor_within_caps_spares_rebuild`: a `first` within every cap
+meets the rebuild premises `StoreStep.writeFloor` takes, so `store_good`
+applies and the rebuild snapshot and the slots after it stay.
 
 `kept` keeps the announcements at or after the current first kept slot, whose
 slots are still in storage. `choose_kept`: choosing among them picks what
@@ -1730,9 +1751,12 @@ forgotten, so every device sees the same state there.
 
 `forgettable` is the rule: no applied raise or reset names the announcement,
 another of its audience covers more, its slot is below the floor's `first`, an
-ordinary one of its audience is newer, and no journaled floor capture names it.
-A `Device` applies entries and, at any point, forgets what is forgettable at the
-`first` and journal it is given. It stores each admin entry's original and an
+ordinary one of its audience is newer, no journaled floor capture names it, and
+no rebuild reads it. `rebuildReads` lists the slots rebuilds read: for each
+circle that is below the store and not deleted, the store's newest ordinary
+announcement at a version of at most the circle's. A `Device` applies entries
+and, at any point, forgets what is forgettable at the `first`, journal and
+rebuild slots it is given. It stores each admin entry's original and an
 announcement's only when it accepts it.
 
 - `answer_same`: after any interleaving of entries and forgetting, a device
@@ -1759,6 +1783,11 @@ announcement's only when it accepts it.
   each announcement is after its coverage. `newest_kept`: the newest
   announcement of an audience, and the newest usable one, are never
   forgettable.
+- `rebuild_announcement_kept`: the announcement a rebuild starts from is never
+  forgettable while its circle stays below the store and not deleted. The
+  other theorems quantify over the rebuild slots, so `answer_same` and
+  `rebuilt_same` hold with this reason as with the others: a device that keeps
+  more answers the same.
 - `listing_spares` and `listing_finds_superseded`: a listing of a device's
   snapshot folders deletes no body a kept announcement or an open operation
   names, and every other body it lists.
@@ -2147,6 +2176,12 @@ they do not replace the separate byte-format, merge or queue tests.
   device migrated and whose converter isn't the migration (`RaiseBody`).
   Floor reload uses ordinary snapshots; prepared bodies are consumed at their
   matching entries. Direct floor loading of a prepared body is not modelled.
+- A claim lands only when storage holds what rebuilds read once its slot is
+  applied (`StoreStep.claim`'s `hrebuild`), as it lands only with its
+  preparation body present. The model keeps the store snapshot a rebuild
+  starts from and the slots after it, not the bodies of store raises or resets
+  between that snapshot and the rebuild slot, which `deleteBody` may delete
+  once the floor covers them.
 - Admin slots and key copies are readable by every member device. So are a
   slot's device, claim number and each part's audience: they are sealed under
   the store key, which every member holds. Public observations include slot
