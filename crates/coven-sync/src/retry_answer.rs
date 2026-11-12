@@ -379,6 +379,17 @@ impl RetryWaits {
         }
     }
 
+    /// The upload worker's own work failed with `error`, which is no bug
+    /// and which no caller hears: write it as how the last pass ended, so
+    /// the sync state shows it (§19.1). A failed write has failed the
+    /// handle.
+    pub async fn show_worker_failure(&self, error: crate::SyncError) -> Result<(), DbError> {
+        let Some(database) = &self.database else {
+            return Err(DbError::Invariant { what: "only a handle that writes the store syncs" });
+        };
+        crate::LastPass::failed(error).record(database).await
+    }
+
     /// A started connection will plan: requests wait for its passes, and
     /// the failure its owner last found still holds them. Once a worker's
     /// panic has halted sync (`sync_halted`), it fails with that bug as

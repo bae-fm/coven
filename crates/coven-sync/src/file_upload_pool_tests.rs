@@ -394,6 +394,30 @@ async fn an_upload_worker_ended_by_a_failed_handle_answers_app_retries() {
     f.close().await;
 }
 
+/// A failure of the upload worker's own work that is not a bug is written as
+/// how the last pass ended, so the sync state says the queue is failing
+/// instead of only the log.
+#[tokio::test]
+async fn a_failure_of_the_upload_workers_own_work_is_shown_as_the_last_pass() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let shown = || async {
+        f.database
+            .read(|sql| {
+                Ok::<_, coven_database::DbError>(sql.query_row(
+                    "SELECT last_pass FROM coven_sync_status",
+                    [],
+                    |row| row.get::<_, Option<crate::LastPass>>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    };
+    assert_eq!(shown().await, None);
+    super::show_worker_failure(&f.files.inner, SyncError::StoreOwner).await.unwrap();
+    assert!(matches!(shown().await, Some(crate::LastPass::Failed { .. })));
+    f.close().await;
+}
+
 /// An app retry joins the run in progress rather than waiting for it: the
 /// run takes it at its next read of the queue, covering the upload still in
 /// flight and the one waiting, and answers once both attempts have ended.

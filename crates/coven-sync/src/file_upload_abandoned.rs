@@ -10,7 +10,8 @@ use coven_storage::UploadSession;
 impl FilesInner {
     /// Abort the recorded session of each upload no file waits for, not in
     /// flight and due, then forget it, so the upload retires with the rest.
-    /// A session already complete needs no abort. A failed abort is the
+    /// A session already complete needs no abort. A session that does
+    /// not read, or a failed abort, is the
     /// upload's failure, recorded and retried as an attempt's is. Without
     /// storage, or while sync is stopped, nothing is aborted, and those
     /// uploads stay queued.
@@ -31,7 +32,15 @@ impl FilesInner {
                 continue;
             }
             let session = match &item.session {
-                Some(bytes) => UploadSession::decode(bytes.as_bytes())?,
+                Some(bytes) => match UploadSession::decode(bytes.as_bytes()) {
+                    Ok(session) => session,
+                    // A session that does not read is this upload's failure,
+                    // not the run's: the other uploads go on.
+                    Err(error) => {
+                        self.record_failure(&item, error.into()).await?;
+                        continue;
+                    }
+                },
                 None => continue,
             };
             let ended =

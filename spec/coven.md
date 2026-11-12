@@ -8304,9 +8304,10 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   retry delay has passed, aborts the session (a temporary staged for it goes
   too, §20.6), or, if the row records only its plan, every session at the
   plan's name, forgets it, and only then retires the upload. Aborting needs
-  storage, so with none connected the upload stays queued. A failed abort is
-  the upload's failure, recorded and retried like an attempt's, and the upload
-  stays queued meanwhile; aborting an ended session succeeds, so a retry after
+  storage, so with none connected the upload stays queued. A failed abort, or a
+  recorded session that doesn't read, is the upload's failure, recorded and
+  retried like an attempt's, and the upload stays queued meanwhile while the
+  other uploads go on; aborting an ended session succeeds, so a retry after
   a crash is safe. A session already complete needs no abort. A store never
   changes location (§20.3), so a recorded session naming another location is
   damage: the connection refuses it before any request, a failure that never

@@ -9919,6 +9919,12 @@ forever.
   every other one that run serves, is answered `WorkerFailed` with the
   bug. The retries waited on the worker's work, so the bug is the
   worker's to report, once.
+- A worker that doesn't end can also fail on something that is no bug: a
+  database read of the upload run, of the pins coven keeps, or of the bound
+  uploads. The worker writes that failure as how the last pass ended, so the
+  sync state shows it instead of every queued upload only waiting, and goes
+  on. A write of that which fails has failed the handle, which ends the
+  worker.
 - A call's `Bug` is always a bug its own work hit, and its caller is the
   one that reports it. A bug coven has already reported comes back to later
   calls under a variant naming the work it failed: `SyncError::WorkerFailed`

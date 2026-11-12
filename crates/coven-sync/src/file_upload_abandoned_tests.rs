@@ -98,6 +98,34 @@ async fn a_failed_abort_keeps_the_upload_until_its_retry_aborts_it() {
     f.close().await;
 }
 
+/// An abandoned upload's recorded session does not read. That is the
+/// upload's failure, as a failed abort is: the run goes on, and the song's
+/// pending record says why, instead of every run failing before any upload
+/// starts.
+#[tokio::test]
+async fn an_abandoned_session_that_does_not_read_is_that_uploads_failure() {
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
+    let (f, song) = left_in_parts(CloudProvider::Dropbox, &clock).await;
+    let [subject, _] = f.subjects(&song).await;
+    let upload = f.upload_of(&song).await.unwrap();
+    f.files
+        .inner
+        .database
+        .record_session(
+            upload.id,
+            coven_crypto::SecretBytes::new(b"not a session".to_vec()),
+            coven_database::UploadProgress { bytes_confirmed: 0, bytes_total: upload.bytes_total },
+        )
+        .await
+        .unwrap();
+    delete_song(&f).await;
+    clock.set(clock.now() + Duration::from_secs(60));
+    f.files.inner.drain_uploads().await.unwrap();
+    let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert!(records.iter().any(|record| record.subject == subject), "{records:?}");
+    f.close().await;
+}
+
 /// With no storage connected, an upload whose session needs aborting stays
 /// queued, while one without a session retires (§17.9).
 #[tokio::test]

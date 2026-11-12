@@ -511,7 +511,6 @@ async fn serve_uploads(
             never = parks.parked() => match never {},
         }
         let owner = owner.upgrade()?;
-        let bugs = owner.database.bugs();
         let run = async {
             match owner.drain_uploads().await {
                 Ok(_) => (),
@@ -524,24 +523,20 @@ async fn serve_uploads(
                     tracing::debug!("file uploads waiting for a completed catch-up");
                 }
                 Err(SyncError::Database(DbError::StoreClosed)) => (),
-                Err(error) => {
-                    if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
-                        tracing::error!(?error, "upload queue failed");
-                    }
-                }
+                Err(error) => show_worker_failure(&owner, error).await?,
             }
             // The switches a run made can ask for pins; a paused queue or no
             // storage holds no pin made from coven's copy.
             match owner.keep_pinned().await {
-                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
-                Err(error) => {
-                    if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
-                        tracing::error!(?error, "keeping files here failed");
-                    }
-                }
+                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => Ok(()),
+                Err(error) => show_worker_failure(&owner, error).await,
             }
         };
-        tokio::select! { biased; _ = stopping.changed() => return None, () = run => {} }
+        let ran =
+            tokio::select! { biased; _ = stopping.changed() => return None, ran = run => ran };
+        if let Err(error) = ran {
+            return Some(error);
+        }
         // A paused queue still runs its bound uploads, whose retries the
         // worker must wake for (§17.4).
         retry = match owner.database.bound_uploads().await {
@@ -552,13 +547,26 @@ async fn serve_uploads(
             // Commits, network reports and wakes still run the worker; no
             // retry wait wakes it until a later run arms one.
             Err(error) => {
-                if !coven_foundation::task::report_carried(owner.database.bugs().as_ref(), &error) {
-                    tracing::error!(?error, "reading the bound uploads failed");
+                if let Err(error) = show_worker_failure(&owner, error.into()).await {
+                    return Some(error);
                 }
                 Box::pin(std::future::pending())
             }
         };
     }
+}
+
+/// A failure of the upload worker's own work, which no caller hears: a bug
+/// goes to the store's bug sink, and any other failure is written as how
+/// the last pass ended, so the sync state says the queue is failing (§19.1)
+/// rather than only the log. A failed write of that has failed the store's
+/// handle, and ends the worker.
+async fn show_worker_failure(owner: &FilesInner, error: SyncError) -> Result<(), SyncError> {
+    if coven_foundation::task::report_carried(owner.database.bugs().as_ref(), &error) {
+        return Ok(());
+    }
+    owner.waits.show_worker_failure(error).await?;
+    Ok(())
 }
 
 impl<M: FilesMode> FilesInner<M> {
