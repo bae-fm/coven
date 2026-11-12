@@ -348,6 +348,12 @@ pub trait StoreDirAccess: Sized {
     /// Retained remote input has its own SQLite owner: receiving bytes must not
     /// wait for a transaction applying those bytes to the application database.
     fn input_database_path(&self) -> PathBuf;
+    /// The database a breaking migration's per-audience check runs in, which
+    /// lives only for that check (§18.3).
+    fn audience_database_path(&self) -> PathBuf;
+    /// Remove that database's file and the files SQLite keeps beside it; one
+    /// that is absent is already removed.
+    fn remove_audience_database(&self) -> Result<(), FileError>;
     /// The record of a replacement whose swap is under way (§19.3). A record
     /// that remains only because publication was interrupted after removing
     /// the bootstrap marker, with settings already naming the new device, is
@@ -483,6 +489,27 @@ impl StoreDirAccess for StoreDir {
     }
     fn input_database_path(&self) -> PathBuf {
         self.path.join("inputs.db")
+    }
+    fn audience_database_path(&self) -> PathBuf {
+        self.path.join("audiences.db")
+    }
+    fn remove_audience_database(&self) -> Result<(), FileError> {
+        let path = self.audience_database_path();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            match std::fs::remove_file(PathBuf::from(&file)) {
+                Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(FileError::at(
+                        "remove the audience database",
+                        &PathBuf::from(file),
+                        source,
+                    ));
+                }
+                _ => (),
+            }
+        }
+        Ok(())
     }
     fn unfinished_replacement(&self) -> Result<Option<super::ReplacementRecord>, SettingsError> {
         super::device_reset::unfinished(&self.path, self.id)

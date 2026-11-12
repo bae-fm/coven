@@ -649,7 +649,8 @@ mod source {
         assert!(
             matches!(
                 file,
-                "change_capture.rs"
+                "audience_database.rs"
+                    | "change_capture.rs"
                     | "database_file_retention.rs"
                     | "derived.rs"
                     | "file_database.rs"
@@ -674,7 +675,8 @@ mod source {
             "unclassified SQL builder in {file}: {sql}"
         );
         assert!(
-            !sql.contains("_coven_") || file == "migration_snapshot.rs",
+            !sql.contains("_coven_")
+                || matches!(file, "migration_snapshot.rs" | "audience_database.rs"),
             "internal SQL builder: {sql}"
         );
         Vec::new()

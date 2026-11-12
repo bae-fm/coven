@@ -406,7 +406,7 @@ impl SnapshotTable {
     }
 }
 
-fn key_sql(table: &TableSchema, prefix: &str) -> String {
+pub(crate) fn key_sql(table: &TableSchema, prefix: &str) -> String {
     format!(
         "coven_key({})",
         key_columns(table)

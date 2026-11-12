@@ -1374,6 +1374,9 @@ tables = [
     # input database and the discarded-database reads share.
     "coven_only",
 ]
+# The database a breaking migration's per-audience check runs in, with the
+# connection, authorizer and views it opens it with (§18.3).
+"crates/coven-database/src/audience_database.rs" = ["AudienceDatabase::stage"]
 "crates/coven-database/src/file_database.rs" = ["FileDatabase::new"]
 "crates/coven-database/src/file_staging.rs" = ["FileStaging::write"]
 # A file's stream opens its local source: a copy in the store's directory,

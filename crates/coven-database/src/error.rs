@@ -399,6 +399,24 @@ pub enum DbError {
         /// The refused migration's version.
         version: u32,
     },
+    /// A breaking run's rows of a table in an audience differ from the same
+    /// migrations run over only that audience's rows and the store's: they
+    /// came from another circle, a local table or this device's own state.
+    #[error("a migration's {table} rows in {audience} depend on rows outside it")]
+    MigrationReadsAcross {
+        /// A table whose rows differ.
+        table: String,
+        /// The audience whose rows differ.
+        audience: coven_merge::Audience,
+    },
+    /// A synced row of a table that synced before a breaking run has no merge
+    /// record, so the check of what the run reads can't tell its audience:
+    /// the database is damaged.
+    #[error("a synced row of {table} has no merge record")]
+    UnrecordedRow {
+        /// The table holding the row.
+        table: String,
+    },
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     #[error("conversion cannot change reference {table}.{column}")]
     MigrationReference {

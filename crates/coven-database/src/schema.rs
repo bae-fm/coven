@@ -105,6 +105,25 @@ pub(crate) struct SchemaForeignKey {
 }
 
 impl Schema {
+    /// The SQL that creates each of the app's objects of one kind
+    /// (`table`, `index`, `view` or `trigger`), by name. An index SQLite makes
+    /// for a key or unique constraint has no SQL of its own.
+    pub(crate) fn create_sql<'s>(&'s self, kind: &'s str) -> impl Iterator<Item = &'s str> + 's {
+        self.objects
+            .iter()
+            .filter(move |((object_kind, _), _)| object_kind == kind)
+            .filter_map(|(_, object)| object.sql.as_deref())
+    }
+
+    /// The app's triggers, each as its name and the SQL that creates it.
+    pub(crate) fn triggers(&self) -> Vec<(String, String)> {
+        self.objects
+            .iter()
+            .filter(|((kind, _), _)| kind == "trigger")
+            .filter_map(|((_, name), object)| Some((name.clone(), object.sql.clone()?)))
+            .collect()
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(&(self.objects.iter().collect::<Vec<_>>(), &self.tables))
             .expect("schema contains only JSON-compatible fields")

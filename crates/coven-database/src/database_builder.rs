@@ -216,6 +216,17 @@ impl DatabaseBuilder {
                         self.installation,
                     )),
                     self.migration_operation.as_deref(),
+                    Some(&|live| {
+                        crate::audience_database::AudienceDatabase::stage(
+                            &self.directory,
+                            &self.sqlite,
+                            &self.functions,
+                            &observer,
+                            settings.device_id,
+                            &tables,
+                            live,
+                        )
+                    }),
                     &mut progress,
                 )?;
                 crate::database::file_database::declare_budgets(writer, &self.namespaces)?;
@@ -409,6 +420,7 @@ impl DatabaseBuilder {
             &tables,
             &migrations,
             &self.functions.versions(),
+            None,
             None,
             None,
             &mut ProgressReport::of(&self.progress, clock),

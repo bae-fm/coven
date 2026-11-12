@@ -1577,6 +1577,10 @@ pub enum DbError {
     /// came from another circle, a local table or this device's own state
     /// (§18.1, §18.3, E13).
     MigrationReadsAcross { table: String, audience: Audience },
+    /// A synced row of a table that synced before a breaking run has no merge
+    /// record, so the check of what the run reads can't tell its audience: the
+    /// database is damaged (§18.3).
+    UnrecordedRow { table: String },
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     MigrationReference { table: String, column: String },
     /// A converted row names the same column twice.

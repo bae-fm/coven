@@ -8981,7 +8981,9 @@ is checked against §18.1's rule before anything commits. Coven runs the same
 migrations again, once per audience the device reads, each time in a database
 of its own holding only that audience's rows and the store's as they were
 before the run, with the local tables empty and coven's views showing nothing
-of this device. It runs the store alone, then each circle with the store.
+of this device. That database is the file `audiences.db` in the store's
+folder, which exists only while the run is checked and is removed when it ends,
+however it ends. It runs the store alone, then each circle with the store.
 After each run, the audience's rows must equal its rows after the real run,
 and so must the store's. A difference fails the open with
 `DbError::MigrationReadsAcross { table, audience }`, naming a table whose rows
@@ -8998,6 +9000,16 @@ body is the rows the per-audience run makes. A device whose real run makes
 other rows refuses, and a device that rebuilds a circle (below) runs the
 migration over exactly that circle and the store. A migration whose
 SQL answers differently each run, such as one using `random()`, fails too.
+No app trigger fires on a row coven copies in, the store's or a circle's: the
+run takes the triggers out while it inserts the circle's rows and puts them
+back before the migrations run, so a shared trigger's writes (§9.4) appear only
+where the migration's own statements fire it.
+Each database holds the file records (`coven_files`) of its audience and the
+store, so a migration that joins them reads what it reads in the real run.
+Every synced row has a merge record, so a row of a table that synced before the
+run and has none fails the open with `DbError::UnrecordedRow { table }`; coven
+never guesses its audience. A table that was local until this run and is synced
+from it on has rows without records; every run holds them.
 Coven can't take the rule on the app's word, and can't find which rows a
 statement read: tracking the tables it reads would refuse the many migrations
 that read only their own audience's rows of a table every audience shares.
@@ -13628,6 +13640,7 @@ maps them are with each provider in Appendix E.
 | `DbError::VersionNotRebuilt` | a read-only open registers another version of a collation or function than the store's indexes were built with | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `DbError::MigrationReadsAcross { table, audience }` | a breaking run's rows of `table` in `audience` differ from the same migrations run over only that audience's rows and the store's: they came from another circle, a local table or this device's own state; nothing commits | §18.1, §18.3 |
+| `DbError::UnrecordedRow { table }` | a synced row of a table that synced before a breaking run has no merge record, so the check can't tell its audience: the database is damaged; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore, join or pairing, is unfinished; only that call resumes it, and a pairing, or the other of a restore and a join, is refused on it | §13.4 |
 | `ReplacementUnfinished` | a reset or restore in place swapped the new installation in but did not finish; names the call that finishes it, and refuses the other | §13.1, §19.3 |

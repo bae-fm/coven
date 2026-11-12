@@ -250,6 +250,7 @@ impl DatabaseConnection {
         versions: &[crate::sql_versions::SqlVersion],
         author: Option<crate::migration_run::MigrationOrigin>,
         operation: Option<&crate::migration::MigrationOperation>,
+        audiences: Option<&crate::audience_database::Stage<'_>>,
         progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
     ) -> Result<Vec<MigrationOutcome>, OpenError> {
         let read_only = author.is_none();
@@ -303,6 +304,21 @@ impl DatabaseConnection {
             crate::OpenStep::Migrating,
             migrations.iter().filter(|m| m.version > current).count() as u64,
         );
+        // A run with a breaking migration is checked against what each
+        // audience alone would make of it, from the rows as they are now (§18.3).
+        let pending: Vec<&Migration> = migrations.iter().filter(|m| m.version > current).collect();
+        let mut staged = None;
+        if let Some(stage) = audiences.filter(|_| {
+            pending.iter().any(|m| matches!(m.kind, crate::migration::MigrationKind::Breaking(_)))
+        }) {
+            let first = pending[0];
+            let before = stage(self);
+            staged = Some(before.map_err(|source| MigrationError::Failed {
+                version: first.version,
+                name: first.name,
+                source: Box::new(source),
+            })?);
+        }
         let result = self.with_profile(|db| {
             db.transaction(|db| {
                 let crate::migration_run::MigrationRun { outcomes, marker } =
@@ -316,6 +332,9 @@ impl DatabaseConnection {
                         &mut at,
                         progress,
                     )?;
+                if let Some(staged) = staged.as_mut() {
+                    crate::audience_database::verify(staged, db, &pending, tables)?;
+                }
                 let breaking = outcomes
                     .iter()
                     .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)

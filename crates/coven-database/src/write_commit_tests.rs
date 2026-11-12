@@ -816,6 +816,19 @@ pub(crate) fn restore_first_generation(
     Ok(())
 }
 
+/// Damage: take every merge record of `table`'s rows away, leaving the rows.
+pub(crate) fn plant_unrecorded_rows(
+    db: &crate::sqlite::DatabaseConnection,
+    table: &str,
+) -> Result<(), crate::DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)",
+        [table],
+    )?;
+    db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [table])?;
+    Ok(())
+}
+
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
