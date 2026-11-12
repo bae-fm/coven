@@ -1,8 +1,9 @@
 /-!
-# A join and a restore of one store on one device
+# A join, a restore and a pairing of one store on one device
 
 A device keeps one unfinished first installation of a store, at the store's
-path, whichever call made it (§13.4): a join (§13.2) or a restore (§13.1).
+path, whichever call made it (§13.4): a join (§13.2), a restore (§13.1) or a
+pairing (§13.2, `join_with_pairing`), which is a restore from its record on.
 Each call keeps what lists it to resume. A join keeps its invite code from
 before its request may be sent; a restore keeps its record from before its
 registration may be sent. Each call removes the installation, and everything
@@ -11,12 +12,18 @@ may have sent its request, or declined; a restore cancelled or failed before
 its record.
 
 A call begins on whatever installation is there, so without a rule a restore
-may begin on a waiting join's installation, or a join on a recorded
-restore's. Then one call's removal takes the other's listing with it: storage
-may hold the other's request or registration, and nothing on the device
-lists it to resume. `Rules.exclusive`: a restore refuses an installation
-holding an invite code, and a join one holding a restore's record, changing
-nothing. Without it, each removal is a checked counterexample.
+or a pairing may begin on a waiting join's installation, or a join on a
+recorded restore's. Then one call's removal takes the other's listing with it:
+storage may hold the other's request or registration, and nothing on the
+device lists it to resume. `Rules.exclusive`: a restore refuses an
+installation holding an invite code, a pairing one holding an invite code or a
+restore's record, and a join one holding a restore's record, changing nothing.
+Without it, each removal is a checked counterexample.
+
+A pairing keeps nothing on the device until its restore records itself: the
+request it sends binds nothing, since approval writes nothing in history. It
+can be cancelled at any point before the record, and it removes its
+installation as a restore's cancel does. From the record on it is a restore.
 
 A join accepts the provider's share before it sends its request, and on
 Dropbox the accepted folder sits in the joining account. A join cancelled
@@ -77,6 +84,8 @@ inductive Call where
   | none
   | join
   | restore
+  /-- A pairing on the new device, before its restore's record. -/
+  | pair
   deriving DecidableEq, Repr
 
 structure World where
@@ -118,8 +127,9 @@ def start : World :=
     false⟩
 
 structure Rules where
-  /-- A restore refuses an installation holding an invite code, and a join
-  one holding a restore's record. -/
+  /-- A restore refuses an installation holding an invite code, a pairing one
+  holding an invite code or a restore's record, and a join one holding a
+  restore's record. -/
   exclusive : Bool
   /-- A join records that it is accepting the share before it accepts. -/
   recordsAcceptance : Bool
@@ -165,6 +175,13 @@ inductive Act where
   /-- A restore begins on the store's installation, making one if none is
   there. -/
   | beginRestore
+  /-- A pairing begins on the store's installation, making one if none is
+  there. -/
+  | beginPair
+  /-- The pairing's restore records itself: from here the call is a restore. -/
+  | pairRecord
+  /-- The pairing is cancelled, or fails or ends, before its record. -/
+  | pairUndo
   /-- The restore records itself. -/
   | record
   /-- The restore sends its registration. -/
@@ -191,6 +208,9 @@ def enabled (R : Rules) (w : World) : Act → Bool
   | .approved => w.call == .join && w.found && !R.publishesAtAdmission
   | .load _ => w.inst == .published && w.found && !w.loaded && !w.stopped
   | .beginRestore => w.call == .none && w.inst != .published && (!R.exclusive || !w.code)
+  | .beginPair =>
+    w.call == .none && w.inst != .published && (!R.exclusive || (!w.code && !w.record))
+  | .pairRecord | .pairUndo => w.call == .pair
   | .record => w.call == .restore
   | .register => w.call == .restore && w.record
   | .restoreUndo => w.call == .restore && !w.record
@@ -220,6 +240,9 @@ def act (R : Rules) (w : World) : Act → World
     else if R.stopsRefused then { w with stopped := true }
     else { w with loaded := true }
   | .beginRestore => { w with inst := .hidden, call := .restore }
+  | .beginPair => { w with inst := .hidden, call := .pair }
+  | .pairRecord => { w with call := .restore, record := true }
+  | .pairUndo => undo w
   | .record => { w with record := true }
   | .register => { w with registered := true }
   | .restoreUndo => undo w
@@ -257,6 +280,18 @@ def InviteeLost (w : World) : Prop :=
 /-! ## Counterexamples: one call's removal takes the other's listing -/
 
 /-- Dan's phone sends its join request for Household, and the app drops the
+join while it waits. Dan then scans a pairing code for Household on the
+phone, which begins on the join's installation, and cancels before the
+pairing's restore records itself. The cancel removes the installation and the
+join's code with it: Ben may approve Dan's request, and no join on the phone
+is listed to finish it. -/
+theorem pairing_strands_join :
+    ∃ w, trace ⟨false, true, true, true, true⟩ start
+        [.beginJoin, .send, .drop, .beginPair, .pairUndo] = some w ∧ Stranded w := by
+  exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
+
+
+/-- Dan's phone sends its join request for Household, and the app drops the
 join while it waits. Someone then restores Household on the phone from a
 restore code, which begins on the join's installation, and cancels before
 the restore records itself. The cancel removes the installation and the
@@ -264,6 +299,18 @@ join's code with it: Ben may approve Dan's request, and no join on the
 phone is listed to finish it. -/
 theorem restore_strands_join :
     ∃ w, trace ⟨false, true, true, true, true⟩ start [.beginJoin, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
+      Stranded w := by
+  exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
+
+/-- Ana's laptop records its restore of Household and sends its
+registration, and the app drops the call. A pairing for Household then begins
+on the restore's installation and is cancelled before its own record. The
+cancel removes the installation and the restore's record with it: the
+registration may land, and no restore on the laptop is listed to finish
+it. -/
+theorem pairing_strands_restore :
+    ∃ w, trace ⟨false, true, true, true, true⟩ start
+        [.beginRestore, .record, .register, .drop, .beginPair, .pairUndo] = some w ∧
       Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -327,6 +374,8 @@ structure Inv (w : World) : Prop where
   one : ¬(w.code = true ∧ w.record = true)
   join : w.call = .join → w.code = true ∧ w.record = false
   restore : w.call = .restore → w.code = false
+  /-- A pairing keeps nothing on the device, so nothing lists it. -/
+  pair : w.call = .pair → w.code = false ∧ w.record = false
   /-- An acceptance is kept by a listed join that records it, or has sent. -/
   accepted : w.accepted = true → w.code = true ∧ (w.acceptKept = true ∨ w.sent = true)
   /-- A join that found its admission is a published store, with no call on
@@ -341,12 +390,13 @@ structure Inv (w : World) : Prop where
 theorem inv_start : Inv start := by
   constructor <;> simp [start]
 
+set_option maxHeartbeats 1600000 in
 theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct w a = true) :
     Inv (act Rules.correct w a) := by
-  obtain ⟨sent, registered, one, join, restore, accepted, found, loaded, invitee⟩ := inv
+  obtain ⟨sent, registered, one, join, restore, pair, accepted, found, loaded, invitee⟩ := inv
   cases a <;> rcases hc : w.call <;> constructor <;>
-    simp_all [act, enabled, Rules.correct, undo, publish] <;>
-    (try split) <;> simp_all
+    (try simp_all [act, enabled, Rules.correct, undo, publish]) <;>
+    (try split) <;> (try simp_all)
 
 theorem steps_keep_inv : ∀ {w w'}, Steps Rules.correct w w' → Inv w → Inv w' := by
   intro w w' h
@@ -382,6 +432,47 @@ theorem acknowledge_idempotent (R : Rules) (w : World)
     enabled R (act R w .acknowledge) .acknowledge = true ∧
       act R (act R w .acknowledge) .acknowledge = act R w .acknowledge := by
   simp_all [enabled, act]
+
+/-- **A pairing keeps nothing until its record.** Nothing on the device lists
+a pairing, and so nothing of a join's or a restore's is under it: its cancel,
+at any point before its restore records itself, removes the installation and
+strands nothing. -/
+theorem pairing_unlisted {w : World} (h : Reachable Rules.correct w) (c : w.call = .pair) :
+    w.code = false ∧ w.record = false ∧ w.registered = false ∧ w.sent = false :=
+  by
+    have inv := steps_keep_inv h inv_start
+    obtain ⟨a, b⟩ := inv.pair c
+    refine ⟨a, b, ?_, ?_⟩
+    · cases hr : w.registered
+      · rfl
+      · simp [inv.registered hr] at b
+    · cases hs : w.sent
+      · rfl
+      · simp [inv.sent hs] at a
+
+/-- A pairing is refused an installation that holds an invite code or a
+restore's record, changing nothing. -/
+theorem pairing_refused {w : World} (held : w.code = true ∨ w.record = true) :
+    enabled Rules.correct w .beginPair = false := by
+  rcases held with c | r
+  · simp [enabled, Rules.correct, c]
+  · simp [enabled, Rules.correct, r]
+
+/-- A pairing cancelled, failed or ended before its record leaves no
+installation and nothing kept beside it. -/
+theorem pairing_cancel_leaves_nothing {w : World} (h : Reachable Rules.correct w)
+    (e : enabled Rules.correct w .pairUndo = true) :
+    (act Rules.correct w .pairUndo).inst = .none ∧ (act Rules.correct w .pairUndo).code = false ∧
+      (act Rules.correct w .pairUndo).record = false ∧ ¬Stranded (act Rules.correct w .pairUndo) := by
+  have inv := steps_keep_inv h inv_start
+  have c : w.call = .pair := by simpa [enabled] using e
+  obtain ⟨hc, hr, hreg, hsent⟩ := pairing_unlisted h c
+  have acc : w.accepted = false := by
+    cases ha : w.accepted
+    · rfl
+    · simp [(inv.accepted ha).1] at hc
+  refine ⟨rfl, rfl, rfl, ?_⟩
+  rintro (⟨s, _⟩ | ⟨r, _⟩ | ⟨a', _⟩) <;> simp_all [act, undo]
 
 /-- Under the rules no call's removal takes another's listing, and no cancel
 leaves an acceptance behind: whatever storage may hold of a join's request or

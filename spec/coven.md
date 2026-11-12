@@ -5279,7 +5279,11 @@ Four things differ, and nothing else:
 
 **The pairing lives while its code shows.** Ana's app ends the pairing when she
 closes Add device, with the ending a cancelled invite has: the marker replaces
-whatever is at the request's path, the request or the handover. So nothing
+whatever is at the request's path, the request or the handover. An ending that
+replaced only a request would forget the pairing with the handover still in
+storage, for a laptop to find and open
+([`ending_leaves_handover`](proofs/sequence/CovenSequence/PairingLifecycle.lean)).
+So nothing
 lists open pairings, and nothing on her list of devices shows one: a pairing
 on no screen would be one Ana could neither see nor end. Nor does a pairing
 outlive its handle. No screen shows it once the handle is gone, so opening the
@@ -5308,8 +5312,10 @@ The code Ana copies or shares as text carries no key, and the new device asks
 her for it. Either way, approval hands over no key.
 
 **Approving** is a write of its own, with or without storage. It checks that
-the pairing hasn't expired and waits with exactly the request Ana was shown,
-then seals the handover to that request's sealing key, with the pair this
+the pairing hasn't expired and waits with exactly the request Ana was shown;
+without that comparison the write would seal to a request she never saw
+([`uncompared_approval_seals_wrong`](proofs/sequence/CovenSequence/PairingLifecycle.lean)).
+It then seals the handover to that request's sealing key, with the pair this
 device holds, and journals its bytes. A pass then puts it in the request's
 place: it deletes the request and creates the handover, create-once, and
 deletes again a request created in between. The bytes were fixed by the
@@ -5543,8 +5549,13 @@ everything is encrypted.
   ([`join_strands_restore`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
   So a restore refuses an installation holding a join's saved code, and a join
   one holding a restore's record, with `BootstrapPending`, changing nothing.
-  A pairing begins on the installation as a restore does, and is refused the
-  same way. The app finishes the call under way first.
+  A pairing begins on the installation as a restore does, and is refused on one
+  holding a join's saved code or a restore's record, with `BootstrapPending`,
+  changing nothing: it keeps nothing on the device until its own record, so its
+  cancel removes the installation and whatever was kept beside it
+  ([`pairing_strands_join`](proofs/sequence/CovenSequence/FirstInstallation.lean),
+  [`pairing_strands_restore`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+  The app finishes the call under way first.
 - **Space a crash left.** An unfinished installation that keeps neither a
   join's saved code nor a restore's record is one a crash or a dropped call
   left before either could write to storage, or a pairing's left before its
@@ -11118,6 +11129,14 @@ What the models cover:
   another admin's device may apply first, ending the device's requests. Each
   ends, what the app sees never goes back, and the app is offered exactly what
   the write steps accept (§11.4, §13.2).
+- **A pairing** on the device that shows it and on the new device that asks:
+  every writer, a crash between any two transactions, a stop for good, a reset,
+  and whoever saw the code writing a request of their own. Each ends with only
+  its marker at the request's path, then is forgotten; what the app sees never
+  goes back; the handover is sealed only to the key of the request the app
+  approved, and nothing at the path carries the member's keys before that; and
+  cancelling the new device before its restore records itself binds nothing
+  (§13.2, §13.4). The sealing and opening are taken as given.
 - **Pieces of storage behaviour,** such as copy publication and upload sessions.
 
 What they don't cover:
@@ -11191,9 +11210,6 @@ What they don't cover:
   grace supplies.
   Nor does a model run a device's raise across every audience it read: each
   audience's raise is modelled alone (§18.3).
-- **Pairing.** No model covers a pairing (§13.2): its stages on the showing
-  device, its ending when its screen closes, or that its handover opens only
-  with the approved request's key. Tests check them against the Rust.
 - **What a stopped device sends.** The model proves a stopped device takes no
   apply or reload step (§5.4). The restriction on sending, its bootstrap
   join-request exception, and recovery once the cause clears are outside the model.
@@ -13305,8 +13321,18 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A restore whose facts count only a removal stays listed for good once its member's keys are replaced after it registers: every resume fails | `replaced_restore_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1, §14.1 |
 | *Body.* A restore whose resume journals a second registration, rather than run the one its journal holds, stays listed for good once the first one's claim is open and its task has failed: every resume fails | `forgotten_registration_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.4, §13.1 |
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |
-| A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
-| *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
+| No write from a stale read: a pairing's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| From every reachable state, crashes, opens, expiry and stops for good included, coven's own steps and the app's closing of the screen end the pairing with only the marker at its path, then forget it: no row, no pending record, no pass in flight and no handover left | `settles`, `settled_no_handover` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2, §14.1 |
+| A request is offered for approval, or approved, only once it passed its checks; one that fails a check ends the pairing in the pass that reads it, with the marker placed and no pending record | `offered_checked`, `refused_ends` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| The status the app is shown only moves forward; its offer of approving, declining and closing the screen is exactly what the write steps accept; it is shown approved exactly while the row journals the approval | `forward`, `offered_accepted`, `approved_iff` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| The handover is sealed only to the key of the request the app approved, which is the one the pairing checked and offered; no other request gets a handover, nothing at the path carries the member's keys before the approval, and a handover at the path belongs to a pairing not yet ended or to a device stopped for good | `handover_only_approved`, `journaled_approved`, `nothing_before_approval`, `handover_owned` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| A pairing claims no slot and records no access | `claims_zero` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| The new device's check that finds the handover never reports the pairing ended; while the pairing is approved, the pass that replaces a request with the handover finishes, and so does it when the new device's request lands between its delete and its create | `check_handover_not_ended`, `approved_converges`, `request_in_window` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| Cancelling the new device at any point before its restore records itself leaves no add-device entry in history, and no member without a device | `cancel_binds_nothing` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| *Body.* Without the pass saving its finding only at the step it read, a finding from before the app's close is saved over the closed row; an approval that doesn't compare the request the app was shown with the stored one seals the handover to a request the app never approved; an ending that replaces only a request forgets the pairing with the handover still at the path | `unguarded_finding_is_stale`, `uncompared_approval_seals_wrong`, `ending_leaves_handover` | `proofs/sequence/CovenSequence/PairingLifecycle.lean` | §13.2 |
+| A join, a restore and a pairing of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, a pairing one holding an invite code or a restore's record, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
+| A pairing keeps nothing on the device until its restore records itself, so nothing lists it, and a store whose installation holds an invite code or a restore's record refuses it; cancelled, dropped or failed before the record, it removes its installation and strands nothing | `pairing_unlisted`, `pairing_refused`, `pairing_cancel_leaves_nothing` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
+| *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. A pairing begun on either, and cancelled before its own record, removes the same. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `pairing_strands_join`, `pairing_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | A join publishes the store in the step that finds its admission, and a store whose first load leaves its device never a member stops for good: a join that found its admission is a published store, listed as no join, and every such store whose first load reached the end of the sequence counts its device a member | `found_published`, `refused_stops` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §14.1 |
 | *Body.* Publishing only once the store has loaded, a call that stops while it loads leaves the join listed with nothing left to do; without the stop, a store whose first load applied a refused admission syncs on unregistered with no step left that would end it | `loaded_first_lists_admitted`, `refused_syncs_forever` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
 | Publishing a join's store keeps the person's name its request carried with the store: whatever happens between, a first load that fails or an app that quits, the store keeps that name until the app acknowledges it, and acknowledging again is allowed and changes nothing | `invitee_kept`, `acknowledge_idempotent` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
@@ -13554,7 +13580,7 @@ maps them are with each provider in Appendix E.
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `DbError::MigrationReadsAcross { table, audience }` | a breaking run's rows of `table` in `audience` differ from the same migrations run over only that audience's rows and the store's: they came from another circle, a local table or this device's own state; nothing commits | §18.1, §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
-| `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it, and the other is refused on it | §13.4 |
+| `BootstrapPending` | a first installation, by restore, join or pairing, is unfinished; only that call resumes it, and a pairing, or the other of a restore and a join, is refused on it | §13.4 |
 | `ReplacementUnfinished` | a reset or restore in place swapped the new installation in but did not finish; names the call that finishes it, and refuses the other | §13.1, §19.3 |
 | `SchemaError::ForeignKeyNotPrimaryKey` | a synced table's foreign key doesn't reference the parent's whole primary key | §9.1 |
 | `SchemaError::LocalChildUpdate` | a local foreign key into a synced non-key column has an update action other than cascade or set null | §9.1 |

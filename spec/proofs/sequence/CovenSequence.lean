@@ -40,6 +40,7 @@ import CovenSequence.Authorship
 import CovenSequence.JoinScan
 import CovenSequence.JoinScanExamples
 import CovenSequence.InviteLifecycle
+import CovenSequence.PairingLifecycle
 import CovenSequence.InviteClaims
 import CovenSequence.AccessKeyReplacement
 import CovenSequence.RestoreRegistration

@@ -7759,8 +7759,8 @@ pub enum ProviderSignOut {
   nothing in history. It returns `None` when the pairing ended before its
   handover opened: declined, closed, expired, refused, or its showing device
   gone for good. A store whose unfinished installation holds a join's saved
-  code is refused with `StoreLockError::BootstrapPending` before anything
-  changes, as a restore is (§13.4).
+  code or a restore's record is refused with `StoreLockError::BootstrapPending`
+  before anything changes (§13.4).
 - Each call takes a `CovenBuilder` from the app's `Coven`, plus its code,
   device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. Restore and pairing also accept the
@@ -8727,8 +8727,8 @@ impl JoinControl {
 /// the pairing ended before its handover opened: declined, closed, expired,
 /// refused, or its showing device gone for good, including when it expired
 /// before the request was sent, which then isn't. A store whose unfinished
-/// installation holds a join's saved code is refused with
-/// `StoreLockError::BootstrapPending` before anything changes (§13.4).
+/// installation holds a join's saved code or a restore's record is refused
+/// with `StoreLockError::BootstrapPending` before anything changes (§13.4).
 pub async fn join_with_pairing(
     builder: CovenBuilder,
     code: &str,

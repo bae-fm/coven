@@ -1372,8 +1372,8 @@ the app to call again, the second's claim meets that open claim and every
 resume fails on every path (`forgotten_registration_stuck`).
 
 [`FirstInstallation`](sequence/CovenSequence/FirstInstallation.lean)
-models one store's unfinished first installation on a device, which a join
-and a restore both begin on (§13.4). A join keeps its invite code from
+models one store's unfinished first installation on a device, which a join,
+a restore and a pairing all begin on (§13.4). A join keeps its invite code from
 before its request may be sent, and a restore its record from before its
 registration may be sent; each lists its call to resume. A join cancelled
 before sending, or declined, and a restore cancelled or failed before its
@@ -1384,9 +1384,12 @@ an approval's becomes the store's access. A join finds its admission, which
 registered its device, by the copies it carries; the published store's
 first load applies it, counted or refused. The app drops either call at any
 point, and records the person's profile from the name the join's request carried,
-acknowledging the name the store keeps. Under `Rules.correct` a restore
-refuses an installation holding an invite code, and a join one holding a
-restore's record, a join records that it is accepting before it accepts, a
+acknowledging the name the store keeps. A pairing keeps nothing on the device
+until its restore records itself, when it becomes a restore; cancelled,
+dropped or failed before, it removes the installation. Under `Rules.correct` a
+restore refuses an installation holding an invite code, a pairing one holding
+an invite code or a restore's record, and a join one holding a restore's
+record, a join records that it is accepting before it accepts, a
 join publishes the store in the step that finds its admission, a store whose
 first load leaves its device never a member stops for good, and publishing
 keeps the person's name its request carried with the store.
@@ -1402,6 +1405,10 @@ keeps the person's name its request carried with the store.
   request carried until the app acknowledges it, whatever happens between.
 - `acknowledge_idempotent`: acknowledging the name again is allowed and
   changes nothing.
+- `pairing_unlisted`, `pairing_refused`, `pairing_cancel_leaves_nothing`: a
+  pairing has no code, record, request or registration on the device; it is
+  refused an installation holding an invite code or a restore's record; and
+  its cancel leaves no installation and nothing stranded.
 
 Each rule is needed. Without the first, one call's removal takes the other's
 listing:
@@ -1411,6 +1418,9 @@ listing:
 - `join_strands_restore`: a join begun on a registering restore's
   installation is cancelled before its request, and removes the restore's
   record.
+- `pairing_strands_join`, `pairing_strands_restore`: a pairing begun on a
+  waiting join's, or a registering restore's, installation is cancelled
+  before its own record, and removes the join's code or the restore's record.
 
 Without the second, `cancel_strands_acceptance`: a join accepts, the app
 closes, and the resumed join is cancelled; it removes its code and leaves
@@ -1538,6 +1548,84 @@ The rule is needed:
 - `cut_commit_orphans_custody`: a crash in the middle of the commit, then the
   facts ending the restore, leaves the custody the commit wrote, the device
   id and keys among it, for a store the device doesn't have.
+
+## Pairings
+
+[`PairingLifecycle`](sequence/CovenSequence/PairingLifecycle.lean) models one
+pairing on the device that shows its code (§13.2, "Pairing: one of the
+person's devices adds another"), the object at the request's one path, and the
+new device that asks. It has the invite's shape: a journal row with a step
+counter, conditional pass writes, the app's write steps, the expiry, a crash,
+a stop for good. Its steps are every writer that acts on them:
+
+- the app's write steps: approving the request it was shown, declining it, and
+  ending the pairing when Add device closes, or forgetting one that ended. Each
+  reads and decides in one transaction;
+- the expiry, which reads and decides in one transaction too;
+- a pass, which reads the pairing's row, does its storage work as separate
+  steps with no transaction open (deleting the request, creating the handover,
+  putting the marker), and writes after. Any other writer may commit in
+  between. Every pass looks at every pairing: it has no doubling wait;
+- a crash, which loses the pass's read and nothing durable;
+- opening the store, and a reset of the showing device, which carry every
+  pairing a closed handle or an old database left to its ending;
+- a stop for good, which finishes the row in its own transaction and does no
+  storage work, and an admin's device that sweeps the stopped device's requests
+  and handovers and writes the gone marker;
+- whoever saw the code writing a request of their own at the one path, one
+  that fails the pairing's checks or passes them;
+- the new device: sending its request, again when the path is empty, finding
+  the handover, being cancelled, recording its restore, and registering.
+
+The one path holds a request, the handover that takes its place, or the
+marker. `Rules` names each choice the properties depend on: the pass saves its
+finding only at the step it read, approving compares the request the app was
+shown with the stored one, and an ending replaces whatever is at the path. The
+properties are proved under `Rules.correct`, which has all three:
+
+- `reachable_inv`: the invariant every reachable state keeps.
+- `finding_current`, `commit_acts_on_read`: no write from a stale read.
+- `settles`: from every reachable state, crashes, opens, expiry and stops
+  included, coven's own steps and the app's closing of the screen reach a state
+  with no row, no pending record, no pass in flight, and at the path the marker,
+  or what the sweep left on a device stopped for good. `settled_no_handover`:
+  no handover is left there. The proof is a measure a step lowers
+  (`progress`).
+- `offered_checked`: a request the pairing offered or approved passed its
+  checks. `refused_ends`: a request that fails a check ends the pairing in the
+  pass that reads it, the marker placed, no pending record.
+- `forward`: what the app is shown never goes back, from waiting, to a request
+  waiting for it, to approved, to ended, to forgotten. `offered_accepted`: the
+  app's offer of approving, declining and closing is what the write steps
+  accept. `approved_iff`: it is shown approved exactly while the row journals
+  the approval.
+- `handover_only_approved`, `journaled_approved`: a handover, journaled or
+  stored, is sealed to the key of the request the app approved, which is the one
+  the pairing checked and offered. `nothing_before_approval`: before the
+  approval nothing at the path carries the member's keys and the new device
+  holds none. `handover_owned`: a handover at the path belongs to a pairing not
+  yet ended, or to a device stopped for good.
+- `claims_zero`: no slot claimed, no access recorded.
+- `check_handover_not_ended`: the new device's check that finds the handover
+  never reports the pairing ended. `approved_converges`: while the pairing is
+  approved, the pass that replaces a request with the handover finishes.
+  `request_in_window`: so it does when the new device's request lands between
+  the pass's delete and its create, and the new device then opens the handover.
+- `cancel_binds_nothing`: cancelling the new device before its restore records
+  itself leaves no add-device entry in history.
+
+Each rule is needed:
+
+- `unguarded_finding_is_stale`: a finding from before the app's close is saved
+  over the closed row.
+- `uncompared_approval_seals_wrong`: the app approves a request it was shown
+  that isn't the stored one; the write is accepted and the handover is
+  journaled for the stored request's key, one the app never approved.
+- `ending_leaves_handover`: an ending that replaces only a request, and
+  finishes without the marker in place, forgets a pairing the app closed after
+  the handover was stored, with the handover still at the path.
+
+The new device's installation is `FirstInstallation`'s (above).
 
 ## Settling a claim whose slot was deleted
 
