@@ -4615,8 +4615,10 @@ else may see it: a photo of her screen, or the message on Dan's lock screen.
 Whoever sees it could use it before Dan, and the invite has one request path,
 so the first request is the only one. So Ana's phone never approves a request
 on its own: it waits for her, and she approves only once Dan's confirmation
-number matches. She picks when the invite expires when she makes it: an hour,
-a day or a week after.
+number matches. She picks when the invite expires when she makes it: seven days
+or thirty days after. No provider ends the share it grants on a clock of its
+own, and an S3 key lasts until the person deletes it, so the invite's end is
+always coven's, by the inviting device's clock.
 
 **The confirmation number.** Dan's phone shows a six-digit number computed from
 the invite id and the two public keys in his request (format.md D11). Ana's

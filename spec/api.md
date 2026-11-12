@@ -8144,9 +8144,8 @@ pub enum InviteAccess {
 
 /// How long an invite stays open after it is made (§13.2).
 pub enum InviteLifetime {
-    Hour,
-    Day,
-    Week,
+    SevenDays,
+    ThirtyDays,
 }
 
 /// One of this device's open invites, as `coven_invites` lists it (E4).
@@ -8765,7 +8764,7 @@ let (invite, _, _) = handle
     .create_invite(
         InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
-        InviteLifetime::Day,
+        InviteLifetime::SevenDays,
     )
     .await?;
 

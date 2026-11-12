@@ -130,20 +130,17 @@ pub enum InviteAccess {
 /// device's clock (§13.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InviteLifetime {
-    /// One hour.
-    Hour,
-    /// One day.
-    Day,
-    /// One week.
-    Week,
+    /// Seven days.
+    SevenDays,
+    /// Thirty days.
+    ThirtyDays,
 }
 
 impl InviteLifetime {
     pub(crate) fn duration(self) -> Duration {
         Duration::from_secs(match self {
-            Self::Hour => 3_600,
-            Self::Day => 86_400,
-            Self::Week => 7 * 86_400,
+            Self::SevenDays => 7 * 86_400,
+            Self::ThirtyDays => 30 * 86_400,
         })
     }
 }

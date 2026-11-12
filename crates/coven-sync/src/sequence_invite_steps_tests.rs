@@ -68,7 +68,7 @@ impl Case {
         let laptop = group.laptop(&ana).await;
         ana.sync.pass().await.unwrap();
         ben.sync.pass().await.unwrap();
-        let invite = carol_invite(&ana, InviteLifetime::Day).await;
+        let invite = carol_invite(&ana, InviteLifetime::SevenDays).await;
         let operation = invite.operation;
         Self {
             group,

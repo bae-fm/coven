@@ -20,7 +20,7 @@ async fn confirming_a_lost_device_cut_off_takes_back_a_share_that_landed_late() 
     let making = phone.sync.create_invite(
         InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount { email: CAROL.into() },
-        InviteLifetime::Day,
+        InviteLifetime::SevenDays,
     );
     let meanwhile = async {
         entering.await.unwrap();

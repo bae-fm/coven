@@ -148,7 +148,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
             access_key_id: "recovery-key".into(),
             secret_access_key: SecretText::new("recovery-secret".into()),
         },
-        crate::InviteLifetime::Day,
+        crate::InviteLifetime::SevenDays,
     )
     .await;
     assert_eq!(recovery.member, carol);
@@ -271,7 +271,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     assert_eq!(code.name, "Snapshot name");
     assert_eq!(
         invite.expires_at.duration_since(owner.clock.now()).unwrap(),
-        Duration::from_secs(24 * 3600)
+        Duration::from_secs(7 * 86_400)
     );
     owner.handle.reset_store().await.unwrap();
     owner.handle.reload_from_snapshot().await.unwrap();

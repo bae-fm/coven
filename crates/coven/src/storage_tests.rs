@@ -356,7 +356,7 @@ async fn an_invite_expires_with_sync_stopped_and_while_closed() {
                 access_key_id: "carol-key".into(),
                 secret_access_key: SecretText::new("carol-secret".into()),
             },
-            crate::InviteLifetime::Hour,
+            crate::InviteLifetime::SevenDays,
         )
         .await
     };

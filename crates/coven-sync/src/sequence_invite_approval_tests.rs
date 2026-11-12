@@ -469,7 +469,7 @@ async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
                 access_key_id: "carol-new".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
             },
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await
         .unwrap();

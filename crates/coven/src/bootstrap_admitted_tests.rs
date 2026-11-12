@@ -454,7 +454,7 @@ async fn discarding_a_joined_store_removes_its_persons_name() {
             access_key_id: "recovery-key".into(),
             secret_access_key: SecretText::new("recovery-secret".into()),
         },
-        crate::InviteLifetime::Day,
+        crate::InviteLifetime::SevenDays,
     )
     .await;
     let control = JoinControl::new();

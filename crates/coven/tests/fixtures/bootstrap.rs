@@ -190,7 +190,7 @@ impl Owner {
             &self.handle,
             InviteTarget::NewMember { role: MemberRole::Member },
             access,
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await
     }

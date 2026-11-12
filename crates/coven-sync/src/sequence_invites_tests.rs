@@ -101,7 +101,7 @@ pub(crate) async fn carol_invite(ana: &Device, lifetime: InviteLifetime) -> Invi
 
 /// Ana's invite for Carol, open for a day (`carol_invite`).
 pub(crate) async fn invite(ana: &Device) -> Invite {
-    carol_invite(ana, InviteLifetime::Day).await
+    carol_invite(ana, InviteLifetime::SevenDays).await
 }
 
 /// Ana's invite for `member`'s replacement pair, through Carol's
@@ -114,7 +114,7 @@ pub(crate) async fn key_replacement_invite(
         .create_invite(
             InviteTarget::ReplaceMemberKeys { member },
             InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await
         .unwrap()
@@ -130,7 +130,7 @@ pub(crate) async fn s3_invite(ana: &Device, name: &str) -> Invite {
                 access_key_id: format!("{}-key", name.to_lowercase()),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
             },
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await
         .unwrap()
@@ -229,11 +229,9 @@ async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline
 #[tokio::test]
 async fn each_lifetime_expires_on_the_inviting_device() {
     use std::time::Duration;
-    for (lifetime, seconds) in [
-        (InviteLifetime::Hour, 3_600),
-        (InviteLifetime::Day, 86_400),
-        (InviteLifetime::Week, 604_800),
-    ] {
+    for (lifetime, seconds) in
+        [(InviteLifetime::SevenDays, 604_800), (InviteLifetime::ThirtyDays, 2_592_000)]
+    {
         let group = Group::new();
         let ana = group.device(1).await;
         group.create(&ana).await;
@@ -289,12 +287,12 @@ async fn opening_writes_the_expiry_of_an_invite_that_ended_while_closed() {
 }
 
 #[tokio::test]
-async fn an_invite_expires_a_day_later_on_the_inviting_device() {
+async fn an_invite_expires_seven_days_later_on_the_inviting_device() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
     invite(&ana).await;
-    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(604_800));
     ana.sync.pass().await.unwrap();
     // The pass deletes the request, and the next takes back the share.
     ana.sync.pass().await.unwrap();
@@ -404,7 +402,7 @@ async fn a_refused_grant_is_the_invites_pending_record_until_cancelled() {
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "owner@example.test".into() },
-            crate::InviteLifetime::Day,
+            crate::InviteLifetime::SevenDays,
         )
         .await;
     let Err(SyncError::Pending(pending)) = result else { panic!("{:?}", result.err()) };
@@ -459,7 +457,7 @@ async fn an_invite_its_maker_can_no_longer_make_is_refused_before_any_grant() {
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            crate::InviteLifetime::Day,
+            crate::InviteLifetime::SevenDays,
         )
         .await;
     let Err(SyncError::Pending(pending)) = result else { panic!("{:?}", result.err()) };
@@ -682,7 +680,7 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
                 access_key_id: "ana".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
             },
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await
         .unwrap();
@@ -731,7 +729,7 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
                 access_key_id: "dan-key".into(),
                 secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
             },
-            crate::InviteLifetime::Day,
+            crate::InviteLifetime::SevenDays,
         )
         .await
         .unwrap();
@@ -752,7 +750,7 @@ async fn a_second_invite_to_an_account_already_shared_is_made() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let sent = invite(&ana).await;
-    let shown = carol_invite(&ana, InviteLifetime::Hour).await;
+    let shown = carol_invite(&ana, InviteLifetime::SevenDays).await;
     let open: Vec<_> = listed(&ana).await.into_iter().map(|invite| invite.id).collect();
     assert_eq!(open, [sent.id, shown.id]);
     // Ending the first invite leaves the account shared for the one still open.
@@ -792,7 +790,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member },
             InviteAccess::ProviderAccount { email: "dan@example.org".into() },
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await
         .unwrap();
@@ -926,7 +924,7 @@ async fn a_recovery_invite_for_a_removed_member_is_refused() {
         .create_invite(
             InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
             InviteAccess::ProviderAccount { email: "ben-again@example.org".into() },
-            InviteLifetime::Day,
+            InviteLifetime::SevenDays,
         )
         .await;
     assert!(

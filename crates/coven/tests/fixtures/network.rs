@@ -179,7 +179,7 @@ impl Network {
                 access_key_id: format!("member-{index}"),
                 secret_access_key: SecretText::new("secret".into()),
             },
-            crate::InviteLifetime::Day,
+            crate::InviteLifetime::SevenDays,
         )
         .await;
         let app_dir = self.root.path().join(index.to_string());

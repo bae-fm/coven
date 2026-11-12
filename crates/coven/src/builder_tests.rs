@@ -189,7 +189,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             access_key_id: "invited-key".into(),
             secret_access_key: SecretText::new("invited-secret".into()),
         },
-        crate::InviteLifetime::Day,
+        crate::InviteLifetime::SevenDays,
     )
     .await;
     let mut invites = handle.test_invites();

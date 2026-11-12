@@ -246,7 +246,7 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
                 access_key_id: key.into(),
                 secret_access_key: SecretText::new("secret".into()),
             },
-            crate::InviteLifetime::Day,
+            crate::InviteLifetime::SevenDays,
         )
     };
     let (first, second) = (invite("first"), invite("second"));
@@ -334,7 +334,7 @@ async fn an_invite_carries_the_s3_key_this_device_holds() {
         ana,
         InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::HeldS3AccessKey,
-        crate::InviteLifetime::Day,
+        crate::InviteLifetime::SevenDays,
     )
     .await;
     assert_eq!(invite.access, MemberAccess::S3AccessKey { access_key_id: "owner-key".into() });

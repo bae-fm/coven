@@ -131,7 +131,7 @@ async fn a_reset_ends_a_replacement_invite_and_records_nothing_about_its_s3_key(
                     access_key_id: key.into(),
                     secret_access_key: SecretText::new("secret".into()),
                 },
-                crate::InviteLifetime::Day,
+                crate::InviteLifetime::SevenDays,
             )
             .await
             .unwrap();

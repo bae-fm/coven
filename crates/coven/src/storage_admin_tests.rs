@@ -32,7 +32,7 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
         &owner.handle,
         InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount { email: "carol@example.test".into() },
-        crate::InviteLifetime::Day,
+        crate::InviteLifetime::SevenDays,
     )
     .await;
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();

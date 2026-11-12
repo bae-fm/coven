@@ -195,7 +195,7 @@ let (invite, _, _) = handle
     .create_invite(
         InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
         InviteAccess::ProviderAccount { email: "dan@example.com".into() },
-        InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        InviteDelivery::Sent { lifetime: InviteLifetime::SevenDays },
     )
     .await?;
 
@@ -251,8 +251,7 @@ or revoke, even where the provider would (bae-fm/coven#238). On S3 coven shares
 nothing: `InviteAccess::S3AccessKey` hands over a key made by hand in the
 provider's console ([below](#s3-access-keys)).
 
-An invite shown in person expires an hour after it was made; one sent by message
-or email expires after the hour, day or week the admin chose. Declining, letting
+An invite expires seven or thirty days after it was made, as the admin chose. Declining, letting
 it expire, or `cancel_invite` takes back the provider access it granted.
 Approving, declining and cancelling are steps of a write,
 `approve_join_request`, `decline_join_request` and `cancel_invite`, offline too.
