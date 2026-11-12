@@ -48,6 +48,7 @@ import SequenceApply
 #print axioms CovenSequence.CopyOrder.need_introduced
 #print axioms CovenSequence.CopyOrder.stuck_scan_finds_copy
 #print axioms CovenSequence.CopyOrder.owed_complete
+#print axioms CovenSequence.CopyOrder.leave_selects_new_key
 #print axioms CovenSequence.CopyOrderExamples.copy_precedes_need_fails
 #print axioms CovenSequence.CopyOrderExamples.early_scan_stops_below_replacement
 #print axioms CovenSequence.CopyOrderExamples.races_follow

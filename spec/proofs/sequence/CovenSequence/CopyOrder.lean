@@ -39,6 +39,11 @@ store key always has its copy first (`store_copy_precedes_need`), and so does a
 circle's key when every replacement or recovery of one of the circle's
 members comes from another of them (`copy_precedes_need_inside`).
 
+Removing a member from a circle is an entry that introduces the circle's
+replacement key, with its copies below it to the readers who remain
+(`leave_selects_new_key`): there is no stretch after the removal in which the
+newest usable key is one the removed member holds.
+
 The floor and deletion are outside this model: `copies` keeps every copy ever
 claimed, as a store snapshot does for slots a floor has passed (§16.1).
 A slot's author and signature, and a write's validity, are checked elsewhere; a
@@ -64,7 +69,9 @@ inductive Change (Aud Mem : Type) where
   | recover (m : Mem) (sealing : Nat)
   | createCircle (key : Key Aud) (hash : Nat)
   | addToCircle (circle : Aud) (m : Mem)
-  | leaveCircle (circle : Aud) (m : Mem)
+  /-- Removing `m` from `circle` introduces the circle's replacement key in the
+  same entry (§15.8); its copies go to the readers who remain. -/
+  | leaveCircle (circle : Aud) (m : Mem) (key : Key Aud) (hash : Nat)
   | rotate (key : Key Aud) (hash : Nat)
   deriving DecidableEq
 
@@ -89,7 +96,8 @@ variable {Aud Mem : Type} [DecidableEq Aud] [DecidableEq Mem]
 /-- The slot's event in `Keys`' projection. -/
 def Slot.event : Slot Aud Mem → Event Aud Mem
   | .entry _ _ (.create key hash _) | .entry _ _ (.createCircle key hash)
-  | .entry _ _ (.rotate key hash) => .introduce key hash
+  | .entry _ _ (.rotate key hash) | .entry _ _ (.leaveCircle _ _ key hash) =>
+    .introduce key hash
   | .copy _ route => .copy route
   | _ => .other
 
@@ -114,7 +122,7 @@ def Roster.apply (store : Aud) (r : Roster Aud Mem) (author : Mem) : Change Aud 
       current := fun a x => if x = m then (r.current a x).map (fun _ => c) else r.current a x }
   | .createCircle key _ => r.seat key.audience author (r.current store author)
   | .addToCircle a m => r.seat a m (r.current store m)
-  | .leaveCircle a m => r.seat a m none
+  | .leaveCircle a m _ _ => r.seat a m none
   | .rotate _ _ => r
 
 /-- A slot's effect on the roster: only entries change it. -/
@@ -152,6 +160,7 @@ def required (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (author : 
         fun i => ⟨i.key, m, c⟩
     | none => []
   | .rotate key _ => routes r.current r.people key
+  | .leaveCircle a m key _ => routes (r.seat a m none).current r.people key
   | _ => []
 
 /-- Who may make an entry (§10.1), as `checked_change` decides it. Creation is
@@ -174,7 +183,9 @@ def allowed (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (author : M
       r.people.all (fun m => (r.current key.audience m).isNone)
   | .addToCircle a m =>
     decide (a ≠ store) && (r.current a author).isSome && (r.current store m).isSome
-  | .leaveCircle a _ => decide (a ≠ store) && (r.current a author).isSome
+  | .leaveCircle a m key _ =>
+    decide (a ≠ store) && (r.current a author).isSome && decide (key.audience = a) &&
+      (decide (m ≠ author) || r.people.all fun x => decide (x = author) || (r.current a x).isNone)
   | .rotate key _ => (r.current key.audience author).isSome
 
 def introduced (h : History Aud Mem) (key : Key Aud) : Bool :=
@@ -383,7 +394,7 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
         rw [same.2]
         exact hv
       · exact ok.sealing a x v hv
-  | leaveCircle c m =>
+  | leaveCircle c m key hash =>
     simp only [allowed, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at yes
     constructor
     · intro a x v hv
@@ -393,7 +404,7 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
       · exact ok.people a x v hv
     · intro a x v hv
       simp only [Roster.apply, seat_current] at hv ⊢
-      have notStore : ¬ (store = c ∧ x = m) := fun e => yes.1 e.1.symm
+      have notStore : ¬ (store = c ∧ x = m) := fun e => yes.1.1.1 e.1.symm
       simp only [notStore, ite_false]
       split at hv
       · cases hv
@@ -600,13 +611,23 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
         simp only [before, required, hv]
         exact List.mem_map.mpr ⟨i, List.mem_filter.mpr ⟨hi, by simp [ha, hs]⟩, rfl⟩
       · exact done i hi ha x v hv
-    | leaveCircle circle m =>
+    | leaveCircle circle m key hash =>
       intro i hi ha x v hv
-      simp only [advance, Slot.event, step, carried, List.nil_append] at hi ⊢
+      simp only [advance, Slot.event, step, carried, List.nil_append, List.mem_cons] at hi ⊢
       simp only [Roster.after, Roster.apply, seat_current] at hv
-      split at hv
-      · cases hv
-      · exact done i hi ha x v hv
+      rcases hi with rfl | old
+      · simp only at ha
+        subst ha
+        split at hv
+        · cases hv
+        · rename_i different
+          exact copies _ (by
+            simp only [before, required]
+            exact routes_complete _ _ _ x v (ok.people _ x v hv) (by
+              simp only [Roster.seat, different, ite_false]; exact hv))
+      · split at hv
+        · cases hv
+        · exact done i old ha x v hv
     | rotate key hash =>
       intro i hi ha x v hv
       simp only [Roster.after, Roster.apply] at hv
@@ -825,5 +846,80 @@ theorem owed_complete {store a : Aud} {r : Roster Aud Mem} (ok : RosterOk store 
   intro i hi ha m c reads
   rw [publish_copies] at hi
   exact needed_complete h through r.current r.people a i hi ha m c (ok.people a m c reads) reads
+
+/-! ## Leaving a circle replaces its key (§15.8)
+
+The entry that removes `m` from a circle introduces the circle's replacement
+key, and the copies it requires sit below it, to the readers who remain. So at
+the slot that removes `m`, the newest usable key of the circle is the new one,
+and none of its copies reached `m`: nothing written under the circle's key from
+then on is readable to `m`. There is no stretch after the removal in which the
+newest usable key is one `m` holds. -/
+
+/-- **A removed circle member reads nothing written after the removal.** Take a
+followed history through `n` and a slot `k` whose entry removes `m` from circle
+`a` and introduces `key`. Suppose `key` is new, every copy of it below `k` went
+to a reader who remains, and a member `writer` who remains holds its material.
+Then `m` no longer reads `a`; the key is the first attempt's choice for `writer`
+(the newest usable key, not one exposed to anyone who left); and no copy of it
+is routed to `m`, whatever sealing keys `m` retains. -/
+theorem leave_selects_new_key {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
+    (hf : Follows store seq n) {k : Nat} (three : 3 ≤ k) (below : k ≤ n)
+    {author : Mem} {outer : Key Aud} {a : Aud} {m : Mem} {key : Key Aud} {hash : Nat}
+    (hs : seq k = .entry author outer (.leaveCircle a m key hash))
+    (freshIntro : ∀ i ∈ (keysAt store seq (k - 1)).introductions, i.key ≠ key)
+    (remaining : ∀ r ∈ (keysAt store seq (k - 1)).copies, r.key = key →
+      (rosterAt store seq k).current a r.member = some r.credential)
+    (held : Custody Aud) (generated : held key = some hash) (writer : Mem)
+    (reads : (rosterAt store seq k).current a writer ≠ none) :
+    (rosterAt store seq k).current a m = none ∧
+    firstKey (keysAt store seq k) held (rosterAt store seq k).current writer a =
+      some ⟨key, hash, k⟩ ∧
+    ∀ cs, ¬ RoutedTo (keysAt store seq k) m cs key := by
+  obtain ⟨j, rfl⟩ : ∃ j, k = j + 1 := ⟨k - 1, by omega⟩
+  have yes := hf.2 (j + 1) three below
+  rw [hs] at yes
+  obtain ⟨allow, -, -, -⟩ := legal_entry yes
+  simp only [allowed, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at allow
+  have inA : key.audience = a := allow.1.2
+  have gone : (rosterAt store seq (j + 1)).current a m = none := by
+    simp [rosterAt, hs, Roster.after, Roster.apply, seat_current]
+  have intros : (keysAt store seq (j + 1)).introductions =
+      ⟨key, hash, j + 1⟩ :: (keysAt store seq j).introductions := by
+    simp [keysAt, advance, hs, Slot.event, step]
+  have copies : (keysAt store seq (j + 1)).copies = (keysAt store seq j).copies := by
+    simp [keysAt, advance, hs, carried]
+  have unexposed : exposed (keysAt store seq (j + 1)) (rosterAt store seq (j + 1)).current key =
+      false := by
+    apply Bool.eq_false_iff.mpr
+    intro bad
+    obtain ⟨r, hr, hk, off⟩ := (exposed_iff _ _ _).mp bad
+    rw [copies] at hr
+    exact off (inA ▸ remaining r (by simpa using hr) hk)
+  have noCopy : ∀ cs, ¬ RoutedTo (keysAt store seq (j + 1)) m cs key := by
+    rintro cs ⟨r, hr, hk, hm, -⟩
+    rw [copies] at hr
+    have := remaining r hr hk
+    rw [hm, gone] at this
+    cases this
+  refine ⟨gone, ?_, noCopy⟩
+  have usableNew : usable (keysAt store seq (j + 1)) held (rosterAt store seq (j + 1)).current
+      writer key = true := by
+    have accept : accepted (keysAt store seq (j + 1)) held key = true := by
+      have := introduction_accepts ⟨(keysAt store seq j).introductions, (keysAt store seq j).copies⟩
+        held key hash (j + 1) freshIntro generated
+      simpa [accepted, intros, step] using this
+    simp only [usable, inA, accept, unexposed, Bool.not_false, Bool.and_true,
+      Option.isSome_iff_ne_none]
+    exact reads
+  unfold firstKey
+  rw [intros]
+  simp only [List.filter_cons, inA, decide_true, Bool.true_and]
+  simp only [usableNew, ↓reduceIte]
+  apply newest_head
+  intro i hi
+  have := ((introduction_at store seq i j).mp (List.mem_filter.mp hi).1).2.1
+  dsimp
+  omega
 
 end CovenSequence.CopyOrder
