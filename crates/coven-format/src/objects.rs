@@ -35,7 +35,7 @@ impl JoinRequest {
 }
 
 /// Who a join request is for (§13.2). The invite's kind fixes which a request
-/// may carry.
+/// may carry, and a pairing takes `OwnDevice` alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Joiner {
     /// A new person, with the name they typed: the admin sees it with the
@@ -47,19 +47,24 @@ pub enum Joiner {
     /// An existing member, whose profile already has a name: the request
     /// carries none.
     Recovery,
+    /// The member's own new device, asking one of their devices to pair it:
+    /// the request carries no name.
+    OwnDevice,
 }
 impl Joiner {
-    /// The kind of invite this request answers.
-    pub fn kind(&self) -> InviteKind {
+    /// The kind of invite this request answers; none for a member's own
+    /// device, which no invite has.
+    pub fn kind(&self) -> Option<InviteKind> {
         match self {
-            Self::NewPerson { .. } => InviteKind::NewPerson,
-            Self::Recovery => InviteKind::Recovery,
+            Self::NewPerson { .. } => Some(InviteKind::NewPerson),
+            Self::Recovery => Some(InviteKind::Recovery),
+            Self::OwnDevice => None,
         }
     }
     fn validate(&self) -> Result<(), Error> {
         match self {
             Self::NewPerson { name: person } => name(person),
-            Self::Recovery => Ok(()),
+            Self::Recovery | Self::OwnDevice => Ok(()),
         }
     }
 }
@@ -71,12 +76,14 @@ impl Wire for Joiner {
                 1u8.put(out)?;
                 person.put(out)
             }
+            Self::OwnDevice => 2u8.put(out),
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::Recovery),
             1 => Ok(Self::NewPerson { name: crate::wire::get_name(input)? }),
+            2 => Ok(Self::OwnDevice),
             tag => Err(Error::UnknownTag { field: "joiner", tag }),
         }
     }

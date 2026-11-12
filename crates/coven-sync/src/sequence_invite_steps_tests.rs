@@ -345,7 +345,7 @@ impl Case {
             keys: self.ben.identity.keys().public_keys(),
             device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol's phone".into(),
-            joiner: crate::sequence_sync::sequence_invites::tests::carol_for(&code),
+            joiner: crate::sequence_sync::sequence_invites::tests::carol_for(&code).into(),
         };
         let path = code.request_path();
         let bytes =

@@ -34,6 +34,8 @@ pub(crate) const SNAPSHOT_ANNOUNCEMENT: u8 = 15;
 pub(crate) const KEY_COPY_ACK: u8 = 16;
 /// Saved restore code frame.
 pub(crate) const SAVED_RESTORE_CODE: u8 = 17;
+/// Pairing code frame.
+pub(crate) const PAIRING_CODE: u8 = 18;
 /// Sealed inner write.
 pub(crate) const INNER_WRITE: u8 = 32;
 /// Sealed sequence slot.
@@ -50,8 +52,10 @@ pub(crate) const FILE: u8 = 38;
 pub(crate) const FLOOR: u8 = 39;
 /// A gone device's marker.
 pub(crate) const GONE_DEVICE: u8 = 40;
+/// A pairing's handover.
+pub(crate) const HANDOVER: u8 = 41;
 
 /// Whether `kind` starts a plaintext frame, as opposed to a stored object.
 pub(crate) const fn is_frame(kind: u8) -> bool {
-    matches!(kind, WRITE_HEADER..=SNAPSHOT_END | JOIN_REQUEST_FRAME..=SAVED_RESTORE_CODE)
+    matches!(kind, WRITE_HEADER..=SNAPSHOT_END | JOIN_REQUEST_FRAME..=PAIRING_CODE)
 }

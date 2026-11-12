@@ -1,12 +1,12 @@
 //! Fixed joining keys and request bytes, sealed locally using the scanned invite.
 
-use crate::SyncError;
+use crate::{Joiner, SyncError};
 use coven_crypto::{
     ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys, ObjectHasher,
 };
 use coven_format::{
     codes::InviteCode,
-    objects::{JoinRequest, Joiner},
+    objects::JoinRequest,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
 };
@@ -199,6 +199,10 @@ impl JoiningIdentity {
 
     /// The request this directory keeps for `code`, opened with the code's
     /// secret and checked against it.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a request for the member's own device is no invite's, so the invitation changed"
+    )]
     fn saved(directory: &StoreDir, code: &InviteCode) -> Result<Option<Self>, SyncError> {
         crate::CodeError::require_store(directory.id(), code.store)?;
         let file = directory.owned_file(StoreFile::Bootstrap);
@@ -244,7 +248,7 @@ impl JoiningIdentity {
             state,
             sealing,
             device_name: opened.device_name,
-            joiner: opened.joiner,
+            joiner: opened.joiner.try_into().map_err(|_| SyncError::InvitationChanged)?,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
             expires_at: code.expires_at,
@@ -271,7 +275,7 @@ impl JoiningIdentity {
                 keys: identity.keys().public_keys(),
                 device,
                 device_name: device_name.into(),
-                joiner: joiner.clone(),
+                joiner: joiner.clone().into(),
             },
             identity.keys(),
         )?;

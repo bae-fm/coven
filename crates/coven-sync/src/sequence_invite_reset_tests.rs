@@ -163,7 +163,7 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
             keys,
             device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol".into(),
-            joiner: crate::Joiner::NewPerson { name: "Carol".into() },
+            joiner: crate::Joiner::NewPerson { name: "Carol".into() }.into(),
         })
         .encode()
         .unwrap(),

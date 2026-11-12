@@ -32,7 +32,7 @@ impl SequenceSync {
         // a recovery none; an invite takes only its own kind (§13.2).
         if request.invite != work.id
             || request.member != work.member
-            || request.joiner.kind() != work.kind()
+            || request.joiner.kind() != Some(work.kind())
         {
             return Ok(Opened::Refused(crate::write_object::wrong_identity(&path)));
         }

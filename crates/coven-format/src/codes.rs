@@ -1,4 +1,4 @@
-//! Restore and invite codes keep every owned secret buffer zeroizing (§13).
+//! Restore, invite and pairing codes keep every owned secret buffer zeroizing (§13).
 
 use crate::code_fields::MAX_STORAGE;
 use crate::error::{bound, require, Error, Rule};
@@ -261,6 +261,79 @@ impl InviteCode {
     }
     /// How an invite code's text starts: its kind and version.
     pub const TEXT_PREFIX: &'static str = "CVI1-";
+    /// Canonical uppercase base32, with CRC-32C, erased on drop.
+    pub fn to_text(&self) -> Result<Zeroizing<String>, Error> {
+        text_encode(Self::TEXT_PREFIX, &self.to_bytes()?)
+    }
+    /// Decode borrowed text without retaining any unerased private copies.
+    pub fn from_text(text: &str) -> Result<Self, Error> {
+        Self::from_bytes(&text_decode(Self::TEXT_PREFIX, text)?)
+    }
+}
+
+/// A pairing code: what the person's new device needs to find the store and
+/// to send a request its showing device can open. It holds no keys (§13.2, D13).
+#[derive(Debug)]
+pub struct PairingCode {
+    /// The store's id.
+    pub store: StoreId,
+    /// When the pairing ends, in seconds since the Unix epoch by the showing
+    /// device's clock: the asking device sends no first request after it.
+    pub expires_at: u64,
+    /// The pairing named by the request's path, in an invite's place.
+    pub pairing: InviteId,
+    /// The showing device's member, whose pair the handover carries. The
+    /// signed request must repeat it.
+    pub member: MemberId,
+    /// Crypto owns the one-time secret and its erasure.
+    pub secret: InviteSecret,
+    /// The device that made the pairing, under whose id the request goes.
+    pub showing: DeviceId,
+    /// The store's location, and on S3 the key the showing device connects
+    /// with where the code is the QR code.
+    pub storage: SecretBytes,
+}
+impl PairingCode {
+    /// Where the asking device's request goes: under the showing device, as
+    /// this code names it (§13.2).
+    pub fn request_path(&self) -> crate::path::ObjectPath {
+        crate::path::ObjectPath::join_request(self.store, self.showing, self.pairing)
+    }
+
+    /// Encode a bounded frame into a buffer erased on drop, allocated once.
+    pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let secret = self.secret.to_secret_bytes();
+        encode_code(
+            kinds::PAIRING_CODE,
+            self.store,
+            &[
+                &self.expires_at.to_be_bytes(),
+                self.pairing.0.as_bytes(),
+                self.member.0.as_bytes(),
+                secret.as_bytes(),
+                &self.showing.0.to_be_bytes(),
+            ],
+            &self.storage,
+        )
+    }
+    /// Decode a borrowed frame; every owned secret buffer erases on drop.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        bound(bytes.len() + 4, MAX_CODE_BYTES, "code bytes")?;
+        let mut input = decode_frame_of(bytes, kinds::PAIRING_CODE, "pairing code kind")?;
+        let store = Wire::get(&mut input)?;
+        let expires_at = u64::get(&mut input)?;
+        let pairing = Wire::get(&mut input)?;
+        let member = Wire::get(&mut input)?;
+        let mut secret = Zeroizing::new([0; 32]);
+        secret.copy_from_slice(input.take(32)?);
+        let secret = InviteSecret::from_bytes(*secret);
+        let showing = Wire::get(&mut input)?;
+        let storage = storage(&mut input)?;
+        input.finish()?;
+        Ok(Self { store, expires_at, pairing, member, secret, showing, storage })
+    }
+    /// How a pairing code's text starts: its kind and version.
+    pub const TEXT_PREFIX: &'static str = "CVP1-";
     /// Canonical uppercase base32, with CRC-32C, erased on drop.
     pub fn to_text(&self) -> Result<Zeroizing<String>, Error> {
         text_encode(Self::TEXT_PREFIX, &self.to_bytes()?)

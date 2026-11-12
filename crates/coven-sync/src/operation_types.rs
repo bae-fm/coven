@@ -234,7 +234,7 @@ pub struct JoinRequest {
     pub device_name: String,
     /// Who asks: a new person with the name they typed, or a recovery. It
     /// matches the invite's kind (§13.2).
-    pub joiner: coven_format::objects::Joiner,
+    pub joiner: crate::Joiner,
     /// Account invited by the owner, absent on S3.
     pub provider_account_email: Option<String>,
     /// Computed from the invite id and `keys`; the requester's device shows

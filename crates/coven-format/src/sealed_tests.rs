@@ -302,6 +302,38 @@ fn join_fixture_opens_with_the_invite_key_and_requested_signer() {
 }
 
 #[test]
+fn pairing_request_fixture_opens_with_the_pairing_key_and_the_new_devices_signer() {
+    let bytes = hex(include_str!("../fixtures/sealed-pairing-request.hex"));
+    let path = test_utils::pairing_request_path();
+    let object = SingleChunkObject::decode(&bytes).unwrap();
+    let prefix = object.prefix().encode().unwrap();
+    let plain = test_utils::pairing()
+        .secret
+        .join_request_key()
+        .open_object_chunk(path.as_str(), &prefix, 0, 0, object.chunk())
+        .unwrap();
+    assert_eq!(Object::decode(&plain).unwrap(), Object::JoinRequest(test_utils::pairing_request()));
+    let mut hash = ObjectHasher::new();
+    hash.update(&object.signed_bytes().unwrap());
+    test_utils::replacement()
+        .signing
+        .verify_object(path.as_str(), &hash.finish(), object.signature())
+        .unwrap();
+    assert_eq!(object.encode().unwrap(), bytes);
+    // An invite's secret opens no pairing request, nor a pairing's an invite's.
+    assert!(test_utils::invite()
+        .secret
+        .join_request_key()
+        .open_object_chunk(path.as_str(), &prefix, 0, 0, object.chunk())
+        .is_err());
+    mutations(&bytes, |changed| {
+        if let Ok(object) = SingleChunkObject::decode(changed) {
+            assert_eq!(object.encode().unwrap(), changed);
+        }
+    });
+}
+
+#[test]
 fn snapshot_fixture_signatures_reject_truncation_and_every_changed_bit() {
     let bytes = hex(include_str!("../fixtures/sealed-snapshot.hex"));
     let length = SnapshotObjectPrefix::length(&bytes).unwrap();

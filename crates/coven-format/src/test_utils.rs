@@ -5,7 +5,7 @@ pub const STORE_ID: coven_foundation::id_source::StoreId =
     coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
 
 use crate::admin::*;
-use crate::codes::{InviteCode, InviteKind, KeychainRestoreCode, RestoreCode};
+use crate::codes::{InviteCode, InviteKind, KeychainRestoreCode, PairingCode, RestoreCode};
 use crate::key::encode_key;
 use crate::objects::*;
 use crate::snapshot::{SnapshotEncoder, SnapshotHeader, SnapshotRecord};
@@ -592,6 +592,38 @@ pub fn invite() -> InviteCode {
         // The S3 location, then the key made for the invite.
         storage: SecretBytes::new([S3_LOCATION, b"\0\0\0\x02id\0\0\0\x06secret"].concat()),
     }
+}
+/// A pairing code for Ana's member, shown by device one, with the S3 location
+/// and the key the showing device connects with: the QR code (D13).
+pub fn pairing() -> PairingCode {
+    PairingCode {
+        store: StoreId(Uuid::from_bytes([0x10; 16])),
+        expires_at: 1_800,
+        pairing: InviteId(Uuid::from_bytes([0x57; 16])),
+        member: member_id(),
+        secret: InviteSecret::from_bytes([0x67; 32]),
+        showing: DeviceId(1),
+        storage: SecretBytes::new([S3_LOCATION, b"\x01\0\0\0\x02id\0\0\0\x06secret"].concat()),
+    }
+}
+/// The same pairing's code Ana copies or shares as text: no key follows.
+pub fn pairing_without_key() -> PairingCode {
+    PairingCode { storage: SecretBytes::new([S3_LOCATION, b"\0"].concat()), ..pairing() }
+}
+/// A pairing code for Household on Dropbox, in the shared folder with namespace
+/// id `4815162342`, which Ana signed in to as `ana@example.com` (D13).
+pub fn pairing_on_dropbox() -> PairingCode {
+    let location: &[u8] = b"\x01\x01\0\0\0\x0a4815162342\x01\0\0\0\x0fana@example.com";
+    PairingCode { storage: SecretBytes::new(location.to_vec()), ..pairing() }
+}
+/// The laptop's request answering that pairing with its fresh pair, which
+/// signs it: the member's own device, with no name.
+pub fn pairing_request() -> JoinRequest {
+    JoinRequest { invite: pairing().pairing, joiner: Joiner::OwnDevice, ..join_request() }
+}
+/// Where the laptop's request goes, and the handover takes its place.
+pub fn pairing_request_path() -> crate::path::ObjectPath {
+    pairing().request_path()
 }
 /// Each admin operation in its canonical tag order.
 pub fn store_changes() -> Vec<StoreChange> {

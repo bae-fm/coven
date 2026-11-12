@@ -547,3 +547,63 @@ fn member_private_keys_erase_when_dropped() {
     }
     assert_eq!(held, 3, "the active pair, a retired one and the candidate");
 }
+
+#[test]
+fn a_handover_opens_only_at_its_path_for_its_key() {
+    let asking = MemberKeys::generate().unwrap();
+    let other = MemberKeys::generate().unwrap();
+    let recipient = asking.public_keys().sealing;
+    let prefix = [41, 0, 1];
+    let sealed =
+        seal_handover(b"the member's pair", &recipient, "s/join-requests/1/a", &prefix).unwrap();
+    assert_eq!(sealed.len(), KEY_BOX_HEAD_LEN + 17 + KEY_BOX_TAG_LEN);
+    let opened = asking.open_handover("s/join-requests/1/a", &prefix, &sealed).unwrap();
+    assert_eq!(opened.as_slice(), b"the member's pair");
+    assert!(matches!(
+        other.open_handover("s/join-requests/1/a", &prefix, &sealed),
+        Err(CryptoError::Authentication)
+    ));
+    assert!(matches!(
+        asking.open_handover("s/join-requests/1/b", &prefix, &sealed),
+        Err(CryptoError::Authentication)
+    ));
+    assert!(matches!(
+        asking.open_handover("s/join-requests/1/a", &[41, 0, 2], &sealed),
+        Err(CryptoError::Authentication)
+    ));
+    let mut changed = sealed.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    assert!(matches!(
+        asking.open_handover("s/join-requests/1/a", &prefix, &changed),
+        Err(CryptoError::Authentication)
+    ));
+    assert!(matches!(
+        asking.open_handover("s/join-requests/1/a", &prefix, &sealed[..sealed.len() - 1]),
+        Err(CryptoError::Authentication)
+    ));
+    assert!(matches!(
+        asking.open_handover("s/join-requests/1/a", &prefix, &sealed[..KEY_BOX_HEAD_LEN]),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
+fn a_handover_is_not_a_key_box_and_a_key_box_is_not_a_handover() {
+    let asking = MemberKeys::generate().unwrap();
+    let recipient = asking.public_keys().sealing;
+    let store = StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32]);
+    let key_box = seal_store_key(&store, &recipient, "p", b"x").unwrap();
+    assert!(asking.open_handover("p", b"x", &key_box).is_err());
+    let handover = seal_handover(&[0; StoreKey::ENCODED_LEN], &recipient, "p", b"x").unwrap();
+    assert!(asking.open_store_key("p", b"x", &handover).is_err());
+}
+
+#[test]
+fn a_handover_refuses_a_zero_contribution() {
+    let asking = MemberKeys::generate().unwrap();
+    let zero = SealingKey::from_bytes([0; 32]);
+    assert!(matches!(seal_handover(b"x", &zero, "p", b"x"), Err(CryptoError::WeakSealingKey)));
+    let mut sealed = seal_handover(b"x", &asking.public_keys().sealing, "p", b"x").unwrap();
+    sealed[..32].fill(0);
+    assert!(matches!(asking.open_handover("p", b"x", &sealed), Err(CryptoError::WeakSealingKey)));
+}

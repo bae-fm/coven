@@ -8,6 +8,7 @@ mod failure_log;
 mod floor_object;
 mod history;
 mod identity;
+mod joiner;
 mod joining_identity;
 mod last_pass;
 mod object_input;
@@ -67,10 +68,10 @@ pub use coven_database::{
     DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
 };
 pub use coven_format::codes::InviteKind;
-pub use coven_format::objects::Joiner;
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{CutOffRefusal, DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
+pub use joiner::Joiner;
 pub use joining_identity::{ended_for, record_ending, sealed_join_request, JoiningIdentity};
 pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;

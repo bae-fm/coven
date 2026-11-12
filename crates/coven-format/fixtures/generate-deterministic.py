@@ -442,6 +442,12 @@ def join_request(sodium):
     return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + u64(3) + text(b"D") + b"\x00")
 
 
+def pairing_request(sodium):
+    """The laptop's request answering a pairing with its fresh pair: the same
+    request as the invite's, for the pairing's id, with the joiner tag 2."""
+    return frame(9, bytes([0x57]) * 16 + ANA + pair(sodium, 0x34) + u64(3) + text(b"D") + b"\x02")
+
+
 def objects(sodium):
     return [frame(4, change) for change in changes(sodium)] + [join_request(sodium)]
 
@@ -481,6 +487,50 @@ def invite_code():
     storage = s3_location() + text(b"id") + text(b"secret")
     return frame(11, STORE + text(b"S") + text(b"A") + b"\x01" + u64(86400) + bytes([0x55]) * 16 + ANA
                  + bytes([0x66]) * 32 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))
+
+
+PAIRING_PATH = STORE_TEXT + b"join-requests/1/57575757-5757-5757-5757-575757575757"
+S3_KEY = text(b"id") + text(b"secret")
+
+
+def pairing_code(storage):
+    """A pairing code (kind 18) for Ana's member, shown by device one: no keys,
+    only the secret that derives the request's key."""
+    return frame(18, STORE + u64(1800) + bytes([0x57]) * 16 + ANA + bytes([0x67]) * 32 + u64(1)
+                 + text(storage))
+
+
+def pairing_codes():
+    """The QR code with the S3 key, the shareable text without it, and Dropbox's
+    shared-folder location (D13)."""
+    dropbox = u8(1) + u8(1) + text(b"4815162342") + u8(1) + text(b"ana@example.com")
+    return [pairing_code(s3_location() + u8(1) + S3_KEY),
+            pairing_code(s3_location() + u8(0)),
+            pairing_code(dropbox)]
+
+
+def handover(sodium):
+    """Ana's pair sealed to the laptop's request key (seed 0x34), at the
+    request's path, under `coven/handover/v1` (D8, D11)."""
+    prefix = bytes([41, 0, 1])
+    recipient = sealing_public(sodium, 0x34)
+    ephemeral = bytes([0x58]) * 32
+    sender = sealing_public(sodium, 0x58)
+    shared = c.create_string_buffer(32)
+    checked(sodium.crypto_scalarmult(shared, ephemeral, recipient))
+    box_context = context(b"coven/handover/v1", PAIRING_PATH, prefix, sender, recipient)
+    extracted = hmac.digest(bytes(32), shared.raw, "sha256")
+    key = hmac.digest(extracted, box_context + b"\x01", "sha256")
+    nonce = bytes([0x47]) * 24
+    plaintext = ANA + text(b"CVMK\x01" + bytes([0x33]) * 64)
+    ciphertext = c.create_string_buffer(len(plaintext) + 16)
+    length = c.c_ulonglong()
+    checked(sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+        ciphertext, c.byref(length), plaintext, len(plaintext),
+        box_context, len(box_context), None, nonce, key,
+    ))
+    assert length.value == len(ciphertext)
+    return prefix + sender + nonce + ciphertext.raw
 
 
 def invite_end():
@@ -665,6 +715,10 @@ def main():
     body += sealed_chunk(sodium, encryption_key(18), path, prefix, 0, 0, plaintext, bytes([0x69]) * 24)
     circle_snapshot = signed(sodium, path, body)
 
+    # The pairing's request is sealed with the pairing secret's key.
+    pairing_object = single_chunk(
+        sodium, 36, b"", derive(bytes([0x67]) * 32, b"coven/join-request/v1"),
+        PAIRING_PATH, pairing_request(sodium), 0x53, 0x34)
     # The request is sealed with the invite secret's key and signed by the pair it requests.
     join_object = single_chunk(
         sodium, 36, b"", derive(bytes([0x66]) * 32, b"coven/join-request/v1"),
@@ -731,16 +785,20 @@ def main():
         ("sealed-admission.hex", admission(sodium)),
         ("restore-code.hex", restore_code()),
         ("invite-code.hex", invite_code()),
+        ("sealed-pairing-request.hex", pairing_object),
+        ("handover.hex", handover(sodium)),
         ("invite-end.hex", invite_end()),
         ("device-gone.hex", device_gone()),
         ("keychain-restore-code.hex", keychain_restore_code()),
         ("file.hex", file_object(sodium)),
     ]:
         (out / name).write_text(data.hex() + "\n")
+    (out / "pairing-code.hex").write_text("".join(code.hex() + "\n" for code in pairing_codes()))
     (out / "file-reference.txt").write_text(file_reference())
     (out / "confirmation-numbers.txt").write_text(confirmation_numbers(sodium))
     (out / "codes.txt").write_text(
-        code_text("CVR1-", restore_code()) + "\n" + code_text("CVI1-", invite_code()) + "\n")
+        code_text("CVR1-", restore_code()) + "\n" + code_text("CVI1-", invite_code()) + "\n"
+        + code_text("CVP1-", pairing_codes()[0]) + "\n")
 
 
 if __name__ == "__main__":

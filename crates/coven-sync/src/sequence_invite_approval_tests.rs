@@ -628,7 +628,7 @@ async fn a_request_failing_a_check_ends_its_invite() {
             keys,
             device,
             device_name: "Carol's phone".into(),
-            joiner: carol_for(&code),
+            joiner: carol_for(&code).into(),
         };
         publish_request(&group, &code, &request, signer).await;
         let pass = ana.sync.pass().await;

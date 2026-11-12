@@ -138,6 +138,9 @@ pub struct MemberKeys {
 }
 
 impl MemberKeys {
+    /// The length of `to_secret_bytes`.
+    pub const SECRET_LEN: usize = MEMBER_KEYS_LENGTH;
+
     /// A pair whose signing and sealing seeds are both `seed`: public test
     /// data, never a person's keys.
     #[cfg(any(test, feature = "test-utils"))]
@@ -255,6 +258,31 @@ impl MemberKeys {
         let plaintext =
             self.open_box::<{ CircleKey::ENCODED_LEN }>(b"circle", path, prefix, sealed)?;
         Ok(CircleKey::from_encoded(&plaintext))
+    }
+
+    /// Open a pairing's handover: the ephemeral key, nonce, ciphertext and tag
+    /// `seal_handover` returned, at the exact path and clear prefix it was
+    /// sealed for, with the private half of the sealing key it was sealed to
+    /// (D11). The plaintext is erased on drop.
+    /// Panics if the storage path is empty.
+    pub fn open_handover(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        sealed: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        let (sender, rest) = sealed.split_first_chunk::<32>().ok_or(CryptoError::Malformed)?;
+        if rest.len() < cipher::NONCE_LEN + KEY_BOX_TAG_LEN {
+            return Err(CryptoError::Malformed);
+        }
+        let recipient = self.public_keys().sealing;
+        let shared = self.sealing.diffie_hellman(&PublicKey::from(*sender));
+        if !shared.was_contributory() {
+            return Err(CryptoError::WeakSealingKey);
+        }
+        let context = handover_context(path, prefix, sender, recipient.as_bytes());
+        let key = derivation::derive(shared.as_bytes(), &context);
+        cipher::open_random(&key, &context, rest).map(Zeroizing::new)
     }
 
     /// Open a box holding exactly `N` plaintext bytes; any other length is
@@ -503,6 +531,36 @@ pub fn seal_circle_key(
     let mut bytes = Zeroizing::new(Vec::with_capacity(CircleKey::ENCODED_LEN));
     key.encode_into(&mut bytes);
     seal_box(b"circle", recipient, path, prefix, &bytes)
+}
+
+/// Seal a pairing's handover anonymously to the sealing key of the request it
+/// answers, authenticating its path and clear prefix (D11). Returns the
+/// ephemeral key, nonce, ciphertext and tag; format supplies the prefix.
+/// Panics if the storage path is empty.
+pub fn seal_handover(
+    plaintext: &[u8],
+    recipient: &SealingKey,
+    path: &str,
+    prefix: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let seed = randomness::secret_bytes()?;
+    let ephemeral = StaticSecret::from(*seed);
+    let sender = PublicKey::from(&ephemeral).to_bytes();
+    let shared = ephemeral.diffie_hellman(&PublicKey::from(recipient.0));
+    if !shared.was_contributory() {
+        return Err(CryptoError::WeakSealingKey);
+    }
+    let context = handover_context(path, prefix, &sender, &recipient.0);
+    let key = derivation::derive(shared.as_bytes(), &context);
+    let body = cipher::seal_random(&key, &context, plaintext)?;
+    let mut bytes = Vec::with_capacity(32 + body.len());
+    bytes.extend_from_slice(&sender);
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
+}
+
+fn handover_context(path: &str, prefix: &[u8], sender: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8> {
+    cipher::context(&[derivation::HANDOVER, cipher::storage_path(path), prefix, sender, recipient])
 }
 
 fn object_message(path: &str, digest: &ObjectDigest) -> Vec<u8> {

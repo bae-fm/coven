@@ -7,6 +7,7 @@ use coven_merge::slot;
 fn codes_use_their_assigned_frame_kinds() {
     assert_eq!(test_utils::restore().to_bytes().unwrap()[0], 10);
     assert_eq!(test_utils::invite().to_bytes().unwrap()[0], 11);
+    assert_eq!(test_utils::pairing().to_bytes().unwrap()[0], 18);
 }
 
 #[test]
@@ -308,4 +309,84 @@ fn saved_codes_refuse_an_empty_name() {
     saved.name = "x".repeat(1024);
     let bytes = saved.to_bytes().unwrap();
     assert_eq!(KeychainRestoreCode::from_bytes(&bytes).unwrap().name.len(), 1024);
+}
+
+#[test]
+fn pairing_code_fixtures_are_canonical_under_every_truncation_and_bit_change() {
+    let expected = [
+        test_utils::pairing(),
+        test_utils::pairing_without_key(),
+        test_utils::pairing_on_dropbox(),
+    ];
+    let fixtures: Vec<_> = include_str!("../fixtures/pairing-code.hex").lines().collect();
+    assert_eq!(fixtures.len(), expected.len());
+    for (text, code) in fixtures.into_iter().zip(expected) {
+        let bytes = crate::tests::hex(text);
+        assert_eq!(bytes, code.to_bytes().unwrap().as_slice());
+        let reencode = |bytes: &[u8]| PairingCode::from_bytes(bytes)?.to_bytes();
+        assert_eq!(reencode(&bytes).unwrap().as_slice(), bytes);
+        for end in 0..bytes.len() {
+            assert!(reencode(&bytes[..end]).is_err());
+        }
+        let mut changed = bytes.clone();
+        for index in 0..bytes.len() {
+            for bit in 0..8 {
+                changed[index] ^= 1 << bit;
+                if let Ok(encoded) = reencode(&changed) {
+                    assert_eq!(encoded.as_slice(), changed);
+                }
+                changed[index] ^= 1 << bit;
+            }
+        }
+        changed.push(0);
+        assert_eq!(reencode(&changed), Err(Error::TrailingBytes));
+        changed = bytes;
+        changed[2] = 2;
+        assert_eq!(reencode(&changed), Err(Error::UnsupportedVersion(2)));
+        changed[2] = 1;
+        for kind in [8, 9, 10, 11, 17, 19] {
+            changed[0] = kind;
+            assert!(reencode(&changed).is_err());
+        }
+    }
+}
+
+#[test]
+fn pairing_text_names_the_requests_path_and_holds_no_keys() {
+    let expected: Vec<_> = include_str!("../fixtures/codes.txt").lines().collect();
+    let pairing = test_utils::pairing();
+    assert_eq!(pairing.to_text().unwrap().as_str(), expected[2]);
+    assert!(expected[2].starts_with("CVP1-"));
+    let read = PairingCode::from_text(expected[2]).unwrap();
+    assert_eq!(read.to_bytes().unwrap(), pairing.to_bytes().unwrap());
+    assert_eq!(read.member, test_utils::member_id());
+    assert_eq!(read.showing, DeviceId(1));
+    assert_eq!(read.expires_at, 1_800);
+    assert_eq!(
+        read.request_path().as_str(),
+        "10101010-1010-1010-1010-101010101010/join-requests/1/57575757-5757-5757-5757-575757575757"
+    );
+    assert_eq!(
+        read.secret.to_secret_bytes().as_bytes(),
+        pairing.secret.to_secret_bytes().as_bytes()
+    );
+    assert!(format!("{pairing:?}").contains("[REDACTED]"));
+    // No member key is anywhere in the code (D13).
+    let bytes = pairing.to_bytes().unwrap();
+    let keys = test_utils::member_keys().to_secret_bytes();
+    assert!(!bytes.windows(8).any(|window| window == &keys.as_bytes()[..8]));
+}
+
+#[test]
+fn a_pairing_code_and_an_invite_or_restore_code_refuse_each_other() {
+    let expected: Vec<_> = include_str!("../fixtures/codes.txt").lines().collect();
+    assert!(PairingCode::from_text(expected[0]).is_err());
+    assert!(PairingCode::from_text(expected[1]).is_err());
+    assert!(RestoreCode::from_text(expected[2]).is_err());
+    assert!(InviteCode::from_text(expected[2]).is_err());
+    let pairing = test_utils::pairing().to_bytes().unwrap();
+    assert!(RestoreCode::from_bytes(&pairing).is_err());
+    assert!(InviteCode::from_bytes(&pairing).is_err());
+    assert!(PairingCode::from_bytes(&test_utils::invite().to_bytes().unwrap()).is_err());
+    assert!(PairingCode::from_bytes(&test_utils::restore().to_bytes().unwrap()).is_err());
 }

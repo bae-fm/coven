@@ -240,7 +240,7 @@ impl InviteWork {
             confirmation: ConfirmationNumber::of(request.invite, &request.keys),
             keys: request.keys,
             device_name: request.device_name,
-            joiner: request.joiner,
+            joiner: request.joiner.try_into()?,
             provider_account_email: self.account().map(str::to_owned),
             record: bytes.to_vec(),
         })
