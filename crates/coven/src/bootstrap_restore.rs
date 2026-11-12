@@ -225,12 +225,7 @@ pub(crate) async fn unfinished_restores(
 ) -> Result<Vec<CodeMetadata>, BootstrapError> {
     let keychain = builder.keychain()?;
     let mut restores = Vec::new();
-    for store in builder
-        .directories
-        .unfinished_first_installations()
-        .await
-        .map_err(BootstrapDirectoryError::from)?
-    {
+    for store in builder.directories.unfinished_first_installations().await? {
         // A join keeps no record; an installation that keeps nothing is
         // reclaimed.
         let entries = StoreKeychain::new(keychain.clone(), store);

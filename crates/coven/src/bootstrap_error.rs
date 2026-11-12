@@ -22,6 +22,10 @@ pub enum BootstrapError {
     /// here, or it has ended.
     #[error("no join is under way for store {0}")]
     NoUnfinishedJoin(StoreId),
+    /// No unfinished first installation of this store is on this device, or
+    /// a call holds it, so `discard_unfinished_installation` deleted nothing.
+    #[error("no unfinished installation of store {0} to discard")]
+    NoUnfinishedInstallation(StoreId),
     /// Cancelling a restore once its device may be registered. The restore
     /// stays unfinished and listed, and only finishes (§13.1).
     #[error("the device may be registered; the restore stays unfinished")]

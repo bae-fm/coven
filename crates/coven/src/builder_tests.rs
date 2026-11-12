@@ -803,3 +803,38 @@ async fn refused_on_a_volume_without_classes(
     assert!(refused_class(&error), "{error:?}");
     plain().open(id, |_| ()).await.unwrap().close().await.unwrap();
 }
+
+/// A first installation whose settings file is damaged can't resume, and
+/// failing the listing of joins names it. Discarding it deletes its
+/// directory and clears the listing; discarding again finds nothing.
+#[tokio::test]
+async fn an_unfinished_installation_with_damaged_settings_is_discarded_by_store() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let id = StoreId(uuid::Uuid::from_u128(77));
+    let pending = app.directories().begin_bootstrap(id, &UuidIds).await.unwrap();
+    let installation = pending.directory().database_path().parent().unwrap().to_owned();
+    pending
+        .directory()
+        .owned_file(coven_foundation::files::StoreFile::Bootstrap)
+        .replace(b"fixed request")
+        .unwrap();
+    std::fs::write(installation.join("settings.json"), b"{").unwrap();
+    drop(pending);
+    let listing = app.builder().unfinished_joins().await;
+    assert!(
+        matches!(
+            listing,
+            Err(BootstrapError::Directory(BootstrapDirectoryError::Settings { store, .. }))
+                if store == id
+        ),
+        "{listing:?}"
+    );
+    app.builder().discard_unfinished_installation(id).await.unwrap();
+    assert!(!installation.exists());
+    assert!(app.builder().unfinished_joins().await.unwrap().is_empty());
+    assert!(matches!(
+        app.builder().discard_unfinished_installation(id).await,
+        Err(BootstrapError::NoUnfinishedInstallation(missing)) if missing == id
+    ));
+}

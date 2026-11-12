@@ -3,7 +3,7 @@
 
 use super::{
     atomic_file::exists, creation, device_reset, lock, protection::Protection,
-    DirectoryCreationError, FileError, StoreDir, StoreLockError,
+    DirectoryCreationError, FileError, SettingsError, StoreDir, StoreLockError,
 };
 use crate::files::StoreDirAccess;
 use crate::id_source::{IdSource, StoreId};
@@ -26,6 +26,16 @@ pub enum BootstrapDirectoryError {
     /// A filesystem operation failed.
     #[error(transparent)]
     File(FileError),
+    /// An unfinished first installation's settings can't be read: missing,
+    /// corrupt, another store's, or not a regular file. Nothing of it can be
+    /// resumed or listed until the person discards it.
+    #[error("store {store}: {source}")]
+    Settings {
+        /// The installation's store.
+        store: StoreId,
+        /// Why its settings can't be read.
+        source: SettingsError,
+    },
     /// The work panicked on the blocking pool: a bug, which the caller
     /// reports (E15).
     #[error(transparent)]
@@ -57,6 +67,7 @@ impl crate::task::CarriesBug for BootstrapDirectoryError {
             Self::File(error) => error.bug(),
             Self::Create(creation) => creation.bug(),
             Self::Lock(error) => error.bug(),
+            Self::Settings { source, .. } => source.bug(),
         }
     }
 }
@@ -68,7 +79,7 @@ impl BootstrapDirectoryError {
         let file = match self {
             Self::File(file) => file,
             Self::Create(creation) => creation.file()?,
-            Self::Lock(_) | Self::Bug(_) => return None,
+            Self::Lock(_) | Self::Settings { .. } | Self::Bug(_) => return None,
         };
         match file {
             FileError::DeviceLocked { path } => Some(path),

@@ -7983,6 +7983,10 @@ pub enum BootstrapDirectoryError {
     Lock(StoreLockError),
     /// A filesystem operation failed.
     File(FileError),
+    /// An unfinished first installation's settings can't be read. Nothing of
+    /// it can be resumed or listed until
+    /// `CovenBuilder::discard_unfinished_installation` deletes it.
+    Settings { store: StoreId, source: SettingsError },
     /// The work panicked on the blocking pool: a bug (E15).
     Bug(Bug),
 }
@@ -7997,6 +8001,9 @@ pub enum BootstrapError {
     /// `resume_join` found no join under way for this store on this device:
     /// none was started here, or it has ended.
     NoUnfinishedJoin(StoreId),
+    /// `discard_unfinished_installation` found no unfinished first
+    /// installation of this store on this device, or a call holds it.
+    NoUnfinishedInstallation(StoreId),
     /// Cancelling a restore once its device may be registered. The restore
     /// stays unfinished and listed; it only finishes (§13.1).
     RestoreRegistered,
@@ -8759,7 +8766,8 @@ impl CovenWrite<'_> {
 impl CovenBuilder {
     /// The joins under way on this device (§13.2), ordered by store id, each
     /// as `decode_code_info` reads its saved code. A saved code coven can't
-    /// read fails the call; it is never skipped. An unfinished installation
+    /// read, or an installation whose settings can't be read, fails the call;
+    /// neither is skipped. An unfinished installation
     /// that keeps neither a saved code nor a restore's record, and that no
     /// call holds, is deleted: a crash left it before its call wrote to
     /// storage (§13.4).
@@ -8785,11 +8793,28 @@ impl CovenBuilder {
     /// The restores under way on this device (§13.1), ordered by store id,
     /// each as `decode_code_info` reads the code it recorded: restores that
     /// recorded themselves before registering the device and have not ended.
-    /// A record coven can't read fails the call; it is never skipped. An
+    /// A record coven can't read, or an installation whose settings can't be read,
+    /// fails the call; neither is skipped. An
     /// unfinished installation that keeps neither a record nor a join's saved
     /// code, and that no call holds, is deleted, as `unfinished_joins` does
     /// (§13.4).
     pub async fn unfinished_restores(&self) -> Result<Vec<CodeMetadata>, BootstrapError>;
+
+    /// Deletes the store's unfinished first installation from this device: its
+    /// directory and this device's entries for it, including a join's saved
+    /// code and sign-in or a restore's record. For an installation that can't
+    /// resume, such as one whose settings can't be read
+    /// (`BootstrapDirectoryError::Settings`). A join whose request was sent
+    /// stays pending in the store until its invite expires or is declined,
+    /// and a restore past its registration leaves this device registered with
+    /// the store, as `Coven::discard_store` does. The person's saved restore
+    /// code and S3 key stay. Fails with `BootstrapError::NoUnfinishedInstallation`
+    /// when the store has no unfinished first installation, or a call holds
+    /// it; repeating after a failure part way finishes the deletion.
+    pub async fn discard_unfinished_installation(
+        &self,
+        store: StoreId,
+    ) -> Result<(), BootstrapError>;
 
     /// Continues an unfinished restore from its record, as `restore_from_code`
     /// does: the code, with an S3 key in it on S3, and the device name. On

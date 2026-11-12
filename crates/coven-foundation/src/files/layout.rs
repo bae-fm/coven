@@ -109,18 +109,20 @@ impl StoreDirectories {
     /// The stores whose first installation on this device is unfinished, a
     /// restore or a join that hasn't loaded, ordered by id (§19.1). A store
     /// whose replacement is unfinished is listed by `store_listing` instead.
-    /// One whose settings don't read is logged and left out: its first
-    /// installation has nothing to resume.
-    pub async fn unfinished_first_installations(&self) -> Result<Vec<StoreId>, FileError> {
+    /// One whose settings don't read fails the call with `Settings`: it is
+    /// neither resumable nor reclaimable until it is discarded.
+    pub async fn unfinished_first_installations(
+        &self,
+    ) -> Result<Vec<StoreId>, BootstrapDirectoryError> {
         let mut stores = Vec::new();
         for listed in self.listed(Installations::UnfinishedFirst).await? {
             match listed.settings {
                 Ok(()) => stores.push(listed.id),
-                Err(error) => tracing::warn!(
-                    store = %listed.id,
-                    error = %error,
-                    "an unfinished first installation has no valid store settings"
-                ),
+                Err(SettingsError::File(error)) => return Err(error.into()),
+                Err(SettingsError::Bug(bug)) => return Err(bug.into()),
+                Err(source) => {
+                    return Err(BootstrapDirectoryError::Settings { store: listed.id, source })
+                }
             }
         }
         Ok(stores)

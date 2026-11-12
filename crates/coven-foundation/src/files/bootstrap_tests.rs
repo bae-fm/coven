@@ -35,6 +35,25 @@ async fn resuming_a_bootstrap_removes_what_unfinished_writes_left() {
     resumed.cancel().unwrap();
 }
 
+/// An unfinished first installation whose settings are damaged fails the
+/// listing, naming the store, instead of being skipped.
+#[tokio::test]
+async fn an_unfinished_installation_with_damaged_settings_fails_the_listing() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(temp.path().into(), crate::task::HeardBugs::shared());
+    let id = StoreId(uuid::Uuid::from_u128(19));
+    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
+    let directory = pending.directory();
+    directory.owned_file(StoreFile::Bootstrap).replace(b"fixed request").unwrap();
+    std::fs::write(directory.database_path().parent().unwrap().join("settings.json"), b"{")
+        .unwrap();
+    assert!(matches!(
+        layout.unfinished_first_installations().await,
+        Err(BootstrapDirectoryError::Settings { store, source: SettingsError::Corrupt(_) })
+            if store == id
+    ));
+}
+
 #[tokio::test]
 async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let temp = tempfile::tempdir().unwrap();

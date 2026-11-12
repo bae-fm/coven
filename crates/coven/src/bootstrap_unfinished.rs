@@ -1,5 +1,6 @@
 //! What lists a store's unfinished first installation for the app to
-//! resume, and reclaiming one that nothing refers to (§13.4, §11.6).
+//! resume, reclaiming one that nothing refers to, and discarding one that
+//! cannot resume (§13.4, §11.6).
 
 use super::*;
 
@@ -70,4 +71,37 @@ pub(super) async fn kept(
         .map_err(BootstrapDirectoryError::from)?;
     }
     Ok(kept)
+}
+
+impl CovenBuilder {
+    /// Delete the store's unfinished first installation from this device: its
+    /// directory and this device's entries for it, including a join's saved
+    /// code and sign-in or a restore's record. For an installation that can't
+    /// resume, such as one whose settings can't be read
+    /// (`BootstrapDirectoryError::Settings`). A join whose request was sent
+    /// stays pending in the store until its invite expires or is declined,
+    /// and a restore past its registration leaves this device registered
+    /// with the store, as `Coven::discard_store` does. The person's saved
+    /// restore code and S3 key stay. Fails with
+    /// `BootstrapError::NoUnfinishedInstallation` when the store has no
+    /// unfinished first installation, or a call holds it; repeating after a
+    /// failure part way finishes the deletion.
+    pub async fn discard_unfinished_installation(
+        &self,
+        store: StoreId,
+    ) -> Result<(), BootstrapError> {
+        let keys = StoreKeychain::new(self.keychain()?, store);
+        let lock = self
+            .directories
+            .lock_unfinished_first(store)
+            .await?
+            .ok_or(BootstrapError::NoUnfinishedInstallation(store))?;
+        let bugs = self.directories.bugs().clone();
+        crate::task::blocking_completing("discard an unfinished installation", bugs, move || {
+            keys.delete_device_entries()?;
+            lock.remove_directory()?;
+            Ok::<(), BootstrapError>(())
+        })
+        .await?
+    }
 }

@@ -5035,7 +5035,9 @@ store's credentials and the code is deleted.
 The listing reads unfinished first installations on this device and lists each
 one with a saved code; an unfinished restore has none. The steps are ordered so
 that it never lists a join that can't resume, and never misses one that may have
-sent its request:
+sent its request. An installation whose settings can't be read fails the listing
+rather than being skipped, and `CovenBuilder::discard_unfinished_installation`
+deletes it by store:
 
 - Starting, Dan's phone makes the installation, then saves his keys and request
   in it, then saves the code, then keeps his sign-in, and only then may send the

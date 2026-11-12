@@ -1718,9 +1718,12 @@ tables = [
     "StorageConnections::resume_setup",
     "settle_opened",
 ]
-# Reclaiming an unfinished installation runs on the blocking pool to its end
-# (E15).
-"crates/coven/src/bootstrap_unfinished.rs" = ["kept"]
+# Reclaiming or discarding an unfinished installation runs on the blocking pool
+# to its end, discarding with the entries it composes for the store (E15).
+"crates/coven/src/bootstrap_unfinished.rs" = [
+    "kept",
+    "CovenBuilder::discard_unfinished_installation",
+]
 # A started loop's connection attempts outlive the start call; close stops
 # and awaits them. Stopping releases the client after the pass.
 "crates/coven/src/storage_control.rs" = [
