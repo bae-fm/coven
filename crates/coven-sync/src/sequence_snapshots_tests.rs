@@ -245,13 +245,7 @@ async fn a_member_removed_from_a_circle_no_longer_snapshots_it() {
             .await
             .unwrap();
     }
-    ana.sync
-        .administer(coven_format::admin::StoreChange::RemoveCircleMember {
-            circle: gifts,
-            member: ben.identity.member(),
-        })
-        .await
-        .unwrap();
+    ana.sync.remove_circle_member(gifts, ben.identity.member()).await.unwrap();
     ben.sync.pass().await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH

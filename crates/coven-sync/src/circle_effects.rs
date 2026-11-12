@@ -53,18 +53,26 @@ pub(crate) fn add(
     Ok(next.circles.get_mut(&circle).expect("a live circle").members.insert(member))
 }
 
-/// Take `member` out of live `circle` at `slot`; false when it isn't there.
+/// Take `member` out of live `circle` at `slot`, as `author`'s entry; false
+/// when it isn't there. The entry introduces the circle's replacement key,
+/// which its author makes, so an author removing themselves while others stay
+/// would know the key meant to shut them out: that is refused (§15.8).
 pub(crate) fn remove(
     next: &mut StoreState,
     circle: CircleId,
     member: &MemberId,
+    author: &MemberId,
     slot: Slot,
-) -> bool {
-    if !next.circles[&circle].members.contains(member) {
-        return false;
+) -> Result<bool, OperationRejection> {
+    let members = &next.circles[&circle].members;
+    if !members.contains(member) {
+        return Ok(false);
+    }
+    if member == author && members.len() > 1 {
+        return Err(OperationRejection::NotAllowed);
     }
     leave(next, circle, member, slot);
-    true
+    Ok(true)
 }
 
 /// The store's removal of `member` at `slot` takes it out of every live circle.

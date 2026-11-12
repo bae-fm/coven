@@ -11,6 +11,15 @@ fn keys(n: u8) -> coven_crypto::MemberPublicKeys {
 fn access(n: u8) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey { access_key_id: n.to_string() }
 }
+/// The entry removing `member` from `circle`, with the key it introduces.
+pub(crate) fn remove_circle_member(circle: CircleId, member: MemberId) -> StoreChange {
+    StoreChange::RemoveCircleMember {
+        circle,
+        member,
+        key: KeyId(uuid::Uuid::from_u128(900)),
+        key_hash: [9; 32],
+    }
+}
 pub(crate) fn header(device: u64, author: u128, after: u64) -> SlotHeader {
     SlotHeader { device: DeviceId(device), author: id(author), after, claim: after + 1 }
 }
@@ -693,7 +702,7 @@ fn a_target_the_state_doesnt_hold_is_gone_not_forbidden() {
     for change in [
         StoreChange::RenameCircle { circle, name: "Gifts".into() },
         StoreChange::AddCircleMember { circle, member: id(2) },
-        StoreChange::RemoveCircleMember { circle, member: id(2) },
+        remove_circle_member(circle, id(2)),
     ] {
         assert_eq!(
             apply(&state, 1, change).err(),
@@ -742,7 +751,7 @@ fn any_member_creates_a_circle_and_only_its_members_manage_it() {
         [
             StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() },
             StoreChange::AddCircleMember { circle: gifts(), member: id(1) },
-            StoreChange::RemoveCircleMember { circle: gifts(), member: id(2) },
+            remove_circle_member(gifts(), id(2)),
             StoreChange::DeleteCircle { circle: gifts() },
             rotation(),
         ]
@@ -858,7 +867,7 @@ fn a_member_makes_a_circle_and_only_its_members_change_or_delete_it() {
     for change in [
         StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() },
         StoreChange::AddCircleMember { circle: gifts(), member: id(2) },
-        StoreChange::RemoveCircleMember { circle: gifts(), member: id(3) },
+        remove_circle_member(gifts(), id(3)),
         StoreChange::DeleteCircle { circle: gifts() },
     ] {
         assert_eq!(apply(&state, 1, change).err(), Some(OperationRejection::NotAllowed));
@@ -873,11 +882,7 @@ fn a_member_makes_a_circle_and_only_its_members_change_or_delete_it() {
         .unwrap()
         .state;
     assert!(state.circles[&gifts()].members.contains(&id(2)));
-    let state =
-        apply(&state, 3, StoreChange::RemoveCircleMember { circle: gifts(), member: id(2) })
-            .unwrap()
-            .unwrap()
-            .state;
+    let state = apply(&state, 3, remove_circle_member(gifts(), id(2))).unwrap().unwrap().state;
     assert!(!state.circles[&gifts()].members.contains(&id(2)));
     let state =
         apply(&state, 3, StoreChange::DeleteCircle { circle: gifts() }).unwrap().unwrap().state;
@@ -923,14 +928,10 @@ fn circle_renames_apply_in_slot_order_and_the_latest_valid_one_names_it() {
 /// renames finds its target gone (§15.5, §15.8).
 #[test]
 fn a_circle_left_empty_is_deleted_at_that_slot() {
-    let left = apply(
-        &circle_made_by_the_plain_member(),
-        3,
-        StoreChange::RemoveCircleMember { circle: gifts(), member: id(3) },
-    )
-    .unwrap()
-    .unwrap()
-    .state;
+    let left = apply(&circle_made_by_the_plain_member(), 3, remove_circle_member(gifts(), id(3)))
+        .unwrap()
+        .unwrap()
+        .state;
     let removed =
         apply(&circle_made_by_the_plain_member(), 1, StoreChange::RemoveMember { member: id(3) })
             .unwrap()
@@ -941,7 +942,7 @@ fn a_circle_left_empty_is_deleted_at_that_slot() {
         assert!(state.circles[&gifts()].members.is_empty());
         for change in [
             StoreChange::AddCircleMember { circle: gifts(), member: id(2) },
-            StoreChange::RemoveCircleMember { circle: gifts(), member: id(3) },
+            remove_circle_member(gifts(), id(3)),
             StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() },
         ] {
             let gone = Some(OperationRejection::TargetGone(EntryTarget::Circle(gifts())));

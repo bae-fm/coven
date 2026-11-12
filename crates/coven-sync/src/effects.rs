@@ -338,8 +338,8 @@ pub(crate) fn checked_change(
                 return Ok(None);
             }
         }
-        RemoveCircleMember { circle, member } => {
-            if !circle_effects::remove(&mut next, *circle, member, slot) {
+        RemoveCircleMember { circle, member, .. } => {
+            if !circle_effects::remove(&mut next, *circle, member, author, slot)? {
                 return Ok(None);
             }
         }

@@ -732,6 +732,9 @@ pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8
         StoreChange::RotateKey { audience, key, key_hash } => {
             Some((audience.clone(), *key, *key_hash))
         }
+        StoreChange::RemoveCircleMember { circle, key, key_hash, .. } => {
+            Some((Audience::Circle(*circle), *key, *key_hash))
+        }
         _ => None,
     }
 }

@@ -1570,7 +1570,7 @@ tables = [
     "SequenceSync::submit",
     "SequenceSync::settle_operations",
 ]
-"crates/coven-sync/src/sequence_keys.rs" = ["SequenceSync::rotate_key"]
+"crates/coven-sync/src/sequence_keys.rs" = ["SequenceSync::run_key"]
 
 # The development tool's entry point builds the production connector from the
 # app's clock and id source (api.md E14).

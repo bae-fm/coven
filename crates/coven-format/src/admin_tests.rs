@@ -78,7 +78,11 @@ fn removal_payloads_contain_only_their_targets() {
     let member = test_utils::other_member_id();
     for (tag, target) in [
         (2, member.0.as_bytes().to_vec()),
-        (10, [circle(1).0.as_bytes().as_slice(), member.0.as_bytes()].concat()),
+        (
+            10,
+            // The replacement key and its hash follow the circle and member.
+            [circle(1).0.as_bytes().as_slice(), member.0.as_bytes(), &[7; 16], &[8; 32]].concat(),
+        ),
     ] {
         let mut bytes = Object::Admin(test_utils::creation_change()).encode().unwrap();
         bytes.truncate(HEADER);
@@ -86,7 +90,7 @@ fn removal_payloads_contain_only_their_targets() {
         bytes.extend(target);
         let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
         bytes[3..7].copy_from_slice(&length.to_be_bytes());
-        let decoded = Object::decode(&bytes).expect("D6 removal has no key payload");
+        let decoded = Object::decode(&bytes).expect("D6 removal carries only its target and key");
         assert_eq!(decoded.encode().unwrap(), bytes);
     }
 }

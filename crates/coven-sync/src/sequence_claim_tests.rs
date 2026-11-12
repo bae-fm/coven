@@ -957,10 +957,7 @@ async fn a_rotation_beaten_to_its_slot_by_a_removal_is_rejected_and_its_copies_s
         ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).collect();
     let copies = ben.sync.session.lock().await.history.copies.len();
     let result = rotating(&group, &ben, circle, creates, async || {
-        ana.sync
-            .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-            .await
-            .unwrap();
+        ana.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
     })
     .await;
     assert!(

@@ -613,10 +613,7 @@ async fn a_reload_keeps_its_selected_audiences_when_a_later_floor_records_depart
         .await;
     assert!(ben.sync.reload_from_snapshot().await.is_err());
     ben.storage.set_faults(Faults::none()).await;
-    ana.sync
-        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
+    ana.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH
             + crate::sequence_sync::sequence_retention::GRACE

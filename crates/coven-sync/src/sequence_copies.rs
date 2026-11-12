@@ -27,6 +27,13 @@ pub(super) fn required_copies(
 ) -> Vec<KeyCopyPrefix> {
     match change {
         StoreChange::RotateKey { audience, key, .. } => history.routes(audience, *key),
+        // The key replaces the one the removed member holds: it goes to the
+        // members who stay, never to the one removed (§15.8).
+        StoreChange::RemoveCircleMember { circle, member, key, .. } => history
+            .routes(&Audience::Circle(*circle), *key)
+            .into_iter()
+            .filter(|route| route.member != *member)
+            .collect(),
         StoreChange::CreateCircle { circle, key, .. } => vec![KeyCopyPrefix {
             audience: Audience::Circle(*circle),
             key: *key,

@@ -10,7 +10,7 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::OperationRecord;
 use coven_format::admin::StoreChange;
-use coven_foundation::id_source::{CircleId, KeyId};
+use coven_foundation::id_source::{CircleId, KeyId, MemberId};
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -28,6 +28,13 @@ pub(crate) enum KeyPreparation {
         audience: Audience,
         key: KeyId,
     },
+    /// Removing `member` from `circle` with the circle's replacement key
+    /// (§15.8): the removal entry introduces it.
+    CircleRemoval {
+        circle: CircleId,
+        member: MemberId,
+        key: KeyId,
+    },
 }
 
 impl KeyPreparation {
@@ -35,6 +42,7 @@ impl KeyPreparation {
         match self {
             Self::Circle { .. } => crate::OperationKind::CreateCircle,
             Self::Rotation { .. } => crate::OperationKind::RotateKey,
+            Self::CircleRemoval { .. } => crate::OperationKind::RemoveCircleMember,
         }
     }
 }
@@ -50,9 +58,37 @@ impl SequenceOperation {
     }
 }
 
+impl SequenceOperation {
+    /// Removing a circle member with the circle's new key, before its first
+    /// step: the pass keeps the key in custody, then claims its copies for the
+    /// members who stay and the removal that introduces it.
+    pub(crate) fn circle_removal(circle: CircleId, member: MemberId, key: KeyId) -> Self {
+        Self {
+            request: Request::Key(KeyPreparation::CircleRemoval { circle, member, key }),
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        }
+    }
+}
+
 impl SequenceSync {
     /// Replace an audience key through the administrative journal.
     pub async fn rotate_key(self: &Arc<Self>, audience: Audience) -> Result<(), SyncError> {
+        let key = KeyId(self.ids.new_id());
+        self.run_key(KeyPreparation::Rotation { audience, key }).await
+    }
+
+    /// Remove `member` from `circle`, replacing the circle's key in the same
+    /// entry (§15.8), through the administrative journal.
+    pub async fn remove_circle_member(
+        self: &Arc<Self>,
+        circle: CircleId,
+        member: MemberId,
+    ) -> Result<(), SyncError> {
+        let key = KeyId(self.ids.new_id());
+        self.run_key(KeyPreparation::CircleRemoval { circle, member, key }).await
+    }
+
+    async fn run_key(self: &Arc<Self>, target: KeyPreparation) -> Result<(), SyncError> {
         let owner = self.clone();
         // The owned task survives cancellation of the app's waiter, as an
         // operation's submission does.
@@ -64,10 +100,10 @@ impl SequenceSync {
             owner.read_forward(&mut session, &mut ring, &member).await?;
             owner.settle_open(&mut session, &mut ring, &member).await?;
             owner.resume_administration(&mut session, &mut ring, &member).await?;
-            owner.install_key(&mut session, &mut ring, &member, audience).await
+            owner.install_key(&mut session, &mut ring, &member, target).await
         };
         coven_foundation::task::spawn_completing(
-            "rotate a key",
+            "replace a key",
             self.database.bugs().clone(),
             rotating,
         )
@@ -78,9 +114,8 @@ impl SequenceSync {
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
-        audience: Audience,
+        target: KeyPreparation,
     ) -> Result<(), SyncError> {
-        let target = KeyPreparation::Rotation { audience, key: KeyId(self.ids.new_id()) };
         let id = self.start_request_row(Request::Key(target), "key").await?;
         crate::operation_outcome::into_slot(
             self.run_administration(session, ring, member, id).await?,
@@ -99,6 +134,7 @@ impl SequenceSync {
         let (audience, key) = match &target {
             KeyPreparation::Circle { circle, key, .. } => (Audience::Circle(*circle), *key),
             KeyPreparation::Rotation { audience, key } => (audience.clone(), *key),
+            KeyPreparation::CircleRemoval { circle, key, .. } => (Audience::Circle(*circle), *key),
         };
         let mut prepared = ring.clone();
         // A crash after custody committed but before the journal advanced
@@ -129,6 +165,9 @@ impl SequenceSync {
             },
             KeyPreparation::Rotation { audience, key } => {
                 StoreChange::RotateKey { audience, key, key_hash: hash }
+            }
+            KeyPreparation::CircleRemoval { circle, member, key } => {
+                StoreChange::RemoveCircleMember { circle, member, key, key_hash: hash }
             }
         };
         let progress = match session.history.validate(
@@ -181,7 +220,9 @@ impl SequenceSync {
                 if self.journaled(rotates).await?.is_some() {
                     continue;
                 }
-                let result = self.install_key(session, ring, member, audience.clone()).await;
+                let key = KeyId(self.ids.new_id());
+                let target = KeyPreparation::Rotation { audience: audience.clone(), key };
+                let result = self.install_key(session, ring, member, target).await;
                 self.own_work(result, rotates).await?;
             }
         }

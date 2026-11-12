@@ -64,13 +64,7 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
     ana.sync.snapshot(Audience::Store).await.unwrap();
     let departed_at = if departure {
         ana.sync.snapshot(Audience::Circle(circle.unwrap().0)).await.unwrap();
-        ana.sync
-            .administer(StoreChange::RemoveCircleMember {
-                circle: circle.unwrap().0,
-                member: ben.identity.member(),
-            })
-            .await
-            .unwrap();
+        ana.sync.remove_circle_member(circle.unwrap().0, ben.identity.member()).await.unwrap();
         Some(ana.database().applied_slot().await.unwrap())
     } else {
         None
@@ -843,14 +837,21 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
+    let cy = group.device(3).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
+    group.admit(&ana, &cy).await;
     let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
     ana.sync
         .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: cy.identity.member() })
+        .await
+        .unwrap();
     ben.sync.pass().await.unwrap();
+    cy.sync.pass().await.unwrap();
     assert_eq!(ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).count(), 1);
     pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "before departure").await;
     insert(ana.database(), "store", "readable").await;
@@ -862,10 +863,7 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
         .await;
     let leave = async {
         observed.await.unwrap();
-        ben.sync
-            .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-            .await
-            .unwrap();
+        cy.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
         resume.send(()).unwrap();
     };
     let (sent, ()) = tokio::join!(ana.sync.pass(), leave);
@@ -883,7 +881,7 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
         .unwrap();
     ben.sync.pass().await.unwrap();
     assert_eq!(pins(ben.database()).await.len(), 1);
-    for device in [&ana, &ben] {
+    for device in [&ana, &ben, &cy] {
         device.database().close().await.unwrap();
     }
 }

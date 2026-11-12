@@ -269,15 +269,16 @@ impl<'write> CovenWrite<'write> {
         self.steps.administer(&self.sql, StoreChange::AddCircleMember { circle, member: *member })
     }
 
-    /// Removes a member from a circle this member is in; the remaining
-    /// members replace the exposed circle key in a later pass (§15.8, E12).
+    /// Removes a member from a circle this member is in, replacing the
+    /// circle's key in the same entry, with a copy of the new key for each
+    /// member who stays (§15.8, E12). Removing oneself while others stay
+    /// fails with `Rejected(NotAllowed)`.
     pub fn remove_circle_member(
         &self,
         circle: CircleId,
         member: &MemberId,
     ) -> Result<Option<OperationId>, SyncError> {
-        self.steps
-            .administer(&self.sql, StoreChange::RemoveCircleMember { circle, member: *member })
+        self.steps.remove_circle_member(&self.sql, circle, *member)
     }
 
     /// Makes an invite, as an admin, and returns its id, the member id it

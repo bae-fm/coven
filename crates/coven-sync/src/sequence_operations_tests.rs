@@ -268,10 +268,7 @@ async fn offline_circle_write(compare: bool) {
         })
         .unwrap()
         .clone();
-    ana.sync
-        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
+    ana.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
     let removal = ana.database().applied_slot().await.unwrap();
     assert!(original.header.read_through < removal);
     let mut after_read = original.clone();

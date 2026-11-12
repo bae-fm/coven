@@ -621,7 +621,12 @@ pub fn store_changes() -> Vec<StoreChange> {
         StoreChange::RenameCircle { circle: c, name: "N".into() },
         StoreChange::DeleteCircle { circle: c },
         StoreChange::AddCircleMember { circle: c, member: m },
-        StoreChange::RemoveCircleMember { circle: c, member: m },
+        StoreChange::RemoveCircleMember {
+            circle: c,
+            member: m,
+            key: KeyId(Uuid::from_bytes([5; 16])),
+            key_hash: [0xb3; 32],
+        },
         StoreChange::RaiseSchema { version: 2, announcement: slot(7) },
         StoreChange::Reset { announcement: slot(8) },
         StoreChange::SetAccess {

@@ -392,11 +392,7 @@ async fn no_copy_is_owed_to_a_removed_member() {
     carol.sync.pass().await.unwrap();
     // Ben's copy for his new key is already there; take him out of the circle
     // and replace his keys again, so the new key has none.
-    carol
-        .sync
-        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
+    carol.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
     ana.sync.pass().await.unwrap();
     let again = coven_format::test_utils::keys_from_seed(13).public_keys();
     ana.sync.replace_member_keys_for(ben.identity.member(), again).await.unwrap();

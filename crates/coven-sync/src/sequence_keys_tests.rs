@@ -143,7 +143,15 @@ async fn rotation_does_not_need_preceding_circle_material() {
     let mut ring = StoreKeyring::new(held.store_key(outer).unwrap().clone());
     assert_eq!(ring.circle_key_ids(circle).count(), 0);
     ana.sync
-        .install_key(&mut session, &mut ring, &ana.identity, Audience::Circle(circle))
+        .install_key(
+            &mut session,
+            &mut ring,
+            &ana.identity,
+            KeyPreparation::Rotation {
+                audience: Audience::Circle(circle),
+                key: KeyId(ana.sync.ids.new_id()),
+            },
+        )
         .await
         .unwrap();
     let intro = session.history.introductions.last().unwrap();
@@ -532,13 +540,9 @@ async fn a_member_added_back_gets_keys_made_while_out_and_never_sends_with_an_ex
         .collect::<Vec<_>>()
         .first()
         .unwrap();
-    ana.sync
-        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
+    ana.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
     pin(ana.database(), PIN_1, circle, "while Ben was out").await;
-    // The first pass replaces the exposed key; the write follows under the new one.
-    ana.sync.pass().await.unwrap();
+    // The removal replaced the exposed key; the write follows under the new one.
     ana.sync.pass().await.unwrap();
     ana.sync
         .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
@@ -563,12 +567,12 @@ async fn a_member_added_back_gets_keys_made_while_out_and_never_sends_with_an_ex
     }
 }
 
-/// Removing a member from a circle is one entry with no key copy. The next
-/// pass replaces the key Ben was sent and copies the new one to the members
-/// who remain, before Ana's next Gifts write; that write goes out under it
-/// (§15.8, §12.2).
+/// Removing a member from a circle replaces the circle's key in the same
+/// entry: the copies go to the members who stay, the entry introduces the key,
+/// and Ana's very next Gifts write is sealed with it. Ben never receives it, so
+/// he cannot open that write (§15.8, §12.2).
 #[tokio::test]
-async fn a_circle_removal_is_one_entry_and_the_next_circle_write_waits_for_a_new_key() {
+async fn a_removed_circle_member_cannot_open_the_write_made_right_after_the_removal() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -579,6 +583,7 @@ async fn a_circle_removal_is_one_entry_and_the_next_circle_write_waits_for_a_new
         .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
+    ben.sync.pass().await.unwrap();
     let audience = Audience::Circle(circle);
     let keys_before = ana
         .sync
@@ -590,41 +595,68 @@ async fn a_circle_removal_is_one_entry_and_the_next_circle_write_waits_for_a_new
         .iter()
         .filter(|i| i.audience == audience)
         .count();
+    let held_by_ben =
+        ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).collect::<Vec<_>>();
     let applied = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
+    assert_eq!(
+        ana.sync.database.applied_slot().await.unwrap(),
+        applied + 2,
+        "one copy of the new key for Ana, the member who stays, then the removal"
+    );
+    // No pass has run since the removal: the write follows it at once.
+    let replacement = {
+        let ring = ana.sync.keys.read().unwrap().unwrap();
+        let session = ana.sync.session.lock().await;
+        let introduced: Vec<_> =
+            session.history.introductions.iter().filter(|i| i.audience == audience).collect();
+        assert_eq!(introduced.len(), keys_before + 1, "the removal introduced a new key");
+        let replacement = introduced.last().unwrap();
+        assert!(!session.history.exposed(&audience, replacement.key));
+        assert_eq!(
+            session.history.sending_key(&ring, ana.identity.member(), &audience).unwrap(),
+            replacement.key,
+            "the next write uses the new key"
+        );
+        replacement.key
+    };
+    pin(ana.database(), PIN_1, circle, "right after Ben left").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert!(pins(ben.database()).await.is_empty(), "Ben reads nothing written after the removal");
+    let ring = ben.sync.keys.read().unwrap().unwrap();
+    assert_eq!(
+        ring.circle_key_ids(circle).collect::<Vec<_>>(),
+        held_by_ben,
+        "Ben never receives the new key"
+    );
+    assert!(!ring.circle_key_ids(circle).any(|key| key == replacement));
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// A member removing themselves while others stay would make the key meant to
+/// shut them out, so the removal is refused and nothing is claimed (§15.8).
+#[tokio::test]
+async fn a_circle_member_cannot_remove_themselves_while_others_stay() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
     ana.sync
-        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
-    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), applied + 1, "one entry, no copy");
-    assert_eq!(
-        ana.sync
-            .session
-            .lock()
-            .await
-            .history
-            .introductions
-            .iter()
-            .filter(|i| i.audience == audience)
-            .count(),
-        keys_before
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    let result = ana.sync.remove_circle_member(circle, ana.identity.member()).await;
+    assert!(
+        matches!(result, Err(SyncError::Rejected(crate::OperationRejection::NotAllowed))),
+        "{result:?}"
     );
-    pin(ana.database(), PIN_1, circle, "after Ben left").await;
-    ana.sync.pass().await.unwrap();
-    ana.sync.pass().await.unwrap();
-    let ring = ana.sync.keys.read().unwrap().unwrap();
-    let session = ana.sync.session.lock().await;
-    let introduced: Vec<_> =
-        session.history.introductions.iter().filter(|i| i.audience == audience).collect();
-    assert_eq!(introduced.len(), keys_before + 1, "a new key replaced the exposed one");
-    let replacement = introduced.last().unwrap();
-    assert!(!session.history.exposed(&audience, replacement.key));
-    assert_eq!(
-        session.history.sending_key(&ring, ana.identity.member(), &audience).unwrap(),
-        replacement.key
-    );
-    drop(session);
-    ben.sync.pass().await.unwrap();
-    assert!(pins(ben.database()).await.is_empty());
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), applied);
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
@@ -649,10 +681,7 @@ async fn a_member_removed_from_a_circle_keeps_its_rows_and_keys() {
     ben.sync.pass().await.unwrap();
     assert_eq!(pins(ben.database()).await.len(), 1);
     let held = ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).collect::<Vec<_>>();
-    ana.sync
-        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
-        .await
-        .unwrap();
+    ana.sync.remove_circle_member(circle, ben.identity.member()).await.unwrap();
     ben.sync.pass().await.unwrap();
     assert!(!ben
         .database()

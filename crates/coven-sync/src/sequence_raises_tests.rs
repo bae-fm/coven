@@ -205,7 +205,7 @@ async fn a_write_into_a_circle_below_its_version_waits_for_the_circles_raise() {
 }
 
 /// Ben's one write pins into Garden and into Orchard, neither raised. Ana
-/// left Orchard after adding him, so only Garden's raise comes: it ends the
+/// was removed from Orchard after adding him, so only Garden's raise comes: it ends the
 /// write's wait for Garden, and the write records its wait for Orchard in
 /// the same commit (§18.5).
 #[tokio::test]
@@ -214,11 +214,14 @@ async fn a_raise_that_leaves_a_write_below_another_circle_records_that_wait() {
     group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
     let ana = group.device(1).await;
     let ben = group.device(2).await;
+    let cy = group.device(3).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
+    group.admit(&ana, &cy).await;
     let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
     let orchard = ana.sync.create_circle("Orchard".into()).await.unwrap();
     ben.sync.pass().await.unwrap();
+    cy.sync.pass().await.unwrap();
     group.version.store(2, std::sync::atomic::Ordering::SeqCst);
     let ben = group.reopen(ben).await;
     for circle in [garden, orchard] {
@@ -231,12 +234,17 @@ async fn a_raise_that_leaves_a_write_below_another_circle_records_that_wait() {
             .unwrap();
     }
     ana.sync
-        .administer(coven_format::admin::StoreChange::RemoveCircleMember {
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
             circle: orchard,
-            member: ana.identity.member(),
+            member: cy.identity.member(),
         })
         .await
         .unwrap();
+    // Cy, who has not migrated, removes Ana from Orchard, and Ana reads that
+    // before she migrates.
+    cy.sync.pass().await.unwrap();
+    cy.sync.remove_circle_member(orchard, ana.identity.member()).await.unwrap();
+    ana.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     ben.database()
@@ -277,7 +285,7 @@ async fn a_raise_that_leaves_a_write_below_another_circle_records_that_wait() {
     assert_eq!(state.reached(&coven_merge::Audience::Circle(orchard)), 0);
     assert_eq!(awaited(&ben).await, [coven_merge::Audience::Circle(orchard)]);
     assert_eq!(ben.database().waiting_snapshot_headers().await.unwrap().len(), 1);
-    for device in [&ana, &ben] {
+    for device in [&ana, &ben, &cy] {
         device.sync.database.close().await.unwrap();
     }
 }

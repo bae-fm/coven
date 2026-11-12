@@ -5,7 +5,7 @@
 //! (§15.5, §15.8, §15.9).
 use crate::effects::checked_change;
 use crate::effects::tests::{
-    apply, create_circle, gifts, header, household, id, with_a_plain_member,
+    apply, create_circle, gifts, header, household, id, remove_circle_member, with_a_plain_member,
 };
 use crate::{EntryTarget, OperationRejection};
 use coven_database::{AdminEffect, StoreState};
@@ -85,9 +85,7 @@ impl Entry {
             Self::Add { circle: c, member, .. } => {
                 StoreChange::AddCircleMember { circle: circle(c), member: id(member) }
             }
-            Self::Remove { circle: c, member, .. } => {
-                StoreChange::RemoveCircleMember { circle: circle(c), member: id(member) }
-            }
+            Self::Remove { circle: c, member, .. } => remove_circle_member(circle(c), id(member)),
             Self::RemoveMember(member) => StoreChange::RemoveMember { member: id(member) },
         }
     }

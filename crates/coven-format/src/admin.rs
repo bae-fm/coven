@@ -178,12 +178,17 @@ pub enum StoreChange {
         /// The added member.
         member: MemberId,
     },
-    /// Remove a circle member, deleting the circle if left empty (§15.8).
+    /// Remove a circle member, deleting the circle if left empty, and
+    /// introduce the circle's replacement key (§15.8).
     RemoveCircleMember {
         /// The circle being left.
         circle: CircleId,
         /// The removed member.
         member: MemberId,
+        /// The replacement circle key, introduced by this entry.
+        key: KeyId,
+        /// SHA-256 of the exact 32 circle-key bytes.
+        key_hash: [u8; 32],
     },
     /// Introduce a key without changing audience membership (§12.1).
     RotateKey {
@@ -301,7 +306,7 @@ store_changes!(
     7 => RenameCircle { circle, name => crate::wire::get_name },
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },
-    10 => RemoveCircleMember { circle, member },
+    10 => RemoveCircleMember { circle, member, key, key_hash },
     11 => RaiseSchema { version, announcement },
     13 => Reset { announcement },
     14 => SetAccess { member, access },

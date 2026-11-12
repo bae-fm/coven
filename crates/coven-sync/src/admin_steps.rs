@@ -55,6 +55,41 @@ impl OperationSteps {
         })
     }
 
+    /// Journal removing `member` from `circle` as a step of a write, with the
+    /// circle's replacement key: the pass keeps the key in custody, claims a
+    /// copy of it for each member who stays, then claims the removal, whose
+    /// entry introduces it (§15.8). `None` when the applied state has the
+    /// member out of the circle already; a removal it refuses fails the step
+    /// with `Rejected`.
+    pub fn remove_circle_member(
+        &self,
+        sql: &SqlContext<'_, '_>,
+        circle: CircleId,
+        member: MemberId,
+    ) -> Result<Option<OperationId>, SyncError> {
+        let key = KeyId(self.ids.new_id());
+        let held = self.held()?;
+        let journaled = sql.journal_step(|journal| {
+            let applied = journal.store_state()?;
+            let author = registered(&applied, self.device, &held)?;
+            // The applied state judges who may remove whom; the key's
+            // commitment is made once the key is in custody, and no rule
+            // reads it.
+            let asked = StoreChange::RemoveCircleMember { circle, member, key, key_hash: [0; 32] };
+            if !changes(journal, &applied, self.device, author, &asked)? {
+                return Ok(None);
+            }
+            SequenceOperation::circle_removal(circle, member, key)
+                .start(journal, "operation")
+                .map(Some)
+        })?;
+        if journaled.is_some() {
+            let state = self.state.clone();
+            sql.after_commit(move || state.request_pass());
+        }
+        Ok(journaled)
+    }
+
     /// Journal making a circle, with this device's member as its first member,
     /// as a step of a write, and return the new circle's id with the
     /// operation's (§15.5). Any active member of the store may make one; the
