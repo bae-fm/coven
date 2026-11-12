@@ -172,8 +172,8 @@ structure Good (st : Store S) (seq : Nat → Slot S) : Prop where
     ∃ a au w, 1 ≤ a ∧ a ≤ st.head ∧ seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A) ∧
       AppliedTo R seq A a
   boundary_body : ∀ A r au v c p, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
-    (st.floor.covers A < r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c))) ∧
-    (∀ L' P' rows, st.body p = some (L', P', rows) → rows = preparedRows R v p (rowsAt R seq A c))
+    (st.floor.covers A < r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A)) ∧
+    (∀ L' P' rows, st.body p = some (L', P', rows) → rows = preparedRows R v p (raiseView R seq A c) A)
 
 /-- A reader of `A` holds the state of the prefix it applied, and every buffered
 record at or above the first kept slot is genuine. -/
@@ -312,7 +312,7 @@ theorem read_ok {reloadAllowed : Bool} {st : Store S} {seq : Nat → Slot S} (g 
     have happ : AppliedTo R seq A (d.pos + 1) := by
       refine ⟨by rw [← hxs]; simp [touches], ?_⟩
       simp only [Nat.add_sub_cancel]; rw [← hxs]; exact hv
-    have hrows : rows = preparedRows R v p (rowsAt R seq A c) :=
+    have hrows : rows = preparedRows R v p (raiseView R seq A c) A :=
       (g.boundary_body A (d.pos + 1) au v c p (by omega) hhead hxs.symm happ).2 L' P' rows hbody
     rw [rowsAt_boundary R seq A d.pos hxs.symm]
     simp only [true_and, hv, ite_true]

@@ -25,7 +25,7 @@ theorem announcement_uploaded {seq : Nat → Slot S} {st st' : Store S}
     (A : S.Aud) (d : S.Dev) (kind : Boundary) (c v : Nat) (p : S.Path)
     (slot : seq (st.head + 1) = .prepare d A kind c v p)
     (applied : AppliedTo R seq A (st.head + 1)) :
-    ∃ L P, st.body p = some (L, P, preparedRows R kind p (rowsAt R seq A c)) := by
+    ∃ L P, st.body p = some (L, P, preparedRows R kind p (raiseView R seq A c) A) := by
   cases step with
   | claim prepared _ => exact prepared A d kind c v p slot applied
   | _ => simp at advances

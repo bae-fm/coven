@@ -845,8 +845,14 @@ landed under the existing claim protocol; it precedes the raise slot (§18.5).
 
 [`CircleRaise`](sequence/CovenSequence/CircleRaise.lean) shows which device can
 raise an audience it reads below its breaking version. It assumes migrating
-leaves an audience with no rows empty: a migration changes rows that exist,
-and a circle made after it has none.
+leaves an audience with no rows empty, whatever the store holds: a migration
+changes rows that exist, and a circle made after it has none. A raise body is
+the audience's rows migrated, and `Rules.migrate` reads a view of every
+audience's rows: its field `migrate_reads` states the rule that an audience's
+migrated rows depend only on its own rows and the store's (coven.md §18.1). A
+raise of `A` covering `c` migrates `A`'s rows at `c` and the store's at `c`, or
+at the slot before the store's raise past `A`'s version when that comes first
+(`inputSlot`).
 
 - `below_refused_until_raised`: a device whose breaking version is 2, reading
   a circle at version 1, gets none of its snapshots counted until a raise to
@@ -859,6 +865,19 @@ and a circle made after it has none.
   circle, a raise must cover it too, and its body is those rows migrated. A
   device that started reading the circle after migrating holds only the part
   it converted on reading, which isn't that body.
+- `rebuilt_body_honest`: a device that reads the circle's rows and the store's
+  from storage up to the circle's coverage (the store's up to its input slot)
+  and migrates a view holding just those two, every other audience at its
+  initial rows, gets exactly the raise body prepared at that coverage. This is
+  `migrate_reads` and the reader's soundness.
+- `rebuilt_raise_counted`: a raise to a higher version, prepared at the
+  rebuilt body's coverage and landing with no raise, reset or announcement
+  covering more than it between, by an active device allowed to raise, is
+  applied; its rows are the rebuilt body with the later parts converted.
+- `cross_read_rebuild_differs`: a migration that reads a second circle (it
+  fills Gifts rows from Garden's) gives a member of both and a rebuilder of
+  Gifts different bodies at the same coverage, so `migrate_reads` fails for it.
+  That is why the rule exists.
 
 [`WriteVersion`](sequence/CovenSequence/WriteVersion.lean) gives the sending
 side of the rule that a part counts only at a version its audience has reached.
@@ -894,20 +913,21 @@ and moves its coverage forward over them.
   part.
 
 [`SecondRaise`](sequence/CovenSequence/SecondRaise.lean) takes a device that
-joined a circle after its first breaking migration, wrote into it, and runs a
-second one before anyone raised the circle. Its migration captures its writes
-through the new marker, the held write into the circle among them.
+read a circle after its first breaking migration and runs a second one before
+anyone raised the circle. Its migration captures its writes through the new
+marker, the held write into the circle among them, and the audiences it read.
 
-- `second_capture_not_body`: capturing the circle, as coven does today,
-  publishes a raise body the device never held: it read the circle's parts
-  converted and never ran the first migration on its rows, so its rows
-  migrated again aren't the circle's rows migrated.
-- `skipped_capture_drops_held`: leaving the circle out sends the held write
+- `second_capture_not_body`: if it read the circle converted, capturing the
+  circle publishes a raise body the device never held: it never ran the first
+  migration on the circle's rows, so its rows migrated again aren't the
+  circle's rows migrated.
+- `skipped_capture_drops_held`: leaving that circle out sends the held write
   ahead of the circle's version. Its part is refused, and the raise a holder
   makes later covers its slot without it.
-
-Neither is right under the rule that only a device that held a circle raises
-it; which device may raise a circle it didn't hold is open.
+- `rebuilt_second_capture_is_body`: if it rebuilt the circle instead, its rows
+  are the circle's rows migrated to the first breaking version, and the second
+  migration's step on them gives the circle's rows migrated to the second:
+  the honest body.
 
 ## Operations
 
@@ -2120,6 +2140,9 @@ they do not replace the separate byte-format, merge or queue tests.
   found" is Rust.
 - Snapshot bodies are honest: ordinary bodies contain the covered state;
   raise bodies contain migrated rows; reset bodies contain the chosen rows.
+  A circle's raise body reads only the circle's rows and the store's
+  (`migrate_reads`); the Rust side holds the app's migrations to it by running
+  them again per audience (coven.md §18.3).
   Coven's raise body differs from that for a part that lands after its raising
   device migrated and whose converter isn't the migration (`RaiseBody`).
   Floor reload uses ordinary snapshots; prepared bodies are consumed at their

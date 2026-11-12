@@ -31,9 +31,9 @@ inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
   | claim (st : Store S)
       (hprepared : ∀ A au v c w p, seq (st.head + 1) = .prepare au A v c w p →
         AppliedTo R seq A (st.head + 1) →
-        ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c)))
+        ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A))
       (hbody : ∀ A au v c p, seq (st.head + 1) = .boundary au A v c p → AppliedTo R seq A (st.head + 1) →
-        ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c))) :
+        ∃ L' P', st.body p = some (L', P', preparedRows R v p (raiseView R seq A c) A)) :
       StoreStep seq st
         { st with
           slot := fun i => if i = st.head + 1 then some (seq (st.head + 1)) else st.slot i

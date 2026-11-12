@@ -54,7 +54,9 @@ def freshKey (rows : List Nat) (key : Nat) : Bool := !rows.contains key
 which migrated before receiving 42 did not create 7; receiving 42 afterward
 does not rerun its migration. Both devices now run schema 1. -/
 def raiseRules : Rules sig :=
-  { rules with migrate := fun _ rows => if 42 ∈ rows then rows ++ [7] else rows }
+  { rules with
+    migrate := fun _ f A => if 42 ∈ f A then f A ++ [7] else f A
+    migrate_reads := by intro v f g A h _; simp [h] }
 
 def raiseHistory : Nat → Slot sig
   | 1 => .writes () 0 (part 42)
@@ -71,8 +73,8 @@ against the selected migration's rows. Deferring only merge cannot turn the
 successful app transaction into the transaction it would execute afterward. -/
 theorem breaking_raise_counterexample :
     AppliedTo raiseRules raiseHistory () 3 ∧
-    raiseRules.migrate 1 [] = [] ∧
-    raiseRules.merge (raiseRules.migrate 1 []) (raiseRules.convert 0 1 42) = [42] ∧
+    raiseRules.migrate 1 (fun _ => []) () = [] ∧
+    raiseRules.merge (raiseRules.migrate 1 (fun _ => []) ()) (raiseRules.convert 0 1 42) = [42] ∧
     raiseLoaded.aud.version = 1 ∧ raiseLoaded.rows = [42, 7] ∧
     (raiseQueued.authored.queue.map (·.schema)) = [1] ∧
     permission raiseRules freshKey (ledgerAt raiseRules raiseHistory 2) (raiseBefore.rows ()) () () 7 = true ∧
@@ -118,7 +120,9 @@ def circleRules : Rules circleSig where
   mayWrite := fun L d _ => !d || L.aux
   merge := rules.merge
   convert := rules.convert
+  store := rules.store
   migrate := rules.migrate
+  migrate_reads := rules.migrate_reads
   resetRows := rules.resetRows
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := rules.sinceReset

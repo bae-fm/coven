@@ -68,7 +68,9 @@ def rules : Rules sig where
   mayWrite := fun _ _ _ => true
   merge := fun (r : List Nat) (b : Nat) => r ++ [b]
   convert := fun _ _ b => b
-  migrate := fun v (r : List Nat) => r ++ [1000 + v]
+  store := ()
+  migrate := fun v f A => f A ++ [1000 + v]
+  migrate_reads := by intro v f g A h _; simp [h]
   resetRows := fun _ => []
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := fun _ b => b
@@ -106,7 +108,7 @@ def st : Store sig where
   head := 4
   floor := ⟨3, fun _ => 2, fun _ => (2 : Nat)⟩
   body := fun (p : Nat) =>
-    if p = 1 then some (ledger0, aud0, rules.migrate 1 (rowsAt rules seqEx () 1))
+    if p = 1 then some (ledger0, aud0, rules.migrate 1 (raiseView rules seqEx () 1) ())
     else some (stateAt rules seqEx () 2)
 
 /-- The joiner after loading the floor's snapshot. -/

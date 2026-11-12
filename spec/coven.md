@@ -8640,7 +8640,10 @@ device, is refused too: no other device holds those. A value that depends on
 what each member can read, such as how often a song was played across every
 circle a member reads, is worked out when it's shown, not stored.
 
-Coven checks the rule as the migration runs (§18.3).
+A migration that did read a second circle would give a device that rebuilds the
+circle another result than a member who held both
+([`cross_read_rebuild_differs`](proofs/sequence/CovenSequence/CircleRaise.lean)),
+which is why the rule stands. Coven checks it as the migration runs (§18.3).
 
 #### 18.2 Additions
 
@@ -8840,7 +8843,11 @@ left is raised by any member who reads it.
 The rebuilt rows are the ones every member who held the circle through the
 rebuild slot makes: the migration's changes to the circle come only from the
 circle's rows and the store's (§18.1), the check holds every device to that,
-and the rebuild starts from exactly those rows.
+and the rebuild starts from exactly those rows, so they are the circle's raise
+body
+([`rebuilt_body_honest`](proofs/sequence/CovenSequence/CircleRaise.lean)). A
+raise built on them, covering the rebuild slot, counts like any other
+([`rebuilt_raise_counted`](proofs/sequence/CovenSequence/CircleRaise.lean)).
 
 **Edge cases of a rebuild.**
 
@@ -13103,13 +13110,17 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A device reading a circle below its breaking version gets none of its snapshots counted until a raise reaches that version | `below_refused_until_raised` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A circle no slot has touched holds its initial rows, which are its raise body when migrating leaves an empty audience empty | `untouched_rows`, `fresh_raise_body` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A device that started reading a circle after migrating holds only converted parts, not the migrated rows a raise covering them must carry | `joiner_cannot_raise` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A device that rebuilds a circle, reading the circle's rows and the store's from storage and migrating a view of just those two, gets the raise body prepared at the rebuild slot, because a migration's result for a circle depends only on its rows and the store's | `rebuilt_body_honest` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A raise prepared at the rebuild slot with the rebuilt body, with no other raise, reset or larger announcement of the circle since, applies, and its rows are that body with the later parts converted | `rebuilt_raise_counted` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A migration that reads a second circle gives a member of both circles and a rebuilder of one other bodies at the same coverage, which is why a breaking migration may read only its audience's rows and the store's | `cross_read_rebuild_differs` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.1 |
 | *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience's version never goes down, so a part sent once its audience reached its version counts on that rule wherever it lands | `step_version`, `version_mono`, `waiting_part_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience no one may raise, such as a deleted circle, keeps its version, so a part ahead of it never meets the version rule wherever it lands | `closed_step_version`, `closed_version`, `closed_part_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* A raise to a version its audience has reached in the prefix its operation validated against, or of an audience no one may raise from there on, is refused at every later slot, so that operation adopts the state instead of claiming | `satisfied_raise_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §15.9, §18.3, §18.8 |
 | *Body.* A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
-| A device that joined a circle after its first breaking migration and wrote into it can't handle the circle at its second: capturing it publishes a raise body it never held, and leaving it out sends its held write ahead of the circle's version, refused everywhere and covered by the holder's later raise without it | `second_capture_not_body`, `skipped_capture_drops_held` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
+| A device that read a circle converted, after its first breaking migration, and wrote into it can't handle the circle at its second: capturing it publishes a raise body it never held, and leaving it out sends its held write ahead of the circle's version, refused everywhere and covered by the holder's later raise without it | `second_capture_not_body`, `skipped_capture_drops_held` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
+| *Body.* A device that rebuilt a circle and then runs a second breaking migration captures the circle's rows migrated to the second version: its second migration's step on the rebuilt rows is the honest body | `rebuilt_second_capture_is_body` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3, §18.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |

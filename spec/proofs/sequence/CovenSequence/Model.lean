@@ -173,8 +173,18 @@ structure Rules (S : Sig) where
   merge : S.Rows → S.Batch → S.Rows
   /-- `convert from to batch`. -/
   convert : Nat → Nat → S.Batch → S.Batch
-  /-- `migrate version rows`: the database part of the raise's migrations. -/
-  migrate : Nat → S.Rows → S.Rows
+  /-- The store: the audience whose rows every circle's migration may read
+  besides the circle's own (coven.md §18.1). -/
+  store : S.Aud
+  /-- `migrate version view A`: the database part of the raise's migrations,
+  giving `A`'s rows after them. `view` holds every audience's rows as the
+  migrating database held them before. -/
+  migrate : Nat → (S.Aud → S.Rows) → S.Aud → S.Rows
+  /-- **What a breaking migration reads** (coven.md §18.1): an audience's
+  migrated rows depend only on its own rows and the store's. Coven checks this
+  of the app's SQL by running the migration again per audience (§18.3). -/
+  migrate_reads : ∀ v (f g : S.Aud → S.Rows) A,
+    f A = g A → f store = g store → migrate v f A = migrate v g A
   resetRows : S.Path → S.Rows
   boundaryAllowed : Ledger S → S.Dev → S.Aud → Boundary → Bool
   /-- Keep only each batch's writes whose authored reads include the reset. -/
@@ -400,8 +410,40 @@ def replay (A : S.Aud) (get : Nat → Slot S) (refused : Nat → Bool) (v reset 
 
 /-- Prepared bodies differ by purpose; reset contents are chosen by the
 resetting device, while a raise migrates the covered prefix. -/
-def preparedRows (kind : Boundary) (path : S.Path) (rows : S.Rows) : S.Rows :=
-  match kind with | .raise v => R.migrate v rows | .reset => R.resetRows path
+def preparedRows (kind : Boundary) (path : S.Path) (view : S.Aud → S.Rows) (A : S.Aud) : S.Rows :=
+  match kind with | .raise v => R.migrate v view A | .reset => R.resetRows path
+
+/-- The latest slot through `c` at which the store's version is at most `v`:
+`c` itself, or the slot before the store's raise past `v`. -/
+def storeBefore (seq : Nat → Slot S) (v : Nat) : Nat → Nat
+  | 0 => 0
+  | j + 1 => if (audAt R seq R.store (j + 1)).version ≤ v then j + 1 else storeBefore seq v j
+
+theorem storeBefore_le (seq : Nat → Slot S) (v : Nat) : ∀ c, storeBefore R seq v c ≤ c
+  | 0 => Nat.le_refl _
+  | j + 1 => by
+    unfold storeBefore
+    split
+    · exact Nat.le_refl _
+    · exact Nat.le_succ_of_le (storeBefore_le seq v j)
+
+/-- The slot at which a raise of `A` covering `c` reads audience `B`'s rows
+(coven.md §18.3 step 2): `A`'s own at `c`; the store's at `c`, or before the
+store's raise past `A`'s version when that comes first, since the store has no
+rows at `A`'s version past it; any other audience's at `c`. -/
+def inputSlot (seq : Nat → Slot S) (A : S.Aud) (c : Nat) (B : S.Aud) : Nat :=
+  if B = A then c
+  else if B = R.store then storeBefore R seq (audAt R seq A c).version c
+  else c
+
+theorem inputSlot_le (seq : Nat → Slot S) (A : S.Aud) (c : Nat) (B : S.Aud) :
+    inputSlot R seq A c B ≤ c := by
+  unfold inputSlot
+  split
+  · exact Nat.le_refl _
+  · split
+    · exact storeBefore_le R seq _ c
+    · exact Nat.le_refl _
 
 /-- A raise converts the uncovered suffix. A reset discards that suffix:
 none of it could have read the reset's not-yet-claimed slot. -/
@@ -413,20 +455,29 @@ def finishBoundary (A : S.Aud) (get : Nat → Slot S) (refused : Nat → Bool)
 
 /-- Audience `A`'s rows after slots `1..k`. A valid raise of `A` at `k+1`
 covering `c` loads the migrated rows as of `c` and replays slots `c+1..k`. -/
-def rowsAt (seq : Nat → Slot S) (A : S.Aud) : Nat → S.Rows
-  | 0 => R.rows0 A
-  | k + 1 =>
+def rowsAt (seq : Nat → Slot S) : S.Aud → Nat → S.Rows
+  | A, 0 => R.rows0 A
+  | A, k + 1 =>
     match seq (k + 1) with
     | .boundary d a v c p =>
       if _h : c < k + 1 ∧ a = A ∧
           audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (.boundary d a v c p) = true then
-        finishBoundary R A seq (audAt R seq A k).refused v (audAt R seq A k).lastReset (preparedRows R v p (rowsAt seq A c)) (c + 1) (k - c)
+        finishBoundary R A seq (audAt R seq A k).refused v (audAt R seq A k).lastReset (preparedRows R v p (fun B => rowsAt seq B (inputSlot R seq A c B)) A) (c + 1) (k - c)
       else rowsAt seq A k
     | x =>
       if touches A x && audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A x then
         applyWrite R A (audAt R seq A k).version (audAt R seq A k).lastReset (rowsAt seq A k) x
       else rowsAt seq A k
-termination_by k => k
+termination_by _ k => k
+decreasing_by
+  all_goals first
+    | omega
+    | exact Nat.lt_of_le_of_lt (inputSlot_le R seq _ _ _) (by have := _h.1; omega)
+
+/-- The rows a raise of `A` covering `c` migrates: every audience's rows at its
+input slot. -/
+def raiseView (seq : Nat → Slot S) (A : S.Aud) (c : Nat) : S.Aud → S.Rows :=
+  fun B => rowsAt R seq B (inputSlot R seq A c B)
 
 /-- Audience `A`'s state after slots `1..k`. -/
 def stateAt (seq : Nat → Slot S) (A : S.Aud) (k : Nat) : Ledger S × AudLedger S × S.Rows :=
@@ -455,7 +506,7 @@ theorem rowsAt_boundary (seq : Nat → Slot S) (A : S.Aud) (k : Nat) {d a v c p}
     (hs : seq (k + 1) = .boundary d a v c p) :
     rowsAt R seq A (k + 1) =
       if a = A ∧ audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (.boundary d a v c p) = true then
-        finishBoundary R A seq (audAt R seq A k).refused v (audAt R seq A k).lastReset (preparedRows R v p (rowsAt R seq A c)) (c + 1) (k - c)
+        finishBoundary R A seq (audAt R seq A k).refused v (audAt R seq A k).lastReset (preparedRows R v p (raiseView R seq A c) A) (c + 1) (k - c)
       else rowsAt R seq A k := by
   rw [rowsAt]
   simp only [hs]

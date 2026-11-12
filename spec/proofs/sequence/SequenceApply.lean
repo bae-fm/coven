@@ -105,7 +105,9 @@ def baseRules (c : Config n) (records : Nat → ClaimRecord String) : Rules (sig
   mayWrite := mayWrite c
   merge := merge
   convert := fun _ _ b => b
-  migrate := fun _ r => r
+  store := 0
+  migrate := fun _ f A => f A
+  migrate_reads := by intro v f g A h _; simp [h]
   resetRows := fun _ => []
   boundaryAllowed := fun _ _ _ _ => false
   sinceReset := fun _ b => b

@@ -61,7 +61,9 @@ def rules : Rules sig where
   mayWrite := fun _ _ _ => true
   merge := fun rows batch => rows ++ [batch]
   convert := fun _ _ batch => batch
-  migrate := fun _ rows => rows
+  store := ()
+  migrate := fun _ f A => f A
+  migrate_reads := by intro v f g A h _; simp [h]
   resetRows := fun _ => []
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := fun _ batch => batch

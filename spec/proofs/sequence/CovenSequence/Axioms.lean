@@ -198,6 +198,9 @@ import SequenceApply
 #print axioms CovenSequence.CircleRaise.fresh_raise_body
 #print axioms CovenSequence.CircleRaise.below_refused_until_raised
 #print axioms CovenSequence.CircleRaise.joiner_cannot_raise
+#print axioms CovenSequence.CircleRaise.rebuilt_body_honest
+#print axioms CovenSequence.CircleRaise.rebuilt_raise_counted
+#print axioms CovenSequence.CircleRaise.cross_read_rebuild_differs
 #print axioms CovenSequence.CircleLifecycle.name_is_latest_rename
 #print axioms CovenSequence.CircleLifecycle.deleted_target_refused
 #print axioms CovenSequence.CircleLifecycle.live_has_member
@@ -217,6 +220,7 @@ import SequenceApply
 #print axioms CovenSequence.RaiseBody.late_part_differs
 #print axioms CovenSequence.SecondRaise.second_capture_not_body
 #print axioms CovenSequence.SecondRaise.skipped_capture_drops_held
+#print axioms CovenSequence.SecondRaise.rebuilt_second_capture_is_body
 
 #print axioms CovenSequence.reaches_target
 #print axioms CovenSequence.QueueReload.commit_numbered

@@ -373,7 +373,9 @@ def adminRules : Rules adminSig where
   mayWrite := fun _ _ _ => true
   merge := fun r _ => r
   convert := fun _ _ b => b
-  migrate := fun _ r => r
+  store := ()
+  migrate := fun _ f A => f A
+  migrate_reads := by intro v f g A h _; simp [h]
   resetRows := fun _ => ()
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := fun _ b => b
