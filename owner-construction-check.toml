@@ -1560,8 +1560,7 @@ tables = [
 "crates/coven-sync/src/restore_codes.rs" = [
     "RestoreCodes::new",
     "RestoreCodes::replace_member_keys",
-    "RestoreCodes::replace_access_key",
-    "RestoreCodes::update_credentials",
+    "RestoreCodes::use_access_key",
     "RestoreCodes::while_open",
 ]
 # A sign-in's custody: device custody once per opened installation, session

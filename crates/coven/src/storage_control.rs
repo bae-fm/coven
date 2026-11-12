@@ -183,7 +183,10 @@ impl StorageConnections {
             // Location identifies the provider even if decoding or reading its
             // credentials fails. A location read itself is a local disk failure.
             let connection_version = self.waits.connection_version();
+            // A call that needed the connection made it while the attempt
+            // waited for the lock: the attempt starts its loop.
             let result = match self.connecting_location().await {
+                Ok(Some(_)) if matches!(&*live, ConnectionState::Active(_)) => Ok(()),
                 Ok(Some(location)) => self.connect(&mut live).await.map_err(|error| {
                     let reason = error.pending_reason(location.provider());
                     (error, reason)

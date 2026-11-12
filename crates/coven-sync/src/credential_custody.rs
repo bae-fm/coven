@@ -7,7 +7,7 @@ use coven_crypto::{
 };
 use coven_format::codes::RestoreCode;
 use coven_foundation::files::StoreDir;
-use coven_storage::{S3Credentials, StorageCredentials};
+use coven_storage::StorageCredentials;
 use std::sync::Arc;
 
 /// The keychain entries a credential change commits: this device's provider
@@ -32,26 +32,6 @@ impl CredentialKeychains {
         directory: StoreDir,
     ) -> Self {
         Self { device, person, directory }
-    }
-
-    /// The S3 key replacing this member's own, kept apart until history
-    /// records it (§14.3).
-    pub(crate) fn replacing_key(&self) -> Result<Option<S3Credentials>, SyncError> {
-        Ok(self
-            .device
-            .replacing_access_key()?
-            .map(|bytes| S3Credentials::decode(bytes.as_bytes()))
-            .transpose()?)
-    }
-
-    /// Keep `key` apart as the one replacing this member's own.
-    pub(crate) fn keep_replacing_key(&self, key: &S3Credentials) -> Result<(), SyncError> {
-        Ok(self.device.set_replacing_access_key(&key.encode()?)?)
-    }
-
-    /// Let go of the replacing key; an absent one succeeds.
-    pub(crate) fn drop_replacing_key(&self) -> Result<(), SyncError> {
-        Ok(self.device.delete_replacing_access_key()?)
     }
 
     /// This device's committed provider credentials, if any.

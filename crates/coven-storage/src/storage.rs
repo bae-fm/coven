@@ -150,6 +150,11 @@ pub trait Storage: Send + Sync {
     ) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
+    /// The id of the S3 key this connection signs with now, without its
+    /// secret; `None` on a provider that doesn't use S3 keys.
+    async fn s3_access_key_id(&self) -> Option<String> {
+        None
+    }
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
     /// The signed-in sharing account, for the member's admin access entry.

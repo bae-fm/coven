@@ -401,6 +401,9 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
     fn read_part_size(&self) -> Option<std::num::NonZeroU64> {
         self.provider.read_part_size()
     }
+    async fn s3_access_key_id(&self) -> Option<String> {
+        self.provider.s3_access_key_id().await
+    }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         self.provider.set_s3_credentials(credentials).await
     }

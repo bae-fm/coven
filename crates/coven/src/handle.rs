@@ -277,11 +277,6 @@ impl CovenHandle {
     pub(crate) fn test_setup_hook(&self, hook: crate::storage::SetupHook) {
         self.storage.test_setup_hook(hook);
     }
-    /// Stop the next S3 key replacement after `at`, as a crash would.
-    #[cfg(test)]
-    pub(crate) fn test_replace_crash(&self, at: coven_sync::ReplaceStop) {
-        self.storage.test_replace_crash(at);
-    }
     /// Open this member's sealed keys and connect without starting the loop.
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {
         self.storage.unlock().await

@@ -23,7 +23,6 @@ const CREDENTIALS_ENTRY: &str = "storage-credentials";
 const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
 const INVITE_CODE_ENTRY: &str = "invite-code";
 const SETUP_CREDENTIALS_ENTRY: &str = "setup-credentials";
-const REPLACING_KEY_ENTRY: &str = "replacing-access-key";
 const RESTORE_RECORD_ENTRY: &str = "restore-record";
 const REPLACEMENT_RECORD_ENTRY: &str = "replacement-record";
 
@@ -250,24 +249,6 @@ impl StoreKeychain {
         self.remove(SETUP_CREDENTIALS_ENTRY)
     }
 
-    /// The S3 key replacing this member's own, kept apart from the
-    /// committed credentials until history records it as the member's key,
-    /// so custody never connects with a key history doesn't name (§14.3).
-    pub fn replacing_access_key(&self) -> Result<Option<SecretBytes>, KeyError> {
-        self.read(REPLACING_KEY_ENTRY)
-    }
-
-    /// Keep a replacement S3 key apart until history records it.
-    pub fn set_replacing_access_key(&self, bytes: &SecretBytes) -> Result<(), KeyError> {
-        self.write(REPLACING_KEY_ENTRY, bytes.as_bytes())
-    }
-
-    /// Remove a replacement key once custody connects with it or the
-    /// replacement ended unrecorded; an absent entry succeeds.
-    pub fn delete_replacing_access_key(&self) -> Result<(), KeyError> {
-        self.remove(REPLACING_KEY_ENTRY)
-    }
-
     /// The invite code of a join under way for this store on this device:
     /// its saved request is encrypted with the code's secret, so resuming
     /// needs the code (§13.2). It is never synced.
@@ -390,7 +371,6 @@ impl StoreKeychain {
             DEVICE_ID_ENTRY,
             CREDENTIALS_ENTRY,
             SETUP_CREDENTIALS_ENTRY,
-            REPLACING_KEY_ENTRY,
             INVITE_CODE_ENTRY,
             RESTORE_RECORD_ENTRY,
             REPLACEMENT_RECORD_ENTRY,

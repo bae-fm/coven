@@ -18,28 +18,14 @@ impl CovenHandle {
         self.codes.transfer_code().await
     }
 
-    /// Commit a replacement S3 key and publish its id; the restore code is unchanged (E9).
-    /// A publication failure retains the credentials; retry with the same key.
-    /// Coven never deletes the key it replaces; the person deletes it in the
-    /// provider's console (§14.3).
-    /// Once this member's removal applies, returns Removed and saves nothing.
-    pub async fn replace_access_key(
+    /// Take an S3 key the person made in the provider's console, whatever the
+    /// reason, and record it as this member's (E9, §14.3). See the spec for
+    /// the call's steps and what each failure leaves.
+    pub async fn use_access_key(
         &self,
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        self.storage.replace_access_key(access_key_id, secret_access_key).await
-    }
-
-    /// Install this member's separately supplied S3 key (E9). Identity, location
-    /// and restore code stay unchanged; disconnected handles keep it for connecting.
-    /// Once this member's removal applies, returns Removed and saves nothing:
-    /// the key would return to the person entries the removal emptied (§14.1).
-    pub async fn update_credentials(
-        &self,
-        access_key_id: String,
-        secret_access_key: SecretText,
-    ) -> Result<(), SyncError> {
-        self.storage.update_credentials(access_key_id, secret_access_key).await
+        self.storage.use_access_key(access_key_id, secret_access_key).await
     }
 }

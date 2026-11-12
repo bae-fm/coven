@@ -220,15 +220,13 @@ async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, Sy
     }))
 }
 
-/// Complete a pass, member-key custody (§11.5) and a replacement S3 key's
-/// custody (§14.3).
+/// Complete a pass and member-key custody (§11.5).
 async fn pass(
     sync: &SequenceSync,
     codes: &crate::RestoreCodes,
 ) -> Result<Option<crate::PendingRecord>, SyncError> {
     sync.pass().await?;
     codes.resume_member_keys(sync).await?;
-    codes.resume_access_key(sync).await?;
     failing(sync).await
 }
 

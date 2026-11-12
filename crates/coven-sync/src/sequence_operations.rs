@@ -593,6 +593,10 @@ impl SequenceSync {
             let validation = if matches!(step, OperationStep::CreatorCopy(_)) {
                 self.check_binding(session, member)?;
                 Ok(true)
+            } else if self.awaits_access_key(member, &request).await {
+                // A key this connection doesn't hold: the call that journaled
+                // the entry never took it (§14.3).
+                Ok(false)
             } else {
                 self.validate_request(session, member, &request)?
             };

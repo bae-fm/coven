@@ -343,6 +343,9 @@ impl ProviderOps for S3Storage {
     async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
         self.location_marker_bytes().await
     }
+    async fn s3_access_key_id(&self) -> Option<String> {
+        Some(read_unpoisoned(&self.credentials.0).access_key_id().to_owned())
+    }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         credentials.validate()?;
         *write_unpoisoned(&self.credentials.0) = aws_credentials(credentials);

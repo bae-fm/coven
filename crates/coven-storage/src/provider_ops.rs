@@ -49,6 +49,10 @@ pub trait ProviderOps: Send + Sync {
     async fn set_oauth_tokens(&self, _tokens: OAuthTokens) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth"))
     }
+    /// The id of the S3 key this provider signs with now, without its secret.
+    async fn s3_access_key_id(&self) -> Option<String> {
+        None
+    }
     /// Replace the S3 signing key after credential custody commits it.
     async fn set_s3_credentials(&self, _credentials: S3Credentials) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))

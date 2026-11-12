@@ -241,7 +241,6 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store.write(StoreKeyring::ENTRY, b"store keys").unwrap();
         store.write(MemberIdentity::ENTRY, b"member keys").unwrap();
         store.set_storage_credentials(&SecretBytes::new(b"credentials".to_vec())).unwrap();
-        store.set_replacing_access_key(&SecretBytes::new(b"replacing".to_vec())).unwrap();
         store.set_host_secret("token", "token").unwrap();
         store.set_host_secret("another-token", "another secret").unwrap();
         store.set_invite_code(&SecretText::new("CVI1-CODE".into())).unwrap();
@@ -260,7 +259,6 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         StoreKeyring::ENTRY,
         MemberIdentity::ENTRY,
         CREDENTIALS_ENTRY,
-        REPLACING_KEY_ENTRY,
         HOST_SECRET_NAMES_ENTRY,
         INVITE_CODE_ENTRY,
         RESTORE_RECORD_ENTRY,

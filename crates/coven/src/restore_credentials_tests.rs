@@ -274,18 +274,15 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
 }
 
 #[tokio::test]
-async fn non_s3_handles_refuse_both_credential_update_calls() {
+async fn non_s3_handles_refuse_a_new_access_key() {
     for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive, CloudProvider::CloudKit] {
         let owner = Owner::new(provider, false).await;
         let before = owner.handle.restore_code().await.unwrap();
-        for result in [
-            owner.handle.update_credentials("key".into(), SecretText::new("secret".into())).await,
-            owner.handle.replace_access_key("key".into(), SecretText::new("secret".into())).await,
-        ] {
-            assert!(
-                matches!(result, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
-            );
-        }
+        let result =
+            owner.handle.use_access_key("key".into(), SecretText::new("secret".into())).await;
+        assert!(
+            matches!(result, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
+        );
         assert_eq!(owner.handle.restore_code().await.unwrap(), before);
         owner.close().await;
     }
@@ -302,9 +299,7 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
         install.keychain.fail_operations_after(&[after]);
         assert!(
             matches!(
-                handle
-                    .update_credentials("replacement".into(), SecretText::new("secret".into()))
-                    .await,
+                handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await,
                 Err(SyncError::SecureStorage(_))
             ),
             "operation {after}"
@@ -315,12 +310,12 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
     for cleanup in 0..2 {
         install.keychain.fail_operations_after(&[4, cleanup]);
         assert!(
-            matches!(handle.update_credentials("replacement".into(), SecretText::new("secret".into())).await,
+            matches!(handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await,
             Err(SyncError::Cleanup { operation, cleanup }) if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_)))
         );
         assert_eq!(handle.restore_code().await.unwrap(), before);
         handle
-            .update_credentials(original.access_key_id.clone(), original.secret_access_key.clone())
+            .use_access_key(original.access_key_id.clone(), original.secret_access_key.clone())
             .await
             .unwrap();
         assert_key(&install, owner.directory.id(), &original);
@@ -414,13 +409,13 @@ async fn the_key_in_the_transfer_code_is_the_one_this_device_uses_now() {
     assert_same_key(&transfer_key(&handle).await, &owner.s3_credentials().unwrap());
     let replaced = supplied_key("replaced");
     handle
-        .replace_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
+        .use_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
         .await
         .unwrap();
     assert_same_key(&transfer_key(&handle).await, &replaced);
     let updated = supplied_key("updated");
     handle
-        .update_credentials(updated.access_key_id.clone(), updated.secret_access_key.clone())
+        .use_access_key(updated.access_key_id.clone(), updated.secret_access_key.clone())
         .await
         .unwrap();
     assert_same_key(&transfer_key(&handle).await, &updated);
@@ -501,11 +496,12 @@ async fn a_locked_keychain_is_reported_rather_than_an_absent_key() {
     owner.close().await;
 }
 
-/// A replacement whose entry is journaled and refused keeps its key apart,
-/// and another key waits for it to end: it is refused with
-/// `ReplacementPending`, keeping nothing (§14.3).
+/// A call whose entry is journaled and refused has taken its key. Another key
+/// then runs that entry first, ignoring its retry wait: while the provider
+/// refuses it the call fails taking nothing, and once it lands the second
+/// key's entry follows, so the record ends on the last key (§14.3).
 #[tokio::test]
-async fn another_key_waits_for_a_replacement_under_way() {
+async fn a_second_key_runs_a_refused_ones_entry_first_and_ends_as_the_members_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
@@ -531,34 +527,34 @@ async fn another_key_waits_for_a_replacement_under_way() {
             ..Faults::none()
         })
         .await;
-    assert!(matches!(
-        handle.replace_access_key("replacement".into(), SecretText::new("secret".into())).await,
-        Err(SyncError::Storage(_))
-    ));
-    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
-    let kept = || {
-        S3Credentials::decode(custody.replacing_access_key().unwrap().unwrap().as_bytes())
-            .unwrap()
-            .access_key_id
-    };
-    assert_eq!(kept(), "replacement");
-    let other =
-        handle.replace_access_key("other".into(), SecretText::new("other-secret".into())).await;
-    assert!(
-        matches!(&other, Err(SyncError::ReplacementPending { access_key_id })
-            if access_key_id == "replacement"),
-        "{other:?}"
-    );
-    assert_eq!(kept(), "replacement");
+    let first = supplied_key("first");
+    let refused =
+        handle.use_access_key(first.access_key_id.clone(), first.secret_access_key.clone()).await;
+    assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
+    assert_key(&install, directory.id(), &first);
+    let second = supplied_key("second");
+    let waiting =
+        handle.use_access_key(second.access_key_id.clone(), second.secret_access_key.clone()).await;
+    assert!(waiting.is_err(), "{waiting:?}");
+    // Nothing of the second key was taken.
+    assert_key(&install, directory.id(), &first);
+    owner.storage.set_faults(Faults::none()).await;
+    handle
+        .use_access_key(second.access_key_id.clone(), second.secret_access_key.clone())
+        .await
+        .unwrap();
+    let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
+    assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: "second".into() });
+    assert_key(&install, directory.id(), &second);
     handle.close().await.unwrap();
     owner.close().await;
 }
 
-/// Retrying a replacement with the key it keeps apart, after its entry was
-/// journaled and its claim refused, runs the journaled entry now rather
-/// than journaling a second one, and finishes it once (§14.3, E9).
+/// Calling again with the key whose entry was journaled and refused runs
+/// that entry now rather than journaling a second one, and finishes it once
+/// (§14.3, E9).
 #[tokio::test]
-async fn retrying_a_refused_replacement_with_its_key_finishes_it_once() {
+async fn retrying_a_refused_key_finishes_it_once() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
@@ -588,17 +584,17 @@ async fn retrying_a_refused_replacement_with_its_key_finishes_it_once() {
         .await;
     let replacement = supplied_key("replacement");
     let (id, secret) = (&replacement.access_key_id, &replacement.secret_access_key);
-    let refused = handle.replace_access_key(id.clone(), secret.clone()).await;
+    let refused = handle.use_access_key(id.clone(), secret.clone()).await;
     assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
+    // The key was taken before the entry was claimed.
+    assert_key(&install, directory.id(), &replacement);
     handle.close().await.unwrap();
     owner.storage.set_faults(Faults::none()).await;
 
     let handle = install.handle(directory.clone(), &owner).await;
-    let retried = handle.replace_access_key(id.clone(), secret.clone()).await;
+    let retried = handle.use_access_key(id.clone(), secret.clone()).await;
     assert!(retried.is_ok(), "{retried:?}");
     assert_key(&install, directory.id(), &replacement);
-    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
-    assert!(custody.replacing_access_key().unwrap().is_none());
     assert!(handle.pending().await.unwrap().is_empty());
     owner.sync().await;
     assert_eq!(slots().await.len(), before.len() + 1);
@@ -606,12 +602,37 @@ async fn retrying_a_refused_replacement_with_its_key_finishes_it_once() {
     owner.close().await;
 }
 
-/// A provider's cooldown holds a retried replacement as it holds every
-/// request: the call sends nothing and fails `RateLimited`, and the
-/// journaled entry and the kept key stay for a pass to finish once the
-/// cooldown ends (§6.7, §14.3).
+/// Calling with the key the member's record already names journals nothing
+/// and claims no slot (§14.3).
 #[tokio::test]
-async fn a_cooldown_holds_a_retried_replacement() {
+async fn the_key_the_record_names_journals_no_entry() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let slots = || async {
+        crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
+            path.slot_number().is_some()
+        })
+        .await
+        .len()
+    };
+    let key = supplied_key("fresh");
+    handle.use_access_key(key.access_key_id.clone(), key.secret_access_key.clone()).await.unwrap();
+    let recorded = slots().await;
+    handle.use_access_key(key.access_key_id.clone(), key.secret_access_key.clone()).await.unwrap();
+    assert_eq!(slots().await, recorded);
+    assert!(handle.pending().await.unwrap().is_empty());
+    assert_key(&install, directory.id(), &key);
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// A provider's cooldown holds a retried call as it holds every request: the
+/// call sends nothing and fails `RateLimited`, and the journaled entry stays
+/// for a pass to finish once the cooldown ends (§6.7, §14.3).
+#[tokio::test]
+async fn a_cooldown_holds_a_retried_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     owner.stop_sync().await;
     let install = Installation::new();
@@ -640,7 +661,7 @@ async fn a_cooldown_holds_a_retried_replacement() {
         .await;
     let replacement = supplied_key("replacement");
     let (id, secret) = (&replacement.access_key_id, &replacement.secret_access_key);
-    let refused = handle.replace_access_key(id.clone(), secret.clone()).await;
+    let refused = handle.use_access_key(id.clone(), secret.clone()).await;
     assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
     // The provider answers the next request with 429 and Retry-After.
     owner
@@ -656,18 +677,15 @@ async fn a_cooldown_holds_a_retried_replacement() {
         matches!(result, Err(SyncError::Storage(error))
             if error.failure() == StorageFailure::RateLimited)
     };
-    let answered = handle.replace_access_key(id.clone(), secret.clone()).await;
+    let answered = handle.use_access_key(id.clone(), secret.clone()).await;
     assert!(rate_limited(&answered), "{answered:?}");
     handle.test_parked().await;
     let requests = owner.storage.request_count();
-    let held = handle.replace_access_key(id.clone(), secret.clone()).await;
+    let held = handle.use_access_key(id.clone(), secret.clone()).await;
     assert!(rate_limited(&held), "{held:?}");
     handle.test_parked().await;
     assert_eq!(owner.storage.request_count(), requests, "the retry sent a request");
-    let custody = StoreKeychain::new(install.keychain.clone(), directory.id());
-    let kept = custody.replacing_access_key().unwrap().unwrap();
-    assert_eq!(S3Credentials::decode(kept.as_bytes()).unwrap().access_key_id, "replacement");
-    assert_key(&install, directory.id(), &owner.s3_credentials().unwrap());
+    assert_key(&install, directory.id(), &replacement);
     assert!(!handle.pending().await.unwrap().is_empty());
     handle.close().await.unwrap();
     owner.close().await;

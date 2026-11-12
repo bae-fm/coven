@@ -127,13 +127,13 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     assert!(before.is_some());
     let key = || ("ben-new".to_owned(), SecretText::new("new secret".into()));
     let (id, secret) = key();
-    let replaced = ben.handle.replace_access_key(id, secret).await;
+    let replaced = ben.handle.use_access_key(id, secret).await;
     assert!(matches!(replaced, Err(SyncError::Removed)), "{replaced:?}");
     assert_eq!(held(&ben.app), before);
     let laptop = &laptop;
     let refused = |handle: CovenHandle| async move {
         let (id, secret) = key();
-        let result = handle.update_credentials(id, secret).await;
+        let result = handle.use_access_key(id, secret).await;
         assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
         assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
         assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());

@@ -160,7 +160,7 @@ async fn connector_failures_wait_for_new_credentials_without_timers() {
             "{failure:?} must not retry by time or repeated start"
         );
         f.handle
-            .update_credentials("replacement".into(), SecretText::new("secret".into()))
+            .use_access_key("replacement".into(), SecretText::new("secret".into()))
             .await
             .unwrap();
         synced(&f.handle).await;
@@ -190,10 +190,7 @@ async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure
     f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests);
     f.storage.set_faults(Faults::none()).await;
-    f.handle
-        .update_credentials("replacement".into(), SecretText::new("secret".into()))
-        .await
-        .unwrap();
+    f.handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await.unwrap();
     synced(&f.handle).await;
     f.handle.close().await.unwrap();
 }
@@ -218,7 +215,7 @@ async fn stopping_an_inflight_failure_preserves_its_delay_for_the_next_start() {
 }
 
 #[tokio::test]
-async fn credentials_changed_during_a_failed_pass_are_evidence_for_its_retry() {
+async fn a_key_call_during_a_failed_pass_waits_for_it_and_then_takes_the_key() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     synced(&f.handle).await;
@@ -234,15 +231,17 @@ async fn credentials_changed_during_a_failed_pass_are_evidence_for_its_retry() {
     f.storage.hold_next_read(floor, entered, resumed).await;
     f.handle.sync_now();
     entering.await.unwrap();
-    f.handle
-        .update_credentials("replacement".into(), SecretText::new("secret".into()))
-        .await
-        .unwrap();
-    f.storage.set_faults(Faults::none()).await;
-    // The clock moves, so the end of the pass after the failed one moves the
-    // last synced time; an authentication failure waits for no timer.
-    f.advance(Duration::from_secs(1));
-    resume.send(()).unwrap();
+    // The call waits for the pass in flight, then takes the key.
+    let call = f.handle.use_access_key("replacement".into(), SecretText::new("secret".into()));
+    let pass = async {
+        f.storage.set_faults(Faults::none()).await;
+        // The clock moves, so the end of the pass after the failed one moves
+        // the last synced time; an authentication failure waits for no timer.
+        f.advance(Duration::from_secs(1));
+        resume.send(()).unwrap();
+    };
+    let (called, ()) = tokio::join!(call, pass);
+    called.unwrap();
     synced_since(&f.handle, f.clock.now()).await;
     f.handle.close().await.unwrap();
 }
@@ -618,10 +617,7 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
     assert_eq!(f.storage.request_count(), requests, "the held pass ran");
     assert_eq!(effect(&f).await, RetryEffect::Failed);
     f.storage.set_faults(Faults::none()).await;
-    f.handle
-        .update_credentials("replacement".into(), SecretText::new("secret".into()))
-        .await
-        .unwrap();
+    f.handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await.unwrap();
     effect_becomes(&f, RetryEffect::Pass).await;
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");

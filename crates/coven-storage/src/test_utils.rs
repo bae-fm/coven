@@ -554,6 +554,9 @@ impl ProviderOps for MemoryProvider {
             Account::Recipient(account) => account.clone(),
         })
     }
+    async fn s3_access_key_id(&self) -> Option<String> {
+        self.s3_key.lock().await.as_ref().map(|key| key.access_key_id.clone())
+    }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         credentials.validate()?;
         if self.config.provider() != CloudProvider::S3 {

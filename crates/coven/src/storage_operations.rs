@@ -7,6 +7,7 @@
 use super::{ConnectionState, StorageConnections};
 use crate::*;
 use coven_format::admin::StoreChange;
+use std::sync::Arc;
 
 impl StorageConnections {
     /// Publish this device's removal, for deleting the store from it, and
@@ -76,41 +77,61 @@ impl StorageConnections {
         live.sync.holds_store().await
     }
 
-    /// Install and record a replacement S3 key; it needs the connection.
-    pub(crate) async fn replace_access_key(
-        &self,
+    /// Use an S3 key the person made in the provider's console, for any
+    /// reason, and record it as this member's (§14.3, E9): the entry setting
+    /// this member's access record to it is journaled, custody and the
+    /// connection take the key, and the entry is claimed with it; a record
+    /// that already names the key journals nothing. Without a connection, the
+    /// call connects with the new key first, committing nothing. The whole
+    /// call runs as one task, so a dropped app future can't stop it between
+    /// the entry and the key. A failure before the key is taken ends the entry
+    /// and changes nothing.
+    pub(crate) async fn use_access_key(
+        self: &Arc<Self>,
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let ConnectionState::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        self.codes.replace_access_key(live.sync.clone(), access_key_id, secret_access_key).await
-    }
-
-    /// Keep a separately supplied S3 key, on the connection when there is one.
-    pub(crate) async fn update_credentials(
-        &self,
-        access_key_id: String,
-        secret_access_key: SecretText,
-    ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        match &*live {
-            ConnectionState::Active(live) => {
-                let sync = Some(live.sync.clone());
-                self.codes.update_credentials(sync, access_key_id, secret_access_key).await
+        self.call(move |owner| async move {
+            let mut live = owner.live.lock().await;
+            owner.ready(&mut live).await?;
+            let key = coven_storage::S3Credentials {
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+            };
+            let fresh = !matches!(&*live, ConnectionState::Active(_));
+            if fresh {
+                let next = owner.codes.s3_connection(key).await?;
+                owner.connect_with(&mut live, next).await?;
             }
-            _ => {
-                self.codes.update_credentials(None, access_key_id, secret_access_key).await?;
-                self.waits.connection_changed();
+            let ConnectionState::Active(connection) = &*live else {
+                return Err(SyncError::NoStorage);
+            };
+            let sync = connection.sync.clone();
+            let used =
+                owner.codes.use_access_key(sync, access_key_id.clone(), secret_access_key, fresh);
+            let used = used.await;
+            let held = owner.codes.connection().await;
+            let taken = matches!(&held, Ok(Some(coven_storage::ConnectionCredentials {
+                credentials: coven_storage::StorageCredentials::S3(key), ..
+            })) if key.access_key_id == access_key_id);
+            if taken {
                 // Custody holds credentials now: a waiting connector uses
                 // them at its next attempt.
-                self.record_custody().await
+                owner.waits.connection_changed();
+                owner.record_custody().await?;
+            } else if fresh {
+                // The connection signs with a key custody doesn't hold.
+                let released = owner.release(&mut live).await;
+                return match (used, released) {
+                    (Err(error), Err(cleanup)) => Err(SyncError::cleanup(error, cleanup)),
+                    (Err(error), Ok(())) => Err(error),
+                    (Ok(()), Err(cleanup)) => Err(cleanup),
+                    (Ok(()), Ok(())) => Ok(()),
+                };
             }
-        }
+            used
+        })
+        .await
     }
 
     /// Replace this member's pair, returning the code for it (§12.3, E9).

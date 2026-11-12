@@ -481,6 +481,17 @@ impl StorageConnections {
             return self.attach(live, storage).await;
         }
         let data = self.codes.connection().await?.ok_or(SyncError::NoStorage)?;
+        self.connect_with(live, data).await
+    }
+
+    /// Reach the recorded location with `data`'s credentials, as a
+    /// connection made from custody does; the credentials may not be in
+    /// custody yet.
+    async fn connect_with(
+        &self,
+        live: &mut ConnectionState,
+        data: ConnectionCredentials,
+    ) -> Result<(), SyncError> {
         let storage = self
             .connector
             .connect(

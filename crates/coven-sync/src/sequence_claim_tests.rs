@@ -70,6 +70,8 @@ async fn administrative_contention_reuses_the_claim_number() {
         .storage
         .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
         .await;
+    ana.hold_key("ana-new").await;
+    ben.hold_key("ben-new").await;
     let first = ana.sync.administer(StoreChange::SetAccess {
         member: ana.identity.member(),
         access: access("ana-new"),
@@ -326,6 +328,7 @@ mod differential {
         let ana = group.device(1).await;
         group.create(&ana).await;
         for i in 0..prior {
+            ana.hold_key(&format!("prior-{i}")).await;
             ana.sync
                 .administer(StoreChange::SetAccess {
                     member: ana.identity.member(),

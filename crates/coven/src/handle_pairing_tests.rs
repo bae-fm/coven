@@ -68,13 +68,13 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
         panic!("a pairing code")
     };
     assert!(!info.metadata.carries_s3_key);
-    // Replacing the key, or supplying another beside it, is the key the next pairing carries.
+    // The key this device takes, and then another, is the key the next pairing carries.
     let replaced = S3Credentials {
         access_key_id: "replaced".into(),
         secret_access_key: SecretText::new("replaced-secret".into()),
     };
     handle
-        .replace_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
+        .use_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
         .await
         .unwrap();
     same_key(&carried_key(&handle.start_pairing().await.unwrap().qr_code).unwrap(), &replaced);
@@ -83,7 +83,7 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
         secret_access_key: SecretText::new("updated-secret".into()),
     };
     handle
-        .update_credentials(updated.access_key_id.clone(), updated.secret_access_key.clone())
+        .use_access_key(updated.access_key_id.clone(), updated.secret_access_key.clone())
         .await
         .unwrap();
     same_key(&carried_key(&handle.start_pairing().await.unwrap().qr_code).unwrap(), &updated);

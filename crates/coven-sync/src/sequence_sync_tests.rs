@@ -29,6 +29,17 @@ pub(crate) struct Device {
     pub(crate) keychain: Arc<Keychain>,
 }
 impl Device {
+    /// Make this device's connection sign with the S3 key `id`, as taking
+    /// that key does, so an entry recording it as the member's runs (§14.3).
+    pub(crate) async fn hold_key(&self, id: &str) {
+        self.storage
+            .set_s3_credentials(coven_storage::S3Credentials {
+                access_key_id: id.into(),
+                secret_access_key: coven_crypto::SecretText::new(format!("{id}-secret")),
+            })
+            .await
+            .unwrap();
+    }
     pub(crate) fn database(&self) -> &Database {
         &self.sync.database
     }
