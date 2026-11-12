@@ -620,11 +620,12 @@ impl StorageConnections {
         journal.end(&self.database, outcome).await?;
         *lock_unpoisoned(&self.setup) = SetupRun::Idle;
         self.reached(SetupStop::Finished).await?;
-        // The row has ended, so these are credentials nothing uses; opening
-        // deletes them if this fails.
-        if let Err(error) = self.keychain.delete_setup_credentials() {
-            tracing::warn!("a finished setup's own credentials can't be deleted yet: {error}");
-        }
+        // The row has ended, so these are credentials nothing uses. They are
+        // the provider's secrets, so a delete that fails fails the setup's
+        // end to its caller, after the connection below is activated: the
+        // setup stands, and a call that retries the delete finds it done
+        // (an absent entry succeeds).
+        let deleted = self.keychain.delete_setup_credentials();
         let released = self.close_live(live).await;
         let started = self.activate(live, sync, start).await;
         // Custody and provider are committed, and setup read the store to its
@@ -649,6 +650,7 @@ impl StorageConnections {
                 );
             }
         }
+        deleted.map_err(SyncError::from)?;
         Ok(restore_code)
     }
 

@@ -10842,6 +10842,10 @@ connection at that bucket removes (§20.7).
 - **Only finishing commits.** The location, the sign-in and the restore code
   are saved on the device once the claim has landed, and setup's own copy of
   the credentials goes; its outcome is `Landed` at its slot, or `Satisfied`.
+  Setup's own copy goes after the row ends. If the keychain refuses that
+  delete, the setup stands and is activated, and the call fails with the
+  keychain's failure so its caller knows the provider's secrets are still
+  kept; opening the store deletes them too.
   So an undone reconnect leaves the device's earlier connection as it was. A
   creation keeps the store key slot 1 introduces just before the point, and
   an undo forgets it.

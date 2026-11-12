@@ -181,6 +181,27 @@ async fn a_setup_cut_past_its_point_of_no_return_finishes_once_sync_starts() {
     }
 }
 
+/// Setup has connected Household and ended its row, but deleting its own
+/// credentials from the keychain fails. The provider's secrets stay behind,
+/// so the setup call fails with why, after the connection stands; opening
+/// the store again deletes them.
+#[tokio::test]
+async fn a_setup_whose_credentials_cant_be_deleted_fails_to_its_caller() {
+    let mut phone = Phone::new().await;
+    let (reached, resume) = phone.pause_at(SetupStop::Finished);
+    let setup = tokio::spawn(phone.setup());
+    reached.await.unwrap();
+    phone.app.fail_next_keychain_operation();
+    resume.send(()).unwrap();
+
+    assert!(matches!(setup.await.unwrap(), Err(StorageSetupError::SecureStorage(_))));
+    assert!(phone.candidate_kept());
+    assert_eq!(phone.handle.storage_config().await.unwrap(), Some(phone.storage.config()));
+    phone.reopen().await;
+    assert!(!phone.candidate_kept());
+    phone.handle.close().await.unwrap();
+}
+
 /// Ana taps Cancel while setup checks the provider. Setup undoes what it
 /// wrote and fails with `Cancelled`; `coven_operations` lists it cancelled,
 /// and nothing was created or kept.
