@@ -74,6 +74,9 @@ pub(crate) fn run<'a>(
     let mut steps = Vec::new();
     for (ran, migration) in migrations.iter().filter(|m| m.version > current).enumerate() {
         *at = migration;
+        if matches!(migration.kind, crate::migration::MigrationKind::Breaking(_)) {
+            check_starts_from(database, migration, current)?;
+        }
         let context = MigrationContext::new(database, before, capture);
         database.migrating(|| migration.apply(&context))?;
         let after = Schema::read(database, &files)?;
@@ -223,6 +226,31 @@ pub(crate) fn run<'a>(
         crate::file_protection::migrate(database, tables)?,
     )?;
     Ok(MigrationRun { outcomes, marker })
+}
+
+/// A breaking migration's `starts_from` against the schema the run has reached
+/// before its statements, by the rules the final declarations meet, and, for the
+/// first pending migration, against what this device registered (§18.3).
+fn check_starts_from(
+    database: &DatabaseConnection,
+    migration: &Migration,
+    current: u32,
+) -> Result<(), DbError> {
+    let starts = &migration.starts_from;
+    let schema = Schema::read(database, &crate::file_table::declared(starts))?;
+    schema.validate(starts)?;
+    crate::schema::validate_local_keys(database, &schema, starts)?;
+    if migration.version == current + 1 {
+        if let Some(table) =
+            crate::row_queries::owner_declaration_changed(database, &schema, starts)?
+        {
+            return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }));
+        }
+        if let Some(table) = crate::file_table::changed(database, &schema, starts)? {
+            return Err(DbError::Schema(crate::SchemaError::FileColumnsChanged { table }));
+        }
+    }
+    Ok(())
 }
 
 fn finish(

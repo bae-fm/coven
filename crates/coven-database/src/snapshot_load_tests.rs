@@ -429,6 +429,7 @@ async fn older_snapshots_cross_additions_but_not_breaking_schema_changes() {
                     "rename",
                     "ALTER TABLE notes RENAME COLUMN title TO name",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ],
         )

@@ -176,6 +176,7 @@ async fn a_set_default_migration_preserves_the_previous_schema_and_rows() {
                             Ok(())
                         },
                         crate::OldWrites::Drop,
+                        tables(),
                     ),
                 ],
             )
@@ -776,7 +777,7 @@ async fn nonprimary_reference_migration_preserves_the_previous_database() {
     .unwrap();
     let before = crate::tests::contents(&db);
     db.close().await.unwrap();
-    let error = store.builder(tables(), vec![Migration::addition(1, "schema", INITIAL), Migration::breaking(2, "nonprimary", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop)]).open().await.err().expect("invalid target refused");
+    let error = store.builder(tables(), vec![Migration::addition(1, "schema", INITIAL), Migration::breaking(2, "nonprimary", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop, tables())]).open().await.err().expect("invalid target refused");
     assert!(matches!(
         database_error(error),
         DbError::Schema(SchemaError::ForeignKeyNotPrimaryKey { .. })

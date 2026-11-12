@@ -90,7 +90,13 @@ mod dropped_schema {
         let migrations = || {
             vec![
                 Migration::addition(1, "tags", TAGS),
-                Migration::breaking(2, "drop tags", "DROP TABLE tags", crate::OldWrites::Drop),
+                Migration::breaking(
+                    2,
+                    "drop tags",
+                    "DROP TABLE tags",
+                    crate::OldWrites::Drop,
+                    Vec::new(),
+                ),
             ]
         };
         let a = stores[0].builder(tables(&["notes"]), migrations()).open().await.unwrap();
@@ -145,18 +151,21 @@ mod dropped_schema {
                     "drop body",
                     "ALTER TABLE notes DROP COLUMN body",
                     crate::OldWrites::Drop,
+                    tables(&["notes"]),
                 ),
                 Migration::breaking(
                     3,
                     "body again",
                     "ALTER TABLE notes ADD COLUMN body TEXT NOT NULL DEFAULT ''",
                     crate::OldWrites::Drop,
+                    tables(&["notes"]),
                 ),
                 Migration::breaking(
                     4,
                     "rename body",
                     "ALTER TABLE notes RENAME COLUMN body TO content",
                     crate::OldWrites::Drop,
+                    tables(&["notes"]),
                 ),
             ]
             .into_iter()
@@ -221,6 +230,7 @@ mod dropped_schema {
                         "drop body",
                         "ALTER TABLE notes DROP COLUMN body",
                         crate::OldWrites::Drop,
+                        tables(&["notes"]),
                     ),
                 ],
             )
@@ -271,6 +281,7 @@ mod dropped_schema {
                         "drop c",
                         "ALTER TABLE rows DROP COLUMN c",
                         crate::OldWrites::Drop,
+                        circle_tables(),
                     ),
                 ],
             )

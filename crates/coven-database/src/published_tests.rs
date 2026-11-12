@@ -104,6 +104,7 @@ async fn a_migration_keeps_the_counted_state_of_only_the_rows_it_changes() {
         "name",
         "ALTER TABLE notes RENAME COLUMN title TO name",
         OldWrites::Drop,
+        tables(),
     ));
     let db = store.builder(tables(), migrations).open().await.unwrap();
     assert_eq!(published(&db, "tracks"), 0, "the migration kept untouched tracks");
@@ -238,7 +239,7 @@ async fn a_migrations_recomputed_rows_keep_their_counted_state() {
     sql(&db, "INSERT INTO artists VALUES('ben','Ben')").await.unwrap();
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "reference", REFERENCE, OldWrites::Drop));
+    migrations.push(Migration::breaking(2, "reference", REFERENCE, OldWrites::Drop, tables()));
     let db = store.builder(tables(), migrations).open().await.unwrap();
     assert!(counted_visible(&db, "first"));
     crate::tests::remote_update(&db, "artists", "ana", &[("name", Value::Text("Ana B".into()))])
@@ -272,7 +273,7 @@ async fn migrate_counted_album(
     count_own(&db).await;
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "parents", migration, OldWrites::Drop));
+    migrations.push(Migration::breaking(2, "parents", migration, OldWrites::Drop, tables()));
     let db = store.builder(tables(), migrations).open().await.unwrap();
     assert_eq!(published(&db, "albums"), 1, "the migration kept the album aside");
     (store, db)
@@ -377,7 +378,7 @@ async fn a_kept_row_shows_under_the_rules_a_migration_leaves() {
     assert!(!counted_visible(&db, "first"), "the CHECK takes the counted album out");
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "unchecked", UNCHECKED, OldWrites::Drop));
+    migrations.push(Migration::breaking(2, "unchecked", UNCHECKED, OldWrites::Drop, tables()));
     let db = store.builder(tables(), migrations).open().await.unwrap();
     assert_eq!(published(&db, "albums"), 1, "the album is still kept aside");
     assert!(counted_visible(&db, "first"), "no rule takes the counted album out now");
@@ -462,7 +463,13 @@ async fn a_dropped_table_freezes_a_kept_rows_counted_removal() {
     assert_eq!(lost_title(counted), &Value::Text("First".into()));
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    migrations.push(Migration::breaking(
+        2,
+        "drop",
+        "DROP TABLE albums",
+        OldWrites::Drop,
+        synced(&["albums", "notes"]),
+    ));
     let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
     let first = Value::Text("First".into());
     let queued = Value::Text("Queued".into());
@@ -508,7 +515,13 @@ async fn a_migration_write_reaches_the_counted_removal_it_replaces_with_none() {
     assert!(app_losses(&db).is_empty(), "{:?}", app_losses(&db));
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    migrations.push(Migration::breaking(
+        2,
+        "drop",
+        "DROP TABLE albums",
+        OldWrites::Drop,
+        synced(&["albums", "notes"]),
+    ));
     let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
     let [counted] = &counted_losses(&db)[..] else { panic!("one counted removal loss") };
     assert!(counted.frozen);
@@ -561,6 +574,7 @@ async fn a_slot_reaching_a_kept_row_folds_the_migration_write_that_replaces_its_
         "drop title",
         "ALTER TABLE albums DROP COLUMN title",
         OldWrites::Drop,
+        tables(),
     ));
     let db = store.builder(tables(), migrations).open().await.unwrap();
     let [counted] = &counted_losses(&db)[..] else { panic!("one counted lost value") };
@@ -603,7 +617,13 @@ async fn a_dropped_table_keeps_a_kept_row_without_the_queues_losses() {
     assert!(counted_losses(&db).is_empty());
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    migrations.push(Migration::breaking(
+        2,
+        "drop",
+        "DROP TABLE albums",
+        OldWrites::Drop,
+        synced(&["albums", "notes"]),
+    ));
     let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
     assert_eq!(db.lost_values().await.unwrap().len(), 1, "the app keeps it frozen");
     assert!(counted_losses(&db).is_empty(), "{:?}", counted_losses(&db));
@@ -661,7 +681,13 @@ async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_nam
     let rename = [("title", Value::Text("Ben".into()))];
     crate::tests::remote_update_concurrent_with_queue(&db, "albums", "first", &rename).await;
     db.close().await.unwrap();
-    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    migrations.push(Migration::breaking(
+        2,
+        "drop",
+        "DROP TABLE albums",
+        OldWrites::Drop,
+        synced(&["albums", "notes"]),
+    ));
     let db = store.builder(synced(&["notes"]), migrations.clone()).open().await.unwrap();
     db.close().await.unwrap();
     migrations.push(Migration::addition(

@@ -307,6 +307,7 @@ impl Network {
             "extra",
             "ALTER TABLE parents ADD COLUMN extra INTEGER NOT NULL DEFAULT 0",
             crate::OldWrites::Drop,
+            tables(),
         ));
         for device in &mut self.devices {
             device.handle.close().await.unwrap();

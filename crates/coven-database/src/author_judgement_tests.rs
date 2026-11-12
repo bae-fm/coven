@@ -570,6 +570,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
                     "drop note",
                     "ALTER TABLE labels DROP COLUMN note",
                     crate::OldWrites::Drop,
+                    tables(),
                 ),
             ],
         )

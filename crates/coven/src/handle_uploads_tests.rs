@@ -346,6 +346,7 @@ fn raised() -> Vec<Migration> {
             "notes by title",
             "CREATE INDEX notes_by_title ON notes(title)",
             OldWrites::Drop,
+            tables(),
         ),
     ]
 }
@@ -428,6 +429,7 @@ fn converting() -> Vec<Migration> {
             "notes by title",
             "CREATE INDEX notes_by_title ON notes(title)",
             OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+            tables(),
         ),
     ]
 }
@@ -560,6 +562,7 @@ fn retitled() -> Vec<Migration> {
             "retitle notes",
             "UPDATE notes SET title='migrated'",
             OldWrites::Drop,
+            tables(),
         ),
     ]
 }

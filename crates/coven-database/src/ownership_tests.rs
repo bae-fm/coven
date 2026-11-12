@@ -134,6 +134,7 @@ async fn a_table_rename_keeps_the_original_creation() {
                     "rename",
                     "ALTER TABLE rows RENAME TO items",
                     crate::OldWrites::Drop,
+                    vec![SyncedTable::new("rows", RowIdentity::SharedKey).owner_only()],
                 ),
             ],
         )

@@ -218,7 +218,7 @@ async fn a_migration_following_coven_files_changes_only_this_device() {
     let store = TestStore::new();
     open(&store, first.clone()).await.close().await.unwrap();
     let mut breaking = first;
-    breaking.push(Migration::breaking(2, "follow", FOLLOWED, crate::OldWrites::Drop));
+    breaking.push(Migration::breaking(2, "follow", FOLLOWED, crate::OldWrites::Drop, tables()));
     let error = store
         .builder(tables(), breaking)
         .namespaces(namespaces(Provenance::AppProvided))

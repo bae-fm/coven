@@ -223,6 +223,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
             output.lock().unwrap().push(change.clone());
             Ok(())
         })),
+        table(),
     );
     let handle = app
         .builder()

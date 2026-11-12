@@ -136,6 +136,7 @@ async fn final_file_columns_validate_after_all_migrations_and_failure_rolls_them
                 "rename file",
                 "ALTER TABLE attachments RENAME COLUMN file TO original",
                 crate::OldWrites::Drop,
+                table(&["file"]),
             ),
         ]
     };
@@ -212,6 +213,7 @@ async fn a_file_column_coven_could_not_write_is_refused() {
                         Ok(())
                     },
                     crate::OldWrites::Drop,
+                    table(&["file"]),
                 ),
             ],
         )
@@ -288,6 +290,7 @@ async fn file_columns_change_only_with_a_migration() {
                     "plain ids",
                     "UPDATE attachments SET file=NULL",
                     crate::OldWrites::Drop,
+                    table(&["file"]),
                 ),
             ],
         )

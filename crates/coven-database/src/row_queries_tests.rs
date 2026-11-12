@@ -68,7 +68,13 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
                 if index < 2 {
                     Migration::addition(index as u32 + 1, "step", sql)
                 } else {
-                    Migration::breaking(index as u32 + 1, "step", sql, crate::OldWrites::Drop)
+                    Migration::breaking(
+                        index as u32 + 1,
+                        "step",
+                        sql,
+                        crate::OldWrites::Drop,
+                        Vec::new(),
+                    )
                 }
             })
             .collect::<Vec<_>>()

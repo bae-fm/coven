@@ -192,7 +192,7 @@ async fn permitted_local_and_shared_triggers_run_with_applying_false() {
         assert_eq!(sql.query_row("SELECT n FROM local", [], |r| r.get::<_, i64>(0))?, 1);
         assert!(!sql.query_row("SELECT coven_applying()", [], |r| r.get::<_, bool>(0))?);
         Ok(())
-    }, crate::OldWrites::Drop)]).open().await.unwrap();
+    }, crate::OldWrites::Drop, Vec::new())]).open().await.unwrap();
     db.close().await.unwrap();
 }
 
@@ -653,7 +653,13 @@ async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
                     "shadowed",
                     "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER)",
                 ),
-                Migration::breaking(2, "dropped", "DROP TABLE items", crate::OldWrites::Drop),
+                Migration::breaking(
+                    2,
+                    "dropped",
+                    "DROP TABLE items",
+                    crate::OldWrites::Drop,
+                    vec![],
+                ),
             ],
         )
         .open()

@@ -372,6 +372,7 @@ async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_rem
                     "remove files",
                     "DROP TABLE t",
                     crate::OldWrites::Drop,
+                    vec![],
                 ),
             ],
         )
@@ -393,10 +394,16 @@ async fn migrate(
     db.close().await.unwrap();
     let db = store
         .builder(
-            tables,
+            tables.clone(),
             vec![
                 crate::Migration::addition(1, "schema", FILES),
-                crate::Migration::breaking(2, "change", change, crate::OldWrites::Drop),
+                crate::Migration::breaking(
+                    2,
+                    "change",
+                    change,
+                    crate::OldWrites::Drop,
+                    tables.clone(),
+                ),
             ],
         )
         .open()

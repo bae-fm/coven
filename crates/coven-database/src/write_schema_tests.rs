@@ -46,6 +46,7 @@ async fn unique_terms_follow_changed_constraints_when_reopening() {
                     "change unique columns",
                     "DROP INDEX claim; CREATE UNIQUE INDEX claim ON notes(body)",
                     crate::OldWrites::Drop,
+                    tables(),
                 ),
             ],
         )
@@ -76,7 +77,7 @@ async fn foreign_key_column_identities_survive_sqlite_id_reordering() {
     .await
     .unwrap();
     db.close().await.unwrap();
-    let db=store.builder(tables(),vec![Migration::addition(1, "schema", SCHEMA),Migration::breaking(2, "reorder references", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(b) REFERENCES parents(id),FOREIGN KEY(a) REFERENCES parents(id)); INSERT INTO rebuilt SELECT * FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes", crate::OldWrites::Drop)]).open().await.unwrap();
+    let db=store.builder(tables(),vec![Migration::addition(1, "schema", SCHEMA),Migration::breaking(2, "reorder references", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(b) REFERENCES parents(id),FOREIGN KEY(a) REFERENCES parents(id)); INSERT INTO rebuilt SELECT * FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes", crate::OldWrites::Drop, tables())]).open().await.unwrap();
     crate::write::tests::sql(&db, "UPDATE notes SET a='2' WHERE id='3'").await.unwrap();
     let record = crate::write::tests::records(&db).pop().unwrap();
     let coven_merge::Operation::Update(columns) = &record.parts[0].rows[0].change.operation else {

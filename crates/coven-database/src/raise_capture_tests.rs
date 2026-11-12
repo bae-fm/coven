@@ -42,6 +42,7 @@ fn index(version: u32, old_writes: crate::OldWrites) -> Migration {
             "CREATE INDEX bodies ON notes(body)"
         },
         old_writes,
+        Vec::new(),
     )
 }
 
@@ -227,7 +228,8 @@ async fn a_failed_migration_leaves_no_capture() {
                     3,
                     "broken",
                     "CREATE INDEX broken ON missing(x)",
-                    crate::OldWrites::Drop
+                    crate::OldWrites::Drop,
+                    notes()
                 )
             ]
         )
@@ -471,7 +473,13 @@ async fn an_adopted_raise_replaces_an_unpublished_migrations_setters() {
     sql(&a, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
     let fill = || {
-        Migration::breaking(2, "fill", "UPDATE notes SET body='migrated'", crate::OldWrites::Drop)
+        Migration::breaking(
+            2,
+            "fill",
+            "UPDATE notes SET body='migrated'",
+            crate::OldWrites::Drop,
+            notes(),
+        )
     };
     let mut migrated = Vec::new();
     for (store, db) in [(&a_store, a), (&b_store, b)] {
@@ -549,6 +557,7 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
         "index",
         "CREATE INDEX values_index ON notes(value)",
         crate::OldWrites::Drop,
+        tables(),
     );
     let db = store.builder(tables(), vec![schema(), index]).open().await.unwrap();
     // Another member raised the circle to version 2, so this device keeps no
@@ -606,6 +615,7 @@ async fn a_file_write_after_the_marker_survives_another_devices_raise() {
             "titles",
             "CREATE INDEX files_title ON files(title)",
             crate::OldWrites::Drop,
+            tables(),
         )
     };
     let a = open(&a_store, vec![initial()]).await.unwrap();

@@ -27,10 +27,16 @@ pub(crate) async fn version_two(store: &TestStore, notes_table: bool) -> crate::
     };
     store
         .builder(
-            tables,
+            tables.clone(),
             vec![
                 crate::Migration::addition(1, "notes", NOTES),
-                crate::Migration::breaking(2, "change", change, crate::OldWrites::Drop),
+                crate::Migration::breaking(
+                    2,
+                    "change",
+                    change,
+                    crate::OldWrites::Drop,
+                    tables.clone(),
+                ),
             ],
         )
         .open()
@@ -221,6 +227,7 @@ async fn a_change_built_on_a_reset_ignored_part_is_a_data_dependency_loss() {
                         counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         Ok(())
                     })),
+                    notes(),
                 ),
             ],
         )

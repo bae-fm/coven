@@ -182,6 +182,7 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
                     "color",
                     "ALTER TABLE notes ADD COLUMN color TEXT NOT NULL DEFAULT 'blue'",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ],
         )
@@ -637,6 +638,7 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
                     "index",
                     "CREATE INDEX notes_body ON notes(body)",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ],
         )

@@ -119,6 +119,7 @@ async fn reference_renames_and_column_reordering_keep_original_parent_generation
                 }
                 Ok(())
             })),
+            reference_tables(),
         ),
     )
     .await;
@@ -170,6 +171,7 @@ async fn changing_or_adding_a_reference_fails_the_receipt() {
                 }
                 Ok(())
             })),
+            reference_tables(),
         );
         let case = Case::new(
             reference_tables,
@@ -204,6 +206,7 @@ async fn a_null_reference_is_still_a_reference_when_converting() {
                 }
                 Ok(())
             })),
+            reference_tables(),
         ),
     )
     .await;
@@ -235,7 +238,7 @@ async fn composite_reference_updates_keep_the_complete_tuple_through_renames() {
                 row.rename_column("intermediate", "renamed");
             }
             Ok(())
-        }))),
+        })), tables()),
     )
     .await;
     case.receive().await.unwrap();
@@ -262,6 +265,7 @@ async fn an_old_insert_cannot_convert_into_a_new_reference_column() {
             "optional reference",
             "ALTER TABLE children ADD COLUMN added TEXT REFERENCES parents(id) ON DELETE SET NULL",
             crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+            reference_tables(),
         ),
     )
     .await;
@@ -294,7 +298,7 @@ async fn two_references_keep_distinct_primary_key_orders() {
                 row.rename_column("parent", "renamed");
             }
             Ok(())
-        }))),
+        })), tables()),
     )
     .await;
     case.receive().await.unwrap();
@@ -325,7 +329,7 @@ async fn replacing_a_reference_target_cannot_reuse_the_old_parents_generation() 
         tables,
         SCHEMA,
         &["INSERT INTO parents VALUES('1'); INSERT INTO others VALUES('1'); INSERT INTO children VALUES('c','1')"],
-        Migration::breaking(2, "retarget", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES others(id)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(())))),
+        Migration::breaking(2, "retarget", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES others(id)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))), tables()),
     )
     .await;
     let original = records(&case.source);
@@ -359,7 +363,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
                 _ => unreachable!(),
             }
             Ok(())
-        })));
+        })), declarations());
         let case =
             Case::new(declarations, SCHEMA, &["INSERT INTO notes VALUES('7','before')"], migration)
                 .await;
@@ -421,6 +425,7 @@ async fn two_references_converted_onto_one_fail_the_receipt() {
             }
             Ok(())
         })),
+        tables(),
     );
     let case = Case::new(
         tables,
@@ -457,6 +462,7 @@ async fn a_data_step_run_on_an_empty_table_still_converts_late_writes() {
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
+        notes(),
     );
     let insert = "INSERT INTO notes(id,title,body) VALUES('n','Title','b')";
     let case = Case::new(notes, NOTES, &[insert], migration).await;
@@ -475,7 +481,10 @@ fn title_tables() -> Vec<SyncedTable> {
 
 /// A version 2 that converts late old-schema writes unchanged and counts
 /// each change its callback sees.
-fn counting(calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Vec<Migration> {
+fn counting(
+    calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    starts_from: Vec<SyncedTable>,
+) -> Vec<Migration> {
     let calls = calls.clone();
     vec![
         Migration::addition(1, "notes", TITLES),
@@ -487,6 +496,7 @@ fn counting(calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Vec<Migra
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             })),
+            starts_from,
         ),
     ]
 }
@@ -517,7 +527,8 @@ async fn a_write_cut_off_by_key_replacement_stays_refused_under_a_converter() {
     let ben = ben_store.schema(title_tables(), TITLES).await.unwrap();
     let carol = carol_store.schema(title_tables(), TITLES).await.unwrap();
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let ana = ana_store.builder(title_tables(), counting(&calls)).open().await.unwrap();
+    let ana =
+        ana_store.builder(title_tables(), counting(&calls, title_tables())).open().await.unwrap();
     for db in [&ana, &ben, &carol] {
         TestStore::register(db, ben_store.device(), 2);
         TestStore::register(db, carol_store.device(), 3);
@@ -590,7 +601,7 @@ async fn an_old_write_the_owner_rule_refuses_never_reaches_the_converter() {
     ana.close().await.unwrap();
 
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let ana = ana_store.builder(owned(), counting(&calls)).open().await.unwrap();
+    let ana = ana_store.builder(owned(), counting(&calls, owned())).open().await.unwrap();
     ana.exclude_later_writes(2).await;
     ana.receive(forged.clone().into()).await.unwrap();
     assert_eq!(note_titles(&ana).await, [("n".to_owned(), "mine".to_owned())]);

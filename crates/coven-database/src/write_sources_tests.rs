@@ -274,7 +274,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     let migrations = || {
         vec![
         crate::Migration::addition(1, "notes", NOTES),
-        crate::Migration::breaking(2, "rename", "ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name", crate::OldWrites::Convert(std::sync::Arc::new(|r| { r.table = "renamed".into(); r.rename_column("title","name"); Ok(()) }))),
+        crate::Migration::breaking(2, "rename", "ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name", crate::OldWrites::Convert(std::sync::Arc::new(|r| { r.table = "renamed".into(); r.rename_column("title","name"); Ok(()) })), notes()),
     ]
     };
     let db = store.builder(tables(), migrations()).open().await.unwrap();
@@ -390,6 +390,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
                     "index",
                     "CREATE INDEX c_p ON c(p)",
                     crate::OldWrites::Drop,
+                    tables(),
                 ),
             ],
         )
@@ -531,6 +532,7 @@ async fn a_schema_default_has_no_setter_until_a_write_sets_the_cell() {
                     "color",
                     "ALTER TABLE notes ADD COLUMN color TEXT NOT NULL DEFAULT 'blue'",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ],
         )

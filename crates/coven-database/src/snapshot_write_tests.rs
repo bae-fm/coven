@@ -587,6 +587,7 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
                     "rename body",
                     "ALTER TABLE notes RENAME COLUMN body TO content",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ],
         )
@@ -638,6 +639,7 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
                     "rename body",
                     "ALTER TABLE notes RENAME COLUMN body TO content",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ],
         )

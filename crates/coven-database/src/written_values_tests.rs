@@ -149,6 +149,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
                 "rename",
                 "ALTER TABLE children RENAME COLUMN parent TO root",
                 crate::OldWrites::Drop,
+                tables(),
             ));
         }
         migrations
@@ -278,7 +279,7 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
         crate::Migration::addition_with(1, "references", move |db| {
             db.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?; Ok(())
         }),
-        crate::Migration::breaking(2, "drop reference", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop),
+        crate::Migration::breaking(2, "drop reference", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop, tables()),
     ]).open().await.unwrap();
     assert_eq!(reference(&b, true).await, Some("parent".into()));
     b.inspect_writer(|db| {

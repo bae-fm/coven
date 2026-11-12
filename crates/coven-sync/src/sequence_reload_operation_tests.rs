@@ -234,27 +234,32 @@ async fn migrate(group: &Group, device: Device) -> Device {
     open_migrated(group, device._temp, device.identity).await
 }
 
+fn pin_tables() -> Vec<coven_database::SyncedTable> {
+    use coven_database::{RowIdentity, SyncedTable};
+    vec![
+        SyncedTable::new("notes", RowIdentity::SharedKey),
+        SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
+    ]
+}
+
 async fn open_migrated(
     group: &Group,
     temp: tempfile::TempDir,
     identity: coven_crypto::MemberIdentity,
 ) -> Device {
-    use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+    use coven_database::{DatabaseBuilder, Migration};
     use coven_foundation::files::StoreDirectories;
     let directory =
         StoreDirectories::new(temp.path().into(), coven_foundation::task::HeardBugs::shared())
             .store_dir(&group.store);
     let database = DatabaseBuilder::new(directory)
-        .synced_tables(vec![
-            SyncedTable::new("notes", RowIdentity::SharedKey),
-            SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
-        ])
+        .synced_tables(pin_tables())
         .migrations(vec![
             Migration::addition(1, "notes", "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
                 CREATE TABLE pins(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL)"),
             Migration::breaking(2, "titles", "CREATE INDEX titles ON notes(title);
                 INSERT INTO notes SELECT 'derived',title FROM notes WHERE id='source'",
-                coven_database::OldWrites::Convert(std::sync::Arc::new(|_| Ok(())))),
+                coven_database::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))), Vec::new()),
         ])
         .open().await.unwrap();
     group

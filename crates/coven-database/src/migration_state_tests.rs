@@ -64,8 +64,13 @@ fn migrated(store: &TestStore, converter: bool) -> crate::DatabaseBuilder {
     } else {
         crate::OldWrites::Drop
     };
-    let index =
-        crate::Migration::breaking(2, "index", "CREATE INDEX rows_a ON rows(a)", old_writes);
+    let index = crate::Migration::breaking(
+        2,
+        "index",
+        "CREATE INDEX rows_a ON rows(a)",
+        old_writes,
+        Vec::new(),
+    );
     store.builder(
         migration_tables(),
         vec![crate::Migration::addition(1, "rows", MIGRATION_SCHEMA), index],
@@ -242,6 +247,7 @@ mod queued {
                     crate::OldWrites::Convert(std::sync::Arc::new(|_| {
                         panic!("a local migration never converts the queue")
                     })),
+                    notes(),
                 ),
             ]
         };
@@ -274,6 +280,7 @@ mod queued {
                         "rename",
                         "ALTER TABLE notes RENAME COLUMN title TO name",
                         crate::OldWrites::Drop,
+                        notes(),
                     ),
                 ],
             )
@@ -314,6 +321,7 @@ mod queued {
                         "rename",
                         "ALTER TABLE notes RENAME COLUMN title TO name",
                         crate::OldWrites::Drop,
+                        notes(),
                     ),
                 ],
             )
@@ -345,6 +353,7 @@ mod queued {
                         "replace body",
                         "ALTER TABLE notes DROP COLUMN body; ALTER TABLE notes ADD COLUMN extra TEXT",
                         crate::OldWrites::Drop,
+notes(),
                     ),
                 ],
             )
@@ -380,6 +389,7 @@ mod queued {
                         "drop body",
                         "ALTER TABLE notes DROP COLUMN body",
                         crate::OldWrites::Drop,
+                        notes(),
                     ),
                 ],
             )
@@ -406,7 +416,7 @@ mod queued {
                 vec![
                     initial(),
                     Migration::addition(2, "color", "ALTER TABLE notes ADD COLUMN color TEXT DEFAULT 'blue'"),
-                    Migration::breaking(3, "rename and index", "ALTER TABLE notes RENAME COLUMN title TO name; CREATE UNIQUE INDEX colors ON notes(color)", crate::OldWrites::Drop),
+                    Migration::breaking(3, "rename and index", "ALTER TABLE notes RENAME COLUMN title TO name; CREATE UNIQUE INDEX colors ON notes(color)", crate::OldWrites::Drop, notes()),
                     Migration::addition(4, "length", "ALTER TABLE notes ADD COLUMN length INTEGER DEFAULT 7"),
                 ],
             )
@@ -444,6 +454,7 @@ mod queued {
                     "rename",
                     "ALTER TABLE notes RENAME COLUMN title TO name",
                     crate::OldWrites::Drop,
+                    notes(),
                 ),
             ]
         };
@@ -512,7 +523,7 @@ mod queued {
         let original = records(&db);
         let old_stamp = original[1].header.timestamp.milliseconds();
         db.close().await.unwrap();
-        let db = store.builder(notes(),vec![initial(),Migration::breaking(2, "slug", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=replace(name,' ','-')", crate::OldWrites::Convert(std::sync::Arc::new(|r| { r.rename_column("title","name"); Ok(()) })))]).clock(Arc::new(FixedClock::new(UNIX_EPOCH+Duration::from_millis(old_stamp+1000)))).open().await.unwrap();
+        let db = store.builder(notes(),vec![initial(),Migration::breaking(2, "slug", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=replace(name,' ','-')", crate::OldWrites::Convert(std::sync::Arc::new(|r| { r.rename_column("title","name"); Ok(()) })), notes())]).clock(Arc::new(FixedClock::new(UNIX_EPOCH+Duration::from_millis(old_stamp+1000)))).open().await.unwrap();
         let late = WriteId { device: DeviceId(999), number: 1 };
         let row = original[0].parts[0].rows[0].row.clone();
         let record = WriteRecord {

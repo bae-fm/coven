@@ -218,6 +218,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             "files",
             "CREATE INDEX attachment_files ON attachments(file)",
             crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+            tables(),
         ));
         result
     };

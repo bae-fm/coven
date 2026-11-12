@@ -2,6 +2,7 @@
 
 use crate::migration_names::MigrationNames;
 use crate::sqlite::DatabaseConnection;
+use crate::SyncedTable;
 use crate::{DbError, MigrationError};
 use rusqlite::{Params, Row};
 use std::cell::RefCell;
@@ -61,6 +62,9 @@ pub struct Migration {
     pub(crate) name: &'static str,
     body: Arc<MigrationBody>,
     pub(crate) kind: MigrationKind,
+    /// The synced tables the schema before a breaking migration declares
+    /// (§18.3); empty for an addition.
+    pub(crate) starts_from: Vec<SyncedTable>,
 }
 
 impl Migration {
@@ -78,22 +82,30 @@ impl Migration {
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static,
     {
-        Self { version, name, body: Arc::new(f), kind: MigrationKind::Addition }
+        Self {
+            version,
+            name,
+            body: Arc::new(f),
+            kind: MigrationKind::Addition,
+            starts_from: Vec::new(),
+        }
     }
 
-    /// Breaking SQL with an explicit choice for late old-version writes.
+    /// Breaking SQL with an explicit choice for late old-version writes, and the
+    /// synced tables the schema before it declares (`starts_from`, §18.3).
     /// An addition or local-only classification refuses the whole batch.
     ///
     /// A breaking migration cannot omit the old-write choice:
     /// ```compile_fail
     /// use coven_database::Migration;
-    /// Migration::breaking(2, "rename", "ALTER TABLE notes RENAME COLUMN title TO name");
+    /// Migration::breaking(2, "rename", "ALTER TABLE notes RENAME COLUMN title TO name", vec![]);
     /// ```
     pub fn breaking(
         version: u32,
         name: &'static str,
         sql: &'static str,
         old_writes: OldWrites,
+        starts_from: Vec<SyncedTable>,
     ) -> Self {
         Self::breaking_with(
             version,
@@ -103,10 +115,12 @@ impl Migration {
                 Ok(())
             },
             old_writes,
+            starts_from,
         )
     }
 
-    /// Breaking code, including backfills and rebuilds, with its old-write choice.
+    /// Breaking code, including backfills and rebuilds, with its old-write choice
+    /// and the synced tables the schema before it declares (`starts_from`).
     ///
     /// ```compile_fail
     /// use coven_database::Migration;
@@ -115,11 +129,23 @@ impl Migration {
     ///     Ok(())
     /// });
     /// ```
-    pub fn breaking_with<F>(version: u32, name: &'static str, f: F, old_writes: OldWrites) -> Self
+    pub fn breaking_with<F>(
+        version: u32,
+        name: &'static str,
+        f: F,
+        old_writes: OldWrites,
+        starts_from: Vec<SyncedTable>,
+    ) -> Self
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static,
     {
-        Self { version, name, body: Arc::new(f), kind: MigrationKind::Breaking(old_writes) }
+        Self {
+            version,
+            name,
+            body: Arc::new(f),
+            kind: MigrationKind::Breaking(old_writes),
+            starts_from,
+        }
     }
 
     pub(crate) fn check_kind(&self, breaking: bool) -> Result<(), DbError> {

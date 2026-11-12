@@ -24,6 +24,7 @@ async fn migrations_change_present_values_without_a_second_copy() {
         "rewrite title",
         "UPDATE notes SET title='migrated'",
         crate::OldWrites::Drop,
+        declarations(),
     ));
     let db = store.builder(declarations(), migrations).open().await.unwrap();
     let migration = crate::write::tests::records(&db).pop().unwrap();

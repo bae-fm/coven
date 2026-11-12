@@ -191,11 +191,14 @@ impl Group {
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
         }
-        let database = database
-            .synced_tables(vec![
+        let tables = || {
+            vec![
                 SyncedTable::new("notes", RowIdentity::SharedKey),
                 SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
-            ])
+            ]
+        };
+        let database = database
+            .synced_tables(tables())
             .migrations(
                 [
                     Migration::addition(
@@ -210,9 +213,16 @@ impl Group {
                         "titles",
                         "CREATE INDEX titles ON notes(title)",
                         coven_database::OldWrites::Drop,
+                        tables(),
                     ),
                     Migration::addition(3, "colors", "ALTER TABLE notes ADD COLUMN color TEXT"),
-                    Migration::breaking(4, "p", "CREATE INDEX p ON pins(title)", OldWrites::Drop),
+                    Migration::breaking(
+                        4,
+                        "p",
+                        "CREATE INDEX p ON pins(title)",
+                        OldWrites::Drop,
+                        tables(),
+                    ),
                 ]
                 .into_iter()
                 .take(self.version.load(std::sync::atomic::Ordering::SeqCst) as usize)

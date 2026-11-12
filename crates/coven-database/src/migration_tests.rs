@@ -21,6 +21,7 @@ async fn final_declarations_validate_only_after_the_whole_run() {
                     "rename",
                     "ALTER TABLE notes RENAME COLUMN id TO note_id",
                     crate::OldWrites::Drop,
+                    vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)],
                 ),
                 Migration::addition(3, "body", "ALTER TABLE notes ADD COLUMN body TEXT"),
             ],
@@ -56,6 +57,7 @@ async fn a_later_failure_rolls_back_every_pending_migration_and_version() {
                 Ok(())
             },
             crate::OldWrites::Drop,
+            notes_tables(),
         ),
     ]);
     let error = store.builder(notes_tables(), migrations).open().await.err().unwrap();
@@ -100,6 +102,7 @@ async fn final_schema_failure_rolls_back_the_entire_app_run() {
                     "remove key",
                     "DROP TABLE notes; CREATE TABLE notes(title TEXT)",
                     crate::OldWrites::Drop,
+                    notes_tables(),
                 ),
             ],
         )
@@ -213,7 +216,7 @@ async fn classify_each_sqlite_definition_change() {
         let store = TestStore::new();
         let mut migrations = notes_migrations();
         migrations.push(if expected == MigrationChange::Breaking {
-            Migration::breaking(2, "change", sql, crate::OldWrites::Drop)
+            Migration::breaking(2, "change", sql, crate::OldWrites::Drop, notes_tables())
         } else {
             Migration::addition(2, "change", sql)
         });
@@ -259,7 +262,7 @@ async fn reordering_existing_columns_is_a_breaking_schema_change() {
             vec![SyncedTable::new("synced", RowIdentity::SharedKey)],
             vec![
                 Migration::addition(1, "initial", "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT)"),
-                Migration::breaking(2, "reorder", "DROP TABLE synced; CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY,b TEXT,a TEXT)", crate::OldWrites::Drop),
+                Migration::breaking(2, "reorder", "DROP TABLE synced; CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY,b TEXT,a TEXT)", crate::OldWrites::Drop, vec![SyncedTable::new("synced", RowIdentity::SharedKey)]),
             ],
         )
         .open()
@@ -395,11 +398,27 @@ async fn dropping_or_renaming_any_table_is_breaking() {
             } else {
                 vec![]
             };
-            store.builder(tables, vec![initial()]).open().await.unwrap().close().await.unwrap();
+            store
+                .builder(tables.clone(), vec![initial()])
+                .open()
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
             let db = store
                 .builder(
-                    declarations,
-                    vec![initial(), Migration::breaking(2, "change", sql, crate::OldWrites::Drop)],
+                    declarations.clone(),
+                    vec![
+                        initial(),
+                        Migration::breaking(
+                            2,
+                            "change",
+                            sql,
+                            crate::OldWrites::Drop,
+                            tables.clone(),
+                        ),
+                    ],
                 )
                 .open()
                 .await
@@ -427,7 +446,7 @@ async fn local_changes_do_not_hide_synced_additions_or_breaks() {
         let db = store.builder(vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)], vec![
             Migration::addition(1, "initial", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX existing_index ON notes(title); CREATE TRIGGER existing_trigger AFTER INSERT ON notes BEGIN SELECT 1; END; CREATE TABLE local(title TEXT)"),
             if expected == MigrationChange::Breaking {
-            Migration::breaking(2, "change", sql, crate::OldWrites::Drop)
+            Migration::breaking(2, "change", sql, crate::OldWrites::Drop, vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)])
         } else { Migration::addition(2, "change", sql) },
         ]).open().await.unwrap();
         assert_eq!(db.applied_migrations().unwrap()[1].change, expected, "{sql}");
@@ -461,6 +480,7 @@ async fn moving_an_index_or_trigger_between_local_and_synced_tables_is_breaking(
                                 Ok(())
                             },
                             crate::OldWrites::Drop,
+                            notes_tables(),
                         ),
                     ],
                 )
@@ -586,9 +606,9 @@ pub(crate) mod declarations {
                                 OldWrites::Drop
                             };
                             if code {
-                                Migration::breaking_with(3, "mismatch", body, old_writes)
+                                Migration::breaking_with(3, "mismatch", body, old_writes, notes())
                             } else {
-                                Migration::breaking(3, "mismatch", statement, old_writes)
+                                Migration::breaking(3, "mismatch", statement, old_writes, notes())
                             }
                         };
                         let error = store
@@ -601,6 +621,7 @@ pub(crate) mod declarations {
                                         "backfill",
                                         "UPDATE notes SET body='candidate'",
                                         OldWrites::Drop,
+notes(),
                                     ),
                                     migration,
                                     Migration::addition(
@@ -700,6 +721,7 @@ pub(crate) mod declarations {
                                 "index",
                                 "CREATE INDEX titles ON notes(title)",
                                 OldWrites::Drop,
+                                notes(),
                             )
                         } else {
                             Migration::addition(
@@ -721,6 +743,7 @@ pub(crate) mod declarations {
                         "wrong",
                         "ALTER TABLE notes ADD COLUMN color TEXT",
                         OldWrites::Drop,
+                        notes(),
                     )
                 };
                 changed.push(Migration::addition_with(3, "must not run", |_| {
@@ -765,7 +788,10 @@ pub(crate) mod declarations {
         let db = store
             .builder(
                 owner_only(),
-                vec![first, Migration::breaking_with(2, "owner", |_| Ok(()), OldWrites::Drop)],
+                vec![
+                    first,
+                    Migration::breaking_with(2, "owner", |_| Ok(()), OldWrites::Drop, notes()),
+                ],
             )
             .open()
             .await
@@ -776,4 +802,63 @@ pub(crate) mod declarations {
         );
         db.close().await.unwrap();
     }
+}
+
+/// The tables a breaking migration starts from are checked against the schema
+/// the run has reached before its statements (§18.3).
+#[tokio::test]
+async fn starts_from_naming_a_missing_column_fails_the_open_and_commits_nothing() {
+    let store = TestStore::new();
+    store.builder(notes_tables(), notes_migrations()).open().await.unwrap().close().await.unwrap();
+    let mut migrations = notes_migrations();
+    migrations.push(Migration::breaking(
+        2,
+        "rename",
+        "ALTER TABLE notes RENAME COLUMN title TO name",
+        OldWrites::Drop,
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).key_columns(["missing"])],
+    ));
+    let error = store.builder(notes_tables(), migrations).open().await.err().unwrap();
+    assert!(matches!(
+        error,
+        OpenError::Migration(MigrationError::Failed { version: 2, name: "rename", .. })
+    ));
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    db.close().await.unwrap();
+}
+
+/// On a device that last ran the version before it, they must also match what
+/// that version registered, since owner-only is not in SQLite's schema (§18.1).
+#[tokio::test]
+async fn starts_from_declaring_owner_only_the_device_registered_otherwise_fails() {
+    let owner = || notes_tables().into_iter().map(|table| table.owner_only()).collect::<Vec<_>>();
+    let store = TestStore::new();
+    store.builder(notes_tables(), notes_migrations()).open().await.unwrap().close().await.unwrap();
+    let migration = |starts_from| {
+        let mut migrations = notes_migrations();
+        migrations.push(Migration::breaking(2, "owner", "", OldWrites::Drop, starts_from));
+        migrations
+    };
+    let error = store.builder(owner(), migration(owner())).open().await.err().unwrap();
+    assert!(matches!(
+        error,
+        OpenError::Migration(MigrationError::Failed { version: 2, name: "owner", ref source })
+            if matches!(**source, DbError::Schema(SchemaError::OwnerOnlyChanged { ref table }) if table == "notes")
+    ));
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn starts_from_matching_what_the_device_registered_opens() {
+    let owner = || notes_tables().into_iter().map(|table| table.owner_only()).collect::<Vec<_>>();
+    let store = TestStore::new();
+    store.builder(notes_tables(), notes_migrations()).open().await.unwrap().close().await.unwrap();
+    let mut migrations = notes_migrations();
+    migrations.push(Migration::breaking(2, "owner", "", OldWrites::Drop, notes_tables()));
+    let db = store.builder(owner(), migrations).open().await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 2);
+    db.close().await.unwrap();
 }

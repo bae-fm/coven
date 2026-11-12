@@ -44,7 +44,7 @@ fn migrations(version: u32, converters: [bool; 2], calls: &Arc<Mutex<Vec<u32>>>)
             } else {
                 crate::OldWrites::Drop
             };
-            Migration::breaking(number, "change", statement, old_writes)
+            Migration::breaking(number, "change", statement, old_writes, Vec::new())
         } else {
             Migration::addition(number, "change", statement)
         };
@@ -298,7 +298,7 @@ mod data_sources {
             })),
             None => crate::OldWrites::Drop,
         };
-        Migration::breaking(version, "rename", sql, old_writes)
+        Migration::breaking(version, "rename", sql, old_writes, tables())
     }
     async fn open(store: &TestStore, migrations: Vec<Migration>) -> Database {
         store.builder(tables(), migrations).open().await.unwrap()
@@ -431,6 +431,7 @@ mod data_sources {
                     "index",
                     "CREATE INDEX notes_title ON notes(title)",
                     old_writes,
+                    tables(),
                 ),
             ]
         };

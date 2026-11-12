@@ -157,6 +157,7 @@ impl FreezeHistory {
                 "freeze hidden rows",
                 "UPDATE rows SET a=a",
                 crate::OldWrites::Drop,
+                Vec::new(),
             ),
         ];
         for (i, step) in self.steps[..through].iter().enumerate() {
@@ -184,6 +185,7 @@ impl FreezeHistory {
                     Ok(())
                 },
                 crate::OldWrites::Drop,
+                Vec::new(),
             ));
         }
         migrations

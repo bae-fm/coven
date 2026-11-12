@@ -238,7 +238,7 @@ async fn a_migration_cannot_write_into_gifts_after_its_deletion_was_applied() {
     crate::tests::delete_circle(&database, gifts).await.unwrap();
     database.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "gift", GIFT, OldWrites::Drop));
+    migrations.push(Migration::breaking(2, "gift", GIFT, OldWrites::Drop, tables()));
     let error = store.builder(tables(), migrations).open().await.err().unwrap();
     let error = crate::tests::database_error(error);
     assert!(matches!(error, DbError::DeletedCircle(circle) if circle == gifts), "{error:?}");
@@ -442,7 +442,13 @@ async fn a_migration_adding_a_deferred_key_over_a_dangling_row_fails_as_its_comm
     sql(&db, "INSERT INTO albums VALUES('first','gone')").await.unwrap();
     db.close().await.unwrap();
     let mut migrations = initial();
-    migrations.push(Migration::breaking(2, "reference", REFERENCE, OldWrites::Drop));
+    migrations.push(Migration::breaking(
+        2,
+        "reference",
+        REFERENCE,
+        OldWrites::Drop,
+        artists_and_albums(),
+    ));
     let error = store.builder(artists_and_albums(), migrations).open().await.err().unwrap();
     let error = crate::tests::database_error(error);
     assert!(foreign_key_failure(&error), "{error:?}");

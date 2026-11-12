@@ -47,7 +47,13 @@ async fn file_references_follow_a_rename() {
                 declare(table, column),
                 vec![
                     Migration::addition(1, "files", SCHEMA),
-                    Migration::breaking(2, "rename", rename, OldWrites::Drop),
+                    Migration::breaking(
+                        2,
+                        "rename",
+                        rename,
+                        OldWrites::Drop,
+                        declare("files", "file"),
+                    ),
                 ],
             )
             .namespaces(namespaces())
@@ -99,6 +105,7 @@ async fn a_migration_leaves_file_records_and_references_with_their_writes() {
                     "titles",
                     "CREATE INDEX files_title ON files(title)",
                     OldWrites::Drop,
+                    tables(),
                 ),
             ],
         )
