@@ -51,7 +51,7 @@ pub use file_upload_pool::DrainOutcome;
 pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};
 pub use file_upload_settings::UploadSettings;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -105,9 +105,11 @@ struct FilesInner<M: FilesMode = Writer> {
     storage: watch::Sender<file_storage::StorageSlot>,
     send: Arc<crate::SequenceState>,
     waits: Arc<crate::RetryWaits>,
-    /// Failures observed on this connection that require a new connection.
-    /// Reopening creates a new connection and permits one attempt again.
-    connection_waits: Mutex<BTreeSet<coven_database::RetrySubject>>,
+    /// Subjects whose failure needs a new connection, each with the number
+    /// of the connection it failed on: it is due again once the slot's
+    /// connection number differs. Reopening creates a new connection and
+    /// permits one attempt again.
+    connection_waits: Mutex<BTreeMap<coven_database::RetrySubject, u64>>,
     ids: IdSourceRef,
     /// Paces the progress a long call reports.
     clock: coven_foundation::clock::ClockRef,
@@ -224,7 +226,7 @@ impl<M: FilesMode> FilesInner<M> {
             storage: watch::channel(file_storage::StorageSlot::opened(storage)).0,
             send,
             waits,
-            connection_waits: Mutex::new(BTreeSet::new()),
+            connection_waits: Mutex::new(BTreeMap::new()),
             ids,
             clock,
             uploads,
@@ -429,7 +431,6 @@ impl Files {
         self.inner.check_open()?;
         ready.await?;
         self.inner.storage.send_modify(|slot| slot.connect(storage));
-        lock_unpoisoned(&self.inner.connection_waits).clear();
         Ok(())
     }
 }
@@ -578,13 +579,15 @@ async fn show_worker_failure(owner: &FilesInner, error: SyncError) -> Result<(),
 
 impl<M: FilesMode> FilesInner<M> {
     fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
-        !lock_unpoisoned(&self.connection_waits).contains(&subject)
+        let connection = self.storage.borrow().connection();
+        lock_unpoisoned(&self.connection_waits).get(&subject) != Some(&connection)
     }
 
     /// The subject's failure needs a new connection: it is due again when
     /// the connection changes.
     fn wait_for_connection(&self, subject: coven_database::RetrySubject) {
-        lock_unpoisoned(&self.connection_waits).insert(subject);
+        let connection = self.storage.borrow().connection();
+        lock_unpoisoned(&self.connection_waits).insert(subject, connection);
     }
 
     fn forget_connection_wait(&self, subject: coven_database::RetrySubject) {
@@ -593,7 +596,7 @@ impl<M: FilesMode> FilesInner<M> {
 
     /// Keep only the connection waits `keep` accepts.
     fn retain_connection_waits(&self, keep: impl Fn(&coven_database::RetrySubject) -> bool) {
-        lock_unpoisoned(&self.connection_waits).retain(|subject| keep(subject));
+        lock_unpoisoned(&self.connection_waits).retain(|subject, _| keep(subject));
     }
 
     /// Hold the lock on one stored object's cache entries while reading

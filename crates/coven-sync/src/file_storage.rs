@@ -34,13 +34,15 @@ pub(super) struct StorageSlot {
     /// A connection attempt is running or backing off.
     attempting: bool,
     closed: bool,
+    /// Which connection `storage` is, counting every change of it.
+    connection: u64,
 }
 
 impl StorageSlot {
     /// The slot of a store as it opens, with the storage its owner loaded, if
     /// any.
     pub(super) fn opened(storage: Option<Arc<dyn Storage>>) -> Self {
-        Self { storage, attempting: false, closed: false }
+        Self { storage, attempting: false, closed: false, connection: 0 }
     }
 
     pub(super) fn state(&self) -> StorageState {
@@ -55,9 +57,14 @@ impl StorageSlot {
         }
     }
 
+    pub(super) fn connection(&self) -> u64 {
+        self.connection
+    }
+
     /// Replace the storage, as a new connection or its release.
     pub(super) fn connect(&mut self, storage: Option<Arc<dyn Storage>>) {
         self.storage = storage;
+        self.connection += 1;
     }
 
     pub(super) fn close(&mut self) {

@@ -4,6 +4,7 @@ use super::{Fixture, CHUNK};
 use crate::FileReadError;
 use coven_database::{DbError, Provenance};
 use coven_foundation::clock::HANG_GUARD;
+use std::sync::Arc;
 
 /// A read that needs storage, asked while a connection is coming, waits for
 /// the connection and then reads the file.
@@ -118,5 +119,20 @@ async fn a_pin_does_not_wait_for_a_connection() {
     let pin =
         tokio::time::timeout(HANG_GUARD, f.files.pin(std::slice::from_ref(&file))).await.unwrap();
     assert!(matches!(pin, Err(FileReadError::NoStorage)), "{pin:?}");
+    f.close().await;
+}
+
+/// The connection number moves with every change of storage, and a failure
+/// that needs a new connection is due again only then.
+#[tokio::test]
+async fn a_connection_wait_ends_when_the_connection_changes() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let subject = coven_database::RetrySubject::Provider;
+    let inner = Arc::clone(&f.files.inner);
+    assert!(inner.connection_due(subject));
+    inner.wait_for_connection(subject);
+    assert!(!inner.connection_due(subject));
+    f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
+    assert!(inner.connection_due(subject));
     f.close().await;
 }
