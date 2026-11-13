@@ -43,6 +43,7 @@ open CovenMerge
 #print axioms audience_converges
 #print axioms audiences_agree
 #print axioms removal_local
+#print axioms fresh_rows_shown
 #print axioms rivals_closed
 #print axioms Moved.agree
 #print axioms Moved.store_wins

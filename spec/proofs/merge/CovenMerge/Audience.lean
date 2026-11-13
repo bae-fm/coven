@@ -16,6 +16,9 @@ the rest as applied (§15.6).
   every row both read.
 * `restrict`, `removal_local`: removal agrees on a set of rows both devices
   have, closed under parents and rivals.
+* `fresh_rows_shown`: rows a local write adds, with no rival and no row
+  outside them pointing at them, all show, and removal outside them is as on
+  a device without them.
 * `rivals_closed`: when every unique claim includes the audience, unique
   rivals share an audience (§15.2).
 * `Moved.agree`, `Moved.store_wins`: Ana moves note 1 into her circle while
@@ -185,6 +188,98 @@ theorem removal_local {G : Inputs Row K} {visA visB R : Row → Bool}
   exact stratified_local (fires_monotone _) (fires_monotone _) hA hrows
     (fun D D' x hx hD => rivals_restrict_eq hc hD hx) h0
     (removal_stratified _) (removal_stratified _)
+
+/-- **Rows a local write adds show.** The rows `E` are present, pass their
+CHECKs, are outside deleted circles and have no rival in either direction; no
+row outside `E` points at one of them; and each of their references is fresh,
+to another row of `E` or to a row shown without `E`. Then every row of `E` is
+kept, and every other row is removed or shown as it is on a device without `E`
+(`removal_local` on the rows outside `E`). -/
+theorem fresh_rows_shown {G : Inputs Row K} {E : Row → Bool}
+    (present : ∀ x, E x = true → G.present x = true)
+    (check : ∀ x, E x = true → G.checkFails x = false)
+    (circle : ∀ x, E x = true → G.inDeletedCircle x = false)
+    (unrivalled : ∀ x y, E x = true →
+      rivalBefore G y x = false ∧ rivalBefore G x y = false)
+    (unpointed : ∀ y, E y = false → ∀ r ∈ G.refs y, E r.parent = false)
+    (fresh : ∀ x, E x = true → ∀ r ∈ G.refs x, r.stale = false ∧
+      (E r.parent = true ∨ (view (restrict G (fun y => !E y))).shown r.parent = true)) :
+    (∀ x, E x = true → removal G x = false) ∧
+    (∀ x, E x = false → removal G x = removal (restrict G (fun y => !E y)) x) := by
+  have hall : restrict G (fun _ => true) = G := by
+    cases G
+    simp [restrict]
+  have hloc : ∀ x, E x = false → removal G x = removal (restrict G (fun y => !E y)) x := by
+    intro x hx
+    have hc : Closure G (fun _ => true) (fun y => !E y) (fun y => !E y) :=
+      { visible := fun y hy => ⟨rfl, hy⟩
+        parents := fun y hy r hr => by
+          have := unpointed y (by simpa using hy) r hr
+          simpa using this
+        rivals := fun y hy z _ hz => by
+          cases hEz : E z
+          · rfl
+          · rw [(unrivalled z y hEz).2] at hz
+            cases hz }
+    have := removal_local hc x (by simpa using hx)
+    rwa [hall] at this
+  refine ⟨?_, hloc⟩
+  obtain ⟨D₁, a, b, c, d⟩ := removal_stratified G
+  -- The rows outside `E` that `G` removes are closed under the rules, and
+  -- hold the start and the unique losers, so they contain the end state.
+  let D' : Row → Bool := fun y => !E y && removal G y
+  have hclosed : ClosedUnder G.rows (FiresP (fires G)) D' := by
+    intro y hrows hf
+    by_cases hy : E y = true
+    · exfalso
+      have hf' : fires G D' y = true := hf
+      simp only [fires, check y hy, circle y hy, Bool.or_false, Bool.false_or] at hf'
+      unfold fkFires at hf'
+      simp only [List.any_eq_true, Bool.or_eq_true] at hf'
+      obtain ⟨r, hr, hs | hd⟩ := hf'
+      · rw [(fresh y hy r hr).1] at hs; cases hs
+      · simp only [D', Bool.and_eq_true, Bool.not_eq_true'] at hd
+        obtain ⟨hEp, hrem⟩ := hd
+        rcases (fresh y hy r hr).2 with h | h
+        · rw [h] at hEp; cases hEp
+        · simp only [view, Bool.and_eq_true, Bool.not_eq_true'] at h
+          rw [hloc _ hEp, h.2] at hrem
+          cases hrem
+    · have hEy : E y = false := by simpa using hy
+      have hmono : FiresP (fires G) (removal G) y :=
+        fires_monotone G D' (removal G) y
+          (fun z hz => by simp only [D', Bool.and_eq_true] at hz; exact hz.2) hf
+      have := normal_closed d y hrows hmono
+      simp [D', hEy, this]
+  have hD1 : ∀ y, D₁ y = true → removal G y = true := fun y hy =>
+    star_grow c y (by simp [uniqueLosers, hy])
+  have h1 : ∀ y, D₁ y = true → D' y = true := by
+    refine (normal_least (fires_monotone G) a b).2.2 D' hclosed ?_
+    intro y hy
+    by_cases hE : E y = true
+    · have := present y hE
+      simp [start, this] at hy
+    · have hEy : E y = false := by simpa using hE
+      have := hD1 y ((normal_least (fires_monotone G) a b).2.1 y hy)
+      simp [D', hEy, this]
+  have h2 : ∀ y, removal G y = true → D' y = true := by
+    refine (normal_least (fires_monotone G) c d).2.2 D' hclosed ?_
+    intro y hy
+    by_cases hE : E y = true
+    · exfalso
+      simp only [uniqueLosers, Bool.or_eq_true, List.any_eq_true, Bool.and_eq_true] at hy
+      rcases hy with h | ⟨z, _, hz, _⟩
+      · have := h1 y h
+        simp [D', hE] at this
+      · rw [(unrivalled y z hE).1] at hz
+        cases hz
+    · have hEy : E y = false := by simpa using hE
+      simp [D', hEy, star_grow c y hy]
+  intro x hx
+  cases h : removal G x
+  · rfl
+  · have := h2 x h
+    simp [D', hx] at this
 
 /-- When every unique claim includes the claiming row's audience, as §15.2
 requires, a row's unique rivals share its audience. -/

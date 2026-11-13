@@ -414,6 +414,12 @@ at.
   rows among any set of rows both have that holds, for each of its rows,
   every parent its references point at and every row whose claim rivals its
   own. Lean: `removal_local`.
+- **Rows a local write adds**: rows a local write adds that are present, pass
+  their CHECKs, lie outside deleted circles and have no rival in either
+  direction, with no row outside them pointing at one of them, and every one
+  of their references fresh, to one of them or to a row shown without them,
+  all show; every other row keeps the removal it has without them. Lean:
+  `fresh_rows_shown`.
 - [§15.3](../coven.md#153-references-stay-readable) gives the parents: a row points only at rows every reader of it can
   read. The check allows a reference into the row's own audience or the
   store, and nothing else; its parent is then readable by every member who
