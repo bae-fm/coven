@@ -91,25 +91,10 @@ impl Database {
                 ))
             })
             .await?;
-        let Some(first) = inputs
-            .migrations
-            .iter()
-            .position(|m| m.version > version && matches!(m.kind, MigrationKind::Breaking(_)))
-        else {
-            return Err(RebuildError::NotBelow { circle, version });
-        };
+        let first = first_past(&inputs, &circle, version)?;
         let scratch = real.rebuild_directory().await?;
-        let opened = DatabaseBuilder::new(scratch.clone())
-            .synced_tables(inputs.migrations[first].starts_from.clone())
-            .migrations(inputs.migrations[..first].to_vec())
-            .namespaces(inputs.namespaces.clone())
-            .sqlite_settings(inputs.sqlite.clone())
-            .sql_functions(inputs.functions.clone())
-            .clock(clock.clone())
-            .id_source(ids.clone())
-            .loading_store()
-            .open()
-            .await;
+        let opened =
+            at_version(&inputs, first, &scratch, &clock, &ids).loading_store().open().await;
         match opened {
             Ok(database) => {
                 self.local_bytes_changed();
@@ -188,6 +173,36 @@ impl RebuildDatabase {
             }),
         }
     }
+}
+
+/// The position of the first breaking migration past `version`, which is
+/// where a store at `version` stops.
+fn first_past(inputs: &OpenInputs, circle: &Audience, version: u32) -> Result<usize, RebuildError> {
+    inputs
+        .migrations
+        .iter()
+        .position(|m| m.version > version && matches!(m.kind, MigrationKind::Breaking(_)))
+        .ok_or_else(|| RebuildError::NotBelow { circle: circle.clone(), version })
+}
+
+/// The builder of a store of the rebuild's folder that runs the app's
+/// migrations before its migration number `first`, declaring the tables that
+/// one starts from.
+fn at_version(
+    inputs: &OpenInputs,
+    first: usize,
+    scratch: &StoreDir,
+    clock: &ClockRef,
+    ids: &IdSourceRef,
+) -> DatabaseBuilder {
+    DatabaseBuilder::new(scratch.clone())
+        .synced_tables(inputs.migrations[first].starts_from.clone())
+        .migrations(inputs.migrations[..first].to_vec())
+        .namespaces(inputs.namespaces.clone())
+        .sqlite_settings(inputs.sqlite.clone())
+        .sql_functions(inputs.functions.clone())
+        .clock(clock.clone())
+        .id_source(ids.clone())
 }
 
 /// `operation` after removing the rebuild's folder.

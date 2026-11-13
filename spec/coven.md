@@ -9446,9 +9446,10 @@ ends the wait.
   old marker counts as an empty write.
 - **A store below the circle's version.** A circle's base can be ahead of the
   store's version, when its maker's app had migrated and the store's raise
-  hadn't gone out yet. The rebuild then migrates the store alone up to the
-  circle's version before loading the circle: the store's changes come only
-  from the store (§18.1).
+  hadn't gone out yet. The rebuild then opens at the store's version, loads
+  the store alone, and migrates it up to the circle's version, with no
+  migration write of its own, before it loads the circle over it: the store's
+  changes come only from the store (§18.1).
 - **History it needs.** Retention keeps the store's snapshot at the circle's
   version, and the slots after it, while the circle is below the store's
   version (§16.6). A missing body, slot or key makes the device wait and say

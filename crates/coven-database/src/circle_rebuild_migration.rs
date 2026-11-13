@@ -18,6 +18,46 @@ impl coven_foundation::task::CarriesBug for ExportStopped {
 }
 
 impl RebuildDatabase {
+    /// Migrate the rebuild's store, which holds only the store, up to
+    /// `version`, the version of the circle about to load, with no migration
+    /// write: the store's changes come only from the store, so the rows are
+    /// the ones every device that raised the store to `version` made, and
+    /// the device's own marker belongs to the migration past it (§18.3). The
+    /// store is closed and opened again with the app's migrations before the
+    /// first breaking one past `version`.
+    ///
+    /// A failure removes the rebuild's folder, as `open_rebuild` does.
+    pub async fn migrate_store_to(
+        &mut self,
+        circle: coven_merge::Audience,
+        version: u32,
+    ) -> Result<(), RebuildError> {
+        let Some(database) = self.database.take() else {
+            return Err(DbError::StoreClosed.into());
+        };
+        let result = match database.close().await {
+            Err(error) => Err(RebuildError::from(error)),
+            Ok(()) => match super::first_past(&self.inputs, &circle, version) {
+                Err(error) => Err(error),
+                Ok(first) => {
+                    super::at_version(&self.inputs, first, &self.scratch, &self.clock, &self.ids)
+                        .loading_store()
+                        .open()
+                        .await
+                        .map_err(RebuildError::from)
+                }
+            },
+        };
+        self.parent.local_bytes_changed();
+        match result {
+            Ok(database) => {
+                self.database = Some(database);
+                Ok(())
+            }
+            Err(operation) => Err(removed_after(&self.real, operation)),
+        }
+    }
+
     /// Run the app's migrations the rebuild's store hasn't, in one run, the
     /// breaking ones making the migration write `header` and not a new one:
     /// the device's migration write for this rebuild, which read the circle
