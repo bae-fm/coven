@@ -139,7 +139,7 @@ pub(crate) struct MemoryView {
     pub(crate) order: Vec<RowId>,
 }
 impl MemoryView {
-    pub(crate) fn present(&mut self, r: RowId, generation: u64, started: Timestamp) {
+    pub(crate) fn present(&mut self, r: RowId, generation: u64, started: ClaimOrder) {
         self.data.insert(
             r,
             RemovalRow::Present {
@@ -190,7 +190,9 @@ impl MemoryView {
                 view.present(
                     r.clone(),
                     s.generation(),
-                    history.timestamp(s.generations()[&s.generation()]).unwrap().unwrap(),
+                    claim_order(
+                        history.timestamp(s.generations()[&s.generation()]).unwrap().unwrap(),
+                    ),
                 );
             } else {
                 view.data.insert(r.clone(), RemovalRow::Absent { generation: s.generation() });
@@ -491,6 +493,16 @@ mod differential {
     fn scalar(ts: Timestamp) -> u128 {
         ((ts.milliseconds() as u128) << 80) | ((ts.counter() as u128) << 64) | ts.device().0 as u128
     }
+    /// A claim order as one number, publication order first, the original
+    /// writes still queued after every published one.
+    fn order_scalar(order: ClaimOrder) -> u128 {
+        match order {
+            ClaimOrder::Published { slot, number } => {
+                (u128::from(slot.get()) << 64) | u128::from(number)
+            }
+            ClaimOrder::Local { number } => (1u128 << 127) | u128::from(number),
+        }
+    }
     fn rule_number(rule: &Rule) -> u64 {
         match rule {
             Rule::ForeignKey(_) => 0,
@@ -551,6 +563,21 @@ mod differential {
         let row_ids: BTreeMap<_, _> =
             rows.iter().cloned().enumerate().map(|(i, r)| (r, i)).collect();
         let write_ids: BTreeMap<_, _> = writes.iter().enumerate().map(|(i, w)| (w.id, i)).collect();
+        // The model compares one number per claim. A key in two audiences is
+        // ordered by (claim order, audience), so give each circle row its
+        // place in that order, after every store row (which take 0).
+        let mut circle_starts: Vec<_> = view
+            .data
+            .iter()
+            .filter_map(|(r, data)| match data {
+                RemovalRow::Present { started, .. } if r.audience != Audience::Store => {
+                    Some((*started, r.audience.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        circle_starts.sort();
+        circle_starts.dedup();
         let mut claims = BTreeMap::new();
         let mut input_rows = Vec::new();
         for r in &view.order {
@@ -571,7 +598,7 @@ mod differential {
                 let key = (r.table.clone(), r.audience.clone(), name.clone(), claim.value.clone());
                 let next = claims.len();
                 let key = *claims.entry(key).or_insert(next);
-                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": match claim.order { ClaimOrder::Published { slot, number } => (u128::from(slot.get()) << 64) | u128::from(number), ClaimOrder::Local { number } => (1u128 << 127) | u128::from(number) }.to_string(), "other": false}));
+                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": order_scalar(claim.order).to_string(), "other": false}));
             }
             let (deleted, started) = match data {
                 RemovalRow::Present { deleted_circle, started, .. } => {
@@ -580,9 +607,14 @@ mod differential {
                 RemovalRow::Absent { .. } => (false, None),
             };
             if let Some(started) = started {
-                // Store rows precede every circle claim, including a circle
-                // generation stamped at zero. Shift circle stamps by one.
-                let ts = if r.audience == Audience::Store { 0 } else { scalar(started) + 1 };
+                let ts = if r.audience == Audience::Store {
+                    0
+                } else {
+                    1 + circle_starts
+                        .iter()
+                        .position(|start| *start == (started, r.audience.clone()))
+                        .unwrap()
+                };
                 let key = u64::from_be_bytes(r.key.clone().try_into().unwrap());
                 row_claims
                     .push(json!({"con": {"terms":[],"partial":null}, "value": key, "ts": ts.to_string(), "other": true}));

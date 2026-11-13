@@ -51,7 +51,8 @@ whether it is a key present in two audiences (§9.2, §15.4). -/
 structure Claim (K : Type) where
   con : UniqueConstraint
   key : K
-  /-- Unique claims use slot/write order; other-audience claims use §15.4. -/
+  /-- Unique claims use slot/write order; other-audience claims use the order of
+  the generation's first write, then the circle id (§15.4), never a clock. -/
   ts : Nat
   other : Bool
 

@@ -1,4 +1,4 @@
-use crate::{Audience, ClaimOrder, MergeError, Parent, RowId, Slot, Timestamp};
+use crate::{Audience, ClaimOrder, MergeError, Parent, RowId, Slot};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The foreign key's ON DELETE action (§9.1).
@@ -78,8 +78,9 @@ pub enum RemovalRow {
     Present {
         /// The row's current odd generation.
         generation: u64,
-        /// The timestamp recorded for this generation in `_coven_rows`.
-        started: Timestamp,
+        /// The claim order of the write `_coven_rows` records for this
+        /// generation (§15.4): the same order unique claims use, never a clock.
+        started: ClaimOrder,
         /// Foreign-key names and their merged references.
         references: BTreeMap<crate::ForeignKey, Reference>,
         /// The slot deleting this row's circle, if any.
@@ -412,7 +413,7 @@ fn judge_groups(
     out: &BTreeSet<RowId>,
 ) -> BTreeMap<RowId, BTreeSet<Rule>> {
     let mut claims = BTreeMap::<Group, Vec<(&RowId, ClaimOrder)>>::new();
-    let mut keys = BTreeMap::<(&str, &[u8]), Vec<(&RowId, Timestamp)>>::new();
+    let mut keys = BTreeMap::<(&str, &[u8]), Vec<(&RowId, ClaimOrder)>>::new();
     for (row, fact) in facts {
         if out.contains(row) {
             continue;
@@ -446,14 +447,12 @@ fn judge_groups(
         }
     }
     for members in keys.values() {
-        let &(winner, earliest) = members
+        let &(winner, _) = members
             .iter()
-            .min_by_key(|(row, stamp)| (row.audience != Audience::Store, *stamp))
+            .min_by_key(|(row, order)| (row.audience != Audience::Store, *order, &row.audience))
             .expect("a key group contains a row");
-        for (row, started) in members {
-            if matches!(row.audience, Audience::Circle(_))
-                && (winner.audience == Audience::Store || earliest < *started)
-            {
+        for (row, _) in members {
+            if *row != winner {
                 judged.entry((*row).clone()).or_default().insert(Rule::OtherAudience);
             }
         }

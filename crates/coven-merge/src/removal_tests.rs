@@ -169,7 +169,7 @@ fn removed_parent_takes_children_out_under_every_action_and_releases_them() {
     ] {
         let mut view = MemoryView::default();
         for n in [45, 46, 7] {
-            view.present(row(n), 1, stamp(n));
+            view.present(row(n), 1, claim_order(stamp(n)));
         }
         view.claim(&row(45), ["title"], "Groceries", claim_order(stamp(1600)));
         view.claim(&row(46), ["title"], "Groceries", claim_order(stamp(1605)));
@@ -277,13 +277,13 @@ fn uniqueness_is_judged_once_between_the_two_other_passes() {
     let mut view = MemoryView::default();
     view.data.insert(row(0), RemovalRow::Absent { generation: 2 });
     for n in [1, 2] {
-        view.present(row(n), 1, stamp(n));
+        view.present(row(n), 1, claim_order(stamp(n)));
     }
     view.reference(&row(1), row(0), 1, OnDelete::Cascade);
     view.claim(&row(1), ["title"], "Plan", claim_order(stamp(10)));
     view.claim(&row(2), ["title"], "Plan", claim_order(stamp(11)));
     assert!(!removal_orders(&view).removed.contains_key(&row(2)));
-    view.present(row(1), 1, stamp(1));
+    view.present(row(1), 1, claim_order(stamp(1)));
     view.reference(&row(2), row(1), 1, OnDelete::Cascade);
     view.claim(&row(1), ["title"], "Plan", claim_order(stamp(11)));
     view.claim(&row(2), ["title"], "Plan", claim_order(stamp(10)));
@@ -297,7 +297,7 @@ fn uniqueness_is_judged_once_between_the_two_other_passes() {
     view.claim(&row(1), ["title"], "Plan", claim_order(stamp(12)));
     assert_eq!(removal_orders(&view).removed, result.removed);
     for n in [3, 4] {
-        view.present(row(n), 1, stamp(n));
+        view.present(row(n), 1, claim_order(stamp(n)));
     }
     view.reference(&row(2), row(3), 1, OnDelete::Cascade);
     view.claim(&row(3), ["title"], "Ideas", claim_order(stamp(12)));
@@ -397,13 +397,18 @@ fn move_generations_belong_to_each_audience_and_store_wins() {
 #[test]
 fn two_circles_choose_the_earlier_generation_and_unique_is_audience_scoped() {
     let mut view = MemoryView::default();
-    view.present(circle(1, 1), 3, stamp(30));
-    view.present(circle(1, 2), 1, stamp(20));
+    view.present(circle(1, 1), 3, claim_order(stamp(30)));
+    view.present(circle(1, 2), 1, claim_order(stamp(20)));
     view.claim(&circle(1, 1), ["title"], "Plan", claim_order(stamp(10)));
     view.claim(&circle(1, 2), ["title"], "Plan", claim_order(stamp(11)));
     let result = removal_orders(&view);
     assert_eq!(rules(&result, &circle(1, 1)), [Rule::OtherAudience].into());
     assert!(!result.removed.contains_key(&circle(1, 2)));
+    // A write still queued here follows every published one, as for unique
+    // claims, so the published generation shows.
+    view.present(circle(1, 1), 3, ClaimOrder::Local { number: 1 });
+    let result = removal_orders(&view);
+    assert_eq!(rules(&result, &circle(1, 1)), [Rule::OtherAudience].into());
     view.data.remove(&circle(1, 2));
     assert!(removal_orders(&view).removed.is_empty());
 }
@@ -477,7 +482,7 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
     }
     let mut before = MemoryView::default();
     for n in [1, 2, 3, 99] {
-        before.present(row(n), 1, stamp(n));
+        before.present(row(n), 1, claim_order(stamp(n)));
     }
     before.claim(&row(1), ["label"], "Plan", claim_order(stamp(10)));
     before.claim(&row(2), ["label"], "Plan", claim_order(stamp(11)));
@@ -497,7 +502,7 @@ fn a_change_reads_its_parents_without_recomputing_their_other_children() {
     // 2's child and row 7 is row 3's. Row 2 starts failing a CHECK.
     let mut before = MemoryView::default();
     for n in 0..8 {
-        before.present(row(n), 1, stamp(n + 1));
+        before.present(row(n), 1, claim_order(stamp(n + 1)));
     }
     before.reference(&row(1), row(0), 1, OnDelete::Cascade);
     for n in 2..6 {
@@ -555,7 +560,7 @@ fn null_substitutions_feed_checks() {
     }
     let mut view = MemoryView::default();
     view.data.insert(row(1), RemovalRow::Absent { generation: 2 });
-    view.present(row(2), 1, stamp(2));
+    view.present(row(2), 1, claim_order(stamp(2)));
     view.reference(&row(2), row(1), 1, OnDelete::SetNull { permitted: true });
     assert_eq!(
         rules(&removals(&Resolved(view)).unwrap(), &row(2)),
@@ -567,7 +572,7 @@ fn null_substitutions_feed_checks() {
 fn cycles_terminate_and_invalid_inputs_are_errors() {
     let mut view = MemoryView::default();
     for n in [1, 2] {
-        view.present(row(n), 1, stamp(n));
+        view.present(row(n), 1, claim_order(stamp(n)));
     }
     view.reference(&row(1), row(2), 1, OnDelete::Cascade);
     view.reference(&row(2), row(1), 1, OnDelete::Cascade);
@@ -595,7 +600,7 @@ fn cycles_terminate_and_invalid_inputs_are_errors() {
 fn two_foreign_keys_on_one_column_keep_separate_removal_reasons() {
     let mut view = MemoryView::default();
     let child = row(0);
-    view.present(child.clone(), 1, stamp(1));
+    view.present(child.clone(), 1, claim_order(stamp(1)));
     for table in ["lefts", "rights"] {
         let parent = RowId { table: table.into(), ..row(1) };
         view.reference(&child, parent.clone(), 1, OnDelete::Restrict);

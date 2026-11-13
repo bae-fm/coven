@@ -12,7 +12,7 @@ use coven_format::value::Value;
 use coven_foundation::id_source::CircleId;
 use coven_merge::{
     Audience, Constraints, ForeignKey, Group, MergeError, OnDelete, Reference, ReferenceValue,
-    RemovalRow, RemovalView, RowId, RowState, RowUpdate, Timestamp, WriteId,
+    RemovalRow, RemovalView, RowId, RowState, RowUpdate, WriteId,
 };
 use rusqlite::params_from_iter;
 use std::cell::RefCell;
@@ -68,7 +68,7 @@ pub(crate) struct DatabaseRemovalView<'a> {
     rules: &'a BTreeMap<String, TableRules>,
     states: States<'a>,
     deleted: &'a BTreeMap<CircleId, crate::Slot>,
-    arriving: Option<(WriteId, Timestamp)>,
+    arriving: Option<WriteId>,
     rows: RowCache<RowId, EvaluatedRow>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
     extra_groups: RefCell<BTreeMap<Group, BTreeSet<RowId>>>,
@@ -92,7 +92,7 @@ impl<'a> DatabaseRemovalView<'a> {
         app: &'a AppView<'a>,
         updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
         deleted: &'a BTreeMap<CircleId, crate::Slot>,
-        arriving: Option<(WriteId, Timestamp)>,
+        arriving: Option<WriteId>,
     ) -> Result<Self, DbError> {
         let mut edges = BTreeMap::<RowId, BTreeSet<RowId>>::new();
         for (id, update) in updates {
@@ -169,21 +169,11 @@ impl<'a> DatabaseRemovalView<'a> {
 
     pub(crate) fn prime(&self, changed: impl IntoIterator<Item = RowId>) -> Result<(), DbError> {
         for row in changed {
-            for group in self
-                .groups(&row)
-                .map_err(|error| error.into_db_error(self.arriving.map(|(id, _)| id)))?
-            {
+            for group in self.groups(&row).map_err(|error| error.into_db_error(self.arriving))? {
                 self.extra_groups.borrow_mut().entry(group).or_default().insert(row.clone());
             }
         }
         Ok(())
-    }
-
-    fn stamp(&self, write: WriteId) -> Timestamp {
-        match self.arriving {
-            Some((id, stamp)) if write == id => stamp,
-            _ => self.store.stamp(write),
-        }
     }
 
     fn remember(&self, id: &RowId, row: EvaluatedRow) -> EvaluatedRow {
@@ -235,10 +225,7 @@ impl<'a> DatabaseRemovalView<'a> {
         for (name, reference) in &references {
             let parent_generation = self.state(&reference.parent.row)?.generation();
             let reading = coven_merge::resolve_reference(id, reference, parent_generation)
-                .map_err(|error| {
-                    RemovalFailure::Merge(error)
-                        .into_db_error(self.arriving.map(|(write, _)| write))
-                })?;
+                .map_err(|error| RemovalFailure::Merge(error).into_db_error(self.arriving))?;
             if reading == ReferenceValue::Null {
                 let fk = table
                     .foreign_keys
@@ -276,7 +263,7 @@ impl<'a> DatabaseRemovalView<'a> {
             })?;
         let facts = RemovalRow::Present {
             generation,
-            started: self.stamp(state.generations()[&generation]),
+            started: crate::sequence::write_order(self.database, state.generations()[&generation])?,
             references,
             deleted_circle: match id.audience {
                 Audience::Store => None,

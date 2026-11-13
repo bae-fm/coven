@@ -29,7 +29,7 @@ fn authored_prefix_and_own_predecessors_match_causality() {
 fn unique_values_use_slot_then_write_then_primary_key() {
     let mut view = MemoryView::default();
     for n in 1..=3 {
-        view.present(row(n), 1, stamp(100 - n));
+        view.present(row(n), 1, claim_order(stamp(100 - n)));
     }
     let claimed = |slot, number| ClaimOrder::Published { slot: crate::slot(slot), number };
     view.claim(&row(1), ["title"], "Plan", claimed(2, 1));
@@ -50,7 +50,7 @@ fn older_live_loser_returns_before_a_new_claim() {
     // LiveClaims.older_loser_returns: claims 1 and 2, delete 1, then claim 3.
     let mut view = MemoryView::default();
     for n in 1..=3 {
-        view.present(row(n), 1, stamp(4 - n));
+        view.present(row(n), 1, claim_order(stamp(4 - n)));
         view.claim(
             &row(n),
             ["title"],

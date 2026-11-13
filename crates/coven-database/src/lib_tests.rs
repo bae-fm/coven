@@ -343,6 +343,24 @@ pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::
     );
 }
 
+/// Deliver `row` as another device's write in the next slot, stamped a
+/// millisecond before the newest write this device authored and having read
+/// nothing, so its timestamp order disagrees with its slot order, after counting this device's queue.
+pub(crate) async fn remote_write_stamped_earlier(
+    database: &crate::Database,
+    row: coven_format::write::RowChange,
+) {
+    let row = database.inspect_writer_schema(|db, schema| {
+        let app = crate::write_rows::AppView::after(db, schema);
+        let store = crate::merge_store::MergeStore::new(db, &app);
+        crate::write_sources::authored(db, &store, row.row, row.change).unwrap()
+    });
+    assert_eq!(
+        deliver_stamped(database, row, None, true, true).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+}
+
 /// Deliver `row` as another device's write in the next slot while this
 /// device's writes still wait in its queue (§6.2).
 pub(crate) async fn remote_write_beside_queue(
@@ -411,6 +429,17 @@ async fn deliver(
     schema_version: Option<u32>,
     count_queue: bool,
 ) -> Result<crate::ApplyOutcome, DbError> {
+    deliver_stamped(database, row, schema_version, count_queue, false).await
+}
+
+/// `deliver`, stamping the write before this device's newest when `earlier`.
+async fn deliver_stamped(
+    database: &crate::Database,
+    row: coven_format::write::RowChange,
+    schema_version: Option<u32>,
+    count_queue: bool,
+    earlier: bool,
+) -> Result<crate::ApplyOutcome, DbError> {
     use coven_format::write::{WriteHeader, WritePart, WriteRecord};
     let previous = crate::write::tests::records(database).pop().expect("local seed write").header;
     if count_queue {
@@ -420,14 +449,19 @@ async fn deliver(
     }
     let applied = database.applied_slot().await?;
     let device = coven_foundation::id_source::DeviceId(10_000 + applied);
-    let timestamp =
-        coven_merge::Timestamp::new(previous.timestamp.milliseconds() + applied + 1, 0, device)
-            .unwrap();
+    let milliseconds = if earlier {
+        previous.timestamp.milliseconds() - 1
+    } else {
+        previous.timestamp.milliseconds() + applied + 1
+    };
+    let timestamp = coven_merge::Timestamp::new(milliseconds, 0, device).unwrap();
     let record = WriteRecord {
         header: WriteHeader {
             position: coven_merge::WriteId { device, number: 1 },
             timestamp,
-            read_through: applied,
+            // An earlier-stamped write read nothing: a write that had read a slot
+            // is stamped after it (§7.2).
+            read_through: if earlier { 0 } else { applied },
             schema_version: schema_version.unwrap_or(database.schema_version().await?),
             disposition: coven_format::write::WriteDisposition::Apply,
         },

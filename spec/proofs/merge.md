@@ -283,7 +283,9 @@ at.
   setters and proves release to the earliest surviving live claimant.
 - **Keys in two audiences**: of two present rows with one key, the store's
   wins over a circle's, and of two circles' rows, the one whose current
-  generation started with the smaller timestamp.
+  generation started in the earlier slot (the claim order unique values use,
+  with the writes still in this device's queue last), never the one with the
+  smaller timestamp; one write starting both is decided by the smaller circle id.
 - [§8.4](../coven.md#84-rows-taken-out-and-rows-that-come-back)'s three steps:
   1. apply the other rules until none fires;
   2. judge unique values and keys in two audiences among the rows still

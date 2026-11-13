@@ -92,7 +92,7 @@ impl<'a> WriteApply<'a> {
             self.visible,
             &updates,
             self.deleted,
-            record.map(|r| (r.header.position, r.header.timestamp)),
+            record.map(|r| r.header.position),
         )?;
         let region =
             self.finish(&old, &new, touched, record.map(|record| record.header.position), || {

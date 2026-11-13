@@ -6043,8 +6043,11 @@ unique value's loser (§8.4, §9.2):
 
 - the store's row wins over a circle's: Ana's devices show the store's note 1 and
   take out Gifts' note 1;
-- of two circles' rows, the one whose current generation started with the smaller
-  timestamp wins, the write `_coven_rows` records for that generation.
+- of two circles' rows, the one whose current generation started first wins:
+  the write `_coven_rows` records for that generation sits in the earlier slot
+  (one still in this device's queue follows every slot), and no clock decides
+  between audiences (the order is the one unique values use, §9.2). One write
+  can start the same key in two circles; the smaller circle id then wins.
 
 A device in both circles can show a different row for that key than a device in
 only one, since each reads different rows.

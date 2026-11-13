@@ -1,10 +1,10 @@
 //! Indexed region discovery and removal through the public API.
 
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::CircleId;
 use coven_merge::{
     recompute, removals, Audience, Constraints, FullRemovalView, Group, MergeError, OnDelete,
     Parent, Reference, ReferenceValue, RemovalResult, RemovalRow, RemovalView, RowId, Rule,
-    Timestamp, UniqueClaim,
+    UniqueClaim,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,14 +18,10 @@ fn circle(key: u64, circle: u64) -> RowId {
     RowId { audience: Audience::Circle(CircleId(Uuid::from_u128(circle.into()))), ..row(key) }
 }
 
-fn stamp(ms: u64) -> Timestamp {
-    Timestamp::new(ms, 0, DeviceId(1)).unwrap()
-}
-
 fn present(ms: u64, parent: Option<RowId>) -> RemovalRow {
     RemovalRow::Present {
         generation: 1,
-        started: stamp(ms),
+        started: coven_merge::ClaimOrder::Published { slot: coven_merge::slot(ms + 1), number: 1 },
         references: parent
             .into_iter()
             .map(|row| {

@@ -50,9 +50,6 @@ impl<'a> WriteMetadata<'a> {
     pub(crate) fn ordinal(&self, id: WriteId) -> i64 {
         self.writes.borrow()[&id].ordinal
     }
-    pub(crate) fn stamp(&self, id: WriteId) -> Timestamp {
-        self.writes.borrow()[&id].timestamp
-    }
     fn retain(&self, row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<WriteId> {
         let timestamp =
             decoded(merge_fields::decode_timestamp(&row.get::<_, Vec<u8>>(offset + 1)?))?;
@@ -188,10 +185,6 @@ impl<'a> MergeStore<'a> {
             generations: RowCache::all(),
             keys: RowCache::all(),
         }
-    }
-
-    pub(crate) fn stamp(&self, id: WriteId) -> Timestamp {
-        self.metadata.stamp(id)
     }
 
     /// Load the writes that started `state`'s generations, read from a

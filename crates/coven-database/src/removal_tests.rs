@@ -575,6 +575,51 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
     }
 }
 
+/// Of two circles' rows for one key, the one whose generation started in the
+/// earlier slot shows, whatever the timestamps of the writes say: a device's
+/// clock never picks between audiences (§15.4).
+#[tokio::test]
+async fn the_earlier_slot_decides_between_circles_rows_not_the_timestamp() {
+    const ANA: &str = "00000000-0000-4000-8000-00000000000a";
+    const BEN: &str = "00000000-0000-4000-8000-00000000000b";
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")
+            ],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT)",
+        )
+        .await
+        .unwrap();
+    store.join_circle(
+        &db,
+        coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(ANA).unwrap()),
+    );
+    db.write(|context| {
+        context.execute(
+            "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001',?1,'Ana')",
+            [ANA],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let mut other_row = records(&db)[0].parts[0].rows[0].clone();
+    other_row.row.audience = coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
+        uuid::Uuid::parse_str(BEN).unwrap(),
+    ));
+    let Operation::Insert(columns) = &mut other_row.change.operation else { panic!("insert") };
+    columns.get_mut("audience").unwrap().value = Value::Text(BEN.into());
+    columns.get_mut("title").unwrap().value = Value::Text("Ben".into());
+    crate::tests::remote_write_stamped_earlier(&db, other_row).await;
+    let shown: String = db
+        .inspect_writer(|db| db.query_row("SELECT audience FROM notes", [], |r| r.get(0)).unwrap());
+    assert_eq!(shown, ANA, "Ana's row started in slot 1, Ben's in slot 2");
+    assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::OtherAudience]));
+    db.close().await.unwrap();
+}
+
 /// A circle's deletion takes its rows out of the app's tables and runs the
 /// same local foreign-key actions as any other removal. The deletion is final,
 /// so those local children stay as the actions left them, and the app's own
