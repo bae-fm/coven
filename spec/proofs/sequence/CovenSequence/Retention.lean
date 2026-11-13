@@ -244,6 +244,27 @@ theorem rebuild_store_start {st : Store S} {seq : Nat → Slot S} (g : Good R st
   refine ⟨⟨cs, ledgerAt R seq cs, audAt R seq R.store cs, rowsAt R seq R.store cs, fun _ => none⟩,
     ⟨rfl, rfl, rfl, (by show cs ≤ st.head; omega), fun i x hb _ => by simp at hb⟩, rfl, hbody, hstart⟩
 
+/-- What the store's own rebuild reads (coven.md §18.3): the floor's snapshot
+of the store with its state, every slot after its coverage through the head,
+and the body of each store raise or reset after that coverage. It is a fresh
+load of the store: it needs no snapshot below the floor, so it asks nothing of
+retention beyond what a load already needs, whatever version the rebuilding
+app has. -/
+def StoreRebuildReads (seq : Nat → Slot S) (st : Store S) : Prop :=
+  st.body (st.floor.path R.store) = some (stateAt R seq R.store (st.floor.covers R.store)) ∧
+    (∀ i, st.floor.covers R.store < i → i ≤ st.head → st.slot i = some (seq i)) ∧
+    ∀ r au v c q, st.floor.covers R.store < r → r ≤ st.head →
+      seq r = .boundary au R.store v c q → AppliedTo R seq R.store r →
+      ∃ L' P', st.body q = some (L', P', preparedRows R v q (raiseView R seq R.store c) R.store)
+
+/-- **Good storage keeps what the store's own rebuild reads.** -/
+theorem store_rebuild_reads_kept {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) :
+    StoreRebuildReads R seq st := by
+  refine ⟨g.floor_body R.store, fun i h1 h2 => ?_, fun r au v c q h1 h2 h3 h4 => ?_⟩
+  · have := g.start_le R.store
+    rw [g.kept_genuine i (by omega), g.first_genuine i (by omega) h2]
+  · exact (g.boundary_body R.store r au v c q (by omega) h2 h3 h4).1 h1
+
 /-- **The claimant's floor check.** A claimant that saw its bytes `x` at slot
 `i`, and then, after any storage steps, reads a floor whose first kept slot is
 not past `i`, holds the genuine slot `i`. If the floor has passed `i`, these bytes

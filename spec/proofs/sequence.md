@@ -945,6 +945,15 @@ at the slot before the store's raise past `A`'s version when that comes first
   sound circle reader then migrates a view of just those two audiences to the
   raise body, with the store's input slot no later than the slot before the
   store's raise past the circle's version.
+- `NeedsStoreRebuild`, `store_rebuild_reads_kept`, `rebuilt_store_body`: the
+  store itself is below a device's app version while some device may still
+  raise it. Its rebuild is a fresh load: the floor's snapshot of the store,
+  the slots and the store's raise and reset bodies after it, through the head.
+  Good storage keeps all of that already, so retention needs no rule for the
+  device's version, which it can't know. A migration of the store reads only
+  the store's rows, so a view holding them alone gives the store's raise body
+  prepared at the head; there is no other audience and no input slot below the
+  head.
 - `rebuilt_raise_counted`: a raise to a higher version, prepared at the
   rebuilt body's coverage and landing with no raise, reset or announcement
   covering more than it between, by an active device allowed to raise, is

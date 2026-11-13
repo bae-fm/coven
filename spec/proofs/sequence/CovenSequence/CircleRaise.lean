@@ -141,6 +141,36 @@ theorem rebuilt_body_from_kept {st : Store S} {seq : Nat → Slot S} (g : Good R
       simp [rebuildView, raiseView, same, hA, okA'.rows, posA]
     · simp [rebuildView, raiseView, same, okS'.rows, posS]
 
+/-- The view of the store's own rebuild: the store's rows as the rebuilder
+read them from storage, and the initial rows of every other audience. -/
+def storeView (store : S.Rows) : S.Aud → S.Rows :=
+  fun B => if B = R.store then store else R.rows0 B
+
+/-- **The store's rebuilt body is the honest body.** A device that loads the
+store as any joiner does, from the floor's snapshot, and follows storage to the
+head, migrates a view holding just the store's rows to the store's raise body
+prepared at the head. A migration of the store reads only the store's own rows
+(`migrate_reads`), so no other audience is read and there is no input slot
+below the head. -/
+theorem rebuilt_store_body {st : Store S} {seq : Nat → Slot S} (g : Good R st seq)
+    (v : Nat) (p : S.Path) :
+    ∃ d', ReadSteps R R.store true st
+        ⟨st.floor.covers R.store, ledgerAt R seq (st.floor.covers R.store),
+          audAt R seq R.store (st.floor.covers R.store),
+          rowsAt R seq R.store (st.floor.covers R.store), fun _ => none⟩ d' ∧
+      d'.pos = st.head ∧
+      R.migrate v (storeView R d'.rows) R.store =
+        preparedRows R (.raise v) p (raiseView R seq R.store st.head) R.store := by
+  obtain ⟨d', run, hpos, hstate⟩ := joiner_reaches_head R g R.store
+  refine ⟨d', run, hpos, ?_⟩
+  have rows : d'.rows = rowsAt R seq R.store st.head := by
+    have := congrArg (fun x => x.2.2) hstate
+    simpa [stateAt] using this
+  simp only [preparedRows]
+  apply R.migrate_reads
+  · simp [storeView, raiseView, inputSlot, rows]
+  · simp [storeView, raiseView, inputSlot, rows]
+
 /-- **A rebuilt raise counts.** A raise of `A` to `v`, prepared at coverage `c`
 and landing at slot `k + 1` with `A` having had no other raise or reset since
 `c` and no announcement covering more than `c`, by an active device allowed to

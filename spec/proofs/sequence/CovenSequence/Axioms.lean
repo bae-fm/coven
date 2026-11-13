@@ -210,6 +210,7 @@ import SequenceApply
 #print axioms CovenSequence.CircleRaise.joiner_cannot_raise
 #print axioms CovenSequence.CircleRaise.rebuilt_body_honest
 #print axioms CovenSequence.CircleRaise.rebuilt_body_from_kept
+#print axioms CovenSequence.CircleRaise.rebuilt_store_body
 #print axioms CovenSequence.CircleRaise.rebuilt_raise_counted
 #print axioms CovenSequence.reaches_target_kept
 #print axioms CovenSequence.CircleRaise.cross_read_rebuild_differs
@@ -393,6 +394,7 @@ import SequenceApply
 #print axioms CovenSequence.Retention.floor_write_spared
 #print axioms CovenSequence.floor_within_caps_spares_rebuild
 #print axioms CovenSequence.rebuild_store_start
+#print axioms CovenSequence.store_rebuild_reads_kept
 #print axioms CovenSequence.Retention.fresh_head_starves
 #print axioms CovenSequence.Retention.daily_coverage_precedes_announcement
 #print axioms CovenSequence.Retention.daily_announcements_starve

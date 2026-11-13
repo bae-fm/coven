@@ -182,6 +182,14 @@ def NeedsRebuild (seq : Nat → Slot S) (head : Nat) (A : S.Aud) : Prop :=
   A ≠ R.store ∧ Raisable R seq A head ∧
     (audAt R seq A head).version < (audAt R seq R.store head).version
 
+/-- The store itself is below the app of a device whose version is `dv`, and
+some device may still raise it: no device on the older app holds the store at
+`dv`, so the device rebuilds the store and raises it (coven.md §18.3). The
+version `dv` belongs to the reading device alone; storage doesn't know it
+(`Retention.store_rebuild_reads_kept`). -/
+def NeedsStoreRebuild (seq : Nat → Slot S) (head dv : Nat) : Prop :=
+  Raisable R seq R.store head ∧ (audAt R seq R.store head).version < dv
+
 /-- **Storage keeps what a rebuild reads** (coven.md §16.6): for each circle
 that needs a rebuild, the store snapshot it starts from is in storage with its
 state, the first kept slot is no later than the slot after it, and the bodies
