@@ -84,6 +84,7 @@ mod cache_progress;
 mod read;
 mod read_capture;
 pub use cache_progress::PinProgress;
+mod inserted_rows;
 mod removal;
 mod removal_schema;
 mod removal_sql;

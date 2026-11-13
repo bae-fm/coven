@@ -16,6 +16,9 @@ pub struct WorkCounts {
     /// Rows whose published state an applied slot kept or put back beside
     /// this device's unsent writes (§6.2).
     pub published_rows: usize,
+    /// Rows a removal view evaluated: its present rows staged, with their
+    /// CHECKs, unique values and references read (§9.3).
+    pub evaluated_rows: usize,
     /// Reads of what a transaction can't change: the schema version, SQLite's
     /// schema cookie, and synced columns' and foreign keys' registered ids.
     pub constant_reads: usize,

@@ -101,7 +101,9 @@ async fn stale_references_are_judged_as_one_null_substitution() {
 /// A row is staged for evaluation once, and only when it has something to
 /// evaluate: a CHECK or unique value to read, a column SQLite would convert,
 /// or one left to its default. A row of plainly typed values that the table
-/// stores as written is judged as it is (§9.3).
+/// stores as written is judged as it is (§9.3). An edit stages a row once in
+/// its state before and once after, in the removal views; a local insert
+/// isn't staged at all (`inserted_rows`).
 #[tokio::test]
 async fn a_row_is_evaluated_once_and_only_when_evaluating_changes_something() {
     let staged = |sql: &str| sql.contains("INSERT INTO temp.\"_coven_eval_");
@@ -114,12 +116,13 @@ async fn a_row_is_evaluated_once_and_only_when_evaluating_changes_something() {
         (
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL CHECK(title<>''), size INTEGER)",
             "INSERT INTO notes VALUES('1','a',1),('2','b',2)",
-            2,
+            4,
         ),
         (
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, size NUMERIC)",
             "INSERT INTO notes VALUES('1','a',1),('2','b',2)",
-            2,
+            // The write's capture of each row's old values stages them too.
+            6,
         ),
     ] {
         let store = TestStore::new();
@@ -128,6 +131,7 @@ async fn a_row_is_evaluated_once_and_only_when_evaluating_changes_something() {
             .await
             .unwrap();
         sql(&db, insert).await.unwrap();
+        sql(&db, "UPDATE notes SET title=title||'x'").await.unwrap();
         let statements = db.inspect_writer(|writer| writer.profiled_statements());
         let evaluations = statements.iter().filter(|s| staged(&s.sql)).count();
         assert_eq!(evaluations, expected, "{schema}");

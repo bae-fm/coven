@@ -197,6 +197,8 @@ impl<'a> DatabaseRemovalView<'a> {
             };
             return Ok(self.remember(id, row));
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        self.database.record_work(|work| work.evaluated_rows += 1);
         let table = self.table(&id.table);
         let rules = &self.rules[&table.name];
         let mut values: AppValues =

@@ -101,7 +101,7 @@ impl DatabaseConnection {
                         Some(record) => crate::file_protection::replaced(&store, record)?,
                         None => BTreeSet::new(),
                     };
-                    let applied = crate::write_apply::WriteApply::new(
+                    let applied = crate::write_apply::WriteApply::local(
                     database,
                     schema,
                     &store,

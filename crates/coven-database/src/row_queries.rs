@@ -215,6 +215,40 @@ pub(crate) fn claimants(
     database.query("SELECT r.table_name,r.key,r.audience FROM _coven_claims c JOIN _coven_rows r ON r.id=c.row_id WHERE c.constraint_id=(SELECT id FROM _coven_constraints WHERE table_name=?1 AND identity=?2) AND c.audience=?3 AND c.value=?4", params![table,encoded(merge_fields::encode_unique_constraint(constraint))?,audience,value], read_identity)
 }
 
+/// Whether a row the removal rules took out claims a unique value of `table`
+/// in `audience`: the claims table holds those rows' claims and no others'.
+pub(crate) fn holds_claims(
+    database: &DatabaseConnection,
+    table: &str,
+    audience: &coven_merge::Audience,
+) -> Result<bool, DbError> {
+    database.query_row("SELECT EXISTS(SELECT 1 FROM _coven_constraints k JOIN _coven_claims c ON c.constraint_id=k.id WHERE k.table_name=?1 AND c.audience=?2)", params![table, audience], |r| r.get(0))
+}
+
+/// How many rows one `pointed_at` statement reads.
+const POINTED_CHUNK: usize = 500;
+
+/// Those of `rows` that a stored row names as a parent, whether or not the
+/// row itself is stored.
+pub(crate) fn pointed_at(
+    database: &DatabaseConnection,
+    rows: &BTreeSet<RowId>,
+) -> Result<BTreeSet<RowId>, DbError> {
+    let rows: Vec<&RowId> = rows.iter().collect();
+    let mut pointed = BTreeSet::new();
+    for chunk in rows.chunks(POINTED_CHUNK) {
+        let values = vec!["(?,?,?)"; chunk.len()].join(",");
+        pointed.extend(database.query(
+            &format!("WITH k(t,k,a) AS (VALUES {values}) SELECT DISTINCT k.t,k.k,k.a FROM k CROSS JOIN _coven_references v ON v.parent_table=k.t AND v.parent_key=k.k AND v.parent_audience=k.a"),
+            rusqlite::params_from_iter(chunk.iter().flat_map(|row| {
+                [&row.table as &dyn rusqlite::ToSql, &row.key, &row.audience]
+            })),
+            read_identity,
+        )?);
+    }
+    Ok(pointed)
+}
+
 pub(crate) fn read_identity(r: &rusqlite::Row<'_>) -> rusqlite::Result<RowId> {
     Ok(RowId { table: r.get(0)?, key: r.get(1)?, audience: audience(r, 2)? })
 }

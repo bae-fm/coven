@@ -163,6 +163,8 @@ pub(crate) fn scan_reason(
     Some("once per migration: drop a column, and SQLite then checks the cells' foreign key"),
 ("_coven_lost_column_deleted" | "_coven_lost_column_moved", "DELETE FROM _coven_columns WHERE id=?4 AND synced=0 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?4)", "_coven_cells") =>
     Some("only a dropped column's last frozen loss deletes a row, and SQLite then checks the cells' foreign key"),
+("row_queries.rs", "WITH k(t,k,a) AS (VALUES {values}) SELECT DISTINCT k.t,k.k,k.a FROM k CROSS JOIN _coven_references v ON v.parent_table=k.t AND v.parent_key=k.k AND v.parent_audience=k.a", "2" | "k") =>
+    Some("a write's inserted rows are the statement's own values"),
         _ => None,
     }
 }

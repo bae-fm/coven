@@ -773,7 +773,9 @@ async fn a_received_root_spelling_its_circle_another_way_is_refused() {
 }
 
 /// A row with unique values is staged once to evaluate its merged state;
-/// shown as that state, it holds the claims that evaluation read.
+/// shown as that state, it holds the claims that evaluation read. A local
+/// insert isn't evaluated, so the rows here are edited, each staged in its
+/// state before the edit and after it.
 #[tokio::test]
 async fn a_row_with_unique_values_is_evaluated_once() {
     let store = TestStore::new();
@@ -793,12 +795,18 @@ async fn a_row_with_unique_values_is_evaluated_once() {
     })
     .await
     .unwrap();
+    db.write(|sql| {
+        sql.execute("UPDATE tracks SET position=position+100", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     let staged = statements
         .iter()
         .filter(|s| s.sql.starts_with("INSERT INTO temp.\"_coven_eval_tracks\""))
         .count();
-    assert_eq!(staged, 20);
+    assert_eq!(staged, 40, "each row once before the edit and once after");
     assert_eq!(count(&db, "tracks"), 20);
     db.close().await.unwrap();
 }

@@ -585,6 +585,9 @@ mod source {
         if file == "merge_store.rs" && sql.contains("{values}") {
             return vec![sql.replace("{values}", "(?,?),(?,?)")];
         }
+        if file == "row_queries.rs" && sql.contains("{values}") {
+            return vec![sql.replace("{values}", "(?,?,?),(?,?,?)")];
+        }
         // A write's whole records while it is judged and applied: a received
         // write's staged in the slot, this device's migration write's kept.
         if matches!(file, "download_stage.rs" | "judge.rs") && sql.contains("{records}") {

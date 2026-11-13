@@ -2554,6 +2554,8 @@ away; the same key shows once (in two audiences, the store's row wins).
   out. E.g. tags have shared keys and unique labels, and tag b, a child of tag a,
   claimed the label "Plan" first: a loses it, and b goes with a. Adding a again
   with "Plan" loses the same way, and both stay out.
+  Coven evaluates such an insert because a row that is out holds its key or
+  claims its value (§9.3).
 - **Unique-value and two-audience losers** count their rule as holding from the
   step that judged it (below).
 - **The order the rules run in.** Every rule except unique values and keys in
@@ -2975,6 +2977,16 @@ row isn't staged. Skipping the staging, and staging the others once rather than
 three times, took a 500-row write from 65.0 µs a row to 57.2 µs. Putting rows
 back in order (§8.4) takes the unique values a row shows from that evaluation
 when the row shows its merged values, rather than staging it again.
+
+A row a local write inserts is usually not evaluated at all. SQLite checked its
+CHECKs, unique values and foreign keys as the statement ran, and the write's
+record holds the values that statement stored. Only a row the app can't see
+could still take it out, so coven evaluates the row only when one could: a row
+of any audience holds its key, a taken-out row of its table claims a unique
+value in its audience, a stored row points at it, or another row the write
+changes reaches it through a reference or a unique value. Ben's import inserts
+albums, releases and tracks under new keys: a write of an album, a release and
+three tracks evaluated five rows before this, and none after.
 
 #### 9.4 Triggers
 

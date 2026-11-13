@@ -28,6 +28,11 @@ pub(crate) struct WriteApply<'a> {
     /// their counted state first, as a write's rows do: a migration's new
     /// rules recompute them on this device alone, beside the queue.
     keeps_recomputed: bool,
+    /// Whether SQLite judged the rows the arriving record inserts as the
+    /// app's statements ran: a local write's, which the removal rules then
+    /// evaluate only where something the app can't see could take them out
+    /// (`inserted_rows`).
+    app_judged: bool,
 }
 
 impl<'a> WriteApply<'a> {
@@ -39,7 +44,29 @@ impl<'a> WriteApply<'a> {
         visible: &'a AppView<'a>,
         deleted: &'a BTreeMap<CircleId, crate::Slot>,
     ) -> Self {
-        Self { database, schema, store, before, visible, deleted, keeps_recomputed: false }
+        Self {
+            database,
+            schema,
+            store,
+            before,
+            visible,
+            deleted,
+            keeps_recomputed: false,
+            app_judged: false,
+        }
+    }
+
+    /// Apply a local write's record, whose inserted rows the app's own
+    /// statements gave to SQLite to judge.
+    pub(crate) fn local(
+        database: &'a DatabaseConnection,
+        schema: &'a WriteSchema,
+        store: &'a MergeStore<'a>,
+        before: &'a AppView<'a>,
+        visible: &'a AppView<'a>,
+        deleted: &'a BTreeMap<CircleId, crate::Slot>,
+    ) -> Self {
+        Self { app_judged: true, ..Self::new(database, schema, store, before, visible, deleted) }
     }
 
     /// Recompute as a migration's new rules do: the rows this reaches keep
@@ -74,7 +101,12 @@ impl<'a> WriteApply<'a> {
             Some(record) => self.store.apply(record)?,
             None => BTreeMap::new(),
         };
-        touched.extend(updates.keys().cloned());
+        let unjudged = if self.app_judged {
+            crate::inserted_rows::unjudged(self.database, self.store, &updates)?
+        } else {
+            BTreeSet::new()
+        };
+        touched.extend(updates.keys().filter(|row| !unjudged.contains(*row)).cloned());
         let empty = BTreeMap::new();
         let old = DatabaseRemovalView::new(
             self.database,
@@ -94,17 +126,21 @@ impl<'a> WriteApply<'a> {
             self.deleted,
             record.map(|r| r.header.position),
         )?;
-        let region =
-            self.finish(&old, &new, touched, record.map(|record| record.header.position), || {
-                match record {
-                    Some(record) => {
-                        crate::write_commit::commit(self.database, record, self.store, &updates)
-                    }
-                    None => Ok(BTreeMap::new()),
+        let region = self.finish(
+            &old,
+            &new,
+            touched,
+            &unjudged,
+            record.map(|record| record.header.position),
+            || match record {
+                Some(record) => {
+                    crate::write_commit::commit(self.database, record, self.store, &updates)
                 }
-            })?;
+                None => Ok(BTreeMap::new()),
+            },
+        )?;
         let mut affected: BTreeSet<_> =
-            region.into_iter().map(|row| (row.table, row.key)).collect();
+            region.into_iter().chain(unjudged).map(|row| (row.table, row.key)).collect();
         if let Some(record) = record {
             affected.extend(crate::dismissal::apply(self.database, record)?);
         }
@@ -128,7 +164,7 @@ impl<'a> WriteApply<'a> {
             self.deleted,
             None,
         )?;
-        self.finish(old, &new, touched, None, || Ok(BTreeMap::new()))
+        self.finish(old, &new, touched, &BTreeSet::new(), None, || Ok(BTreeMap::new()))
     }
 
     fn finish(
@@ -136,6 +172,7 @@ impl<'a> WriteApply<'a> {
         old: &DatabaseRemovalView<'_>,
         new: &DatabaseRemovalView<'_>,
         touched: BTreeSet<RowId>,
+        unjudged: &BTreeSet<RowId>,
         write: Option<coven_merge::WriteId>,
         persist: impl FnOnce()
             -> Result<BTreeMap<RowId, crate::write_commit::StoredGeneration>, DbError>,
@@ -154,7 +191,11 @@ impl<'a> WriteApply<'a> {
         // slot or a snapshot changes the counted state itself, beside the
         // kept rows it put back.
         if write.is_some() || (self.keeps_recomputed && crate::published::exists(self.database)?) {
-            crate::published::capture_rows(self.database, self.store, &removal.region)?;
+            crate::published::capture_rows(
+                self.database,
+                self.store,
+                removal.region.iter().chain(unjudged),
+            )?;
         }
         let stored = persist()?;
         crate::removal::materialize(
