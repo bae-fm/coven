@@ -359,3 +359,81 @@ async fn a_floor_whose_store_snapshot_is_below_the_version_is_rebuilt() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// The same, for an installation that is the newer app from its first open and
+/// joins the store: nothing of its own raises the store, so the rebuild does
+/// (§18.3).
+#[tokio::test]
+async fn a_fresh_install_loading_a_floor_below_the_version_rebuilds_and_raises_the_store() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    // Cy's app is the newer one from the start, and he joins: his
+    // installation loads its store and makes no migration write of its own.
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    group.joining.store(true, std::sync::atomic::Ordering::SeqCst);
+    let cy = group.device(2).await;
+    group.joining.store(false, std::sync::atomic::Ordering::SeqCst);
+    group.create(&ana).await;
+    group.admit(&ana, &cy).await;
+    let applied = cy.database().applied_slot().await.unwrap();
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a1", "before").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a2", "after").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    group.clock.set(floor_clock());
+    {
+        let mut session = ana.sync.session.lock().await;
+        let mut ring = ana.sync.ring(&mut session, &ana.identity).await.unwrap();
+        ana.sync.retain_sequence(&mut session, &mut ring, &ana.identity).await.unwrap();
+    }
+    let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
+    assert!(floor.header.first.get() > applied + 1);
+
+    cy.sync.pass().await.unwrap();
+    assert!(cy.database().rebuilds_waiting().await.unwrap().contains_key(&Audience::Store));
+    for _ in 0..6 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    let state = cy.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 2);
+    assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
+    assert_eq!(rows(cy.database()).await, rows(ana.database()).await);
+    for device in [&ana, &cy] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana, on the old app, resets the store; Cy's app, which has gone past it,
+/// can't hold the reset's body at the old version. He rebuilds the store from
+/// it, migrates it and raises it (§18.3).
+#[tokio::test]
+async fn a_store_reset_below_the_version_is_rebuilt() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let cy = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &cy).await;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let cy = group.reopen(cy).await;
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a1", "before").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.reset(Audience::Store).await.unwrap();
+    cy.sync.pass().await.unwrap();
+    assert!(cy.database().rebuilds_waiting().await.unwrap().contains_key(&Audience::Store));
+    for _ in 0..6 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    let state = cy.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 2);
+    assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
+    assert_eq!(rows(cy.database()).await, rows(ana.database()).await);
+    for device in [&ana, &cy] {
+        device.sync.database.close().await.unwrap();
+    }
+}

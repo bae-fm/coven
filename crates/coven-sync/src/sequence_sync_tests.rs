@@ -64,6 +64,7 @@ pub(crate) struct Group {
     /// Whether the app also syncs `deeds`, a table whose rows only their
     /// creating member may change (§9.6).
     pub(crate) owned: std::sync::atomic::AtomicBool,
+    pub(crate) joining: std::sync::atomic::AtomicBool,
     pub(crate) custody: Custody,
     /// The app's bug sink, shared by every device of the group, which a
     /// test that expects a bug takes it from.
@@ -97,6 +98,7 @@ impl Group {
             version: 1.into(),
             raises: false.into(),
             owned: false.into(),
+            joining: false.into(),
             custody: Custody::Memory,
             bugs: coven_foundation::task::HeardBugs::shared(),
         }
@@ -208,6 +210,9 @@ impl Group {
         let mut database = DatabaseBuilder::new(directory.clone());
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
+        }
+        if self.joining.load(std::sync::atomic::Ordering::SeqCst) {
+            database = database.loading_store();
         }
         let owned = self.owned.load(std::sync::atomic::Ordering::SeqCst);
         let tables = move || {
@@ -486,25 +491,23 @@ pub(crate) async fn pin(
     .await
     .unwrap();
 }
-pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
-    db.read(|sql| {
-        Ok::<_, DbError>(sql.query("SELECT id,title FROM pins ORDER BY id", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?)
+async fn titles(db: &Database, table: &'static str) -> Vec<(String, String)> {
+    db.read(move |sql| {
+        Ok::<_, DbError>(sql.query(
+            &format!("SELECT id,title FROM {table} ORDER BY id"),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
     })
     .await
     .unwrap()
+}
+pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
+    titles(db, "pins").await
 }
 pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
-    db.read(|sql| {
-        Ok::<_, DbError>(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?)
-    })
-    .await
-    .unwrap()
+    titles(db, "notes").await
 }
-
 pub(crate) async fn assert_idle_work(device: &Device) {
     let requests = device.storage.request_count();
     let received: usize = device.storage.received_buffers().await.iter().sum();
