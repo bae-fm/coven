@@ -4,7 +4,6 @@
 //! the provider for good.
 
 use crate::{files::file_failure::upload_subject, files::FilesInner, PendingRecord, SyncError};
-use coven_foundation::locks::read_unpoisoned;
 use coven_storage::UploadSession;
 
 impl FilesInner {
@@ -19,7 +18,7 @@ impl FilesInner {
         if !self.waits.started() {
             return Ok(());
         }
-        let Some(storage) = read_unpoisoned(&self.storage).clone() else {
+        let Ok(storage) = super::file_storage::connected(self.storage_state()) else {
             return Ok(());
         };
         let in_flight = self.database.uploads_in_flight().current();

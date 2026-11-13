@@ -55,9 +55,9 @@ mod sequence_state;
 mod sync_often;
 mod sync_status;
 pub use files::{
-    DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,
-    FileStream, Files, FilesMode, PinProgress, QueuedUpload, ReadProgress, TransferLimits,
-    UploadPhase, UploadProgress, UploadQueue, UploadSettings,
+    ConnectionComing, DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream,
+    FileReadError, FileStatus, FileStream, Files, FilesMode, PinProgress, QueuedUpload,
+    ReadProgress, TransferLimits, UploadPhase, UploadProgress, UploadQueue, UploadSettings,
 };
 pub use retry_waits::{
     NetworkOwner, PassRequests, RetryAnswer, RetryEffect, RetryOutcome, RetryWaits,

@@ -12,7 +12,6 @@ use crate::{
 use coven_database::{DbError, FileLocation, FilePlace, FileRef};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
-use coven_foundation::locks::read_unpoisoned;
 use coven_storage::StoredObject;
 
 /// A file's current availability (E8).
@@ -98,8 +97,7 @@ impl Files {
             }
             FilePlace::Cloud { location, .. } => location,
         };
-        let storage =
-            read_unpoisoned(&self.inner.storage).clone().ok_or(FileReadError::NoStorage)?;
+        let storage = super::file_storage::connected(self.inner.settled().await?)?;
         let path = location.path(self.inner.directory.id());
         let remote = match storage.status(&path).await? {
             Some(object) => complete(&file, &object).map(|()| true),

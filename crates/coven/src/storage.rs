@@ -781,6 +781,9 @@ impl StorageConnections {
     }
 }
 
+#[path = "storage_attempt.rs"]
+mod attempt;
+
 #[path = "storage_control.rs"]
 mod control;
 

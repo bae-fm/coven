@@ -5,13 +5,12 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use super::file_error::{FileReadError, TransferError};
-use super::FilesMode;
+use super::{FilesMode, StorageState};
 use crate::{
     files::FilesInner, FileMissingReason, FileSourceFailure, LocalFailure, PendingReason,
     PendingRecord, PendingSubject, Prerequisite,
 };
 use coven_database::{FileLocation, FilePlace, FileRef};
-use coven_foundation::locks::read_unpoisoned;
 use coven_storage::StorageFailure;
 use std::error::Error;
 
@@ -179,13 +178,15 @@ impl<M: FilesMode> FilesInner<M> {
                 if error.failure() == StorageFailure::CatchUpRequired {
                     return PendingReason::Waits(Prerequisite::SequenceCatchUp);
                 }
-                match read_unpoisoned(&self.storage).as_ref() {
-                    Some(storage) => PendingReason::Storage {
+                match self.storage_state() {
+                    StorageState::Connected(storage) => PendingReason::Storage {
                         provider: storage.config().provider(),
                         failure: error.failure(),
                         answered: error.answered(),
                     },
-                    None => PendingReason::NoStorage,
+                    StorageState::Connecting | StorageState::Released | StorageState::Closed => {
+                        PendingReason::NoStorage
+                    }
                 }
             }
             (_, FileReadError::UserFileMissing { .. }) => PendingReason::FileUnavailable(

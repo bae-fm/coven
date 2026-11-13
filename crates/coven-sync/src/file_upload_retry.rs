@@ -3,9 +3,11 @@
 //! delay; sign-in and access failures wait for a new connection. A catch-up
 //! wait is woken by the sequence state; a provider cooldown holds the whole queue.
 
-use crate::{files::FilesInner, PendingReason, PendingRecord, Retry};
+use crate::{
+    files::{FilesInner, StorageState},
+    PendingReason, PendingRecord, Retry,
+};
 use coven_database::{FileUpload, RetrySubject};
-use coven_foundation::locks::read_unpoisoned;
 use std::collections::BTreeSet;
 
 impl FilesInner {
@@ -29,7 +31,8 @@ impl FilesInner {
         &self,
         bound: &BTreeSet<i64>,
     ) -> Option<crate::retry_waits::Wake> {
-        let connected = read_unpoisoned(&self.storage).is_some() && self.send.files_allowed();
+        let connected =
+            matches!(self.storage_state(), StorageState::Connected(_)) && self.send.files_allowed();
         let held = self.trailing_held();
         // A pin coven keeps waits for its own retry, uploads held or not.
         let wake = self.waits.next_wake(|subject| match subject {

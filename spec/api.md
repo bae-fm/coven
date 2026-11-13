@@ -6735,6 +6735,8 @@ impl CovenHandle {
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
 
     /// Reads a whole file. A stored file is checked against its content hash.
+    /// Bytes not cached wait for a storage connection that is coming, and
+    /// fail with `NoStorage` when none is (§17.7).
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
 
     /// Opens a file for reading ranges (§17.7), as its record stands when it
@@ -7111,7 +7113,10 @@ impl<M: FilesMode> FileRangeStream<'_, M> {
 pub enum FileReadError {
     /// This file uses a newer coven format (Appendix C.2).
     UpdateRequired(RequiredUpdate),
-    /// Remote status or uncached bytes were requested with no storage connected.
+    /// Remote status or uncached bytes were requested with no storage connected
+    /// and none coming: sync is stopped or no storage is set up (§17.7). A
+    /// request made while a connection attempt runs waits for it instead; the
+    /// store closing ends the wait with `DbError::StoreClosed`.
     NoStorage,
     /// Storage confirms nothing at the path the file's record names: the
     /// provider lost it (§17.6). Its pending reason is `FileUnavailable(Lost)`.

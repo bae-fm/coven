@@ -16,6 +16,8 @@ mod file_keep;
 mod file_read;
 #[path = "file_status.rs"]
 mod file_status;
+#[path = "file_storage.rs"]
+mod file_storage;
 #[path = "file_upload.rs"]
 mod file_upload;
 #[path = "file_upload_abandoned.rs"]
@@ -35,13 +37,15 @@ mod file_upload_settings;
 use crate::SyncError;
 pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase, Mode, ReadOnly, Writer};
-use coven_foundation::locks::{lock_unpoisoned, write_unpoisoned};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 pub use file_device_only::{DeviceOnlyError, DeviceOnlyStep};
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream, ReadProgress};
 pub use file_status::FileStatus;
+pub use file_storage::ConnectionComing;
+pub(crate) use file_storage::StorageState;
 pub(crate) use file_upload_connections::SpareConnection;
 pub use file_upload_pool::DrainOutcome;
 pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};
@@ -95,7 +99,10 @@ type FileReadLocks = BTreeMap<
 struct FilesInner<M: FilesMode = Writer> {
     database: FileDatabase<M>,
     directory: StoreDir,
-    storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
+    /// Whether storage is connected, and if not why: the one place it is
+    /// kept, written by the connection's owner through `set_storage` and
+    /// `expect_connection`, and by `close`. Readers wait on it.
+    storage: watch::Sender<file_storage::StorageSlot>,
     send: Arc<crate::SequenceState>,
     waits: Arc<crate::RetryWaits>,
     /// Failures observed on this connection that require a new connection.
@@ -214,7 +221,7 @@ impl<M: FilesMode> FilesInner<M> {
         Self {
             database,
             directory,
-            storage: std::sync::RwLock::new(storage),
+            storage: watch::channel(file_storage::StorageSlot::opened(storage)).0,
             send,
             waits,
             connection_waits: Mutex::new(BTreeSet::new()),
@@ -263,7 +270,7 @@ impl<M: FilesMode> Files<M> {
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
         lock_unpoisoned(&self.inner.app_retries).clear();
-        write_unpoisoned(&self.inner.storage).take();
+        self.inner.storage.send_modify(|slot| slot.close());
     }
 }
 impl Files {
@@ -421,7 +428,7 @@ impl Files {
         let _cache = self.inner.cache.write().await;
         self.inner.check_open()?;
         ready.await?;
-        *write_unpoisoned(&self.inner.storage) = storage;
+        self.inner.storage.send_modify(|slot| slot.connect(storage));
         lock_unpoisoned(&self.inner.connection_waits).clear();
         Ok(())
     }
@@ -574,6 +581,8 @@ impl<M: FilesMode> FilesInner<M> {
         !lock_unpoisoned(&self.connection_waits).contains(&subject)
     }
 
+    /// The subject's failure needs a new connection: it is due again when
+    /// the connection changes.
     fn wait_for_connection(&self, subject: coven_database::RetrySubject) {
         lock_unpoisoned(&self.connection_waits).insert(subject);
     }

@@ -1,6 +1,6 @@
 //! Authenticated, bounded ranged reads with cached ciphertext and read-ahead.
 
-use super::FilesMode;
+use super::{FilesMode, StorageState};
 use crate::{
     files::file_failure::stored,
     files::file_status::Uploading,
@@ -19,7 +19,6 @@ use coven_format::{
 };
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileName, StoreReadLock};
-use coven_foundation::locks::read_unpoisoned;
 use coven_storage::{ByteProgress, ByteRange, ObjectPath};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -164,7 +163,7 @@ impl<M: FilesMode> Files<M> {
         if let FilePlace::DeviceOnly { device } = file.place() {
             return Err(self.inner.unreadable(&file, device).await);
         }
-        let opened = match UploadedFile::open(self.inner.clone(), file.clone()).await {
+        let opened = match UploadedFile::open(self.inner.clone(), file.clone(), true).await {
             Ok(opened) => opened,
             Err(error) => return self.inner.complete_read(&file, Err(error.into()), false).await,
         };
@@ -350,7 +349,7 @@ impl FilesInner {
         if file.size() == 0 && self.downloads_held() {
             return Ok(None);
         }
-        UploadedFile::open(self.clone(), file).await?.keep_whole().await
+        UploadedFile::open(self.clone(), file, false).await?.keep_whole().await
     }
 }
 impl<M: FilesMode> UploadedFile<M> {
@@ -358,10 +357,13 @@ impl<M: FilesMode> UploadedFile<M> {
     /// Otherwise the first fetch checks the header: one starting at chunk
     /// zero carries it in the same request, and any other first fetch reads
     /// it alone (§17.7). An empty file's header is the whole object, so it
-    /// is checked here.
+    /// is checked here, waiting for a connection that is coming when
+    /// `wait_for_connection`, which a pin's download, holding the pins' lock,
+    /// leaves off.
     pub(crate) async fn open(
         owner: Arc<FilesInner<M>>,
         file: FileRef,
+        wait_for_connection: bool,
     ) -> Result<Self, FileReadError> {
         let (location, hash) = stored(&file)?;
         let location = location.clone();
@@ -389,14 +391,30 @@ impl<M: FilesMode> UploadedFile<M> {
             _lock: lock,
         };
         if opened.header.chunk_count() == 0 {
-            let _file = opened.owner.lock_file(&opened.file, &opened.location).await;
-            let _guard = opened.owner.cache.read().await;
-            let cached = opened.cached_header().await?;
-            if cached != CachedHeader::Checked {
-                opened.fetch_header(cached).await?;
-            }
+            opened.open_header(wait_for_connection).await?;
         }
         Ok(opened)
+    }
+    /// Check an empty file's header, fetching it when the cache lacks it. A
+    /// fetch while a connection is coming waits for it holding none of the
+    /// cache's locks.
+    async fn open_header(&self, wait_for_connection: bool) -> Result<(), FileReadError> {
+        loop {
+            {
+                let _file = self.owner.lock_file(&self.file, &self.location).await;
+                let _guard = self.owner.cache.read().await;
+                let cached = self.cached_header().await?;
+                if cached == CachedHeader::Checked {
+                    return Ok(());
+                }
+                if !(wait_for_connection
+                    && matches!(self.owner.storage_state(), StorageState::Connecting))
+                {
+                    return self.fetch_header(cached).await;
+                }
+            }
+            self.owner.settled().await?;
+        }
     }
     /// Check the header cached for this file, if one is.
     async fn cached_header(&self) -> Result<CachedHeader, FileReadError> {
@@ -543,15 +561,33 @@ impl<M: FilesMode> UploadedFile<M> {
     // Reads of one file coalesce; independent files can fetch concurrently,
     // and so can a pin's ranges of one file, which put nothing in the cache.
     // The shared cache guard excludes eviction and store close during a fetch.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a chunk the file size's layout lacks is the disagreement Integrity names"
-    )]
     async fn chunks(
         &self,
         first: u64,
         last: u64,
         destination: ChunkDestination<'_>,
+    ) -> Result<ChunkStep, FileReadError> {
+        loop {
+            match self.chunks_once(first, last, &destination).await? {
+                ChunkStep::Connecting => {
+                    // The read needs storage and a connection is coming:
+                    // wait for it holding none of the cache's locks, then
+                    // read again, as the cache may serve it by then.
+                    self.owner.settled().await?;
+                }
+                step => return Ok(step),
+            }
+        }
+    }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a chunk the file size's layout lacks is the disagreement Integrity names"
+    )]
+    async fn chunks_once(
+        &self,
+        first: u64,
+        last: u64,
+        destination: &ChunkDestination<'_>,
     ) -> Result<ChunkStep, FileReadError> {
         self.owner.check_open()?;
         let file_lock = self.owner.lock_file(&self.file, &self.location).await;
@@ -573,6 +609,16 @@ impl<M: FilesMode> UploadedFile<M> {
         {
             return Ok(ChunkStep::Held);
         }
+        // Only a fetch needs storage: a read the cache serves goes on, and
+        // one that must fetch waits while a connection is coming. A pin's
+        // download holds the pins' lock and fails instead: its failure waits
+        // for a new connection.
+        if matches!(destination, ChunkDestination::Cache(_))
+            && !(matches!(cached, Some(Ok(_))) && header == CachedHeader::Checked)
+            && matches!(self.owner.storage_state(), StorageState::Connecting)
+        {
+            return Ok(ChunkStep::Connecting);
+        }
         // An unchecked header comes with an uncached chunk zero; any other
         // first read checks it alone (§17.7).
         let mut with_header = false;
@@ -584,10 +630,7 @@ impl<M: FilesMode> UploadedFile<M> {
         match cached {
             Some(Ok(chunk)) => return Ok(ChunkStep::Read(first, vec![chunk])),
             Some(Err(_)) => {
-                return Ok(ChunkStep::Read(
-                    first,
-                    vec![self.write_back(first, &destination).await?],
-                ))
+                return Ok(ChunkStep::Read(first, vec![self.write_back(first, destination).await?]))
             }
             None => {}
         }
@@ -616,7 +659,7 @@ impl<M: FilesMode> UploadedFile<M> {
             end_index += 1;
             end = next_end;
         }
-        let received = self.received(&destination, first, end_index, start)?;
+        let received = self.received(destination, first, end_index, start)?;
         let request_start = if with_header { 0 } else { start };
         // A pin's fetch puts nothing in the cache, so its file's other reads
         // need not wait for it: the lock covered reading the cache and
@@ -800,6 +843,10 @@ enum ChunkStep {
     Read(u64, Vec<OpenedChunk>),
     /// A pin's download needs storage, and a metered network holds it.
     Held,
+    /// A read needs storage and a connection is coming: it waits for the
+    /// connection outside the cache's lock, which the connection's change
+    /// takes, and goes again.
+    Connecting,
 }
 
 async fn cache<M: FilesMode>(
@@ -828,8 +875,7 @@ impl<M: FilesMode> UploadedFile<M> {
         end: u64,
         received: &ByteProgress,
     ) -> Result<Vec<u8>, FileReadError> {
-        let storage =
-            read_unpoisoned(&self.owner.storage).clone().ok_or(FileReadError::NoStorage)?;
+        let storage = super::file_storage::connected(self.owner.storage_state())?;
         let size = self.header.encrypted_size().map_err(|_| self.integrity())?;
         let parts = self
             .parts

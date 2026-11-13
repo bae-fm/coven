@@ -390,12 +390,23 @@ fn builder(app: &Coven, clock: ClockRef, storage: Arc<dyn StorageConnector>) -> 
     app.builder()
         .clock(clock)
         .storage_connector(storage)
-        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::addition(
-            1,
-            "notes",
-            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
-        )])
+        .synced_tables(vec![
+            SyncedTable::new("notes", RowIdentity::SharedKey),
+            SyncedTable::new("covers", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
+        ])
+        .namespaces(vec![Namespace::new("covers", Provenance::AppProvided, 1 << 30)])
+        .migrations(vec![
+            Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
+            ),
+            Migration::addition(
+                2,
+                "covers",
+                "CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+            ),
+        ])
 }
 
 /// Wait for a pass that ended synced at `at` or later, by the store's
@@ -975,3 +986,6 @@ mod s3_setup;
 
 #[path = "storage_control_tests.rs"]
 mod control;
+
+#[path = "storage_attempt_tests.rs"]
+mod attempt;

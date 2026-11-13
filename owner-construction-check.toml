@@ -539,6 +539,10 @@ NetworkView = "NetworkWatch"
 SyncingWatch = "RetryWaits"
 # The answer to an app's early retry of its uploads (§17.9).
 UploadRetryAnswer = "FilesInner"
+# What the file layer's storage is now, which readers match on, and the
+# mark of a running connection attempt that keeps them waiting (§17.7).
+StorageState = "StorageSlot"
+ConnectionComing = "Files"
 # One observation of the store's commits, shared by the observer that
 # tells it of each and what it watches for (§4).
 CommitSubscription = "CommitObserver"
@@ -1521,6 +1525,8 @@ tables = [
 # Creates a reserved cache file for a pin or an upload's own copy.
 "crates/coven-sync/src/file_cache.rs" = ["FilesInner::create_cache_file"]
 "crates/coven-sync/src/files.rs" = ["Files::new", "Files::read_only", "FilesInner::new"]
+# The file layer's storage facts, composed with its file owner.
+"crates/coven-sync/src/file_storage.rs" = ["StorageSlot::opened"]
 # The writer's copies of the upload settings, composed with its file owner.
 "crates/coven-sync/src/file_upload_settings.rs" = ["UploadSettings::new"]
 # Made once with the writer's upload settings: the connections its upload
@@ -1742,6 +1748,8 @@ tables = [
     "StorageConnections::start_locked",
     "StorageConnections::stop",
 ]
+# Each attempt is its own task, marked on the file layer while it lives.
+"crates/coven/src/storage_attempt.rs" = ["StorageConnections::start_attempt"]
 "crates/coven/src/test_utils.rs" = [
     # An installation for a test, with an in-memory keychain and a network the
     # test drives.

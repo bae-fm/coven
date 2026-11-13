@@ -7,11 +7,11 @@
 //! An app's early retry joins the run in progress.
 
 use crate::{
-    files::file_failure::upload_subject, files::FilesInner, files::TrailingHold,
-    retry_waits::Ending, NetworkOwner, PendingRecord, Retry, SyncError,
+    files::file_failure::upload_subject, files::FilesInner, files::StorageState,
+    files::TrailingHold, retry_waits::Ending, NetworkOwner, PendingRecord, Retry, SyncError,
 };
 use coven_database::{DbError, FileUpload, RetrySubject};
-use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::StorageFailure;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use std::{
@@ -340,7 +340,7 @@ impl FilesInner {
             Some(Blocked::Closed)
         } else if !self.waits.started() {
             Some(Blocked::NotSyncing)
-        } else if read_unpoisoned(&self.storage).is_none() {
+        } else if !matches!(self.storage_state(), StorageState::Connected(_)) {
             Some(Blocked::NoStorage)
         } else if self.changing.load(Ordering::Acquire) > 0 {
             Some(Blocked::Changing)

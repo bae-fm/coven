@@ -51,23 +51,7 @@ impl StorageConnections {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         // The attempt is the start of the first pass: retries wait for it.
         self.waits.sync_started().await?;
-        let owner = self.clone();
-        let ending = self.clone();
-        let parks = coven_sync::Parks::new();
-        #[cfg(test)]
-        let attempt_parks = parks.clone();
-        let task = crate::task::spawn_owned(
-            "connect to storage",
-            self.database.bugs().clone(),
-            async move { owner.connect_started(epoch, parks).await },
-            |bug| async move { ending.attempt_panicked(bug).await },
-        );
-        *lock_unpoisoned(&self.attempts) = Some(ConnectionAttempt {
-            epoch,
-            task,
-            #[cfg(test)]
-            parks: attempt_parks,
-        });
+        self.start_attempt(epoch);
         Ok(())
     }
 
@@ -75,7 +59,7 @@ impl StorageConnections {
     /// store's bug sink: the last pass is recorded failed with it, sync
     /// stops, and the retries waiting, those the attempt took among them,
     /// are answered with it as `SyncError::WorkerFailed` (E15).
-    async fn attempt_panicked(&self, bug: crate::task::Bug) {
+    pub(super) async fn attempt_panicked(&self, bug: crate::task::Bug) {
         #[expect(
             clippy::let_underscore_must_use,
             reason = "the attempt has ended either way; a bug has gone to the sink, and any other failed write has failed the handle, which reports it"
@@ -93,7 +77,7 @@ impl StorageConnections {
     /// backoff until it connects or stopping is requested. Each attempt is
     /// the start of a pass: a failed one answers the retries it took, and a
     /// connected one leaves them to the loop's first pass (IO `RetryAnswer`).
-    async fn connect_started(self: Arc<Self>, epoch: u64, parks: coven_sync::Parks) {
+    pub(super) async fn connect_started(self: Arc<Self>, epoch: u64, parks: coven_sync::Parks) {
         let _running = parks.running();
         let superseded = || self.epoch.load(Ordering::SeqCst) != epoch;
         let mut rearmed = self.waits.rearmed();
@@ -376,6 +360,7 @@ impl StorageConnections {
 
     /// Finish the connection's work, then release custody owners.
     pub(crate) async fn close(&self) -> Result<(), SyncError> {
+        self.files.closing();
         self.epoch.fetch_add(1, Ordering::SeqCst);
         let stopped = self.waits.sync_stopped().await;
         self.stopped.notify_waiters();

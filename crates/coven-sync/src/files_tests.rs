@@ -631,6 +631,8 @@ mod read;
 mod read_parts;
 #[path = "file_status_tests.rs"]
 mod status;
+#[path = "file_storage_tests.rs"]
+mod storage_states;
 #[path = "file_upload_connections_tests.rs"]
 mod upload_connections;
 #[path = "file_upload_pool_tests.rs"]

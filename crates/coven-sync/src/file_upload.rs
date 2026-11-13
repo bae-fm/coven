@@ -9,7 +9,6 @@ use coven_database::FileLocationKey;
 use coven_database::TransferMeter;
 use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::file::{FileHeader, FILE_HEADER_LEN};
-use coven_foundation::locks::read_unpoisoned;
 use coven_storage::{ObjectPath, UploadSession};
 
 /// How an upload attempt ended.
@@ -85,7 +84,7 @@ impl FilesInner {
         let coven_format::file_reference::FileReference { key, .. } =
             item.location.reference().map_err(FileReadError::from)?;
         let path = item.location.path(self.directory.id());
-        let storage = read_unpoisoned(&self.storage).clone().ok_or(FileReadError::NoStorage)?;
+        let storage = super::file_storage::connected(self.storage_state())?;
         // The queue fixed this source at staging; the rows naming its files
         // may have changed since without affecting it (§17.9).
         let source =

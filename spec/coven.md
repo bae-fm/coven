@@ -8035,8 +8035,9 @@ path's metadata in storage ([api.md E8](api.md#e8-files-and-the-cache)):
 | **missing, source failed** | the file is on this device only, uploading, and its source failed: its original is missing, as its move's record says, or coven's copy fails its check (§17.3, §17.9). A changed original fails the move, and the file is then device-only |
 | **device-only** | the file is on one device only, with no upload: another device, and this one can't read it, or this one, which reads it from its bytes here |
 
-- A network or permission failure is an error, never proof of absence. With no
-  storage set up, the call returns `NoStorage`, except for a file on one device
+- A network or permission failure is an error, never proof of absence. While a
+  connection is coming, the call waits for it (§17.7); with sync stopped or no
+  storage set up, it returns `NoStorage`, except for a file on one device
   only, whose status needs no storage.
 - Nothing deletes stored bytes a record names (§17.10), so a missing file was
   lost by storage. Nothing will bring it back on its own: the app can stage it
@@ -8125,6 +8126,29 @@ seeking within it are reads of different ranges.
 - **Offline,** reading a range whose chunks aren't cached returns the storage
   network failure and its native cause, for the app to show or log. Pinning a file
   ahead of time (§17.8) is how it becomes available offline.
+- **While storage connects,** a read that needs storage waits for the
+  connection instead of failing. The file layer's storage is in one of four
+  states, and every reader follows one rule for each:
+
+  | State | When | A read that needs storage |
+  |---|---|---|
+  | **connected** | storage is connected | goes ahead |
+  | **connecting** | a connection attempt is running or backing off (§6.7) | waits for the state to change, then follows the rule for the state it changed to |
+  | **released** | sync is stopped, or no storage is set up: nothing connects until the app starts sync or sets storage up | fails at once with `NoStorage` |
+  | **closed** | the store has closed | fails with `StoreClosed` |
+
+  A read the cache or this device's copy serves never waits. A read that waits
+  holds no lock a connection change takes, and a caller that stops waiting
+  drops it, leaving nothing behind. Closing the store ends a waiting read with
+  `StoreClosed`. An attempt that ends without a connection (sync stops, or the
+  attempt gives up) leaves the state released,
+  and the waiting read fails with `NoStorage`; one that keeps backing off keeps
+  the read waiting. Ben's phone opens with no network: the attempt backs off,
+  and the covers on screen wait, showing their plain tile, then load as it
+  connects. Status (§17.6) waits and fails the same way. Uploads and pins
+  don't wait inside an attempt, which would hold the locks a connection change
+  takes: they fail with `NoStorage`, and their failure waits for the next
+  connection (§17.9).
 
 **No key yet.** A file key travels inside its record. If the audience key needed
 to read that record hasn't arrived, the write or snapshot holding it waits with
@@ -8164,7 +8188,7 @@ again.
 
 | Condition | Pending reason | What happens next |
 |---|---|---|
-| no storage connected | `NoStorage` | |
+| no storage connected and none coming: sync stopped, or none set up | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
 | the file is on this device only and uploading, and its source fails the read's check | the upload's record (§17.9) | the upload retries, or its move fails (§17.9) |
@@ -13937,7 +13961,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 |---|---|---|
 | sync state | not synced, syncing, waiting to sync, synced, offline, offline with unsent changes, signed out, no access to storage, storage full, storage folder missing, update needed, removed, device needs reset, clock wrong, or failed; the first of them by the order below when several hold | §19.1 |
 | `LastPass` | how the last pass ended: synced, offline, blocked at a slot with a reason, or failed | §6.4, F.5 |
-| `NoStorage` | no storage is connected | §17.6, §17.7 |
+| `NoStorage` | no storage is connected and none is coming: sync is stopped or none is set up; a read or status call waits while a connection is coming | §17.6, §17.7 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.7 |
 | `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.6, §17.7, §17.9 |
 | `DeviceOnly` | a file is on one device only, with no upload: its status, and, on any other device, the error reads, downloads and pins return | §17.3, §17.6, §17.8 |
