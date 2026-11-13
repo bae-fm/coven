@@ -1,8 +1,8 @@
 # Sourced by pre-commit and scripts/check-fast.sh. Bash 3.2 compatible.
 #
 # The pre-commit hook's mode: "strict" runs every step; "quick" runs the cheap
-# steps and compiles the changed crates instead of running clippy, rustdoc and
-# the mobile checks. The mode is one machine-wide setting, `builds mode`
+# steps and runs clippy over the changed crates and their dependents instead of
+# the whole workspace. The mode is one machine-wide setting, `builds mode`
 # (quick or strict; strict when unset, unreadable or without `builds`);
 # HOOK_MODE overrides it, for testing the switch. Any other value fails, so a
 # misspelled mode never silently runs as one of the two.

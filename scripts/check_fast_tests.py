@@ -66,9 +66,9 @@ class FastChecks(unittest.TestCase):
                     ]
                 self.assertEqual(commands, expected)
 
-    def test_quick_mode_checks_instead_of_linting_and_a_bad_mode_fails(self):
+    def test_quick_mode_lints_what_the_landing_lints_and_a_bad_mode_fails(self):
         for mode, expected_status, expected_tail in (
-            ("quick", 0, ["check -p coven-storage --all-targets --all-features"]),
+            ("quick", 0, ["clippy -p coven-storage --all-targets --all-features -- -D warnings"]),
             ("fast", 1, None),
         ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
@@ -96,12 +96,11 @@ class FastChecks(unittest.TestCase):
                 else:
                     commands = calls.read_text().splitlines()
                     self.assertEqual(commands[-1:], expected_tail)
-                    self.assertFalse([c for c in commands if c.startswith("clippy")])
                     self.assertNotIn("check -p coven-storage", commands)
 
     def test_machine_wide_mode_comes_from_builds_and_defaults_to_strict(self):
         for builds_body, expected_first in (
-            ("echo quick", "check -p coven-storage --all-targets --all-features"),
+            ("echo quick", "clippy -p coven-storage --all-targets --all-features -- -D warnings"),
             ("echo strict", "clippy -p coven-storage --all-targets --all-features -- -D warnings"),
             ("exit 1", "clippy -p coven-storage --all-targets --all-features -- -D warnings"),
         ):

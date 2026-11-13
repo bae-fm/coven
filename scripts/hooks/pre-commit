@@ -28,8 +28,8 @@ run_check() {
 source "$(dirname "$0")/restage-formatted.sh"
 source "$(dirname "$0")/hook-mode.sh"
 
-# Quick mode (`builds mode`, or HOOK_MODE) replaces clippy with a cargo check;
-# see scripts/hooks/hook-mode.sh and scripts/check-fast.sh.
+# Quick mode (`builds mode`, or HOOK_MODE) lints only the packages the staged
+# files can break instead of the workspace; see scripts/hooks/hook-mode.sh and scripts/check-fast.sh.
 MODE=$(hook_mode) || exit 1
 echo "Pre-commit hook mode: $MODE"
 
