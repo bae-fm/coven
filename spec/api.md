@@ -8749,8 +8749,12 @@ pub async fn restore_from_saved_code(
 /// than the one the invite shared the folder with (`InviteInfo::shared_with`)
 /// fails the call with `BootstrapError::WrongAccount`, keeping nothing of it
 /// and leaving the join listed. Returns `None` when the request is declined,
-/// the invite expires, or the invited account's first acceptance of the share
-/// is refused, including when it expired before the request was
+/// the invite expires, or the join's access to the shared location is gone
+/// before it finds its admission (a permission refusal or a missing location
+/// at the acceptance, the request's creation or resend, or any read of the
+/// request, the inviting device's marker or the slots; on S3 also a refused
+/// key), the invited account's first acceptance of the share being refused
+/// among them, including when it expired before the request was
 /// sent, which then isn't. Dropping the call keeps the unfinished join for
 /// `resume_join`. Cancelling through `control` before the request may have
 /// been sent unmounts a Dropbox folder the join may have mounted, then
@@ -8860,8 +8864,9 @@ impl CovenBuilder {
     /// the kept one staying). With neither, or a
     /// kept one the provider refuses even after its one refresh, it fails with
     /// `OAuthError::Reauthorize` and the join stays unfinished. Returns `None`
-    /// when the request was declined or the invite expired, after deleting the
-    /// kept sign-in and the saved code. A store with no saved code fails with
+    /// when the request was declined, the invite expired or the join's access
+    /// to the location is gone before its admission (`join_with_invite`),
+    /// after deleting the kept sign-in and the saved code. A store with no saved code fails with
     /// `BootstrapError::NoUnfinishedJoin`.
     pub async fn resume_join(
         self,

@@ -118,10 +118,13 @@ impl Joining {
         self.identity.record_acceptance()?;
         match sync.accept_join(&self.invitation).await {
             Ok(()) => Ok(true),
-            // A refusal for the invited account's own access, which the
-            // sign-in was shown to be: the invite ended (§13.2).
+            // A refusal for the invited account's own access: the invite
+            // ended (§13.2). Dropbox's and OneDrive's sign-in was shown to be
+            // that account's; iCloud's acceptance counts once it succeeded,
+            // which a join that sent its request has seen.
             Err(SyncError::Storage(error))
-                if self.invitation.account().is_some() && error.failure().share_refused() =>
+                if (self.invitation.account().is_some() || self.identity.attempted())
+                    && error.failure().share_refused() =>
             {
                 Ok(false)
             }
@@ -158,8 +161,8 @@ impl Joining {
             }
         }
         // A send an earlier call recorded may not have reached storage.
-        if sent_before {
-            sync.resend_join(&self.identity).await?;
+        if sent_before && !sync.resend_join(&self.identity).await? {
+            return Ok(false);
         }
         let confirmation = self.identity.confirmation();
         // Each status is shown once, when it changes.

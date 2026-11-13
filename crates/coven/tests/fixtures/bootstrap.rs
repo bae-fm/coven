@@ -114,7 +114,7 @@ impl Owner {
         request.member
     }
 
-    fn check_at_once(&self, control: &JoinControl) {
+    pub(super) fn check_at_once(&self, control: &JoinControl) {
         let guard = control.check_often(Duration::ZERO);
         coven_foundation::locks::lock_unpoisoned(&self.often).push(guard);
     }

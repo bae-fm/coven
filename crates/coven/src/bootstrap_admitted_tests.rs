@@ -611,3 +611,160 @@ async fn published_before_loading(owner: &Owner, install: &Installation) -> Cove
     };
     handle
 }
+
+/// Carol's join has sent its request and waits. `faults` take her access
+/// away; she checks at once. Returns what the join returned and the request
+/// Ana's phone holds.
+async fn join_losing_access(
+    owner: &Owner,
+    install: &Installation,
+    invite: &Invite,
+    faults: coven_storage::test_utils::Faults,
+) -> (Result<Option<CovenHandle>, BootstrapError>, JoinRequest) {
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        owner,
+        Installation::join_request(invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    join_with_response(joining, async {
+        let request = owner.next_join_request().await;
+        owner.storage.set_faults(faults).await;
+        owner.check_at_once(&control);
+        request
+    })
+    .await
+}
+
+/// Every storage request of a waiting join can meet its access gone: the
+/// request's read, the marker of the inviting device's departure, the scan
+/// of the slots. The join ends as an ended invite, `None`, with its code,
+/// sign-in and installation gone; on S3 the invite's key refused is that
+/// key's access lost (§13.2).
+#[tokio::test]
+async fn a_waiting_join_that_loses_its_access_ends_as_an_ended_invite() {
+    use coven_storage::test_utils::Faults;
+    for provider in [CloudProvider::Dropbox, CloudProvider::S3] {
+        let refused = if provider == CloudProvider::S3 {
+            StorageFailure::Authentication
+        } else {
+            StorageFailure::PermissionDenied
+        };
+        for point in ["request", "marker", "scan"] {
+            let owner = Owner::new(provider, false).await;
+            let invite = owner.invite().await;
+            let install = Installation::new();
+            let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
+            let faults = match point {
+                "request" => Faults {
+                    read_failures: [(crate::tests::request_path(&invite), refused)].into(),
+                    ..Faults::none()
+                },
+                "marker" => Faults {
+                    read_failures: [(
+                        ObjectPath::device_gone(code.store, code.inviting_writer),
+                        refused,
+                    )]
+                    .into(),
+                    ..Faults::none()
+                },
+                _ => Faults { fail_next: 1_000, failure: refused, ..Faults::none() },
+            };
+            let (result, _) = join_losing_access(&owner, &install, &invite, faults).await;
+            assert!(matches!(result, Ok(None)), "{provider:?} {point}: {:?}", result.err());
+            assert!(saved_code(&install, code.store).is_none());
+            install.absent(code.store).await;
+            owner.close().await;
+        }
+    }
+}
+
+/// Carol's join sent its request and the app closed. While it was closed her
+/// access was taken back: resuming ends the join, leaving nothing, instead of
+/// failing every call (§13.2).
+#[tokio::test]
+async fn a_sent_join_whose_share_was_revoked_while_closed_ends_when_resumed() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    owner.storage.revoke_access("join@example.com").await.unwrap();
+    let control = JoinControl::new();
+    let result = install
+        .builder(&owner, owner.recipient())
+        .resume_join(store, check_when_waiting(&control), &control)
+        .await;
+    assert!(matches!(result, Ok(None)), "{:?}", result.err());
+    assert!(saved_code(&install, store).is_none());
+    install.absent(store).await;
+    owner.close().await;
+}
+
+/// A sign-in the provider rejects is not lost access: the join stays
+/// listed for the person to sign in again.
+#[tokio::test]
+async fn a_rejected_oauth_sign_in_leaves_a_waiting_join_listed() {
+    use coven_storage::test_utils::Faults;
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    owner
+        .storage
+        .set_faults(Faults {
+            read_failures: [(crate::tests::request_path(&invite), StorageFailure::Authentication)]
+                .into(),
+            ..Faults::none()
+        })
+        .await;
+    let control = JoinControl::new();
+    let builder = install.builder(&owner, owner.recipient());
+    let result = builder.resume_join(store, check_when_waiting(&control), &control).await;
+    assert!(
+        matches!(
+            result,
+            Err(BootstrapError::OAuth(coven_storage::providers::OAuthError::Reauthorize(_)))
+        ),
+        "{:?}",
+        result.err()
+    );
+    let listed = install.builder(&owner, owner.recipient()).unfinished_joins().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    owner.close().await;
+}
+
+/// Ana's invite is still open when Carol's join ended on lost access, and
+/// she approves the request. Her admission lands: Carol is a member with a
+/// registered device that never syncs, which Ana removes as she removes
+/// any device that stopped for good (§13.2).
+#[tokio::test]
+async fn ana_approving_a_request_whose_join_ended_admits_a_device_she_can_remove() {
+    use coven_storage::test_utils::Faults;
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let faults =
+        Faults { fail_next: 1_000, failure: StorageFailure::Authentication, ..Faults::none() };
+    let (result, request) = join_losing_access(&owner, &install, &invite, faults).await;
+    assert!(matches!(result, Ok(None)), "{:?}", result.err());
+    owner.storage.set_faults(Faults::none()).await;
+    crate::tests::approve(&owner.handle, &request).await;
+    owner.pass_now().await;
+    let members = owner.handle.members().await.unwrap();
+    let carol =
+        members.iter().find(|member| member.id == request.member).expect("Carol is a member");
+    let phone = carol
+        .devices
+        .iter()
+        .find(|device| device.name == request.device_name)
+        .expect("her phone is registered")
+        .id;
+    let (removal, _) = owner.handle.remove_device(phone).await.unwrap();
+    crate::tests::landed(&owner.handle, removal).await;
+    owner.close().await;
+}

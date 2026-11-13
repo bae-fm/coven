@@ -314,6 +314,14 @@ impl From<StorageError> for StorageCheckError {
 }
 
 impl StorageFailure {
+    /// Whether the provider answered that the signed-in account may not use
+    /// the shared location, or that the location is gone: the access an
+    /// invite shared is no longer there. A sign-in the provider rejects
+    /// (`Authentication`) is not: signing in again can mend it.
+    pub fn access_ended(self) -> bool {
+        matches!(self, Self::PermissionDenied | Self::ContainerNotFound)
+    }
+
     /// Whether the provider answered, to accepting an invite's share, that the
     /// account may not use the location or that the share or location is gone.
     /// A refused sign-in (`Authentication`) is not: signing in again can mend

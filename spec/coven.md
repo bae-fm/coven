@@ -5054,9 +5054,35 @@ rather than reuse them.
   there already is left alone. Once the invite has expired by its own clock it
   sends nothing, and the join ends as an expired one does.
 - A request the provider refused was never stored, so the retry sends it again.
-- Past the first acceptance, provider permission errors reach the app, even when
-  they come from access being taken back after a decline or expiry. A request it
-  can't read is not a request that's absent.
+- A join whose access is gone before its admission is found ends as an ended
+  invite. Say Ana takes the share back, or Dropbox revokes Dan's access, while
+  Dan's phone waits or while the app is closed. Every storage request the join
+  makes before it finds its admission can meet that: accepting the share again
+  when it resumes, creating the request, sending it again, reading the request,
+  reading the marker of the inviting device's departure, and scanning the slots
+  and floor for the copies. A permission refusal or a missing location from
+  the shared location ends the join, as an absent request does: its saved
+  request records the ending, then the kept sign-in, the saved code and the
+  installation go. Nothing is left that would fail every later call, and
+  nothing in a join that can't read its storage waits for an answer that can't
+  come (Appendix G.4). It
+  applies once the join's account is proven, so a refusal that could mean
+  Dan's own sign-in is never read as an end: on Dropbox and OneDrive the
+  account check passed; on iCloud the acceptance succeeded once (the saved
+  request records it); on S3 always, since the key is the invite's own and its
+  refusal, deleted or disabled, is that key's access lost. A sign-in the
+  provider rejects, even after its one refresh, ends nothing: Dan signs in
+  again (`OAuthError::Reauthorize`). Once the join has found its admission, its
+  saved request records it and the store is published, and none of this
+  applies: the lost access is any store's (below). A request it can't read for
+  another reason is not a request that's absent.
+- The ending leaves one case. Ana's invite is still open when Dan's join ends
+  on lost access, because she took the share back and gave it again around a
+  race, or access was taken away outside coven. Ana can then approve Dan's
+  request. Her admission lands, and Dan is a member with a registered device
+  that never syncs. Ana sees it in her device list and removes it, as she
+  removes any device that stopped for good without being removed. No history is
+  wrong, and Dan's person starts again from a new invite.
 
 **Picking up after a restart.** Dan closes the app while he waits, or his phone
 stops it in the background. The saved keys and request are encrypted with the
@@ -5093,7 +5119,8 @@ deletes it by store:
   in it, then saves the code, then keeps his sign-in, and only then may send the
   request. A listed join always has the request it resumes from, and a kept
   sign-in always belongs to a listed join.
-- Ending without its store, declined, expired, or cancelled before sending, it
+- Ending without its store, declined, expired, its access lost, or cancelled
+  before sending, it
   first records in the saved request that it ends, then deletes the store's
   entries on the device, the kept sign-in before the code, then the
   installation; cancelled, it unmounts a Dropbox folder first, while the
@@ -12322,6 +12349,9 @@ accounts of the sharing tests (`COVEN_LIVE_DROPBOX_ENV` and
 |---|---|
 | `dropbox_live_account_sharing` | an invitation made for the second account names the account id `get_current_account` gives that account |
 | `onedrive_live_sequence` | an invitation made for the second account's address matches the address `/me` gives that account, personal and work or school accounts alike |
+| `dropbox_live_account_sharing`, after `revoke_access` | a recipient whose mount is refused: the refusal is `PermissionDenied` (a join then ends as an ended invite) |
+| `onedrive_live_sequence`, after `revoke_access` | a recipient whose read of the shared folder is refused: the refusal is `PermissionDenied` or `ContainerNotFound`, never `Authentication` |
+| an S3 test bucket, the invite's key deleted while a join waits | the next read is refused with a failure the join reads as the key's access lost (`Authentication` or `PermissionDenied`) |
 | either, an invitation made for an alias or secondary address of the second account | whether Dropbox still names the account's id (the comparison then holds), and what address `/me` returns on OneDrive (the comparison then reads another account, which this run shows) |
 
 ### E.3 S3 settings and profiles
@@ -13953,6 +13983,7 @@ pass's failure, kept for its retry.
 | `Conflict` | a racer's condition was refused; for a shared temporary, a retryable answer | E.6, E.10 |
 | `Corrupted` | two reads of the same bytes of an immutable object, a slot, a file or a snapshot, disagreed: a fault on the way changed one; it retries as a failed read does | §6.5, §19.1 |
 | `StorageFailure::StoreExists` | another creation already holds slot 1; setup is undone | §10.3 |
+| `StorageFailure::PermissionDenied`, `ContainerNotFound` at a join before its admission is found (S3: also `Authentication`) | the join's proven access to the shared location is gone; the join ends as an ended invite, `Ok(None)`, leaving nothing | §13.2 |
 | `BootstrapError::WrongAccount` | a join's sign-in is to another Dropbox or OneDrive account than the one its invite shared the folder with; nothing is kept, accepted or sent | §13.2 |
 | `StorageSetupError::Cancelled` | the app cancelled setup before its point of no return, and setup undid what it wrote | §11.6, §20.8 |
 | `StorageSetupError::SetupRunning` | another setup call is running on this device, or a setup past its point of no return is still finishing | §20.8 |

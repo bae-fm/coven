@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{HeldIntervals, JoiningIdentity, SyncError};
 use coven_foundation::progress::ProgressReport;
-use coven_storage::{StorageFailure, StorageInvitation};
+use coven_storage::{CloudProvider, StorageFailure, StorageInvitation};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -45,17 +45,43 @@ impl SequenceSync {
     /// Publish the recorded immutable request after provider acceptance.
     /// `false` when the invite ended before it was sent: its marker holds
     /// the request's path, and the join ends as declined (§13.2).
+    /// `false` too when the join's access to the location is gone
+    /// (`access_lost`).
     pub async fn submit_join(&self, request: &JoiningIdentity) -> Result<bool, SyncError> {
-        request.publish(self.storage.as_ref()).await
+        self.unless_access_lost(request.publish(self.storage.as_ref()).await)
     }
 
     /// Send the request of a join that recorded its send in an earlier call
     /// and may have stopped before the create, while the invite is open.
-    pub async fn resend_join(&self, request: &JoiningIdentity) -> Result<(), SyncError> {
+    /// `false` when the join's access to the location is gone
+    /// (`access_lost`).
+    pub async fn resend_join(&self, request: &JoiningIdentity) -> Result<bool, SyncError> {
         if self.join_open(request) {
-            request.resend(self.storage.as_ref()).await?;
+            return self
+                .unless_access_lost(request.resend(self.storage.as_ref()).await.map(|()| true));
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Whether `error` says the access a join was shown to hold, to the
+    /// invite's own location, is gone: the provider refused the account or
+    /// found the location missing, or an S3 key the invite carries was
+    /// deleted or disabled. A sign-in the provider rejects is no such answer:
+    /// the person signs in again (§13.2).
+    pub fn access_lost(&self, error: &SyncError) -> bool {
+        let SyncError::Storage(error) = error else { return false };
+        let failure = error.failure();
+        failure.access_ended()
+            || (self.storage.config().provider() == CloudProvider::S3
+                && failure == StorageFailure::Authentication)
+    }
+
+    /// `result`, with a lost access as the join's end: `false`.
+    fn unless_access_lost(&self, result: Result<bool, SyncError>) -> Result<bool, SyncError> {
+        match result {
+            Err(error) if self.access_lost(&error) => Ok(false),
+            result => result,
+        }
     }
 
     /// Inspect the slots after the invite for copies routed to the request's
@@ -67,10 +93,23 @@ impl SequenceSync {
     /// `subscribe_progress` while it scans for the copies: the scan is part
     /// of the wait. Once they open, it reports the scan as loading's first
     /// step (E10).
+    ///
+    /// A check that could not reach the shared location before the keys open
+    /// has lost the join's access, and ends it as an absent request does
+    /// (`access_lost`, `JoinScan.outcome`); one of a join whose keys already
+    /// opened is the published store's lost access, which is no ending.
     pub async fn join_outcome(
         &self,
         request: &mut JoiningIdentity,
     ) -> Result<JoinOutcome, SyncError> {
+        let opened = request.opened();
+        match self.check_join(request).await {
+            Err(error) if !opened && self.access_lost(&error) => Ok(JoinOutcome::Declined),
+            result => result,
+        }
+    }
+
+    async fn check_join(&self, request: &mut JoiningIdentity) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         if member.keys().public_keys() != request.identity().keys().public_keys() {

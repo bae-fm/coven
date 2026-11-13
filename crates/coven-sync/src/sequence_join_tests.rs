@@ -131,7 +131,8 @@ async fn approved_with_retention(
     if compare {
         let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
             "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
-            "copies":copies, "scanned":scanned.get(), "pending":false});
+            "copies":copies, "scanned":scanned.get(), "pending":false,
+            "reach":true});
         assert_eq!(
             crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
             serde_json::json!(format!("{outcome:?}"))
@@ -187,7 +188,8 @@ async fn declined_with_retention(compare: bool) {
         let current = floor(&group, &ana).await;
         let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
             "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
-            "copies":[], "scanned":scanned.get(), "pending":false});
+            "copies":[], "scanned":scanned.get(), "pending":false,
+            "reach":true});
         assert_eq!(
             crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
             serde_json::json!(format!("{outcome:?}"))
@@ -197,6 +199,101 @@ async fn declined_with_retention(compare: bool) {
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }
+}
+
+/// A waiting join's next check meets `failure` reading the path `at` names:
+/// it could not reach the shared location, so it ends as declined, as the
+/// model's `outcome` with no reach (`JoinScan.lost_access_ends`).
+async fn losing_access(
+    group: &Group,
+    at: impl FnOnce(&Group, coven_merge::Slot, &JoiningDevice) -> ObjectPath,
+    failure: coven_storage::StorageFailure,
+    compare: bool,
+) {
+    let (ana, mut carol) = waiting(group).await;
+    let scanned = carol.device.sync.session.lock().await.scanned;
+    let current = floor(group, &ana).await;
+    group
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            read_failures: [(at(group, scanned, &carol), failure)].into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let outcome = carol.device.sync.join_outcome(&mut carol.request).await.unwrap();
+    assert_eq!(outcome, JoinOutcome::Declined);
+    if compare {
+        let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.get(),
+            "head":ana.database().applied_slot().await.unwrap(), "captured_at":current.header.at,
+            "copies":[], "scanned":scanned.get(), "pending":true, "reach":false});
+        assert_eq!(
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+            serde_json::json!(format!("{outcome:?}"))
+        );
+    }
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_check_that_cannot_read_the_request_marker_or_slots_declines() {
+    use coven_storage::StorageFailure::{ContainerNotFound, PermissionDenied};
+    let now = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+    losing_access(
+        &clocks(UNIX_EPOCH, now),
+        |_, _, carol| carol.request.path().clone(),
+        PermissionDenied,
+        false,
+    )
+    .await;
+    let group = clocks(UNIX_EPOCH, now);
+    losing_access(
+        &group,
+        |group, _, carol| ObjectPath::device_gone(group.store, carol.request.approver()),
+        ContainerNotFound,
+        false,
+    )
+    .await;
+    let group = clocks(UNIX_EPOCH, now);
+    losing_access(
+        &group,
+        |group, scanned, _| ObjectPath::slot(group.store, scanned.into()),
+        PermissionDenied,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_rejected_oauth_sign_in_is_no_lost_access() {
+    use coven_storage::StorageFailure::Authentication;
+    // An OAuth sign-in the provider rejects is an error to sign in again for.
+    let group = clocks(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(1_790_000_000));
+    let (ana, mut carol) = waiting(&group).await;
+    group
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            read_failures: [(carol.request.path().clone(), Authentication)].into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(carol.device.sync.join_outcome(&mut carol.request).await.is_err());
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn join_scan_lost_access_matches_lean() {
+    losing_access(
+        &clocks(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(1_790_000_000)),
+        |_, _, carol| carol.request.path().clone(),
+        coven_storage::StorageFailure::PermissionDenied,
+        true,
+    )
+    .await;
 }
 
 #[tokio::test]
