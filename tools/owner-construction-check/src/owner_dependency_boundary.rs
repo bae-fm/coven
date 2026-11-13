@@ -32,8 +32,8 @@ use crate::made_here::{callback_argument_made_here, returns_made_here};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    kept_callback_arguments, shared_type_names, supplied_type_names, type_name, type_names,
-    visibility_crosses_owner, RustFile,
+    is_test_support_only, kept_callback_arguments, shared_type_names, supplied_type_names,
+    type_name, type_names, visibility_crosses_owner, RustFile,
 };
 use crate::type_identity::TypeIdentity;
 
@@ -355,6 +355,8 @@ fn collect_database_callables(
         collect_database_callables_in_items(
             &file.relative_path,
             &file.syntax.items,
+            false,
+            policy.test_support_features(),
             raw_database_types,
             identity,
             leaks,
@@ -365,6 +367,8 @@ fn collect_database_callables(
 fn collect_database_callables_in_items(
     path: &str,
     items: &[syn::Item],
+    gated: bool,
+    test_support: &[String],
     raw_database_types: &BTreeSet<String>,
     identity: &TypeIdentity,
     leaks: &mut BTreeSet<Finding>,
@@ -376,7 +380,8 @@ fn collect_database_callables_in_items(
                     path,
                     None,
                     &function.sig,
-                    matches!(function.vis, syn::Visibility::Public(_)),
+                    matches!(function.vis, syn::Visibility::Public(_))
+                        && !(gated || is_test_support_only(&function.attrs, test_support)),
                     raw_database_types,
                     identity,
                     leaks,
@@ -386,6 +391,7 @@ fn collect_database_callables_in_items(
                 let Some(owner) = type_name(&implementation.self_ty) else {
                     continue;
                 };
+                let gated = gated || is_test_support_only(&implementation.attrs, test_support);
                 for item in &implementation.items {
                     let syn::ImplItem::Fn(method) = item else {
                         continue;
@@ -394,7 +400,8 @@ fn collect_database_callables_in_items(
                         path,
                         Some(&owner),
                         &method.sig,
-                        matches!(method.vis, syn::Visibility::Public(_)),
+                        matches!(method.vis, syn::Visibility::Public(_))
+                            && !(gated || is_test_support_only(&method.attrs, test_support)),
                         raw_database_types,
                         identity,
                         leaks,
@@ -405,6 +412,7 @@ fn collect_database_callables_in_items(
                 if matches!(trait_item.vis, syn::Visibility::Public(_)) =>
             {
                 let owner = trait_item.ident.to_string();
+                let gated = gated || is_test_support_only(&trait_item.attrs, test_support);
                 for item in &trait_item.items {
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
@@ -413,7 +421,7 @@ fn collect_database_callables_in_items(
                         path,
                         Some(&owner),
                         &method.sig,
-                        true,
+                        !(gated || is_test_support_only(&method.attrs, test_support)),
                         raw_database_types,
                         identity,
                         leaks,
@@ -425,6 +433,8 @@ fn collect_database_callables_in_items(
                     collect_database_callables_in_items(
                         path,
                         items,
+                        gated || is_test_support_only(&module.attrs, test_support),
+                        test_support,
                         raw_database_types,
                         identity,
                         leaks,

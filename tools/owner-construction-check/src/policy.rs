@@ -283,6 +283,13 @@ pub(crate) struct Database {
     /// (`database_boundary.rs`). With none, the rule reads no write path.
     #[serde(default)]
     pub(crate) write_types: Vec<String>,
+    /// Cargo features that only test support enables. A callable, or the
+    /// `impl`, trait or module holding it, gated on `test` or on one of these
+    /// features alone (`cfg(feature = "test-utils")`,
+    /// `cfg(any(test, feature = "test-utils"))`) may take a raw database
+    /// handle; ungated, it may not. With none, only `cfg(test)` counts.
+    #[serde(default)]
+    pub(crate) test_support_features: Vec<String>,
 }
 
 /// A domain: tables whose schema and writes only its homes hold. SQL
@@ -371,6 +378,12 @@ impl Policy {
                 self.capabilities.iter().find(|capability| capability.name == database.capability)
             })
             .map_or(&[], |capability| capability.homes.as_slice())
+    }
+
+    /// The features only test support enables, which let the items they gate
+    /// take a raw database handle.
+    pub(crate) fn test_support_features(&self) -> &[String] {
+        self.database.as_ref().map_or(&[], |database| database.test_support_features.as_slice())
     }
 
     /// The types whose holder is an owner: the capability types, shared

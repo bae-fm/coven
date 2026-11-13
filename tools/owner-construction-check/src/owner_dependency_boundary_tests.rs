@@ -2,6 +2,11 @@ use super::*;
 
 const PATH: &str = "crates/app-database/src/work.rs";
 fn policy() -> Policy {
+    policy_with("")
+}
+
+/// The policy, with `database` holding `database_extra` beyond its capability.
+fn policy_with(database_extra: &str) -> Policy {
     Policy::fixture(&format!(
         r#"
         capability_types = ["Clock", "DatabaseConnection", "Permit"]
@@ -15,6 +20,7 @@ fn policy() -> Policy {
 
         [database]
         capability = "SQLite"
+        {database_extra}
 
         [[capabilities]]
         name = "SQLite"
@@ -24,9 +30,12 @@ fn policy() -> Policy {
 }
 
 fn leaks(path: &str, source: &str) -> Vec<Finding> {
+    leaks_under(&policy(), path, source)
+}
+
+fn leaks_under(policy: &Policy, path: &str, source: &str) -> Vec<Finding> {
     let files = [RustFile::fixture(path, source)];
-    let policy = policy();
-    find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy))
+    find_owner_dependency_leaks(&files, policy, &OwnerGraph::collect(&files, policy))
 }
 
 fn findings(path: &str, messages: &[&str]) -> Vec<Finding> {
@@ -436,4 +445,59 @@ fn a_listed_trait_method_can_return_the_owner_it_makes() {
             find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
         assert_eq!(found, expected, "{roots}");
     }
+}
+
+#[test]
+fn items_gated_on_test_support_take_a_raw_handle_only_when_the_policy_names_the_feature() {
+    let named = policy_with(r#"test_support_features = ["test-utils"]"#);
+    for (gated, source) in [
+        (true, r#"#[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {}"#),
+        (
+            true,
+            r#"#[cfg(any(test, feature = "test-utils"))] pub fn open_on(connection: &Connection) {}"#,
+        ),
+        (
+            true,
+            r#"impl Library { #[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {} }"#,
+        ),
+        (
+            true,
+            r#"#[cfg(feature = "test-utils")] impl Library { pub fn open_on(connection: &Connection) {} }"#,
+        ),
+        (
+            true,
+            r#"#[cfg(feature = "test-utils")] mod support { pub fn open_on(connection: &Connection) {} }"#,
+        ),
+        (false, "pub fn open_on(connection: &Connection) {}"),
+        (
+            false,
+            r#"#[cfg(any(feature = "test-utils", feature = "cloud"))] pub fn open_on(connection: &Connection) {}"#,
+        ),
+        (false, r#"#[cfg(feature = "other")] pub fn open_on(connection: &Connection) {}"#),
+    ] {
+        let expected = if gated {
+            Vec::new()
+        } else {
+            findings(PATH, &["open_on accepts raw dependency Connection"])
+        };
+        assert_eq!(leaks_under(&named, PATH, source), expected, "{source}");
+    }
+    assert_eq!(
+        leaks(PATH, r#"#[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {}"#),
+        findings(PATH, &["open_on accepts raw dependency Connection"]),
+        "a policy naming no feature refuses it"
+    );
+}
+
+#[test]
+fn an_item_gated_on_test_support_still_cannot_return_a_raw_handle() {
+    let named = policy_with(r#"test_support_features = ["test-utils"]"#);
+    assert_eq!(
+        leaks_under(
+            &named,
+            PATH,
+            r#"#[cfg(feature = "test-utils")] pub fn open() -> Connection { todo!() }"#
+        ),
+        findings(PATH, &["open returns retained dependency Connection"])
+    );
 }

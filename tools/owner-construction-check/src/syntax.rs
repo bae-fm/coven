@@ -530,17 +530,26 @@ pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
 /// `cfg(not(test))`, `cfg(any(test, feature = "…"))` and
 /// `cfg(feature = "test-utils")` all compile into production builds.
 pub(crate) fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+    is_test_support_only(attrs, &[])
+}
+
+/// [`is_test_only`], also counting the `features` that only test support
+/// enables: a `#[cfg(…)]` whose predicate holds only under `test` or one of
+/// them, such as `cfg(feature = "test-utils")` or
+/// `cfg(any(test, feature = "test-utils"))`.
+pub(crate) fn is_test_support_only(attrs: &[syn::Attribute], features: &[String]) -> bool {
     attrs.iter().any(|attribute| {
         attribute.path().segments.last().is_some_and(|segment| segment.ident == "test")
             || (attribute.path().is_ident("cfg")
                 && attribute
                     .parse_args::<syn::Meta>()
-                    .is_ok_and(|predicate| cfg_requires_test(&predicate)))
+                    .is_ok_and(|predicate| cfg_requires_test(&predicate, features)))
     })
 }
 
-/// Whether a `cfg` predicate can hold only when `test` does.
-fn cfg_requires_test(predicate: &syn::Meta) -> bool {
+/// Whether a `cfg` predicate can hold only when `test` or one of `features`
+/// does.
+fn cfg_requires_test(predicate: &syn::Meta, features: &[String]) -> bool {
     match predicate {
         syn::Meta::Path(path) => path.is_ident("test"),
         syn::Meta::List(list) => {
@@ -550,14 +559,22 @@ fn cfg_requires_test(predicate: &syn::Meta) -> bool {
                 return false;
             };
             if list.path.is_ident("all") {
-                children.iter().any(cfg_requires_test)
+                children.iter().any(|child| cfg_requires_test(child, features))
             } else if list.path.is_ident("any") {
-                !children.is_empty() && children.iter().all(cfg_requires_test)
+                !children.is_empty()
+                    && children.iter().all(|child| cfg_requires_test(child, features))
             } else {
                 false
             }
         }
-        syn::Meta::NameValue(_) => false,
+        syn::Meta::NameValue(pair) => {
+            pair.path.is_ident("feature")
+                && matches!(
+                    &pair.value,
+                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(name), .. })
+                        if features.contains(&name.value())
+                )
+        }
     }
 }
 
