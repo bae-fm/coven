@@ -186,13 +186,8 @@ impl Owner {
         } else {
             InviteAccess::ProviderAccount { email: "join@example.com".into() }
         };
-        crate::tests::invite(
-            &self.handle,
-            InviteTarget::NewMember { role: MemberRole::Member },
-            access,
-            InviteLifetime::SevenDays,
-        )
-        .await
+        crate::tests::invite(&self.handle, MemberRole::Member, access, InviteLifetime::SevenDays)
+            .await
     }
 
     pub(super) fn s3_credentials(&self) -> Option<S3Credentials> {
@@ -333,7 +328,7 @@ impl Installation {
             code: coven_sync::read_invite_code(invite.shown_code()).unwrap(),
             terms: RequestTerms::Given {
                 device_name: "New phone".into(),
-                joiner: crate::tests::carol_joins(invite.shown_code()),
+                name: crate::tests::carol_joins(invite.shown_code()),
             },
             held: control.often.subscribe(),
             parks: control.parks.clone(),

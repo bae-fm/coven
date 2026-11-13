@@ -33,7 +33,7 @@ async fn household() -> Network {
         vec![Migration::addition(1, "covers", SCHEMA)],
     )
     .await;
-    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    network.join_as(1, MemberRole::Member).await;
     network.sync(0).await;
     network.sync(1).await;
     network
@@ -525,7 +525,7 @@ async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
     let ana = &network.devices[0];
     assert!(ana.handle.store_state().await.schema.is_empty());
     assert_eq!(own(ana).await, before);
-    let joined = network.try_join_as(2, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    let joined = network.try_join_as(2, MemberRole::Member).await;
     assert!(joined.is_ok(), "{joined:?}");
     let ana = &network.devices[0];
 
@@ -735,7 +735,7 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
     retitle(&mut network, 1).await;
     network.sync(1).await;
     network.update_app(retitled());
-    network.join_as(2, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    network.join_as(2, MemberRole::Member).await;
     network.sync(2).await;
     let (ben, carol) = (&network.devices[1], &network.devices[2]);
     assert!(carol.handle.pending().await.unwrap().is_empty());
@@ -825,7 +825,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
     assert!(network.devices[1].handle.applied_slot().await > marker_slot + 1);
 
     network.update_app(retitled());
-    network.join_as(2, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    network.join_as(2, MemberRole::Member).await;
     network.sync(2).await;
     network.sync(1).await;
     let (ben, carol) = (&network.devices[1], &network.devices[2]);
@@ -849,7 +849,7 @@ async fn a_store_created_at_a_breaking_version_asks_an_older_app_to_update() {
     network.sync(0).await;
     assert_eq!(network.devices[0].handle.store_state().await.schema[&Audience::Store].number, 2);
     network.update_app(vec![Migration::addition(1, "covers", SCHEMA)]);
-    let joined = network.try_join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    let joined = network.try_join_as(1, MemberRole::Member).await;
     let Err(BootstrapError::Published { handle, source }) = joined else {
         panic!("the join publishes the store before it loads: {joined:?}");
     };

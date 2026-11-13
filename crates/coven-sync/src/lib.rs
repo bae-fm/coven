@@ -72,7 +72,7 @@ pub use coven_database::WriteCutoff;
 pub use coven_database::{
     DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
 };
-pub use coven_format::codes::InviteKind;
+pub use coven_format::codes::InviteAdmits;
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{CutOffRefusal, DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
@@ -80,7 +80,7 @@ pub use joiner::Joiner;
 pub use joining_identity::{ended_for, record_ending, sealed_join_request, JoiningIdentity};
 pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
-pub use pairing_types::{Pairing, PairingEnd, PairingId, PairingRequest, PairingStatus};
+pub use pairing_types::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
 pub use pending::{
     FileMissingReason, FileSourceFailure, LocalFailure, PendingReason, PendingRecord,
     PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,

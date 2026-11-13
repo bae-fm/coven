@@ -16,7 +16,7 @@ note. Attachments reference the user's own files.
 ```rust
 use coven::{
     Audience, Coven, DropboxAccess, DropboxLocation, FileColumn, InviteAccess,
-    InviteDelivery, InviteTarget, MemberRole, Migration, Namespace, OAuthAccess,
+    InviteLifetime, MemberRole, Migration, Namespace, OAuthAccess,
     Provenance, RowIdentity, StorageConfig, StoreLayout, SyncState, SyncStatus,
     SyncWait, SyncedTable, UuidText,
 };
@@ -230,9 +230,10 @@ let bytes = handle.read_file(&file).await?;
 ```rust
 let (invite, ben, _) = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member, name: "Ben".into() },
+        MemberRole::Member,
         InviteAccess::ProviderAccount { email: "ben@example.com".into() },
-        InviteDelivery::InPerson,
+        InviteLifetime::SevenDays,
+        "Ana".into(),
     )
     .await?;
 // A pass shares the folder with Ben's account, then the invite shows its code.

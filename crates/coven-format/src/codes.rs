@@ -131,29 +131,30 @@ impl KeychainRestoreCode {
     }
 }
 
-/// What an invite is for, fixed when the admin makes it (§13.2, §13.3). It
-/// decides which person a join request may name (`objects::Joiner`).
+/// Who an invite code admits, fixed when the admin makes it (§13.2, §13.3):
+/// the byte the code carries. It decides which person a join request may name
+/// (`objects::Joiner`); the joining device reads it from the decoded code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InviteKind {
+pub enum InviteAdmits {
     /// A new person: the join request carries the name they typed.
     NewPerson,
-    /// An existing member getting access again: their profile already has a
-    /// name, so the request carries none.
-    Recovery,
+    /// An existing member's new keys: their profile already has a name, so
+    /// the request carries none.
+    MemberKeys,
 }
-impl Wire for InviteKind {
+impl Wire for InviteAdmits {
     fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), Error> {
         match self {
             Self::NewPerson => 0u8,
-            Self::Recovery => 1,
+            Self::MemberKeys => 1,
         }
         .put(out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::NewPerson),
-            1 => Ok(Self::Recovery),
-            tag => Err(Error::UnknownTag { field: "invite kind", tag }),
+            1 => Ok(Self::MemberKeys),
+            tag => Err(Error::UnknownTag { field: "invite admits", tag }),
         }
     }
 }
@@ -168,8 +169,8 @@ pub struct InviteCode {
     /// The inviting admin's name, as their app gave it when it made the
     /// invite: the joining device can't read who is who until it is let in.
     pub inviter: String,
-    /// Whether the invite adds a new person or recovers a member.
-    pub kind: InviteKind,
+    /// Whether the invite admits a new person or a member's new keys.
+    pub admits: InviteAdmits,
     /// When the invite ends, in seconds since the Unix epoch by the inviting
     /// device's clock: a joining device sends no first request after it.
     pub expires_at: u64,
@@ -201,9 +202,9 @@ impl InviteCode {
         let secret = self.secret.to_secret_bytes();
         name(&self.name)?;
         name(&self.inviter)?;
-        let kind = match self.kind {
-            InviteKind::NewPerson => 0,
-            InviteKind::Recovery => 1,
+        let admits = match self.admits {
+            InviteAdmits::NewPerson => 0,
+            InviteAdmits::MemberKeys => 1,
         };
         encode_code(
             kinds::INVITE_CODE,
@@ -213,7 +214,7 @@ impl InviteCode {
                 self.name.as_bytes(),
                 &(self.inviter.len() as u32).to_be_bytes(),
                 self.inviter.as_bytes(),
-                &[kind],
+                &[admits],
                 &self.expires_at.to_be_bytes(),
                 self.invite.0.as_bytes(),
                 self.member.0.as_bytes(),
@@ -232,7 +233,7 @@ impl InviteCode {
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
         let inviter = crate::wire::get_name(&mut input)?;
-        let kind = InviteKind::get(&mut input)?;
+        let admits = InviteAdmits::get(&mut input)?;
         let expires_at = u64::get(&mut input)?;
         let invite = Wire::get(&mut input)?;
         let member = Wire::get(&mut input)?;
@@ -248,7 +249,7 @@ impl InviteCode {
             store,
             name: label,
             inviter,
-            kind,
+            admits,
             expires_at,
             invite,
             member,

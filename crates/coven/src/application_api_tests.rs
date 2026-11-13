@@ -183,7 +183,7 @@ fn app_tests_can_find_open_files_and_assert_they_are_released() {
 fn bootstrap_and_operation_futures_stay_small() {
     use crate::{
         BootstrapStatus, CovenBuilder, CovenHandle, InviteAccess, InviteId, InviteLifetime,
-        InviteTarget, JoinControl, JoinRequest, MemberId, MemberPublicKeys, OperationId,
+        JoinControl, JoinRequest, MemberId, MemberPublicKeys, MemberRole, OperationId,
         S3Credentials, SavedRestoreCode, StoreId,
     };
     use std::future::Future;
@@ -228,7 +228,7 @@ fn bootstrap_and_operation_futures_stay_small() {
                 |(b, c, j, d, o, x): (
                     CovenBuilder,
                     &'static str,
-                    crate::Joiner,
+                    Option<String>,
                     &'static str,
                     Status,
                     &'static JoinControl,
@@ -287,11 +287,23 @@ fn bootstrap_and_operation_futures_stay_small() {
             size(
                 |(h, t, a, d, i): (
                     &'static CovenHandle,
-                    InviteTarget,
+                    MemberRole,
                     InviteAccess,
                     InviteLifetime,
                     String,
                 )| h.create_invite(t, a, d, i),
+            ),
+        ),
+        (
+            "add_device_for",
+            size(
+                |(h, m, a, d, i): (
+                    &'static CovenHandle,
+                    MemberId,
+                    InviteAccess,
+                    InviteLifetime,
+                    String,
+                )| h.add_device_for(m, a, d, i),
             ),
         ),
         (

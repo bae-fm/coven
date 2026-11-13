@@ -17,12 +17,20 @@ pub(crate) struct JoiningDevice {
     pub(crate) request: JoiningIdentity,
 }
 
-/// Who joins with `code`: Carol, typing her name, when it adds a new person;
-/// a recovery otherwise.
-pub(crate) fn carol_for(code: &coven_format::codes::InviteCode) -> Joiner {
-    match code.kind {
-        InviteKind::NewPerson => Joiner::NewPerson { name: "Carol".into() },
-        InviteKind::Recovery => Joiner::Recovery,
+/// The name joining with `code` gives: Carol's, typed, when it admits a new
+/// person; none when it admits a member's new keys.
+pub(crate) fn carol_for(code: &coven_format::codes::InviteCode) -> Option<String> {
+    match code.admits {
+        InviteAdmits::NewPerson => Some("Carol".into()),
+        InviteAdmits::MemberKeys => None,
+    }
+}
+
+/// The person the request of the join `carol_for` names carries.
+pub(crate) fn carol_asks(code: &coven_format::codes::InviteCode) -> coven_format::objects::Joiner {
+    match carol_for(code) {
+        Some(name) => coven_format::objects::Joiner::NewPerson { name },
+        None => coven_format::objects::Joiner::MemberKeys,
     }
 }
 
@@ -91,7 +99,7 @@ pub(crate) async fn listed(device: &Device) -> Vec<Invite> {
 pub(crate) async fn carol_invite(ana: &Device, lifetime: InviteLifetime) -> Invite {
     ana.sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: "Carol@example.org".into() },
             lifetime,
         )
@@ -111,8 +119,8 @@ pub(crate) async fn key_replacement_invite(
     member: coven_foundation::id_source::MemberId,
 ) -> Invite {
     ana.sync
-        .create_invite(
-            InviteTarget::ReplaceMemberKeys { member },
+        .add_device_for(
+            member,
             InviteAccess::ProviderAccount { email: "carol@example.org".into() },
             InviteLifetime::SevenDays,
         )
@@ -125,7 +133,7 @@ pub(crate) async fn key_replacement_invite(
 pub(crate) async fn s3_invite(ana: &Device, name: &str) -> Invite {
     ana.sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::S3AccessKey {
                 access_key_id: format!("{}-key", name.to_lowercase()),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -239,7 +247,7 @@ async fn each_lifetime_expires_on_the_inviting_device() {
         let invite = ana
             .sync
             .create_invite(
-                InviteTarget::NewMember { role: MemberRole::Member },
+                MemberRole::Member,
                 InviteAccess::S3AccessKey {
                     access_key_id: "dan-key".into(),
                     secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
@@ -249,13 +257,13 @@ async fn each_lifetime_expires_on_the_inviting_device() {
             .await
             .unwrap();
         assert_eq!(invite.expires_at, made + Duration::from_secs(seconds));
-        assert_eq!(invite.kind, InviteKind::NewPerson);
-        let CodeInfo::Invite(InviteInfo { kind, inviter, .. }) =
+        assert_eq!(invite.admits, InviteAdmits::NewPerson);
+        let CodeInfo::Invite(InviteInfo { admits, inviter, .. }) =
             decode_code_info(invite.shown_code()).unwrap()
         else {
             panic!("an invite code");
         };
-        assert_eq!(kind, InviteKind::NewPerson);
+        assert_eq!(admits, InviteAdmits::NewPerson);
         // The code names whom the joining person tells and waits for.
         assert_eq!(inviter, "Ana");
         group.clock.set(invite.expires_at - Duration::from_secs(1));
@@ -406,7 +414,7 @@ async fn a_refused_grant_is_the_invites_pending_record_until_cancelled() {
     let result = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: "owner@example.test".into() },
             crate::InviteLifetime::SevenDays,
         )
@@ -461,7 +469,7 @@ async fn an_invite_its_maker_can_no_longer_make_is_refused_before_any_grant() {
     let result = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: "carol@example.org".into() },
             crate::InviteLifetime::SevenDays,
         )
@@ -505,7 +513,7 @@ async fn a_live_query_follows_each_open_invite_in_order() {
         (shown[0].id, shown[0].shown_code(), &shown[0].shown_request().cloned()),
         (invite.id, invite.shown_code(), &None)
     );
-    assert_eq!(shown[0].kind, InviteKind::NewPerson);
+    assert_eq!(shown[0].admits, InviteAdmits::NewPerson);
     assert_eq!(shown[0], invite);
     // A rename and the slots after it leave the code the joiner scanned as
     // it was: its saved request is bound to those exact bytes.
@@ -681,7 +689,7 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
     let invite = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::S3AccessKey {
                 access_key_id: "ana".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -730,7 +738,7 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
     let invite = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::S3AccessKey {
                 access_key_id: "dan-key".into(),
                 secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
@@ -794,7 +802,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     let waiting = ana
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: "dan@example.org".into() },
             InviteLifetime::SevenDays,
         )
@@ -927,8 +935,8 @@ async fn a_recovery_invite_for_a_removed_member_is_refused() {
     let journaled = ana.sync.database.operations().await.unwrap().len();
     let result = ana
         .sync
-        .create_invite(
-            InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
+        .add_device_for(
+            ben.identity.member(),
             InviteAccess::ProviderAccount { email: "ben-again@example.org".into() },
             InviteLifetime::SevenDays,
         )

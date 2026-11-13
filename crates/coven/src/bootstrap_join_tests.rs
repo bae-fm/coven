@@ -98,10 +98,10 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     )
     .unwrap();
     assert!(resumed.attempted());
-    // The saved request gives the person's name back, and another name or a
-    // recovery in its place is a changed join.
+    // The saved request gives the person's name back, and another name or
+    // none in its place is a changed join.
     assert_eq!(resumed.joiner(), &Joiner::NewPerson { name: "Carol".into() });
-    for other in [Joiner::NewPerson { name: "Caroline".into() }, Joiner::Recovery] {
+    for other in [Some("Caroline".to_owned()), None] {
         let device = directory.settings().unwrap().device_id;
         let changed = JoiningIdentity::prepare(&directory, &code, device, "New phone", other);
         assert!(matches!(
@@ -141,9 +141,9 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let (result, carol) = owner.join_and_approve(joining, &control, |_| async {}).await;
     let lost = result.unwrap().unwrap();
     let old_code = lost.restore_code().await.unwrap();
-    let recovery = crate::tests::invite(
+    let recovery = crate::tests::device_invite(
         &owner.handle,
-        InviteTarget::ReplaceMemberKeys { member: carol },
+        carol,
         InviteAccess::S3AccessKey {
             access_key_id: "recovery-key".into(),
             secret_access_key: SecretText::new("recovery-secret".into()),
@@ -616,8 +616,8 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
         panic!("an invite code");
     };
     assert_eq!(
-        (info.store_name.as_str(), info.inviter.as_str(), info.kind),
-        ("Household", "Ana", InviteKind::NewPerson)
+        (info.store_name.as_str(), info.inviter.as_str(), info.admits),
+        ("Household", "Ana", InviteAdmits::NewPerson)
     );
     assert_eq!(builder.unfinished_joins().await.unwrap(), [info]);
     assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.shown_code());

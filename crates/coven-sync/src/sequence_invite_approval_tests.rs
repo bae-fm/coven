@@ -1,5 +1,5 @@
 use crate::sequence_sync::sequence_invites::tests::{
-    carol_for, invite, join, no_request, request_path, requests,
+    carol_asks, carol_for, invite, join, no_request, request_path, requests,
 };
 use crate::sequence_sync::sequence_invites::InviteWork;
 use crate::sequence_sync::tests::*;
@@ -463,8 +463,8 @@ async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
         .unwrap();
     let invite = ana
         .sync
-        .create_invite(
-            InviteTarget::ReplaceMemberKeys { member: carol.member() },
+        .add_device_for(
+            carol.member(),
             InviteAccess::S3AccessKey {
                 access_key_id: "carol-new".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -628,7 +628,7 @@ async fn a_request_failing_a_check_ends_its_invite() {
             keys,
             device,
             device_name: "Carol's phone".into(),
-            joiner: carol_for(&code).into(),
+            joiner: carol_asks(&code),
         };
         publish_request(&group, &code, &request, signer).await;
         let pass = ana.sync.pass().await;

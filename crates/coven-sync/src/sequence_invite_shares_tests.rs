@@ -65,7 +65,7 @@ async fn an_uncancellable_provider_grant_keeps_its_cleanup_until_it_ends() {
     let (release, released) = tokio::sync::oneshot::channel();
     phone.storage.hold_next_access(CAROL, true, entered, released).await;
     let making = phone.sync.create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member },
+        MemberRole::Member,
         InviteAccess::ProviderAccount { email: CAROL.into() },
         InviteLifetime::SevenDays,
     );
@@ -299,7 +299,7 @@ async fn an_invite_cancelled_while_its_share_lands_settles_the_share() {
         &group,
         &phone,
         phone.sync.create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: CAROL.into() },
             InviteLifetime::SevenDays,
         ),
@@ -428,7 +428,7 @@ async fn an_admin_whose_account_doesnt_hold_the_store_cannot_share_it() {
     let result = ben
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: CAROL.into() },
             crate::InviteLifetime::SevenDays,
         )
@@ -461,8 +461,8 @@ async fn a_recovery_invites_cleanup_takes_back_only_its_new_grant() {
     assert_eq!(before.map(|(intended, _)| intended), Some(true));
     let invite = phone
         .sync
-        .create_invite(
-            InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
+        .add_device_for(
+            ben.identity.member(),
             InviteAccess::ProviderAccount { email: "Ben@example.org".into() },
             crate::InviteLifetime::SevenDays,
         )
@@ -527,7 +527,7 @@ async fn a_refusal_only_a_person_can_fix_ends_the_invite_and_keeps_its_reason() 
         let made = phone
             .sync
             .create_invite(
-                InviteTarget::NewMember { role: MemberRole::Member },
+                MemberRole::Member,
                 InviteAccess::ProviderAccount { email: CAROL.into() },
                 InviteLifetime::SevenDays,
             )
@@ -593,7 +593,7 @@ async fn a_failure_a_retry_can_fix_keeps_the_invite_waiting() {
     let made = phone
         .sync
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::ProviderAccount { email: CAROL.into() },
             InviteLifetime::SevenDays,
         )

@@ -165,20 +165,25 @@ impl Sealing {
 impl JoiningIdentity {
     /// Restore a fixed request or prepare it before any provider mutation.
     /// A new request names `device`, the joining installation's id, for the
-    /// approval to register, and `joiner`, which must be the kind the invite
-    /// is for. A changed invite, device name or person cannot silently reuse
-    /// another request.
+    /// approval to register, and `name`, the new person's name: given when
+    /// the invite admits a new person, absent when it admits a member's new
+    /// keys, as the code says. A changed invite, device name or name cannot
+    /// silently reuse another request.
     pub fn prepare(
         directory: &StoreDir,
         code: &InviteCode,
         device: DeviceId,
         device_name: &str,
-        joiner: Joiner,
+        name: Option<String>,
     ) -> Result<Self, SyncError> {
-        if joiner.kind() != code.kind {
+        let joiner = match name {
+            Some(name) => Joiner::NewPerson { name },
+            None => Joiner::MemberKeys,
+        };
+        if joiner.admits() != code.admits {
             return Err(crate::CodeError::WrongJoiner {
-                expected: code.kind,
-                actual: joiner.kind(),
+                expected: code.admits,
+                actual: joiner.admits(),
             }
             .into());
         }

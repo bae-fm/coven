@@ -1,7 +1,7 @@
 //! Signed join request frames (D8).
 
 use crate::admin::MemberPublicKeys;
-use crate::codes::InviteKind;
+use crate::codes::InviteAdmits;
 use crate::error::Error;
 use crate::value::name;
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
@@ -46,32 +46,32 @@ pub enum Joiner {
     },
     /// An existing member, whose profile already has a name: the request
     /// carries none.
-    Recovery,
+    MemberKeys,
     /// The member's own new device, asking one of their devices to pair it:
     /// the request carries no name.
     OwnDevice,
 }
 impl Joiner {
-    /// The kind of invite this request answers; none for a member's own
+    /// What the invite this request answers admits; none for a member's own
     /// device, which no invite has.
-    pub fn kind(&self) -> Option<InviteKind> {
+    pub fn admits(&self) -> Option<InviteAdmits> {
         match self {
-            Self::NewPerson { .. } => Some(InviteKind::NewPerson),
-            Self::Recovery => Some(InviteKind::Recovery),
+            Self::NewPerson { .. } => Some(InviteAdmits::NewPerson),
+            Self::MemberKeys => Some(InviteAdmits::MemberKeys),
             Self::OwnDevice => None,
         }
     }
     fn validate(&self) -> Result<(), Error> {
         match self {
             Self::NewPerson { name: person } => name(person),
-            Self::Recovery | Self::OwnDevice => Ok(()),
+            Self::MemberKeys | Self::OwnDevice => Ok(()),
         }
     }
 }
 impl Wire for Joiner {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         match self {
-            Self::Recovery => 0u8.put(out),
+            Self::MemberKeys => 0u8.put(out),
             Self::NewPerson { name: person } => {
                 1u8.put(out)?;
                 person.put(out)
@@ -81,7 +81,7 @@ impl Wire for Joiner {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
-            0 => Ok(Self::Recovery),
+            0 => Ok(Self::MemberKeys),
             1 => Ok(Self::NewPerson { name: crate::wire::get_name(input)? }),
             2 => Ok(Self::OwnDevice),
             tag => Err(Error::UnknownTag { field: "joiner", tag }),

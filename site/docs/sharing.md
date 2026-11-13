@@ -116,7 +116,7 @@ spares them typing it. On Dropbox and OneDrive the new device signs in to the
 person's own account.
 
 With one of their devices in hand, the person can skip the code. They open Add
-device on that device (`handle.start_pairing()`), which shows a *pairing code*
+device on that device (`handle.add_device()`), which shows a *pairing code*
 as a QR code and as text to share. The pairing code holds no keys: it lets the
 new device send a request, and the new device calls `join_with_pairing`. It
 shows a six-digit confirmation number, the showing device shows the number of
@@ -204,9 +204,10 @@ they match:
 // Ana's phone
 let (invite, _, _) = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+        MemberRole::Member,
         InviteAccess::ProviderAccount { email: "dan@example.com".into() },
-        InviteDelivery::Sent { lifetime: InviteLifetime::SevenDays },
+        InviteLifetime::SevenDays,
+        "Ana".into(),
     )
     .await?;
 
@@ -246,7 +247,18 @@ builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
 // The waiting screen shows Dan's number and when the next check runs; its
 // Check now button calls control.check_now().
 let control = JoinControl::new();
-match join_with_invite(builder, &scanned, "Dan's phone", |step| show_step(step), &control).await? {
+// The name Dan typed after he scanned the code. The code says whether it
+// asks for one (`InviteInfo::admits`).
+match join_with_invite(
+    builder,
+    &scanned,
+    Some("Dan".into()),
+    "Dan's phone",
+    |step| show_step(step),
+    &control,
+)
+.await?
+{
     Some(handle) => show_store(handle),
     None => show_declined(),
 }
@@ -324,8 +336,8 @@ app does. Before the request is sent, cancelling removes everything.
 
 ## Losing everything
 
-Ben loses every device and his restore code. An admin invites him again with
-`InviteTarget::ReplaceMemberKeys { member }`, naming his existing member id.
+Ben loses every device and his restore code. An admin adds a device to him with
+`add_device_for(member, ...)`, naming his existing member id.
 Approving it replaces his keys: his role, circles and existing device ids stay
 attached to his id, writes signed with his old keys that land afterwards are
 refused, and his old keys count as exposed, so keys copied to them are replaced

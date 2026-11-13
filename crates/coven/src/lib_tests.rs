@@ -120,27 +120,42 @@ pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>)
     }
 }
 
-/// Who joins with `code`: Carol, typing her name, when it adds a new person;
-/// a recovery otherwise.
-pub(crate) fn carol_joins(code: &str) -> Joiner {
+/// The name joining with `code` gives: Carol's, typed, when it admits a new
+/// person; none when it admits a member's new keys.
+pub(crate) fn carol_joins(code: &str) -> Option<String> {
     let Ok(CodeInfo::Invite(info)) = decode_code_info(code) else {
         panic!("an invite code");
     };
-    match info.kind {
-        InviteKind::NewPerson => Joiner::NewPerson { name: "Carol".into() },
-        InviteKind::Recovery => Joiner::Recovery,
+    match info.admits {
+        InviteAdmits::NewPerson => Some("Carol".into()),
+        InviteAdmits::MemberKeys => None,
     }
 }
 
-/// Make an invite, as an app does in a write of its own, and wait for the
-/// pass that grants its access to show its code.
+/// Make an invite for a new person, as an app does in a write of its own,
+/// and wait for the pass that grants its access to show its code.
 pub(crate) async fn invite(
     owner: &CovenHandle,
-    target: InviteTarget,
+    role: MemberRole,
     access: InviteAccess,
     lifetime: crate::InviteLifetime,
 ) -> Invite {
-    let (id, _, _) = owner.create_invite(target, access, lifetime, "Ana".into()).await.unwrap();
+    let (id, _, _) = owner.create_invite(role, access, lifetime, "Ana".into()).await.unwrap();
+    shown_invite(owner, id).await
+}
+
+/// Make an invite that adds a device to `member`, as `invite` does.
+pub(crate) async fn device_invite(
+    owner: &CovenHandle,
+    member: MemberId,
+    access: InviteAccess,
+    lifetime: crate::InviteLifetime,
+) -> Invite {
+    let (id, _, _) = owner.add_device_for(member, access, lifetime, "Ana".into()).await.unwrap();
+    shown_invite(owner, id).await
+}
+
+async fn shown_invite(owner: &CovenHandle, id: InviteId) -> Invite {
     owner
         .test_invites()
         .wait_for(|invites| {

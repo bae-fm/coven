@@ -10,28 +10,28 @@ use uuid::Uuid;
 /// (§13.2, format.md D10).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PairingId(
+pub struct AddDeviceId(
     /// The pairing's UUID, supplied by the id source.
     pub Uuid,
 );
 
-impl From<InviteId> for PairingId {
+impl From<InviteId> for AddDeviceId {
     fn from(id: InviteId) -> Self {
         Self(id.0)
     }
 }
 
-impl From<PairingId> for InviteId {
-    fn from(id: PairingId) -> Self {
+impl From<AddDeviceId> for InviteId {
+    fn from(id: AddDeviceId) -> Self {
         Self(id.0)
     }
 }
 
-/// A pairing `start_pairing` made: what the screen that adds a device shows.
+/// A pairing `add_device` made: what the screen that adds a device shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pairing {
+pub struct AddDevice {
     /// Names the pairing in every later call.
-    pub id: PairingId,
+    pub id: AddDeviceId,
     /// The code to show as a QR code, behind a tap. On S3 it carries the key
     /// this device connects with, so the new device asks for none: whoever
     /// sees it reaches the storage as this member until the key is replaced
@@ -48,27 +48,27 @@ pub struct Pairing {
 /// for a request that is `Waiting`, and ends the pairing when its screen
 /// closes, whatever its status.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PairingStatus {
+pub enum AddDeviceStatus {
     /// Waiting for a request, then with the checked request, for the person
     /// to compare its number and decide.
     Waiting {
         /// The checked request, once one has come.
-        request: Option<PairingRequest>,
+        request: Option<AddDeviceRequest>,
     },
     /// The person approved `request`: its handover is on its way to the
     /// request's place, or there, waiting for the new device to register.
     Approved {
         /// The approved request.
-        request: PairingRequest,
+        request: AddDeviceRequest,
     },
     /// The pairing has ended, its marker in place or on its way; the app
     /// shows how until it ends the pairing and forgets it.
-    Ended(PairingEnd),
+    Ended(AddDeviceEnd),
 }
 
 /// How a pairing ended (§13.2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PairingEnd {
+pub enum AddDeviceEnd {
     /// This device applied the new device's add-device entry.
     Added {
         /// The device the request named.
@@ -85,11 +85,11 @@ pub enum PairingEnd {
     Expired,
 }
 
-/// A checked pairing request, as `PairingStatus` shows it (§13.2).
+/// A checked pairing request, as `AddDeviceStatus` shows it (§13.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PairingRequest {
+pub struct AddDeviceRequest {
     /// The pairing it answers.
-    pub pairing: PairingId,
+    pub pairing: AddDeviceId,
     /// The name the new device gave itself, for the person to check.
     pub device_name: String,
     /// Computed from the pairing id and the request's keys; the new device

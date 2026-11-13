@@ -153,11 +153,25 @@ impl Network {
         network
     }
     async fn join(&mut self, index: usize) {
-        self.join_as(index, InviteTarget::NewMember { role: MemberRole::Member }).await;
+        self.join_as(index, MemberRole::Member).await;
     }
-    /// Join device `index` through an invite for `target`, approved by device 0.
-    pub(crate) async fn join_as(&mut self, index: usize, target: InviteTarget) {
-        let joined = self.try_join_as(index, target).await;
+    /// Join device `index` as a new person with `role`, through an invite
+    /// approved by device 0.
+    pub(crate) async fn join_as(&mut self, index: usize, role: MemberRole) {
+        let joined = self.try_join_as(index, role).await;
+        assert!(joined.is_ok(), "{:?}", joined.err());
+    }
+    /// Join device `index` with new keys for `member`, through an invite from
+    /// `add_device_for` approved by device 0.
+    pub(crate) async fn join_for(&mut self, index: usize, member: MemberId) {
+        let invite = crate::tests::device_invite(
+            &self.devices[0].handle,
+            member,
+            self.s3_access(index),
+            crate::InviteLifetime::SevenDays,
+        )
+        .await;
+        let joined = self.join_through(index, invite).await;
         assert!(joined.is_ok(), "{:?}", joined.err());
     }
     /// Join device `index` as `join_as` does, returning what the join returned:
@@ -165,23 +179,29 @@ impl Network {
     pub(crate) async fn try_join_as(
         &mut self,
         index: usize,
-        target: InviteTarget,
+        role: MemberRole,
     ) -> Result<(), BootstrapError> {
+        let invite = crate::tests::invite(
+            &self.devices[0].handle,
+            role,
+            self.s3_access(index),
+            crate::InviteLifetime::SevenDays,
+        )
+        .await;
+        self.join_through(index, invite).await
+    }
+    fn s3_access(&self, index: usize) -> InviteAccess {
+        InviteAccess::S3AccessKey {
+            access_key_id: format!("member-{index}"),
+            secret_access_key: SecretText::new("secret".into()),
+        }
+    }
+    async fn join_through(&mut self, index: usize, invite: Invite) -> Result<(), BootstrapError> {
         let owner = &self.devices[0].handle;
         // Device 0's invite looks for the join's request and the join checks
         // for its approval, each backing off between looks, on held waits:
         // device 0 reads the request in the pass asked for once the join
         // waits, and a held check runs the check that finds the approval.
-        let invite = crate::tests::invite(
-            owner,
-            target,
-            InviteAccess::S3AccessKey {
-                access_key_id: format!("member-{index}"),
-                secret_access_key: SecretText::new("secret".into()),
-            },
-            crate::InviteLifetime::SevenDays,
-        )
-        .await;
         let app_dir = self.root.path().join(index.to_string());
         std::fs::create_dir(&app_dir).unwrap();
         let app = Coven::in_memory(app_dir);

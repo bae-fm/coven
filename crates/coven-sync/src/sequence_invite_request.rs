@@ -2,11 +2,11 @@
 
 use super::*;
 
-/// Whom a request must answer for, by the kind of person it names (§13.2).
+/// Whom a request must answer for, by the person it names (§13.2).
 #[derive(Clone, Copy)]
 pub(crate) enum Expected {
-    /// An invite takes the kind of person it is for.
-    Invite(coven_format::codes::InviteKind),
+    /// An invite takes the person it admits.
+    Invite(coven_format::codes::InviteAdmits),
     /// A pairing takes only the member's own new device.
     OwnDevice,
 }
@@ -14,7 +14,7 @@ pub(crate) enum Expected {
 impl Expected {
     fn accepts(self, joiner: &coven_format::objects::Joiner) -> bool {
         match self {
-            Self::Invite(kind) => joiner.kind() == Some(kind),
+            Self::Invite(admits) => joiner.admits() == Some(admits),
             Self::OwnDevice => matches!(joiner, coven_format::objects::Joiner::OwnDevice),
         }
     }
@@ -38,7 +38,7 @@ pub(crate) struct RequestChecks<'a> {
 impl RequestChecks<'_> {
     /// Open and check a request: it opens with the secret, its own new
     /// signing key verifies it, it repeats the code's id and member id, it is
-    /// for the kind of person the code is for, and `state`, the history this
+    /// for the person the code admits, and `state`, the history this
     /// pass caught up with, has bound neither of its keys and registers no
     /// device with its device id (§13.2). A request that fails a check is
     /// `Refused`; one in a newer format than this device reads waits for its
@@ -60,7 +60,7 @@ impl RequestChecks<'_> {
             return Ok(Opened::Refused(crate::write_object::wrong_identity(self.path)));
         };
         // A request for a new person carries the name they typed, and one for
-        // a recovery none; an invite takes only its own kind (§13.2).
+        // a recovery none; an invite takes only the person it admits (§13.2).
         if request.invite != self.id
             || request.member != self.member
             || !self.expected.accepts(&request.joiner)
@@ -94,7 +94,7 @@ impl SequenceSync {
             secret: &secret,
             id: work.id,
             member: work.member,
-            expected: Expected::Invite(work.kind()),
+            expected: Expected::Invite(work.admits()),
         }
         .open(state, bytes)
     }

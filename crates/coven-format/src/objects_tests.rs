@@ -13,7 +13,7 @@ fn a_new_persons_request_carries_the_name_they_typed_after_the_device_name() {
     // The frame ends with the joiner: tag 1, then the name.
     assert!(bytes.ends_with(b"\x01\0\0\0\x03Dan"));
     assert_eq!(Object::decode(&bytes).unwrap(), Object::JoinRequest(request.clone()));
-    assert_eq!(request.joiner.kind(), Some(InviteKind::NewPerson));
+    assert_eq!(request.joiner.admits(), Some(InviteAdmits::NewPerson));
 }
 
 #[test]
@@ -23,7 +23,7 @@ fn a_recoverys_request_says_so_and_carries_no_name() {
     // The frame ends with the joiner: tag 0 and nothing after it.
     assert!(bytes.ends_with(b"\0\0\0\x01D\0"));
     assert_eq!(Object::decode(&bytes).unwrap(), Object::JoinRequest(request.clone()));
-    assert_eq!(request.joiner.kind(), Some(InviteKind::Recovery));
+    assert_eq!(request.joiner.admits(), Some(InviteAdmits::MemberKeys));
 }
 
 #[test]
@@ -45,5 +45,5 @@ fn a_pairings_request_says_it_is_the_members_own_device_and_carries_no_name() {
     assert!(bytes.ends_with(b"\0\0\0\x01D\x02"));
     assert_eq!(Object::decode(&bytes).unwrap(), Object::JoinRequest(request.clone()));
     // No invite has this kind, so an invite's kind check refuses it.
-    assert_eq!(request.joiner.kind(), None);
+    assert_eq!(request.joiner.admits(), None);
 }

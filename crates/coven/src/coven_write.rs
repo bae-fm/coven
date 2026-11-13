@@ -281,30 +281,52 @@ impl<'write> CovenWrite<'write> {
         self.steps.remove_circle_member(&self.sql, circle, *member)
     }
 
-    /// Makes an invite, as an admin, and returns its id, the member id it
-    /// fixes and its operation (§13.2, E10). A new person gets a fresh
-    /// member id; recovering an existing active member keeps their id, role,
-    /// circles and devices. The write checks the invite against the state
-    /// this device has applied and journals it, with or without storage; it
-    /// is listed in `coven_invites` from the commit, without a code. Once
-    /// the write commits, a pass checks it again against the history it
-    /// catches up with, grants the storage access and fixes the code, which
-    /// `coven_invites` then shows. A check that fails there, or a failed
-    /// grant, is the invite's pending record under its operation in
+    /// Makes an invite for a new person, as an admin, and returns its id,
+    /// the member id it fixes and its operation (§13.2, E10). The new person
+    /// gets a fresh member id and `role`. The write checks the invite against
+    /// the state this device has applied and journals it, with or without
+    /// storage; it is listed in `coven_invites` from the commit, without a
+    /// code. Once the write commits, a pass checks it again against the
+    /// history it catches up with, grants the storage access and fixes the
+    /// code, which `coven_invites` then shows. A check that fails there, or a
+    /// failed grant, is the invite's pending record under its operation in
     /// `coven_pending`; cancelling the invite ends it. It expires `lifetime`
     /// after it is made. Made by a device that isn't a registered admin it
-    /// fails with
-    /// `Rejected(NotAllowed)`; an empty name with `Format`; an App-folder
-    /// Dropbox store with `DropboxAppFolderNotShareable`.
+    /// fails with `Rejected(NotAllowed)`; an empty name with `Format`; an
+    /// App-folder Dropbox store with `DropboxAppFolderNotShareable`.
     pub fn create_invite(
         &self,
-        target: InviteTarget,
+        role: MemberRole,
         access: InviteAccess,
         lifetime: InviteLifetime,
         inviter: String,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.steps
-            .create_invite(&self.sql, coven_sync::NewInvite { target, access, lifetime, inviter })
+        self.steps.create_invite(
+            &self.sql,
+            coven_sync::NewInvite::person(role, access, lifetime, inviter),
+        )
+    }
+
+    /// Makes an invite that adds a device to `member`, an active member who
+    /// lost every device, as an admin (§13.2, E10). It is an invite as
+    /// `create_invite` makes it, listed, checked, granted and cancelled the
+    /// same way, and returns the same: the id, the member id it fixes (the
+    /// member's own) and its operation. Approving the request it receives
+    /// binds the requester's new keys to the member's id, keeping its role,
+    /// circles and devices. A member who isn't active fails with
+    /// `Rejected(TargetGone)`, and this device's own member with
+    /// `Rejected(NotAllowed)`; the other failures are `create_invite`'s.
+    pub fn add_device_for(
+        &self,
+        member: MemberId,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+        inviter: String,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
+        self.steps.create_invite(
+            &self.sql,
+            coven_sync::NewInvite::member_keys(member, access, lifetime, inviter),
+        )
     }
 
     /// Approves exactly this checked request (§13.2, E10), and returns the
@@ -360,8 +382,8 @@ impl<'write> CovenWrite<'write> {
     /// in the shared one; an S3 pairing without it fails with
     /// `InvalidConfiguration`. Made by a device that isn't registered, or
     /// whose member isn't active, it fails with `Rejected(NotAllowed)`.
-    pub fn start_pairing(&self, key: Option<S3Credentials>) -> Result<Pairing, SyncError> {
-        self.steps.start_pairing(&self.sql, key)
+    pub fn add_device(&self, key: Option<S3Credentials>) -> Result<AddDevice, SyncError> {
+        self.steps.add_device(&self.sql, key)
     }
 
     /// Approves exactly this checked request (§13.2, E10): the write seals
@@ -370,23 +392,23 @@ impl<'write> CovenWrite<'write> {
     /// Once it commits, a pass puts the handover in the request's place. A
     /// request the pairing no longer shows, and a pairing that has ended or
     /// expired, fail with `InvitationChanged`.
-    pub fn approve_pairing(&self, request: &PairingRequest) -> Result<(), SyncError> {
-        self.steps.approve_pairing(&self.sql, request)
+    pub fn approve_add_device(&self, request: &AddDeviceRequest) -> Result<(), SyncError> {
+        self.steps.approve_add_device(&self.sql, request)
     }
 
     /// Declines exactly this checked request: the pairing ends as declined,
     /// and a pass puts its marker in the request's place. A request the
     /// pairing no longer shows, an approved pairing, and one that has ended
     /// or expired, fail with `InvitationChanged`.
-    pub fn decline_pairing(&self, request: &PairingRequest) -> Result<(), SyncError> {
-        self.steps.decline_pairing(&self.sql, request)
+    pub fn decline_add_device(&self, request: &AddDeviceRequest) -> Result<(), SyncError> {
+        self.steps.decline_add_device(&self.sql, request)
     }
 
     /// The screen showing the pairing's code closed: ends the pairing at
     /// whatever stage it is, and forgets it. A pairing that has ended is only
     /// forgotten; one already forgotten changes nothing.
-    pub fn end_pairing(&self, pairing: PairingId) -> Result<(), SyncError> {
-        self.steps.end_pairing(&self.sql, pairing)
+    pub fn end_add_device(&self, pairing: AddDeviceId) -> Result<(), SyncError> {
+        self.steps.end_add_device(&self.sql, pairing)
     }
 
     /// Acknowledges a finished operation's outcome, in this write, so it

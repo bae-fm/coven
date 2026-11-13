@@ -77,12 +77,12 @@ use status::{loading, open_installation};
 
 /// Accept provider access, retain one signed request across restarts, and wait
 /// for approval. Returns the open store, or None when declined or expired.
-/// `joiner` is the new person with the name they typed, or a recovery, as the
-/// invite's `InviteInfo::kind` says; the other kind fails with
-/// `CodeError::WrongJoiner` before anything changes. Dropping the future
-/// before the join finds its admission preserves the unfinished join for a
-/// subsequent call with the same invite, device name and person, or
-/// `resume_join`. On Dropbox and
+/// `name` is the name the new person typed when the invite admits a new
+/// person, and `None` when it admits a member's new keys, as the invite's
+/// `InviteInfo::admits` says; the other fails with `CodeError::WrongJoiner`
+/// before anything changes. Dropping the future before the join finds its
+/// admission preserves the unfinished join for a subsequent call with the
+/// same invite, device name and name, or `resume_join`. On Dropbox and
 /// OneDrive the builder's sign-in is kept on the device beside the saved code
 /// until the join ends, and a later call without one uses it (§13.2).
 /// `control` cancels the join or asks for a check for approval at once.
@@ -97,7 +97,7 @@ use status::{loading, open_installation};
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
-    joiner: Joiner,
+    name: Option<String>,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
@@ -109,7 +109,7 @@ pub async fn join_with_invite(
         builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
-            terms: RequestTerms::Given { device_name: device_name.into(), joiner },
+            terms: RequestTerms::Given { device_name: device_name.into(), name },
             held: control.often.subscribe(),
             parks: control.parks.clone(),
         },
@@ -250,10 +250,10 @@ enum BootstrapRequest {
     },
 }
 
-/// The device name and person a join's request carries.
+/// The device name and the new person's name a join's request carries.
 enum RequestTerms {
     /// What the app passed, which a saved request must repeat.
-    Given { device_name: String, joiner: Joiner },
+    Given { device_name: String, name: Option<String> },
     /// What the saved request carries: the join resumes from it.
     Saved,
 }

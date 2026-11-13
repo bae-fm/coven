@@ -125,8 +125,8 @@ async fn a_reset_ends_a_replacement_invite_and_records_nothing_about_its_s3_key(
         group.create(&ana).await;
         group.admit(&ana, &ben).await;
         ana.sync
-            .create_invite(
-                InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
+            .add_device_for(
+                ben.identity.member(),
                 InviteAccess::S3AccessKey {
                     access_key_id: key.into(),
                     secret_access_key: SecretText::new("secret".into()),

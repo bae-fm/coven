@@ -484,7 +484,7 @@ async fn growth_snapshots_let_retention_delete_covered_slots_and_superseded_snap
 async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> MemberId {
     let (id, _, _) = handle
         .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::S3AccessKey {
                 access_key_id: "member-key".into(),
                 secret_access_key: SecretText::new("secret".into()),

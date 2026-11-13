@@ -416,15 +416,27 @@ impl CovenHandle {
     ) -> Result<(), OperationError> {
         self.write(move |write| write.retry_pending_operation(operation)).await
     }
-    /// Makes an invite, in a write of its own (`CovenWrite::create_invite`).
+    /// Makes an invite for a new person, in a write of its own
+    /// (`CovenWrite::create_invite`).
     pub async fn create_invite(
         &self,
-        target: InviteTarget,
+        role: MemberRole,
         access: InviteAccess,
         lifetime: InviteLifetime,
         inviter: String,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.write(move |write| write.create_invite(target, access, lifetime, inviter)).await
+        self.write(move |write| write.create_invite(role, access, lifetime, inviter)).await
+    }
+    /// Makes an invite that adds a device to a member who lost every device,
+    /// in a write of its own (`CovenWrite::add_device_for`).
+    pub async fn add_device_for(
+        &self,
+        member: MemberId,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+        inviter: String,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
+        self.write(move |write| write.add_device_for(member, access, lifetime, inviter)).await
     }
     /// Follow `coven_invites` with a live query, as an app does (E10).
     #[cfg(any(test, feature = "test-utils"))]

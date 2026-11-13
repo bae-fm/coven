@@ -351,7 +351,7 @@ async fn an_invite_expires_with_sync_stopped_and_while_closed() {
     let invite = || async {
         crate::tests::invite(
             &f.handle,
-            InviteTarget::NewMember { role: MemberRole::Member },
+            MemberRole::Member,
             InviteAccess::S3AccessKey {
                 access_key_id: "carol-key".into(),
                 secret_access_key: SecretText::new("carol-secret".into()),

@@ -172,28 +172,28 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
 }
 
 #[test]
-fn invite_carries_the_inviters_name_and_its_kind_after_the_store_name() {
+fn invite_carries_the_inviters_name_and_who_it_admits_after_the_store_name() {
     let mut invite = test_utils::invite();
     let bytes = invite.to_bytes().unwrap();
     // Prefix, store id, then the store name `S`, the inviter's name `A` and
-    // the kind: the fixture recovers a member.
+    // who it admits: the fixture admits a member's new keys.
     assert_eq!(&bytes[23..28], b"\0\0\0\x01S");
     assert_eq!(&bytes[28..33], b"\0\0\0\x01A");
     assert_eq!(bytes[33], 1);
-    assert_eq!(InviteCode::from_bytes(&bytes).unwrap().kind, InviteKind::Recovery);
-    invite.kind = InviteKind::NewPerson;
+    assert_eq!(InviteCode::from_bytes(&bytes).unwrap().admits, InviteAdmits::MemberKeys);
+    invite.admits = InviteAdmits::NewPerson;
     let bytes = invite.to_bytes().unwrap();
     assert_eq!(bytes[33], 0);
     let decoded = InviteCode::from_bytes(&bytes).unwrap();
-    assert_eq!(decoded.kind, InviteKind::NewPerson);
+    assert_eq!(decoded.admits, InviteAdmits::NewPerson);
     assert_eq!(decoded.invite, invite.invite);
-    // No new person's name is in the code: the expiry follows the kind.
+    // No new person's name is in the code: the expiry follows who it admits.
     assert_eq!(&bytes[34..42], &86_400u64.to_be_bytes());
     let mut unknown = bytes.to_vec();
     unknown[33] = 2;
     assert_eq!(
         InviteCode::from_bytes(&unknown).err(),
-        Some(Error::UnknownTag { field: "invite kind", tag: 2 })
+        Some(Error::UnknownTag { field: "invite admits", tag: 2 })
     );
 }
 

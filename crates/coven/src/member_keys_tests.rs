@@ -209,7 +209,7 @@ mod owner_identity {
     #[tokio::test]
     async fn owned_rows_keep_their_member_across_key_replacement() {
         let mut network = owned_notes().await;
-        network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+        network.join_as(1, MemberRole::Member).await;
         let carol = own_id(&network.devices[1].handle).await;
         network.devices[1]
             .handle
@@ -225,7 +225,7 @@ mod owner_identity {
         assert_eq!(title(ana).await, "first");
         refused_naming(rename(ana, "ana's").await, carol);
         let before = ana.members().await.unwrap().into_iter().find(|m| m.id == carol).unwrap().keys;
-        network.join_as(2, InviteTarget::ReplaceMemberKeys { member: carol }).await;
+        network.join_for(2, carol).await;
         let replaced = &network.devices[2].handle;
         assert_eq!(own_id(replaced).await, carol);
         network.sync(0).await;
@@ -251,7 +251,7 @@ mod owner_identity {
     async fn a_snapshot_carries_another_members_ownership_to_a_new_device() {
         use coven_storage::Storage;
         let mut network = owned_notes().await;
-        network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+        network.join_as(1, MemberRole::Member).await;
         let carol = own_id(&network.devices[1].handle).await;
         network.devices[1]
             .handle
@@ -288,7 +288,7 @@ mod owner_identity {
             .await
             .unwrap()
             .is_none());
-        network.join_as(2, InviteTarget::NewMember { role: MemberRole::Member }).await;
+        network.join_as(2, MemberRole::Member).await;
         let dan = &network.devices[2].handle;
         assert_eq!(title(dan).await, "first");
         refused_naming(rename(dan, "dan's").await, carol);

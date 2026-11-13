@@ -13,7 +13,7 @@ use super::sequence_invites::{
 };
 use super::{SequenceSync, Session};
 use crate::sequence_sync::OperationState;
-use crate::{Pairing, PairingEnd, PairingId, PairingRequest, PairingStatus, SyncError};
+use crate::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus, SyncError};
 use coven_crypto::{InviteSecret, MemberIdentity, SecretText};
 use coven_database::{
     operation_kind, DbError, Journal, NewOperation, OperationId, OperationRecord, SqlContext,
@@ -42,13 +42,13 @@ pub(crate) enum PairingState {
     HandedOver { request: Vec<u8> },
     /// The pairing ended, and the app is shown how: the marker goes in the
     /// place of the request or the handover.
-    Ending { how: PairingEnd },
+    Ending { how: AddDeviceEnd },
     /// The app closed the screen: the marker goes in the place of the request
     /// or the handover, and then the row is finished.
     Forgetting,
     /// The marker is in place; the app reads how the pairing ended until it
     /// closes the screen.
-    Ended { how: PairingEnd },
+    Ended { how: AddDeviceEnd },
 }
 
 /// A pairing's journal row.
@@ -101,7 +101,7 @@ impl PairingWork {
     }
 
     /// End the pairing for `how`.
-    fn end(&mut self, how: PairingEnd) {
+    fn end(&mut self, how: AddDeviceEnd) {
         self.state = PairingState::Ending { how };
     }
 
@@ -118,7 +118,7 @@ impl PairingWork {
 
     /// End the pairing as its expiry does.
     pub(crate) fn expire(&mut self) {
-        self.end(PairingEnd::Expired);
+        self.end(AddDeviceEnd::Expired);
     }
 }
 
@@ -137,7 +137,7 @@ pub(crate) fn make_pairing(
     now: SystemTime,
     location: &coven_storage::StorageConfig,
     key: Option<S3Credentials>,
-) -> Result<Pairing, SyncError> {
+) -> Result<AddDevice, SyncError> {
     let expires_at = now.checked_add(LIFETIME).ok_or(
         StorageFailure::InvalidConfiguration
             .with_source("the clock cannot represent the pairing's expiry"),
@@ -185,10 +185,10 @@ pub(crate) fn make_pairing(
         journal.start_operation(&NewOperation {
             kind: operation_kind::PAIRING.into(),
             data: serde_json::to_vec(&work)?,
-            started_by: "start_pairing".into(),
+            started_by: "add_device".into(),
             pauses_writes: false,
         })?;
-        Ok(Pairing {
+        Ok(AddDevice {
             id: id.into(),
             qr_code: qr_code.as_str().to_owned(),
             shared_code: shared_code.as_str().to_owned(),
@@ -211,7 +211,7 @@ pub(crate) fn approve_request(
     store: coven_foundation::id_source::StoreId,
     now: SystemTime,
     held: &MemberIdentity,
-    request: &PairingRequest,
+    request: &AddDeviceRequest,
 ) -> Result<OperationId, SyncError> {
     sql.journal_step(|journal| {
         let (record, mut work) = pairing_record(journal, request.pairing.into())?;
@@ -245,7 +245,7 @@ pub(crate) fn approve_request(
 pub(crate) fn decline_request(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
-    request: &PairingRequest,
+    request: &AddDeviceRequest,
 ) -> Result<OperationId, SyncError> {
     sql.journal_step(|journal| {
         let (record, mut work) = pairing_record(journal, request.pairing.into())?;
@@ -256,7 +256,7 @@ pub(crate) fn decline_request(
             PairingState::Waiting { request: Some(stored) } if *stored == request.record => (),
             _ => return Err(SyncError::InvitationChanged),
         }
-        work.end(PairingEnd::Declined);
+        work.end(AddDeviceEnd::Declined);
         journal.advance_operation(&work.update(&record)?)?;
         Ok(record.id)
     })
@@ -266,9 +266,9 @@ pub(crate) fn decline_request(
 /// pairing ends at whatever stage it is, approved included, and is forgotten
 /// once the marker is in the request's or handover's place. A pairing that
 /// has ended is forgotten as it is; one already forgotten changes nothing.
-pub(crate) fn end_pairing(
+pub(crate) fn end_add_device(
     sql: &SqlContext<'_, '_>,
-    pairing: PairingId,
+    pairing: AddDeviceId,
 ) -> Result<Option<OperationId>, SyncError> {
     sql.journal_step(|journal| {
         let (record, mut work) = match pairing_record(journal, pairing.into()) {
@@ -307,10 +307,10 @@ fn pairing_record(
 impl PairingWork {
     /// Where the pairing is for the app, or `None` once the app has closed
     /// the screen: the pairing is forgotten even while its marker is on its way.
-    fn status(&self) -> Result<Option<PairingStatus>, SyncError> {
-        let present = |bytes: &[u8]| -> Result<PairingRequest, SyncError> {
+    fn status(&self) -> Result<Option<AddDeviceStatus>, SyncError> {
+        let present = |bytes: &[u8]| -> Result<AddDeviceRequest, SyncError> {
             let request = decode_request(bytes)?;
-            Ok(PairingRequest {
+            Ok(AddDeviceRequest {
                 pairing: self.id.into(),
                 device_name: request.device_name,
                 confirmation: coven_crypto::ConfirmationNumber::of(self.id, &request.keys),
@@ -319,13 +319,13 @@ impl PairingWork {
         };
         Ok(Some(match &self.state {
             PairingState::Waiting { request } => {
-                PairingStatus::Waiting { request: request.as_deref().map(present).transpose()? }
+                AddDeviceStatus::Waiting { request: request.as_deref().map(present).transpose()? }
             }
             PairingState::Approving { request, .. } | PairingState::HandedOver { request } => {
-                PairingStatus::Approved { request: present(request)? }
+                AddDeviceStatus::Approved { request: present(request)? }
             }
             PairingState::Ending { how } | PairingState::Ended { how } => {
-                PairingStatus::Ended(how.clone())
+                AddDeviceStatus::Ended(how.clone())
             }
             PairingState::Forgetting => return Ok(None),
         }))
@@ -341,8 +341,8 @@ impl PairingWork {
 )]
 pub fn pairing_status(
     sql: coven_database::SqlReadContext<'_>,
-    pairing: PairingId,
-) -> Result<Option<PairingStatus>, DbError> {
+    pairing: AddDeviceId,
+) -> Result<Option<AddDeviceStatus>, DbError> {
     for record in sql.operations_of_kind(operation_kind::PAIRING)? {
         let work: PairingWork =
             serde_json::from_slice(&record.data).map_err(DbError::StateEncoding)?;
@@ -466,7 +466,7 @@ impl SequenceSync {
                         // ends, as a decline ends it.
                         Opened::Refused(refusal) => {
                             tracing::warn!(?id, %refusal, "a pairing's request failed its checks");
-                            work.end(PairingEnd::Refused);
+                            work.end(AddDeviceEnd::Refused);
                             self.database.advance_operation(work.update(&record)?).await?;
                         }
                     }
@@ -494,7 +494,7 @@ impl SequenceSync {
                     if !registered {
                         return self.found_nothing(id, record.last_step).await;
                     }
-                    work.end(PairingEnd::Added {
+                    work.end(AddDeviceEnd::Added {
                         device: request.device,
                         name: request.device_name,
                     });

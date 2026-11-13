@@ -1,7 +1,6 @@
 //! Application values for operations, members, circles and invitations (api.md).
 
 use coven_crypto::SecretText;
-use coven_format::admin::MemberRole;
 use coven_foundation::id_source::{InviteId, MemberId};
 use std::time::{Duration, SystemTime};
 
@@ -125,22 +124,6 @@ impl OperationKind {
     }
 }
 
-/// The admin's choice, fixed before the invite is shown (§13.2, §13.3).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InviteTarget {
-    /// A new person: coven generates a fresh member id, added with this role.
-    NewMember {
-        /// The role the person receives on approval.
-        role: MemberRole,
-    },
-    /// An existing active member who lost every device: approval binds the
-    /// requester's new keys to this id, keeping its role, circles and devices.
-    ReplaceMemberKeys {
-        /// The member whose keys the approval replaces.
-        member: MemberId,
-    },
-}
-
 /// How the invited person reaches the store's provider.
 #[derive(Clone)]
 pub enum InviteAccess {
@@ -190,8 +173,8 @@ pub struct Invite {
     pub operation: coven_database::OperationId,
     /// The stable member id the invite fixed.
     pub member: MemberId,
-    /// Whether the invite adds a new person or recovers a member.
-    pub kind: coven_format::codes::InviteKind,
+    /// Whether the invite admits a new person or a member's new keys.
+    pub admits: coven_format::codes::InviteAdmits,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries, never its secret (§14.3).
     pub access: coven_format::MemberAccess,

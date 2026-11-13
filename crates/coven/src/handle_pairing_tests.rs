@@ -17,7 +17,7 @@ fn same_key(actual: &S3Credentials, expected: &S3Credentials) {
 
 /// The new device writes its request to the pairing's one path, with fresh
 /// keys, naming `device`.
-async fn ask(owner: &Owner, pairing: &Pairing, device: DeviceId) -> coven_crypto::MemberKeys {
+async fn ask(owner: &Owner, pairing: &AddDevice, device: DeviceId) -> coven_crypto::MemberKeys {
     let code = coven_sync::read_pairing_code(&pairing.shared_code).unwrap();
     let keys = coven_crypto::MemberKeys::generate().unwrap();
     let request = AskRequest {
@@ -36,16 +36,16 @@ async fn ask(owner: &Owner, pairing: &Pairing, device: DeviceId) -> coven_crypto
 }
 
 /// The request the pairing offers, once Ana's pass has read it.
-async fn offered(owner: &Owner, pairing: &Pairing) -> PairingRequest {
+async fn offered(owner: &Owner, pairing: &AddDevice) -> AddDeviceRequest {
     owner.pass_now().await;
-    match owner.handle.pairing(pairing.id).await.unwrap() {
-        Some(PairingStatus::Waiting { request: Some(request) }) => request,
+    match owner.handle.add_device_status(pairing.id).await.unwrap() {
+        Some(AddDeviceStatus::Waiting { request: Some(request) }) => request,
         status => panic!("a checked request was expected: {status:?}"),
     }
 }
 
-async fn status(owner: &Owner, pairing: &Pairing) -> Option<PairingStatus> {
-    owner.handle.pairing(pairing.id).await.unwrap()
+async fn status(owner: &Owner, pairing: &AddDevice) -> Option<AddDeviceStatus> {
+    owner.handle.add_device_status(pairing.id).await.unwrap()
 }
 
 #[tokio::test]
@@ -54,7 +54,7 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
     let phone = Installation::new();
     let handle = phone.restore(&owner).await;
     let directory = phone.app.store_dir(&owner.directory.id());
-    let pairing = handle.start_pairing().await.unwrap();
+    let pairing = handle.add_device().await.unwrap();
     same_key(&carried_key(&pairing.qr_code).unwrap(), &owner.s3_credentials().unwrap());
     // The code to share carries none, and the new device asks for it.
     assert!(carried_key(&pairing.shared_code).is_none());
@@ -77,7 +77,7 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
         .use_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
         .await
         .unwrap();
-    same_key(&carried_key(&handle.start_pairing().await.unwrap().qr_code).unwrap(), &replaced);
+    same_key(&carried_key(&handle.add_device().await.unwrap().qr_code).unwrap(), &replaced);
     let updated = S3Credentials {
         access_key_id: "updated".into(),
         secret_access_key: SecretText::new("updated-secret".into()),
@@ -86,10 +86,10 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
         .use_access_key(updated.access_key_id.clone(), updated.secret_access_key.clone())
         .await
         .unwrap();
-    same_key(&carried_key(&handle.start_pairing().await.unwrap().qr_code).unwrap(), &updated);
+    same_key(&carried_key(&handle.add_device().await.unwrap().qr_code).unwrap(), &updated);
     handle.close().await.unwrap();
     let handle = phone.handle(directory, &owner).await;
-    same_key(&carried_key(&handle.start_pairing().await.unwrap().qr_code).unwrap(), &updated);
+    same_key(&carried_key(&handle.add_device().await.unwrap().qr_code).unwrap(), &updated);
     handle.close().await.unwrap();
     owner.close().await;
 }
@@ -98,7 +98,7 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
 async fn on_other_providers_the_two_codes_are_equal_and_carry_no_key() {
     for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive, CloudProvider::CloudKit] {
         let owner = Owner::new(provider, false).await;
-        let pairing = owner.handle.start_pairing().await.unwrap();
+        let pairing = owner.handle.add_device().await.unwrap();
         assert_eq!(pairing.qr_code, pairing.shared_code, "{provider:?}");
         assert!(carried_key(&pairing.qr_code).is_none(), "{provider:?}");
         let CodeInfo::Pairing(info) = decode_code_info(&pairing.qr_code).unwrap() else {
@@ -129,7 +129,7 @@ async fn a_member_who_is_no_admin_can_start_a_pairing() {
     let members = carol_handle.members().await.unwrap();
     let info = members.iter().find(|member| member.id == carol).unwrap();
     assert_eq!(info.role, MemberRole::Member);
-    let pairing = carol_handle.start_pairing().await.unwrap();
+    let pairing = carol_handle.add_device().await.unwrap();
     assert_eq!(coven_sync::read_pairing_code(&pairing.shared_code).unwrap().member, carol);
     carol_handle.close().await.unwrap();
     owner.close().await;
@@ -150,7 +150,7 @@ async fn a_removed_device_cannot_start_a_pairing() {
     )
     .await
     .expect("the phone hears of its removal");
-    let started = handle.start_pairing().await;
+    let started = handle.add_device().await;
     assert!(
         matches!(
             started,
@@ -166,8 +166,8 @@ async fn a_removed_device_cannot_start_a_pairing() {
 #[tokio::test]
 async fn approval_takes_the_request_shown_and_declining_an_approved_pairing_fails() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    let pairing = owner.handle.start_pairing().await.unwrap();
-    assert_eq!(status(&owner, &pairing).await, Some(PairingStatus::Waiting { request: None }));
+    let pairing = owner.handle.add_device().await.unwrap();
+    assert_eq!(status(&owner, &pairing).await, Some(AddDeviceStatus::Waiting { request: None }));
     let keys = ask(&owner, &pairing, DeviceId(70)).await;
     let request = offered(&owner, &pairing).await;
     assert_eq!(request.device_name, "Ana’s laptop");
@@ -180,23 +180,23 @@ async fn approval_takes_the_request_shown_and_declining_an_approved_pairing_fail
     );
     // A request the pairing doesn't hold is refused.
     let mut other = request.clone();
-    other.pairing = PairingId(uuid::Uuid::from_u128(1));
+    other.pairing = AddDeviceId(uuid::Uuid::from_u128(1));
     assert!(matches!(
-        owner.handle.approve_pairing(&other).await,
+        owner.handle.approve_add_device(&other).await,
         Err(SyncError::InvitationChanged)
     ));
-    owner.handle.approve_pairing(&request).await.unwrap();
+    owner.handle.approve_add_device(&request).await.unwrap();
     assert_eq!(
         status(&owner, &pairing).await,
-        Some(PairingStatus::Approved { request: request.clone() })
+        Some(AddDeviceStatus::Approved { request: request.clone() })
     );
     // Once approved, declining fails, and so does approving again.
     assert!(matches!(
-        owner.handle.decline_pairing(&request).await,
+        owner.handle.decline_add_device(&request).await,
         Err(SyncError::InvitationChanged)
     ));
     assert!(matches!(
-        owner.handle.approve_pairing(&request).await,
+        owner.handle.approve_add_device(&request).await,
         Err(SyncError::InvitationChanged)
     ));
     // A pass puts the handover in the request's place, which opens with the
@@ -211,33 +211,33 @@ async fn approval_takes_the_request_shown_and_declining_an_approved_pairing_fail
     assert_eq!(member, owner.member.member());
     assert_eq!(pair.public_keys(), owner.member.keys().public_keys());
     // Closing the screen still ends it, and forgets it.
-    owner.handle.end_pairing(pairing.id).await.unwrap();
+    owner.handle.end_add_device(pairing.id).await.unwrap();
     assert_eq!(status(&owner, &pairing).await, None);
     owner.pass_now().await;
     let marker = owner.storage.read(&code.request_path()).await.unwrap();
     assert!(coven_format::invite_end::InviteEnd::decode(&marker).is_ok());
     // Closing again, or a pairing never made, succeeds and changes nothing.
-    owner.handle.end_pairing(pairing.id).await.unwrap();
+    owner.handle.end_add_device(pairing.id).await.unwrap();
     owner.close().await;
 }
 
 #[tokio::test]
 async fn an_expired_pairing_refuses_approval_and_reports_how_it_ended() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    let pairing = owner.handle.start_pairing().await.unwrap();
+    let pairing = owner.handle.add_device().await.unwrap();
     ask(&owner, &pairing, DeviceId(70)).await;
     let request = offered(&owner, &pairing).await;
     owner.clock.set(pairing.expires_at);
     assert!(matches!(
-        owner.handle.approve_pairing(&request).await,
+        owner.handle.approve_add_device(&request).await,
         Err(SyncError::InvitationChanged)
     ));
     assert!(matches!(
-        owner.handle.decline_pairing(&request).await,
+        owner.handle.decline_add_device(&request).await,
         Err(SyncError::InvitationChanged)
     ));
     owner.pass_now().await;
-    assert_eq!(status(&owner, &pairing).await, Some(PairingStatus::Ended(PairingEnd::Expired)));
+    assert_eq!(status(&owner, &pairing).await, Some(AddDeviceStatus::Ended(AddDeviceEnd::Expired)));
     owner.close().await;
 }
 
@@ -246,19 +246,20 @@ async fn an_expired_pairing_refuses_approval_and_reports_how_it_ended() {
 #[tokio::test]
 async fn the_live_status_moves_forward_and_ends_forgotten() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    let pairing = owner.handle.start_pairing().await.unwrap();
+    let pairing = owner.handle.add_device().await.unwrap();
     let mut live =
-        coven_database::test_utils::Followed::new(owner.handle.subscribe_pairing(pairing.id));
-    live.wait_for(|status| matches!(status, Some(PairingStatus::Waiting { request: None }))).await;
+        coven_database::test_utils::Followed::new(owner.handle.follow_add_device(pairing.id));
+    live.wait_for(|status| matches!(status, Some(AddDeviceStatus::Waiting { request: None })))
+        .await;
     ask(&owner, &pairing, DeviceId(70)).await;
     let request = offered(&owner, &pairing).await;
-    live.wait_for(|status| matches!(status, Some(PairingStatus::Waiting { request: Some(_) })))
+    live.wait_for(|status| matches!(status, Some(AddDeviceStatus::Waiting { request: Some(_) })))
         .await;
-    owner.handle.decline_pairing(&request).await.unwrap();
-    live.wait_for(|status| matches!(status, Some(PairingStatus::Ended(PairingEnd::Declined))))
+    owner.handle.decline_add_device(&request).await.unwrap();
+    live.wait_for(|status| matches!(status, Some(AddDeviceStatus::Ended(AddDeviceEnd::Declined))))
         .await;
     owner.pass_now().await;
-    owner.handle.end_pairing(pairing.id).await.unwrap();
+    owner.handle.end_add_device(pairing.id).await.unwrap();
     live.wait_for(|status| status.is_none()).await;
     owner.close().await;
 }

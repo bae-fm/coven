@@ -447,9 +447,9 @@ async fn discarding_a_joined_store_removes_its_persons_name() {
     assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
     handle.close().await.unwrap();
     install.app.discard_store(&install.app.store_dir(&store)).await.unwrap();
-    let recovery = crate::tests::invite(
+    let recovery = crate::tests::device_invite(
         &owner.handle,
-        InviteTarget::ReplaceMemberKeys { member: carol },
+        carol,
         InviteAccess::S3AccessKey {
             access_key_id: "recovery-key".into(),
             secret_access_key: SecretText::new("recovery-secret".into()),

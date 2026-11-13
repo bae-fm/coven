@@ -3,9 +3,9 @@ use coven_format::objects::Joiner as Wire;
 
 #[test]
 fn the_apps_two_joiners_round_trip_through_the_formats() {
-    for joiner in [Joiner::NewPerson { name: "Carol".into() }, Joiner::Recovery] {
+    for joiner in [Joiner::NewPerson { name: "Carol".into() }, Joiner::MemberKeys] {
         let wire: Wire = joiner.clone().into();
-        assert_eq!(wire.kind(), Some(joiner.kind()));
+        assert_eq!(wire.admits(), Some(joiner.admits()));
         assert_eq!(Joiner::try_from(wire).unwrap(), joiner);
     }
 }

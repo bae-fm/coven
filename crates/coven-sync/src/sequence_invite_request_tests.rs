@@ -1,6 +1,6 @@
 use super::*;
 use crate::sequence_sync::sequence_invites::tests::{
-    accepted_invitation, carol_for, invite, request_path, requests,
+    accepted_invitation, carol_asks, invite, request_path, requests,
 };
 use crate::sequence_sync::tests::*;
 use crate::*;
@@ -36,7 +36,7 @@ async fn a_request_naming_another_member_than_its_invite_is_refused() {
         keys: keys.public_keys(),
         device: coven_foundation::id_source::DeviceId(70),
         device_name: "Carol's phone".into(),
-        joiner: carol_for(&code).into(),
+        joiner: carol_asks(&code),
     };
     let sealed = |request: &coven_format::objects::JoinRequest| {
         sealed_join_request(&code.secret, &code.request_path(), request, &keys).unwrap()
@@ -76,7 +76,7 @@ async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
         keys: named.public_keys(),
         device: coven_foundation::id_source::DeviceId(70),
         device_name: "forged".into(),
-        joiner: carol_for(&code).into(),
+        joiner: carol_asks(&code),
     };
     let bytes = sealed_join_request(&code.secret, &code.request_path(), &forged, &signer).unwrap();
     let record = ana
@@ -115,11 +115,11 @@ async fn a_request_of_the_other_kind_than_its_invite_is_refused() {
         .find(|record| record.kind == operation_kind::INVITE)
         .unwrap();
     let new_person_invite: InviteWork = serde_json::from_slice(&record.data).unwrap();
-    assert_eq!(new_person_invite.kind(), InviteKind::NewPerson);
+    assert_eq!(new_person_invite.admits(), InviteAdmits::NewPerson);
     let mut recovery_invite: InviteWork = serde_json::from_slice(&record.data).unwrap();
     let keys = coven_crypto::MemberKeys::generate().unwrap();
     recovery_invite.binding = InviteBinding::Replace { expected: keys.public_keys() };
-    assert_eq!(recovery_invite.kind(), InviteKind::Recovery);
+    assert_eq!(recovery_invite.admits(), InviteAdmits::MemberKeys);
     let state = coven_database::StoreState::default();
     let sealed = |joiner: coven_format::objects::Joiner| {
         let request = coven_format::objects::JoinRequest {
@@ -142,7 +142,7 @@ async fn a_request_of_the_other_kind_than_its_invite_is_refused() {
     };
     let recovery_for_person = ana
         .sync
-        .open_request(&new_person_invite, &state, &sealed(Joiner::Recovery.into()))
+        .open_request(&new_person_invite, &state, &sealed(Joiner::MemberKeys.into()))
         .unwrap();
     assert!(refused(recovery_for_person), "a recovery's request for a new person's invite");
     // A pairing's request, for the member's own device, is no invite's kind.
@@ -158,8 +158,10 @@ async fn a_request_of_the_other_kind_than_its_invite_is_refused() {
     assert!(refused(person_for_recovery), "a new person's request for a recovery's invite");
     let matching = ana.sync.open_request(&new_person_invite, &state, &sealed(person())).unwrap();
     assert!(matches!(matching, Opened::Checked(_)));
-    let matching =
-        ana.sync.open_request(&recovery_invite, &state, &sealed(Joiner::Recovery.into())).unwrap();
+    let matching = ana
+        .sync
+        .open_request(&recovery_invite, &state, &sealed(Joiner::MemberKeys.into()))
+        .unwrap();
     assert!(matches!(matching, Opened::Checked(_)));
     ana.sync.database.close().await.unwrap();
 }
@@ -173,7 +175,7 @@ async fn a_new_persons_request_carries_the_name_they_typed_to_the_approval() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let invite = invite(&ana).await;
-    assert_eq!(invite.kind, InviteKind::NewPerson);
+    assert_eq!(invite.admits, InviteAdmits::NewPerson);
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
     let request = JoiningIdentity::prepare(
@@ -181,7 +183,7 @@ async fn a_new_persons_request_carries_the_name_they_typed_to_the_approval() {
         &code,
         directory.settings().unwrap().device_id,
         "Carol's phone",
-        Joiner::NewPerson { name: "Carol Danvers".into() },
+        Some("Carol Danvers".into()),
     )
     .unwrap();
     let carol = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
@@ -198,10 +200,10 @@ async fn a_new_persons_request_carries_the_name_they_typed_to_the_approval() {
     carol.database().close().await.unwrap();
 }
 
-/// A join gives its person to the kind its invite is for, or fails before it
-/// changes anything (§13.2).
+/// A join gives the person its invite admits, or fails before it changes
+/// anything (§13.2).
 #[tokio::test]
-async fn a_join_of_the_other_kind_than_its_invite_fails_before_it_begins() {
+async fn a_join_of_another_person_than_its_invite_admits_fails_before_it_begins() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -213,13 +215,13 @@ async fn a_join_of_the_other_kind_than_its_invite_fails_before_it_begins() {
         &code,
         directory.settings().unwrap().device_id,
         "Carol's phone",
-        Joiner::Recovery,
+        None,
     );
     assert!(matches!(
         result,
         Err(SyncError::Code(CodeError::WrongJoiner {
-            expected: InviteKind::NewPerson,
-            actual: InviteKind::Recovery
+            expected: InviteAdmits::NewPerson,
+            actual: InviteAdmits::MemberKeys
         }))
     ));
     ana.database().close().await.unwrap();

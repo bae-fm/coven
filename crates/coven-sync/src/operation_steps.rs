@@ -3,7 +3,7 @@
 use crate::sequence_sync::make_retry_due;
 use crate::sequence_sync::sequence_invites::{approve_request, end_invite, make_invite, NewInvite};
 use crate::sequence_sync::sequence_pairings;
-use crate::{Pairing, PairingId, PairingRequest};
+use crate::{AddDevice, AddDeviceId, AddDeviceRequest};
 use crate::{RetryWaits, SequenceState, SyncError};
 use coven_crypto::{custody::KeySession, MemberIdentity};
 use coven_database::{OperationId, SqlContext};
@@ -177,11 +177,11 @@ impl OperationSteps {
     /// pairing's QR code carries; one without it fails with
     /// `InvalidConfiguration`. Once the write commits, a pass is asked for,
     /// which looks for the pairing's request.
-    pub fn start_pairing(
+    pub fn add_device(
         &self,
         sql: &SqlContext<'_, '_>,
         key: Option<coven_storage::S3Credentials>,
-    ) -> Result<Pairing, SyncError> {
+    ) -> Result<AddDevice, SyncError> {
         let location =
             coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
         let made = sequence_pairings::make_pairing(
@@ -204,10 +204,10 @@ impl OperationSteps {
     /// the write commits, a pass is asked for, which puts the handover in the
     /// request's place. A request the pairing no longer shows, and a pairing
     /// whose lifetime ended, fail the step with `InvitationChanged`.
-    pub fn approve_pairing(
+    pub fn approve_add_device(
         &self,
         sql: &SqlContext<'_, '_>,
-        request: &PairingRequest,
+        request: &AddDeviceRequest,
     ) -> Result<(), SyncError> {
         sequence_pairings::approve_request(
             sql,
@@ -225,10 +225,10 @@ impl OperationSteps {
     /// marker in the request's place. A request the pairing no longer shows,
     /// an approved pairing, and one whose lifetime ended, fail the step with
     /// `InvitationChanged`.
-    pub fn decline_pairing(
+    pub fn decline_add_device(
         &self,
         sql: &SqlContext<'_, '_>,
-        request: &PairingRequest,
+        request: &AddDeviceRequest,
     ) -> Result<(), SyncError> {
         sequence_pairings::decline_request(sql, self.clock.now(), request)?;
         self.pass_after_commit(sql);
@@ -240,12 +240,12 @@ impl OperationSteps {
     /// once a pass has put the marker in the place of its request or
     /// handover. A pairing that has ended is forgotten as it is; one already
     /// forgotten changes nothing.
-    pub fn end_pairing(
+    pub fn end_add_device(
         &self,
         sql: &SqlContext<'_, '_>,
-        pairing: PairingId,
+        pairing: AddDeviceId,
     ) -> Result<(), SyncError> {
-        sequence_pairings::end_pairing(sql, pairing)?;
+        sequence_pairings::end_add_device(sql, pairing)?;
         self.pass_after_commit(sql);
         Ok(())
     }

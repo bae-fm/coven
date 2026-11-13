@@ -1,6 +1,6 @@
 //! Checked code metadata used by bootstrap (E10).
 
-use coven_format::codes::{InviteCode, InviteKind, PairingCode, RestoreCode};
+use coven_format::codes::{InviteAdmits, InviteCode, PairingCode, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
 use coven_storage::{CloudProvider, InviteStorage, OAuthAccess, RestoreStorage, StorageConfig};
 
@@ -24,7 +24,7 @@ pub enum CodeInfo {
     /// A restore code reveals no store name before loading.
     Restore(CodeMetadata),
     /// An invite carries the store's name captured when the admin made it
-    /// and whether it adds a new person or recovers a member.
+    /// and whether it admits a new person or a member's new keys.
     Invite(InviteInfo),
     /// A pairing code reveals no name either, and holds no keys.
     Pairing(PairingInfo),
@@ -63,9 +63,9 @@ pub struct InviteInfo {
     /// invite, for the joining person's screens to say whom to tell the code
     /// and whom they wait for (§13.2).
     pub inviter: String,
-    /// Whether the invite adds a new person, whose join request carries the
-    /// name they type, or recovers a member, whose carries none.
-    pub kind: InviteKind,
+    /// Whether the invite admits a new person, whose join request carries the
+    /// name they type, or a member's new keys, whose carries none.
+    pub admits: InviteAdmits,
     /// When the invite ends, by the inviting device's clock, to the second:
     /// the joining device sends no first request after it (§13.2).
     pub expires_at: std::time::SystemTime,
@@ -115,14 +115,14 @@ pub enum CodeError {
         /// The store the code names.
         actual: StoreId,
     },
-    /// A join's person is not the kind its invite is for: a name for a
-    /// recovery invite, or a recovery for a new person's.
-    #[error("invite is for {expected:?}, but the join is for {actual:?}")]
+    /// A join's person is not the one its invite admits: a name for an
+    /// invite that admits a member's new keys, or none for a new person's.
+    #[error("invite admits {expected:?}, but the join is for {actual:?}")]
     WrongJoiner {
-        /// The kind the invite is for.
-        expected: InviteKind,
-        /// The kind the join named.
-        actual: InviteKind,
+        /// Who the invite admits.
+        expected: InviteAdmits,
+        /// Who the join named.
+        actual: InviteAdmits,
     },
 }
 
@@ -154,7 +154,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
             metadata: metadata(code.store, code.member),
             store_name: code.name,
             inviter: code.inviter,
-            kind: code.kind,
+            admits: code.admits,
             expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
         }),
         DecodedCode::Pairing(code) => CodeInfo::Pairing(PairingInfo {

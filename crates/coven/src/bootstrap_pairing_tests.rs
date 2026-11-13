@@ -29,14 +29,14 @@ fn recording() -> (impl Fn(BootstrapStatus), Reported, watch::Receiver<bool>) {
 struct Scene {
     owner: Owner,
     install: Installation,
-    pairing: Pairing,
+    pairing: AddDevice,
     control: JoinControl,
 }
 
 impl Scene {
     async fn new(provider: CloudProvider) -> Self {
         let owner = Owner::new(provider, false).await;
-        let pairing = owner.handle.start_pairing().await.unwrap();
+        let pairing = owner.handle.add_device().await.unwrap();
         Self { owner, install: Installation::new(), pairing, control: JoinControl::new() }
     }
 
@@ -73,20 +73,20 @@ impl Scene {
 
     /// Once the new device has sent its request and waits for the next
     /// check, Ana's pass reads it and the screen offers it.
-    async fn offered(&self, waits: &mut watch::Receiver<bool>) -> PairingRequest {
+    async fn offered(&self, waits: &mut watch::Receiver<bool>) -> AddDeviceRequest {
         waits.wait_for(|waiting| *waiting).await.unwrap();
         self.control.parked_from_now().await;
         self.owner.pass_now().await;
-        match self.owner.handle.pairing(self.pairing.id).await.unwrap() {
-            Some(PairingStatus::Waiting { request: Some(request) }) => request,
+        match self.owner.handle.add_device_status(self.pairing.id).await.unwrap() {
+            Some(AddDeviceStatus::Waiting { request: Some(request) }) => request,
             status => panic!("a checked request was expected: {status:?}"),
         }
     }
 
     /// Ana approves, her pass puts the handover in place, and the new device
     /// is asked to check at once. The ask lasts as long as the guard.
-    async fn approve(&self, request: &PairingRequest) -> coven_sync::SyncOftenGuard {
-        self.owner.handle.approve_pairing(request).await.unwrap();
+    async fn approve(&self, request: &AddDeviceRequest) -> coven_sync::SyncOftenGuard {
+        self.owner.handle.approve_add_device(request).await.unwrap();
         self.owner.pass_now().await;
         self.control.check_often(Duration::ZERO)
     }
@@ -96,8 +96,8 @@ impl Scene {
         self.owner.storage.read(&self.code().request_path()).await.unwrap()
     }
 
-    async fn status(&self) -> Option<PairingStatus> {
-        self.owner.handle.pairing(self.pairing.id).await.unwrap()
+    async fn status(&self) -> Option<AddDeviceStatus> {
+        self.owner.handle.add_device_status(self.pairing.id).await.unwrap()
     }
 
     async fn close(self) {
@@ -185,7 +185,7 @@ async fn a_pairing_restores_the_new_device_and_ends_added() {
     {
         let scene = Scene::new(provider).await;
         let mut live = coven_database::test_utils::Followed::new(
-            scene.owner.handle.subscribe_pairing(scene.pairing.id),
+            scene.owner.handle.follow_add_device(scene.pairing.id),
         );
         let (status, reported, mut waits) = recording();
         let joining = scene.join(qr, status);
@@ -212,7 +212,7 @@ async fn a_pairing_restores_the_new_device_and_ends_added() {
         // next pass applies it and ends the pairing as added.
         scene.owner.pass_now().await;
         let added =
-            PairingStatus::Ended(PairingEnd::Added { device, name: "Ana’s laptop".into() });
+            AddDeviceStatus::Ended(AddDeviceEnd::Added { device, name: "Ana’s laptop".into() });
         assert_eq!(scene.status().await, Some(added.clone()), "{provider:?} qr {qr}");
         live.wait_for(|status| status.as_ref() == Some(&added)).await;
         scene.owner.pass_now().await;
@@ -287,13 +287,13 @@ async fn a_declined_pairing_ends_the_call_with_no_installation_left() {
     let joining = scene.join(true, status);
     let responding = async {
         let request = scene.offered(&mut waits).await;
-        scene.owner.handle.decline_pairing(&request).await.unwrap();
+        scene.owner.handle.decline_add_device(&request).await.unwrap();
         scene.owner.pass_now().await;
         scene.control.check_often(Duration::ZERO)
     };
     let (result, _guard) = join_with_response(joining, responding).await;
     assert!(matches!(result, Ok(None)), "{:?}", result.err());
-    assert_eq!(scene.status().await, Some(PairingStatus::Ended(PairingEnd::Declined)));
+    assert_eq!(scene.status().await, Some(AddDeviceStatus::Ended(AddDeviceEnd::Declined)));
     assert!(is_marker(&scene.stored().await));
     scene.install.absent(scene.store()).await;
     assert!(!scene.install.root.path().join("stores").join(scene.store().to_string()).exists());
@@ -315,12 +315,12 @@ async fn closing_the_screen_before_the_laptop_reads_the_handover_ends_the_call()
         let responding = async {
             let request = scene.offered(&mut waits).await;
             if approved {
-                scene.owner.handle.approve_pairing(&request).await.unwrap();
+                scene.owner.handle.approve_add_device(&request).await.unwrap();
                 scene.owner.pass_now().await;
                 // The handover is in the request's place, unread.
                 assert!(Handover::decode(&scene.stored().await).is_ok());
             }
-            scene.owner.handle.end_pairing(scene.pairing.id).await.unwrap();
+            scene.owner.handle.end_add_device(scene.pairing.id).await.unwrap();
             scene.owner.pass_now().await;
             assert!(is_marker(&scene.stored().await), "approved {approved}");
             scene.control.check_often(Duration::ZERO)
@@ -354,12 +354,12 @@ async fn cancelling_after_the_request_was_sent_leaves_the_pairing_to_close() {
     scene.owner.pass_now().await;
     assert_eq!(
         scene.status().await,
-        Some(PairingStatus::Waiting { request: Some(request.clone()) })
+        Some(AddDeviceStatus::Waiting { request: Some(request.clone()) })
     );
-    scene.owner.handle.approve_pairing(&request).await.unwrap();
+    scene.owner.handle.approve_add_device(&request).await.unwrap();
     scene.owner.pass_now().await;
     assert!(Handover::decode(&scene.stored().await).is_ok());
-    scene.owner.handle.end_pairing(scene.pairing.id).await.unwrap();
+    scene.owner.handle.end_add_device(scene.pairing.id).await.unwrap();
     scene.owner.pass_now().await;
     assert!(is_marker(&scene.stored().await));
     scene.close().await;
@@ -412,7 +412,7 @@ async fn keys_replaced_after_approval_fail_the_restore() {
     let joining = scene.join(true, status);
     let responding = async {
         let request = scene.offered(&mut waits).await;
-        scene.owner.handle.approve_pairing(&request).await.unwrap();
+        scene.owner.handle.approve_add_device(&request).await.unwrap();
         scene.owner.pass_now().await;
         scene.owner.handle.replace_member_keys().await.unwrap();
         scene.owner.sync().await;
@@ -531,7 +531,7 @@ async fn a_showing_device_removed_while_a_handover_waits_ends_the_call() {
     let phone_install = Installation::new();
     let phone = phone_install.restore(&owner).await;
     phone.start_sync().await.unwrap();
-    let pairing = phone.start_pairing().await.unwrap();
+    let pairing = phone.add_device().await.unwrap();
     let path = coven_sync::read_pairing_code(&pairing.shared_code).unwrap().request_path();
     let pass = || async {
         match phone.retry_now().await.unwrap().await {
@@ -554,12 +554,12 @@ async fn a_showing_device_removed_while_a_handover_waits_ends_the_call() {
         waits.wait_for(|waiting| *waiting).await.unwrap();
         control.parked_from_now().await;
         pass().await;
-        let Some(PairingStatus::Waiting { request: Some(request) }) =
-            phone.pairing(pairing.id).await.unwrap()
+        let Some(AddDeviceStatus::Waiting { request: Some(request) }) =
+            phone.add_device_status(pairing.id).await.unwrap()
         else {
             panic!("the phone offers the laptop's request")
         };
-        phone.approve_pairing(&request).await.unwrap();
+        phone.approve_add_device(&request).await.unwrap();
         pass().await;
         assert!(Handover::decode(&owner.storage.read(&path).await.unwrap()).is_ok());
         let (removal, _) = owner.handle.remove_device(phone.device_id()).await.unwrap();

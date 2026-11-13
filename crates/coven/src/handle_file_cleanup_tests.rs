@@ -12,7 +12,7 @@ use coven_storage::Storage;
 /// Returns Ben's member id and the file.
 async fn bens_upload() -> (Network, MemberId, FileId) {
     let mut network = file_network().await;
-    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    network.join_as(1, MemberRole::Member).await;
     let ben = &network.devices[1];
     let kept = attach(&ben.handle, "kept", vec![5; 1024]).await;
     wait_for_empty_queue(&ben.handle).await;
@@ -152,7 +152,7 @@ async fn a_reset_devices_orphan_is_deleted_by_its_replacement() {
 async fn a_member_key_replacement_lets_the_new_pairs_device_clean_up() {
     let (mut network, ben, kept) = bens_upload().await;
     let orphan = orphan(&network).await;
-    network.join_as(2, InviteTarget::ReplaceMemberKeys { member: ben }).await;
+    network.join_for(2, ben).await;
     network.sync(0).await;
     ana_writes(&network, "after the replacement").await;
     network.sync(2).await;
@@ -186,7 +186,7 @@ async fn an_admin_cleans_up_after_a_members_last_device() {
 #[tokio::test]
 async fn an_admin_cleans_up_when_the_owner_has_no_device_left() {
     let mut network = file_network().await;
-    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Admin }).await;
+    network.join_as(1, MemberRole::Admin).await;
     let ana = &network.devices[0];
     let kept = attach(&ana.handle, "kept", vec![5; 1024]).await;
     wait_for_empty_queue(&ana.handle).await;

@@ -5,9 +5,9 @@ use super::{SequenceSync, Session};
 use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::sequence_sync::OperationState;
 use crate::{
-    Invite, InviteAccess, InviteLifetime, InviteTarget, JoinRequest, OperationKind,
-    OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
-    ProviderAccessAction, SyncError,
+    Invite, InviteAccess, InviteLifetime, JoinRequest, OperationKind, OperationOutcome,
+    OperationRejection, PendingReason, PendingRecord, PendingSubject, ProviderAccessAction,
+    SyncError,
 };
 use approval::Child;
 use coven_crypto::{ConfirmationNumber, InviteSecret, MemberIdentity, SecretText, StoreKeyring};
@@ -130,12 +130,12 @@ impl InviteWork {
     fn secret(&self) -> Result<InviteSecret, SyncError> {
         Ok(InviteSecret::from_bytes(serde_json::from_str(self.secret.as_str())?))
     }
-    /// Whether the invite adds a new person or recovers a member: the kind of
+    /// Whether the invite admits a new person or a member's new keys: the
     /// request it takes.
-    fn kind(&self) -> coven_format::codes::InviteKind {
+    fn admits(&self) -> coven_format::codes::InviteAdmits {
         match self.binding {
-            InviteBinding::Add { .. } => coven_format::codes::InviteKind::NewPerson,
-            InviteBinding::Replace { .. } => coven_format::codes::InviteKind::Recovery,
+            InviteBinding::Add { .. } => coven_format::codes::InviteAdmits::NewPerson,
+            InviteBinding::Replace { .. } => coven_format::codes::InviteAdmits::MemberKeys,
         }
     }
     fn account(&self) -> Option<&str> {
@@ -225,7 +225,7 @@ impl InviteWork {
             id: self.id,
             operation,
             member: self.member,
-            kind: self.kind(),
+            admits: self.admits(),
             access: self.access.member_access(),
             expires_at: self.expires_at,
             stage,
@@ -326,27 +326,38 @@ impl Invite {
 }
 
 impl SequenceSync {
-    /// Make an invite as the app's write step does, then run a pass, and
-    /// return the invite once it shows its code, or its pending record as
-    /// the error.
+    /// Make an invite for a new person as the app's write step does, then
+    /// run a pass, and return the invite once it shows its code, or its
+    /// pending record as the error.
     #[cfg(test)]
     pub(crate) async fn create_invite(
         &self,
-        target: InviteTarget,
+        role: MemberRole,
         access: InviteAccess,
         lifetime: InviteLifetime,
     ) -> Result<Invite, SyncError> {
-        let inviter = "Ana".to_owned();
+        self.made_invite(NewInvite::person(role, access, lifetime, "Ana".to_owned())).await
+    }
+
+    /// Make an invite for a member's new keys as `add_device_for` does, and
+    /// run it as `create_invite` does.
+    #[cfg(test)]
+    pub(crate) async fn add_device_for(
+        &self,
+        member: MemberId,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+    ) -> Result<Invite, SyncError> {
+        self.made_invite(NewInvite::member_keys(member, access, lifetime, "Ana".to_owned())).await
+    }
+
+    #[cfg(test)]
+    async fn made_invite(&self, made: NewInvite) -> Result<Invite, SyncError> {
         let steps = self.operation_steps();
         let location = self.storage.config().clone();
         coven_storage::record_config(&self.directory, &location)?;
-        let (invite, _, operation) = self
-            .database
-            .write_as(move |sql| {
-                let made = NewInvite { target, access, lifetime, inviter };
-                steps.create_invite(&sql, made)
-            })
-            .await?;
+        let (invite, _, operation) =
+            self.database.write_as(move |sql| steps.create_invite(&sql, made)).await?;
         self.pass().await?;
         let shown = self.database.read(Invite::list).await?.into_iter().find(|listed| {
             listed.id == invite && !matches!(listed.stage, crate::InviteStage::Granting)
@@ -877,7 +888,7 @@ impl SequenceSync {
             store: store.id,
             name: store.name.clone(),
             inviter: work.inviter.clone(),
-            kind: work.kind(),
+            admits: work.admits(),
             expires_at: seconds(work.expires_at)?,
             invite: work.id,
             member: work.member,

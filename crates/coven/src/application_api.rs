@@ -116,17 +116,18 @@ pub use coven_storage::{
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageCheckError};
 pub use coven_sync::{
-    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, InviteKind, Joiner,
-    PairingInfo, UnreadableSavedCode,
+    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteAdmits, InviteInfo,
+    Joiner, PairingInfo, UnreadableSavedCode,
 };
+pub use coven_sync::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
 pub use coven_sync::{
     Circle, CircleMemberInfo, CutOffRefusal, DamagedObject, DeviceIdEvidence, DeviceInfo,
     DeviceState, DeviceStop, EntryTarget, FileMissingReason, FileSourceFailure, Invite,
-    InviteAccess, InviteLifetime, InviteStage, InviteTarget, JoinRequest, LastPass, LocalFailure,
-    MemberInfo, OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection,
-    PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction,
-    Refusal, RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure,
-    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
+    InviteAccess, InviteLifetime, InviteStage, JoinRequest, LastPass, LocalFailure, MemberInfo,
+    OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection, PassFailure,
+    PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
+    RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure, SyncCause,
+    SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
     WriteCutoff,
 };
 pub use coven_sync::{
@@ -134,7 +135,6 @@ pub use coven_sync::{
     FileStream, FilesMode, PinProgress, QueuedUpload, ReadProgress, TransferLimits, UploadPhase,
     UploadProgress, UploadQueue, UploadSettings,
 };
-pub use coven_sync::{Pairing, PairingEnd, PairingId, PairingRequest, PairingStatus};
 
 #[cfg(any(test, doctest))]
 #[path = "application_api_tests.rs"]

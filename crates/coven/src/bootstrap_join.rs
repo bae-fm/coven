@@ -29,9 +29,9 @@ pub(super) fn prepare_request(
     parks: Parks,
 ) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match terms {
-        RequestTerms::Given { device_name, joiner } => {
+        RequestTerms::Given { device_name, name } => {
             let device = directory.settings().map_err(CovenError::from)?.device_id;
-            JoiningIdentity::prepare(directory, code, device, device_name, joiner.clone())?
+            JoiningIdentity::prepare(directory, code, device, device_name, name.clone())?
         }
         RequestTerms::Saved => JoiningIdentity::resume(directory, code)?,
     };
@@ -79,7 +79,7 @@ impl Joining {
     pub(super) fn invitee(&self) -> Option<String> {
         match self.identity.joiner() {
             Joiner::NewPerson { name } => Some(name.clone()),
-            Joiner::Recovery => None,
+            Joiner::MemberKeys => None,
         }
     }
 

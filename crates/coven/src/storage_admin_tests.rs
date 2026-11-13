@@ -30,7 +30,7 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
     let owner = &network.devices[0];
     let invite = crate::tests::invite(
         &owner.handle,
-        InviteTarget::NewMember { role: MemberRole::Member },
+        MemberRole::Member,
         InviteAccess::ProviderAccount { email: "carol@example.test".into() },
         crate::InviteLifetime::SevenDays,
     )

@@ -15,33 +15,33 @@ use std::time::Duration;
 impl SequenceSync {
     /// Start a pairing as the app's write step does, on a location that holds
     /// no S3 key.
-    async fn start_pairing(&self) -> Result<crate::Pairing, SyncError> {
+    async fn add_device(&self) -> Result<crate::AddDevice, SyncError> {
         let location = self.storage.config().clone();
         coven_storage::record_config(&self.directory, &location)?;
         let steps = self.operation_steps();
-        self.database.write_as(move |sql| steps.start_pairing(&sql, None)).await
+        self.database.write_as(move |sql| steps.add_device(&sql, None)).await
     }
 
     async fn approve_request(&self, pairing: InviteId, shown: &[u8]) -> Result<(), SyncError> {
         let (steps, shown) = (self.operation_steps(), shown_request(pairing, shown));
-        self.database.write_as(move |sql| steps.approve_pairing(&sql, &shown)).await
+        self.database.write_as(move |sql| steps.approve_add_device(&sql, &shown)).await
     }
 
     async fn decline_request(&self, pairing: InviteId, shown: &[u8]) -> Result<(), SyncError> {
         let (steps, shown) = (self.operation_steps(), shown_request(pairing, shown));
-        self.database.write_as(move |sql| steps.decline_pairing(&sql, &shown)).await
+        self.database.write_as(move |sql| steps.decline_add_device(&sql, &shown)).await
     }
 
-    async fn end_pairing(&self, pairing: InviteId) -> Result<(), SyncError> {
+    async fn end_add_device(&self, pairing: InviteId) -> Result<(), SyncError> {
         let steps = self.operation_steps();
-        self.database.write_as(move |sql| steps.end_pairing(&sql, pairing.into())).await
+        self.database.write_as(move |sql| steps.end_add_device(&sql, pairing.into())).await
     }
 }
 
 /// The request the app was shown, as the pairing's status presents it.
-fn shown_request(pairing: InviteId, record: &[u8]) -> PairingRequest {
+fn shown_request(pairing: InviteId, record: &[u8]) -> AddDeviceRequest {
     let Object::JoinRequest(read) = Object::decode(record).unwrap() else { panic!("a request") };
-    PairingRequest {
+    AddDeviceRequest {
         pairing: pairing.into(),
         device_name: read.device_name,
         confirmation: ConfirmationNumber::of(pairing, &read.keys),
@@ -50,22 +50,22 @@ fn shown_request(pairing: InviteId, record: &[u8]) -> PairingRequest {
 }
 
 /// A pairing Ana's device made, and what the new device needs to ask.
-struct Pairing {
+struct Shown {
     id: InviteId,
     code: PairingCode,
     path: ObjectPath,
 }
 
-async fn started(ana: &Device) -> Pairing {
-    let made = ana.sync.start_pairing().await.unwrap();
+async fn started(ana: &Device) -> Shown {
+    let made = ana.sync.add_device().await.unwrap();
     let code = read_pairing_code(&made.shared_code).unwrap();
     assert_eq!(code.pairing, InviteId::from(made.id));
     let path = code.request_path();
-    Pairing { id: code.pairing, code, path }
+    Shown { id: code.pairing, code, path }
 }
 
 /// The new device's request, answering `pairing` with fresh `keys` as `device`.
-fn request(pairing: &Pairing, keys: &MemberKeys, device: DeviceId, joiner: Tag) -> JoinRequest {
+fn request(pairing: &Shown, keys: &MemberKeys, device: DeviceId, joiner: Tag) -> JoinRequest {
     JoinRequest {
         invite: pairing.code.pairing,
         member: pairing.code.member,
@@ -76,7 +76,7 @@ fn request(pairing: &Pairing, keys: &MemberKeys, device: DeviceId, joiner: Tag) 
     }
 }
 
-async fn send(group: &Group, pairing: &Pairing, request: &JoinRequest, keys: &MemberKeys) {
+async fn send(group: &Group, pairing: &Shown, request: &JoinRequest, keys: &MemberKeys) {
     let bytes =
         crate::sealed_join_request(&pairing.code.secret, &pairing.path, request, keys).unwrap();
     group.storage.create(&pairing.path, &bytes).await.unwrap();
@@ -102,19 +102,19 @@ async fn rows(device: &Device) -> Vec<(OperationRecord, PairingWork)> {
         .collect()
 }
 
-async fn work_of(device: &Device, pairing: &Pairing) -> Option<PairingWork> {
+async fn work_of(device: &Device, pairing: &Shown) -> Option<PairingWork> {
     rows(device).await.into_iter().map(|(_, work)| work).find(|work| work.id == pairing.id)
 }
 
-async fn state_of(device: &Device, pairing: &Pairing) -> Option<PairingState> {
+async fn state_of(device: &Device, pairing: &Shown) -> Option<PairingState> {
     work_of(device, pairing).await.map(|work| work.state)
 }
 
 /// How a test builds the request it sends to a pairing.
-type Asking = Box<dyn Fn(&Pairing) -> (JoinRequest, MemberKeys)>;
+type Asking = Box<dyn Fn(&Shown) -> (JoinRequest, MemberKeys)>;
 
 /// A fresh request that passes every check, sent by a new device.
-async fn asked(group: &Group, ana: &Device, pairing: &Pairing) -> (JoinRequest, MemberKeys) {
+async fn asked(group: &Group, ana: &Device, pairing: &Shown) -> (JoinRequest, MemberKeys) {
     let keys = MemberKeys::generate().unwrap();
     let request = request(pairing, &keys, DeviceId(70), Tag::OwnDevice);
     send(group, pairing, &request, &keys).await;
@@ -137,11 +137,7 @@ enum At {
 
 const ALL: [At; 4] = [At::Nothing, At::Offered, At::Approved, At::HandedOver];
 
-async fn reach(
-    group: &Group,
-    ana: &Device,
-    at: At,
-) -> (Pairing, Option<(JoinRequest, MemberKeys)>) {
+async fn reach(group: &Group, ana: &Device, at: At) -> (Shown, Option<(JoinRequest, MemberKeys)>) {
     let pairing = started(ana).await;
     if matches!(at, At::Nothing) {
         return (pairing, None);
@@ -214,7 +210,7 @@ async fn a_request_that_fails_a_check_ends_the_pairing_with_the_marker_placed() 
             "a recovery",
             Box::new(move |p| {
                 let keys = fresh();
-                (request(p, &keys, DeviceId(70), Tag::Recovery), keys)
+                (request(p, &keys, DeviceId(70), Tag::MemberKeys), keys)
             }),
         ),
         (
@@ -252,7 +248,7 @@ async fn a_request_that_fails_a_check_ends_the_pairing_with_the_marker_placed() 
         assert!(
             matches!(
                 state_of(&ana, &pairing).await,
-                Some(PairingState::Ended { how: PairingEnd::Refused })
+                Some(PairingState::Ended { how: AddDeviceEnd::Refused })
             ),
             "{what}: {:?}",
             state_of(&ana, &pairing).await
@@ -420,7 +416,7 @@ async fn the_new_devices_registration_ends_the_pairing_as_added() {
     let Some(PairingState::Ended { how }) = state_of(&ana, &pairing).await else {
         panic!("ended: {:?}", state_of(&ana, &pairing).await)
     };
-    assert_eq!(how, PairingEnd::Added { device: laptop_id, name: "Ana's laptop".into() });
+    assert_eq!(how, AddDeviceEnd::Added { device: laptop_id, name: "Ana's laptop".into() });
     assert!(marker_at(&group.storage, &pairing.path).await);
     ana.database().close().await.unwrap();
     laptop.database().close().await.unwrap();
@@ -462,14 +458,14 @@ async fn every_ending_leaves_only_the_marker_and_then_no_row() {
                     assert!(
                         matches!(
                             state_of(&ana, &pairing).await,
-                            Some(PairingState::Ending { how: PairingEnd::Expired })
+                            Some(PairingState::Ending { how: AddDeviceEnd::Expired })
                         ),
                         "{label}: {:?}",
                         state_of(&ana, &pairing).await
                     );
                 }
                 _ => {
-                    ana.sync.end_pairing(pairing.id).await.unwrap();
+                    ana.sync.end_add_device(pairing.id).await.unwrap();
                     assert!(
                         matches!(state_of(&ana, &pairing).await, Some(PairingState::Forgetting)),
                         "{label}"
@@ -487,12 +483,12 @@ async fn every_ending_leaves_only_the_marker_and_then_no_row() {
                     "{label}: {:?}",
                     state_of(&ana, &pairing).await
                 );
-                ana.sync.end_pairing(pairing.id).await.unwrap();
+                ana.sync.end_add_device(pairing.id).await.unwrap();
                 assert!(state_of(&ana, &pairing).await.is_none(), "{label}: forgotten");
                 assert!(marker_at(&group.storage, &pairing.path).await, "{label}");
             }
             // Ending it again changes nothing.
-            ana.sync.end_pairing(pairing.id).await.unwrap();
+            ana.sync.end_add_device(pairing.id).await.unwrap();
             ana.database().close().await.unwrap();
         }
     }
@@ -510,7 +506,7 @@ async fn opening_the_store_forgets_every_pairing_and_still_places_the_marker() {
         // A pairing that ended already: its request failed a check.
         let ended = started(&ana).await;
         let keys = MemberKeys::generate().unwrap();
-        send(&group, &ended, &request(&ended, &keys, DeviceId(73), Tag::Recovery), &keys).await;
+        send(&group, &ended, &request(&ended, &keys, DeviceId(73), Tag::MemberKeys), &keys).await;
         ana.sync.pass().await.unwrap();
         assert!(matches!(state_of(&ana, &ended).await, Some(PairingState::Ended { .. })));
         pairings_opened(ana.database()).await.unwrap();
@@ -639,7 +635,7 @@ async fn a_pairing_claims_nothing_and_records_no_provider_access() {
     for _ in 0..2 {
         assert!(ana.database().current_claim().await.unwrap().is_none());
         assert_eq!(other_work(&ana).await, before);
-        ana.sync.end_pairing(pairing.id).await.unwrap();
+        ana.sync.end_add_device(pairing.id).await.unwrap();
         ana.sync.pass().await.unwrap();
     }
     ana.database().close().await.unwrap();
@@ -679,7 +675,7 @@ async fn the_expiry_write_covers_pairings_and_wakes_at_the_earliest() {
     .await
     .unwrap();
     let expires =
-        |pairing: &Pairing| std::time::UNIX_EPOCH + Duration::from_secs(pairing.code.expires_at);
+        |pairing: &Shown| std::time::UNIX_EPOCH + Duration::from_secs(pairing.code.expires_at);
     assert_eq!(next, Some(expires(&first)), "the wake is the earliest pairing's expiry");
     group.clock.set(expires(&first));
     let next = crate::sequence_sync::sequence_invites::expiry::expire(
@@ -692,7 +688,7 @@ async fn the_expiry_write_covers_pairings_and_wakes_at_the_earliest() {
     .unwrap();
     assert!(matches!(
         state_of(&ana, &first).await,
-        Some(PairingState::Ending { how: PairingEnd::Expired })
+        Some(PairingState::Ending { how: AddDeviceEnd::Expired })
     ));
     assert!(matches!(state_of(&ana, &second).await, Some(PairingState::Waiting { .. })));
     assert_eq!(next, Some(expires(&second)));

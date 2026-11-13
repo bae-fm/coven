@@ -439,7 +439,7 @@ def changes(sodium):
 
 def join_request(sodium):
     """Ana's request answering the re-binding invite with her replacement pair."""
-    # The joiner is a recovery: tag 0, and no name.
+    # The joiner is a member's new keys: tag 0, and no name.
     return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + u64(3) + text(b"D") + b"\x00")
 
 
@@ -483,8 +483,8 @@ def restore_code():
 
 
 def invite_code():
-    """A re-binding invite fixing Ana's existing id, so its kind is a recovery
-    (tag 1), for the S3 location with the key made for it."""
+    """A re-binding invite fixing Ana's existing id, so it admits a member's new
+    keys (byte 1), for the S3 location with the key made for it."""
     storage = s3_location() + text(b"id") + text(b"secret")
     return frame(11, STORE + text(b"S") + text(b"A") + b"\x01" + u64(86400) + bytes([0x55]) * 16 + ANA
                  + bytes([0x66]) * 32 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))

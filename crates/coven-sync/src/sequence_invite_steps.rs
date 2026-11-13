@@ -5,18 +5,49 @@
 
 use super::*;
 
-/// What the app asks an invite for: whom it adds or recovers, how they
-/// reach storage, and how long it stays open (§13.2).
+/// Whom an invite admits.
+enum Admits {
+    /// A new person, with this role.
+    Person(MemberRole),
+    /// This member's new keys, after they lost every device.
+    MemberKeys(MemberId),
+}
+
+/// What the app asks an invite for: whom it admits, how they reach storage,
+/// and how long it stays open (§13.2).
 pub struct NewInvite {
-    /// A new person, or an existing member whose pair the invite replaces.
-    pub target: InviteTarget,
-    /// The provider account to share with, or the S3 key made for them.
-    pub access: InviteAccess,
-    /// How long after it is made the invite expires.
-    pub lifetime: InviteLifetime,
-    /// The inviting admin's name, a format `name`, which the invite carries
-    /// for the joining person's screens (§13.2).
-    pub inviter: String,
+    admits: Admits,
+    access: InviteAccess,
+    lifetime: InviteLifetime,
+    inviter: String,
+}
+
+impl NewInvite {
+    /// An invite for a new person, added with `role`. `access` is the
+    /// provider account to share with or the S3 key made for them; the invite
+    /// expires `lifetime` after it is made; `inviter` is the inviting admin's
+    /// name, a format `name`, which the invite carries for the joining
+    /// person's screens (§13.2).
+    pub fn person(
+        role: MemberRole,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+        inviter: String,
+    ) -> Self {
+        Self { admits: Admits::Person(role), access, lifetime, inviter }
+    }
+
+    /// An invite for `member`'s new keys: the member lost every device, and
+    /// approval binds the requester's new keys to their id, keeping its
+    /// role, circles and devices. The other fields are those of `person`.
+    pub fn member_keys(
+        member: MemberId,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+        inviter: String,
+    ) -> Self {
+        Self { admits: Admits::MemberKeys(member), access, lifetime, inviter }
+    }
 }
 
 /// Make an invite, as a step of a write (§13.2), and return its id, the
@@ -45,7 +76,7 @@ pub(crate) fn make_invite(
     custody: &crate::DeviceCredentials,
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-    let NewInvite { target, access, lifetime, inviter } = invite;
+    let NewInvite { admits, access, lifetime, inviter } = invite;
     coven_format::value::name(&inviter)?;
     if matches!(
         location,
@@ -64,17 +95,19 @@ pub(crate) fn make_invite(
             .with_source("the clock cannot represent the invite's expiry"),
     )?;
     let id = InviteId(ids.new_id());
+    let started_by = match admits {
+        Admits::Person(_) => "create_invite",
+        Admits::MemberKeys(_) => "add_device_for",
+    };
     let made = sql.journal_step(|journal| {
         let applied = journal.store_state()?;
         let me = crate::sequence_sync::registered(&applied, device, held)?;
         if !applied.active_admin(&me) {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
-        let (member, binding) = match target {
-            InviteTarget::NewMember { role } => {
-                (MemberId(ids.new_id()), InviteBinding::Add { role })
-            }
-            InviteTarget::ReplaceMemberKeys { member: target } => {
+        let (member, binding) = match admits {
+            Admits::Person(role) => (MemberId(ids.new_id()), InviteBinding::Add { role }),
+            Admits::MemberKeys(target) => {
                 let Some(existing) = applied.active_member(&target) else {
                     return Err(SyncError::Rejected(OperationRejection::TargetGone(
                         crate::EntryTarget::Member(target),
@@ -113,7 +146,7 @@ pub(crate) fn make_invite(
         let operation = journal.start_operation(&NewOperation {
             kind: operation_kind::INVITE.into(),
             data: serde_json::to_vec(&work)?,
-            started_by: "create_invite".into(),
+            started_by: started_by.into(),
             pauses_writes: false,
         })?;
         Ok((id, member, operation))

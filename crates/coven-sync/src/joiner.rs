@@ -1,10 +1,10 @@
-//! Who an invite's join request is for, as the app names it (api.md E10).
+//! Who an invite's join request names, as the admin's app shows it (api.md E10).
 
-use coven_format::codes::InviteKind;
+use coven_format::codes::InviteAdmits;
 
-/// Who asks to join through an invite (§13.2): the app names one of two. A
-/// member's own new device asks through a pairing instead, which the format's
-/// request can say and an invite never takes.
+/// Who asks to join through an invite (§13.2): one of two, as the invite
+/// admits. A member's own new device asks through an add-device pairing
+/// instead, which the format's request can say and an invite never takes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Joiner {
     /// A new person, with the name they typed: the admin sees it with the
@@ -13,16 +13,16 @@ pub enum Joiner {
         /// The name, which follows the `name` rule (format.md D2).
         name: String,
     },
-    /// An existing member, whose profile already has a name.
-    Recovery,
+    /// An existing member getting new keys, whose profile already has a name.
+    MemberKeys,
 }
 
 impl Joiner {
-    /// The kind of invite this joiner answers.
-    pub fn kind(&self) -> InviteKind {
+    /// What the invite this joiner answers admits.
+    pub fn admits(&self) -> InviteAdmits {
         match self {
-            Self::NewPerson { .. } => InviteKind::NewPerson,
-            Self::Recovery => InviteKind::Recovery,
+            Self::NewPerson { .. } => InviteAdmits::NewPerson,
+            Self::MemberKeys => InviteAdmits::MemberKeys,
         }
     }
 }
@@ -31,7 +31,7 @@ impl From<Joiner> for coven_format::objects::Joiner {
     fn from(joiner: Joiner) -> Self {
         match joiner {
             Joiner::NewPerson { name } => Self::NewPerson { name },
-            Joiner::Recovery => Self::Recovery,
+            Joiner::MemberKeys => Self::MemberKeys,
         }
     }
 }
@@ -44,7 +44,7 @@ impl TryFrom<coven_format::objects::Joiner> for Joiner {
     fn try_from(joiner: coven_format::objects::Joiner) -> Result<Self, Self::Error> {
         match joiner {
             coven_format::objects::Joiner::NewPerson { name } => Ok(Self::NewPerson { name }),
-            coven_format::objects::Joiner::Recovery => Ok(Self::Recovery),
+            coven_format::objects::Joiner::MemberKeys => Ok(Self::MemberKeys),
             coven_format::objects::Joiner::OwnDevice => {
                 Err(coven_format::Error::UnknownTag { field: "invite joiner", tag: 2 }.into())
             }

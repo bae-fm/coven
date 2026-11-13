@@ -35,7 +35,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
         vec![Migration::addition(1, "tracks", SCHEMA)],
     )
     .await;
-    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    network.join_as(1, MemberRole::Member).await;
     network.sync(0).await;
     let (ana, carol) = (&network.devices[0], &network.devices[1]);
     let gifts = crate::tests::circle(&ana.handle, "Gifts").await;
@@ -134,7 +134,7 @@ async fn shared_track() -> (Network, CircleId, FileId) {
         vec![Migration::addition(1, "tracks", SCHEMA)],
     )
     .await;
-    network.join_as(1, InviteTarget::NewMember { role: MemberRole::Member }).await;
+    network.join_as(1, MemberRole::Member).await;
     network.sync(0).await;
     let ana = &network.devices[0];
     let ben =
