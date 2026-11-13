@@ -413,6 +413,19 @@ fn two_circles_choose_the_earlier_generation_and_unique_is_audience_scoped() {
     assert!(removal_orders(&view).removed.is_empty());
 }
 
+/// One write can start the same key in two circles, so their generations have
+/// the same claim order: the smaller circle id shows, on every device.
+#[test]
+fn equal_claim_orders_between_two_circles_fall_to_the_smaller_circle_id() {
+    let same = ClaimOrder::Published { slot: slot(4), number: 1 };
+    let mut view = MemoryView::default();
+    view.present(circle(1, 1), 1, same);
+    view.present(circle(1, 2), 1, same);
+    let result = removal_orders(&view);
+    assert!(!result.removed.contains_key(&circle(1, 1)));
+    assert_eq!(rules(&result, &circle(1, 2)), [Rule::OtherAudience].into());
+}
+
 #[test]
 fn deleted_circle_entries_hide_existing_and_arriving_rows_without_deleting_them() {
     let writes = vec![

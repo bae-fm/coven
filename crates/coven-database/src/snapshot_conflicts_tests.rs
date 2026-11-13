@@ -50,33 +50,68 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
     }
 }
 
-/// A key in two circles shows in the circle that started it first, and only
-/// on a device that has both rows (§15.4): one device's circle snapshot can
-/// show a row another device takes out, and the other way round. Each
-/// device's own rules decide.
+/// A key in two circles shows in the circle whose row's write is earlier in
+/// the slot order, and only on a device that has both rows (§15.4): one
+/// device's circle snapshot can show a row another device takes out, and the
+/// other way round. Each device's own rules decide. The earlier slot's row
+/// wins whichever circle id is smaller.
 #[tokio::test]
 async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
-    const OTHER: CircleId = CircleId(uuid::Uuid::from_u128(11));
+    // The earlier slot's circle has the larger id (Gifts is 10).
+    judged_by_the_rows_this_device_has(11).await;
+}
+
+#[tokio::test]
+async fn the_earlier_slot_wins_when_its_circle_id_is_the_smaller() {
+    judged_by_the_rows_this_device_has(9).await;
+}
+
+/// The write as a device without `circle`'s key downloads it: that part is
+/// skipped, but the write still takes its slot.
+fn without_key(
+    write: &coven_format::write::WriteRecord,
+    circle: CircleId,
+) -> crate::DownloadedWrite {
+    let mut download = crate::DownloadedWrite::from(write.clone());
+    for part in &mut download.parts {
+        if let crate::DownloadedPart::Opened(opened) = part {
+            if opened.audience == Audience::Circle(circle) {
+                *part = crate::DownloadedPart::Skipped(opened.audience.clone());
+            }
+        }
+    }
+    download
+}
+
+async fn in_both(store: &TestStore, other: CircleId) -> Database {
+    let db = circle_device(store).await;
+    store.join_circle(&db, other);
+    db
+}
+
+async fn judged_by_the_rows_this_device_has(other_circle: u128) {
+    let other_circle = CircleId(uuid::Uuid::from_u128(other_circle));
+    let other = other_circle.0.to_string();
     const KEY: &str = "00000000-0000-4000-8000-000000000009";
     let ids = SequentialIds::new();
     let stores: [TestStore; 5] = [(); 5].map(|()| TestStore::with_ids(&ids));
-    async fn open(store: &TestStore) -> Database {
-        let db = circle_device(store).await;
-        store.join_circle(&db, OTHER);
-        db
-    }
-    // `both` has both circles' rows; `gifts` only its own.
-    let both = open(&stores[0]).await;
-    let gifts = open(&stores[1]).await;
-    let earlier = open(&stores[2]).await;
+    // `both` has both circles' rows; `gifts` only its own, and it applies the
+    // other circle's write with that part skipped.
+    let both = in_both(&stores[0], other_circle).await;
+    let gifts = circle_device(&stores[1]).await;
+    let earlier = in_both(&stores[2], other_circle).await;
     sql(&both, "INSERT INTO folders VALUES('home','Home')").await.unwrap();
     let folder = records(&both);
     publish(&both, &[&both, &gifts, &earlier]).await;
-    sql(&earlier, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000009','00000000-0000-0000-0000-00000000000b','home','in other')")
-        .await
-        .unwrap();
+    let insert_in_other = format!(
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000009','{other}','home','in other')"
+    );
+    sql(&earlier, insert_in_other.leak()).await.unwrap();
     let in_other = records(&earlier);
     publish(&earlier, &[&both]).await;
+    for write in &in_other {
+        gifts.receive(without_key(write, other_circle)).await.unwrap();
+    }
     sql(&gifts, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000009','00000000-0000-0000-0000-00000000000a','home','in gifts')")
         .await
         .unwrap();
@@ -98,14 +133,14 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
             .unwrap()
         })
     };
-    let other = "00000000-0000-0000-0000-00000000000b";
+    let other = other.as_str();
     let in_gifts = "00000000-0000-0000-0000-00000000000a";
     assert_eq!(shown(&both), [other]);
     assert_eq!(removed(&both), 1);
     assert_eq!(shown(&gifts), [in_gifts]);
     // Without the other circle's row, both's Gifts snapshot shows the row
     // both took out.
-    let without = open(&stores[3]).await;
+    let without = in_both(&stores[3], other_circle).await;
     without
         .load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
             crate::tests::reload(
@@ -126,7 +161,7 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
     assert_eq!(removed(&without), 0);
     assert_rules_settled(&without);
     // With it, gifts's Gifts snapshot loses the row gifts shows.
-    let with = open(&stores[4]).await;
+    let with = in_both(&stores[4], other_circle).await;
     for write in folder.iter().chain(&in_other) {
         with.receive(write.clone().into()).await.unwrap();
     }
