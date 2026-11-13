@@ -1466,7 +1466,8 @@ pub enum DbError {
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
     /// `SQLITE_NOTADB`), decoding stored facts found damage (§19.3), or a
-    /// snapshot's staged records differ from a second staging's (§19.1).
+    /// snapshot's staged records differ from a second staging's or from
+    /// their digest at the end of staging (§16.2, §19.1).
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's contract
     /// or a step its state machine cannot reach: a bug, never stored damage.

@@ -4,7 +4,7 @@
 
 #[cfg(any(test, feature = "test-utils"))]
 use super::table;
-use super::{SnapshotStaging, StagedTables};
+use super::{Phase, SnapshotStaging, StagedTables};
 use crate::snapshot_error::SnapshotError;
 use crate::sqlite::DatabaseConnection;
 use crate::DbError;
@@ -18,7 +18,10 @@ pub struct StagedDigest([u8; 32]);
 
 /// Read back every record `tables` hold and digest them, each table's rows
 /// in the order of their encodings, so the digest is of their values alone.
-fn digest(db: &DatabaseConnection, tables: &StagedTables) -> Result<StagedDigest, DbError> {
+pub(super) fn digest(
+    db: &DatabaseConnection,
+    tables: &StagedTables,
+) -> Result<StagedDigest, DbError> {
     let mut hasher = coven_crypto::ContentHasher::new();
     let mut table = |name: &str, select: &str, params: &[&dyn rusqlite::ToSql]| {
         let mut rows = Vec::new();
@@ -46,6 +49,20 @@ fn digest(db: &DatabaseConnection, tables: &StagedTables) -> Result<StagedDigest
         &[&tables.id],
     )?;
     Ok(StagedDigest(*hasher.finish().as_bytes()))
+}
+
+/// Fail with `DamagedDatabase` unless the records the disk holds are the
+/// ones `staging` ended with (§16.2). A staging whose stream hasn't ended
+/// has no digest yet, and the load refuses it.
+pub(super) fn unchanged(db: &DatabaseConnection, staging: &SnapshotStaging) -> Result<(), DbError> {
+    let (Phase::Staged { digest, .. }, Some(tables)) = (&staging.phase, &staging.tables) else {
+        return Ok(());
+    };
+    if self::digest(db, tables)? != *digest {
+        tracing::warn!("a snapshot's staged records changed on this device since staging");
+        return Err(DbError::DamagedDatabase);
+    }
+    Ok(())
 }
 
 /// One row's values, each tagged with its type and text or blob lengths
@@ -108,6 +125,9 @@ pub enum StagedDamage {
     /// Its staged writes claim to have read through their own slots, which
     /// finishing the staging refuses.
     Writes,
+    /// Its first staged row is gone: the records that remain are valid, and
+    /// a load or file check finds nothing wrong with them.
+    Row,
 }
 
 /// Make `damage` to the staging `staging`.
@@ -131,6 +151,31 @@ pub(super) fn damage(
             "UPDATE temp._coven_snapshot_writes SET read_through=slot WHERE source=?1",
             [staging],
         )?,
+        StagedDamage::Row => {
+            let others: Vec<String> =
+                ["generations", "columns", "parts", "authored", "creations", "records"]
+                    .iter()
+                    .map(|name| table(staging, name).trim_start_matches("temp.").to_owned())
+                    .collect();
+            let rows = db.query(
+                "SELECT name FROM temp.sqlite_schema WHERE type='table' AND name GLOB ?1
+                 ORDER BY rootpage",
+                [format!("_coven_staged_{staging}_*")],
+                |row| row.get::<_, String>(0),
+            )?;
+            let mut changed = 0;
+            for name in rows.into_iter().filter(|name| !others.contains(name)) {
+                let name = format!("temp.{}", crate::sql::identifier(&name));
+                changed = db.internal_execute(
+                    &format!("DELETE FROM {name} WHERE rowid=(SELECT min(rowid) FROM {name})"),
+                    [],
+                )?;
+                if changed > 0 {
+                    break;
+                }
+            }
+            changed
+        }
     };
     match changed {
         0 => {

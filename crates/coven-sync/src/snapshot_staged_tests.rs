@@ -37,7 +37,18 @@ async fn reloads_after_local_damage(ana: &Device, ben: &Device) {
 #[tokio::test]
 async fn a_staged_snapshot_damaged_before_its_load_is_not_refused() {
     let (_group, ana, ben) = snapshotted().await;
-    ben.sync.database.damage_next_staged_read().await.unwrap();
+    ben.sync.database.damage_next_staged_read(coven_database::StagedDamage::Record).await.unwrap();
+    reloads_after_local_damage(&ana, &ben).await;
+}
+
+/// A row of Ben's staged copy is lost on his disk before his load reads it,
+/// leaving records that are all valid. The load must not install the
+/// snapshot without that row: staging kept a digest of its records, and the
+/// load finds them changed (§16.2).
+#[tokio::test]
+async fn a_staged_snapshot_changed_to_valid_records_is_not_loaded() {
+    let (_group, ana, ben) = snapshotted().await;
+    ben.sync.database.damage_next_staged_read(StagedDamage::Row).await.unwrap();
     reloads_after_local_damage(&ana, &ben).await;
 }
 
@@ -70,6 +81,7 @@ async fn a_snapshot_whose_stagings_agree_is_refused() {
                 &result,
                 Err(SyncError::Damaged(DamagedObject { failure: Refusal::Parse { .. }, .. }))
             ),
+            StagedDamage::Row => unreachable!("the loop names the damages that fail records"),
         };
         assert!(refused, "{damage:?}: {result:?}");
         ana.sync.database.close().await.unwrap();
@@ -169,7 +181,11 @@ async fn a_body_failure_is_judged_when_removing_its_staging_fails() {
         if agreeing {
             ben.sync.database.damage_staged_finishes(StagedDamage::Record, 2).await.unwrap();
         } else {
-            ben.sync.database.damage_next_staged_read().await.unwrap();
+            ben.sync
+                .database
+                .damage_next_staged_read(coven_database::StagedDamage::Record)
+                .await
+                .unwrap();
         }
         ben.sync.database.fail_next_staging_removal().await.unwrap();
         let result = ben.sync.reload_from_snapshot().await;

@@ -6443,6 +6443,19 @@ back one at a time and writing each row's merge records through the merge took
   with the load whether it commits or fails, and a reload that needs the
   snapshot again stages it afresh. Staged records belong to the connection, so a
   restart finds none.
+- **Staging ends with a digest of its records, and the load compares it.**
+  Records on this device's disk can change after they are staged, to others
+  that are still valid, which no check of the records would notice. When the
+  stream checks out to its end, staging keeps a digest of everything it staged
+  (§19.1), and every load or file check reads the digest of what the disk holds
+  before it reads a record. If the two differ, the call fails with
+  `DamagedDatabase`, removes its stagings as any failed load does, and the
+  next reload or pass reads the snapshot again. Say a disk error drops one of
+  the rows Ben's laptop staged from Ana's snapshot while it waits for the
+  slots after it: the reload fails, and his next one installs every row.
+  Without the digest, that reload would install the snapshot without the row,
+  and nothing would say a row was missing
+  ([`checked_load_fails_damage`](proofs/io/CovenIO/Reread.lean)).
 - **Reading only the history.** A device that needs only a store snapshot's
   original slots and claims, to authenticate the floor (§16.4) or settle a claim
   (§5.3), reads the body the same way and stages nothing.
@@ -13728,6 +13741,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A refusal judges the stored bytes when it stands only on two reads that agree, so an object whose stored bytes pass is never refused, and a kept copy that is the stored bytes applies; refusing on one read, one fault on the way refuses an honest object for good, while with the second read the next pass applies it | `refusal_judges_stored`, `honest_never_refused`, `stored_copy_applies`, `one_read_refuses_honest`, `fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
 | *Body.* A file's cached copy is kept only once it checked, and only the stored bytes pass an authenticated check, so the stored bytes pass: a file whose cached copy fails its check is never refused, and a copy that passes applies with no read of storage; refused on the copy, a file whose stored bytes pass is refused | `cached_stored_passes`, `damaged_copy_never_refused`, `passing_copy_applies`, `copy_once_refuses_honest` | `proofs/io/CovenIO/Reread.lean` | §17.8, §19.1 |
 | A snapshot, read once and kept nowhere whole, is judged at once when its digest is the announced one, and otherwise refused as not the announced snapshot only when a second read's digest is the first's: a refusal is then a verdict on what storage holds, and an honestly stored snapshot that passes is never refused; refused as soon as its digest differs, one fault makes it not the announced one | `announced_refusal_judges_stored`, `honest_announced_never_refused`, `digest_once_refuses_honest`, `announced_fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
+| *Body.* A load reads only the records staging produced, and reads them whenever the disk kept them; records that changed on this device to valid ones install as the snapshot without the comparison with the digest staging ended with, and fail the load with it | `checked_load_reads_staged`, `intact_load_reads_staged`, `unchecked_load_installs_damage`, `checked_load_fails_damage` | `proofs/io/CovenIO/Reread.lean` | §16.2 |
 | A refusal is rechecked by every build of coven other than the one that recorded it, so by every build that would judge it differently, and never by its own; waiting loses nothing, and a recheck that refuses again records its build, so each build rechecks once and never loops. Keyed to a number several builds share, a refusal is never rechecked by a build that would accept it | `other_build_rechecks`, `differing_build_rechecks`, `own_refusal_waits`, `waiting_loses_nothing`, `recheck_once`, `shared_key_strands` | `proofs/io/CovenIO/Recheck.lean` | §19.1 |
 | A replacement of this device's installation that records itself before its fresh device registers, refuses opens while recorded and from the record on only goes forward never opens the old installation once a registration replacing it may have landed, keeps the new installation while history names it, and settles, on every path, published or with the old installation the store and no claim open | `old_never_stale`, `never_missing`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §11.6, §19.3 |
 | *Body.* A replacement that records itself only at the swap opens the old installation after a crash once its registration landed; one that moves the old installation back after a failure past the swap does the same; a cancel that doesn't wait removes the new installation while its registration is on its way | `crashed_replacement_opens_old`, `unswapped_replacement_opens_old`, `cancelled_replacement_missing` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §19.3 |
@@ -13800,7 +13814,7 @@ maps them are with each provider in Appendix E.
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
 | `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
 | `DbError::StatePersistence` | coven can't save pending state or the sync status; sync and database calls stop | §19.1 |
-| `DbError::DamagedDatabase` | a statement meets damage SQLite reports, a stored fact doesn't decode, or a snapshot's staged records differ from a second staging's; the call fails, opening included | §19.1, §19.3 |
+| `DbError::DamagedDatabase` | a statement meets damage SQLite reports, a stored fact doesn't decode, or a snapshot's staged records differ from a second staging's or from their digest at the end of staging; the call fails, opening included | §16.2, §19.1, §19.3 |
 | `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
 | `DbError::ReservedCollation` | an app collation has the name of one of SQLite's own; the open fails | §4 |
 | `DbError::DuplicateCollation` | the app registered two collations under one name; the open fails | §4 |

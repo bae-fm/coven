@@ -67,6 +67,28 @@ async fn a_load_removes_the_records_it_staged() {
     db.close().await.unwrap();
 }
 
+/// A staged snapshot whose records changed on this device since staging
+/// ended, to records that are all valid, is not loaded: staging kept a digest
+/// of its records and the load compares it first (§16.2). The load removes
+/// the records as any failed load does.
+#[tokio::test]
+async fn a_load_of_a_staging_changed_since_it_ended_fails() {
+    let store = TestStore::new();
+    let (db, snapshot) = fixture(&store).await;
+    let staged = staged(&db, &snapshot).await;
+    db.damage_next_staged_read(crate::StagedDamage::Row).await.unwrap();
+    assert!(matches!(
+        db.load_snapshots::<crate::pending::tests::Record, _>(
+            reload(&db, snapshot.prefix.covers, vec![staged]),
+            None
+        )
+        .await,
+        Err(DbError::DamagedDatabase)
+    ));
+    assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
+    db.close().await.unwrap();
+}
+
 /// A failed load ends the operations that staged its snapshots: it removes
 /// their records before it reports the failure.
 #[tokio::test]

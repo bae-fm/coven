@@ -190,14 +190,16 @@ impl InputDatabase {
     ) -> Result<T, DbError> {
         super::with_locked(&self.writer, |writer| {
             #[cfg(any(test, feature = "test-utils"))]
-            if self.damage_staged.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if let Some(made) = coven_foundation::locks::lock_unpoisoned(&self.damage_staged).take()
+            {
                 let first = stagings.as_mut().iter().find_map(|staging| staging.tables.as_ref());
                 let first = first.map(|tables| tables.id).ok_or(DbError::Invariant {
                     what: "a test damages a staging that holds its records",
                 })?;
-                writer.transaction(|db| damage::damage(db, first, StagedDamage::Record))?;
+                writer.transaction(|db| damage::damage(db, first, made))?;
             }
             let read = writer.transaction(|db| {
+                stagings.as_mut().iter().try_for_each(|staging| damage::unchanged(db, staging))?;
                 let inputs = crate::input_preparation::PreparedInputs::new(db)?;
                 let result = consume(&inputs, stagings)?;
                 inputs.finish()?;
@@ -261,6 +263,10 @@ enum Phase {
     /// The stream checked out to its end marker.
     Staged {
         header: SnapshotHeader,
+        /// The digest of the records as staging ended, which every load or
+        /// file check compares with what the disk holds before it reads
+        /// any (§16.2).
+        digest: StagedDigest,
         /// The first record that failed the loader's checks as it staged,
         /// and its section: the load or file check refuses the body with it
         /// where it reaches that section.
@@ -374,12 +380,12 @@ impl Database {
         .await
     }
 
-    /// Change a staged record before the next load or file check reads it,
-    /// as damage to this device's disk would (§19.1).
+    /// Make `damage` to a staging before the next load or file check reads
+    /// it, as damage to this device's disk would (§19.1).
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn damage_next_staged_read(&self) -> Result<(), DbError> {
-        self.call(|inner| {
-            inner.inputs.damage_staged.store(true, std::sync::atomic::Ordering::SeqCst);
+    pub async fn damage_next_staged_read(&self, damage: StagedDamage) -> Result<(), DbError> {
+        self.call(move |inner| {
+            *coven_foundation::locks::lock_unpoisoned(&inner.inputs.damage_staged) = Some(damage);
             Ok::<_, DbError>(())
         })
         .await
@@ -500,7 +506,11 @@ impl SnapshotStaging {
         };
         let expected = self.expected.clone();
         let records = state.records;
-        let (header, refusal) = self
+        let tables = StagedTables {
+            id: staging,
+            tables: self.tables.as_ref().map(|tables| tables.tables.clone()).unwrap_or_default(),
+        };
+        let (header, refusal, digest) = self
             .database
             .call(move |inner| {
                 #[cfg(any(test, feature = "test-utils"))]
@@ -516,7 +526,8 @@ impl SnapshotStaging {
                         .clone();
                     check_header(&inner.access.write_schema, &expected, &header)?;
                     SnapshotMetadata::staged(db, staging).validate(header.covers)?;
-                    Ok((header, state.refusal))
+                    let digest = damage::digest(db, &tables)?;
+                    Ok((header, state.refusal, digest))
                 })
             })
             .await?;
@@ -527,7 +538,7 @@ impl SnapshotStaging {
             time = ?self.time,
             "staged snapshot"
         );
-        self.phase = Phase::Staged { header, refusal };
+        self.phase = Phase::Staged { header, digest, refusal };
         Ok(())
     }
 
@@ -553,7 +564,7 @@ impl SnapshotStaging {
         authorship: &dyn crate::Authorship,
     ) -> Result<crate::snapshot_preparation::PreparedSnapshot<'a>, DbError> {
         let staging = self.id()?;
-        let Phase::Staged { header, refusal } = &mut self.phase else {
+        let Phase::Staged { header, refusal, .. } = &mut self.phase else {
             return Err(DbError::Invariant {
                 what: "a snapshot is read once its stream checked out to its end",
             });

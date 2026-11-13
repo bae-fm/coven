@@ -35,10 +35,10 @@ pub(crate) struct InputDatabase {
     active: Arc<Mutex<BTreeMap<i64, Weak<InputRead>>>>,
     /// The next snapshot staging's number; 0 is the installing snapshot's.
     stagings: std::sync::atomic::AtomicI64,
-    /// A test's request to change a staged record before the next load or
-    /// file check reads it, as damage on this device's disk would.
+    /// A test's request to damage a staging before the next load or file
+    /// check reads it, as damage on this device's disk would.
     #[cfg(any(test, feature = "test-utils"))]
-    damage_staged: std::sync::atomic::AtomicBool,
+    damage_staged: Mutex<Option<staging::StagedDamage>>,
     /// A test's request to damage the next stagings that finish, and how
     /// many, before finishing checks them, as damage on this device's disk
     /// would.
@@ -202,7 +202,7 @@ impl InputDatabase {
             active: Arc::new(Mutex::new(BTreeMap::new())),
             stagings: std::sync::atomic::AtomicI64::new(1),
             #[cfg(any(test, feature = "test-utils"))]
-            damage_staged: std::sync::atomic::AtomicBool::new(false),
+            damage_staged: Mutex::new(None),
             #[cfg(any(test, feature = "test-utils"))]
             damage_finishing: Mutex::new(None),
             #[cfg(any(test, feature = "test-utils"))]

@@ -246,4 +246,70 @@ theorem copy_once_refuses_honest :
     refusesFaults damagedCopy.stored = false ∧ copyOnce refusesFaults damagedCopy = .refused := by
   decide
 
+
+/-! A staged snapshot's records (§16.2) are a function of its bytes, and
+staging ends with a digest of them (`Staged.digest`). The load reads the
+records the device's disk holds now, and compares their digest with the one
+staging ended with before it reads any (`loadStaged`). A digest is equal
+exactly when its records are, so a load that gets past the comparison reads
+the records staging produced, and records that changed on this device, even to
+ones that are valid, fail the load (`DamagedDatabase`).
+
+Proved here: a load reads only the records staging produced
+(`checked_load_reads_staged`), and reads them whenever the disk kept them
+(`intact_load_reads_staged`). Reading what the disk holds without the
+comparison, records that changed to valid ones install as the snapshot
+(`unchecked_load_installs_damage`), where the comparison fails the load
+(`checked_load_fails_damage`). -/
+
+/-- One staging of a snapshot: the records it ended with, the records the
+disk holds when the load reads them, and the digest of records. Two records
+share a digest only when they are equal. -/
+structure Staged (Records Digest : Type) where
+  digest : Records → Digest
+  distinct : ∀ a b, digest a = digest b → a = b
+  staged : Records
+  held : Records
+
+/-- The load compares the digest of what the disk holds with the one staging
+ended with, and reads the records only when they match; otherwise it fails
+and installs nothing. -/
+def loadStaged {Records Digest : Type} [DecidableEq Digest] (s : Staged Records Digest) :
+    Option Records :=
+  if s.digest s.held = s.digest s.staged then some s.held else none
+
+/-- Reading what the disk holds, with no comparison. -/
+def loadUnchecked {Records Digest : Type} (s : Staged Records Digest) : Option Records :=
+  some s.held
+
+theorem checked_load_reads_staged {Records Digest : Type} [DecidableEq Digest]
+    (s : Staged Records Digest) (r : Records) (loaded : loadStaged s = some r) :
+    r = s.staged := by
+  unfold loadStaged at loaded
+  split at loaded
+  · rename_i same
+    cases loaded
+    exact s.distinct _ _ same
+  · cases loaded
+
+theorem intact_load_reads_staged {Records Digest : Type} [DecidableEq Digest]
+    (s : Staged Records Digest) (intact : s.held = s.staged) :
+    loadStaged s = some s.staged := by
+  simp [loadStaged, intact]
+
+/-- The records `0`, which the disk now holds as `1`, with their value as
+their digest. -/
+def damagedStaging : Staged Nat Nat where
+  digest := id
+  distinct _ _ same := same
+  staged := 0
+  held := 1
+
+theorem unchecked_load_installs_damage :
+    loadUnchecked damagedStaging = some 1 ∧ damagedStaging.staged = 0 := by
+  decide
+
+theorem checked_load_fails_damage : loadStaged damagedStaging = none := by
+  decide
+
 end CovenIO.Reread

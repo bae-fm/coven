@@ -474,7 +474,10 @@ async fn a_snapshot_staged_for_file_deletion_damaged_here_is_not_refused() {
                 .await
                 .unwrap();
         } else {
-            ana.database().damage_next_staged_read().await.unwrap();
+            ana.database()
+                .damage_next_staged_read(coven_database::StagedDamage::Record)
+                .await
+                .unwrap();
         }
         ana.sync.pass().await.unwrap();
         assert!(group.storage.status(&object).await.unwrap().is_some(), "the file stays");
@@ -513,7 +516,7 @@ async fn a_snapshot_staged_for_file_deletion_damaged_here_is_not_refused() {
 #[tokio::test]
 async fn a_snapshot_damaged_here_is_not_refused_when_removing_its_staging_fails() {
     let (group, ana, object) = ana_with_an_unreferenced_stored_file().await;
-    ana.database().damage_next_staged_read().await.unwrap();
+    ana.database().damage_next_staged_read(coven_database::StagedDamage::Record).await.unwrap();
     ana.database().fail_next_staging_removal().await.unwrap();
     ana.sync.pass().await.unwrap();
     assert!(group.storage.status(&object).await.unwrap().is_some(), "the file stays");

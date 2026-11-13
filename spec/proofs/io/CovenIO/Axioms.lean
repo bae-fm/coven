@@ -200,6 +200,10 @@ import CovenIO
 #print axioms CovenIO.Reread.damaged_copy_never_refused
 #print axioms CovenIO.Reread.passing_copy_applies
 #print axioms CovenIO.Reread.copy_once_refuses_honest
+#print axioms CovenIO.Reread.checked_load_reads_staged
+#print axioms CovenIO.Reread.intact_load_reads_staged
+#print axioms CovenIO.Reread.unchecked_load_installs_damage
+#print axioms CovenIO.Reread.checked_load_fails_damage
 #print axioms CovenIO.Budget.within_budget
 #print axioms CovenIO.Budget.pinned_kept
 #print axioms CovenIO.Budget.other_namespace_kept
