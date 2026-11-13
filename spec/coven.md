@@ -9125,7 +9125,8 @@ circle's own version from storage, as a member on the old app holds them, and
 migrates them itself. It starts once its migration write's marker has a slot
 (§18.4); until the rebuild commits, it passes the circle's parts unopened, as
 it did before it could read the circle, and goes on applying the rest of the
-store.
+store. The migration write is one the rebuild has of its own: the device
+queues it when it starts reading the circle (§18.4).
 
 1. In a database of its own, it runs the app's migrations up to the version
    before the first breaking migration past the circle's version, and declares
@@ -9133,7 +9134,8 @@ store.
 2. It loads the circle's newest usable snapshot and the store's newest
    ordinary snapshot at or below the circle's version, or starts either empty
    where history holds none (§16.5). It applies the slots after them up to the
-   *rebuild slot*: the slot the device has applied. It reads the store only
+   *rebuild slot*: the slot the device had applied when it started reading the
+   circle, which its migration write for the rebuild read through (§18.4). It reads the store only
    through its *input slot*: the rebuild slot, or, if the store was raised
    past the circle's version before that, the slot before the store's raise.
    Past it, the store has no rows at the circle's version, and an old-app
@@ -9142,22 +9144,32 @@ store.
    own migration marker or another device's captured write, counts there as
    everywhere: its parts in an audience below that version are refused
    (§18.5), and the rebuild does not wait for the app to support the version.
-3. It runs the breaking migrations over that database, checked as any run is.
-4. It takes the circle's migrated rows as its own, holding the circle as a
-   member who held it through the rebuild slot and then migrated would. Cells
-   the migration changed are set by this device's migration write (§18.4).
-   The circle's parts after the rebuild slot apply as late writes (§18.6),
-   and the rebuild commits.
+3. It runs the breaking migrations over that database, checked as any run is,
+   and makes the migration write with the header the device queued for the
+   rebuild: its number, its timestamp and the rebuild slot as the slot it read
+   through (§18.4). A header that isn't a migration at the version the run
+   reaches, this device's next write in the database, newer than every write
+   it holds and read through the slot the database has applied, is refused
+   before any statement runs. Cells the migration changed are set by that
+   write.
+4. It reads on, as a device that held the circle through the rebuild slot,
+   migrated and went on reading would: it applies the slots after the rebuild
+   slot, up to the slot the device has applied. The migration write's own
+   marker counts there, at its slot, as it does on any device, and the
+   circle's other parts are late writes (§18.6). It takes the circle's rows
+   then as its own, and the rebuild commits.
 5. It captures the circle, as a migration captures what it read (§18.5), and
    raises it with its other captures.
 
 Ben's app migrates to version 2 while he reads only Household's store, and his
 raise of the store waits for his queued writes to land. Ana, on the old app,
-adds him to Garden at slot 70. Ben's laptop passes Garden's parts unopened
-until his migration marker lands at slot 72. With slot 74 applied, it loads
-Garden's version 1 snapshot covering 60 and the store's version 1 snapshot
-covering 55 into a database of its own at version 1, applies slots 56 to 74
-there, runs version 2, and holds Garden at version 2. It raises Garden
+adds him to Garden at slot 70. Ben's laptop applies slot 70 and queues a
+migration write for Garden, an empty marker that has read through slot 70. It
+passes Garden's parts unopened until that marker lands at slot 72. With slot 74
+applied, it loads Garden's version 1 snapshot covering 60 and the store's
+version 1 snapshot covering 55 into a database of its own at version 1,
+applies slots 56 to 70 there, runs version 2 under the migration write it
+queued, applies slots 71 to 74, and holds Garden at version 2. It raises Garden
 alongside the store. Ana's update later finds Garden raised and loads Ben's
 raise; had hers come first, Ben's laptop would load hers (§18.8). No member
 waits for another to update, and a circle whose members who held it have all
@@ -9192,7 +9204,10 @@ raise built on them, covering the rebuild slot, counts like any other
   of the store's folder, with the store's id and this device's, opened at the
   circle's version like any store. The store's own reads and writes go on
   meanwhile. A folder a crash left is removed before the next rebuild opens
-  its own.
+  its own. The rebuild's output is the circle's state in that database at the
+  slot it has applied, written as a snapshot body and staged in the store like
+  a stored one, so that the store installs it as it installs any snapshot; a
+  failure while writing it removes the folder and what was staged.
 
 **Devices on an older app.** An older app can't apply an audience's newer schema.
 It records `UpdateRequired` and stops at that slot under §5's rule for stuck
@@ -9272,16 +9287,29 @@ applied its device's registration: Carol's phone, updated while Household's
 load is still refused, runs version 2 on that open and makes no migration write
 there either (§13.4).
 
-**A rebuilt circle's changes join the device's migration write.** A device
-that rebuilds a circle (§18.3) puts what the migration changed in the circle
-into its migration write of its newest breaking version, as if the circle had
-been in its database when it migrated. The rebuild starts only once that
-write's marker has a slot, so the rebuilt circle's snapshots cover it and the
-changes count at once. Ben's marker landed at slot 72, and his rebuild of
-Garden sets Garden's changed cells by that write, so his raise of Garden waits
-for no other marker. A device with no migration write, such as Carol's phone
-that joined with its app already at version 2, queues one for the rebuild: an
-empty marker, as migrating queues (§18.5).
+**A rebuild makes a migration write of its own.** A device that rebuilds a
+circle (§18.3) puts what the migration changed in the circle into a migration
+write made for the rebuild. The device queues it when it starts reading the
+circle: an empty marker at its newest breaking version, read through the slot
+it has then applied, with a timestamp newer than every write it holds, whether
+or not it ran the breaking step on this open (Carol's phone, which joined with
+its app already at version 2, queues one too). The rebuild starts only once
+that marker has a slot, runs the migration under the write's header, and reads
+on as a holder does (§18.3).
+
+The changes can't ride on a write that read less than the rows they are
+computed from. A write's change wins only over what the write read and is
+newer than (§8.1): were the changes computed from the circle's rows at a later
+slot and carried by an earlier write, an edit landing between would be newer
+than the write and would replace the migrated value, and an update to a row
+first written after the write read would be refused as an update of a
+generation it never saw. So the rebuild migrates the rows the write read, and
+the parts after that slot apply to the result as they would on any device that
+held the circle. Ben's laptop starts reading Garden at slot 70: its migration
+write read through 70, the rebuild sets Garden's changed cells by that write,
+and Ana's edit of a pin title at slot 71 is a late write, converted or kept as
+a lost value as the migration declares (§18.6, §18.7). Garden's raise waits
+for that write's marker and no other.
 
 #### 18.5 The migrating device's own queue
 

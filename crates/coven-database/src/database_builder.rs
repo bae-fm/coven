@@ -7,9 +7,10 @@ use crate::{migration::MigrationOperation, AutoVacuum, NewOperation, OpenError, 
 use coven_foundation::progress::{ProgressChannel, ProgressReport, ProgressWatch};
 
 /// What opening the store took that a rebuild needs again: the app's
-/// migrations, namespaces and SQLite choices (§18.3).
+/// newest table declarations, migrations, namespaces and SQLite choices (§18.3).
 #[derive(Clone)]
 pub(crate) struct OpenInputs {
+    pub(crate) tables: Vec<SyncedTable>,
     pub(crate) migrations: Vec<Migration>,
     pub(crate) namespaces: Vec<crate::Namespace>,
     pub(crate) sqlite: crate::SqliteSettings,
@@ -104,6 +105,14 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Open a rebuild's store for the migrations it hasn't run: their
+    /// breaking migration writes are made under `header`, the migration write
+    /// the device's real database queued for the rebuild (§18.3).
+    pub(crate) fn rebuilding(mut self, header: coven_format::write::WriteHeader) -> Self {
+        self.installation = crate::migration_run::Installation::Rebuilding(header);
+        self
+    }
+
     /// Let sync describe the operation that publishes a breaking migration batch.
     /// The database commits its step 1 with the schema, converted waiting writes
     /// and migration write. A factory error rolls all of them back. Standalone
@@ -195,6 +204,7 @@ impl DatabaseBuilder {
         };
         let started = clock.elapsed();
         let open_inputs = OpenInputs {
+            tables: tables.clone(),
             migrations: migrations.clone(),
             namespaces: self.namespaces.clone(),
             sqlite: self.sqlite.clone(),
@@ -229,7 +239,7 @@ impl DatabaseBuilder {
                     Some(crate::migration_run::MigrationOrigin(
                         settings.device_id,
                         clock.now(),
-                        self.installation,
+                        self.installation.clone(),
                     )),
                     self.migration_operation.as_deref(),
                     Some(&|live| {

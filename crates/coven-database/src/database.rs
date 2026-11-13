@@ -38,7 +38,7 @@ mod circle_rebuild;
 pub(crate) mod file_retention;
 #[path = "database_snapshots.rs"]
 mod snapshots;
-pub use circle_rebuild::{RebuildDatabase, RebuildError};
+pub use circle_rebuild::{ExportStopped, RebuildDatabase, RebuildError};
 
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "database_operations_tests.rs"]

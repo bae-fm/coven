@@ -14,7 +14,7 @@ fn tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience")]
 }
 
-fn garden() -> CircleId {
+pub(crate) fn garden() -> CircleId {
     CircleId(uuid::Uuid::from_u128(11))
 }
 
@@ -38,7 +38,7 @@ async fn open_app(store: &TestStore) -> Database {
 }
 
 /// The folder a rebuild's store takes in the real store's.
-fn rebuild_folder(store: &TestStore) -> std::path::PathBuf {
+pub(crate) fn rebuild_folder(store: &TestStore) -> std::path::PathBuf {
     store.directory().area_path(FileArea::Cache).parent().unwrap().join("rebuild")
 }
 
@@ -200,7 +200,7 @@ fn pin_ids(rebuild: &RebuildDatabase) -> Vec<String> {
 
 /// A reload into the rebuild of the version one `snapshots` and `writes` as
 /// slots after them, with the store state of `source`.
-async fn reload_into(
+pub(crate) async fn reload_into(
     rebuild: &RebuildDatabase,
     source: &Database,
     snapshots: [&SnapshotFrames; 2],

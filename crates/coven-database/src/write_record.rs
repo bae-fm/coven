@@ -422,12 +422,25 @@ pub(crate) fn changed(
     unordered(database, device, now, changes, BTreeMap::new())
 }
 
+/// The record of these changes under the header of a write made elsewhere, as
+/// a rebuild makes the migration write its device's real database queued.
+pub(crate) fn changed_under(
+    header: WriteHeader,
+    changes: BTreeMap<RowId, RowChange>,
+) -> WriteRecord {
+    grouped(
+        WriteHeader { disposition: WriteDisposition::Apply, ..header },
+        changes,
+        BTreeMap::new(),
+    )
+}
+
 fn unordered(
     database: &DatabaseConnection,
     device: DeviceId,
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
-    mut executions: BTreeMap<Audience, Vec<RowExecution>>,
+    executions: BTreeMap<Audience, Vec<RowExecution>>,
 ) -> Result<WriteRecord, DbError> {
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
@@ -442,6 +455,15 @@ fn unordered(
         schema_version: database.schema_version()?,
         disposition: WriteDisposition::Apply,
     };
+    Ok(grouped(header, changes, executions))
+}
+
+/// The changes and executions of a write, grouped into a part for each audience.
+fn grouped(
+    header: WriteHeader,
+    changes: BTreeMap<RowId, RowChange>,
+    mut executions: BTreeMap<Audience, Vec<RowExecution>>,
+) -> WriteRecord {
     let mut parts = BTreeMap::<Audience, Vec<RowChange>>::new();
     for change in changes.into_values() {
         parts.entry(change.row.audience.clone()).or_default().push(change);
@@ -449,7 +471,7 @@ fn unordered(
     for audience in executions.keys() {
         parts.entry(audience.clone()).or_default();
     }
-    Ok(WriteRecord {
+    WriteRecord {
         header,
         parts: parts
             .into_iter()
@@ -460,7 +482,7 @@ fn unordered(
                 dismissals: Vec::new(),
             })
             .collect(),
-    })
+    }
 }
 
 /// A moved row's cell, naming the new file the move made in the row's new

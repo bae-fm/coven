@@ -4,10 +4,13 @@
 //! (§18.3). The real store is changed only by installing what the rebuild
 //! makes, never by running it.
 
+use super::builder::OpenInputs;
 use super::{Database, DatabaseBuilder};
 use crate::migration::MigrationKind;
-use crate::{DbError, OpenError};
+use crate::{DbError, OpenError, SnapshotWriteError};
+use coven_foundation::clock::ClockRef;
 use coven_foundation::files::{FileError, SettingsError, StoreDir, StoreDirAccess};
+use coven_foundation::id_source::IdSourceRef;
 use coven_merge::Audience;
 
 /// Why a rebuild could not run.
@@ -22,9 +25,12 @@ pub enum RebuildError {
         /// Its version.
         version: u32,
     },
-    /// The rebuild's store could not open at the circle's version.
+    /// The rebuild's store could not open at the circle's version or migrate.
     #[error(transparent)]
     Open(#[from] OpenError),
+    /// The circle's state could not be read out of the rebuild's store.
+    #[error(transparent)]
+    Export(#[from] SnapshotWriteError<ExportStopped>),
     /// The rebuild's store failed.
     #[error(transparent)]
     Database(#[from] DbError),
@@ -35,12 +41,12 @@ pub enum RebuildError {
     #[error("the rebuild's folder: {0}")]
     Folder(#[from] FileError),
     /// A rebuild failed, and so did removing what it left.
-    #[error("{operation}; removing the rebuild's folder also failed: {cleanup}")]
+    #[error("{operation}; removing what it left also failed: {cleanup}")]
     Cleanup {
         /// The failure that ended the rebuild.
         operation: Box<RebuildError>,
         /// The failure of the removal that followed.
-        cleanup: FileError,
+        cleanup: Box<RebuildError>,
     },
 }
 
@@ -52,6 +58,12 @@ pub struct RebuildDatabase {
     database: Option<Database>,
     /// The real store, whose folder holds the rebuild's.
     real: StoreDir,
+    /// The rebuild's own store, which `migrate` opens again.
+    scratch: StoreDir,
+    /// What the real store opened with.
+    inputs: OpenInputs,
+    clock: ClockRef,
+    ids: IdSourceRef,
     /// The real store's handle, told when the folder's bytes change: they
     /// are on this device's disk, so its storage figures count them (§17.8).
     parent: Database,
@@ -87,21 +99,29 @@ impl Database {
             return Err(RebuildError::NotBelow { circle, version });
         };
         let scratch = real.rebuild_directory().await?;
-        let opened = DatabaseBuilder::new(scratch)
+        let opened = DatabaseBuilder::new(scratch.clone())
             .synced_tables(inputs.migrations[first].starts_from.clone())
             .migrations(inputs.migrations[..first].to_vec())
             .namespaces(inputs.namespaces.clone())
             .sqlite_settings(inputs.sqlite.clone())
             .sql_functions(inputs.functions.clone())
-            .clock(clock)
-            .id_source(ids)
+            .clock(clock.clone())
+            .id_source(ids.clone())
             .loading_store()
             .open()
             .await;
         match opened {
             Ok(database) => {
                 self.local_bytes_changed();
-                Ok(RebuildDatabase { database: Some(database), real, parent: self.clone() })
+                Ok(RebuildDatabase {
+                    database: Some(database),
+                    real,
+                    scratch,
+                    inputs,
+                    clock,
+                    ids,
+                    parent: self.clone(),
+                })
             }
             Err(operation) => Err(removed_after(&real, operation.into())),
         }
@@ -148,6 +168,10 @@ impl RebuildDatabase {
     /// Close the rebuild's store and remove its folder, reporting the first
     /// failure (both, as `Cleanup`, when both fail).
     pub async fn discard(mut self) -> Result<(), RebuildError> {
+        self.discard_inner().await
+    }
+
+    async fn discard_inner(&mut self) -> Result<(), RebuildError> {
         let closed = match self.database.take() {
             Some(database) => database.close().await.map_err(RebuildError::from),
             None => Ok(()),
@@ -158,9 +182,10 @@ impl RebuildDatabase {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(cleanup)) => Err(cleanup.into()),
             (Err(operation), Ok(())) => Err(operation),
-            (Err(operation), Err(cleanup)) => {
-                Err(RebuildError::Cleanup { operation: Box::new(operation), cleanup })
-            }
+            (Err(operation), Err(cleanup)) => Err(RebuildError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup.into()),
+            }),
         }
     }
 }
@@ -169,10 +194,17 @@ impl RebuildDatabase {
 fn removed_after(real: &StoreDir, operation: RebuildError) -> RebuildError {
     match real.remove_rebuild_directory() {
         Ok(()) => operation,
-        Err(cleanup) => RebuildError::Cleanup { operation: Box::new(operation), cleanup },
+        Err(cleanup) => RebuildError::Cleanup {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup.into()),
+        },
     }
 }
 
+#[path = "circle_rebuild_migration.rs"]
+mod migration;
+pub use migration::ExportStopped;
+
 #[cfg(test)]
 #[path = "circle_rebuild_tests.rs"]
-mod tests;
+pub(crate) mod tests;

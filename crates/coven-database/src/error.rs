@@ -413,6 +413,15 @@ pub enum DbError {
         /// The audience whose rows differ.
         audience: coven_merge::Audience,
     },
+    /// A rebuild's migration write was given a header that is not the one the
+    /// rebuild's store can make: it must be a migration at the store's newest
+    /// version, this device's next write, read through the slot the store has
+    /// applied (§18.3).
+    #[error("a rebuild's migration write header: {reason}")]
+    RebuildHeader {
+        /// What about the header the store refused.
+        reason: &'static str,
+    },
     /// A synced row of a table that synced before a breaking run has no merge
     /// record, so the check of what the run reads can't tell its audience:
     /// the database is damaged.

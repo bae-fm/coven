@@ -152,6 +152,29 @@ impl Database {
         .await
     }
 
+    /// Stream an audience's plaintext frames as [`Self::write_snapshot`] does,
+    /// without refusing while a raise of the audience waits: a rebuild's store
+    /// holds such raises and writes the circle's state it counted (§18.3).
+    pub(crate) async fn write_counted_snapshot<B, F, E>(
+        &self,
+        id: coven_format::admin::SnapshotId,
+        begin: B,
+        emit: F,
+    ) -> Result<u32, crate::SnapshotWriteError<E>>
+    where
+        B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
+        F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
+        E: coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        self.call(move |inner| {
+            inner.access.with_committed(|reader| {
+                crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
+                crate::snapshot_write::write(reader, &inner.access.write_schema, id, begin, emit)
+            })
+        })
+        .await
+    }
+
     /// The version of the newest breaking migration this installation ran,
     /// zero if none: its snapshots' breaking version (§16.3).
     pub async fn breaking_version(&self) -> Result<u32, DbError> {

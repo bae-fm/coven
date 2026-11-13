@@ -20,7 +20,7 @@ pub(crate) struct MigrationRun {
 
 /// The device and wall clock authoring a migration's local write, and
 /// where the installation's state comes from.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct MigrationOrigin(
     pub(crate) DeviceId,
     pub(crate) SystemTime,
@@ -29,7 +29,7 @@ pub(crate) struct MigrationOrigin(
 
 /// Where an installation's state comes from, which decides whether its
 /// breaking migrations make a migration write (§18.4).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Installation {
     /// Its own: the store's creator, or a device whose store has loaded.
     Own,
@@ -37,6 +37,10 @@ pub(crate) enum Installation {
     /// or a joined store whose first load has not registered its device:
     /// the device isn't registered yet, and the load replaces its state.
     Loading,
+    /// A rebuild's store (§18.3): it makes the migration write the header
+    /// gives, which the device's real database queued for the rebuild, and
+    /// queues only its marker in the rebuild's store.
+    Rebuilding(coven_format::write::WriteHeader),
 }
 
 struct MigrationStep<'a> {
@@ -58,6 +62,9 @@ pub(crate) fn run<'a>(
 ) -> Result<MigrationRun, DbError> {
     // Each version's file references: the registered ones, carried through
     // each step's renames, then the final declarations (§18.1).
+    if let Installation::Rebuilding(header) = &origin.2 {
+        check_rebuild_header(database, origin.0, supported, header)?;
+    }
     let mut files = crate::file_table::registered_columns(database)?;
     let mut before = Schema::read(database, &files)?;
     let removed = crate::published::removal_losses_before_migrating(database, &before)?;
@@ -168,7 +175,7 @@ pub(crate) fn run<'a>(
     // A joined store opened again before its first load has applied this
     // device's registration is as unregistered as the installation that
     // published it.
-    let installation = if installation == Installation::Own
+    let installation = if matches!(installation, Installation::Own)
         && crate::store_state_tables::awaiting_registration(database, device)?
     {
         Installation::Loading
@@ -200,7 +207,12 @@ pub(crate) fn run<'a>(
         // A write made before the device is registered is one no device, its
         // own included, can accept, and the store this installation loads
         // replaces what the migration changed.
-        if installation == Installation::Own {
+        let given = match installation {
+            Installation::Own => Some(None),
+            Installation::Rebuilding(header) => Some(Some(header)),
+            Installation::Loading => None,
+        };
+        if let Some(given) = given {
             marker = Some(finish(
                 database,
                 tables,
@@ -211,6 +223,7 @@ pub(crate) fn run<'a>(
                 capture.into_snapshot().expect("breaking statement captured its before state"),
                 &removed,
                 author,
+                given,
             )?);
         }
     }
@@ -237,6 +250,42 @@ pub(crate) fn run<'a>(
         crate::file_protection::migrate(database, tables)?,
     )?;
     Ok(MigrationRun { outcomes, marker })
+}
+
+/// Refuse, before any statement runs, a rebuild's migration write header that
+/// is not this device's next write in the rebuild's store, a migration at the
+/// version the run reaches, read through the slot the store has applied: the
+/// merge counts a write's changes only over what it read (§18.3).
+fn check_rebuild_header(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    supported: u32,
+    header: &coven_format::write::WriteHeader,
+) -> Result<(), DbError> {
+    let refuse = |reason| Err(DbError::RebuildHeader { reason });
+    if header.disposition != WriteDisposition::Migration {
+        return refuse("it is not a migration write");
+    }
+    if header.schema_version != supported {
+        return refuse("it is not at the version the run reaches");
+    }
+    if header.position.device != device {
+        return refuse("it is another device's write");
+    }
+    if crate::write_metadata::newest_number(database, device)?
+        .is_some_and(|newest| header.position.number <= newest)
+    {
+        return refuse("it is not newer than this device's writes in the store");
+    }
+    if header.read_through != crate::sequence::applied(database)? {
+        return refuse("it did not read through the slot the store has applied");
+    }
+    if crate::write_encoding::latest_timestamp(database)?
+        .is_some_and(|latest| header.timestamp <= latest)
+    {
+        return refuse("it is not newer than every write the store holds");
+    }
+    Ok(())
 }
 
 /// A breaking migration's `starts_from` against the schema the run has reached
@@ -274,6 +323,7 @@ fn finish(
     mut snapshot: crate::migration_snapshot::MigrationSnapshot<'_>,
     removed: &[coven_format::loss::Loss],
     (device, now): (DeviceId, SystemTime),
+    given: Option<coven_format::write::WriteHeader>,
 ) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     crate::write_schema::with_evaluators(database, &schema, || {
@@ -334,7 +384,10 @@ fn finish(
                 changes.insert(row.clone(), change);
             }
         }
-        let mut record = crate::write_record::changed(database, device, now, changes)?;
+        let mut record = match given {
+            Some(header) => crate::write_record::changed_under(header, changes),
+            None => crate::write_record::changed(database, device, now, changes)?,
+        };
         for row in &deletes {
             hidden.freeze(
                 &schema,
