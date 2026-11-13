@@ -57,6 +57,17 @@ of coven's own or the app's left that would end it (`refused_syncs_forever`).
 Past its admission, the other facts, a removal or a replacement of its
 member's keys, stop the store as any store, outside this model.
 
+A join reads the account it is signed in as before it keeps a sign-in or
+accepts the share, and compares it with the account the invite was shared with
+(`Act.checkAccount`). A different account keeps nothing and accepts nothing:
+the join stays listed, unsent and cancellable (`wrong_account_keeps_join`).
+Until the account is proven, a refusal of the first acceptance is one
+observation for two causes, an ended invite and a wrong account, so a join
+that ends on it ends some wrong account's join, and one that keeps it keeps
+some ended invite's (`unchecked_refusal_misjudged`). Once it is proven, the
+location's refusal can only mean the access is gone, and the join ends as a
+declined one does (`Act.lostAccess`, `lost_access_after_proof`).
+
 The join's request carries the new person's name, which the app makes their
 profile with, and nothing in history does; the join keeps the request on the
 device beside its code. Publishing deletes both, so the store keeps that name,
@@ -120,11 +131,14 @@ structure World where
   /-- The app has recorded the person's profile, or its request for it, and
   acknowledged the name. -/
   profiled : Bool
+  /-- The join has proven the account it is signed in as is the one the
+  invite was shared with. -/
+  proven : Bool
   deriving DecidableEq, Repr
 
 def start : World :=
   ⟨.none, .none, false, false, false, false, false, false, false, false, false, false, false,
-    false⟩
+    false, false⟩
 
 structure Rules where
   /-- A restore refuses an installation holding an invite code, a pairing one
@@ -162,8 +176,14 @@ inductive Act where
   /-- The join is cancelled before it may have sent its request: it takes
   back the acceptance it records, then removes the installation. -/
   | joinCancel
+  /-- The join reads the account it is signed in as and compares it with the
+  invite's. The right account is proven; a wrong one changes nothing. -/
+  | checkAccount (right : Bool)
   /-- The join's request is declined: it ends without its store. -/
   | declined
+  /-- The shared location refuses the join whose account is proven: its access
+  is gone, and it ends without its store. -/
+  | lostAccess
   /-- The join finds its admission. -/
   | found
   /-- The join, its admission found, publishes the store once it has loaded
@@ -200,9 +220,11 @@ inductive Act where
 
 def enabled (R : Rules) (w : World) : Act → Bool
   | .beginJoin => w.call == .none && w.inst != .published && (!R.exclusive || !w.record)
-  | .keepAcceptance => w.call == .join && !w.sent
-  | .accept => w.call == .join && !w.sent && (!R.recordsAcceptance || w.acceptKept)
-  | .send => w.call == .join
+  | .checkAccount _ => w.call == .join
+  | .keepAcceptance => w.call == .join && w.proven && !w.sent
+  | .accept => w.call == .join && w.proven && !w.sent && (!R.recordsAcceptance || w.acceptKept)
+  | .send => w.call == .join && w.proven
+  | .lostAccess => w.call == .join && w.proven
   | .joinCancel => w.call == .join && !w.sent
   | .declined | .found => w.call == .join && w.sent && !w.found
   | .approved => w.call == .join && w.found && !R.publishesAtAdmission
@@ -223,15 +245,18 @@ store's, and the store keeps the person's name the request carried where the
 rules say. -/
 def publish (R : Rules) (w : World) : World :=
   { w with inst := .published, call := .none, code := false, sent := false, accepted := false,
-           acceptKept := false, inviteeKept := R.keepsInvitee }
+           acceptKept := false, proven := false, inviteeKept := R.keepsInvitee }
 
 def act (R : Rules) (w : World) : Act → World
   | .beginJoin => { w with inst := .hidden, call := .join, code := true }
   | .keepAcceptance => { w with acceptKept := true }
   | .accept => { w with accepted := true }
   | .send => { w with sent := true }
-  | .joinCancel => { undo w with accepted := w.accepted && !w.acceptKept, acceptKept := false }
-  | .declined => { undo w with sent := false, accepted := false, acceptKept := false }
+  | .checkAccount right => { w with proven := w.proven || right }
+  | .joinCancel =>
+    { undo w with accepted := w.accepted && !w.acceptKept, acceptKept := false, proven := false }
+  | .declined | .lostAccess =>
+    { undo w with sent := false, accepted := false, acceptKept := false, proven := false }
   | .found =>
     if R.publishesAtAdmission then publish R { w with found := true } else { w with found := true }
   | .approved => publish R w
@@ -287,7 +312,7 @@ join's code with it: Ben may approve Dan's request, and no join on the phone
 is listed to finish it. -/
 theorem pairing_strands_join :
     ∃ w, trace ⟨false, true, true, true, true⟩ start
-        [.beginJoin, .send, .drop, .beginPair, .pairUndo] = some w ∧ Stranded w := by
+        [.beginJoin, .checkAccount true, .send, .drop, .beginPair, .pairUndo] = some w ∧ Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
 
@@ -298,7 +323,7 @@ the restore records itself. The cancel removes the installation and the
 join's code with it: Ben may approve Dan's request, and no join on the
 phone is listed to finish it. -/
 theorem restore_strands_join :
-    ∃ w, trace ⟨false, true, true, true, true⟩ start [.beginJoin, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
+    ∃ w, trace ⟨false, true, true, true, true⟩ start [.beginJoin, .checkAccount true, .send, .drop, .beginRestore, .restoreUndo] = some w ∧
       Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -330,7 +355,7 @@ app closes before sending his request. Resumed, the join is cancelled: it
 removes the installation and the code, and Household stays mounted in Dan's
 Dropbox with no join listed to take it out. -/
 theorem cancel_strands_acceptance :
-    ∃ w, trace ⟨true, false, true, true, true⟩ start [.beginJoin, .accept, .drop, .beginJoin, .joinCancel] =
+    ∃ w, trace ⟨true, false, true, true, true⟩ start [.beginJoin, .checkAccount true, .accept, .drop, .beginJoin, .joinCancel] =
         some w ∧ Stranded w := by
   exact ⟨_, rfl, by simp [Stranded, act, undo, start]⟩
 
@@ -340,7 +365,7 @@ theorem cancel_strands_acceptance :
 publishes, and the call stops while it loads: Dan's storage access was taken
 away. The join stays listed, though nothing is left for it to claim. -/
 theorem loaded_first_lists_admitted :
-    ∃ w, trace ⟨true, true, false, true, true⟩ start [.beginJoin, .send, .found, .drop] = some w ∧
+    ∃ w, trace ⟨true, true, false, true, true⟩ start [.beginJoin, .checkAccount true, .send, .found, .drop] = some w ∧
       w.found = true ∧ w.code = true := by
   exact ⟨_, rfl, rfl, rfl⟩
 
@@ -349,7 +374,7 @@ history its first load applies refused that admission, and the store doesn't
 stop. Its device never a member, it sends nothing, and no step is left that
 would end it: coven has none, and the app's only one records Dan's name. -/
 theorem refused_syncs_forever :
-    ∃ w, trace ⟨true, true, true, false, true⟩ start [.beginJoin, .send, .found, .load false] =
+    ∃ w, trace ⟨true, true, true, false, true⟩ start [.beginJoin, .checkAccount true, .send, .found, .load false] =
         some w ∧ w.loaded = true ∧ w.member = false ∧ w.stopped = false ∧
       ∀ a, a ≠ .acknowledge → enabled ⟨true, true, true, false, true⟩ w a = false := by
   refine ⟨_, rfl, rfl, rfl, rfl, ?_⟩
@@ -361,9 +386,38 @@ invite code, but the store keeps none of the code's person's name. Its first
 load fails, or the app quits, before the app has recorded Dan's profile: the
 name is nowhere on the phone, and the app can't record it. -/
 theorem published_join_loses_invitee :
-    ∃ w, trace ⟨true, true, true, true, false⟩ start [.beginJoin, .send, .found] = some w ∧
+    ∃ w, trace ⟨true, true, true, true, false⟩ start [.beginJoin, .checkAccount true, .send, .found] = some w ∧
       InviteeLost w ∧ enabled ⟨true, true, true, true, false⟩ w .acknowledge = false := by
   exact ⟨_, rfl, by simp [InviteeLost, act, publish, start], rfl⟩
+
+/-! ## Counterexample: one observation for two causes -/
+
+/-- Why the shared location refused a join's first acceptance. -/
+inductive Cause where
+  | endedInvite
+  | wrongAccount
+  deriving DecidableEq, Repr
+
+/-- What a join does with the refusal. -/
+inductive Reply where
+  | ends
+  | keeps
+  deriving DecidableEq, Repr
+
+/-- The right reply to each cause: an ended invite ends the join; a wrong
+account keeps it, to be tried again with the right sign-in. -/
+def right : Cause → Reply
+  | .endedInvite => .ends
+  | .wrongAccount => .keeps
+
+/-- **Without the account check, a refusal is misjudged.** A join that has not
+compared accounts sees the same refusal for both causes, so whichever reply
+its one rule gives is wrong for one of them: ending strands a wrong account's
+join as ended, keeping leaves an ended invite's join waiting for ever. -/
+theorem unchecked_refusal_misjudged (rule : Reply) : ∃ cause, rule ≠ right cause := by
+  cases rule
+  · exact ⟨.wrongAccount, by decide⟩
+  · exact ⟨.endedInvite, by decide⟩
 
 /-! ## Under the rules -/
 
@@ -383,6 +437,9 @@ structure Inv (w : World) : Prop where
   found : w.found = true → w.inst = .published ∧ w.code = false ∧ w.call = .none
   /-- A store whose first load reached the end is a member. -/
   loaded : w.loaded = true → w.member = true
+  /-- A join that sent, accepted or kept that it is accepting has proven its
+  account. -/
+  proven : (w.sent = true ∨ w.accepted = true ∨ w.acceptKept = true) → w.proven = true
   /-- A join that found its admission keeps its person's name until the app
   acknowledges it. -/
   invitee : w.found = true → w.profiled = false → w.inviteeKept = true
@@ -393,7 +450,7 @@ theorem inv_start : Inv start := by
 set_option maxHeartbeats 1600000 in
 theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct w a = true) :
     Inv (act Rules.correct w a) := by
-  obtain ⟨sent, registered, one, join, restore, pair, accepted, found, loaded, invitee⟩ := inv
+  obtain ⟨sent, registered, one, join, restore, pair, accepted, found, loaded, proven, invitee⟩ := inv
   cases a <;> rcases hc : w.call <;> constructor <;>
     (try simp_all [act, enabled, Rules.correct, undo, publish]) <;>
     (try split) <;> (try simp_all)
@@ -417,6 +474,58 @@ one whose history refused the admission stopped instead. -/
 theorem refused_stops {w : World} (h : Reachable Rules.correct w) (loaded : w.loaded = true) :
     w.member = true :=
   (steps_keep_inv h inv_start).loaded loaded
+
+/-- **A wrong account keeps the join.** A join that has not proven its account
+has sent nothing and accepted nothing, and is still listed and cancellable:
+signing in as another account changes none of that. -/
+theorem wrong_account_keeps_join {w : World} (h : Reachable Rules.correct w)
+    (c : w.call = .join) (wrong : w.proven = false) :
+    w.sent = false ∧ w.accepted = false ∧ w.acceptKept = false ∧ w.code = true ∧
+      enabled Rules.correct w .joinCancel = true := by
+  have inv := steps_keep_inv h inv_start
+  have none : ¬(w.sent = true ∨ w.accepted = true ∨ w.acceptKept = true) :=
+    fun held => by simp [inv.proven held] at wrong
+  simp only [not_or, Bool.not_eq_true] at none
+  obtain ⟨s, a, k⟩ := none
+  refine ⟨s, a, k, (inv.join c).1, ?_⟩
+  simp [enabled, c, s]
+
+/-- The wrong account is checked, not accepted: the join signs in as another
+account, and the account it signed in as before still lists it, unsent and
+unaccepted. -/
+theorem wrong_account_trace :
+    ∃ w, trace Rules.correct start [.beginJoin, .checkAccount false] = some w ∧
+      w.code = true ∧ w.accepted = false ∧
+      enabled Rules.correct w .accept = false ∧ enabled Rules.correct w .send = false ∧
+      enabled Rules.correct w .joinCancel = true := by
+  exact ⟨_, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- A refusal ends a join only on a proven account: the location's refusal
+is read as lost access only after the account matched. -/
+theorem lost_access_after_proof (R : Rules) (w : World)
+    (e : enabled R w .lostAccess = true) : w.proven = true := by
+  simp_all [enabled]
+
+/-- **Lost access ends the join.** A join whose account is proven that loses
+its access ends as a declined one: no installation, code, request or
+acceptance is left, so nothing is stranded. -/
+theorem lost_access_leaves_nothing {w : World} (h : Reachable Rules.correct w)
+    (e : enabled Rules.correct w .lostAccess = true) :
+    (act Rules.correct w .lostAccess).inst = .none ∧
+      (act Rules.correct w .lostAccess).code = false ∧
+      ¬Stranded (act Rules.correct w .lostAccess) := by
+  have inv := steps_keep_inv h inv_start
+  have c : w.call = .join := by simp_all [enabled]
+  have noRegistration : w.registered = false := by
+    cases hr : w.registered
+    · rfl
+    · have j := (inv.join c).2
+      simp [inv.registered hr] at j
+  refine ⟨rfl, rfl, ?_⟩
+  rintro (⟨s, _⟩ | ⟨r, _⟩ | ⟨a', _⟩)
+  · simp [act, undo] at s
+  · simp [act, undo, noRegistration] at r
+  · simp [act, undo] at a'
 
 /-- **The person's name outlives the code.** Whatever the app and the device
 do, a store a join published keeps the name its request carried until the app

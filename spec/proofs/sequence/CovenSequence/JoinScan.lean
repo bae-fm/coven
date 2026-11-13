@@ -354,21 +354,39 @@ only from the admission's own slot, so a check whose copies open has found
 its admission, and the join publishes the store (§13.2). Whether that
 admission counts is for the store's first load, which applies it
 (`approved_eventually_admitted`); a refused one stops the store for good
-(`FirstInstallation.refused_stops`), not the join. -/
-def outcome (key pending : Bool) : Outcome :=
+(`FirstInstallation.refused_stops`), not the join. `reach` says the check
+reached the shared location with the access the join has proven: a check
+that could not has lost the join's access. Before the keys open that ends the
+join, as an absent request does; once they have opened it is the published
+store's lost access, which `reach` never touches (§13.2). -/
+def outcome (key pending reach : Bool) : Outcome :=
   if key then .admitted
+  else if !reach then .declined
   else if pending then .waiting
   else .declined
 
 /-- A join whose copies opened never goes back to waiting for them: no outcome
 waits for an entry that follows its copies. -/
-theorem opened_never_waits (pending : Bool) : outcome true pending ≠ .waiting := by
-  cases pending <;> simp [outcome]
+theorem opened_never_waits (pending reach : Bool) : outcome true pending reach ≠ .waiting := by
+  cases pending <;> cases reach <;> simp [outcome]
 
-theorem approved_never_declined (pending : Bool) : outcome true pending = .admitted := by
+theorem approved_never_declined (pending reach : Bool) :
+    outcome true pending reach = .admitted := by
   simp [outcome]
 
-theorem real_decline : outcome false false = .declined := by
+theorem real_decline : outcome false false true = .declined := by
+  simp [outcome]
+
+/-- **A join that lost its access ends.** A check that cannot reach the shared
+location before the keys open ends the join as declined, whether or not the
+request is still there to find: nothing is left to wait for. -/
+theorem lost_access_ends (pending : Bool) : outcome false pending false = .declined := by
+  simp [outcome]
+
+/-- Opened keys win over lost access: the admission is found, so the join is
+a published store whatever the location does after. -/
+theorem opened_wins_over_lost_access (pending : Bool) :
+    outcome true pending false = .admitted := by
   simp [outcome]
 
 /-- An applied admission admits its member; retention cannot undo it. Only a

@@ -394,6 +394,8 @@ import SequenceApply
 #print axioms CovenSequence.JoinScan.approved_never_declined
 #print axioms CovenSequence.JoinScan.real_decline
 #print axioms CovenSequence.JoinScan.opened_never_waits
+#print axioms CovenSequence.JoinScan.lost_access_ends
+#print axioms CovenSequence.JoinScan.opened_wins_over_lost_access
 #print axioms CovenSequence.JoinScan.approved_eventually_admitted
 #print axioms CovenSequence.JoinScanExamples.missing_below_existing_is_deleted
 #print axioms CovenSequence.JoinScanExamples.retained_good
@@ -481,6 +483,11 @@ import SequenceApply
 #print axioms CovenSequence.FirstInstallation.never_stranded
 #print axioms CovenSequence.FirstInstallation.found_published
 #print axioms CovenSequence.FirstInstallation.refused_stops
+#print axioms CovenSequence.FirstInstallation.wrong_account_keeps_join
+#print axioms CovenSequence.FirstInstallation.wrong_account_trace
+#print axioms CovenSequence.FirstInstallation.lost_access_after_proof
+#print axioms CovenSequence.FirstInstallation.lost_access_leaves_nothing
+#print axioms CovenSequence.FirstInstallation.unchecked_refusal_misjudged
 #print axioms CovenSequence.FirstInstallation.loaded_first_lists_admitted
 #print axioms CovenSequence.FirstInstallation.refused_syncs_forever
 #print axioms CovenSequence.FirstInstallation.invitee_kept
@@ -522,6 +529,7 @@ import SequenceApply
 #print axioms CovenSequence.BootstrapCommit.cut_commit_orphans_custody
 #print axioms CovenSequence.JoinStatus.phases_forward
 #print axioms CovenSequence.JoinStatus.opened_never_waits
+#print axioms CovenSequence.JoinStatus.lost_access_reports_done
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
 #print axioms CovenSequence.JoinStatus.scan_shown_as_loading
 

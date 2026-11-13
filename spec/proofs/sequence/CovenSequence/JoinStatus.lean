@@ -38,10 +38,12 @@ def Phase.rank : Phase → Nat
   | .loading => 1
   | .done => 2
 
-/-- What one check finds: its keys open, the request is still in storage.
-Keys open only from the admission's slot, so a check whose keys open ends the
-join (`JoinScan.approved_never_declined`). -/
-abbrev Check := Bool × Bool
+/-- What one check finds: its keys open, the request is still in storage, the
+shared location is reachable with the join's proven access. Keys open only
+from the admission's slot, so a check whose keys open ends the join
+(`JoinScan.approved_never_declined`); one that cannot reach the location
+before they open ends it too (`JoinScan.lost_access_ends`). -/
+abbrev Check := Bool × Bool × Bool
 
 /-- What happens to a join, in order. -/
 inductive Event where
@@ -71,10 +73,10 @@ def run (R : Rules) (opened : Bool) : List Event → List Phase
   | .stop :: rest => run R (R.kept && opened) rest
   | .stopLoading :: rest =>
     (if opened then [] else [Phase.waiting]) ++ [Phase.loading] ++ run R R.kept rest
-  | .check (key, pending) :: rest =>
+  | .check (key, pending, reach) :: rest =>
     let before := if opened then [] else [Phase.waiting]
     let during := if key || R.scanLoads then [Phase.loading] else []
-    match outcome key pending with
+    match outcome key pending reach with
     | .admitted | .declined => before ++ during ++ [.done]
     | _ => before ++ during ++ run R (opened || key) rest
 
@@ -86,7 +88,7 @@ theorem opened_never_waits : ∀ events, Phase.waiting ∉ run Rules.correct tru
     simpa [run] using opened_never_waits rest
   | .stopLoading :: rest => by
     simpa [run] using opened_never_waits rest
-  | .check (key, pending) :: rest => by
+  | .check (key, pending, reach) :: rest => by
     have := opened_never_waits rest
     simp only [run, correct_scanLoads, Bool.true_or, Bool.or_false, ite_true]
     split <;> cases key <;> simp_all
@@ -114,7 +116,7 @@ theorem phases_forward : ∀ (opened : Bool) (events : List Event),
     cases opened <;>
       simp_all [Phase.rank] <;>
       intro p mem <;> cases p <;> simp_all
-  | opened, .check (key, pending) :: rest => by
+  | opened, .check (key, pending, reach) :: rest => by
     have tail := phases_forward (opened || key) rest
     have above := loading_below_opened rest
     have keyless := opened_never_waits rest
@@ -128,21 +130,28 @@ theorem phases_forward : ∀ (opened : Bool) (events : List Event),
         | (constructor <;> intro p mem <;> cases p <;> simp_all [Phase.rank])
         | skip
 
+/-- A first check that finds the join's access lost reports its wait and then
+that the join is done: it ends as an ended invite does, with no loading
+between and nothing after. -/
+theorem lost_access_reports_done (pending : Bool) (rest : List Event) :
+    run Rules.correct false (.check (false, pending, false) :: rest) = [.waiting, .done] := by
+  simp [run, outcome]
+
 /-- Kept only in the call: the call stops while it loads, and the resumed
 call reports waiting after the call before it loaded. -/
 theorem resumed_waits_again :
-    run ⟨false, false⟩ false [.stopLoading, .check (true, false)] =
+    run ⟨false, false⟩ false [.stopLoading, .check (true, false, true)] =
         [.waiting, .loading, .waiting, .loading, .done] ∧
-      ¬ (run ⟨false, false⟩ false [.stopLoading, .check (true, false)]).Pairwise
+      ¬ (run ⟨false, false⟩ false [.stopLoading, .check (true, false, true)]).Pairwise
         (fun a b => a.rank ≤ b.rank) := by
   decide
 
 /-- A scan that finds no copies, reported as loading: the next check reports
 waiting again. -/
 theorem scan_shown_as_loading :
-    run ⟨true, true⟩ false [.check (false, true), .check (false, true)] =
+    run ⟨true, true⟩ false [.check (false, true, true), .check (false, true, true)] =
         [.waiting, .loading, .waiting, .loading] ∧
-      ¬ (run ⟨true, true⟩ false [.check (false, true), .check (false, true)]).Pairwise
+      ¬ (run ⟨true, true⟩ false [.check (false, true, true), .check (false, true, true)]).Pairwise
         (fun a b => a.rank ≤ b.rank) := by
   decide
 

@@ -702,7 +702,10 @@ what make one conditional floor write safe.
   deletes the prefix under it, `approved_never_declined` has a check whose
   copies open end the join by publishing the store, since the slot they open
   from is the admission itself; the store's first load applies it
-  (`approved_eventually_admitted`), and
+  (`approved_eventually_admitted`); a check that cannot reach the shared
+  location before its keys open, with the access the join has proven, ends the
+  join as an absent request does (`lost_access_ends`), and keys that opened win
+  over that (`opened_wins_over_lost_access`); and
   `JoinScanExamples.exponential_probes_miss_approval` and
   `missing_below_existing_is_deleted` show why a missing slot below a kept
   one is read as deleted history, not probed past.
@@ -1323,7 +1326,9 @@ check whose copies open the keys, in its admission, records that with the
 saved request before it reports loading, and that check ends the join: it
 publishes the store, which loads on as a store.
 `phases_forward` proves the phases never go back: waiting, then loading, then
-done. Each rule is needed:
+done. A check can also find the join's access lost: with no keys opened, it
+reports its wait and then done (`lost_access_reports_done`). Each rule is
+needed:
 
 - `resumed_waits_again`: with the opened keys kept only in the call, a call
   that stops after finding its admission, before it published, is resumed by
@@ -1408,6 +1413,13 @@ join publishes the store in the step that finds its admission, a store whose
 first load leaves its device never a member stops for good, and publishing
 keeps the person's name its request carried with the store.
 
+- `wrong_account_keeps_join`, `wrong_account_trace`: a join that has not
+  proven the account it is signed in as is the account the invite was shared
+  with has sent nothing and accepted nothing, and stays listed and
+  cancellable.
+- `lost_access_after_proof`, `lost_access_leaves_nothing`: a refusal of the
+  shared location ends a join only once its account is proven, and the join
+  then ends as a declined one, with nothing stranded.
 - `never_stranded`: whatever storage may hold of a join's request or a
   restore's registration, and whatever acceptance the joining account
   holds, the call that made it stays listed until it meets its outcome.
@@ -1423,6 +1435,10 @@ keeps the person's name its request carried with the store.
   pairing has no code, record, request or registration on the device; it is
   refused an installation holding an invite code or a restore's record; and
   its cancel leaves no installation and nothing stranded.
+
+Without the account check, `unchecked_refusal_misjudged`: the location's
+refusal of the first acceptance is one observation for an ended invite and a
+wrong account, so whichever reply a join gives it is wrong for one of them.
 
 Each rule is needed. Without the first, one call's removal takes the other's
 listing:

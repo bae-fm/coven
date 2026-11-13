@@ -374,7 +374,9 @@ def readJoinScan (j : Json) : Except String Json := do
     | .key => pure true
     | .endOfSequence => pure false
     | .advance _ => throw "scan did not reach its target"
-  return toJson (match JoinScan.outcome key (← j.getObjValAs? Bool "pending") with
+  -- Every check in this differential reaches storage: its input carries no
+  -- lost access, which `JoinScan.lost_access_ends` proves on its own.
+  return toJson (match JoinScan.outcome key (← j.getObjValAs? Bool "pending") true with
     | .waiting => "Waiting" | .admitted => "Admitted" | .declined => "Declined")
 
 def run (j : Json) : Except String Json := do
