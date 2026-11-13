@@ -33,7 +33,8 @@ pub(crate) struct MigrationOrigin(
 pub(crate) enum Installation {
     /// Its own: the store's creator, or a device whose store has loaded.
     Own,
-    /// The store it loads from storage next, for a join, restore or reset:
+    /// The store it loads from storage next, for a join, restore or reset,
+    /// or a joined store whose first load has not registered its device:
     /// the device isn't registered yet, and the load replaces its state.
     Loading,
 }
@@ -164,6 +165,16 @@ pub(crate) fn run<'a>(
         }
     }
     let MigrationOrigin(device, now, installation) = origin;
+    // A joined store opened again before its first load has applied this
+    // device's registration is as unregistered as the installation that
+    // published it.
+    let installation = if installation == Installation::Own
+        && crate::store_state_tables::awaiting_registration(database, device)?
+    {
+        Installation::Loading
+    } else {
+        installation
+    };
     let author = (device, now);
     *at = steps.last().expect("pending migrations").migration;
     let mut marker = None;

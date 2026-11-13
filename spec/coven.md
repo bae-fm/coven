@@ -9255,7 +9255,10 @@ her own included, so her first pass would stop; and the snapshot she loads
 replaces whatever the migration changed. Her phone still reads only snapshots
 at version 2 or later, as any device that ran the breaking step does. The
 store's creator, whose state is its own, makes its migration write as any
-device does.
+device does. So does a joined store opened again before its first load has
+applied its device's registration: Carol's phone, updated while Household's
+load is still refused, runs version 2 on that open and makes no migration write
+there either (§13.4).
 
 **A rebuilt circle's changes join the device's migration write.** A device
 that rebuilds a circle (§18.3) puts what the migration changed in the circle

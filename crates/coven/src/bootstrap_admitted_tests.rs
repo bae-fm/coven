@@ -484,36 +484,8 @@ async fn discarding_a_joined_store_removes_its_persons_name() {
 #[tokio::test]
 async fn a_joined_store_refuses_synced_writes_until_its_registration_has_applied() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
     let install = Installation::new();
-    let store = owner.directory.id();
-    let (_, cancel) = watch::channel(false);
-    let control = JoinControl::new();
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite, &control),
-        owner.recipient(),
-        &cancel,
-        |_| {},
-    );
-    let (result, _member) = owner
-        .join_and_approve(joining, &control, |_| async {
-            owner
-                .storage
-                .set_faults(coven_storage::test_utils::Faults {
-                    read_failures: [(
-                        ObjectPath::slot(store, 1.try_into().unwrap()),
-                        StorageFailure::PermissionDenied,
-                    )]
-                    .into(),
-                    ..coven_storage::test_utils::Faults::none()
-                })
-                .await;
-        })
-        .await;
-    let Err(BootstrapError::Published { handle, .. }) = result else {
-        panic!("the admitted join is a store that couldn't load: {:?}", result.err())
-    };
+    let handle = published_before_loading(&owner, &install).await;
     let early = handle
         .write(|sql| {
             sql.execute(
@@ -566,4 +538,76 @@ async fn rows_of(handle: &CovenHandle) -> Vec<String> {
         })
         .await
         .unwrap()
+}
+
+/// Carol's join has published Household, and the first load, refused by the
+/// provider, has applied nothing, so her device is not registered. The app is
+/// updated and opens Household again with a breaking migration. Its migration
+/// write would record the slot she had applied, zero, and Ana's device would
+/// refuse it as it refuses the app's own writes; the open makes none, as the
+/// first open of a joining installation makes none (§18.4).
+#[tokio::test]
+async fn a_breaking_migration_on_a_joined_store_not_yet_loaded_makes_no_migration_write() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let first = published_before_loading(&owner, &install).await;
+    first.close().await.unwrap();
+    let mut changed = migrations();
+    changed.push(Migration::breaking(
+        2,
+        "extra",
+        "ALTER TABLE notes ADD COLUMN extra INTEGER NOT NULL DEFAULT 0",
+        crate::OldWrites::Drop,
+        tables(),
+    ));
+    let handle = install
+        .builder(&owner, owner.recipient())
+        .migrations(changed)
+        .open(store, |_| {})
+        .await
+        .unwrap();
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    handle.start_sync().await.unwrap();
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+    owner.pass_now().await;
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Carol's join is approved and published, and her phone cannot read slot 1
+/// yet, so it has loaded nothing: the store as the join leaves it before its
+/// first load.
+async fn published_before_loading(owner: &Owner, install: &Installation) -> CovenHandle {
+    let invite = owner.invite().await;
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, _member) = owner
+        .join_and_approve(joining, &control, |_| async {
+            owner
+                .storage
+                .set_faults(coven_storage::test_utils::Faults {
+                    read_failures: [(
+                        ObjectPath::slot(store, 1.try_into().unwrap()),
+                        StorageFailure::PermissionDenied,
+                    )]
+                    .into(),
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
+        })
+        .await;
+    let Err(BootstrapError::Published { handle, .. }) = result else {
+        panic!("the admitted join is a store that couldn't load: {:?}", result.err())
+    };
+    handle
 }
