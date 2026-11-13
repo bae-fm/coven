@@ -23,7 +23,7 @@
 
 use coven::{
     Coven, CovenHandle, MemoryStorage, Migration, ObjectPrefix, RetryOutcome, RowIdentity,
-    SecretText, Storage, SyncedTable,
+    S3Credentials, SecretText, Storage, SyncedTable,
 };
 use coven_format::snapshot::section;
 use grace_clock::GraceClock;
@@ -90,6 +90,15 @@ async fn notes_store_builder(
         .unwrap();
     handle.start_sync().await.unwrap();
     handle
+}
+
+/// The key `create` set the store up with: a restore code carries none, so a
+/// new device enters it.
+fn owner_key() -> S3Credentials {
+    S3Credentials {
+        access_key_id: "key".into(),
+        secret_access_key: SecretText::new("secret".into()),
+    }
 }
 
 /// Run `statement` with one text parameter of `size` bytes, all `fill`, in
@@ -232,7 +241,7 @@ async fn second_device(
     handle: &CovenHandle,
     root: &std::path::Path,
 ) -> CovenHandle {
-    let code = handle.restore_code_for_transfer().await.unwrap();
+    let code = handle.restore_code().await.unwrap();
     let (_cancelling, cancel) = tokio::sync::watch::channel(false);
     let restored = coven::restore_from_code(
         Coven::in_memory(root.into())
@@ -246,7 +255,7 @@ async fn second_device(
             )])
             .storage_connector(Arc::new(storage.for_device())),
         &code,
-        None,
+        Some(owner_key()),
         "Ana's phone",
         |_| {},
         &cancel,
@@ -429,7 +438,7 @@ async fn snapshot_growth_with_edit_history() {
         let (snapshots, slots, floor) = stored(&storage, handle.store_id()).await;
         let pages = store_pages(&handle).await;
         let used: i64 = pages.iter().map(|(_, bytes)| bytes).sum();
-        let code = (at == LISTED).then(|| handle.restore_code_for_transfer());
+        let code = (at == LISTED).then(|| handle.restore_code());
         let code = match code {
             Some(code) => Some(code.await.unwrap()),
             None => None,

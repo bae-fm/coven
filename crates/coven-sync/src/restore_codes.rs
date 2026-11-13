@@ -131,25 +131,6 @@ impl RestoreCodes {
         Ok(owner.code(&RestoreStorage::location_only(location)).await?.to_text()?.to_string())
     }
 
-    /// The restore code this device shows to the person's own new device: the
-    /// one `restore_code` gives, carrying on S3 the key this device's custody
-    /// holds now, read where the connection reads it, so a replaced key is the
-    /// current one (§13.1). Without a key it is `restore_code`'s.
-    pub async fn transfer_code(&self) -> Result<String, SyncError> {
-        let guard = self.inner.lock().await;
-        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let storage = match owner.connection()? {
-            Some(ConnectionCredentials { location, credentials: StorageCredentials::S3(key) }) => {
-                RestoreStorage { location, s3_key: Some(key) }
-            }
-            Some(ConnectionCredentials { location, .. }) => RestoreStorage::location_only(location),
-            None => RestoreStorage::location_only(
-                coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?,
-            ),
-        };
-        Ok(owner.code(&storage).await?.to_text()?.to_string())
-    }
-
     /// Replace this member's pair on `sync`, the connection's sequence
     /// owner, and return the code for that exact result. The change holds
     /// this owner from the call on, so credential changes, reads and

@@ -111,10 +111,21 @@ from iCloud Keychain on Apple platforms, from Google's Block Store on a new
 Android phone set up from the old one, or by typing it. Coven saves the code
 there after setup, joining and key replacement. Storage access is
 separate: on S3 the person enters their access key, which they keep apart, in a
-password manager say. The QR code their own device shows comes from
-`handle.restore_code_for_transfer()`, which holds the key that device uses, and
-the saved entry keeps the key beside the code; either spares them typing it. On
-Dropbox and OneDrive the new device signs in to the person's own account.
+password manager say, or the saved entry keeps the key beside the code and
+spares them typing it. On Dropbox and OneDrive the new device signs in to the
+person's own account.
+
+With one of their devices in hand, the person can skip the code. They open Add
+device on that device (`handle.start_pairing()`), which shows a *pairing code*
+as a QR code and as text to share. The pairing code holds no keys: it lets the
+new device send a request, and the new device calls `join_with_pairing`. It
+shows a six-digit confirmation number, the showing device shows the number of
+the request it read, and the person approves only if they match. The showing
+device then hands over the member's keys, sealed to the new device's request
+alone, and the new device restores from them as `restore_from_code` does. On S3
+the QR code carries the key the showing device uses, so the new device asks for
+none; the text to share carries none. A pairing lasts 30 minutes, or until the
+person closes Add device.
 
 On Apple platforms and Android, `saved_restore_codes().await?` lists the stores
 coven saved,

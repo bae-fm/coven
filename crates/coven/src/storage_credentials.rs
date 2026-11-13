@@ -9,15 +9,6 @@ impl CovenHandle {
         self.codes.restore_code().await
     }
 
-    /// This member's current restore code for the app to show in a QR code
-    /// to the person's own new device, behind the same tap (§13.1, E10). On
-    /// S3 it carries the key this device uses now, so the new device asks for
-    /// none; after a replacement it is the new key. Without a key, on other
-    /// providers or when this device holds none, it is `restore_code`'s.
-    pub async fn restore_code_for_transfer(&self) -> Result<String, SyncError> {
-        self.codes.transfer_code().await
-    }
-
     /// Take an S3 key the person made in the provider's console, whatever the
     /// reason, and record it as this member's (E9, §14.3). See the spec for
     /// the call's steps and what each failure leaves.

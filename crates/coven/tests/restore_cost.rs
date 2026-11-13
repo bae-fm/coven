@@ -33,7 +33,7 @@ use grace_clock::GraceClock;
 use coven::{
     Clock, Coven, CovenBuilder, CovenHandle, CovenResult, CovenWrite, FileColumn, FileId,
     FileSource, MemoryStorage, Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance,
-    RetryOutcome, RowIdentity, SecretText, Storage, SyncedTable,
+    RetryOutcome, RowIdentity, S3Credentials, SecretText, Storage, SyncedTable,
 };
 use std::{
     sync::Arc,
@@ -318,6 +318,15 @@ async fn create(
     handle
 }
 
+/// The key `create` set the store up with: a restore code carries none, so a
+/// new device enters it.
+fn owner_key() -> S3Credentials {
+    S3Credentials {
+        access_key_id: "key".into(),
+        secret_access_key: SecretText::new("secret".into()),
+    }
+}
+
 /// Restore `code` on a new device, returning its handle and how long the
 /// restore took.
 async fn restore(
@@ -334,7 +343,7 @@ async fn restore(
             .clock(clock.clone())
             .storage_connector(Arc::new(storage.for_device())),
         code,
-        None,
+        Some(owner_key()),
         "Ana's phone",
         |_| {},
         &cancel,
@@ -360,7 +369,7 @@ async fn restore_cost(library: Library, floor: bool) {
     edit(&handle, &clock).await;
     eprintln!("built the store in {:?} ({library:?}, floor {floor})", building.elapsed());
     let store = handle.store_id();
-    let code = handle.restore_code_for_transfer().await.unwrap();
+    let code = handle.restore_code().await.unwrap();
     handle.close().await.unwrap();
     if !floor {
         // The import's size triggers took snapshots, and the floor names the
@@ -438,7 +447,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     let root = tempfile::tempdir().unwrap();
     let handle = create(&empty, &clock, root.path(), Library::Plain).await;
     pass(&handle, &clock).await;
-    let code = handle.restore_code_for_transfer().await.unwrap();
+    let code = handle.restore_code().await.unwrap();
     handle.close().await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let (restored, fixed) = restore(&empty, &clock, root.path(), Library::Plain, &code).await;
@@ -449,7 +458,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     let handle = create(&storage, &clock, owner.path(), Library::Plain).await;
     let store = handle.store_id();
     import(&handle, &clock, Library::Plain, releases).await;
-    let code = handle.restore_code_for_transfer().await.unwrap();
+    let code = handle.restore_code().await.unwrap();
     handle.close().await.unwrap();
 
     storage.delete(&ObjectPath::floor(store)).await.unwrap();
@@ -463,7 +472,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     clock.pass_grace();
     pass(&replayed, &clock).await;
     pass(&replayed, &clock).await;
-    let code = replayed.restore_code_for_transfer().await.unwrap();
+    let code = replayed.restore_code().await.unwrap();
     eprintln!("snapshot sections: {:?}", replayed.test_snapshot_section_bytes().await.unwrap());
     replayed.close().await.unwrap();
     let snapshot_bytes = newest_snapshot_bytes(&storage, store).await;
