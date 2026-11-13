@@ -595,11 +595,15 @@ impl History {
                 ordinary.insert(audience, *slot);
             }
         }
+        // A rebuild of a circle below the store starts from its announcement
+        // (§16.6).
+        let rebuilds = self.rebuild_announcements();
         self.announcements
             .range(..first)
             .filter(|(slot, announcement)| {
                 let audience = &announcement.snapshot.audience;
                 !self.activated.contains(slot)
+                    && !rebuilds.contains(slot)
                     && !named.contains(slot)
                     && greatest[audience] > announcement.covers
                     && ordinary.get(audience).is_some_and(|newest| newest > slot)

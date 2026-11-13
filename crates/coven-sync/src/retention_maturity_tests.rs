@@ -78,3 +78,131 @@ async fn retention_never_reads_an_announcement_slot_below_the_floor() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben, on the first app version, holds Garden while Ana's migration raises
+/// the store. A member who starts reading Garden rebuilds it from the store's
+/// snapshot at Garden's version, so `first` stays at or before the slot after
+/// that snapshot's coverage while Garden is below the store, and moves past it
+/// once Garden is raised (§16.6).
+#[tokio::test]
+async fn a_circle_below_the_store_keeps_the_stores_snapshot_at_its_version() {
+    use coven_database::StoreVersion;
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    // Ben, who stays on the old app, makes Garden; Ana is not in it.
+    let garden = ben.sync.create_circle("Garden".into()).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let old = ana.sync.snapshot(Audience::Store).await.unwrap();
+    let covers = ana.sync.session.lock().await.history.announcements[&old].covers;
+    // Garden's own snapshot covers more than the old store snapshot, so
+    // without the rebuild's hold `first` would pass the store snapshot.
+    ben.sync.pass().await.unwrap();
+    ben.sync.snapshot(Audience::Circle(garden)).await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.sync.database.store_state().await.unwrap().reached(&Audience::Store), 2);
+    assert_eq!(
+        ana.sync.database.store_state().await.unwrap().reached(&Audience::Circle(garden)),
+        0
+    );
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE * 2
+            + std::time::Duration::from_secs(1),
+    );
+    let first = async |ana: &Device| {
+        let session = ana.sync.session.lock().await;
+        match ana.sync.propose_floor(&session, &group.ring).await.unwrap() {
+            Some(crate::sequence_sync::sequence_retention::Retention::Capture(capture)) => {
+                capture.first.get()
+            }
+            other => panic!("expected a floor, found {}", other.is_some()),
+        }
+    };
+    assert!(first(&ana).await <= covers + 1, "first keeps the snapshot Garden rebuilds from");
+    // Garden raised: nothing rebuilds from the old snapshot.
+    {
+        let mut session = ana.sync.session.lock().await;
+        let announced = session.history.announcements.values().last().unwrap().snapshot.clone();
+        let entry = coven_merge::slot(session.through);
+        session.history.state.schema.insert(
+            Audience::Circle(garden),
+            StoreVersion {
+                number: 2,
+                snapshot: coven_format::admin::SnapshotId {
+                    audience: Audience::Circle(garden),
+                    ..announced
+                },
+                entry,
+            },
+        );
+    }
+    assert!(first(&ana).await > covers + 1, "first moves on once Garden is raised");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// The same scenario, run through the deletion walk. Ana's own old store
+/// snapshot and her store reset are superseded by a newer mature snapshot, and
+/// the floor passes both, so the walk would delete their bodies; Garden is
+/// rebuilt from that snapshot with that reset replayed over it, so both
+/// bodies survive (§16.6).
+#[tokio::test]
+async fn the_bodies_a_rebuild_reads_survive_the_deletion_walk() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ben.sync.create_circle("Garden".into()).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let old = ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.reset(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.snapshot(Audience::Circle(garden)).await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let (old_body, reset_body) = {
+        let session = ana.sync.session.lock().await;
+        let reads = session.history.rebuild_reads();
+        assert_eq!(reads.len(), 1, "Garden is below the store");
+        let (slot, _) = reads[0].snapshot.expect("the old store snapshot is the start");
+        assert_eq!(slot, old);
+        assert_eq!(reads[0].replay.len(), 1, "the reset is replayed over it");
+        let path = |id: &coven_format::admin::SnapshotId| {
+            crate::snapshot_object::path(group.store, id).unwrap()
+        };
+        (path(&session.history.announcements[&slot].snapshot), path(&reads[0].replay[0]))
+    };
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE * 2
+            + std::time::Duration::from_secs(1),
+    );
+    for _ in 0..4 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert!(group.storage.status(&old_body).await.unwrap().is_some(), "the start survives");
+    assert!(group.storage.status(&reset_body).await.unwrap().is_some(), "the replay survives");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

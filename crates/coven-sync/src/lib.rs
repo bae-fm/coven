@@ -7,6 +7,7 @@ mod error;
 mod failure_log;
 mod floor_object;
 mod history;
+mod history_rebuild;
 mod identity;
 mod joiner;
 mod joining_identity;

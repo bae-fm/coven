@@ -139,6 +139,13 @@ impl SequenceSync {
             .as_ref()
             .map(|floor| floor.header.snapshots.iter().copied().collect())
             .unwrap_or_default();
+        // What rebuilds of circles below the store's version read: the store
+        // snapshot they start from, which is never forgotten, and the bodies
+        // of the store's raises and resets they replay (§16.6, §16.8).
+        let rebuilds = session.history.rebuild_reads();
+        kept.extend(rebuilds.iter().filter_map(|read| read.snapshot.map(|(slot, _)| slot)));
+        let replayed: BTreeSet<coven_format::admin::SnapshotId> =
+            rebuilds.iter().flat_map(|read| read.replay.iter().cloned()).collect();
         let mut pending_snapshots = Vec::new();
         let mut pending_listings = BTreeSet::new();
         let mut own_listing = false;
@@ -208,6 +215,7 @@ impl SequenceSync {
             if (id.device != self.device && !gone.contains(&id.device))
                 || kept.contains(slot)
                 || pending_snapshots.contains(id)
+                || replayed.contains(id)
             {
                 continue;
             }
@@ -389,6 +397,16 @@ impl SequenceSync {
             }
             None => previous_first,
         };
+        // A circle below the store's version is rebuilt from the store's
+        // snapshot at its version, so `first` stays at or before the slot
+        // after that snapshot's coverage, and never moves back (§16.6).
+        let first = session
+            .history
+            .rebuild_reads()
+            .iter()
+            .map(|read| read.cap())
+            .fold(first, |first, cap| first.min(cap))
+            .max(previous_first);
         let names_advance =
             session.floor.as_ref().is_none_or(|floor| floor.header.snapshots != named);
         if first == previous_first && !names_advance {
