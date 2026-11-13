@@ -619,7 +619,7 @@ async fn closing_reports_several_failures_chained() {
         .synced_tables(Vec::new())
         .migrations(Vec::new())
         .key_custody(CustodyChoice::Custom(Arc::new(PanicsOnClose)))
-        .create_store("session", "Test device")
+        .create_store("session", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let clone = handle.clone();

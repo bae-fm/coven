@@ -38,7 +38,10 @@ structure Route (Aud Mem : Type) where
   deriving DecidableEq
 
 inductive Event (Aud Mem : Type) where
-  | introduce (key : Key Aud) (hash : Nat)
+  /-- The keys one slot introduces, each with its hash: an entry introduces
+  one, and the entry that creates the store the first store key and each of
+  its circles' first keys (§10.3). -/
+  | introduce (keys : List (Key Aud × Nat))
   | copy (route : Route Aud Mem)
   | other
   deriving DecidableEq
@@ -55,7 +58,8 @@ abbrev Current (Aud Mem : Type) := Aud → Mem → Option Nat
 
 /-- Newest introductions first; repeated copies remain independent slots. -/
 def step (h : History Aud Mem) (slot : Nat) : Event Aud Mem → History Aud Mem
-  | .introduce key hash => { h with introductions := ⟨key, hash, slot⟩ :: h.introductions }
+  | .introduce keys =>
+    { h with introductions := keys.map (fun p => (⟨p.1, p.2, slot⟩ : Introduction Aud)) ++ h.introductions }
   | .copy route => { h with copies := route :: h.copies }
   | .other => h
 
@@ -67,22 +71,25 @@ omit [DecidableEq Aud] in
 /-- Exact provenance, including the introduction's actual sequence position. -/
 theorem introduction_slot (seq : Nat → Event Aud Mem) (i : Introduction Aud) :
     ∀ n, i ∈ (historyAt seq n).introductions ↔
-      0 < i.slot ∧ i.slot ≤ n ∧ seq i.slot = .introduce i.key i.hash := by
+      0 < i.slot ∧ i.slot ≤ n ∧ ∃ keys, seq i.slot = .introduce keys ∧ (i.key, i.hash) ∈ keys := by
   intro n
   induction n with
   | zero => simp [historyAt]; omega
   | succ n ih =>
     rw [historyAt]
     cases hs : seq (n + 1) with
-    | introduce key hash =>
-      simp only [step, List.mem_cons, ih]
+    | introduce keys =>
+      simp only [step, List.mem_append, List.mem_map, ih]
       constructor
-      · rintro (rfl | ⟨hp, hn, he⟩)
-        · exact ⟨Nat.zero_lt_succ n, Nat.le_refl _, hs⟩
+      · rintro (⟨p, hp, rfl⟩ | ⟨hp, hn, he⟩)
+        · exact ⟨Nat.zero_lt_succ n, Nat.le_refl _, keys, hs, hp⟩
         · exact ⟨hp, by omega, he⟩
       · rintro ⟨hp, hn, he⟩
         by_cases same : i.slot = n + 1
-        · rw [same, hs] at he
+        · obtain ⟨ks, hks, hmem⟩ := he
+          rw [same, hs] at hks
+          cases hks
+          refine Or.inl ⟨(i.key, i.hash), hmem, ?_⟩
           cases i
           simp_all
         · exact Or.inr ⟨hp, by omega, he⟩
@@ -91,7 +98,11 @@ theorem introduction_slot (seq : Nat → Event Aud Mem) (i : Introduction Aud) :
       constructor
       · rintro ⟨hp, hn, he⟩; exact ⟨hp, by omega, he⟩
       · rintro ⟨hp, hn, he⟩
-        have ne : i.slot ≠ n + 1 := by intro eq; rw [eq, hs] at he; cases he
+        have ne : i.slot ≠ n + 1 := by
+          intro eq
+          obtain ⟨ks, hks, _⟩ := he
+          rw [eq, hs] at hks
+          cases hks
         exact ⟨hp, by omega, he⟩
 
 omit [DecidableEq Aud] in
@@ -113,7 +124,7 @@ theorem copy_slot (seq : Nat → Event Aud Mem) (r : Route Aud Mem) :
         by_cases same : s = n + 1
         · rw [same, hs] at he; cases he; exact Or.inl rfl
         · exact Or.inr ⟨s, hp, by omega, he⟩
-    | introduce key hash | other =>
+    | introduce keys | other =>
       simp only [step, ih]
       constructor
       · rintro ⟨s, hp, hn, he⟩; exact ⟨s, hp, by omega, he⟩
@@ -135,15 +146,17 @@ theorem accepted_iff (h : History Aud Mem) (held : Custody Aud) (key : Key Aud) 
 /-- A tentative copy cannot authorize use before its introduction slot. -/
 theorem accepted_from_introduction (seq : Nat → Event Aud Mem) (held : Custody Aud)
     (key : Key Aud) (n : Nat) (yes : accepted (historyAt seq n) held key = true) :
-    ∃ s hash, 0 < s ∧ s ≤ n ∧ seq s = .introduce key hash ∧ held key = some hash := by
+    ∃ s hash keys, 0 < s ∧ s ≤ n ∧ seq s = .introduce keys ∧ (key, hash) ∈ keys ∧
+      held key = some hash := by
   obtain ⟨⟨i, hi, hk⟩, hashes⟩ := (accepted_iff _ _ _).mp yes
   have origin := (introduction_slot seq i n).mp hi
-  exact ⟨i.slot, i.hash, origin.1, origin.2.1, hk ▸ origin.2.2, hashes i hi hk⟩
+  obtain ⟨keys, hs, hmem⟩ := origin.2.2
+  exact ⟨i.slot, i.hash, keys, origin.1, origin.2.1, hs, hk ▸ hmem, hashes i hi hk⟩
 
 theorem introduction_accepts (h : History Aud Mem) (held : Custody Aud) (key : Key Aud)
     (hash slot : Nat) (fresh : ∀ i ∈ h.introductions, i.key ≠ key)
     (material : held key = some hash) :
-    accepted (step h slot (.introduce key hash)) held key = true := by
+    accepted (step h slot (.introduce [(key, hash)])) held key = true := by
   apply (accepted_iff _ _ _).mpr
   constructor
   · exact ⟨⟨key, hash, slot⟩, by simp [step], rfl⟩
@@ -346,7 +359,7 @@ theorem routes_complete (current : Current Aud Mem) (members : List Mem) (key : 
 /-- The concrete slot plan: copies first, then the introduction. All outer
 envelopes may use the old metadata key, even when it is exposed. -/
 def rotationSlots (current : Current Aud Mem) (members : List Mem) (key : Key Aud) (hash : Nat) :
-    List (Event Aud Mem) := (routes current members key).map Event.copy ++ [.introduce key hash]
+    List (Event Aud Mem) := (routes current members key).map Event.copy ++ [.introduce [(key, hash)]]
 
 def publish (h : History Aud Mem) (through : Nat) (slots : List (Event Aud Mem)) : History Aud Mem :=
   (slots.zipIdx through).foldl (fun h (e, n) => step h (n + 1) e) h
@@ -504,7 +517,7 @@ held but not accepted. -/
 theorem copy_order_agrees (h : History Aud Mem) (held : Custody Aud) (key : Key Aud)
     (material hash slot : Nat) (fresh : ∀ i ∈ h.introductions, i.key ≠ key)
     (unheld : held key = none) :
-    let h' := step h slot (.introduce key hash)
+    let h' := step h slot (.introduce [(key, hash)])
     (∃ tentative, openCopy h held key material = some tentative ∧
       tentative key = some material ∧ accepted h tentative key = false) ∧
     (openCopy h held key material).bind (fun c => openCopy h' c key material) =
@@ -534,7 +547,7 @@ theorem copy_order_agrees (h : History Aud Mem) (held : Custody Aud) (key : Key 
       exact all ⟨key, hash, slot⟩ (by simp [h', step]) rfl
     · intro holds
       refine ⟨⟨⟨key, hash, slot⟩, by simp [h', step], rfl⟩, fun i hi hk => ?_⟩
-      simp only [h', step, List.mem_cons] at hi
+      simp only [h', step, List.map_cons, List.map_nil, List.mem_append, List.mem_singleton] at hi
       rcases hi with rfl | old
       · exact holds
       · exact absurd hk (fresh i old)

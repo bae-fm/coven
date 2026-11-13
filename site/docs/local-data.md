@@ -20,7 +20,7 @@ let layout = StoreLayout::new(app_dir);
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .create_store("Household", "Ana's phone")
+    .create_store("Household", "Ana's phone", &[], |_, _| Ok(()))
     .await?;
 
 // Later launches: open it again.

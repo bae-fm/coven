@@ -301,7 +301,7 @@ async fn create(
     let handle = configured(Coven::in_memory(root.into()).builder(), library)
         .clock(clock.clone())
         .storage_connector(storage.clone())
-        .create_store("Library", "Test device")
+        .create_store("Library", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     handle

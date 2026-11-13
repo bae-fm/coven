@@ -121,6 +121,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                     device_name: "D".into(),
                     key,
                     key_hash,
+                    circles: vec![],
                 },
                 StoreChange::CreateCircle {
                     circle: circle(1),
@@ -149,10 +150,12 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                 vec![15, 0],
                 [vec![15, 1], circle(1).0.as_bytes().to_vec()].concat(),
             ];
-            for (change, prefix) in changes.into_iter().zip(prefixes) {
+            // Creation's circles follow its key: none here.
+            let suffixes = [b"\0\0\0\0".to_vec(), vec![], vec![], vec![]];
+            for ((change, prefix), suffix) in changes.into_iter().zip(prefixes).zip(suffixes) {
                 let object = frame(change);
                 let bytes = object.encode().unwrap();
-                let expected = [prefix, key_bytes.to_vec(), key_hash.to_vec()].concat();
+                let expected = [prefix, key_bytes.to_vec(), key_hash.to_vec(), suffix].concat();
                 assert_eq!(&bytes[HEADER..], expected);
                 assert_eq!(Object::decode(&bytes).unwrap(), object);
                 for hash_length in 0..32 {
@@ -213,6 +216,30 @@ fn rotation_rejects_unknown_audiences_and_member_ids_need_no_key_validation() {
         Object::decode(&removal).unwrap(),
         frame(StoreChange::RemoveMember { member: MemberId(uuid::Uuid::nil()) })
     );
+}
+
+/// Creation names the circles its first write asked for, each with its first
+/// key, and checks their names as a circle entry's (D6).
+#[test]
+fn creation_carries_its_circles_in_order() {
+    let circles: Vec<_> = (1..=2)
+        .map(|n| crate::admin::CreationCircle {
+            circle: circle(n),
+            name: format!("Circle {n}"),
+            breaking_version: n as u32,
+            key: KeyId(uuid::Uuid::from_bytes([n as u8; 16])),
+            key_hash: [n as u8; 32],
+        })
+        .collect();
+    let mut entry = test_utils::creation_change();
+    let StoreChange::CreateStore { circles: asked, .. } = &mut entry else { unreachable!() };
+    *asked = circles;
+    let object = Object::Admin(entry.clone());
+    assert_eq!(Object::decode(&object.encode().unwrap()).unwrap(), object);
+    assert_eq!(Object::decode(&encode_frame(4, &entry).unwrap()).unwrap(), object);
+    let StoreChange::CreateStore { circles: asked, .. } = &mut entry else { unreachable!() };
+    asked[1].name = "bad\0name".into();
+    assert!(Object::Admin(entry).encode().is_err());
 }
 
 #[test]

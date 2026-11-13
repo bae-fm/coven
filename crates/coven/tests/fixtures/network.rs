@@ -31,6 +31,9 @@ pub(crate) fn stopping(handle: &CovenHandle) -> tokio::task::JoinHandle<Result<(
     tokio::spawn(async move { handle.stop_sync().await })
 }
 
+/// A creating write, boxed.
+type Creating = dyn FnOnce(&MemberWrite<'_>, &[CircleId]) -> CovenResult<()> + Send;
+
 #[cfg(test)]
 pub(crate) struct Network {
     root: tempfile::TempDir,
@@ -92,6 +95,31 @@ impl Network {
         tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
     ) -> Self {
+        Self::started(provider, tables, migrations, None).await
+    }
+
+    /// A network whose first device made its store with `circles` and the
+    /// creating write `creating` (§10.3).
+    pub(crate) async fn with_creation<F>(
+        provider: CloudProvider,
+        tables: Vec<SyncedTable>,
+        migrations: Vec<Migration>,
+        circles: &[&str],
+        creating: F,
+    ) -> Self
+    where
+        F: FnOnce(&MemberWrite<'_>, &[CircleId]) -> CovenResult<()> + Send + 'static,
+    {
+        let circles = circles.iter().map(|circle| (*circle).to_owned()).collect();
+        Self::started(provider, tables, migrations, Some((circles, Box::new(creating)))).await
+    }
+
+    async fn started(
+        provider: CloudProvider,
+        tables: Vec<SyncedTable>,
+        migrations: Vec<Migration>,
+        creation: Option<(Vec<String>, Box<Creating>)>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let app_dir = root.path().join("0");
         std::fs::create_dir(&app_dir).unwrap();
@@ -100,7 +128,23 @@ impl Network {
         polling.hold_waits();
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
         let app = Coven::in_memory(app_dir);
-        let directory = app.create_closed_store("Household", ids.clone()).await.unwrap();
+        let directory = match creation {
+            None => app.create_closed_store("Household", ids.clone()).await.unwrap(),
+            Some((circles, creating)) => {
+                let circles: Vec<&str> = circles.iter().map(String::as_str).collect();
+                let created = app
+                    .builder()
+                    .id_source(ids.clone())
+                    .synced_tables(tables.clone())
+                    .migrations(migrations.clone())
+                    .create_store("Household", "Test device", &circles, creating)
+                    .await
+                    .unwrap();
+                let directory = app.store_dir(&created.store_id());
+                created.close().await.unwrap();
+                directory
+            }
+        };
         let storage = Arc::new(
             MemoryStorage::builder()
                 .provider(provider)

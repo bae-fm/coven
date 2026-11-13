@@ -1,164 +1,14 @@
 use super::*;
-use coven_crypto::{CircleKey, SealingKey, StoreKey};
+use coven_crypto::{CircleKey, StoreKey};
 use coven_database::{StoreCircle, StoreMember};
 use coven_format::{admin::MemberRole, sealed_key::CopyBox};
 use coven_foundation::id_source::StoreId;
 use coven_merge::slot;
-use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-/// Equality-preserving tokens at the JSON boundary, shared by selection and
-/// publication comparisons. No selection or exposure decision is made here.
-pub(crate) struct Projection {
-    audiences: Vec<Audience>,
-    keys: Vec<(Audience, KeyId)>,
-    members: Vec<MemberId>,
-    credentials: Vec<SealingKey>,
-    hashes: Vec<[u8; 32]>,
-}
-
-fn token<T: PartialEq>(values: &[T], value: &T) -> usize {
-    values.iter().position(|v| v == value).unwrap()
-}
-
-impl Projection {
-    pub(crate) fn new(history: &History, ring: &StoreKeyring) -> Self {
-        let mut audiences = BTreeSet::from([Audience::Store]);
-        audiences.extend(history.state.circles.keys().copied().map(Audience::Circle));
-        audiences.extend(history.introductions.iter().map(|i| i.audience.clone()));
-        let mut keys: BTreeSet<_> =
-            history.introductions.iter().map(|i| (i.audience.clone(), i.key)).collect();
-        let mut members: BTreeSet<_> = history.state.members.keys().copied().collect();
-        let mut credentials: BTreeSet<_> =
-            history.state.members.values().map(|m| m.keys.sealing).collect();
-        for copy in &history.copies {
-            let route = copy.route();
-            audiences.insert(route.audience.clone());
-            keys.insert((route.audience.clone(), route.key));
-            members.insert(route.member);
-            credentials.insert(route.sealing);
-        }
-        for audience in &audiences {
-            let ids: Vec<_> = match audience {
-                Audience::Store => ring.store_key_ids().collect(),
-                Audience::Circle(circle) => ring.circle_key_ids(*circle).collect(),
-            };
-            keys.extend(ids.into_iter().map(|id| (audience.clone(), id)));
-        }
-        let mut hashes: BTreeSet<_> = history.introductions.iter().map(|i| i.hash).collect();
-        for (audience, key) in &keys {
-            if let Some(hash) =
-                crate::write_seal::held(ring, audience, *key).map(|held| held.hash())
-            {
-                hashes.insert(hash);
-            }
-        }
-        Self {
-            audiences: audiences.into_iter().collect(),
-            keys: keys.into_iter().collect(),
-            members: members.into_iter().collect(),
-            credentials: credentials.into_iter().collect(),
-            hashes: hashes.into_iter().collect(),
-        }
-    }
-
-    pub(crate) fn audience(&self, audience: &Audience) -> usize {
-        token(&self.audiences, audience)
-    }
-
-    pub(crate) fn key(&self, audience: &Audience, key: KeyId) -> usize {
-        token(&self.keys, &(audience.clone(), key))
-    }
-
-    pub(crate) fn member(&self, member: MemberId) -> usize {
-        token(&self.members, &member)
-    }
-
-    pub(crate) fn introduction(&self, i: &Introduction) -> Value {
-        json!({"kind":"introduce", "audience":self.audience(&i.audience),
-            "key":self.key(&i.audience, i.key), "hash":token(&self.hashes, &i.hash)})
-    }
-
-    pub(crate) fn slots(&self, history: &History, through: u64) -> Vec<Value> {
-        let mut slots = vec![json!({"kind":"other"}); usize::try_from(through).unwrap()];
-        for i in &history.introductions {
-            slots[usize::try_from(i.slot.get() - 1).unwrap()] = self.introduction(i);
-        }
-        for copy in &history.copies {
-            let r = copy.route();
-            let slot = copy.path.slot_number().unwrap().get();
-            let index = usize::try_from(slot - 1).unwrap();
-            assert_eq!(slots[index], json!({"kind":"other"}));
-            slots[index] = json!({"kind":"copy", "audience":self.audience(&r.audience),
-                "key":self.key(&r.audience, r.key), "member":self.member(r.member),
-                "credential":token(&self.credentials, &r.sealing)});
-        }
-        slots
-    }
-
-    pub(crate) fn input(
-        &self,
-        history: &History,
-        ring: &StoreKeyring,
-        writer: MemberId,
-        through: u64,
-    ) -> Value {
-        let mut current = Vec::new();
-        for audience in &self.audiences {
-            for (member, value) in &history.state.members {
-                if effects::belongs(&history.state, audience, member) {
-                    current.push(json!({"audience":self.audience(audience),
-                        "member":self.member(*member), "credential":token(&self.credentials, &value.keys.sealing)}));
-                }
-            }
-        }
-        let held: Vec<_> = self
-            .keys
-            .iter()
-            .filter_map(|(a, k)| {
-                crate::write_seal::held(ring, a, *k).map(|held| held.hash()).map(|hash| {
-                    json!({"audience":self.audience(a),
-                "key":self.key(a, *k), "hash":token(&self.hashes, &hash)})
-                })
-            })
-            .collect();
-        json!({"kind":"keys", "slots":self.slots(history, through), "held":held,
-            "current":current, "writer":self.member(writer), "store":self.audience(&Audience::Store),
-            "audiences":(0..self.audiences.len()).collect::<Vec<_>>(),
-            "keys":self.keys.iter().map(|(a,k)| json!({"audience":self.audience(a), "key":self.key(a,*k)})).collect::<Vec<_>>()})
-    }
-
-    pub(crate) fn result(&self, history: &History, ring: &StoreKeyring, writer: MemberId) -> Value {
-        let selections: Vec<_> = self
-            .audiences
-            .iter()
-            .map(|a| {
-                let (selected, sending) = match history.sending_key(ring, writer, a) {
-                    Ok(k) => (Some(self.key(a, k)), json!({"key":self.key(a,k)})),
-                    Err(SyncError::Removed) => (None, json!({"error":"removed"})),
-                    Err(SyncError::KeyUnavailable { key: k, .. }) => {
-                        (None, json!({"unavailable":self.key(a,k)}))
-                    }
-                    Err(SyncError::Rejected(OperationRejection::NotAllowed)) => {
-                        (None, json!({"error":"notAllowed"}))
-                    }
-                    Err(error) => panic!("unexpected key-selection failure: {error:?}"),
-                };
-                let first =
-                    if effects::belongs(&history.state, a, &writer) { selected } else { None };
-                json!({"audience":self.audience(a), "first":first, "sending":sending})
-            })
-            .collect();
-        let metadata = match history.metadata_key(ring) {
-            Ok(k) => Some(self.key(&Audience::Store, k)),
-            Err(SyncError::Rejected(OperationRejection::NotAllowed)) => None,
-            Err(error) => panic!("unexpected metadata-key failure: {error:?}"),
-        };
-        json!({"keys":self.keys.iter().map(|(a,k)| json!({"audience":self.audience(a),
-            "key":self.key(a,*k), "accepted":history.accepted(ring,a,*k),
-            "exposed":history.exposed(a,*k)})).collect::<Vec<_>>(), "selection":selections, "metadata":metadata})
-    }
-}
+#[path = "history_tests/projection.rs"]
+mod projection;
+pub(crate) use projection::Projection;
 
 fn key(n: u128) -> KeyId {
     KeyId(uuid::Uuid::from_u128(n))
@@ -395,6 +245,7 @@ impl Household {
                 device_name: "Ana's phone".into(),
                 key: key(90),
                 key_hash: [1; 32],
+                circles: vec![],
             },
         );
         household

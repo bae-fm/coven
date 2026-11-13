@@ -39,7 +39,7 @@ her write lands at 14, in the new store key's slot but with the Gifts key of
 its first attempt (§6.3). The same pass then replaces the Gifts key, at slots
 15 to 17, and sends what she owes Ben of the older one, at slot 18 (§12.1). -/
 def recovery : Nat → CopyOrder.Slot Nat Nat
-  | 1 => .entry ana storeKey (.create storeKey 100 10)
+  | 1 => .entry ana storeKey (.create storeKey 100 10 [])
   | 2 => .entry ana storeKey (.admit ben false 20 benCircleKey 300)
   | 3 => .entry ana storeKey (.admit carol false 30 carolCircleKey 301)
   | 4 => .copy storeKey ⟨giftsKey, carol, 30⟩
@@ -60,7 +60,7 @@ def recovery : Nat → CopyOrder.Slot Nat Nat
   | _ => .writes nextStoreKey []
 
 theorem recovery_follows : Follows household recovery 18 := by
-  refine ⟨⟨ana, storeKey, 100, 10, rfl, rfl⟩, ?_⟩
+  refine ⟨⟨ana, storeKey, 100, 10, [], rfl, rfl⟩, ?_⟩
   have all : ∀ k, k < 19 → 2 ≤ k → legal household (keysAt household recovery (k - 1))
       (rosterAt household recovery (k - 1)) (recovery k) = true := by decide +kernel
   exact fun k two below => all k (by omega) two
@@ -107,7 +107,7 @@ too. Then Dan replaces his keys among the next rotation's copies, after one of
 them went to his old sealing key, and Ben sends one to his new one. His
 replacement carries his own circle's key too, which only he holds. -/
 def races : Nat → CopyOrder.Slot Nat Nat
-  | 1 => .entry ana storeKey (.create storeKey 100 10)
+  | 1 => .entry ana storeKey (.create storeKey 100 10 [])
   | 2 => .entry ana storeKey (.admit ben true 20 benCircleKey 300)
   | 3 => .copy storeKey ⟨secondKey, ana, 10⟩
   | 4 => .entry ana storeKey (.admit dan false 40 danCircleKey 303)
@@ -126,7 +126,7 @@ def races : Nat → CopyOrder.Slot Nat Nat
   | _ => .copy thirdKey ⟨thirdKey, ana, 10⟩
 
 theorem races_follow : Follows household races 17 := by
-  refine ⟨⟨ana, storeKey, 100, 10, rfl, rfl⟩, ?_⟩
+  refine ⟨⟨ana, storeKey, 100, 10, [], rfl, rfl⟩, ?_⟩
   have all : ∀ k, k < 18 → 2 ≤ k → legal household (keysAt household races (k - 1))
       (rosterAt household races (k - 1)) (races k) = true := by decide +kernel
   exact fun k two below => all k (by omega) two

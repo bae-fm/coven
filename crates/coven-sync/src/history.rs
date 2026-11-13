@@ -436,7 +436,8 @@ impl History {
 
     /// Validate the copies a store's creation carries, after its entry: they
     /// all go to the creator at the sealing key the entry binds, and name
-    /// exactly the store key the entry introduces (§10.3, format.md D6).
+    /// exactly the keys the entry introduces: the store's first key and each
+    /// of its circles' (§10.3, format.md D6).
     fn validate_creation(
         &self,
         header: &SlotHeader,
@@ -444,10 +445,11 @@ impl History {
         copies: &[CopyBox],
         effect: Option<AdminEffect>,
     ) -> Result<Option<AdminEffect>, OperationRejection> {
-        let StoreChange::CreateStore { admin, key, .. } = change else {
+        let StoreChange::CreateStore { admin, .. } = change else {
             unreachable!("an admission's kind holds only an admit, recover or create-store change")
         };
-        let introduced = BTreeSet::from([(Audience::Store, *key)]);
+        let introduced: BTreeSet<(Audience, KeyId)> =
+            introductions(change).into_iter().map(|(audience, key, _)| (audience, key)).collect();
         let copied: BTreeSet<(Audience, KeyId)> =
             copies.iter().map(|copy| (copy.routing.audience.clone(), copy.routing.key)).collect();
         let routed = copies.iter().all(|copy| {
@@ -492,7 +494,7 @@ impl History {
         changed(&self.state.members, &effect.state.members, slot, &mut self.members);
         changed(&self.state.devices, &effect.state.devices, slot, &mut self.devices);
         changed(&self.state.circles, &effect.state.circles, slot, &mut self.circles);
-        if let Some((audience, key, hash)) = introduction(&effect.change) {
+        for (audience, key, hash) in introductions(&effect.change) {
             self.introductions.push(Introduction { slot, audience, key, hash });
         }
         if let Some(boundary) = &effect.boundary {
@@ -765,19 +767,26 @@ impl History {
     }
 }
 
-pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8; 32])> {
+/// The keys `change` introduces, in the order its slot's copies list them
+/// (`(audience, key)`, format.md D9): a creation introduces the store's first
+/// key and each circle's first key.
+pub(crate) fn introductions(change: &StoreChange) -> Vec<(Audience, KeyId, [u8; 32])> {
     match change {
-        StoreChange::CreateStore { key, key_hash, .. } => Some((Audience::Store, *key, *key_hash)),
+        StoreChange::CreateStore { key, key_hash, circles, .. } => {
+            let mut keys = vec![(Audience::Store, *key, *key_hash)];
+            keys.extend(circles.iter().map(|c| (Audience::Circle(c.circle), c.key, c.key_hash)));
+            keys
+        }
         StoreChange::CreateCircle { circle, key, key_hash, .. } => {
-            Some((Audience::Circle(*circle), *key, *key_hash))
+            vec![(Audience::Circle(*circle), *key, *key_hash)]
         }
         StoreChange::RotateKey { audience, key, key_hash } => {
-            Some((audience.clone(), *key, *key_hash))
+            vec![(audience.clone(), *key, *key_hash)]
         }
         StoreChange::RemoveCircleMember { circle, key, key_hash, .. } => {
-            Some((Audience::Circle(*circle), *key, *key_hash))
+            vec![(Audience::Circle(*circle), *key, *key_hash)]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 

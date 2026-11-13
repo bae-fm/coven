@@ -140,7 +140,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
             .unwrap(),
     );
     let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
-        .create_store("Account", "Test device")
+        .create_store("Account", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let directory = app.store_dir(&handle.store_id());
@@ -259,7 +259,7 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
     );
     let mut builder = builder(&app, clock.clone(), storage.clone(), &sign_in);
     builder.authenticate(coven_storage::OAuthAccess::OneDrive).await.unwrap();
-    let handle = builder.create_store("Account", "Test device").await.unwrap();
+    let handle = builder.create_store("Account", "Test device", &[], |_, _| Ok(())).await.unwrap();
     let store = handle.store_id();
 
     assert!(matches!(
@@ -359,7 +359,7 @@ async fn a_failed_or_dropped_sign_in_keeps_the_prior_one() {
 
     // The first sign-in is what setup commits: no new presentation, and the
     // tokens of the one successful exchange.
-    let handle = builder.create_store("Account", "Test device").await.unwrap();
+    let handle = builder.create_store("Account", "Test device", &[], |_, _| Ok(())).await.unwrap();
     handle.setup_oauth_storage(storage.config(), |_| {}).await.unwrap();
     assert_eq!(sign_in.presentation_count(), 2);
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(
@@ -399,7 +399,7 @@ mod provider_access_tests {
                 MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),
             );
             let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
-                .create_store("Account", "Test device")
+                .create_store("Account", "Test device", &[], |_, _| Ok(()))
                 .await
                 .unwrap();
             let directory = app.store_dir(&handle.store_id());
@@ -500,7 +500,7 @@ async fn dropping_sign_in_while_presenting_or_exchanging_cancels_it_and_keeps_th
             .unwrap(),
     );
     let handle = builder(&app, clock, storage.clone(), &sign_in)
-        .create_store("Account", "Test device")
+        .create_store("Account", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let scoped = StoreKeychain::new(keychain, app.store_dir(&handle.store_id()).id());

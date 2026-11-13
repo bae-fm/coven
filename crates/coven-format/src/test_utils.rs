@@ -196,6 +196,7 @@ pub fn creation_change() -> StoreChange {
         key: store_key().id(),
         key_hash: store_key().hash(),
         device_name: "D".into(),
+        circles: vec![],
     }
 }
 /// The slot-one fixture creating the store: an admission-kind slot whose

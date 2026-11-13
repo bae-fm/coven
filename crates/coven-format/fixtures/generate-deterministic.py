@@ -410,7 +410,7 @@ def changes(sodium):
     s3_key = b"\x01" + text(b"fixture-access-key")
     return [
         b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + text(b"D")
-        + bytes([1]) * 16 + initial_hash,
+        + bytes([1]) * 16 + initial_hash + collection([]),
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test")
         + u64(2) + text(b"D"),
         b"\x02" + BEN,

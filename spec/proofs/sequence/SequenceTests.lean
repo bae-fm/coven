@@ -532,6 +532,23 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (json% {"kind":"queueReload","scenario":"reset"})
   rejects (json% {"kind":"queueReload","scenario":"unknown"})
 
+-- Store creation introduces the store's key and a circle's key in one slot,
+-- and carries the creator's copy of each (§10.3).
+#eval do
+  let creation := json% {"kind":"introduce",
+    "keys":[{"audience":0,"key":9,"hash":10}, {"audience":1,"key":7,"hash":30}],
+    "copies":[{"audience":0,"key":9,"member":1,"credential":2},
+      {"audience":1,"key":7,"member":1,"credential":2}]}
+  let held := [json% {"audience":0,"key":9,"hash":10}, json% {"audience":1,"key":7,"hash":30}]
+  let current := [json% {"audience":0,"member":1,"credential":2},
+    json% {"audience":1,"member":1,"credential":2}]
+  let made ← run (keyCase [creation] held current)
+  checkField made ["keys","0","accepted"] (toJson true)
+  checkField made ["keys","2","accepted"] (toJson true)
+  checkField made ["keys","0","exposed"] (toJson false)
+  checkField made ["selection","1","sending"] (json% {"key":7})
+  checkField made ["metadata"] (toJson (9 : Nat))
+
 #eval do
   check (json% {"kind":"floor","coverage":[10,null]}) Json.null
   check (json% {"kind":"floor","coverage":[10,8]}) (toJson (9 : Nat))

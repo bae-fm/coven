@@ -17,6 +17,7 @@ mod coven_error;
 mod coven_write;
 mod error;
 mod handle;
+mod member_write;
 mod read_handle;
 mod saved_restore;
 

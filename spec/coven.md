@@ -3513,22 +3513,40 @@ store and the directory-sync failure with its source (api.md E1). The complete
 store stays on disk, and the app reopens it with `open`. No creation error
 carries an open handle, so retaining an error cannot keep the store locked.
 
-Slot 1 creates the store. It registers the first admin and their first device
-and introduces the first store key. Since nobody is a member yet, slot 1
-carries its author's public key, and that key verifies its signature. Its clear
-prefix carries the creator's copy of every key it introduces, sealed to the
-creator's sealing key, as an admission carries a joiner's (§13.2). The store id
-in slot 1 must match its path.
+Slot 1 creates the store. It registers the first admin and their first device,
+introduces the first store key, and makes each circle the app's first write
+asks for, each with the creator as its first member and its own first key. Since
+nobody is a member yet, slot 1 carries its author's public key, and that key
+verifies its signature. Its clear prefix carries the creator's copy of every key
+it introduces, sealed to the creator's sealing key, as an admission carries a
+joiner's (§13.2). The store id in slot 1 must match its path, and a circle id
+that repeats is refused.
 
 Slot 1 is decided when the store is created, on the device, before any storage
 exists. Ana makes Household on her laptop, offline. `create_store` sets up her
-member keys and the first store key in custody, builds slot 1, keeps its exact
-bytes as the laptop's attempt at slot 1, and applies it. Ana is Household's
+member keys, the first store key and each circle's first key in custody, builds
+slot 1, keeps its exact bytes as the laptop's attempt at slot 1, and applies it. Ana is Household's
 admin and her laptop its device from that moment: she rates, makes playlists
 and renames the store before Household has any storage. If creation fails at
 any step, no store is visible and custody holds nothing for it. No other device
 can claim slot 1 first, since none knows the store's id until slot 1 is
 published. A copy of the laptop's directory could, and §19.3's checks catch it.
+
+The app names the circles it wants when it creates the store, since slot 1
+makes them and no write can go into a circle before one has applied. Its first
+write then runs inside the creation, after slot 1 has applied and before the
+store is visible: the *first write*. It sees Ana as a member and
+her laptop as a device, and each circle slot 1 made is already in
+`coven_circles`, so its rows can name those circles and go into them. It is an
+ordinary write that reads through slot 1, queued with the laptop's others, and
+no operation is journaled for the circles, since slot 1 made them. It has the
+app's SQL only: no step that changes the store's members, devices or circles
+exists on it. The store becomes visible once that write commits; if the write
+fails, or the circle names are refused, no store is visible and custody holds
+nothing for it. Without that, a crash between creating the store
+and the app's first write would leave a store the app never set up, which no
+later step would know to finish. Ana's app makes a private circle
+and its first row in that write, so Household never shows without them.
 
 Slot 1 records no storage access: the storage doesn't exist when the store is
 created. Setting up storage publishes slot 1, then records how its creator
@@ -13628,8 +13646,9 @@ Write-ups explain each model and state its assumptions:
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | A copy opened before its key's introduction is held as tentative and not accepted; once the introduction applies, the device ends as if it had applied the introduction first: the key accepted when its material matches the commitment, a stop when it doesn't | `copy_order_agrees` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
 | The copies an audience still needs, of every key introduced for it to each current member's current sealing key, give every current member every older key once published; then none is needed, so a retry sends none, and they expose no key | `needed_complete`, `needed_after_none`, `needed_exposes_nothing` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
-| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation holds the rule in its one slot, whose prefix carries the creator's copy (§12.1) | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
+| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation holds the rule in its one slot, whose prefix carries the creator's copy of the first store key and of each circle's first key (§12.1) | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
 | An admission or a recovery makes the member's circle in its own slot: the slot introduces the circle's key and carries the member's copy of it, so the circle's first reader has its copy from the slot that makes the circle | `admission_carries_own_copy` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §13.2, §15.5 |
+| Store creation makes the circles its creating write asked for in slot 1: the slot introduces the store's first key and each circle's first key and carries the creator's copy of every one, so each circle's first reader has its copy from the slot that makes it | `creation_carries_own_copies` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §10.3, §12.1 |
 | A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
 | *Body.* Removing a member from a circle introduces the circle's replacement key in the same entry, with its copies below it to the readers who remain: the removed member no longer reads the circle, the key is the first-attempt choice of a remaining writer holding it, and no copy of it is routed to the removed member | `leave_selects_new_key` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §15.8 |

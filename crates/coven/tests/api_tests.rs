@@ -72,7 +72,7 @@ async fn application_tests_use_memory_storage_through_the_facade() {
         .synced_tables(vec![])
         .migrations(vec![])
         .storage_connector(storage.clone())
-        .create_store("Household", "Test device")
+        .create_store("Household", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     handle

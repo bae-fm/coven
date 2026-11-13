@@ -317,22 +317,6 @@ impl CovenBuilder {
         self
     }
 
-    /// Create and open a store, initializing its member, first store key and
-    /// slot 1 before publication; `device_name` names this installation.
-    /// Cancellation does not interrupt creation or rollback. Errors carry no
-    /// handle; a published store is closed before returning.
-    pub async fn create_store(
-        self,
-        name: &str,
-        device_name: &str,
-    ) -> Result<CovenHandle, StoreCreationError> {
-        let (name, device_name) = (name.to_owned(), device_name.to_owned());
-        let bugs = self.directories.bugs().clone();
-        let publish = coven_foundation::files::BootstrapStore::publish;
-        let creating = creation::create(self, name, device_name, publish);
-        crate::task::spawn_completing("create the store", bugs, creating).await?
-    }
-
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening always migrates coven's tables before the app's schema, then
     /// unlocks both custody sessions before resuming unfinished operations and

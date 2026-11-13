@@ -18,6 +18,7 @@ pub use crate::error::{
     StoreKeyUnlockError,
 };
 pub use crate::handle::{Circles, CovenHandle, IfUnsent};
+pub use crate::member_write::MemberWrite;
 pub use crate::read_handle::CovenReadHandle;
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;

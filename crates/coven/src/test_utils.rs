@@ -136,7 +136,7 @@ impl Coven {
             .id_source(ids)
             .synced_tables(Vec::new())
             .migrations(Vec::new())
-            .create_store(name, "Test device")
+            .create_store(name, "Test device", &[], |_, _| Ok(()))
             .await?;
         let directory = self.store_dir(&handle.store_id());
         handle.close().await?;

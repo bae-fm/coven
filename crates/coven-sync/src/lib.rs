@@ -3,7 +3,7 @@
 mod chunk_reader;
 mod circle_effects;
 mod creation;
-pub use creation::{decide_creation, Creation};
+pub use creation::{decide_creation, Creation, NewCircle};
 mod effects;
 mod error;
 mod failure_log;

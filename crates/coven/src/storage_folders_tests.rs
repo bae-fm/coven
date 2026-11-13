@@ -205,7 +205,7 @@ impl Fixture {
                     .migrations(vec![])
                     .storage_connector(connector.clone()),
             )
-            .create_store("Household", "Test device")
+            .create_store("Household", "Test device", &[], |_, _| Ok(()))
             .await
             .unwrap();
         Self { _root: root, app, handle, sign_in, fake, storage, connector, clock }

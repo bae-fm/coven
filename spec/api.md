@@ -2525,18 +2525,29 @@ impl CovenBuilder {
         F: Fn(&FunctionArguments<'_>) -> SqliteResult<T> + Send + Sync + 'static,
         T: Into<types::Value>;
 
-    /// Creates an open store before publication: its member and first store
-    /// key in the chosen custody, and slot 1 sealed, kept as this device's
-    /// attempt at it and applied, so the creator is the store's first admin
-    /// and `device_name` names its first device from the start (§10.3).
-    /// Cancellation does not interrupt creation or rollback. Errors carry no
-    /// handle; a published store is closed before returning, and a store that
-    /// is not published leaves nothing in custody.
-    pub async fn create_store(
+    /// Creates an open store before publication: its member, first store
+    /// key and one key for each of `circles` in the chosen custody, and slot
+    /// 1 sealed, kept as this device's attempt at it and applied, so the
+    /// creator is the store's first admin, `device_name` names its first
+    /// device and each of `circles`, named in order, exists with the creator
+    /// as its first member from the start (§10.3). Then `creating`, the app's
+    /// first write, runs on a `MemberWrite` with the circles' ids in that
+    /// order, in a write of its own that reads through slot 1; the store is
+    /// published only once it commits. A `circles` name the format refuses
+    /// fails before anything is made. Cancellation does not interrupt
+    /// creation or rollback. Errors carry no handle, and the closure's own
+    /// error is `StoreCreationError::Store`; a published store is closed
+    /// before returning, and a store that is not published, whether its
+    /// creating write failed or not, leaves nothing in custody.
+    pub async fn create_store<F>(
         self,
         name: &str,
         device_name: &str,
-    ) -> Result<CovenHandle, StoreCreationError>;
+        circles: &[&str],
+        creating: F,
+    ) -> Result<CovenHandle, StoreCreationError>
+    where
+        F: FnOnce(&MemberWrite<'_>, &[CircleId]) -> CovenResult<()> + Send + 'static;
 
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening always migrates coven's tables before the app's schema, then
@@ -2907,7 +2918,11 @@ let handle = coven.builder()
         Namespace::new("thumbnails", Provenance::AppProvided, 256 << 20),
     ])
     .migrations(migrations())                       // E13
-    .create_store("Household", "Ana's laptop")
+    .create_store("Household", "Ana's laptop", &["Private"], |write, circles| {
+        // Ana's first write: a row in her private circle (§10.3).
+        write.execute("INSERT INTO notes VALUES('welcome', 'Hello', ?1)", [circles[0].to_string()])?;
+        Ok(())
+    })
     .await?;
 ```
 
@@ -3163,6 +3178,13 @@ pub struct StagedFiles<T> { /* private fields */ }
 
 /// One write's SQL and coven's steps, in one transaction (§4, E3).
 pub struct CovenWrite<'write> { /* private fields */ }
+
+/// The app's SQL as a member begins: the creator's first write, run by
+/// `create_store` after slot 1 applies and before the store is visible
+/// (§10.3, E1). It has `execute`, `execute_batch`, `query_row` and `query`
+/// as `CovenWrite` does, and `SqlRead`; it has no operation, file or
+/// administrative step, so it changes nothing in the store's membership.
+pub struct MemberWrite<'write> { /* private fields */ }
 
 /// A bulk write's SQL access, borrowing its connection (§4, E3).
 pub struct BulkSqlContext<'connection> { /* private fields */ }

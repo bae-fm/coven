@@ -44,6 +44,23 @@ pub struct SnapshotId {
 }
 wire_struct!(SnapshotId, audience, device, number);
 
+/// A circle store creation makes, with its first key (§10.3, D6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreationCircle {
+    /// The circle's id.
+    pub circle: CircleId,
+    /// The circle's name.
+    pub name: String,
+    /// The newest breaking migration the creator's app had run, zero if
+    /// none, as `CreateCircle` records it.
+    pub breaking_version: u32,
+    /// The circle's first key, introduced by the creation.
+    pub key: KeyId,
+    /// SHA-256 of the exact 32 circle-key bytes.
+    pub key_hash: [u8; 32],
+}
+wire_struct!(CreationCircle, circle, name => crate::wire::get_name, breaking_version, key, key_hash);
+
 /// Every admin operation listed in §10, including store creation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreChange {
@@ -64,6 +81,9 @@ pub enum StoreChange {
         key_hash: [u8; 32],
         /// The name of the device that wrote this entry, belonging to its author.
         device_name: String,
+        /// The circles the creator's first write asks for, each with the
+        /// creator as its first member, in the order they were asked for.
+        circles: Vec<CreationCircle>,
     },
     /// Record how the store's first admin reaches storage, which fixes the
     /// kind of access every member has and, for a provider account, the
@@ -249,9 +269,10 @@ pub enum StoreChange {
 impl StoreChange {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::CreateStore { name: n, device_name, .. } => {
+            Self::CreateStore { name: n, device_name, circles, .. } => {
                 name(n)?;
-                name(device_name)
+                name(device_name)?;
+                circles.iter().try_for_each(|circle| name(&circle.name))
             }
             Self::RenameStore { name: n }
             | Self::AdmitMember { device_name: n, .. }
@@ -305,7 +326,7 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash },
+    0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash, circles },
     1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },

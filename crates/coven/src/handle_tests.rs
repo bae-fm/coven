@@ -170,7 +170,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     let handle = builder(&app)
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("session", "Test device")
+        .create_store("session", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let directory = app.store_dir(&handle.store_id());
@@ -402,7 +402,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
         .storage_connector(connector.clone())
-        .create_store("session", "Test device")
+        .create_store("session", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let member = identity.keys.lock().unwrap().as_ref().unwrap().member();
@@ -502,7 +502,7 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
     let handle = builder(&app)
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("session", "Test device")
+        .create_store("session", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let clone = handle.clone();

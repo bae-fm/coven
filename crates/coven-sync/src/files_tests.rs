@@ -109,6 +109,7 @@ impl Fixture {
                 device: directory.settings().unwrap().device_id,
                 device_name: "Files".into(),
                 member: &coven_format::test_utils::identity(),
+                circles: vec![],
                 ring: &coven_crypto::StoreKeyring::new(coven_format::test_utils::store_key()),
             },
         )

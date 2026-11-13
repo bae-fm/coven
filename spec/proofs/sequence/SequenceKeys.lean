@@ -13,20 +13,47 @@ def key (j : Json) : Except String (Key Nat) := do
 
 def event (j : Json) : Except String (Event Nat Nat) := do
   match ← j.getObjValAs? String "kind" with
-  | "introduce" => return .introduce (← key j) (← nat j "hash")
+  | "introduce" =>
+    -- One key, or the `keys` a slot introduces together (store creation's).
+    match j.getObjVal? "keys" with
+    | .ok list =>
+      return .introduce (← (← list.getArr?).toList.mapM fun x => do return (← key x, ← nat x "hash"))
+    | .error _ => return .introduce [(← key j, ← nat j "hash")]
   | "copy" => return .copy ⟨← key j, ← nat j "member", ← nat j "credential"⟩
   | "other" => return .other
   | _ => throw "unknown key event"
 
+/-- The copies the same slot carries beside the keys it introduces: an
+admission's, and store creation's (§10.3, §13.2). -/
+def carriedCopies (j : Json) : Except String (List (Route Nat Nat)) := do
+  match j.getObjVal? "copies" with
+  | .ok list =>
+    (← list.getArr?).toList.mapM fun x => do
+      return ⟨← key x, ← nat x "member", ← nat x "credential"⟩
+  | .error _ => return []
+
+/-- One slot: its event, and the copies it carries beside an introduction. -/
+def slot (j : Json) : Except String (Event Nat Nat × List (Route Nat Nat)) := do
+  return (← event j, ← carriedCopies j)
+
+/-- The projection through every slot, each slot's carried copies after its event. -/
+def publishSlots (h : History Nat Nat) : List (Event Nat Nat × List (Route Nat Nat)) →
+    History Nat Nat :=
+  fun slots => (slots.zipIdx 0).foldl (fun h ((e, copies), n) =>
+    copies.foldl (fun h r => step h (n + 1) (.copy r)) (step h (n + 1) e)) h
+
 def eventJson : Event Nat Nat → Json
-  | .introduce k hash => Json.mkObj [("kind", toJson "introduce"), ("audience", toJson k.audience),
-      ("key", toJson k.id), ("hash", toJson hash)]
+  | .introduce [(k, hash)] => Json.mkObj [("kind", toJson "introduce"),
+      ("audience", toJson k.audience), ("key", toJson k.id), ("hash", toJson hash)]
+  | .introduce keys => Json.mkObj [("kind", toJson "introduce"), ("keys", Json.arr
+      (keys.toArray.map fun (k, hash) => Json.mkObj [("audience", toJson k.audience),
+        ("key", toJson k.id), ("hash", toJson hash)]))]
   | .copy r => Json.mkObj [("kind", toJson "copy"), ("audience", toJson r.key.audience),
       ("key", toJson r.key.id), ("member", toJson r.member), ("credential", toJson r.credential)]
   | .other => Json.mkObj [("kind", toJson "other")]
 
 structure Input where
-  slots : List (Event Nat Nat)
+  slots : List (Event Nat Nat × List (Route Nat Nat))
   held : Custody Nat
   bindings : List ((Nat × Nat) × Nat)
   writer : Nat
@@ -38,7 +65,7 @@ def Input.current (input : Input) : Current Nat Nat :=
   fun a m => (input.bindings.find? (·.1 == (a, m))).map (·.2)
 
 def readInput (j : Json) : Except String Input := do
-  let slots ← (← j.getObjValAs? (List Json) "slots").mapM event
+  let slots ← (← j.getObjValAs? (List Json) "slots").mapM slot
   let held ← (← j.getObjValAs? (List Json) "held").mapM fun x => do
     return (← key x, ← nat x "hash")
   distinct (held.map (·.1)) "held key"
@@ -74,7 +101,7 @@ def result (input : Input) (h : History Nat Nat) : Json := Json.mkObj [
 
 def readKeys (j : Json) : Except String Json := do
   let input ← readInput j
-  return result input (publish ⟨[], []⟩ 0 input.slots)
+  return result input (publishSlots ⟨[], []⟩ input.slots)
 
 def readCustody (j : Json) : Except String Json := do
   let held ← j.getObjValAs? (Option Nat) "held"
@@ -89,7 +116,7 @@ def readCustody (j : Json) : Except String Json := do
 
 def readRotation (j : Json) : Except String Json := do
   let input ← readInput j
-  let h := publish (⟨[], []⟩ : History Nat Nat) 0 input.slots
+  let h := publishSlots (⟨[], []⟩ : History Nat Nat) input.slots
   let rotation ← j.getObjVal? "rotation"
   let fresh ← key rotation
   let hash ← nat rotation "hash"

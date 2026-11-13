@@ -262,7 +262,9 @@ fn bootstrap_and_operation_futures_stay_small() {
         ),
         (
             "create_store",
-            size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n, "Test device")),
+            size(|(b, n): (CovenBuilder, &'static str)| {
+                b.create_store(n, "Test device", &[], |_, _| Ok(()))
+            }),
         ),
         ("open", size(|(b, s): (CovenBuilder, StoreId)| b.open(s, |_| ()))),
         ("open_read_only", size(|(b, s): (CovenBuilder, StoreId)| b.open_read_only(s))),
@@ -354,7 +356,7 @@ async fn app_tests_count_the_steps_a_read_runs() {
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
         )])
-        .create_store("Steps", "Test device")
+        .create_store("Steps", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let counter = WorkCounter::new();
@@ -412,7 +414,7 @@ async fn app_tests_count_each_read_statement_once() {
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
         )])
-        .create_store("Statements", "Test device")
+        .create_store("Statements", "Test device", &[], |_, _| Ok(()))
         .await
         .unwrap();
     let counter = WorkCounter::new();
@@ -463,7 +465,7 @@ async fn app_tests_count_the_steps_a_write_runs() {
             .builder()
             .synced_tables(vec![SyncedTable::new("anchors", RowIdentity::SharedKey)])
             .migrations(migrations)
-            .create_store(name, "Test device")
+            .create_store(name, "Test device", &[], |_, _| Ok(()))
             .await
             .unwrap();
         let counter = WorkCounter::new();

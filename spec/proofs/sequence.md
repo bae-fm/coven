@@ -337,7 +337,8 @@ reads each audience with which sealing key, as `effects.rs` and
 `circle_effects.rs` keep it. `required` is Rust's `required_copies`. An
 admission, admitting or recovering a member (§13.2), carries those copies in
 its own slot (`carried`), and so does creation; the projection takes a slot's copies from what it
-carries, a key-copy slot's one, an admission's or the creation's. `legal` says a slot followed
+carries, a key-copy slot's one, an admission's or the creation's. A slot introduces a list of keys
+(`Keys.Event.introduce`): an entry's one, or creation's store key and first circle keys. `legal` says a slot followed
 the rules at its position: any other entry's required copies are in the prefix
 before it, which `operation_outcome` gives when validation asks for them, and
 every key sealing the slot is introduced. `Follows` is a history of legal slots
@@ -357,6 +358,10 @@ before it, a slot below carries a copy to the member's current sealing key.
   (`circleFree`), and the member alone reads it. The circle's first reader has
   its copy from the slot that makes the circle, and the claims above are
   unchanged.
+- `creation_carries_own_copies`: creation makes the circles its creating write asked for, each read
+  by the creator alone, so slot 1 introduces the store's first key and each circle's first key and
+  carries the creator's copy of every one. A circle's first reader has its copy from the slot that
+  makes it, and the claims above hold of the circles' keys from slot 1 on.
 - `leave_selects_new_key`: the entry that removes a member from a circle
   introduces the circle's replacement key, and the copies it requires sit below
   it, to the readers who remain (`required`'s `leaveCircle` case; an entry whose

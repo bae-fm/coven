@@ -169,7 +169,7 @@ pub(crate) fn checked_change(
     }
     let mut next = state.clone();
     match change {
-        CreateStore { store, name, admin, device_name, .. } => {
+        CreateStore { store, name, admin, device_name, circles, .. } => {
             next.store = Some(StoreIdentity { id: *store, name: name.clone(), named_at: slot });
             next.members.insert(
                 *author,
@@ -184,6 +184,15 @@ pub(crate) fn checked_change(
                     state: DeviceState::Active,
                 },
             );
+            for circle in circles {
+                circle_effects::create(
+                    &mut next,
+                    circle.circle,
+                    &circle.name,
+                    *author,
+                    circle.breaking_version,
+                )?;
+            }
         }
         // The store's storage is set up once. History satisfies a repeat of
         // the first before it gets here (`History::validate`).

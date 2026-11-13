@@ -587,7 +587,8 @@ async fn a_store_opens_over_the_keychain_its_installation_saved() {
             .migrations(vec![Migration::addition(1, "records", SCHEMA)])
     };
     let app = Coven::in_memory(app_dir.path().into());
-    let handle = builder(&app).create_store("Kept", "Test device").await.unwrap();
+    let handle =
+        builder(&app).create_store("Kept", "Test device", &[], |_, _| Ok(())).await.unwrap();
     let store = handle.store_id();
     note(&handle, "kept".into()).await;
     handle.close().await.unwrap();

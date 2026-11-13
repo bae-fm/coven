@@ -250,11 +250,15 @@ pub(crate) fn open_bounded(
     let (header, frame) = bounded_plaintext(&bytes, path, ring)?;
     if !history.accepted(ring, &coven_merge::Audience::Store, object.prefix.key) {
         let introduced = match &frame {
-            SlotFrame::Admin(change) => crate::history::introduction(change),
+            SlotFrame::Admin(change) => {
+                crate::history::introductions(change).into_iter().find(|(audience, id, _)| {
+                    *audience == coven_merge::Audience::Store && *id == object.prefix.key
+                })
+            }
             _ => None,
         };
         match introduced {
-            Some((coven_merge::Audience::Store, id, hash)) if id == object.prefix.key => {
+            Some((_, id, hash)) => {
                 ring.store_key(id)?.check_hash(&hash).map_err(|error| {
                     damaged(path, Refusal::WrongIdentity { cause: Some(Arc::new(error)) })
                 })?;

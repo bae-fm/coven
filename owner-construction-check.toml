@@ -425,6 +425,9 @@ task_types = [
     # An app's write borrows the store's operation steps and files for that
     # one transaction.
     "CovenWrite",
+    # The creator's first write borrows the writer's SQL for the one
+    # transaction that commits it before the store is visible.
+    "MemberWrite",
     # A bulk write's SQL borrows the writer connection for its one
     # transaction, as a write's does.
     "BulkSqlContext",
@@ -1669,11 +1672,15 @@ tables = [
     # Resuming a recorded deletion opens the store to finish leaving it (§11.6).
     "CovenBuilder::resume_deletion",
     "CovenBuilder::owners",
-    "CovenBuilder::create_store",
     "OpeningOwners::into_handle",
     "OpeningStore::open",
 ]
-"crates/coven/src/builder_creation.rs" = ["create", "prepare", "undo_blocking"]
+"crates/coven/src/builder_creation.rs" = [
+    "CovenBuilder::create_store",
+    "create",
+    "prepare",
+    "undo_blocking",
+]
 "crates/coven/src/builder_read_only.rs" = ["CovenBuilder::open_read_only"]
 # The app's stores on this device, with the OS keychain it builds once at
 # startup and the platform's network, and what it builds over them.

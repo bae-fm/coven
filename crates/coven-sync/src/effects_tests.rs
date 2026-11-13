@@ -31,6 +31,7 @@ pub(crate) fn household() -> StoreState {
         device_name: "Ana".into(),
         key: KeyId(uuid::Uuid::from_u128(11)),
         key_hash: [1; 32],
+        circles: vec![],
     };
     let state = checked_change(
         &StoreState::default(),
@@ -515,6 +516,7 @@ mod sequence_differential {
                     device_name: "Ana".into(),
                     key,
                     key_hash: group.ring.store_key(key).unwrap().hash(),
+                    circles: vec![],
                 },
                 1,
             ),

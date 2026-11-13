@@ -155,6 +155,7 @@ impl SequenceSync {
         &self,
         name: &str,
         device_name: &str,
+        circles: Vec<crate::NewCircle>,
         ring: &StoreKeyring,
     ) -> Result<(), SyncError> {
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
@@ -166,6 +167,7 @@ impl SequenceSync {
                 device: self.device,
                 device_name: device_name.into(),
                 member: &member,
+                circles,
                 ring,
             },
         )

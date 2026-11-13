@@ -30,8 +30,10 @@ interleaving of its devices, so two admins racing, a member joining
 mid-rotation and a replacement landing among a rotation's copies are all
 histories of `Follows`, not cases of their own
 (`CopyOrderExamples.races_follow`). Store creation holds the rule in its one
-slot, as an admission does: slot 1 sets up the first member and key and carries
-the creator's copy of that key (§10.3, §12.1).
+slot, as an admission does: slot 1 sets up the first member and key, makes the
+circles its creating write asked for, and carries the creator's copy of the
+store's first key and of each circle's first key (§10.3, §12.1,
+`creation_carries_own_copies`).
 
 `CopyPrecedesNeed` fails. An admin outside a circle who recovers a member can
 send only the keys it holds (`required`, §12.1), so a circle's key has
@@ -61,8 +63,10 @@ open Keys
 /-- An admin entry, as far as keys and readers go. Removing a device changes
 neither: a member's device shares the member's keys (§12.2). -/
 inductive Change (Aud Mem : Type) where
-  /-- Slot 1: the first member, with its sealing key, and the first store key. -/
-  | create (key : Key Aud) (hash sealing : Nat)
+  /-- Slot 1: the first member, with its sealing key, the first store key, and
+  the first key of each circle its creating write asks for, which the first
+  member alone reads (§10.3). -/
+  | create (key : Key Aud) (hash sealing : Nat) (circles : List (Key Aud × Nat))
   /-- An admission adding member `m` with its sealing key, and the circle of
   `key`'s audience, which `m` alone reads (§13.2). -/
   | admit (m : Mem) (admin : Bool) (sealing : Nat) (key : Key Aud) (hash : Nat)
@@ -100,10 +104,10 @@ variable {Aud Mem : Type} [DecidableEq Aud] [DecidableEq Mem]
 
 /-- The slot's event in `Keys`' projection. -/
 def Slot.event : Slot Aud Mem → Event Aud Mem
-  | .entry _ _ (.create key hash _) | .entry _ _ (.createCircle key hash)
-  | .entry _ _ (.rotate key hash) | .entry _ _ (.leaveCircle _ _ key hash)
-  | .entry _ _ (.admit _ _ _ key hash) | .entry _ _ (.recover _ _ key hash) =>
-    .introduce key hash
+  | .entry _ _ (.create key hash _ circles) => .introduce ((key, hash) :: circles)
+  | .entry _ _ (.createCircle key hash) | .entry _ _ (.rotate key hash)
+  | .entry _ _ (.leaveCircle _ _ key hash) | .entry _ _ (.admit _ _ _ key hash)
+  | .entry _ _ (.recover _ _ key hash) => .introduce [(key, hash)]
   | .copy _ route => .copy route
   | _ => .other
 
@@ -117,8 +121,11 @@ def Roster.seat (r : Roster Aud Mem) (a : Aud) (m : Mem) (value : Option Nat) : 
 
 /-- An entry's effect on the roster. -/
 def Roster.apply (store : Aud) (r : Roster Aud Mem) (author : Mem) : Change Aud Mem → Roster Aud Mem
-  | .create _ _ c =>
-    { r.seat store author (some c) with people := author :: r.people, admins := author :: r.admins }
+  | .create _ _ c circles =>
+    { current := fun a m =>
+        if m = author ∧ (decide (a = store) || circles.any fun p => decide (p.1.audience = a)) = true
+        then some c else r.current a m
+      people := author :: r.people, admins := author :: r.admins }
   | .admit m admin c key _ =>
     { (r.seat store m (some c)).seat key.audience m (some c) with
       people := m :: r.people, admins := if admin then m :: r.admins else r.admins }
@@ -228,7 +235,8 @@ creation's, the creator's copy of the first store key (§10.3). -/
 def carried (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) :
     Slot Aud Mem → List (Route Aud Mem)
   | .copy _ route => [route]
-  | .entry author _ (.create key _ c) => [⟨key, author, c⟩]
+  | .entry author _ (.create key _ c circles) =>
+    ⟨key, author, c⟩ :: circles.map fun p => ⟨p.1, author, c⟩
   | .entry author _ (.admit m admin c key hash) =>
     required store h r author (.admit m admin c key hash)
   | .entry author _ (.recover m c key hash) => required store h r author (.recover m c key hash)
@@ -282,7 +290,8 @@ theorem keysAt_introductions (store : Aud) (seq : Nat → Slot Aud Mem) :
 up to `n`, introduces it. -/
 theorem introduction_at (store : Aud) (seq : Nat → Slot Aud Mem) (i : Introduction Aud) (n : Nat) :
     i ∈ (keysAt store seq n).introductions ↔
-      0 < i.slot ∧ i.slot ≤ n ∧ (seq i.slot).event = .introduce i.key i.hash := by
+      0 < i.slot ∧ i.slot ≤ n ∧
+        ∃ keys, (seq i.slot).event = .introduce keys ∧ (i.key, i.hash) ∈ keys := by
   rw [keysAt_introductions]
   exact introduction_slot _ i n
 
@@ -296,9 +305,25 @@ theorem admission_carries_own_copy (store : Aud) (h : History Aud Mem) (r : Rost
         carried store h r (.entry author outer (.admit m admin c key hash)) ∧
       (⟨key, m, c⟩ : Route Aud Mem) ∈
         carried store h r (.entry author outer (.recover m c key hash)) ∧
-      (Slot.entry author outer (.admit m admin c key hash)).event = .introduce key hash ∧
-      (Slot.entry author outer (.recover m c key hash)).event = .introduce key hash := by
+      (Slot.entry author outer (.admit m admin c key hash)).event = .introduce [(key, hash)] ∧
+      (Slot.entry author outer (.recover m c key hash)).event = .introduce [(key, hash)] := by
   simp [carried, required, Slot.event]
+
+/-- **Creation's slot carries its circles' copies.** Slot 1 introduces the
+store's first key and each circle's first key, and carries the creator's copy
+of every one, so each circle's first reader has its copy from the slot that
+makes it (§10.3). -/
+theorem creation_carries_own_copies (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem)
+    (author : Mem) (outer key : Key Aud) (hash c : Nat) (circles : List (Key Aud × Nat)) :
+    (⟨key, author, c⟩ : Route Aud Mem) ∈
+        carried store h r (.entry author outer (.create key hash c circles)) ∧
+      (∀ p ∈ circles, (⟨p.1, author, c⟩ : Route Aud Mem) ∈
+        carried store h r (.entry author outer (.create key hash c circles))) ∧
+      (Slot.entry author outer (.create key hash c circles)).event =
+        .introduce ((key, hash) :: circles) := by
+  refine ⟨by simp [carried], fun p hp => ?_, by simp [Slot.event]⟩
+  simp only [carried, List.mem_cons, List.mem_map]
+  exact Or.inr ⟨p, hp, rfl⟩
 
 /-- A slot follows the rules at its position. Metadata may use any accepted
 store key, exposed or not (§12.2), and the new key may encrypt its own
@@ -322,7 +347,8 @@ def legal (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) : Slot Aud Me
 which carries its creator's copy of the first store key, and each later slot
 was legal at its position. -/
 def Follows (store : Aud) (seq : Nat → Slot Aud Mem) (n : Nat) : Prop :=
-  (∃ x key hash c, key.audience = store ∧ seq 1 = .entry x key (.create key hash c)) ∧
+  (∃ x key hash c circles, key.audience = store ∧
+    seq 1 = .entry x key (.create key hash c circles)) ∧
   ∀ k, 2 ≤ k → k ≤ n →
     legal store (keysAt store seq (k - 1)) (rosterAt store seq (k - 1)) (seq k) = true
 
@@ -349,7 +375,7 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
     (author : Mem) (change : Change Aud Mem) (yes : allowed store h r author change = true) :
     RosterOk store (r.apply store author change) := by
   cases change with
-  | create key hash c => simp [allowed] at yes
+  | create key hash c circles => simp [allowed] at yes
   | admit m admin c key hash =>
     simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at yes
     obtain ⟨⟨_, fresh⟩, ⟨⟨notStore, _⟩, _⟩⟩ := yes
@@ -514,15 +540,17 @@ theorem legal_entry {store : Aud} {h : History Aud Mem} {r : Roster Aud Mem} {au
 /-- The roster every slot through `n` of a followed history leaves. -/
 theorem roster_ok {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat} (hf : Follows store seq n) :
     RosterOk store (rosterAt store seq n) := by
-  obtain ⟨⟨x, key, hash, c, _, s1⟩, later⟩ := hf
+  obtain ⟨⟨x, key, hash, c, circles, _, s1⟩, later⟩ := hf
   have first : RosterOk store (rosterAt store seq 1) := by
     constructor <;> intro a m v hv <;>
-      simp only [rosterAt, s1, Roster.after, Roster.apply, seat_current] at hv ⊢
+      simp only [rosterAt, s1, Roster.after, Roster.apply] at hv ⊢
     · split at hv
-      · rename_i same; simp [same.2]
+      · rename_i same; simp [same.1]
       · cases hv
     · split at hv
-      · rename_i same; simp [same.2, hv]
+      · rename_i same
+        cases hv
+        simp [same.1]
       · cases hv
   have up : ∀ j, j + 1 ≤ n → RosterOk store (rosterAt store seq (j + 1)) := by
     intro j
@@ -604,13 +632,13 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
   | entry author outer change =>
     obtain ⟨allow, copies, -, -⟩ := legal_entry yes
     cases change with
-    | create key hash c => simp [allowed] at allow
+    | create key hash c circles => simp [allowed] at allow
     | admit m admin c key hash =>
       simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq,
         List.all_eq_true, Option.isNone_iff_eq_none] at allow
       obtain ⟨⟨_, _⟩, ⟨⟨notStore, unused⟩, empty⟩⟩ := allow
       intro i hi ha x v hv
-      simp only [advance, Slot.event, step, carried] at hi ⊢
+      simp only [advance, Slot.event, step, List.map_cons, List.map_nil, List.cons_append, carried] at hi ⊢
       simp only [Roster.after, Roster.apply, seat_current] at hv
       rcases List.mem_cons.mp hi with rfl | old
       · simp only at ha
@@ -663,7 +691,7 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
         List.all_eq_true, Option.isNone_iff_eq_none] at allow
       obtain ⟨⟨_, _⟩, ⟨⟨notStore, unused⟩, empty⟩⟩ := allow
       intro i hi ha x v hv
-      simp only [advance, Slot.event, step, carried] at hi ⊢
+      simp only [advance, Slot.event, step, List.map_cons, List.map_nil, List.cons_append, carried] at hi ⊢
       simp only [Roster.after, Roster.apply, seat_current] at hv
       rcases List.mem_cons.mp hi with rfl | old
       · simp only at ha
@@ -695,7 +723,7 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
       obtain ⟨⟨⟨⟨y, hy⟩, _⟩, fresh⟩, empty⟩ := allow
       intro i hi ha x v hv
       simp only [Roster.after, Roster.apply, seat_current] at hv
-      simp only [advance, Slot.event, step, carried, List.nil_append, List.mem_cons] at hi ⊢
+      simp only [advance, Slot.event, step, List.map_cons, List.map_nil, List.cons_append, carried, List.nil_append, List.mem_cons] at hi ⊢
       rcases hi with rfl | old
       · simp only at ha
         subst ha
@@ -730,7 +758,7 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
       · exact done i hi ha x v hv
     | leaveCircle circle m key hash =>
       intro i hi ha x v hv
-      simp only [advance, Slot.event, step, carried, List.nil_append, List.mem_cons] at hi ⊢
+      simp only [advance, Slot.event, step, List.map_cons, List.map_nil, List.cons_append, carried, List.nil_append, List.mem_cons] at hi ⊢
       simp only [Roster.after, Roster.apply, seat_current] at hv
       rcases hi with rfl | old
       · simp only at ha
@@ -748,7 +776,7 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
     | rotate key hash =>
       intro i hi ha x v hv
       simp only [Roster.after, Roster.apply] at hv
-      simp only [advance, Slot.event, step, carried, List.nil_append, List.mem_cons] at hi ⊢
+      simp only [advance, Slot.event, step, List.map_cons, List.map_nil, List.cons_append, carried, List.nil_append, List.mem_cons] at hi ⊢
       rcases hi with rfl | old
       · simp only at ha
         subst ha
@@ -771,16 +799,20 @@ theorem audience_complete {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
     induction j with
     | zero =>
       intro _
-      obtain ⟨⟨x, key, hash, c, _, s1⟩, _⟩ := hf
+      obtain ⟨⟨x, key, hash, c, circles, _, s1⟩, _⟩ := hf
       intro i hi ha m v hv
-      simp only [keysAt, advance, s1, Slot.event, step, carried, List.mem_cons,
-        List.not_mem_nil, or_false, List.append_nil] at hi ⊢
-      subst hi
-      simp only [rosterAt, s1, Roster.after, Roster.apply, seat_current] at hv
+      simp only [keysAt, advance, s1, Slot.event, step, List.map_cons,
+        carried, List.mem_cons, List.mem_map,
+        List.append_nil] at hi ⊢
+      simp only [rosterAt, s1, Roster.after, Roster.apply] at hv
       split at hv
       · rename_i same
         cases hv
-        simp [same.2]
+        obtain ⟨hm, _⟩ := same
+        subst hm
+        rcases hi with rfl | ⟨p, hp, rfl⟩
+        · simp
+        · exact Or.inr ⟨p, hp, rfl⟩
       · cases hv
     | succ j ih =>
       intro below

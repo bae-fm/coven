@@ -11,17 +11,28 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{ClaimAttempt, ClaimWork, Database};
 use coven_format::{
-    admin::StoreChange,
+    admin::{CreationCircle, StoreChange},
     path::ObjectPath,
     sequence::{SlotFrame, SlotHeader},
 };
-use coven_foundation::id_source::{DeviceId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 use coven_merge::Slot;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
-/// What slot 1 sets up: the store, its first admin and device, and the
-/// first store key `ring` holds.
+/// A circle slot 1 makes, whose first key `ring` holds.
+#[derive(Clone, Debug)]
+pub struct NewCircle {
+    /// The circle's id.
+    pub circle: CircleId,
+    /// The circle's name.
+    pub name: String,
+    /// The circle's first key.
+    pub key: KeyId,
+}
+
+/// What slot 1 sets up: the store, its first admin and device, the first
+/// store key and the circles' first keys `ring` holds.
 pub struct Creation<'a> {
     /// The new store's id.
     pub store: StoreId,
@@ -33,17 +44,34 @@ pub struct Creation<'a> {
     pub device_name: String,
     /// The first admin, who signs slot 1.
     pub member: &'a MemberIdentity,
-    /// The custody ring holding the first store key and no other.
+    /// The circles the creator's first write asks for, each with the
+    /// creator as its first member.
+    pub circles: Vec<NewCircle>,
+    /// The custody ring holding the first store key and each circle's first
+    /// key, and no other.
     pub ring: &'a StoreKeyring,
 }
 
 /// Seal slot 1, journal its exact bytes as this device's attempt at it with
 /// the operation that sends it, and apply it, all in `database`. The store is
 /// not published yet, so no other device can claim slot 1 first; setup
-/// later sends these bytes (§10.3). The creator's copy of the store key
-/// rides in slot 1's clear prefix, as an admission's copies do (§12.1).
+/// later sends these bytes (§10.3). The creator's copy of each key slot 1
+/// introduces rides in its clear prefix, as an admission's copies do (§12.1).
 pub async fn decide_creation(database: &Database, creation: Creation<'_>) -> Result<(), SyncError> {
-    let Creation { store, name, device, device_name, member, ring } = creation;
+    let Creation { store, name, device, device_name, member, circles, ring } = creation;
+    let breaking_version = database.breaking_version().await?;
+    let circles = circles
+        .into_iter()
+        .map(|new| {
+            Ok(CreationCircle {
+                key_hash: ring.circle_key(new.circle, new.key)?.hash(),
+                circle: new.circle,
+                name: new.name,
+                breaking_version,
+                key: new.key,
+            })
+        })
+        .collect::<Result<Vec<_>, SyncError>>()?;
     let key =
         ring.store_key_ids().next().ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
     let change = StoreChange::CreateStore {
@@ -53,6 +81,7 @@ pub async fn decide_creation(database: &Database, creation: Creation<'_>) -> Res
         key,
         key_hash: ring.store_key(key)?.hash(),
         device_name,
+        circles,
     };
     let history = History::default();
     let copies = required_copies(&history, ring, &change, member.member());

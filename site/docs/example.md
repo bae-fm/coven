@@ -86,7 +86,7 @@ let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .namespaces(namespaces())
     .migrations(migrations())
-    .create_store("Household", "Ana's phone")
+    .create_store("Household", "Ana's phone", &[], |_, _| Ok(()))
     .await?;
 ```
 

@@ -100,6 +100,34 @@ impl Clock for JoinClock {
     }
 }
 
+/// Ana's first write, made as Household was created, puts a row in her
+/// private circle. A device restored from her code reads the circle's key
+/// from the copy slot 1 carries, and so reads that row (§10.3).
+#[tokio::test]
+async fn a_restored_device_reads_the_row_the_creating_write_made_in_a_circle() {
+    let owner = Owner::created(&["Private"], |write, circles| {
+        write.execute(
+            "INSERT INTO circle_notes VALUES('00000000-0000-4000-8000-000000000001','mine',?1)",
+            [circles[0].to_string()],
+        )?;
+        Ok(())
+    })
+    .await;
+    let install = Installation::new();
+    let restored = install.restore(&owner).await;
+    let titles: Vec<String> = restored
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query("SELECT body FROM circle_notes", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(titles, ["mine"]);
+    let circles = restored.circles().list().await.unwrap();
+    assert_eq!(circles.iter().map(|circle| circle.name.as_str()).collect::<Vec<_>>(), ["Private"]);
+    restored.close().await.unwrap();
+    owner.close().await;
+}
+
 #[tokio::test]
 async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
     let owner = Owner::new(CloudProvider::S3, true).await;

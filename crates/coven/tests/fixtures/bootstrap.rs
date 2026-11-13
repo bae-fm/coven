@@ -4,14 +4,18 @@ use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::RecordingClock;
 
 pub(super) fn tables() -> Vec<SyncedTable> {
-    vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
+    vec![
+        SyncedTable::new("notes", RowIdentity::SharedKey),
+        SyncedTable::new("circle_notes", RowIdentity::IndependentUuid).audience_column("audience"),
+    ]
 }
 
 pub(super) fn migrations() -> Vec<Migration> {
     vec![Migration::addition(
         1,
         "notes",
-        "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL, body BLOB NOT NULL)",
+        "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL, body BLOB NOT NULL); \
+         CREATE TABLE circle_notes(id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL, audience TEXT NOT NULL)",
     )]
 }
 
@@ -68,6 +72,32 @@ impl Owner {
             .unwrap();
         network.sync(0).await;
         // Passes read join requests and approve them; the loop keeps running.
+        handle.start_sync().await.unwrap();
+        Self { network, directory, handle, member, storage, clock, code, often: Default::default() }
+    }
+
+    /// Ana's store as `create_store` made it, with `circles` and her
+    /// `creating` write, and set up on S3, with no other rows.
+    pub(super) async fn created<F>(circles: &[&str], creating: F) -> Self
+    where
+        F: FnOnce(&MemberWrite<'_>, &[CircleId]) -> CovenResult<()> + Send + 'static,
+    {
+        let network = crate::tests::Network::with_creation(
+            CloudProvider::S3,
+            tables(),
+            migrations(),
+            circles,
+            creating,
+        )
+        .await;
+        let device = &network.devices[0];
+        let handle = device.handle.clone();
+        let directory = device.app.store_dir(&device.store);
+        let storage = device.storage.clone();
+        let clock = network.clock.clone();
+        let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
+        let member = MemberIdentity::new(code.member, code.member_keys.clone());
+        network.sync(0).await;
         handle.start_sync().await.unwrap();
         Self { network, directory, handle, member, storage, clock, code, often: Default::default() }
     }

@@ -11,10 +11,10 @@ def held : Custody Nat := fun k => if k = old then some 10 else if k = fresh the
 def current : Current Nat Nat := fun _ m => if m = 1 then some 2 else none
 
 def slots : Nat → Event Nat Nat
-  | 1 => .introduce old 10
+  | 1 => .introduce [(old, 10)]
   | 2 => .copy ⟨old, 2, 1⟩
   | 3 => .copy ⟨fresh, 1, 2⟩
-  | 4 => .introduce fresh 20
+  | 4 => .introduce [(fresh, 20)]
   | _ => .other
 
 theorem tentative_not_accepted :

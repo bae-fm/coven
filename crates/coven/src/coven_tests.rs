@@ -263,7 +263,8 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
     let builder = || {
         app.builder().synced_tables(vec![]).migrations(vec![]).storage_connector(storage.clone())
     };
-    let handle = builder().create_store("Household", "Test device").await.unwrap();
+    let handle =
+        builder().create_store("Household", "Test device", &[], |_, _| Ok(())).await.unwrap();
     let directory = app.store_dir(&handle.store_id());
     assert_eq!(handle.storage_config().await.unwrap(), None);
     assert_eq!(Coven::storage_config(&directory).await.unwrap(), None);
@@ -309,7 +310,8 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
 async fn device_id_is_available_before_setup_and_survives_reopen() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
-    let handle = builder(&app).create_store("Household", "Test device").await.unwrap();
+    let handle =
+        builder(&app).create_store("Household", "Test device", &[], |_, _| Ok(())).await.unwrap();
     let store = handle.store_id();
     let device = handle.device_id();
     assert_eq!(handle.clone().device_id(), device);
@@ -544,7 +546,7 @@ fn calls_on_a_runtime_that_shut_down_are_shutdowns() {
             "{:?}",
             opened.map(drop)
         );
-        let created = builder(&app).create_store("Work", "Test device").await;
+        let created = builder(&app).create_store("Work", "Test device", &[], |_, _| Ok(())).await;
         assert!(
             matches!(created, Err(StoreCreationError::Shutdown(Shutdown { .. }))),
             "{:?}",
