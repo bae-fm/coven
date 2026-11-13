@@ -70,13 +70,12 @@ pub(crate) fn pin_progress(
         bytes_cached: 0,
         bytes_total: 0,
     };
-    let too_large =
-        || DbError::TooLarge { field: "requested file bytes", actual: u64::MAX, maximum: u64::MAX };
     for file in files {
         let cached = covered(db, file, device)?;
-        progress.bytes_cached = progress.bytes_cached.checked_add(cached).ok_or_else(too_large)?;
+        progress.bytes_cached =
+            crate::sqlite::add_total("requested file bytes cached", progress.bytes_cached, cached)?;
         progress.bytes_total =
-            progress.bytes_total.checked_add(file.size()).ok_or_else(too_large)?;
+            crate::sqlite::add_total("requested file bytes", progress.bytes_total, file.size())?;
         let whole = match file.place() {
             crate::FilePlace::DeviceOnly { device: on } => on == device,
             crate::FilePlace::Cloud { .. } => crate::database::file_database::cache_kept(db, file)?,

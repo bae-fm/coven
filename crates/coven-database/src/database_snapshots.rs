@@ -18,20 +18,18 @@ impl Database {
     ) -> Result<u64, DbError> {
         self.call(move |inner| {
             inner.access.with_committed(|db| {
-                let too_large = || DbError::TooLarge {
-                    field: "snapshot slot bytes", actual: u64::MAX, maximum: u64::MAX - 1,
-                };
                 let mut bytes = 0u64;
                 db.for_each("SELECT s.size FROM _coven_write_slot_audiences a JOIN _coven_write_slots s ON s.slot=a.slot WHERE a.audience=?1 AND a.slot>?2",
                     rusqlite::params![audience, after.to_be_bytes()], |row| {
                         let size = u64::try_from(row.get::<_, i64>(0)?).map_err(|_negative| DbError::DamagedDatabase)?;
-                        bytes = bytes.checked_add(size).ok_or_else(too_large)?;
+                        bytes = crate::sqlite::add_total("snapshot slot bytes", bytes, size)?;
                         Ok::<_, DbError>(())
                     })?;
                 if audience == coven_merge::Audience::Store {
                     let records: i64 = db.query_row("SELECT coalesce(sum(length(record)),0) FROM _coven_slot_records WHERE slot>?1",
                         [after.to_be_bytes()], |row| row.get(0))?;
-                    bytes = u64::try_from(records).ok().and_then(|records| bytes.checked_add(records)).ok_or_else(too_large)?;
+                    let records = u64::try_from(records).map_err(|_negative| DbError::DamagedDatabase)?;
+                    bytes = crate::sqlite::add_total("snapshot slot bytes", bytes, records)?;
                 }
                 Ok(bytes)
             })

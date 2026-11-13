@@ -953,6 +953,12 @@ pub(crate) fn integer(field: &'static str, value: u64) -> Result<i64, DbError> {
     })
 }
 
+/// `total` plus `addend`; a sum past `u64::MAX` is `TotalTooLarge`, naming
+/// the running total and the addend that did not fit.
+pub(crate) fn add_total(field: &'static str, total: u64, addend: u64) -> Result<u64, DbError> {
+    total.checked_add(addend).ok_or(DbError::TotalTooLarge { field, total, addend })
+}
+
 #[cfg(test)]
 #[path = "sqlite_tests.rs"]
 pub(crate) mod tests;

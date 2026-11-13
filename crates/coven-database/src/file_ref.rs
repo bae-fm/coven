@@ -54,6 +54,13 @@ pub enum FilePlace<'a> {
 }
 
 impl FileRef {
+    /// This reference with a size its record never held, for tests of what
+    /// sums sizes (a real file this large cannot be staged).
+    #[cfg(test)]
+    pub(crate) fn planted_size(mut self, size: u64) -> Self {
+        self.size = size;
+        self
+    }
     /// The file's id, which rows name.
     pub fn id(&self) -> FileId {
         self.id

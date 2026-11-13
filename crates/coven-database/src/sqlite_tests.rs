@@ -966,3 +966,15 @@ async fn a_profile_ends_on_every_path_out_of_its_run() {
     });
     db.close().await.unwrap();
 }
+
+/// A sum past `u64::MAX` carries the running total and the term that did not
+/// fit; a sum that fits is the sum.
+#[test]
+fn add_total_names_the_terms_that_overflow() {
+    assert_eq!(add_total("bytes", u64::MAX - 3, 3).unwrap(), u64::MAX);
+    let error = add_total("bytes", u64::MAX - 3, 4).unwrap_err();
+    assert!(matches!(
+        error,
+        DbError::TotalTooLarge { field: "bytes", total, addend: 4 } if total == u64::MAX - 3
+    ));
+}

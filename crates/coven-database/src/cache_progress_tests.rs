@@ -56,3 +56,29 @@ async fn a_live_pin_answer_follows_coven_pins() {
     assert_eq!(db.files_pinned(vec![file, absent]).await.unwrap(), [Some(true), None]);
     db.close().await.unwrap();
 }
+
+/// Requested files whose sizes add past `u64::MAX` are refused naming the
+/// running total and the size that did not fit, not a stand-in maximum.
+#[tokio::test]
+async fn pin_progress_sum_past_u64_names_the_real_numbers() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"bytes".to_vec(), true).await.unwrap();
+    let file = db.file_ref(file).await.unwrap();
+    let half = u64::MAX / 2 + 1;
+    let files = vec![file.clone().planted_size(half), file.planted_size(half)];
+    let error = db.pin_progress(files).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::TotalTooLarge { field: "requested file bytes cached", total, addend }
+                if total == half && addend == half
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "requested file bytes cached total 9223372036854775808 plus 9223372036854775808 exceeds 18446744073709551615"
+    );
+    db.close().await.unwrap();
+}

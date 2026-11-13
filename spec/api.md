@@ -1536,6 +1536,9 @@ pub enum DbError {
     /// A value or row exceeds the format (§4), or a write's plaintext or sealed
     /// bytes cannot fit in a SQLite value and its queue row (§6.3).
     TooLarge { field: &'static str, actual: u64, maximum: u64 },
+    /// A sum of sizes passes `u64::MAX`: the running total and the term that
+    /// did not fit.
+    TotalTooLarge { field: &'static str, total: u64, addend: u64 },
     /// The write directly changed another member's row (§9.6). The
     /// transaction, including its upload record, did not commit.
     NotOwner { table: String, key: RowKey, owner: MemberId },

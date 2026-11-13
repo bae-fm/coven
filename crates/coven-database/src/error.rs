@@ -317,6 +317,16 @@ pub enum DbError {
         /// Its maximum length.
         maximum: u64,
     },
+    /// A sum of sizes passes `u64::MAX`, so no total exists to report.
+    #[error("{field} total {total} plus {addend} exceeds {}", u64::MAX)]
+    TotalTooLarge {
+        /// The summed quantity.
+        field: &'static str,
+        /// The sum so far.
+        total: u64,
+        /// The next term, which did not fit.
+        addend: u64,
+    },
     /// A reference reaches an audience the source row's readers cannot read (§15.3).
     #[error("reference {table}.{column} at {key:?} reaches another audience")]
     ReferenceAudience {
