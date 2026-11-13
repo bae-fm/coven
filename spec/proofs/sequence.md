@@ -1006,6 +1006,15 @@ and moves its coverage forward over them.
   in the model's body and not in coven's. The honest-body premise below is the
   model's body, so the model's theorems don't cover coven's body for such a
   part.
+- `holder_body_is_rebuilt`: a holder that queues a fresh marker and rebuilds
+  the circle from storage at the marker's read slot `m'` gets the model's body
+  at `m'`, the same as a rebuilder (`rebuilt_body_honest` with `m'` as the
+  rebuild slot).
+- `write_before_fresh_marker_kept`: a write that landed after the holder's
+  first migration and before the fresh marker's read slot is in that body, even
+  under `Drop`.
+- `write_after_fresh_marker_late`: a part after the marker's read slot is a late
+  write, which `Drop` leaves out, as for any rebuilder.
 
 [`SecondRaise`](sequence/CovenSequence/SecondRaise.lean) takes a device that
 read a circle after its first breaking migration and runs a second one before

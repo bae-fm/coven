@@ -237,6 +237,9 @@ import SequenceApply
 #print axioms CovenSequence.WriteVersion.satisfied_raise_never_counts
 #print axioms CovenSequence.RaiseBody.one_part_agrees
 #print axioms CovenSequence.RaiseBody.late_part_differs
+#print axioms CovenSequence.RaiseBody.holder_body_is_rebuilt
+#print axioms CovenSequence.RaiseBody.write_before_fresh_marker_kept
+#print axioms CovenSequence.RaiseBody.write_after_fresh_marker_late
 #print axioms CovenSequence.SecondRaise.second_capture_not_body
 #print axioms CovenSequence.SecondRaise.skipped_capture_drops_held
 #print axioms CovenSequence.SecondRaise.rebuilt_second_capture_is_body
