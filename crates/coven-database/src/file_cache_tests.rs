@@ -128,6 +128,21 @@ async fn cache_counters_follow_their_records() {
     db.close().await.unwrap();
 }
 
+/// A namespace with no budget row has no cached count either: reading it is
+/// `UndeclaredNamespace`, never 0 bytes.
+#[tokio::test]
+async fn an_undeclared_namespace_has_no_cached_count() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    db.inspect_writer(|sql| {
+        assert!(matches!(
+            super::cached(sql, "missing"),
+            Err(DbError::UndeclaredNamespace { namespace }) if namespace == "missing"
+        ));
+    });
+    db.close().await.unwrap();
+}
+
 /// A pinned entry's bytes are counted as pinned, not as cached: a published
 /// pin, then the entries trimmed and evicted around it.
 #[tokio::test]

@@ -372,14 +372,14 @@ pub(crate) fn set_budget(
     Ok(())
 }
 /// The namespace's cached bytes: its chunks' and headers', which its budget
-/// counts. Maintained with its cache records.
+/// counts. Maintained with its cache records. An undeclared namespace is
+/// `UndeclaredNamespace`, not zero bytes.
 pub(crate) fn cached(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
-    Ok(db
-        .query("SELECT cached FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
-            r.get::<_, i64>(0)
-        })?
-        .pop()
-        .unwrap_or(0))
+    db.query("SELECT cached FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
+        r.get::<_, i64>(0)
+    })?
+    .pop()
+    .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })
 }
 /// Evict over-budget entries in a transaction of their own; returns their
 /// recorded names, whose bytes the caller removes once the writer is free
