@@ -495,9 +495,10 @@ import SequenceApply
 #print axioms CovenSequence.FirstInstallation.unchecked_refusal_misjudged
 #print axioms CovenSequence.FirstInstallation.loaded_first_lists_admitted
 #print axioms CovenSequence.FirstInstallation.refused_syncs_forever
-#print axioms CovenSequence.FirstInstallation.invitee_kept
-#print axioms CovenSequence.FirstInstallation.acknowledge_idempotent
-#print axioms CovenSequence.FirstInstallation.published_join_loses_invitee
+#print axioms CovenSequence.FirstInstallation.profile_with_registration
+#print axioms CovenSequence.FirstInstallation.acknowledged_profile_lags
+#print axioms CovenSequence.JoiningWrite.every_device_has_profile
+#print axioms CovenSequence.JoiningWrite.device_record_lost
 #print axioms CovenSequence.FirstInstallation.pairing_strands_join
 #print axioms CovenSequence.FirstInstallation.pairing_strands_restore
 #print axioms CovenSequence.FirstInstallation.pairing_unlisted

@@ -1416,16 +1416,15 @@ acceptance it records first; a decline's acceptance ends with the invite, and
 an approval's becomes the store's access. A join finds its admission, which
 registered its device, by the copies it carries; the published store's
 first load applies it, counted or refused. The app drops either call at any
-point, and records the person's profile from the name the join's request carried,
-acknowledging the name the store keeps. A pairing keeps nothing on the device
+point, and the app records the person's profile. A pairing keeps nothing on the device
 until its restore records itself, when it becomes a restore; cancelled,
 dropped or failed before, it removes the installation. Under `Rules.correct` a
 restore refuses an installation holding an invite code, a pairing one holding
 an invite code or a restore's record, and a join one holding a restore's
 record, a join records that it is accepting before it accepts, a
 join publishes the store in the step that finds its admission, a store whose
-first load leaves its device never a member stops for good, and publishing
-keeps the person's name its request carried with the store.
+first load leaves its device never a member stops for good, and the joining
+write commits in the step that first applies the device's registration.
 
 - `wrong_account_keeps_join`, `wrong_account_trace`: a join that has not
   proven the account it is signed in as is the account the invite was shared
@@ -1441,10 +1440,9 @@ keeps the person's name its request carried with the store.
   listed as no join, with no call on it.
 - `refused_stops`: a store a join published whose first load reached the end
   of the sequence counts its device a member; a refused admission stopped it.
-- `invitee_kept`: a store a join published keeps the person's name its
-  request carried until the app acknowledges it, whatever happens between.
-- `acknowledge_idempotent`: acknowledging the name again is allowed and
-  changes nothing.
+- `profile_with_registration`: every reachable world whose loaded history
+  registers the device has the person's profile committed, since the joining
+  write commits in the step that first applies the registration.
 - `pairing_unlisted`, `pairing_refused`, `pairing_cancel_leaves_nothing`: a
   pairing has no code, record, request or registration on the device; it is
   refused an installation holding an invite code or a restore's record; and
@@ -1475,9 +1473,22 @@ and the call stops while it loads, its storage access lost; the join stays
 listed with nothing left to do. Without the fourth,
 `refused_syncs_forever`: a store whose first load applied a refused
 admission syncs on unregistered, with no step left that would end it.
-Without the fifth, `published_join_loses_invitee`: the join publishes,
-deleting its code, and the app hasn't recorded the person's profile; the
-name is nowhere on the device.
+Without the fifth, `acknowledged_profile_lags`: the app writes the person's
+profile in a write of its own after the load, so a registered member exists
+without it until that write, and for good if the app quits first.
+
+[`JoiningWrite`](sequence/CovenSequence/JoiningWrite.lean) follows one
+member's devices through a join, a restore or a pairing's new device, a lost
+phone and a landed write. The join's facts, the name and the circle the
+admission made, live in the member's state in history, and the app's joining
+write runs as each device's registration applies.
+
+- `every_device_has_profile`: each device of the member whose registration
+  applied has the profile, whichever devices were lost and whether or not
+  the first write landed.
+- `device_record_lost`: with the facts kept only on the joining phone, a
+  phone lost before its write lands leaves a restored device registered with
+  the member and no profile, in every extension.
 
 [`DeviceReplacement`](sequence/CovenSequence/DeviceReplacement.lean)
 models `reset_device` and `restore_device` past loading (§19.3, §13.1): the

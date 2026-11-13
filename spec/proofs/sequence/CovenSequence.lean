@@ -45,6 +45,7 @@ import CovenSequence.InviteClaims
 import CovenSequence.AccessKeyReplacement
 import CovenSequence.RestoreRegistration
 import CovenSequence.FirstInstallation
+import CovenSequence.JoiningWrite
 import CovenSequence.DeviceReplacement
 import CovenSequence.StoreDiscard
 import CovenSequence.StoreDeletion
