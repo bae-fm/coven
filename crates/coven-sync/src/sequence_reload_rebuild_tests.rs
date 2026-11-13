@@ -313,3 +313,49 @@ async fn a_device_ahead_of_the_stores_raise_rebuilds_and_raises_the_store() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana, on the old app, publishes a floor past what Cy has applied; Cy's app,
+/// which has gone past a raise of the store no one made, loads that floor.
+/// Its store snapshot is at the old version, which his database can't hold, so
+/// the store waits for its rebuild, which Cy raises himself instead of waiting
+/// for an older app to update (§18.3).
+#[tokio::test]
+async fn a_floor_whose_store_snapshot_is_below_the_version_is_rebuilt() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let cy = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &cy).await;
+    let applied = cy.database().applied_slot().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let cy = group.reopen(cy).await;
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a1", "before").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a2", "after").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    group.clock.set(floor_clock());
+    {
+        let mut session = ana.sync.session.lock().await;
+        let mut ring = ana.sync.ring(&mut session, &ana.identity).await.unwrap();
+        ana.sync.retain_sequence(&mut session, &mut ring, &ana.identity).await.unwrap();
+    }
+    let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
+    assert!(floor.header.first.get() > applied + 1);
+
+    cy.sync.pass().await.unwrap();
+    assert!(cy.database().rebuilds_waiting().await.unwrap().contains_key(&Audience::Store));
+    for _ in 0..6 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    let state = cy.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 2);
+    assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
+    assert_eq!(rows(cy.database()).await, rows(ana.database()).await);
+    for device in [&ana, &cy] {
+        device.sync.database.close().await.unwrap();
+    }
+}

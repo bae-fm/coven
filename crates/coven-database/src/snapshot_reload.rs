@@ -48,10 +48,12 @@ pub struct SnapshotReload<R, W> {
     pub boundaries: Vec<BoundaryCoverage>,
     /// Initiating operation's transition committed with the rows.
     pub operation: Option<OperationUpdate>,
-    /// Circles the slots made readable below this device's breaking version,
-    /// which have no start here: each is gated and waits for its rebuild, with
-    /// the device's migration marker queued for it (§18.3).
-    pub rebuilds: Vec<Audience>,
+    /// Audiences the slots made readable, or the floor holds, below this
+    /// device's breaking version, which have no start here: each is gated and
+    /// waits for its rebuild, with the device's migration marker queued for
+    /// it (§18.3). The slot beside each is the one its rows are counted
+    /// through: the coverage of the snapshot the load leaves unloaded.
+    pub rebuilds: Vec<(Audience, u64)>,
     /// Authentication of other members' write evidence.
     pub authorship: std::sync::Arc<dyn crate::Authorship>,
 }

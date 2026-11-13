@@ -116,6 +116,9 @@ pub(crate) fn load<P: crate::PendingValue>(
                 }
             }
         }
+        for (_, covers) in &rebuilds {
+            coverage.gated(*covers)?;
+        }
         // A published row the reload replaces is read from its snapshot now.
         for audience in &selected {
             database.internal_execute(
@@ -129,7 +132,8 @@ pub(crate) fn load<P: crate::PendingValue>(
             crate::reload_gate::clear_reload(database, audience)?;
         }
         if !rebuilds.is_empty() {
-            crate::rebuild_wait::begin::<P>(database, schema, now, &rebuilds)?;
+            let gated: Vec<_> = rebuilds.into_iter().map(|(audience, _)| audience).collect();
+            crate::rebuild_wait::begin::<P>(database, schema, now, &gated)?;
         }
         if let Some(rebuilt) = rebuilt {
             if !selected.contains(&rebuilt.circle) {

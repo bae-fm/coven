@@ -217,6 +217,7 @@ impl SequenceSync {
                 through,
                 operation: Some(operation),
                 rebuilds: Vec::new(),
+                store_history: None,
             };
             match self
                 .install_selected(session, starts, inputs, ring, member, floor.as_ref(), false)

@@ -308,7 +308,12 @@ impl SequenceSync {
         own_listing: bool,
     ) -> Result<(), SyncError> {
         let forgotten = session.history.forgettable(first, named);
-        if forgotten.is_empty() {
+        // A device whose store waits for its rebuild knows the store's
+        // announcements from the floor's snapshot but holds none of their
+        // original slots: the rebuild's install brings them (§18.3).
+        if forgotten.is_empty()
+            || self.database.rebuilds_waiting().await?.contains_key(&Audience::Store)
+        {
             return Ok(());
         }
         let history = &session.history;

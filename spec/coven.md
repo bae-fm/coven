@@ -9388,13 +9388,18 @@ raise built on them, covering the rebuild slot, counts like any other
 
 **The store's own rebuild.** The store can sit below a device's app too: a
 device on an app that has gone past a raise of the store can't hold that
-raise's body, or a reset's, at the older version. The device doesn't wait for an older app to update
+raise's body, or a reset's, at the older version, nor the floor's snapshot of a
+store nobody raised that far. The device doesn't wait for an older app to update
 and raise the store. It rebuilds the store as it rebuilds a circle: the slot
 that raises or resets the store below the device's version applies with the
 store's rows gated, writes into the store refused with `AudienceReloading`, the
 store's rebuild recorded as waiting, and the device's marker queued, in the one
-commit. A capture of the store the device made when its app migrated is
-dropped there, since the rebuild makes the store's capture when it installs.
+commit. A load of the floor does the same when the floor's store snapshot is
+below the device's version: it reads that snapshot for its history and stages
+none of it, and counts the slots from its coverage. A capture of the store the
+device made when its app migrated is dropped there, since the rebuild makes the
+store's capture when it installs. Until it does, the device forgets no
+announcement, for it holds none of the store's original slots.
 The rebuild reads only the store: it starts from the newest store snapshot at a
 version of at most the store's, which is what a load of the store reads, so
 retention keeps nothing more for it than for a load

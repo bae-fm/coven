@@ -130,8 +130,11 @@ struct ReloadInputs {
     /// The slot `history` holds the slots through.
     through: u64,
     operation: Option<OperationUpdate>,
-    /// Circles the load leaves for their rebuild (§18.3).
+    /// Audiences the load leaves for their rebuild (§18.3).
     rebuilds: Vec<Audience>,
+    /// The floor's store snapshot when the store is among `rebuilds`: read
+    /// for its history and staged nowhere, since the database can't hold it.
+    store_history: Option<ReadSnapshot>,
 }
 
 #[path = "sequence_reload_evidence.rs"]
@@ -438,21 +441,44 @@ impl SequenceSync {
         let breaking = self.database.breaking_version().await?;
         loop {
             let mut tentative_ring = ring.clone();
-            let (history, store_snapshot) = self
-                .floor_start(&floor, &mut tentative_ring, member, progress.as_deref_mut())
-                .await?;
-            // A circle below this database's version takes no snapshot of the
-            // floor, which holds it at that lower version: it waits for its
-            // rebuild, as a circle made readable by a slot does (§18.3).
+            // A store snapshot below this database's version can't be staged
+            // in it: the history is read from it alone (§18.3).
+            let below = breaking > 0
+                && self.floor_store_announcement(&floor, &tentative_ring)?.breaking_version
+                    < breaking;
+            let mut store_history = None;
+            let mut store_snapshot = None;
+            let history = if below {
+                let (history, read) =
+                    self.floor_history(&floor, &mut tentative_ring, member).await?;
+                if history.state.rebuilt_by(&Audience::Store, breaking) {
+                    store_history = Some(read);
+                    history
+                } else {
+                    let (history, selected) = self
+                        .floor_start(&floor, &mut tentative_ring, member, progress.as_deref_mut())
+                        .await?;
+                    store_snapshot = Some(selected);
+                    history
+                }
+            } else {
+                let (history, selected) = self
+                    .floor_start(&floor, &mut tentative_ring, member, progress.as_deref_mut())
+                    .await?;
+                store_snapshot = Some(selected);
+                history
+            };
+            // An audience below this database's version takes no snapshot of
+            // the floor, which holds it at that lower version: it waits for
+            // its rebuild, as one made readable by a slot does (§18.3).
             let rebuilds: Vec<Audience> = history
                 .state
                 .readable_audiences(&member.member())
                 .into_iter()
-                .filter(|audience| {
-                    *audience != Audience::Store && history.state.rebuilt_by(audience, breaking)
-                })
+                .filter(|audience| history.state.rebuilt_by(audience, breaking))
                 .collect();
-            let mut starts = vec![ReloadStart::Stored(store_snapshot)];
+            let mut starts: Vec<ReloadStart> =
+                store_snapshot.into_iter().map(ReloadStart::Stored).collect();
             let selected = async {
                 for original in floor.announcements.iter().skip(1) {
                     let announcement = history
@@ -484,6 +510,7 @@ impl SequenceSync {
             let target = starts
                 .iter()
                 .map(|start| start.covers(session.through))
+                .chain(store_history.iter().map(|read| read.announcement().covers))
                 .max()
                 .expect("store snapshot")
                 .max(session.through);
@@ -497,6 +524,7 @@ impl SequenceSync {
                         through: floor.header.at,
                         operation: None,
                         rebuilds: rebuilds.clone(),
+                        store_history,
                     },
                     &mut tentative_ring,
                     member,
@@ -651,7 +679,14 @@ impl SequenceSync {
             .install_selected(
                 session,
                 starts,
-                ReloadInputs { target, history, through, operation: None, rebuilds: Vec::new() },
+                ReloadInputs {
+                    target,
+                    history,
+                    through,
+                    operation: None,
+                    rebuilds: Vec::new(),
+                    store_history: None,
+                },
                 &mut ring,
                 member,
                 floor.as_ref(),
@@ -705,10 +740,11 @@ impl SequenceSync {
         previous_floor: Option<&FloorObject>,
         reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
-        let ReloadInputs { target, history, through, operation, rebuilds } = inputs;
+        let ReloadInputs { target, history, through, operation, rebuilds, store_history } = inputs;
         let first = starts
             .iter()
             .map(|start| start.covers(session.through))
+            .chain(store_history.iter().map(|read| read.announcement().covers))
             .min()
             .expect("reload audience");
         let mut rows = 0;
@@ -728,7 +764,13 @@ impl SequenceSync {
                     store_snapshot.announcement().covers,
                 )
             }
-            None => (session.history.clone(), session.through),
+            None => match &store_history {
+                Some(read) => (
+                    History::restore(&read.body().originals, self.store(), ring, member)?,
+                    read.announcement().covers,
+                ),
+                None => (session.history.clone(), session.through),
+            },
         };
         let started = self.clock.elapsed();
         let mut bytes = 0;
@@ -835,7 +877,16 @@ impl SequenceSync {
                     boundaries: at_target.boundaries.clone(),
                     provider_access: at_target.provider_access(member.member())?,
                     operation,
-                    rebuilds,
+                    rebuilds: rebuilds
+                        .into_iter()
+                        .map(|audience| {
+                            let covers = match (&audience, &store_history) {
+                                (Audience::Store, Some(read)) => read.announcement().covers,
+                                _ => target,
+                            };
+                            (audience, covers)
+                        })
+                        .collect(),
                     authorship,
                 },
                 reporting.then(|| ProgressReport::of(&self.progress, self.clock.clone())),
