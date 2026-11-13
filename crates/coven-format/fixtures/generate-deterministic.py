@@ -421,7 +421,7 @@ def changes(sodium):
         b"\x07" + CIRCLE + text(b"N"),
         b"\x08" + CIRCLE,
         b"\x09" + CIRCLE + ANA,
-        b"\x0a" + CIRCLE + ANA,
+        b"\x0a" + CIRCLE + ANA + bytes([5]) * 16 + bytes([0xB3]) * 32,
         b"\x0b" + u32(2) + u64(7),
         b"\x0d" + u64(8),
         b"\x0e" + ANA + b"\x01" + text(b"replacement-key"),
