@@ -88,7 +88,18 @@ impl AudienceDatabase {
         let (mut circles, mut staged) = (BTreeSet::new(), Vec::new());
         database.transaction(|scratch| {
             scratch.batch("PRAGMA defer_foreign_keys=ON")?;
-            for sql in before.create_sql("table") {
+            // A virtual table's shadow tables come with it, and SQLite
+            // refuses to create one by name. Their rows are the virtual
+            // table's own and not synced: the copy holds the table empty.
+            let shadows: BTreeSet<String> = live
+                .query(
+                    "SELECT lower(name) FROM pragma_table_list WHERE schema='main' AND type='shadow'",
+                    [],
+                    |r| r.get(0),
+                )?
+                .into_iter()
+                .collect();
+            for sql in before.create_table_sql(&shadows) {
                 scratch.batch(sql)?;
             }
             for table in before.tables.values() {

@@ -308,3 +308,30 @@ async fn a_table_local_until_the_run_holds_its_rows_in_every_run() {
     assert_eq!(db.schema_version().await.unwrap(), 2);
     db.close().await.unwrap();
 }
+
+fn with_search_index() -> Migration {
+    Migration::addition(
+        1,
+        "pins",
+        Box::leak(
+            format!("{SCHEMA}; CREATE VIRTUAL TABLE pin_search USING fts5(note)").into_boxed_str(),
+        ),
+    )
+}
+
+#[tokio::test]
+async fn a_breaking_migration_runs_over_a_schema_with_a_full_text_index() {
+    let store = TestStore::new();
+    library_from(&store, &[gifts()], with_search_index, tables()).await;
+    let db = match store
+        .builder(tables(), vec![with_search_index(), breaking("UPDATE pins SET tally=1")])
+        .open()
+        .await
+    {
+        Ok(db) => db,
+        Err(error) => panic!("{:?}", database_error(error)),
+    };
+    assert_eq!(db.schema_version().await.unwrap(), 2);
+    db.close().await.unwrap();
+    no_scratch_file(&store);
+}

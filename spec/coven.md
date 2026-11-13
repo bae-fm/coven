@@ -9134,7 +9134,9 @@ is checked against §18.1's rule before anything commits. Coven runs the same
 migrations again, once per audience the device reads, each time in a database
 of its own holding only that audience's rows and the store's as they were
 before the run, with the local tables empty and coven's views showing nothing
-of this device. That database is the file `audiences.db` in the store's
+of this device. A virtual table, an FTS5 index among them, is recreated there
+empty, its shadow tables made by creating it and never by name; it is local, so
+no audience's run compares it. That database is the file `audiences.db` in the store's
 folder, which exists only while the run is checked and is removed when it ends,
 however it ends. It runs the store alone, then each circle with the store.
 After each run, the audience's rows must equal its rows after the real run,

@@ -115,6 +115,21 @@ impl Schema {
             .filter_map(|(_, object)| object.sql.as_deref())
     }
 
+    /// The SQL that creates each of the app's tables but its virtual tables'
+    /// shadow tables, by name: SQLite refuses to create one by name, and
+    /// creating the virtual table makes its own.
+    pub(crate) fn create_table_sql<'s>(
+        &'s self,
+        shadows: &'s BTreeSet<String>,
+    ) -> impl Iterator<Item = &'s str> + 's {
+        self.objects
+            .iter()
+            .filter(move |((kind, name), _)| {
+                kind == "table" && !shadows.contains(&name.to_ascii_lowercase())
+            })
+            .filter_map(|(_, object)| object.sql.as_deref())
+    }
+
     /// The app's triggers, each as its name and the SQL that creates it.
     pub(crate) fn triggers(&self) -> Vec<(String, String)> {
         self.objects
