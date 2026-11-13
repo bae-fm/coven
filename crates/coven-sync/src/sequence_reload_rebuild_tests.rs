@@ -193,3 +193,70 @@ async fn a_floor_reload_leaves_a_circle_below_the_version_gated_for_its_rebuild(
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana raises the store to 2, which Cy applies on 2; Ben, on 2, then makes
+/// Garden and adds Cy; Ana's next update raises the store to 4, and Cy's app
+/// updates to 4 before he applies any of Garden. Garden is at 2: the only store snapshot at a version of at most 2 is
+/// Ana's raise body, so the rebuild starts the store from a raise body, with
+/// the store's raise to 4 left unread (§18.3).
+#[tokio::test]
+async fn a_rebuild_starts_the_store_from_a_raise_body() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let cy = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &cy).await;
+    cy.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let ben = group.reopen(ben).await;
+    let cy = group.reopen(cy).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    for _ in 0..2 {
+        ben.sync.pass().await.unwrap();
+        cy.sync.pass().await.unwrap();
+    }
+    let garden = ben.sync.create_circle("Garden".into()).await.unwrap();
+    pin(ben.database(), EARLY, garden, "early").await;
+    // The pin goes out before the admission, so the rebuild reads it.
+    ben.sync.pass().await.unwrap();
+    ben.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: cy.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    group.version.store(4, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    let cy = group.reopen(cy).await;
+    cy.sync.pass().await.unwrap();
+    let input = cy.database().waiting_snapshot_headers().await.unwrap()[0].header.read_through;
+    {
+        let session = cy.sync.session.lock().await;
+        let state = &session.history.state;
+        assert_eq!(state.reached(&Audience::Circle(garden)), 2);
+        assert_eq!(state.reached(&Audience::Store), 4);
+        let starts = session.history.rebuild_starts(garden, 2, input);
+        let store = starts.store.expect("the store has a start");
+        assert_eq!(store.purpose, coven_format::sequence::Purpose::Raise(2));
+    }
+    for _ in 0..8 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert_eq!(pins(cy.database()).await, [(EARLY.to_string(), "early".to_string())]);
+    for device in [&ana, &ben, &cy] {
+        device.sync.database.close().await.unwrap();
+    }
+}

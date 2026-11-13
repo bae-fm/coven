@@ -9272,7 +9272,9 @@ migrations, and installing it makes the circle's capture (§18.4).
    there the tables that breaking migration starts from (above).
 2. It loads the circle's newest usable snapshot and the store's newest
    ordinary snapshot at or below the circle's version, or starts either empty
-   where history holds none (§16.5). It applies the slots after them up to the
+   where history holds none (§16.5). The body of a store reset or raise at or
+   below the circle's version, if newer, is the store's start instead, as
+   replaying it over the ordinary snapshot would give. It applies the slots after them up to the
    *rebuild slot*: the slot the device had applied when it started reading the
    circle, which its migration write for the rebuild read through (§18.4). It reads the store only
    through its *input slot*: the rebuild slot, or, if the store was raised
