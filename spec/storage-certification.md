@@ -73,8 +73,6 @@ run in every provider's live test; the races are separate tests.
   CloudKit tests.
 - **The copy reply (suite 6):** whether a `CopyObject` reply describes the
   object as a HEAD does. It never decides the verdict. `s3_copy_reply_live.rs`.
-- **The upload initiation time (suite 7):** a listed unfinished upload's start
-  falls between the publications before and after it. `s3_initiation_live.rs`.
 - **Sharing and revoking access:** a recipient reads and writes after a grant
   and is refused after revocation. `access_live.rs`, `dropbox_live.rs`,
   `onedrive_live.rs`, `cloudkit_live_sharing` in the CloudKit tests.
@@ -167,7 +165,9 @@ reruns](#versity-gateway-reruns-2026-10-15)). Suite version 6 adds the copy repl
 never decides the verdict. On 2026-10-28 it passed GCS, SeaweedFS and RustFS 1.0.2 (both bucket
 states where versioned), Ceph RGW unversioned and the `VersityGw` entry in both states. No copy
 profile's reply describes the object as its HEAD does, so the HEAD after each copy stays; R2's key
-was refused and it was not run ([suite 6](#suite-6-2026-10-28)). The selected entries are in
+was refused and it was not run ([suite 6](#suite-6-2026-10-28)). Suite version 7
+added the upload initiation time, which suite version 8 removes, since no floor session
+sits at a shared name. The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§20](coven.md#20-what-coven-needs-from-a-provider)
 and [Appendix E.6](coven.md#e6-running-the-certification-suite).

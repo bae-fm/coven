@@ -1136,7 +1136,8 @@ impl ObjectPath {
     pub fn parse(value: &str) -> Result<Self, PathError>;
     /// The path bound into the object's encryption.
     pub fn as_str(&self) -> &str;
-    /// Whether this is the floor path, which permits conditional replacement.
+    /// Whether this is the floor pointer's path, which permits conditional
+    /// replacement.
     pub fn is_replaceable(&self) -> bool;
 
     /// One create-once slot in the store's shared sequence (§5).
@@ -1145,8 +1146,15 @@ impl ObjectPath {
     /// The positive number of a sequence slot.
     pub fn slot_number(&self) -> Option<Slot>;
 
-    /// The store's conditionally replaced floor (§16.4).
+    /// The store's conditionally replaced floor pointer (§16.4).
     pub fn floor(store: StoreId) -> Self;
+
+    /// One floor body, created once at a number of its writing device's own
+    /// (§16.4).
+    pub fn floor_body(store: StoreId, device: DeviceId, number: NonZeroU64) -> Self;
+
+    /// The writer and number a floor body's path names.
+    pub fn floor_body_id(&self) -> Option<(DeviceId, NonZeroU64)>;
 
     /// The identity carried by a snapshot path.
     pub fn snapshot_id(&self) -> Option<SnapshotId>;
@@ -1171,7 +1179,7 @@ impl ObjectPath {
     /// The store whose objects this path names.
     pub fn store(&self) -> StoreId;
 
-    /// The device named by a snapshot or uploaded file path.
+    /// The device named by a snapshot, floor body or uploaded file path.
     pub fn device(&self) -> Option<DeviceId>;
 
     /// The stored object's id, the last part of a stored file's path.
@@ -6179,7 +6187,8 @@ pub enum OperationKind {
     RemoveDevice,
     RenameCircle,
     RemoveCircleMember,
-    /// Conditionally advance the floor, then delete slots below it (§16.6).
+    /// Upload the next floor body, conditionally replace the floor pointer,
+    /// then delete slots below the new `first` (§16.6).
     RetainSequence,
     /// Delete stored files nothing retained refers to (§17.10).
     RetainFiles,

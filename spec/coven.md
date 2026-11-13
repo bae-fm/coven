@@ -1482,8 +1482,9 @@ deleted, its path is empty again, and a create-once request for it can succeed.
 A request from long ago, delayed in the network, could land there and look like a
 genuine slot to a device that reads it.
 
-The defence is a single record, the *floor*, at `<store>/floor`. It says which
-slot is the first one still kept. A device that reads slots checks the floor
+The defence is a single small record, the *floor pointer*, at `<store>/floor`.
+It says which slot is the first one still kept, and names the *floor body*
+(§16.4). Together they are the *floor*. A device that reads slots checks the floor
 after reading them and before applying them. Anything below the floor is not
 trusted; the device loads a snapshot instead.
 
@@ -1847,11 +1848,11 @@ After applying and claiming, the device does the work the new state calls for:
   slot that triggered it, or leaves that slot pending (§16.5).
 - **Snapshots** are taken when enough has been written since the last one
   (§16.2).
-- **Deleting history.** The device writes the new floor conditionally, then
-  deletes the slots below it, and the snapshots nothing loads any more: its own,
-  and those of devices gone for good whose files it deletes (§16.6). It also
-  ends every upload session that can never publish: those left at a slot it has
-  applied, and where certified, floor sessions begun before the floor (§17.10).
+- **Deleting history.** The device uploads the new floor body, replaces the
+  floor pointer conditionally, then deletes the slots below the new `first`, and
+  the snapshots nothing loads any more: its own, and those of devices gone for
+  good whose files it deletes (§16.6). It also ends every upload session that
+  can never publish: those left at a slot it has applied (§17.10).
 - **Deleting files** needs §17.10's reference checks. Once a device is gone for
   good (§14.1), the device responsible for its cleanup lists its whole file
   folder for deletion.
@@ -4873,10 +4874,11 @@ entered the code an hour after she sent it; Ana retries, and the request shows
 at once instead of after up to 5 minutes.
 
 **Dan's side, while he waits.** Starting after the slot the invite names, Dan's
-phone first reads the floor's clear prefix for its key copies and `first`, the
-first kept slot. Without a copy for him, it reads ahead from the greater of
-`first` and its next unscanned slot, looking only at each slot's kind and any key
-copy's routing. Before a floor exists, `first` is 1. This applies nothing and
+phone first reads the floor pointer's clear prefix for `first`, the first kept
+slot, and the body it names, then that body's clear prefix for its key
+copies. Without a copy for him, it reads ahead from the greater of `first` and
+its next unscanned slot, looking only at each slot's kind and any key copy's
+routing. Before a floor exists, `first` is 1. This applies nothing and
 gives no right to send.
 
 Suppose Dan's next unscanned slot is 4, retention has kept only slots 13–15, and
@@ -6444,7 +6446,10 @@ and reach the end of the sequence, without anyone holding deletion back for it.
 
 #### 16.4 The floor
 
-The floor (§5.2) is one signed record at `<store>/floor`. It does two separate
+The floor (§5.2) is two signed records: the *pointer* at `<store>/floor`, which
+is small and replaced, and the *body* it names at
+`<store>/floors/<device>/<n>`, a name of the writing device's own, created once
+and never replaced ([format.md D10](format.md#d10-paths)). It does two separate
 jobs. For each audience it names the newest ordinary snapshot that applies
 (§16.2, §16.3): that is where a new device starts. And it names the first kept
 slot (`first`): the slots below it may be deleted. Before any floor exists, the
@@ -6475,6 +6480,21 @@ moves `first` to 161 and slots 1 to 160 are deleted (§16.6).
   `at` covers at least `first - 1`. A copy below `first` is therefore captured
   before retention can delete its slot.
 - **It takes effect when written,** even while old slots still sit in storage.
+
+**The pointer and the body.** The pointer's clear prefix carries the store
+key's id, `first`, and the body's writer, number and digest. Its encrypted part
+names its signer and the slot `at` that signer had applied. The body carries
+the snapshots, the announcement originals and the key copies. A device reads
+the pointer where it reads the floor. A pointer whose bytes haven't changed
+since the device last checked it costs nothing more (§6.1); a changed one is
+followed to its body, whose digest must equal the pointer's and whose `first`
+must equal both prefixes'. Readers follow the pointer and never scan body
+numbers, so a late create at the name of a deleted body is never read, and
+the pointer always names a body in storage. A reader that finds the body it
+was following gone reads the pointer again: the pointer moved on, and the
+device that wrote the body deleted it (§16.6). A keyless joiner reads the
+pointer's clear prefix, then the body's clear prefix for its key copies
+(§13.2).
 
 The clear `first` guides only the key scan until the floor authenticates. A
 provider can change it to make a joiner stop early, as it can by withholding
@@ -6669,9 +6689,9 @@ forward; one that moves only the names deletes nothing. A device with deletion
 permission:
 
 1. journals the new floor and the deletions it plans;
-2. writes the new floor, naming the new `first` and each audience's snapshot
-   together, with a request that succeeds only if the floor hasn't changed since
-   it read it;
+2. uploads the new floor body at the next number of its own, then replaces the
+   pointer, naming the new `first` and the body, with one request that succeeds
+   only if the pointer hasn't changed since it read it;
 3. then deletes the slots from the previous floor's `first` (slot 1 if there was
    none) up to the new `first`.
 
@@ -6680,11 +6700,14 @@ Moving the floor from `first` 501 to 801, Ana deletes slots 501 to 800. Slots 1 
 (§19.1); deleting them again on every floor write would send more requests with
 each one.
 
-A floor can exceed one provider request: it contains the original announcements
-for every required audience. Ana records its fixed encrypted bytes and upload
-session, sends its parts, and publishes them as one floor under the revision she
-first observed. Parts alone authorize no deletion. Recording even a floor that
-fits one part keeps ownership of provider cleanup if its reply is lost (§20.6).
+A floor body can exceed one provider request: it contains the original
+announcements for every required audience. Ana records its fixed encrypted
+bytes and upload session, sends its parts, and publishes them like any
+immutable object, at a name only her device writes (§20.6). The pointer that
+names it is always one request, replaced under the revision she first
+observed. Parts alone authorize no deletion, and neither does a stored body:
+only the pointer's replacement does. Recording even a body that fits one part
+keeps ownership of provider cleanup if its reply is lost (§20.6).
 
 **Reading back the floor it wrote.** A floor write keeps the names it
 journaled, and it can land long after it was journaled. Ana's floor names her
@@ -6737,15 +6760,16 @@ The rules:
   The ordinary snapshot must cover the latest raise and reset. An activated
   preparation is not enough: retention waits for an ordinary snapshot covering
   its activating entry.
-- **A lost race changes nothing.** If the floor changed, the conditional write
-  fails. The device reads the current floor and decides again. It never moves
+- **A lost race changes nothing.** If the pointer changed, the conditional
+  replacement fails. The device reads the current floor, deletes the body it
+  uploaded, and decides again. It never moves
   `first`, or any audience's coverage, backward.
 - **A lost reply is settled by reading the floor** before deleting anything.
   Another device may have replaced the floor since, past the slots this one has
   applied, so the device reads forward first, as a pass does (§6.1, §6.2), and
   checks the floor as §16.4 says. Then it decides:
-  - The floor is still the one its write was conditional on: the write didn't
-    land, and the device writes it again.
+  - The pointer is still the one its write was conditional on: the write didn't
+    land, and the device replaces it again with the same bytes.
   - A changed floor whose `first` reaches the write's own: the device deletes
     the slots below that floor's `first`. Its write may not have landed, since
     another device's floor can reach that far too; the deletions are below a
@@ -6793,6 +6817,11 @@ The rules:
   history needs no such rule: until it's raised, no device snapshots Garden
   past slot 299, since the old app stops at the store's raise and the new one
   takes no ordinary snapshot of an audience below its version (§16.2).
+- **Each device deletes its own floor bodies.** A body the pointer no longer
+  names can never be read again, since the pointer moves forward only, and the
+  device that wrote it deletes it once it reads a pointer naming another. A
+  body its floor write left unnamed, when another device's pointer won the
+  race, goes at once. The body a pointer names stays.
 - **Each device deletes its own snapshots.** Once the protections above no
   longer keep one of its announced snapshots, the device deletes the body. A
   body whose announcement it has forgotten it finds by listing its own
@@ -6823,6 +6852,10 @@ Ana's own would.
   provider access reaches the store's objects (§17.10), so these devices have
   permission to delete them. Every device reads who they are from the same
   history.
+- **Floor bodies.** The same devices list the gone device's floor folder,
+  `floors/<device>/`, with its snapshot folders and delete every body the
+  pointer doesn't name. If the pointer names one, it goes once the pointer
+  names another.
 - **Which bodies.** Nothing a device announces after the entry that stopped it
   counts (§14.1), and the deleting device has applied that entry, so it holds
   every announcement of the gone device there will ever be. A listed body none
@@ -8451,8 +8484,9 @@ depends on it.
 through the provider's resumable or multipart upload. Providers require this
 above a size: Dropbox, for example, above 150 MiB per request. Any object past
 that size goes up this way (§20.6), a large writes slot, snapshot or floor
-included. A floor keeps its original absent or observed-revision
-condition in the session, because a retry must not overwrite a competing floor.
+included. A floor body goes up like any immutable object, at a name only its
+writer uses; the floor pointer, which a retry must not let overwrite a
+competing floor, is never uploaded in parts.
 
 - The upload session records each part the provider confirms, and its byte count,
   before reporting progress. Resuming, the app's `uploads()`, and
@@ -8524,9 +8558,7 @@ condition in the session, because a retry must not overwrite a competing floor.
     its claim on slot 41, and a provider cooldown refuses the first part before
     anything is sent: the plan stays unmarked, and the next pass sends the
     claim. Without the mark, a claim stopped before its first part could never
-    be sent. While the floor is still one replaced object, a floor replacement
-    whose destination still holds the floor the session observed is as good as
-    empty.
+    be sent.
   - A Dropbox session's start is itself the request that begins it, and no
     route lists one, so a plan would name nothing there; Dropbox discards the
     session 7 days after it began.
@@ -8796,10 +8828,10 @@ the devices that clean up a gone device's files end its uploads too.
   as a refused completion does (Appendix E.10). A session a device began at a
   slot and lost the id of is one of these: its own next attempt starts fresh
   beside it (§17.9), and once the slot is applied it is aborted like any
-  other. A session at a slot not yet applied stays. A session at the floor's
-  path stays, since a floor session there may still publish; R2 aborts those 7
-  days after they began, RustFS, Ceph RGW and Versity Gateway keep them until
-  a lifecycle rule the bucket's owner sets ends them.
+  other. A session at a slot not yet applied stays. No session sits at the
+  floor's path: the pointer is replaced in one request, and a floor body's
+  upload sits at a name of its writer's own, where its next attempt or its
+  abort ends what a lost start left (§17.9).
 - **Several at once.** Ending an upload already ended succeeds, so the laptop
   and Ben's tablet may both do this, and the phone may run on until it reads
   the entry that stopped it.
@@ -10167,17 +10199,16 @@ devices would each believe they hold slot 41 and history would split.
 
 A provider lacking create-once cannot hold a store.
 
-**Conditional replace.** Replace the floor only if its revision is still the one
-the device read, as one atomic step. A failed condition changes nothing; the
-caller rereads the floor and validates the new one. Without this, two devices
-moving the floor at once could each overwrite the other's floor. Setup tests both
+**Conditional replace.** Replace the floor pointer only if its revision is
+still the one the device read, as one atomic step in one request. The pointer is
+small, so a replacement never goes up in parts. A failed condition changes
+nothing; the caller rereads the floor and validates the new one. Without this,
+two devices moving the floor at once could each overwrite the other's pointer. Setup tests both
 a matching replacement and a refusal with a stale revision. A provider without
 conditional replacement is refused. On OneDrive, racing replacements can all be
 refused while the floor keeps its bytes; the device rereads the floor and tries
 again on a later pass, as after any refusal (Appendix E.2). At most one
-replacement using that observed revision succeeds. The rule covers floors
-published in parts too: the final publication compares the original revision
-and exposes all the bytes together; it never adopts a newer revision on retry.
+replacement using that observed revision succeeds.
 
 **Complete reads, whole and by byte range.** A complete-object read streams
 through bounded buffers, so the reader checks each chunk as it arrives without a
@@ -10224,7 +10255,7 @@ The four providers reach these requirements in different ways. In brief:
 | Provider | Members reach the store by | Large objects published by |
 |---|---|---|
 | Dropbox | a shared folder, from their own account | its resumable upload |
-| OneDrive | a shared folder, from their own account | creation: upload to a temporary, then a copy that fails on an occupied name; floor replacement: a session bound to its observed revision |
+| OneDrive | a shared folder, from their own account | creation: upload to a temporary, then a copy that fails on an occupied name; the floor pointer's replacement: a session bound to its observed revision, in one call |
 | iCloud (CloudKit) | a CloudKit share of the store's zone, from their own account | an atomic save once every part exists |
 | S3 services | their own access key | per service: conditional completion, or a conditional copy |
 
@@ -10581,13 +10612,6 @@ creating a new item showed it in listings and reads before its last byte
 (Appendix E.2), so OneDrive always creates objects this way. AWS dates
 multipart objects from their start, and GCS doesn't enforce create-once on completion, so
 both copy too. The copy's completion is the object's publication time.
-
-A floor replacement keeps the old floor visible while its parts arrive. The
-session records the revision first observed, and final publication must still
-match it. Dropbox finishes with that revision; S3 completes or copies under it;
-CloudKit saves the fetched floor record and new parts together. OneDrive uses a
-session bound to the observed item and revision, whose final fragment publishes
-(Appendix E.2). No provider may expose the parts as a floor.
 
 How a temporary is kept safe:
 
@@ -11033,7 +11057,7 @@ Each kind of work adds its own requests:
 | admin preparation | its actual requests: key copies, access changes, snapshot uploads |
 | a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the pass that wrote that floor reading forward once more: the next slot, and the floor's bytes |
 | a reload | the floor's named snapshots, and the slots after them it needs |
-| deleting history | the floor upload's parts and one conditional publication, the next slot and the floor read back, its cleanup, the deletes, one listing of the sessions left at applied slots, and on a profile certified to date them, the floor's status and one listing of floor sessions (§17.10) |
+| deleting history | the floor body's upload (its parts, or one request), one conditional pointer replacement, the next slot and the floor read back (the pointer, then its body), the body's cleanup, the deletes, and one listing of the sessions left at applied slots (§17.10); later, the delete of the superseded body |
 | files | their own reads, upload parts and deletes, outside the pass; a bound upload's requests are the same as a trailing one's, sent in its own lane (§17.4) |
 | reading an object | one bounded stream; a snapshot's start takes at most two range requests, on iCloud one stream of its first part, and the rest one more stream, read once (§6.5, §16.2) |
 
@@ -11819,7 +11843,8 @@ identifiers let a reader choose the key before opening the encrypted contents.
 
 An introduced store key may seal its own introduction (§12.1). In that case its
 id is also the clear slot selector; its key bytes and commitment stay encrypted.
-The floor also carries key copies with their routing in the clear (§16.4).
+The floor body also carries key copies with their routing in the clear
+(§16.4).
 
 ### D.6 Where secrets live
 
@@ -11910,8 +11935,8 @@ an incomplete asset as a complete object. Bounded asset parts let ranged reads
 skip unrelated parts.
 
 - CloudKit has no upload an app resumes from a byte offset, so coven keeps its
-  own durable session: its id, destination, original absent or observed-revision
-  condition, total size and confirmed part boundary. A long-lived `CKOperation`
+  own durable session: its id, destination, total size and confirmed part
+  boundary. A long-lived `CKOperation`
   does keep running after the app exits, and can be fetched again at launch
   (`fetchAllLongLivedOperationIDs`); coven doesn't use one.
 - Each asset part and its confirmed boundary are saved together in the custom
@@ -11925,11 +11950,9 @@ skip unrelated parts.
 - The destination record is created only once every part exists, atomically
   marking the session published. Its `creationDate` therefore dates complete
   publication, never the session's start or an early part.
-- A floor replacement instead fetches the record with its observed change tag.
-  One atomic transaction saves that record with the new upload reference, marks
-  the new session published, and deletes the former upload root. Otherwise a
-  replacement would strand the former asset chain. Replacing a multipart floor
-  with one asset removes its old upload reference in the same transaction.
+- A floor pointer replacement instead fetches the record with its observed
+  change tag and saves it with the new bytes, deleting any former upload root
+  in the same atomic transaction.
 - Pending sessions and parts use their own record types and reserved names
   outside coven's paths, so listings can't mistake them for published objects.
   A session's root record is named `<store>/.coven-uploads/<device>/<session>`
@@ -12054,9 +12077,9 @@ isn't listed, and isn't reported: it reaches that item, not the folder.
 `get_folder_metadata`'s `link_metadata` isn't used: Dropbox documents
 it as possibly not returned, so its absence says nothing.
 
-**OneDrive floor replacement.** OneDrive's direct `PUT …/content` with
-`If-Match` let two writers holding one eTag both succeed, so the floor is
-replaced through an upload session instead.
+**OneDrive floor pointer replacement.** OneDrive's direct `PUT …/content` with
+`If-Match` let two writers holding one eTag both succeed, so the floor pointer
+is replaced through an upload session instead, in one call.
 
 - The session is on the observed item id, created with the observed eTag in
   `If-Match` and `item.@microsoft.graph.conflictBehavior: replace`.
@@ -12069,12 +12092,9 @@ replaced through an upload session instead.
   the floor before deciding what to do next.
 - Racing writers can all be refused, leaving the floor's bytes and eTag
   unchanged. At most one writer succeeds, and the floor then holds its bytes.
-- A recorded session keeps its confirmed offset after every result, including a
-  lost reply. Resume queries the same upload URL; a restart retains the original
-  revision. It never requests a newer revision to make a failed condition pass.
-- A buffered replacement cancels its failed session without retrying it. A
-  recorded floor operation keeps failed cleanup for retry. Cancellation can be
-  refused with `resourceModified` once the session can no longer publish.
+- A failed replacement cancels its session without retrying it. Cancellation
+  can be refused with `resourceModified` once the session can no longer
+  publish.
 - Microsoft documents that `If-Match` is compared when the session is created,
   not that it holds through completion. Two-account live races are the evidence
   that it does: [one winner in every
@@ -12146,7 +12166,7 @@ place is distinct from every coven path.
 |---|---|
 | signing | AWS SigV4, or Google HMAC |
 | single-PUT create-once condition | `If-None-Match: *`, or `x-goog-if-generation-match: 0` |
-| copy publication (`S3CopyPublication`) | **never**: single PUTs and multipart completions carry the create-once condition; **multipart uploads only**; or **every object**, single-request creates and floor replacements included. Creates carry a destination condition: `If-None-Match: *`, `x-goog-if-generation-match: 0` or `cf-copy-destination-if-none-match: *`; replacements use the observed revision as E.10 describes |
+| copy publication (`S3CopyPublication`) | **never**: single PUTs and multipart completions carry the create-once condition; **multipart uploads only**; or **every object**, single-request creates and floor pointer replacements included. Creates carry a destination condition: `If-None-Match: *`, `x-goog-if-generation-match: 0` or `cf-copy-destination-if-none-match: *`; replacements use the observed revision as E.10 describes |
 | native multipart timestamp | completion, or start |
 | checksum policy | scope stated; unstated scope ignored; or none returned |
 | listing | V2 or V1 |
@@ -12377,20 +12397,6 @@ It prints each trial, then `copy_reply_time_equals_status` and
 that falls short only leaves status to the HEAD. The ignored `s3_copy_reply`
 test runs this observation alone, with the location's profile.
 
-**The upload initiation time** (from suite 7). Ending a floor session begun
-before the current floor was published (E.10) needs the service to list each
-unfinished upload's `Initiated` time, never earlier than a publication that
-finished before the upload began, and never later than one that came after. On
-a profile publishing by conditional completion, the suite runs 20 trials 50 ms
-apart: read the floor's time by status, begin a floor session and list its
-start, abort it, then replace the floor and read the new time. Every trial must
-list the start, at or after the earlier floor's second and at or before the
-later one's. It prints each trial and `upload_initiation_ordered`. A passing
-run prints the profile's `upload_initiation` certification beside its others;
-that certification enables only the floor rule, and never decides the verdict.
-A copy profile prints `upload_initiation publication=copy`: its floor sessions
-sit in a device's folder (§20.6).
-
 **Results.**
 
 - A service that returns no checksum on any probe, even with checksum mode, is
@@ -12549,8 +12555,7 @@ names none.
 - Aborting never deletes a destination. It ends another claimant's session only
   once that session can never publish (below).
 - Retrying or resuming a record derives the same name, including after multipart
-  completion or a lost copy reply. A floor replacement also retains its original
-  observed revision; a replacement session never acquires a newer one.
+  completion or a lost copy reply.
 
 **Parts in any order.** The parts after the first go in any order, several at
 once (§17.9). The record keeps each part the provider confirmed by its number,
@@ -12564,10 +12569,7 @@ so the object holds each part once.
 
 **Copy publication.** The assembled temporary is sent with one server-side
 `CopyObject` to the destination, carrying the profile's destination condition
-(`x-goog-if-generation-match: 0` for a GCS create). A floor replacement instead
-uses its recorded revision: `If-Match`, `x-goog-if-generation-match`, or
-`cf-copy-destination-if-match`, according to the profile. Conditional multipart
-completion likewise uses `If-Match` for replacement.
+(`x-goog-if-generation-match: 0` for a GCS create).
 
 - The destination's time is the copy's completion, never the temporary's
   creation or the multipart start.
@@ -12593,9 +12595,11 @@ same way:
 - The temporary is deleted whatever the copy's outcome. A failed deletion fails
   the call, with both errors kept.
 
-A buffered floor replacement on an every-copy profile also uses a conditional
-copy, so it cannot race a multipart copy through a different publication method.
-Its temporary name includes the observed revision and fixed bytes: SHA-256 over
+A floor pointer replacement on an every-copy profile uses a conditional copy
+too, so it cannot race a multipart copy through a different publication method:
+`If-Match`, `x-goog-if-generation-match` or `cf-copy-destination-if-match`
+carry the observed revision, according to the profile. Its temporary name
+includes the observed revision and fixed bytes: SHA-256 over
 `coven/replace-temporary/v1`, the revision length and revision, then the path
 length, path and bytes; lengths are big-endian u64s. The first 16 bytes form the
 UUID. An uncertain result is settled by authenticating the floor; a shared
@@ -12670,8 +12674,8 @@ object. Aborting first stops a session from assembling another temporary after
 the listing.
 
 **Ending sessions that can never publish.** Under conditional completion, a
-claim's session sits at its slot's key and a floor write's at the floor's,
-where no device's id appears and other claimants' sessions share the key. So
+claim's session sits at its slot's key, where no device's id appears and other
+claimants' sessions share the key. So
 none is ended for being a gone device's. One is ended once it can never
 publish, whoever began it, and that rests on create-once alone: once slot `n`
 is published, the service refuses every other completion at `seq/n`. A device
@@ -12683,19 +12687,10 @@ aborted finds `NoSuchUpload` at completion; its recovery then reads the slot,
 finds another object, and settles the claim as lost, as after a refused
 completion.
 
-A floor session publishes only while the floor keeps the revision it observed
-before it began. So once the current floor was published in an earlier second
-than a session's `Initiated` time in the multipart listing says it began, that
-session observed an older revision and is dead. The device reads the floor's
-status and lists the uploads at the floor's key, and aborts each begun in a
-strictly earlier second than the floor's publication, in the same two places.
-That rests on the service never dating a session begun after a publication
-earlier than it, which only a profile certified for it by suite 7 (E.6) is
-trusted with; no profile holds that certification yet, so until one does, no
-floor session is ended this way. A listing there without `Initiated` is a
-protocol failure. A session at a slot not yet applied, a floor session begun
-in the floor's second or later, and every floor session on a profile not
-certified for it, stay. R2 aborts every multipart upload 7 days after it began,
+No floor session needs ending this way: a floor body's upload sits at a name
+of its writer's own, where its next attempt or its abort sweeps what a lost
+start left, and the pointer is replaced in one request. A session at a slot not
+yet applied stays. R2 aborts every multipart upload 7 days after it began,
 by a lifecycle rule each bucket has
 ([object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/));
 RustFS, Ceph RGW and Versity Gateway keep one until a rule the bucket's owner
@@ -12713,7 +12708,7 @@ mutation, never throttling.
 - The invalidated session is recorded even on failure. It keeps only the ids
   needed for cleanup and can't complete or copy again.
 - A replacement session starts only after cleanup succeeds, at offset zero, with
-  the same path, size, fixed bytes and absent or observed-revision condition.
+  the same path, size, fixed bytes and absent condition.
 - An occupied immutable destination still needs complete byte comparison (§5.1).
   A floor is settled by authenticating the current floor (§16.6).
 

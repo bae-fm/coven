@@ -93,7 +93,8 @@ spaces only separate fields for reading. Example times are UTC.
 | · admission slot | | an admin entry admitting a member and registering their first device, with that member's key copies | D6, D9, D11 |
 | · snapshot announcement slot | | a snapshot's id, coverage, breaking version, purpose and hash | D9 |
 | Inner write | inside a writes slot | one write: a header, then one part per audience | D5, D9 |
-| Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
+| Floor pointer | `<store>/floor` | the first kept slot, and the newest floor body's writer, number and digest | D8, D9 |
+| Floor body | `<store>/floors/<device>/<n>` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
 | Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite or pairing | the member id it answers for, public keys, device name and who asks: for a new person, their name | D8, D9 |
@@ -157,6 +158,7 @@ Format 1 uses these:
 | 16 | Key-copy acknowledgement frame | D9 |
 | 17 | Saved restore code frame | D13 |
 | 18 | Pairing code frame | D13 |
+| 19 | Floor pointer header frame | D8 |
 | 32 | Inner write | D9 |
 | 33 | Sequence slot | D9 |
 | 34 | Snapshot | D9 |
@@ -166,6 +168,7 @@ Format 1 uses these:
 | 39 | Floor | D9 |
 | 40 | Gone device's marker | D8 |
 | 41 | Pairing's handover | D8 |
+| 42 | Floor pointer | D9 |
 
 A kind not in this table doesn't exist in format 1, and a reader refuses it (D1).
 
@@ -412,6 +415,7 @@ payload. D1 gives the frame's own layout.
 | 16 | Key-copy acknowledgement | empty; the box is in D9’s prefix |
 | 17 | Saved restore code | D13 |
 | 18 | Pairing code | D13 |
+| 19 | Floor pointer header | D8 |
 
 ---
 
@@ -1504,11 +1508,13 @@ paths occur in a snapshot. Loading leaves these local obligations intact.
 
 ## D8 Floor and join frames
 
-### The floor (kind 12)
+### The floor body (kind 12)
 
 Old slots are deleted once snapshots cover them (§16.6). The floor records what
 was deleted and where to start instead: the first kept slot, and each audience's
-newest applicable snapshot ([§16.4](coven.md#164-the-floor)).
+newest applicable snapshot ([§16.4](coven.md#164-the-floor)). Its large part is
+the *body*, at `<store>/floors/<device>/<n>`; the *pointer* at `<store>/floor`
+names the newest body (below).
 
 ```
 author     DeviceId
@@ -1541,12 +1547,34 @@ laptop, `at` is 570, `first` is 501, and `snapshots` is `[562, 523]`: store
 first. Both snapshots cover at least 500. The body carries slot 562's object,
 then slot 523's, then the end frame.
 
-**Replacing it.** Retention replaces this entire record conditionally before
-deleting slots below `first`. Conflicts reread the floor, and can't move it
-backward (§16.6).
+**Numbering it.** Retention creates each body once, at the next number of the
+writing device's own, then replaces the pointer before deleting slots below
+`first`. A body is never replaced; a device deletes its own once the pointer
+names another. Conflicts reread the floor, and can't move it backward (§16.6).
 
-D9 gives the floor's sealed envelope, which also carries the original key copies
+D9 gives the body's sealed envelope, which also carries the original key copies
 a new device needs.
+
+### The floor pointer header (kind 19)
+
+The pointer is the small record at `<store>/floor` that names the newest body.
+Its encrypted part is this frame:
+
+```
+author     DeviceId
+at         u64
+```
+
+| Field | Rule |
+| --- | --- |
+| `author` | the device that signed the pointer |
+| `at` | the signer's applied slot; it covers the body's named announcements. Verify the signer against the membership at that slot (D9). |
+
+The pointer's clear prefix (D9) names the body's writer, number and digest, and
+carries `first`. *Example.* Carol's laptop writes body 7 and replaces the
+pointer: the prefix names her device and number 7 with the body's digest, and
+the header names her device and `at` 570. Replacing the pointer is one
+request, conditional on the revision she read.
 
 ### The join request (kind 9)
 
@@ -1844,9 +1872,38 @@ ephemeral:32 bytes | nonce:24 bytes | ciphertext:bytes | tag:16 bytes
 - An admission's boxes are in increasing order of `(audience, key)`, with no
   duplicates.
 
-### The floor (kind 39)
+### The floor pointer (kind 42)
 
-The floor's prefix carries the first kept slot and the key copies a new device
+The pointer is a one-chunk sealed stream like the body: a clear prefix, one
+sealed chunk holding the kind-19 header (D8), and a signature.
+
+```
+kind     42
+format   u16
+key      KeyId
+first    Slot
+device   DeviceId
+number   Slot
+body     [u8; 32]
+```
+
+- `key` names the store key that seals the header.
+- `first` guides a keyless joiner's scan past deleted slots (§13.2). It grants
+  no authority until the floor authenticates, and must equal the body's `first`.
+- `device` and `number` name the body, `<store>/floors/<device>/<number>`.
+- `body` is the SHA-256 of the body's complete bytes, signature included. A
+  reader requires the body it reads to match it, or refuses the floor as
+  damaged.
+- The signer is `author`, in the state at `at`; the signature covers every byte
+  before it, and the path `<store>/floor` is bound into the sealing and the
+  signature.
+
+*Example.* Carol's laptop, device 4, writes body 7 with `first` 501: the prefix
+is `2a 0001`, the key id, 501, 4, 7 and the body's digest.
+
+### The floor body (kind 39)
+
+The body's prefix carries the first kept slot and the key copies a new device
 needs before it holds any key (§16.4).
 
 - `key` names the store key that seals the floor's body.
@@ -2005,7 +2062,8 @@ provider can't move one object into another's place.
 | --- | --- |
 | `coven-location` | Create-once ownership marker at the root of a location that holds one store (§20.3) |
 | `<store>/seq/<n>` | One create-once sequence slot |
-| `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
+| `<store>/floor` | The floor pointer: the first retained slot and the newest body's writer, number and digest, signed; conditional replacement, in one request |
+| `<store>/floors/<device>/<n>` | One floor body: signed, encrypted snapshot references, the first retained slot and the key copies; created once, deleted by its writer once the pointer names another |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement; a device gone for good's folders are listed once, for bodies no announcement names (§16.6) |
 | `<store>/files/<device>/<object>` | An uploaded file, by its random object id |
 | `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite or pairing, a pairing's handover in the request's place, or the marker of its end |
@@ -2031,7 +2089,7 @@ numbered 3 is `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/snapshots/store/4242/3`.
 - The sequence has no gaps before retention.
 - Snapshot numbers identify objects; they are never discovery cursors.
 - Every immutable path is created once, and retries compare exact bytes. Only
-  the floor is replaceable.
+  the floor pointer is replaceable.
 - Bootstrap discovers store creation at slot 1, or in the floor's store
   snapshot. The location marker (below) reserves ownership only; it doesn't mark
   creation.
