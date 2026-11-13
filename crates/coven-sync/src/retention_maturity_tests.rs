@@ -157,24 +157,46 @@ async fn a_circle_below_the_store_keeps_the_stores_snapshot_at_its_version() {
 /// snapshot and her store reset are superseded by a newer mature snapshot, and
 /// the floor passes both, so the walk would delete their bodies; Garden is
 /// rebuilt from that snapshot with that reset replayed over it, so both
-/// bodies survive (§16.6).
+/// bodies survive (§16.6). Cy, added to Garden before the walk and applying
+/// the admission only after it, rebuilds Garden from those bodies, and holds
+/// what Ben, who held it and migrated in place, holds.
 #[tokio::test]
 async fn the_bodies_a_rebuild_reads_survive_the_deletion_walk() {
     use coven_merge::Audience;
+    const EARLY: &str = "00000000-0000-4000-8000-000000000001";
+    const LATE: &str = "00000000-0000-4000-8000-000000000002";
     let group = Group::new();
     group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
     let ana = group.device(1).await;
     let ben = group.device(2).await;
+    let cy = group.device(3).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
+    group.admit(&ana, &cy).await;
+    cy.sync.pass().await.unwrap();
     let garden = ben.sync.create_circle("Garden".into()).await.unwrap();
+    pin(ben.database(), EARLY, garden, "early").await;
     ana.sync.pass().await.unwrap();
     let old = ana.sync.snapshot(Audience::Store).await.unwrap();
     ana.sync.reset(Audience::Store).await.unwrap();
     ben.sync.pass().await.unwrap();
     ben.sync.snapshot(Audience::Circle(garden)).await.unwrap();
+    pin(ben.database(), LATE, garden, "late").await;
+    ben.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: cy.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    let ben_keys = ben.sync.keys.read().unwrap().unwrap();
     group.version.store(2, std::sync::atomic::Ordering::SeqCst);
     let ana = group.reopen(ana).await;
+    let cy = group.reopen(cy).await;
+    // Ben migrates in place and never passes: his raise has not landed.
+    let ben = group.reopen(ben).await;
+    ben.sync.keys.persist(&ben_keys).unwrap();
     for _ in 0..3 {
         ana.sync.pass().await.unwrap();
     }
@@ -202,7 +224,19 @@ async fn the_bodies_a_rebuild_reads_survive_the_deletion_walk() {
     }
     assert!(group.storage.status(&old_body).await.unwrap().is_some(), "the start survives");
     assert!(group.storage.status(&reset_body).await.unwrap().is_some(), "the replay survives");
-    for device in [&ana, &ben] {
+
+    for _ in 0..8 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    let held = pins(ben.database()).await;
+    assert_eq!(held.len(), 2, "Ben holds both pins");
+    assert_eq!(pins(cy.database()).await, held);
+    assert_eq!(
+        cy.database().lost_values().await.unwrap(),
+        ben.database().lost_values().await.unwrap()
+    );
+    for device in [&ana, &ben, &cy] {
         device.database().close().await.unwrap();
     }
 }
