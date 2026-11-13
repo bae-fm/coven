@@ -119,15 +119,17 @@ pub(crate) fn apply<P: crate::PendingValue>(
         // don't reload: the slot applies, and each waits for its rebuild.
         let mut rebuilding = Vec::new();
         if let SlotContent::Admin { effect: Some(effect), .. } = &incoming.content {
-            if let Some(circles) = crate::rebuild_wait::rebuilt(
+            let (rebuild, rest) = crate::rebuild_wait::split(
                 &effect.state,
                 &effect.reload,
                 crate::raise_capture::breaking_version(db)?,
-            ) {
-                rebuilding = circles;
-            } else if let Some(audience) = effect.reload.first() {
+            );
+            rebuilding = rebuild;
+            // The circles that wait for a rebuild don't hold the slot back:
+            // it applies, or is loaded, with them gated (§18.3).
+            if let Some(audience) = rest.first() {
                 authenticate()?;
-                for required in &effect.reload {
+                for required in &rest {
                     crate::reload_gate::require_reload::<P>(db, required)?;
                 }
                 return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(audience.clone())));

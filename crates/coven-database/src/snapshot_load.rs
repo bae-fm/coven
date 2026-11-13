@@ -13,6 +13,16 @@ use coven_foundation::progress::ProgressReport;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A circle installed from this device's own rebuild of it (§18.3).
+pub(crate) struct Rebuilt<'a> {
+    /// The circle.
+    pub(crate) circle: coven_merge::Audience,
+    /// The device's migration marker its rebuild ran under.
+    pub(crate) marker: coven_merge::WriteId,
+    /// How the device journals the raises of its captures.
+    pub(crate) operation: Option<&'a crate::migration::MigrationOperation>,
+}
+
 pub(crate) fn load<P: crate::PendingValue>(
     database: &mut DatabaseConnection,
     before: &DatabaseConnection,
@@ -21,6 +31,8 @@ pub(crate) fn load<P: crate::PendingValue>(
     files: &crate::file_write::WriteFiles<'_>,
     progress: &mut ProgressReport<LoadStep>,
     store_through: Option<u64>,
+    now: std::time::SystemTime,
+    rebuilt: Option<Rebuilt<'_>>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
         let files = &crate::file_write::FileWrite::new(database, files);
@@ -33,6 +45,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             cutoffs,
             boundaries,
             operation,
+            rebuilds,
             authorship: _,
         } = reload;
         let current = crate::sequence::applied(database)?;
@@ -115,6 +128,20 @@ pub(crate) fn load<P: crate::PendingValue>(
         crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage, progress)?;
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
+        }
+        if !rebuilds.is_empty() {
+            crate::rebuild_wait::begin::<P>(database, schema, now, &rebuilds)?;
+        }
+        if let Some(rebuilt) = rebuilt {
+            if !selected.contains(&rebuilt.circle) {
+                return Err(invalid("a rebuilt circle is loaded from its rebuild"));
+            }
+            crate::raise_capture::capture_rebuilt(
+                database,
+                &rebuilt.circle,
+                rebuilt.marker,
+                rebuilt.operation,
+            )?;
         }
         // The removal rules run only where they can reach; every other
         // installed row shows its merged values (§8.4).

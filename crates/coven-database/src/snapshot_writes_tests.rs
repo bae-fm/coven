@@ -596,6 +596,7 @@ async fn a_reload_keeps_no_refused_announcements_original() {
             cutoffs: vec![],
             boundaries: vec![],
             operation: None,
+            rebuilds: Vec::new(),
             authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
         },
         None,

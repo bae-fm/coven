@@ -138,6 +138,7 @@ async fn snapshots_and_slots_of_version_one_load_into_it() {
                 cutoffs: vec![],
                 boundaries: vec![],
                 operation: None,
+                rebuilds: Vec::new(),
                 authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
             },
             target,

@@ -75,19 +75,19 @@ impl SelectedSnapshot {
         self.read.authenticate(history)
     }
     /// The snapshot object's path, where a failure of its body is judged.
-    fn path(&self) -> &coven_storage::ObjectPath {
+    pub(crate) fn path(&self) -> &coven_storage::ObjectPath {
         self.read.object.path()
     }
     /// What the load reads: the snapshot's identity, its staging and the
     /// member `author` whose key signed it.
-    fn into_source(
+    pub(crate) fn into_source(
         self,
         author: coven_foundation::id_source::MemberId,
     ) -> SnapshotSource<SnapshotStaging> {
         SnapshotSource::Stored { id: self.read.announcement.snapshot, input: self.staging, author }
     }
     /// Remove its staged records.
-    async fn discard(self) -> Result<(), SyncError> {
+    pub(crate) async fn discard(self) -> Result<(), SyncError> {
         Ok(self.staging.discard().await?)
     }
 }
@@ -130,6 +130,8 @@ struct ReloadInputs {
     /// The slot `history` holds the slots through.
     through: u64,
     operation: Option<OperationUpdate>,
+    /// Circles the load leaves for their rebuild (§18.3).
+    rebuilds: Vec<Audience>,
 }
 
 #[path = "sequence_reload_evidence.rs"]
@@ -137,6 +139,9 @@ mod evidence;
 
 #[path = "sequence_reload_operation.rs"]
 mod operation;
+
+#[path = "sequence_reload_rebuild.rs"]
+mod rebuild;
 
 impl ReloadStart {
     fn audience(&self) -> &Audience {
@@ -219,7 +224,19 @@ impl SequenceSync {
         &self,
         announcement: SnapshotAnnouncement,
         ring: &StoreKeyring,
+        progress: Option<&mut ProgressReport<LoadStep>>,
+    ) -> Result<SelectedSnapshot, SyncError> {
+        self.select_into(announcement, ring, progress, None).await
+    }
+
+    /// [`Self::select`], staging into the rebuild's store `rebuild` when
+    /// given, which loads it, and into this one's otherwise.
+    pub(crate) async fn select_into(
+        &self,
+        announcement: SnapshotAnnouncement,
+        ring: &StoreKeyring,
         mut progress: Option<&mut ProgressReport<LoadStep>>,
+        rebuild: Option<&coven_database::RebuildDatabase>,
     ) -> Result<SelectedSnapshot, SyncError> {
         let object = self.snapshot_prefix(&announcement).await?;
         let path = object.path().clone();
@@ -227,10 +244,18 @@ impl SequenceSync {
             progress
                 .begin(LoadStep::Streaming(announcement.snapshot.audience.clone()), object.size());
         }
-        let mut staging = self
-            .database
-            .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
-            .await?;
+        let mut staging = match rebuild {
+            Some(rebuild) => {
+                rebuild
+                    .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
+                    .await?
+            }
+            None => {
+                self.database
+                    .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
+                    .await?
+            }
+        };
         let read = self
             .read_snapshot(announcement.clone(), object, ring, Some(&mut staging), progress)
             .await;
@@ -453,7 +478,13 @@ impl SequenceSync {
                 .install_selected(
                     session,
                     starts,
-                    ReloadInputs { target, history, through: floor.header.at, operation: None },
+                    ReloadInputs {
+                        target,
+                        history,
+                        through: floor.header.at,
+                        operation: None,
+                        rebuilds: Vec::new(),
+                    },
                     &mut tentative_ring,
                     member,
                     Some(&floor),
@@ -491,6 +522,7 @@ impl SequenceSync {
         session: &mut Session,
         slot: Slot,
         required: &[Audience],
+        rebuilds: Vec<Audience>,
         history: History,
         ring: &StoreKeyring,
         member: &MemberIdentity,
@@ -590,7 +622,7 @@ impl SequenceSync {
                 .state
                 .readable_audiences(&member.member())
                 .into_iter()
-                .filter(|audience| !required.contains(audience))
+                .filter(|audience| !required.contains(audience) && !rebuilds.contains(audience))
                 .map(ReloadStart::Current),
         );
         let target = starts
@@ -607,7 +639,7 @@ impl SequenceSync {
             .install_selected(
                 session,
                 starts,
-                ReloadInputs { target, history, through, operation: None },
+                ReloadInputs { target, history, through, operation: None, rebuilds },
                 &mut ring,
                 member,
                 floor.as_ref(),
@@ -661,7 +693,7 @@ impl SequenceSync {
         previous_floor: Option<&FloorObject>,
         reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
-        let ReloadInputs { target, history, through, operation } = inputs;
+        let ReloadInputs { target, history, through, operation, rebuilds } = inputs;
         let first = starts
             .iter()
             .map(|start| start.covers(session.through))
@@ -791,6 +823,7 @@ impl SequenceSync {
                     boundaries: at_target.boundaries.clone(),
                     provider_access: at_target.provider_access(member.member())?,
                     operation,
+                    rebuilds,
                     authorship,
                 },
                 reporting.then(|| ProgressReport::of(&self.progress, self.clock.clone())),
@@ -818,7 +851,7 @@ impl SequenceSync {
 }
 /// A slot at or below the store snapshot's coverage: the snapshot, or this
 /// device when none is loaded, already holds its kept originals.
-fn retained_slot(
+pub(crate) fn retained_slot(
     received: ReceivedSlot,
 ) -> IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>> {
     let (received, body) = received.into_parts();

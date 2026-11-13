@@ -285,6 +285,7 @@ async fn read_forward(
         provider_access: Vec::new(),
         boundaries: vec![],
         operation: None,
+        rebuilds: Vec::new(),
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     }
 }
@@ -591,6 +592,7 @@ async fn an_exported_circle_loads_as_the_circle_of_the_holder_and_the_rebuild_is
             provider_access: Vec::new(),
             boundaries: vec![],
             operation: None,
+            rebuilds: Vec::new(),
             authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
         },
         None,

@@ -44,6 +44,7 @@ fn reload(
         provider_access: Vec::new(),
         boundaries: vec![],
         operation: None,
+        rebuilds: Vec::new(),
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     }
 }

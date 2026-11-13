@@ -256,6 +256,7 @@ pub(crate) async fn load_one_by<R: std::io::Read + Send + 'static>(
                 provider_access: Vec::new(),
                 boundaries: vec![],
                 operation: None,
+                rebuilds: Vec::new(),
                 authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
             },
             None,

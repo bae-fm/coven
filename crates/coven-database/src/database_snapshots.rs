@@ -306,7 +306,24 @@ impl Database {
     where
         W: std::io::Read + Send + 'static,
     {
-        self.load_through::<P, W>(reload, progress, None).await
+        self.load_through::<P, W>(reload, progress, None, None).await
+    }
+
+    /// Install `circle`, which this device rebuilt under its migration write
+    /// `marker`: its start is the rebuilt snapshot, its raise is captured
+    /// through the marker, and its wait for the rebuild ends, all in the one
+    /// commit that loads it (§18.3). `reload` is a [`Self::load_snapshots`]
+    /// input whose `circle` start is the stored snapshot the rebuild exported.
+    pub async fn install_rebuilt<P: crate::PendingValue, W>(
+        &self,
+        reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
+        circle: coven_merge::Audience,
+        marker: coven_merge::WriteId,
+    ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
+    where
+        W: std::io::Read + Send + 'static,
+    {
+        self.load_through::<P, W>(reload, None, None, Some((circle, marker))).await
     }
 
     /// [`Self::load_snapshots`], for a rebuild's store when `store_through`
@@ -317,6 +334,7 @@ impl Database {
         reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
         progress: Option<ProgressReport<crate::LoadStep>>,
         store_through: Option<u64>,
+        rebuilt: Option<(coven_merge::Audience, coven_merge::WriteId)>,
     ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
         W: std::io::Read + Send + 'static,
@@ -382,6 +400,7 @@ impl Database {
                     cutoffs: reload.cutoffs,
                     boundaries: reload.boundaries,
                     operation: reload.operation,
+                    rebuilds: reload.rebuilds,
                     authorship,
                 };
                 let prepared = inner.clock.elapsed();
@@ -403,6 +422,12 @@ impl Database {
                                 files,
                                 &mut progress,
                                 store_through,
+                                inner.clock.now(),
+                                rebuilt.map(|(circle, marker)| crate::snapshot_load::Rebuilt {
+                                    circle,
+                                    marker,
+                                    operation: inner.raise_operation.as_deref(),
+                                }),
                             )
                         })
                     })

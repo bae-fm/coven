@@ -58,6 +58,9 @@ pub(crate) struct Group {
     pub(crate) version: std::sync::atomic::AtomicU32,
     /// Whether a breaking migration journals the raises passes publish.
     pub(crate) raises: std::sync::atomic::AtomicBool,
+    /// Whether the app also syncs `deeds`, a table whose rows only their
+    /// creating member may change (§9.6).
+    pub(crate) owned: std::sync::atomic::AtomicBool,
     pub(crate) custody: Custody,
     /// The app's bug sink, shared by every device of the group, which a
     /// test that expects a bug takes it from.
@@ -90,6 +93,7 @@ impl Group {
             clock,
             version: 1.into(),
             raises: false.into(),
+            owned: false.into(),
             custody: Custody::Memory,
             bugs: coven_foundation::task::HeardBugs::shared(),
         }
@@ -202,11 +206,20 @@ impl Group {
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
         }
-        let tables = || {
-            vec![
+        let owned = self.owned.load(std::sync::atomic::Ordering::SeqCst);
+        let tables = move || {
+            let mut tables = vec![
                 SyncedTable::new("notes", RowIdentity::SharedKey),
                 SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
-            ]
+            ];
+            if owned {
+                tables.push(
+                    SyncedTable::new("deeds", RowIdentity::IndependentUuid)
+                        .audience_column("audience")
+                        .owner_only(),
+                );
+            }
+            tables
         };
         let database = database
             .synced_tables(tables())
@@ -217,6 +230,8 @@ impl Group {
                         "notes",
                         "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
                          CREATE TABLE pins(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,
+                           title TEXT NOT NULL);
+                         CREATE TABLE deeds(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,
                            title TEXT NOT NULL)",
                     ),
                     Migration::breaking(

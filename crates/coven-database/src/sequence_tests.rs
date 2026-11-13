@@ -389,6 +389,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
         provider_access: Vec::new(),
         boundaries,
         operation: None,
+        rebuilds: Vec::new(),
         authorship,
     }
 }

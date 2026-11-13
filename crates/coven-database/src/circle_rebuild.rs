@@ -160,7 +160,7 @@ impl RebuildDatabase {
         let Some(database) = &self.database else {
             return Err(DbError::StoreClosed);
         };
-        let loaded = database.load_through::<P, W>(reload, None, Some(store_through)).await;
+        let loaded = database.load_through::<P, W>(reload, None, Some(store_through), None).await;
         self.parent.local_bytes_changed();
         loaded
     }

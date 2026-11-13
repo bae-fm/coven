@@ -9183,7 +9183,13 @@ and queues that write's marker, so no pass stops on the circle.
    circle's other parts are late writes (§18.6). It takes the circle's rows
    then as its own, and the rebuild commits.
 5. It captures the circle, as a migration captures what it read (§18.5), and
-   raises it with its other captures.
+   raises it with its other captures. The circle's rebuilt state is installed
+   in one commit: the circle's rows are replaced by the rebuild's snapshot, at
+   the slot the device has applied, the capture is made through the migration
+   marker, and the circle's gate and wait end. Every other audience stays as it
+   is. A pass that reaches this runs only after the marker has a slot, and a
+   rebuild that fails changes nothing, so the circle still waits and the next
+   pass runs it again.
 
 Ben's app migrates to version 2 while he reads only Household's store, and his
 raise of the store waits for his queued writes to land. Ana, on the old app,
@@ -9213,6 +9219,17 @@ raise built on them, covering the rebuild slot, counts like any other
 - **Writes into the circle.** Until the rebuild commits, they fail with
   `AudienceReloading`, as during any load (§16.5). After it, they wait for the
   circle's raise, as writes made after a migration do (§18.5).
+- **A slot that also loads other audiences.** A slot can make a circle below
+  the device's version readable and, together, make the store or a circle at
+  the device's version readable. The circle below waits for its rebuild as
+  above; the others load from their snapshots as any newly readable audience
+  does, in the same commit that applies the slot, and the marker is queued in
+  that commit.
+- **A marker whose history is gone.** If retention has removed the slots after
+  the snapshots the rebuild would start from while the marker was in flight,
+  the device queues a new marker, read through the slot it has applied then,
+  points the waiting rebuilds at it, and rebuilds from it once it lands. The
+  old marker counts as an empty write.
 - **A store below the circle's version.** A circle's base can be ahead of the
   store's version, when its maker's app had migrated and the store's raise
   hadn't gone out yet. The rebuild then migrates the store alone up to the

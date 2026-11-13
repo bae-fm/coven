@@ -1,0 +1,337 @@
+//! The rebuild of a circle this device reads below its version: in a store of
+//! its own, the circle and the store as they were at the slot the device's
+//! migration marker read through, migrated, read forward to the applied slot,
+//! then installed as the circle's snapshot (§18.3).
+
+use super::{release, retained_slot, ReloadStart};
+use crate::{
+    history::History,
+    sequence_sync::{next_slot, SequenceSync, Session},
+    slot_object,
+    snapshot_authorship::SnapshotAuthorship,
+    PendingRecord, Refusal, SyncError,
+};
+use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::{RebuildDatabase, SnapshotReload, SnapshotSource};
+use coven_format::{sequence::SnapshotAnnouncement, write::WriteHeader};
+use coven_foundation::id_source::CircleId;
+use coven_merge::{Audience, SlotRange};
+use std::sync::Arc;
+
+type RebuildSlot = coven_database::IncomingSlot<
+    coven_database::DownloadedWriteStream<crate::chunk_reader::PartPlaintext>,
+>;
+
+/// A rebuild's failure, kept with its cause as a database failure.
+fn failed(error: coven_database::RebuildError) -> SyncError {
+    SyncError::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
+}
+
+impl SequenceSync {
+    /// Rebuild every circle waiting for it whose migration marker has landed
+    /// (§18.3). A rebuild that fails leaves the circle waiting, the real store
+    /// as it was and nothing of the rebuild behind; the pass reports the
+    /// failure and the next one runs it again.
+    pub(crate) async fn resume_rebuilds(
+        &self,
+        session: &mut Session,
+        ring: &StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        for (audience, marker) in self.database.rebuilds_waiting().await? {
+            let Audience::Circle(circle) = audience else {
+                continue;
+            };
+            let Some((header, Some(_))) = self.database.write_header(marker).await? else {
+                continue;
+            };
+            self.rebuild(session, ring, member, circle, header).await?;
+        }
+        Ok(())
+    }
+
+    async fn rebuild(
+        &self,
+        session: &mut Session,
+        ring: &StoreKeyring,
+        member: &MemberIdentity,
+        circle: CircleId,
+        header: WriteHeader,
+    ) -> Result<(), SyncError> {
+        let audience = Audience::Circle(circle);
+        let version = session.history.state.reached(&audience);
+        let starts = session.history.rebuild_starts(circle, version, header.read_through);
+        // Retention may have removed the slots after the starts while the
+        // marker was in flight: a new marker reads through the slot applied
+        // now, and the next pass rebuilds from it.
+        let needed = [&starts.circle, &starts.store]
+            .into_iter()
+            .map(|start| start.as_ref().map_or(0, |announcement| announcement.covers))
+            .min()
+            .unwrap_or(0)
+            + 1;
+        if session.floor.as_ref().is_some_and(|floor| floor.header.first.get() > needed) {
+            self.database.restart_rebuilds().await?;
+            return Ok(());
+        }
+        let mut ring = ring.clone();
+        let mut rebuild =
+            self.database.open_rebuild(audience.clone(), version).await.map_err(failed)?;
+        let migrated = self
+            .migrated_circle(session, &mut ring, member, &audience, &header, &starts, &mut rebuild)
+            .await;
+        if let Err(error) = migrated {
+            return match rebuild.discard().await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(SyncError::cleanup(error, failed(cleanup))),
+            };
+        }
+        let id = coven_format::admin::SnapshotId {
+            audience: audience.clone(),
+            device: self.device,
+            number: self.database.reserve_snapshot_number().await?.get(),
+        };
+        let key = session.history.sending_key(&ring, member.member(), &audience)?;
+        let staging = rebuild.export(id.clone(), key, &self.database).await.map_err(failed)?;
+        let authorship = Arc::new(SnapshotAuthorship {
+            store: self.store(),
+            history: session.history.clone(),
+            ring: ring.clone(),
+        });
+        self.database
+            .install_rebuilt::<PendingRecord, crate::chunk_reader::PartPlaintext>(
+                SnapshotReload {
+                    snapshots: vec![SnapshotSource::Stored {
+                        id,
+                        input: staging,
+                        author: member.member(),
+                    }],
+                    slots: Vec::new(),
+                    target: session.through,
+                    state: session.history.state.clone(),
+                    cutoffs: Self::cutoffs(&session.history),
+                    provider_access: session.history.provider_access(member.member())?,
+                    boundaries: session.history.boundaries.clone(),
+                    operation: None,
+                    rebuilds: Vec::new(),
+                    authorship,
+                },
+                audience,
+                header.position,
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn cutoffs(history: &History) -> Vec<(coven_merge::Slot, coven_format::admin::StoreChange)> {
+        history.cutoffs.iter().map(|cutoff| (cutoff.slot, cutoff.change.clone())).collect()
+    }
+
+    /// Load the circle and the store at the slot the marker read through into
+    /// `rebuild`, migrate there under the marker's header, and read on to the
+    /// applied slot.
+    async fn migrated_circle(
+        &self,
+        session: &Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        audience: &Audience,
+        header: &WriteHeader,
+        starts: &crate::history_rebuild::RebuildStarts,
+        rebuild: &mut RebuildDatabase,
+    ) -> Result<(), SyncError> {
+        let input = header.read_through;
+        let mut selected: Vec<ReloadStart> = Vec::new();
+        for announcement in [&starts.store, &starts.circle] {
+            let Some(announcement) = announcement else {
+                continue;
+            };
+            match self.select_into(announcement.clone(), ring, None, Some(rebuild)).await {
+                Ok(snapshot) => selected.push(ReloadStart::Stored(snapshot)),
+                Err(error) => return release(selected, Err(error)).await,
+            }
+        }
+        let stored: Vec<_> = selected
+            .iter()
+            .filter_map(|start| match start {
+                ReloadStart::Stored(snapshot) => {
+                    Some((snapshot.announcement().clone(), snapshot.path().clone()))
+                }
+                ReloadStart::Current(_) | ReloadStart::Empty(_) => None,
+            })
+            .collect();
+        let reloaded =
+            self.first_reload(session, ring, member, audience, starts, input, &mut selected).await;
+        let (reload, mut at) = match reloaded {
+            Ok(reloaded) => reloaded,
+            Err(error) => return release(selected, Err(error)).await,
+        };
+        if let Err(error) = rebuild.load::<PendingRecord, _>(reload, starts.store_through).await {
+            return Err(self.judge_staged_body(error, &stored, ring, SyncError::from).await);
+        }
+        rebuild.migrate(header.clone()).await.map_err(failed)?;
+        let target = session.through;
+        let mut slots = Vec::new();
+        self.read_rebuild_slots(
+            session, ring, member, audience, &mut at, 0, input, target, &mut slots,
+        )
+        .await?;
+        let forward = SnapshotReload {
+            snapshots: vec![
+                SnapshotSource::Current(Audience::Store),
+                SnapshotSource::Current(audience.clone()),
+            ],
+            slots,
+            target,
+            state: at.state.clone(),
+            cutoffs: Self::cutoffs(&at),
+            provider_access: Vec::new(),
+            boundaries: at.boundaries.clone(),
+            operation: None,
+            rebuilds: Vec::new(),
+            authorship: Arc::new(SnapshotAuthorship {
+                store: self.store(),
+                history: session.history.clone(),
+                ring: ring.clone(),
+            }),
+        };
+        rebuild
+            .load::<PendingRecord, _>(forward, starts.store_through_at(target))
+            .await
+            .map_err(SyncError::from)?;
+        Ok(())
+    }
+
+    /// The input to the first load: the starts' stagings, the slots after
+    /// them through `input`, and the history at `input`, which the forward
+    /// load continues from.
+    async fn first_reload(
+        &self,
+        session: &Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        audience: &Audience,
+        starts: &crate::history_rebuild::RebuildStarts,
+        input: u64,
+        selected: &mut Vec<ReloadStart>,
+    ) -> Result<
+        (
+            SnapshotReload<
+                coven_database::SnapshotStaging,
+                coven_database::DownloadedWriteStream<crate::chunk_reader::PartPlaintext>,
+            >,
+            History,
+        ),
+        SyncError,
+    > {
+        let store_start = selected.iter().find_map(|start| match start {
+            ReloadStart::Stored(snapshot)
+                if snapshot.announcement().snapshot.audience == Audience::Store =>
+            {
+                Some(snapshot)
+            }
+            _ => None,
+        });
+        let (mut at, store_covers) = match store_start {
+            Some(snapshot) => (
+                History::restore(&snapshot.body().originals, self.store(), ring, member)?,
+                snapshot.announcement().covers,
+            ),
+            None => (History::default(), 0),
+        };
+        let circle_covers = starts.circle.as_ref().map_or(0, |a: &SnapshotAnnouncement| a.covers);
+        let mut slots = Vec::new();
+        self.read_rebuild_slots(
+            session,
+            ring,
+            member,
+            audience,
+            &mut at,
+            store_covers,
+            circle_covers.min(starts.store.as_ref().map_or(0, |a| a.covers)),
+            input,
+            &mut slots,
+        )
+        .await?;
+        let authors = selected
+            .iter()
+            .map(|start| match start {
+                ReloadStart::Stored(snapshot) => snapshot.authenticate(&session.history).map(Some),
+                ReloadStart::Current(_) | ReloadStart::Empty(_) => Ok(None),
+            })
+            .collect::<Result<Vec<_>, SyncError>>()?;
+        let mut snapshots = Vec::new();
+        if starts.store.is_none() {
+            snapshots.push(SnapshotSource::Empty(Audience::Store));
+        }
+        if starts.circle.is_none() {
+            snapshots.push(SnapshotSource::Empty(audience.clone()));
+        }
+        for (start, author) in std::mem::take(selected).into_iter().zip(authors) {
+            match (start, author) {
+                (ReloadStart::Stored(snapshot), Some(author)) => {
+                    snapshots.push(snapshot.into_source(author));
+                }
+                _ => unreachable!("every selected start is stored and authenticated"),
+            }
+        }
+        // The starts were taken; a failure from here on has nothing to release.
+        let reload = SnapshotReload {
+            snapshots,
+            slots,
+            target: input,
+            state: at.state.clone(),
+            cutoffs: Self::cutoffs(&at),
+            provider_access: Vec::new(),
+            boundaries: at.boundaries.clone(),
+            operation: None,
+            rebuilds: Vec::new(),
+            authorship: Arc::new(SnapshotAuthorship {
+                store: self.store(),
+                history: session.history.clone(),
+                ring: ring.clone(),
+            }),
+        };
+        Ok((reload, at))
+    }
+
+    /// The slots after `first` through `last`, opened for the circle and the
+    /// store, and consumed into `at` where the store's snapshot, which holds
+    /// the kept originals through `store_covers`, doesn't.
+    async fn read_rebuild_slots(
+        &self,
+        session: &Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        audience: &Audience,
+        at: &mut History,
+        store_covers: u64,
+        first: u64,
+        last: u64,
+        slots: &mut Vec<RebuildSlot>,
+    ) -> Result<(), SyncError> {
+        let range = SlotRange::new(next_slot(first)?, last);
+        let mut reads = crate::sequence_sync::SlotReads::new(self, range);
+        for number in range {
+            let path = self.path(number);
+            let input = reads.next().await?.ok_or_else(|| {
+                crate::write_object::damaged(&path, Refusal::Parse { cause: None })
+            })?;
+            let received = slot_object::open(
+                input.local_bytes().await?,
+                &path,
+                ring,
+                &session.history,
+                |opened| *opened == Audience::Store || opened == audience,
+            )?;
+            slots.push(if number.get() > store_covers {
+                let incoming = at.consume(received, member.member());
+                at.acquire(ring, member)?;
+                incoming
+            } else {
+                retained_slot(received)
+            });
+        }
+        Ok(())
+    }
+}

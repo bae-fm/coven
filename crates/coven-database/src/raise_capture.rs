@@ -113,10 +113,22 @@ pub(crate) fn capture_made(
         Some(through) => through,
         None => crate::write_metadata::newest_number(db, device)?.unwrap_or(0),
     };
+    capture_circle(db, &audience, through, operation)
+}
+
+/// Capture `audience` through the device's write number `through` at the
+/// device's version, and open the journal through which passes publish the
+/// capture if the migration's has finished.
+fn capture_circle(
+    db: &DatabaseConnection,
+    audience: &Audience,
+    through: u64,
+    operation: Option<&crate::migration::MigrationOperation>,
+) -> Result<(), DbError> {
     db.internal_execute(
         "INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",
         params![
-            &audience,
+            audience,
             db.schema_version()?,
             through.to_be_bytes(),
             crate::sequence::applied(db)?.to_be_bytes()
@@ -131,6 +143,19 @@ pub(crate) fn capture_made(
         }
     }
     Ok(())
+}
+
+/// The capture of a circle this device rebuilt, installed in the commit that
+/// loads it: the circle is held as any held audience is, so the device's
+/// writes after its migration marker `marker` wait for its raise (§18.3,
+/// §18.4).
+pub(crate) fn capture_rebuilt(
+    db: &DatabaseConnection,
+    audience: &Audience,
+    marker: WriteId,
+    operation: Option<&crate::migration::MigrationOperation>,
+) -> Result<(), DbError> {
+    capture_circle(db, audience, marker.number, operation)
 }
 
 /// Journal the operation through which passes publish this installation's

@@ -215,6 +215,7 @@ impl SequenceSync {
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.check_admitted(&session, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
+        self.resume_rebuilds(&mut session, &ring, &member).await?;
         if let Some((through, first)) = sendable {
             // The queue's first write names a wait for its sealing key; a
             // later send that succeeds settles that condition.
@@ -482,9 +483,17 @@ impl SequenceSync {
             return Ok(());
         }
         let mut reloads = Vec::new();
+        let mut rebuilds = Vec::new();
         if let SlotContent::Admin { effect: Some(effect), .. } = &mut incoming.content {
             effect.provider_access = history.provider_access(member.member())?;
-            reloads = effect.reload.clone();
+            // A circle below this device's version waits for its rebuild
+            // instead of reloading (§18.3).
+            let breaking = self.database.breaking_version().await?;
+            (rebuilds, reloads) = effect.reload.iter().cloned().partition(|audience| {
+                breaking > 0
+                    && matches!(audience, Audience::Circle(_))
+                    && history.state.awaits_raise(audience, breaking)
+            });
         }
         // A reload persists the audience gates before any replacement body is
         // read, and keeps the keys after it loads.
@@ -514,7 +523,9 @@ impl SequenceSync {
             | (
                 coven_database::ApplyOutcome::Waiting(coven_database::WriteWait::Reload(_)),
                 false,
-            ) => self.reload_activation(session, at, &reloads, history, ring, member).await,
+            ) => {
+                self.reload_activation(session, at, &reloads, rebuilds, history, ring, member).await
+            }
             (coven_database::ApplyOutcome::Waiting(wait), _) => {
                 Err(SyncError::Pending(Box::new(PendingRecord::new(
                     PendingSubject::Slot(at),

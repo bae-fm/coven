@@ -595,6 +595,7 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
                 provider_access: Vec::new(),
                 boundaries: vec![],
                 operation: None,
+                rebuilds: Vec::new(),
                 authorship: std::sync::Arc::new(NoSnapshotEvidence),
             },
             None,
@@ -646,6 +647,7 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         provider_access: Vec::new(),
         boundaries: vec![],
         operation: None,
+        rebuilds: Vec::new(),
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
     assert!(db.load_snapshots::<Pending, _>(input(2), None).await.is_err());
@@ -716,6 +718,7 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         provider_access: Vec::new(),
         boundaries: vec![],
         operation: None,
+        rebuilds: Vec::new(),
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
     assert!(db.load_snapshots::<Pending, _>(reload(2), None).await.is_err());

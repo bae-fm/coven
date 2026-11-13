@@ -8,21 +8,19 @@ use crate::{DbError, PendingValue, StoreState};
 use coven_merge::Audience;
 use std::time::SystemTime;
 
-/// The circles `reload` names when every audience in it is a circle this
-/// device must rebuild: below `breaking`, the device's newest breaking
-/// version, and not deleted. None when `reload` names anything else, such as
-/// a store being loaded, which reloads as it always has.
-pub(crate) fn rebuilt(
+/// Split the audiences `reload` names into the circles this device must
+/// rebuild (below `breaking`, the device's newest breaking version, and not
+/// deleted) and the rest, which reload from snapshots as they always have.
+pub(crate) fn split(
     state: &StoreState,
     reload: &[Audience],
     breaking: u32,
-) -> Option<Vec<Audience>> {
-    (breaking > 0
-        && !reload.is_empty()
-        && reload.iter().all(|audience| {
-            matches!(audience, Audience::Circle(_)) && state.awaits_raise(audience, breaking)
-        }))
-    .then(|| reload.to_vec())
+) -> (Vec<Audience>, Vec<Audience>) {
+    reload.iter().cloned().partition(|audience| {
+        breaking > 0
+            && matches!(audience, Audience::Circle(_))
+            && state.awaits_raise(audience, breaking)
+    })
 }
 
 /// End the wait of every circle `state` no longer lets this device read, or
@@ -58,6 +56,30 @@ pub(crate) fn begin<P: PendingValue>(
     now: SystemTime,
     circles: &[Audience],
 ) -> Result<(), DbError> {
+    let marker = queue_marker(db, schema, now)?;
+    for circle in circles {
+        crate::reload_gate::require_rebuild::<P>(db, circle, marker.header.position)?;
+    }
+    Ok(())
+}
+
+/// Run every waiting rebuild under a new marker, read through the slot applied
+/// now, for rebuilds whose history at their marker's slot is gone (§18.3).
+/// The old marker counts as an empty write.
+pub(crate) fn restart(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    now: SystemTime,
+) -> Result<(), DbError> {
+    let marker = queue_marker(db, schema, now)?;
+    crate::reload_gate::follow(db, marker.header.position)
+}
+
+fn queue_marker(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    now: SystemTime,
+) -> Result<coven_format::write::WriteRecord, DbError> {
     let device = db
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
@@ -65,10 +87,7 @@ pub(crate) fn begin<P: PendingValue>(
     crate::write_commit::retain_original(db, &marker.header, None)?;
     crate::write_commit::queue(db, schema, &marker, Default::default())?;
     crate::raise_capture::follow(db, marker.header.position)?;
-    for circle in circles {
-        crate::reload_gate::require_rebuild::<P>(db, circle, marker.header.position)?;
-    }
-    Ok(())
+    Ok(marker)
 }
 
 #[cfg(test)]

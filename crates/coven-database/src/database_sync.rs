@@ -252,6 +252,45 @@ impl Database {
         .await
     }
 
+    /// The header of one of this device's writes the store holds, with the
+    /// slot it landed in if it has landed: a rebuild runs under the header of
+    /// its migration marker, once the marker has a slot (§18.3).
+    pub async fn write_header(
+        &self,
+        write: coven_merge::WriteId,
+    ) -> Result<Option<(coven_format::write::WriteHeader, Option<coven_merge::Slot>)>, DbError>
+    {
+        self.call(move |inner| {
+            inner.access.readers.acquire_reader().with_reader(|db| {
+                let Some(frame) = crate::write_headers::read(db, write)? else {
+                    return Ok(None);
+                };
+                let slot =
+                    crate::write_metadata::stored_write(db, write)?.and_then(|stored| stored.slot);
+                Ok(Some((frame.header, slot)))
+            })
+        })
+        .await
+    }
+
+    /// Queue a new migration marker, read through the slot applied now, and
+    /// point every waiting rebuild at it: their history at the old marker's
+    /// slot is gone (§18.3).
+    pub async fn restart_rebuilds(&self) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|writer| {
+                    crate::rebuild_wait::restart(
+                        writer,
+                        &inner.access.write_schema,
+                        inner.clock.now(),
+                    )
+                })
+            })
+        })
+        .await
+    }
+
     /// Current pending records, decoded as the sync owner's typed values.
     pub async fn pending<P: crate::PendingValue>(&self) -> Result<Vec<P>, DbError> {
         self.read(|sql| sql.pending()).await

@@ -211,8 +211,13 @@ impl SequenceSync {
                 Ok(operation) => operation,
                 Err(error) => return release(starts, Err(error)).await,
             };
-            let inputs =
-                ReloadInputs { target: *target, history, through, operation: Some(operation) };
+            let inputs = ReloadInputs {
+                target: *target,
+                history,
+                through,
+                operation: Some(operation),
+                rebuilds: Vec::new(),
+            };
             match self
                 .install_selected(session, starts, inputs, ring, member, floor.as_ref(), false)
                 .await?

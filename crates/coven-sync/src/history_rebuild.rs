@@ -2,7 +2,10 @@
 //! (§16.6, §18.3; `Retention.RebuildKept`, `CircleRaise.rebuilt_body_from_kept`).
 
 use crate::history::History;
-use coven_format::{admin::SnapshotId, sequence::Purpose};
+use coven_format::{
+    admin::SnapshotId,
+    sequence::{Purpose, SnapshotAnnouncement},
+};
 use coven_merge::{Audience, Slot};
 use std::collections::BTreeSet;
 
@@ -29,7 +32,77 @@ impl RebuildRead {
     }
 }
 
+/// The snapshots one circle's rebuild loads, and how far it reads the store.
+pub(crate) struct RebuildStarts {
+    /// The circle's newest snapshot covering at most the input slot; None
+    /// when the circle starts empty.
+    pub(crate) circle: Option<SnapshotAnnouncement>,
+    /// The store's newest snapshot, ordinary or the replayed body of a reset,
+    /// at a version of at most the circle's, covering at most `store_through`;
+    /// None when the store starts empty.
+    pub(crate) store: Option<SnapshotAnnouncement>,
+    /// The last slot whose store parts the rebuild reads, if it reads to
+    /// `input`: the input slot, or the slot before the store's raise past the
+    /// circle's version when that is earlier (§16.6, §18.3).
+    pub(crate) store_through: u64,
+    /// The slot before the store's raise past the circle's version, if
+    /// history holds one: the last slot whose store parts any rebuild of the
+    /// circle reads.
+    pub(crate) store_limit: u64,
+}
+
+impl RebuildStarts {
+    /// The last slot whose store parts the rebuild reads when it has read
+    /// the slots through `target`.
+    pub(crate) fn store_through_at(&self, target: u64) -> u64 {
+        self.store_limit.min(target)
+    }
+}
+
 impl History {
+    /// What the rebuild of `circle`, at `version`, loads to reach `input`, the
+    /// slot its migration marker read through.
+    pub(crate) fn rebuild_starts(
+        &self,
+        circle: coven_foundation::id_source::CircleId,
+        version: u32,
+        input: u64,
+    ) -> RebuildStarts {
+        let audience = Audience::Circle(circle);
+        let store_limit = self
+            .boundaries
+            .iter()
+            .filter_map(|coverage| match &coverage.boundary {
+                coven_database::Boundary::SchemaChange(raise)
+                    if raise.snapshot.audience == Audience::Store && raise.number > version =>
+                {
+                    Some(raise.entry.get() - 1)
+                }
+                _ => None,
+            })
+            .min()
+            .map_or(u64::MAX, |before| before);
+        let store_through = store_limit.min(input);
+        let newest = |audience: &Audience, through: u64| {
+            self.announcements
+                .iter()
+                .filter(|(_, announcement)| {
+                    announcement.snapshot.audience == *audience
+                        && announcement.covers <= through
+                        && announcement.breaking_version <= version
+                        && self.usable_at(announcement, through)
+                })
+                .max_by_key(|(slot, announcement)| (announcement.covers, **slot))
+                .map(|(_, announcement)| announcement.clone())
+        };
+        RebuildStarts {
+            circle: newest(&audience, input),
+            store: newest(&Audience::Store, store_through),
+            store_through,
+            store_limit,
+        }
+    }
+
     /// Each circle that isn't deleted and is below the store's version, with
     /// what a member who starts reading it rebuilds it from.
     pub(crate) fn rebuild_reads(&self) -> Vec<RebuildRead> {

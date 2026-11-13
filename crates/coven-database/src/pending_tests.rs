@@ -356,6 +356,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
             included: 0,
         }],
         operation: None,
+        rebuilds: Vec::new(),
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     };
     db.record_pending(record(1)).await.unwrap();

@@ -39,18 +39,19 @@ fn only_circles_below_the_breaking_version_are_rebuilt() {
     let state = state(&[(1, 0), (2, 2), (3, 0)], &[3]);
     let orchard = Audience::Circle(circle(2));
     let gone = Audience::Circle(circle(3));
-    assert_eq!(rebuilt(&state, &[garden()], 2), Some(vec![garden()]));
-    assert_eq!(rebuilt(&state, &[garden()], 1), Some(vec![garden()]));
-    assert_eq!(rebuilt(&state, std::slice::from_ref(&orchard), 2), None, "a circle at the version");
-    assert_eq!(rebuilt(&state, &[gone], 2), None, "a deleted circle");
-    assert_eq!(rebuilt(&state, &[garden()], 0), None, "a device that ran no breaking migration");
-    assert_eq!(rebuilt(&state, &[], 2), None);
+    let split = |reload: &[Audience], breaking| split(&state, reload, breaking);
+    assert_eq!(split(&[garden()], 2), (vec![garden()], vec![]));
+    assert_eq!(split(&[garden()], 1), (vec![garden()], vec![]));
+    assert_eq!(split(std::slice::from_ref(&orchard), 2), (vec![], vec![orchard.clone()]));
+    assert_eq!(split(std::slice::from_ref(&gone), 2), (vec![], vec![gone.clone()]));
+    assert_eq!(split(&[garden()], 0), (vec![], vec![garden()]), "no breaking migration ran");
+    assert_eq!(split(&[], 2), (vec![], vec![]));
     assert_eq!(
-        rebuilt(&state, &[Audience::Store, garden()], 2),
-        None,
-        "a store being loaded reloads, and its circles with it"
+        split(&[Audience::Store, garden()], 2),
+        (vec![garden()], vec![Audience::Store]),
+        "a store being loaded reloads, and a circle below the version waits for its rebuild"
     );
-    assert_eq!(rebuilt(&state, &[garden(), orchard], 2), None, "one circle already at the version");
+    assert_eq!(split(&[garden(), orchard.clone()], 2), (vec![garden()], vec![orchard]));
 }
 
 fn index() -> Migration {
@@ -155,5 +156,22 @@ async fn a_breaking_migration_points_a_waiting_rebuild_at_its_own_marker() {
     let waiting = db.rebuilds_waiting().await.unwrap();
     assert_eq!(waiting[&garden()], marker.header.position);
     assert_ne!(waiting[&garden()], first);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn restarting_points_a_waiting_rebuild_at_a_new_marker_read_through_the_applied_slot() {
+    let (_store, db) = migrated().await;
+    db.inspect_writer_schema(|connection, schema| {
+        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[garden()]).unwrap();
+    });
+    let first = db.rebuilds_waiting().await.unwrap()[&garden()];
+    db.restart_rebuilds().await.unwrap();
+    let marker = records(&db).last().unwrap().clone();
+    assert_eq!(marker.header.disposition, WriteDisposition::Migration);
+    assert_eq!(marker.header.position.number, first.number + 1);
+    assert_eq!(marker.header.read_through, db.applied_slot().await.unwrap());
+    assert_eq!(db.rebuilds_waiting().await.unwrap()[&garden()], marker.header.position);
+    assert_eq!(db.reloading_audiences().await.unwrap(), [garden()].into());
     db.close().await.unwrap();
 }

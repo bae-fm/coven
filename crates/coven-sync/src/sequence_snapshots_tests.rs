@@ -688,7 +688,7 @@ async fn a_circle_made_after_its_makers_migration_counts_snapshots_at_its_base()
 /// Garden's, so he asks for none: aged history brings a snapshot of the store
 /// and none of Garden (§16.2, §16.3).
 #[tokio::test]
-async fn no_snapshot_is_asked_for_an_audience_not_raised_to_the_devices_migration() {
+async fn only_a_raise_is_taken_of_an_audience_not_raised_to_the_devices_migration() {
     let group = Group::new();
     group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
     let ana = group.device(1).await;
@@ -727,7 +727,23 @@ async fn no_snapshot_is_asked_for_an_audience_not_raised_to_the_devices_migratio
         })
     };
     assert!(uploaded(coven_merge::Audience::Store), "Ben snapshots the store");
-    assert!(!uploaded(coven_merge::Audience::Circle(garden)), "Ben takes no Garden snapshot");
+    // Garden is not raised to his migration when the pass starts: the
+    // snapshot he uploads is the raise his rebuild of it makes, not an
+    // ordinary one.
+    let history = ben.sync.session.lock().await.history.clone();
+    let garden_announcements: Vec<_> = history
+        .announcements
+        .values()
+        .filter(|announcement| {
+            announcement.snapshot.audience == coven_merge::Audience::Circle(garden)
+        })
+        .collect();
+    assert!(
+        garden_announcements
+            .iter()
+            .all(|announcement| announcement.purpose == coven_format::sequence::Purpose::Raise(2)),
+        "{garden_announcements:?}"
+    );
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }

@@ -421,6 +421,7 @@ async fn reload_from_empty(db: &Database, history: Vec<(u64, WriteRecord)>) {
         cutoffs: vec![],
         boundaries: vec![],
         operation: None,
+        rebuilds: Vec::new(),
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     };
     db.load_snapshots::<crate::pending::tests::Record, _>(reload, None).await.unwrap();

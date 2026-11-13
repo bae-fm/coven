@@ -2,6 +2,30 @@
 //! raise.
 
 use crate::sequence_sync::tests::*;
+use coven_database::{Database, DbError};
+
+async fn deed(
+    db: &Database,
+    id: &'static str,
+    circle: coven_foundation::id_source::CircleId,
+    title: &'static str,
+) {
+    db.write(move |sql| {
+        sql.execute("INSERT INTO deeds VALUES(?1,?2,?3)", (id, circle.to_string(), title))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+async fn deeds(db: &Database) -> Vec<(String, String)> {
+    db.read(|sql| {
+        Ok::<_, DbError>(sql.query("SELECT id,title FROM deeds ORDER BY id", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?)
+    })
+    .await
+    .unwrap()
+}
 
 /// Ana's phone prepares Garden on the old app, so its creation entry records
 /// base 0, and her app updates with a breaking migration before the entry
@@ -386,9 +410,129 @@ async fn a_circle_readable_below_the_devices_version_waits_for_its_rebuild_while
         "{refused:?}"
     );
     // Its own marker lands for the device like any migration marker, and the
-    // circle still waits.
+    // pass that reads it rebuilds the circle.
     ben.sync.pass().await.unwrap();
-    assert_eq!(ben.database().rebuilds_waiting().await.unwrap().len(), 1);
+    assert!(ben.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert!(ben.database().reloading_audiences().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ben's app migrated before Ana, still on the old app, added him to Garden,
+/// where she had pinned. No device that migrated holds Garden's rows at
+/// version 2, so Ben rebuilds it: once his marker has a slot he migrates
+/// Garden and the store as they were when he started reading it, reads on to
+/// the end of the sequence, holds Ana's first pin at version 2 and raises
+/// Garden and the store. Her second pin landed after the slot he started
+/// reading at, so it is a late write, which this migration drops into lost
+/// values, as it would on a device that held Garden then (§18.6). Ana's
+/// update finds both raised and loads them. A pin Ben makes after the rebuild
+/// waits for Garden's raise and then sends (§18.3).
+#[tokio::test]
+async fn a_circle_joined_after_migrating_is_rebuilt_and_raised_by_the_member_who_joined() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    let before = "00000000-0000-4000-8000-000000000001";
+    let after = "00000000-0000-4000-8000-000000000002";
+    pin(ana.database(), before, garden, "before").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    pin(ana.database(), after, garden, "after").await;
+    ana.sync.pass().await.unwrap();
+
+    // His marker is queued, sent and lands; the pass after it rebuilds.
+    for _ in 0..4 {
+        ben.sync.pass().await.unwrap();
+    }
+    assert!(ben.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert!(ben.database().reloading_audiences().await.unwrap().is_empty());
+    assert_eq!(pins(ben.database()).await, [(before.to_string(), "before".to_string())]);
+    for _ in 0..3 {
+        ben.sync.pass().await.unwrap();
+    }
+    // He raised Garden himself.
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Circle(garden)), 2);
+    assert_eq!(state.schema[&Audience::Circle(garden)].snapshot.device, ben.sync.device);
+    assert!(ben.database().raise_captures().await.unwrap().is_empty());
+    let mine = "00000000-0000-4000-8000-000000000003";
+    pin(ben.database(), mine, garden, "mine").await;
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Circle(garden)), 2);
+    assert_eq!(state.schema[&Audience::Circle(garden)].snapshot.device, ben.sync.device);
+    assert!(ana.sync.database.raise_captures().await.unwrap().is_empty());
+    ana.sync.pass().await.unwrap();
+    assert_eq!(pins(ana.database()).await, pins(ben.database()).await);
+    assert_eq!(pins(ana.database()).await.len(), 2);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Garden holds a deed only its creator, Ana, may change. Ben, who rebuilds
+/// Garden, is not its author, so the snapshot of his rebuild carries her
+/// write's evidence, and the load of it checks that evidence as it checks a
+/// snapshot of any other member (§9.6, §16.2). Ana's update loads his raise
+/// and holds the deed.
+#[tokio::test]
+async fn a_rebuilt_circle_carries_the_evidence_of_another_members_owned_rows() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    group.owned.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    let deed_id = "00000000-0000-4000-8000-0000000000d1";
+    deed(ana.database(), deed_id, garden, "the deed").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    for _ in 0..7 {
+        ben.sync.pass().await.unwrap();
+    }
+    assert!(ben.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert_eq!(deeds(ben.database()).await, [(deed_id.to_string(), "the deed".to_string())]);
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Circle(garden)), 2);
+    assert_eq!(state.schema[&Audience::Circle(garden)].snapshot.device, ben.sync.device);
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(deeds(ana.database()).await, deeds(ben.database()).await);
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }
@@ -454,10 +598,11 @@ async fn a_write_into_a_circle_awaiting_its_rebuild_is_refused_until_a_raise_of_
 }
 
 /// Ben is added to Garden and Orchard after his app migrated; Ana can raise
-/// only Garden, since Cy removed her from Orchard. Ben's load of Garden's
-/// raise ends Garden's wait for its rebuild and leaves Orchard's (§18.3).
+/// only Garden, since Cy removed her from Orchard, and Cy has not migrated.
+/// Ben raises Orchard by his rebuild of it, and loads Ana's raise of Garden
+/// (§18.3).
 #[tokio::test]
-async fn a_circles_raise_ends_only_its_own_wait_for_a_rebuild() {
+async fn a_circle_only_the_joined_member_can_raise_is_raised_by_his_rebuild() {
     use coven_merge::Audience;
     let group = Group::new();
     group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -506,11 +651,14 @@ async fn a_circles_raise_ends_only_its_own_wait_for_a_rebuild() {
     let ana = group.reopen(ana).await;
     ana.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
-    ben.sync.pass().await.unwrap();
+    for _ in 0..3 {
+        ben.sync.pass().await.unwrap();
+    }
     let state = ben.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&Audience::Circle(garden)), 2);
-    assert_eq!(state.reached(&Audience::Circle(orchard)), 0);
-    assert_eq!(waiting(&ben).await, [Audience::Circle(orchard)]);
+    assert_eq!(state.reached(&Audience::Circle(orchard)), 2);
+    assert!(waiting(&ben).await.is_empty());
+    assert_eq!(state.schema[&Audience::Circle(orchard)].snapshot.device, ben.sync.device);
     for device in [&ana, &ben, &cy] {
         device.sync.database.close().await.unwrap();
     }
