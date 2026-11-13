@@ -423,6 +423,27 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
     assert_eq!(temporaries(&state), 0);
 }
 
+/// A refused copy whose destination check cannot be answered says nothing of
+/// the destination: the create fails with the failed check, which the caller
+/// retries, not with the copy's refusal as if the check had found another
+/// object there.
+#[tokio::test]
+async fn every_object_copy_failing_its_destination_check_reports_the_check() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    storage.create(&path, b"original").await.unwrap();
+    state.lock().unwrap().fail_object_head = true;
+    let failed = storage.create(&path, b"replacement").await.unwrap_err();
+    assert_eq!(failed.failure(), StorageFailure::Network, "{failed:?}");
+    assert!(failed.retryable());
+    assert_eq!(temporaries(&state), 0);
+    state.lock().unwrap().fail_object_head = false;
+    assert_eq!(
+        storage.create(&path, b"replacement").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
+}
+
 /// A temporary that cannot be deleted fails the create even when the copy
 /// published it. The caller's retry of the same create stages and deletes
 /// the same temporary, and finds a plain occupied path holding its own

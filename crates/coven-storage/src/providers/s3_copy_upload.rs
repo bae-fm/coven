@@ -427,7 +427,19 @@ impl S3Storage {
                 {
                     match self.confirm_marker(path, bytes.len() as u64, &token).await {
                         Ok(()) => Ok(()),
-                        Err(_) => Err(error),
+                        // The destination answered: another object holds it,
+                        // or none does. The copy's own answer stands.
+                        Err(found)
+                            if matches!(
+                                found.failure(),
+                                StorageFailure::AlreadyExists | StorageFailure::SessionExpired
+                            ) =>
+                        {
+                            Err(error)
+                        }
+                        // The check itself failed: nothing is known of the
+                        // destination, so the copy's answer is not the verdict.
+                        Err(failed) => Err(failed),
                     }
                 }
                 // No source: another attempt of this create, staging under

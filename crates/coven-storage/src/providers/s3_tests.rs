@@ -85,6 +85,9 @@ struct Remote {
     broken_check: Option<StorageCheck>,
     forced_error: Option<(&'static str, u16)>,
     held_copy: Option<gcs::HeldCopy>,
+    /// Every HEAD of an object fails with a server error, as a lost reply
+    /// to a destination check does.
+    fail_object_head: bool,
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -351,6 +354,9 @@ fn respond(
             }
             None => response(404, "<Error><Code>NoSuchKey</Code></Error>"),
         },
+        Method::HEAD if state.fail_object_head => {
+            response(500, "<Error><Code>InternalError</Code></Error>")
+        }
         Method::HEAD => match state.objects.get(&key) {
             Some(bytes) => Response::builder()
                 .header("content-length", bytes.len())

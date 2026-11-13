@@ -12741,7 +12741,9 @@ same way:
 - Slots sent in one request are such creates, each still dated by one
   request's completion: the copy's.
 - A refused copy, or one whose reply was lost, settles as stored when the
-  destination carries its marker; otherwise the copy's answer stands.
+  destination carries its marker; otherwise the copy's answer stands. A
+  destination check that itself fails, its answer unknown, fails the call with
+  that failure, never with the copy's answer.
 - The temporary is deleted whatever the copy's outcome. A failed deletion fails
   the call, with both errors kept.
 
