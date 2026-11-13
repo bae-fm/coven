@@ -788,6 +788,9 @@ mod restore_credentials;
 #[path = "handle_pairing_tests.rs"]
 mod handle_pairing;
 
+#[path = "bootstrap_pairing_tests.rs"]
+mod pairing;
+
 #[path = "bootstrap_join_tests.rs"]
 mod join;
 

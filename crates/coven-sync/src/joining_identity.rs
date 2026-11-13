@@ -1,16 +1,17 @@
 //! Fixed joining keys and request bytes, sealed locally using the scanned invite.
 
+use crate::request_at::{Placed, RequestAt};
 use crate::{Joiner, SyncError};
 use coven_crypto::{
     ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys, ObjectHasher,
 };
+use coven_format::invite_end::InviteEnd;
 use coven_format::{
     codes::InviteCode,
     objects::JoinRequest,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
 };
-use coven_format::{device_gone::DeviceGone, invite_end::InviteEnd};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_foundation::id_source::DeviceId;
@@ -418,29 +419,27 @@ impl JoiningIdentity {
         Ok(())
     }
 
+    /// The request and where it goes, for the storage work it shares with a
+    /// pairing's.
+    fn at(&self) -> RequestAt<'_> {
+        RequestAt { path: &self.path, request: &self.request, showing: self.inviting_writer }
+    }
+
     /// Publish the recorded immutable request. An occupied path must hold
     /// exactly these bytes (§19.3). `false`, sending nothing, once the
     /// inviting device is gone for good: an admin's device has ended its
     /// requests, and none would ever be answered (§13.2).
     pub async fn publish(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        if self.inviter_gone(storage).await? {
+        let at = self.at();
+        if at.showing_gone(storage).await? {
             return Ok(false);
         }
-        match storage.create(&self.path, &self.request).await {
-            Ok(_) => Ok(true),
-            Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                let found = storage.read(&self.path).await?;
-                if found == self.request {
-                    return Ok(true);
-                }
-                // The invite ended before the request was sent, and its
-                // marker holds the path (§13.2).
-                if InviteEnd::decode(&found).is_ok() {
-                    return Ok(false);
-                }
-                Err(SyncError::InvitationChanged)
-            }
-            Err(error) => Err(error.into()),
+        match at.place(storage).await? {
+            Placed::Ours => Ok(true),
+            // The invite ended before the request was sent, and its marker
+            // holds the path (§13.2).
+            Placed::Other(found) if InviteEnd::decode(&found).is_ok() => Ok(false),
+            Placed::Other(_) => Err(SyncError::InvitationChanged),
         }
     }
 
@@ -462,34 +461,10 @@ impl JoiningIdentity {
 
     /// Whether this request is still in storage: an ended invite's marker
     /// in its place, or nothing, means it is gone. A request beside its
-    /// inviting device's gone marker reached storage after an admin's
-    /// device listed that device's requests, and no device will list them
-    /// again, so this device deletes it, and it is gone too (§13.2).
+    /// inviting device's gone marker is deleted, and is gone too
+    /// (`RequestAt::pending`).
     pub(crate) async fn pending(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        let present = match storage.read(&self.path).await {
-            Ok(found) => found == self.request,
-            Err(error) if error.failure() == StorageFailure::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        if present && self.inviter_gone(storage).await? {
-            storage.delete_if_present(&self.path).await?;
-            return Ok(false);
-        }
-        Ok(present)
-    }
-
-    /// Whether the inviting device's gone marker is in storage: it is gone
-    /// for good, and an admin's device has ended its requests (§13.2).
-    async fn inviter_gone(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        let marker = ObjectPath::device_gone(self.path.store(), self.inviting_writer);
-        match storage.read(&marker).await {
-            Ok(found) => {
-                DeviceGone::decode(&found)?;
-                Ok(true)
-            }
-            Err(error) if error.failure() == StorageFailure::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        self.at().pending(storage).await
     }
 
     /// Whether the invite still lets a first request be sent at `now`.

@@ -6,7 +6,7 @@ use super::*;
 use coven_crypto::ConfirmationNumber;
 use coven_foundation::files::StoreDir;
 use coven_foundation::locks::lock_unpoisoned;
-use coven_sync::{HeldIntervals, JoinOutcome, JoinPoll, JoiningIdentity, Parks};
+use coven_sync::{ApprovalWaits, HeldIntervals, JoinOutcome, JoinPoll, JoiningIdentity, Parks};
 
 /// A prepared join request with the provider access its invite grants.
 pub(super) struct Joining {
@@ -126,6 +126,7 @@ impl Joining {
     pub(super) async fn admit(
         &mut self,
         sync: &SequenceSync,
+        approval: &ApprovalWaits,
         database: &Database,
         status: &impl Fn(BootstrapStatus),
     ) -> Result<bool, BootstrapError> {
@@ -162,7 +163,7 @@ impl Joining {
         // The conditions the last check found unmet, shown instead of the wait.
         let mut pending = Vec::new();
         let _running = self.parks.running();
-        let mut poll = JoinPoll::new(sync, self.held.clone(), self.parks.clone());
+        let mut poll = JoinPoll::new(approval.clone(), self.held.clone(), self.parks.clone());
         // Once its copies open, in its admission, in this call or an earlier
         // one, its status stays at loading, never going back to waiting
         // (E10). Polls back off 1, 2, 4, … 300 seconds apart; the persisted
@@ -174,16 +175,16 @@ impl Joining {
             poll.due().await?;
             match loading(sync, sync.join_outcome(&mut self.identity), status).await? {
                 JoinOutcome::Admitted => {
-                    sync.join_poll_settled().await?;
+                    approval.settled().await?;
                     return Ok(true);
                 }
                 JoinOutcome::Declined => {
-                    sync.join_poll_settled().await?;
+                    approval.settled().await?;
                     return Ok(false);
                 }
                 JoinOutcome::Waiting => {
                     pending = database.pending::<coven_sync::PendingRecord>().await?;
-                    sync.join_poll_waiting().await?
+                    approval.waiting().await?
                 }
             }
         }

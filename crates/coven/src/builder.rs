@@ -995,6 +995,6 @@ mod read_only;
 #[path = "bootstrap.rs"]
 mod bootstrap;
 pub use bootstrap::{
-    join_with_invite, restore_from_code, restore_from_saved_code, BootstrapError, BootstrapStatus,
-    JoinControl,
+    join_with_invite, join_with_pairing, restore_from_code, restore_from_saved_code,
+    BootstrapError, BootstrapStatus, JoinControl,
 };

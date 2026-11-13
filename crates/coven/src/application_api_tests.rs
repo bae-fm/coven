@@ -236,6 +236,19 @@ fn bootstrap_and_operation_futures_stay_small() {
             ),
         ),
         (
+            "join_with_pairing",
+            size(
+                |(b, c, s, d, o, x): (
+                    CovenBuilder,
+                    &'static str,
+                    Option<S3Credentials>,
+                    &'static str,
+                    Status,
+                    &'static JoinControl,
+                )| crate::join_with_pairing(b, c, s, d, o, x),
+            ),
+        ),
+        (
             "resume_join",
             size(|(b, s, o, x): (CovenBuilder, StoreId, Status, &'static JoinControl)| {
                 b.resume_join(s, o, x)

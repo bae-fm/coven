@@ -137,3 +137,35 @@ pub(super) fn provider_auth(
         }
     })
 }
+
+/// Connect to the location `data` names as `device`, replacing the location
+/// with the label its provider gives it (§20.2).
+pub(super) async fn connect_storage(
+    builder: &mut CovenBuilder,
+    data: &mut ConnectionCredentials,
+    sign_in: &SignInCustody,
+    device: DeviceId,
+    state: &Arc<coven_sync::SequenceState>,
+    waits: &Arc<coven_sync::RetryWaits>,
+) -> Result<Arc<coven_storage::StorageConnection>, BootstrapError> {
+    data.location = crate::authentication::label_location(
+        builder.connector().as_ref(),
+        data.location.clone(),
+        provider_auth(data, sign_in)?,
+        waits.clone(),
+    )
+    .await
+    .map_err(SyncError::from)?;
+    Ok(builder
+        .connector()
+        .connect(
+            data.location.clone(),
+            provider_auth(data, sign_in)?,
+            device,
+            state.clone(),
+            waits.clone(),
+            builder.transfers.clone(),
+        )
+        .await
+        .map_err(SyncError::from)?)
+}

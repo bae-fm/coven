@@ -134,17 +134,38 @@ impl SequenceSync {
         }
         Ok(JoinOutcome::Admitted)
     }
+}
+
+/// The wait between an approval's checks, which a join and a pairing keep:
+/// its persisted delay, armed again after reopening, and any provider
+/// cooldown (§6.7).
+#[derive(Clone)]
+pub struct ApprovalWaits {
+    database: coven_database::Database,
+    waits: std::sync::Arc<crate::RetryWaits>,
+    clock: coven_foundation::clock::ClockRef,
+}
+
+impl ApprovalWaits {
+    /// The waits of an installation with this database, waits and clock.
+    pub fn new(
+        database: coven_database::Database,
+        waits: std::sync::Arc<crate::RetryWaits>,
+        clock: coven_foundation::clock::ClockRef,
+    ) -> Self {
+        Self { database, waits, clock }
+    }
 
     /// A poll that found the request still waiting persists its next delay
     /// before waiting, continuing the backoff across reopening.
-    pub async fn join_poll_waiting(&self) -> Result<(), SyncError> {
+    pub async fn waiting(&self) -> Result<(), SyncError> {
         let subject = coven_database::RetrySubject::Join;
         let previous = self.database.retry_wait(subject).await?;
         self.waits.fail(subject, previous.as_ref()).await
     }
 
     /// The outcome is known: approval polling ends.
-    pub async fn join_poll_settled(&self) -> Result<(), SyncError> {
+    pub async fn settled(&self) -> Result<(), SyncError> {
         let subject = coven_database::RetrySubject::Join;
         if self.database.retry_wait(subject).await?.is_some() {
             self.database.clear_retry(subject).await?;
@@ -154,28 +175,28 @@ impl SequenceSync {
     }
 }
 
-/// A join's wait for its next approval poll: its persisted delay, armed
-/// again after reopening, any provider cooldown (§6.7), and the intervals
-/// the app holds (§13.2).
-pub struct JoinPoll<'a> {
-    sync: &'a SequenceSync,
+/// An approval's wait for its next poll: its persisted delay, armed again
+/// after reopening, any provider cooldown (§6.7), and the intervals the app
+/// holds (§13.2).
+pub struct JoinPoll {
+    waits: ApprovalWaits,
     held: HeldIntervals,
     parks: crate::Parks,
 }
 
-impl<'a> JoinPoll<'a> {
-    /// The wait for `sync`'s join, honoring the intervals `held` reads and
-    /// telling `parks` where it parks.
-    pub fn new(sync: &'a SequenceSync, held: HeldIntervals, parks: crate::Parks) -> Self {
-        Self { sync, held, parks }
+impl JoinPoll {
+    /// The wait on `waits`, honoring the intervals `held` reads and telling
+    /// `parks` where it parks.
+    pub fn new(waits: ApprovalWaits, held: HeldIntervals, parks: crate::Parks) -> Self {
+        Self { waits, held, parks }
     }
 
     /// Wait until the next approval poll is due. While a guard is held, the
-    /// join's own wait also ends once the shortest interval held has passed
-    /// since its last check ended, keeping its failure count; a provider
-    /// cooldown still holds (§13.2).
+    /// wait also ends once the shortest interval held has passed since the
+    /// last check ended, keeping its failure count; a provider cooldown still
+    /// holds (§13.2).
     pub async fn due(&mut self) -> Result<(), SyncError> {
-        let sync = self.sync;
+        let sync = &self.waits;
         let subject = coven_database::RetrySubject::Join;
         loop {
             let persisted = sync.database.retry_wait(subject).await?;
@@ -208,7 +229,7 @@ impl<'a> JoinPoll<'a> {
     /// which the persisted wait's start, `T - W`, marks; never when no guard
     /// is held or the wait has ended already.
     async fn held_check(
-        sync: &SequenceSync,
+        sync: &ApprovalWaits,
         persisted: Option<&coven_database::RetryWait>,
         shortest: Option<Duration>,
     ) -> Result<(), SyncError> {

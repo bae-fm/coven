@@ -1,5 +1,5 @@
 use crate::sequence_sync::tests::*;
-use crate::{floor_object::FloorObject, JoinOutcome, JoinPoll};
+use crate::{floor_object::FloorObject, ApprovalWaits, JoinOutcome, JoinPoll};
 use coven_format::admin::StoreChange;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::clock::HANG_GUARD;
@@ -9,6 +9,11 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+/// The approval waits of `sync`'s installation.
+fn approval(sync: &crate::SequenceSync) -> ApprovalWaits {
+    ApprovalWaits::new(sync.database.clone(), sync.waits.clone(), sync.clock.clone())
+}
 
 fn clocks(provider: SystemTime, deleting: SystemTime) -> Group {
     let mut group = Group::shared();
@@ -387,7 +392,7 @@ async fn backed_off(group: &Group, carol: &JoiningDevice) -> (std::time::SystemT
     let sync = &carol.device.sync;
     let wait =
         || async { carol.device.database().retry_wait(RetrySubject::Join).await.unwrap().unwrap() };
-    while sync.join_poll_waiting().await.is_ok() && wait().await.wait < Duration::from_secs(300) {}
+    while approval(sync).waiting().await.is_ok() && wait().await.wait < Duration::from_secs(300) {}
     (group.clock.now(), wait().await.failures)
 }
 
@@ -410,7 +415,7 @@ async fn a_held_interval_brings_a_backed_off_joins_check_forward() {
     let often = crate::SyncOften::new();
     let _guard = often.hold(Duration::from_secs(5));
     let parks = crate::Parks::new();
-    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut poll = JoinPoll::new(approval(sync), often.subscribe(), parks.clone());
     let mut due: Due<'_> = Box::pin(poll.due());
     group.clock.set(last + Duration::from_secs(4));
     stays_waiting(&mut due, &parks).await;
@@ -419,7 +424,7 @@ async fn a_held_interval_brings_a_backed_off_joins_check_forward() {
     let ended = carol.device.database().retry_wait(RetrySubject::Join).await.unwrap();
     assert!(ended.is_none_or(|ended| (ended.failures, ended.wait) == (failures, Duration::ZERO)));
     // The check found the request waiting: the doubling goes on from there.
-    sync.join_poll_waiting().await.unwrap();
+    approval(sync).waiting().await.unwrap();
     let next = carol.device.database().retry_wait(RetrySubject::Join).await.unwrap().unwrap();
     assert_eq!((next.failures, next.wait), (failures + 1, Duration::from_secs(300)));
     close_both(&ana, &carol).await;
@@ -437,7 +442,7 @@ async fn dropping_the_guard_returns_the_check_to_the_backoff() {
     let often = crate::SyncOften::new();
     let guard = often.hold(Duration::from_secs(5));
     let parks = crate::Parks::new();
-    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut poll = JoinPoll::new(approval(sync), often.subscribe(), parks.clone());
     let mut due: Due<'_> = Box::pin(poll.due());
     stays_waiting(&mut due, &parks).await;
     drop(guard);
@@ -464,7 +469,7 @@ async fn a_guard_taken_after_its_interval_checks_at_once() {
     let often = crate::SyncOften::new();
     let _guard = often.hold(Duration::from_secs(5));
     let parks = crate::Parks::new();
-    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut poll = JoinPoll::new(approval(sync), often.subscribe(), parks.clone());
     tokio::time::timeout(HANG_GUARD, poll.due()).await.unwrap().unwrap();
     close_both(&ana, &carol).await;
 }
@@ -478,7 +483,7 @@ async fn a_guard_taken_during_the_wait_shortens_it() {
     let (last, _) = backed_off(&group, &carol).await;
     let often = crate::SyncOften::new();
     let parks = crate::Parks::new();
-    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut poll = JoinPoll::new(approval(sync), often.subscribe(), parks.clone());
     let mut due: Due<'_> = Box::pin(poll.due());
     group.clock.set(last + Duration::from_secs(6));
     stays_waiting(&mut due, &parks).await;
@@ -498,7 +503,7 @@ async fn the_shortest_of_several_guards_decides_the_joins_check() {
     let _long = often.hold(Duration::from_secs(30));
     let _short = often.hold(Duration::from_secs(5));
     let parks = crate::Parks::new();
-    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut poll = JoinPoll::new(approval(sync), often.subscribe(), parks.clone());
     let mut due: Due<'_> = Box::pin(poll.due());
     group.clock.set(last + Duration::from_secs(4));
     stays_waiting(&mut due, &parks).await;
@@ -520,7 +525,7 @@ async fn a_provider_cooldown_holds_the_check_a_guard_would_make() {
     let often = crate::SyncOften::new();
     let _guard = often.hold(Duration::from_secs(5));
     let parks = crate::Parks::new();
-    let mut poll = JoinPoll::new(sync, often.subscribe(), parks.clone());
+    let mut poll = JoinPoll::new(approval(sync), often.subscribe(), parks.clone());
     let mut due: Due<'_> = Box::pin(poll.due());
     group.clock.set(last + Duration::from_secs(5));
     stays_waiting(&mut due, &parks).await;

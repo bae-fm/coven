@@ -20,7 +20,9 @@ use tokio::sync::watch;
 
 #[path = "bootstrap_authentication.rs"]
 mod authentication;
-use authentication::{account_sign_in, join_sign_in, provider_auth, SignInCustody};
+use authentication::{
+    account_sign_in, connect_storage, join_sign_in, provider_auth, SignInCustody,
+};
 use coven_sync::SessionSignIn;
 
 #[path = "bootstrap_commit.rs"]
@@ -31,6 +33,11 @@ mod join;
 
 #[path = "bootstrap_admitted.rs"]
 mod admitted;
+
+#[path = "bootstrap_pairing.rs"]
+mod pairing;
+pub use pairing::join_with_pairing;
+use pairing::Start;
 
 #[path = "bootstrap_replace.rs"]
 mod replace;
@@ -255,18 +262,16 @@ enum RequestTerms {
 /// futures apps hold stay small (application_api_tests bounds them).
 async fn bootstrap_device(
     mut builder: CovenBuilder,
-    request: BootstrapRequest,
+    start: impl Into<Start>,
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
-    if matches!(request, BootstrapRequest::Restore { .. }) {
+    let start = start.into();
+    if matches!(start, Start::Pair(_) | Start::Request(BootstrapRequest::Restore { .. })) {
         check_cancel(cancel)?;
     }
     let keychain = builder.keychain()?;
-    let id = match &request {
-        BootstrapRequest::Restore { code, .. } => code.store,
-        BootstrapRequest::Join { code, .. } => code.store,
-    };
+    let id = start.store();
     let device_entries = StoreKeychain::new(keychain.clone(), id);
     let clock = builder.clock.clone();
     let started = clock.elapsed();
@@ -284,9 +289,12 @@ async fn bootstrap_device(
     // a waiting join's installation, or a join on a recorded restore's,
     // would remove the other's listing when it ends without the store, with
     // its request or registration possibly in storage (§13.4).
-    let other = match &request {
-        BootstrapRequest::Restore { .. } => device_entries.invite_code()?.is_some(),
-        BootstrapRequest::Join { .. } => device_entries.restore_record()?.is_some(),
+    let other = match &start {
+        Start::Request(BootstrapRequest::Restore { .. }) => device_entries.invite_code()?.is_some(),
+        Start::Request(BootstrapRequest::Join { .. }) => device_entries.restore_record()?.is_some(),
+        Start::Pair(_) => {
+            device_entries.invite_code()?.is_some() || device_entries.restore_record()?.is_some()
+        }
     };
     if other {
         return Err(BootstrapDirectoryError::from(StoreLockError::BootstrapPending(id)).into());
@@ -294,11 +302,33 @@ async fn bootstrap_device(
     // A join that decided to end and stopped part way through deleting
     // what it kept finishes that, without connecting: the sign-in it would
     // connect with may be gone already (§13.4).
-    if let BootstrapRequest::Join { code, .. } = &request {
+    if let Start::Request(BootstrapRequest::Join { code, .. }) = &start {
         if coven_sync::ended_for(&pending.directory(), code)? {
             return remove_unfinished(&device_entries, &pending, Ok(None));
         }
     }
+    // A pairing asks first, keeping nothing on the device, and then goes down
+    // the restore path with what its handover carried. Until that restore
+    // records itself, whatever ends the call removes the installation.
+    let asked = matches!(start, Start::Pair(_));
+    let request = match start {
+        Start::Pair(pair) => {
+            match pairing::handed_over(&mut builder, &pending, pair, &status, cancel).await {
+                Ok(Some(restore)) => restore,
+                result => {
+                    return remove_unfinished(&device_entries, &pending, result.map(|_| None));
+                }
+            }
+        }
+        Start::Request(request) => request,
+    };
+    // The asking reported the opening and the connecting, and a phase never
+    // comes back (E10).
+    let status = |next: BootstrapStatus| {
+        if !(asked && matches!(next, BootstrapStatus::Opening(_) | BootstrapStatus::Connecting)) {
+            status(next);
+        }
+    };
     let result =
         prepare_and_load(&mut builder, Installing::New(&pending), &request, None, &status, cancel)
             .await;
@@ -641,26 +671,9 @@ async fn prepare_and_load(
                 .await
                 .map_err(CovenError::from)?,
         );
-        data.location = crate::authentication::label_location(
-            builder.connector().as_ref(),
-            data.location.clone(),
-            provider_auth(&data, &sign_in)?,
-            waits.clone(),
-        )
-        .await
-        .map_err(SyncError::from)?;
-        let storage = builder
-            .connector()
-            .connect(
-                data.location.clone(),
-                provider_auth(&data, &sign_in)?,
-                settings.device_id,
-                state.clone(),
-                waits.clone(),
-                builder.transfers.clone(),
-            )
-            .await
-            .map_err(SyncError::from)?;
+        let storage =
+            connect_storage(builder, &mut data, &sign_in, settings.device_id, &state, &waits)
+                .await?;
         if matches!(admission, Admission::Restoring) {
             storage.check_location_claim(settings.id).await.map_err(SyncError::from)?;
         }
@@ -720,6 +733,7 @@ async fn prepare_and_load(
     // The location as the joining account names it, read once the share is
     // accepted (§20.2): the store a join publishes records it, and no storage
     // request comes between finding the admission and publishing (§13.2).
+    let approval = coven_sync::ApprovalWaits::new(database.clone(), waits.clone(), clock.clone());
     let mut accepted_label = None;
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
@@ -728,7 +742,7 @@ async fn prepare_and_load(
             }
             let labelled = storage.labelled_config().await.map_err(SyncError::from)?;
             accepted_label = Some(labelled.clone());
-            if !joining.admit(&sync, &database, status).await? {
+            if !joining.admit(&sync, &approval, &database, status).await? {
                 return Ok(None);
             }
             // Its admission found, which registered its device, the join

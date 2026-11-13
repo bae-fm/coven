@@ -1545,9 +1545,9 @@ tables = [
 # One sequence state per opened installation, which the store's bootstrap or
 # builder makes and gives to its sequence and storage owners.
 "crates/coven-sync/src/sequence_state.rs" = ["SequenceState::new"]
-# A join's wait for its next approval poll, reading the intervals the app
-# holds for it (§13.2).
-"crates/coven-sync/src/sequence_join.rs" = ["JoinPoll::new"]
+# A join's or a pairing's wait for its next approval poll, reading the
+# intervals the app holds for it, and the persisted delay it keeps (§13.2).
+"crates/coven-sync/src/sequence_join.rs" = ["JoinPoll::new", "ApprovalWaits::new"]
 # The intervals apps hold for idle passes, one per sequence state, made with
 # it, and for a waiting join's checks, one per join control.
 "crates/coven-sync/src/sync_often.rs" = ["SyncOften::new"]
@@ -1590,6 +1590,9 @@ tables = [
     # An app makes one for each join it may cancel or ask to check often (api.md E10).
     "JoinControl::new",
 ]
+# A pairing asks with a pair it keeps in memory, on a connection and an
+# installation database of its own, and goes on as a restore (§13.2).
+"crates/coven/src/bootstrap_pairing.rs" = ["join_with_pairing", "handed_over", "Start::from"]
 "crates/coven/src/bootstrap_restore.rs" = [
     "restore_from_code",
     "restore_from_saved_code",
