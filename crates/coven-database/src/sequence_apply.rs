@@ -273,6 +273,10 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         }
         let cutoff =
             crate::sequence::refusal(db, slot, header.device, header.author, write.signer())?;
+        // A write above the rebuild's version is ahead of every audience the
+        // rebuild holds, and every device refuses its parts there (§18.5).
+        let ahead = matches!(&staging, Staging::Reload(coverage) if coverage.is_rebuild())
+            && write.header().header.schema_version > db.schema_version()?;
         if let Some((cutoff, cause)) = cutoff {
             db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
                 rusqlite::params![slot.get().to_be_bytes(), cutoff.get().to_be_bytes()])?;
@@ -302,7 +306,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 schema,
                 write,
                 slot,
-                cutoff.is_some(),
+                cutoff.is_some() || ahead,
                 |audience| coverage.needs(audience, slot),
                 None,
             )?,

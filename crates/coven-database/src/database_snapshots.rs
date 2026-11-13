@@ -285,6 +285,21 @@ impl Database {
     where
         W: std::io::Read + Send + 'static,
     {
+        self.load_through::<P, W>(reload, progress, None).await
+    }
+
+    /// [`Self::load_snapshots`], for a rebuild's store when `store_through`
+    /// is given: the store's parts in slots after it aren't read, and a write
+    /// above this database's version is refused, not waited for (§18.3).
+    pub(crate) async fn load_through<P: crate::PendingValue, W>(
+        &self,
+        reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
+        progress: Option<ProgressReport<crate::LoadStep>>,
+        store_through: Option<u64>,
+    ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
+    where
+        W: std::io::Read + Send + 'static,
+    {
         // Each stored source names its staging by its place among them.
         let mut stagings = Vec::new();
         let sources: Vec<crate::SnapshotSource<usize>> = reload
@@ -366,6 +381,7 @@ impl Database {
                                 reload,
                                 files,
                                 &mut progress,
+                                store_through,
                             )
                         })
                     })

@@ -52,6 +52,9 @@ pub struct RebuildDatabase {
     database: Option<Database>,
     /// The real store, whose folder holds the rebuild's.
     real: StoreDir,
+    /// The real store's handle, told when the folder's bytes change: they
+    /// are on this device's disk, so its storage figures count them (§17.8).
+    parent: Database,
 }
 
 impl Database {
@@ -96,7 +99,10 @@ impl Database {
             .open()
             .await;
         match opened {
-            Ok(database) => Ok(RebuildDatabase { database: Some(database), real }),
+            Ok(database) => {
+                self.local_bytes_changed();
+                Ok(RebuildDatabase { database: Some(database), real, parent: self.clone() })
+            }
             Err(operation) => Err(removed_after(&real, operation.into())),
         }
     }
@@ -117,9 +123,16 @@ impl RebuildDatabase {
 
     /// Load snapshots staged here and the slots after them into the
     /// rebuild's store, as a device loads them (§16.2).
+    ///
+    /// The store's parts in slots after `store_through` aren't read: past the
+    /// slot before the store's raise beyond the circle's version, the store
+    /// holds no rows at the circle's version. A write above the rebuild's
+    /// version is refused, as every device refuses a part ahead of its
+    /// audience (§18.3, §18.5).
     pub async fn load<P: crate::PendingValue, W>(
         &self,
         reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
+        store_through: u64,
     ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
         W: std::io::Read + Send + 'static,
@@ -127,7 +140,9 @@ impl RebuildDatabase {
         let Some(database) = &self.database else {
             return Err(DbError::StoreClosed);
         };
-        database.load_snapshots::<P, W>(reload, None).await
+        let loaded = database.load_through::<P, W>(reload, None, Some(store_through)).await;
+        self.parent.local_bytes_changed();
+        loaded
     }
 
     /// Close the rebuild's store and remove its folder, reporting the first
@@ -137,7 +152,9 @@ impl RebuildDatabase {
             Some(database) => database.close().await.map_err(RebuildError::from),
             None => Ok(()),
         };
-        match (closed, self.real.remove_rebuild_directory()) {
+        let removed = self.real.remove_rebuild_directory();
+        self.parent.local_bytes_changed();
+        match (closed, removed) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(cleanup)) => Err(cleanup.into()),
             (Err(operation), Ok(())) => Err(operation),

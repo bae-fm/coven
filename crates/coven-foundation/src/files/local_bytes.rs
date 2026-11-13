@@ -1,6 +1,8 @@
 //! The bytes a store keeps in its directory (§17.8, §19.3): everything the
 //! store's own files hold, apart from the cache, whose bytes its database
-//! counts, and the installations resets kept.
+//! counts, and the installations resets kept. A rebuild's folder (§18.3) is
+//! one of the store's own files while it lives, its cache folder with it: the
+//! figures show what is on the disk.
 
 use super::{device_reset, FileError};
 use std::fs;

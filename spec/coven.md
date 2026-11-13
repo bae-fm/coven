@@ -8290,7 +8290,8 @@ Ben's phone has 3 GB of pinned albums and 1 GB of played tracks in a 20 GB
 namespace: `pinned` is 3 GB, `cached` 1 GB. The partial downloads pins left
 are counted apart, as `pinning`, and the store's own files in its directory,
 the database and its journals, the settings, the key files and coven's copies
-of app files, as `library`. One read, `local_bytes`, returns these from a
+of app files, and the folder of a rebuild while one runs (§18.3), as `library`.
+One read, `local_bytes`, returns these from a
 single snapshot of the database and a walk of the store's directory. It leaves
 out the cache's folder, since the entries count it, and the archives resets
 kept, which it reports as `before_reset` while there is one (§19.3). A watch
@@ -8298,7 +8299,9 @@ on it measures once at once, then again after each change to a namespace's
 counters or budget and after each deletion of the archives. A cached read's
 recency and a pin download's growing partial change neither, so they start no
 measurement; a reader slower than the changes gets one measurement of the
-state now ([api.md E8](api.md#e8-files-and-the-cache)).
+state now ([api.md E8](api.md#e8-files-and-the-cache)). A rebuild's folder
+counts in full, its own cache folder included, since all of it is on the disk;
+the watch measures again when a rebuild opens, loads and ends.
 
 #### 17.9 Uploads
 
@@ -9130,9 +9133,15 @@ store.
 2. It loads the circle's newest usable snapshot and the store's newest
    ordinary snapshot at or below the circle's version, or starts either empty
    where history holds none (§16.5). It applies the slots after them up to the
-   *rebuild slot*: the slot the device has applied, or, if the store was
-   raised past the circle's version before that, the slot before the store's
-   raise. Past it, the store has no rows at the circle's version.
+   *rebuild slot*: the slot the device has applied. It reads the store only
+   through its *input slot*: the rebuild slot, or, if the store was raised
+   past the circle's version before that, the slot before the store's raise.
+   Past it, the store has no rows at the circle's version, and an old-app
+   writer stops at the raise, so no circle part after it reads store rows from
+   later. A write above the version the rebuild runs at, such as this device's
+   own migration marker or another device's captured write, counts there as
+   everywhere: its parts in an audience below that version are refused
+   (§18.5), and the rebuild does not wait for the app to support the version.
 3. It runs the breaking migrations over that database, checked as any run is.
 4. It takes the circle's migrated rows as its own, holding the circle as a
    member who held it through the rebuild slot and then migrated would. Cells

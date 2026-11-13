@@ -20,6 +20,7 @@ pub(crate) fn load<P: crate::PendingValue>(
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::WriteFiles<'_>,
     progress: &mut ProgressReport<LoadStep>,
+    store_through: Option<u64>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
         let files = &crate::file_write::FileWrite::new(database, files);
@@ -49,7 +50,10 @@ pub(crate) fn load<P: crate::PendingValue>(
         if !resets.is_empty() {
             crate::pending::reset(database)?;
         }
-        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(target);
+        let mut coverage = match store_through {
+            Some(last) => crate::snapshot_coverage::SnapshotCoverage::rebuilding(target, last),
+            None => crate::snapshot_coverage::SnapshotCoverage::new(target),
+        };
         crate::download_stage::begin(database)?;
         let mut touched = crate::published::restore(database, schema)?;
         crate::snapshot_state::create_tables(database)?;
