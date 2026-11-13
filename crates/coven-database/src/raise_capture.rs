@@ -39,7 +39,13 @@ pub(crate) fn capture(
     else {
         return Ok(false);
     };
+    // A circle awaiting its rebuild was never held at any version: its raise
+    // body is the rebuild's, captured when the rebuild installs.
+    let rebuilding = crate::reload_gate::rebuilding(db)?;
     for selected in state.readable_audiences(&member) {
+        if rebuilding.contains_key(&selected) {
+            continue;
+        }
         db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![&selected,version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
     Ok(true)

@@ -771,3 +771,61 @@ async fn a_second_breaking_migration_points_a_waiting_rebuild_at_its_marker() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben waits for Garden's rebuild when his app runs a second breaking
+/// migration. Garden is not a circle he ever held at any version, so the
+/// migration captures the store alone; the rebuild, which now reaches the
+/// second migration's version, installs the capture of Garden itself and Ben
+/// raises it at that version (§18.3).
+#[tokio::test]
+async fn a_second_breaking_migration_does_not_capture_a_circle_awaiting_its_rebuild() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert!(ben
+        .database()
+        .rebuilds_waiting()
+        .await
+        .unwrap()
+        .contains_key(&Audience::Circle(garden)));
+
+    group.version.store(4, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    let captured: Vec<_> = ben
+        .database()
+        .raise_captures()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|capture| capture.audience)
+        .collect();
+    assert_eq!(captured, [Audience::Store]);
+
+    for _ in 0..8 {
+        ben.sync.pass().await.unwrap();
+    }
+    assert!(ben.database().rebuilds_waiting().await.unwrap().is_empty());
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Circle(garden)), 4);
+    assert_eq!(state.schema[&Audience::Circle(garden)].snapshot.device, ben.sync.device);
+    assert!(ben.database().raise_captures().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

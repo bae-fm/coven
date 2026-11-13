@@ -9159,7 +9159,11 @@ store. The migration write is one the rebuild has of its own: the device
 queues it when it starts reading the circle (§18.4). The slot that makes the
 circle readable applies like any other, and in the same commit the device
 gates writes into the circle, records that the circle waits for its rebuild,
-and queues that write's marker, so no pass stops on the circle.
+and queues that write's marker, so no pass stops on the circle. A later
+breaking migration of the device captures only the audiences it held: a circle
+awaiting its rebuild was never held at any version, so the migration leaves it
+out, its rebuild runs under the new migration's write and the app's newest
+migrations, and installing it makes the circle's capture (§18.4).
 
 1. In a database of its own, it runs the app's migrations up to the version
    before the first breaking migration past the circle's version, and declares
