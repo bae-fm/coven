@@ -72,6 +72,50 @@ impl OAuthSession {
         }
         Ok(account)
     }
+    /// The signed-in account's id and primary address, from the provider's
+    /// own identity API.
+    pub async fn identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        let api = super::oauth_api(self.provider).expect("checked OAuth provider");
+        self.identity_at(api).await
+    }
+    pub(crate) async fn identity_at(
+        &self,
+        api: &str,
+    ) -> Result<crate::ProviderAccount, StorageError> {
+        let (method, url, body) = match self.provider {
+            CloudProvider::Dropbox => (
+                Method::POST,
+                endpoint(api, &["users", "get_current_account"], &[])?,
+                Body::Json(Value::Null),
+            ),
+            CloudProvider::OneDrive => (
+                Method::GET,
+                endpoint(api, &["me"], &[("$select", "mail,userPrincipalName")])?,
+                Body::Empty,
+            ),
+            _ => unreachable!("checked OAuth provider"),
+        };
+        let value = json(self.provider, self.send(method, &url, &[], body, true).await?).await?;
+        let (id, address) = match self.provider {
+            CloudProvider::Dropbox => {
+                (Some(string(&value, "account_id")?), string(&value, "email")?)
+            }
+            CloudProvider::OneDrive => (
+                None,
+                if value["mail"].is_null() {
+                    string(&value, "userPrincipalName")?
+                } else {
+                    string(&value, "mail")?
+                },
+            ),
+            _ => unreachable!("checked OAuth provider"),
+        };
+        let address = coven_format::MemberAccess::normalized_account(address);
+        if address.is_empty() || id.is_some_and(str::is_empty) {
+            return Err(StorageFailure::Protocol.with_source("empty signed-in account"));
+        }
+        Ok(crate::ProviderAccount { id: id.map(str::to_owned), address })
+    }
     /// Install tokens after their owner committed them to custody.
     pub async fn set_tokens(&self, tokens: OAuthTokens) {
         self.tokens.install(tokens).await;

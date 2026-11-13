@@ -2637,16 +2637,27 @@ bits are zero.
 | Code | S3 | Dropbox | OneDrive | CloudKit |
 | --- | --- | --- | --- | --- |
 | restore | `s3_key:Option<S3Key>` | nothing | nothing | nothing |
-| invite | `s3_key:S3Key` | nothing | `share_token:Option<text>` | `share_url:text` |
+| invite | `s3_key:S3Key` | `shared_with:SharedWith` | `share_token:Option<text> \| shared_with:SharedWith` | `share_url:text` |
 | pairing | `s3_key:Option<S3Key>` | nothing | nothing | nothing |
 
 `S3Key` is `access_key_id:text | secret_access_key:text`, and neither may be
 empty.
 
+`SharedWith` is `address:text | id:Option<text>`: the account the inviting
+device shared the folder with. `address` is the address the invite went to,
+trimmed and lowercase; `id` is Dropbox's `account_id` for the account when the
+share reported one, which it does for an address that has an account. A OneDrive
+invite carries no `id`. The joining device compares the account it is
+signed in as with `id` when present, else with `address` (§13.2). S3 and
+CloudKit invites carry none.
+
 **Edge cases.**
 
 - An invite's Dropbox location must be a shared folder, which the new person
   mounts; an App folder can't be shared, and a reader refuses it.
+- A reader refuses a `SharedWith` that is empty, whose `address` is not in the
+  normal form (trimmed, lowercase), or whose `id` is present and empty; and a
+  Dropbox or OneDrive invite without one, or an S3 or CloudKit invite with one.
 - A OneDrive invite carries no share token when the folder is already shared
   with the new person's account. A token, when present, is not empty.
 - A CloudKit invite's share URL uses https.

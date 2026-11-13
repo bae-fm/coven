@@ -1,4 +1,6 @@
 use super::*;
+use crate::sequence_sync::tests::Group;
+use crate::*;
 use coven_crypto::{InviteSecret, SecretBytes, SecretText};
 use coven_format::codes::PairingCode;
 use coven_foundation::id_source::{DeviceId, InviteId, KeyId};
@@ -241,6 +243,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                     inviter: "Ana".into(),
                     admits: InviteAdmits::NewPerson,
                     expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400),
+                    shared_with: None,
                 }),
                 CodeKind::Pairing => unreachable!("this loop reads a restore and an invite"),
             }
@@ -273,7 +276,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
 #[test]
 fn invite_metadata_exposes_locations_without_provider_admission_secrets() {
     use serde_json::json;
-    for (location, acceptance) in [
+    for (location, acceptance, shared_with) in [
         (
             StorageConfig::OneDrive {
                 drive_id: "drive".into(),
@@ -282,6 +285,7 @@ fn invite_metadata_exposes_locations_without_provider_admission_secrets() {
                 folder_label: None,
             },
             json!({"OneDriveShare":{"token":"provider-admission-secret"}}),
+            json!({"address":"dan@example.com","id":"graph:dan"}),
         ),
         (
             StorageConfig::CloudKit {
@@ -290,10 +294,14 @@ fn invite_metadata_exposes_locations_without_provider_admission_secrets() {
                 zone: "household".into(),
             },
             json!({"CloudKitShare":{"url":"https://www.icloud.com/share/provider-admission-secret"}}),
+            serde_json::Value::Null,
         ),
     ] {
         let invitation = StorageInvitation::decode(
-            &serde_json::to_vec(&json!({"location":location,"acceptance":acceptance})).unwrap(),
+            &serde_json::to_vec(
+                &json!({"location":location,"acceptance":acceptance,"shared_with":shared_with}),
+            )
+            .unwrap(),
         )
         .unwrap();
         let code = invite(InviteStorage::Account(invitation));
@@ -379,12 +387,15 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
         owner: "_0123456789abcdef0123456789abcdef".into(),
         zone: "coven-5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5".into(),
     };
-    let account = |location: &StorageConfig, acceptance: serde_json::Value| {
+    let account = |location: &StorageConfig,
+                   acceptance: serde_json::Value,
+                   shared_with: serde_json::Value| {
         InviteStorage::Account(
             StorageInvitation::decode(
                 &serde_json::to_vec(&serde_json::json!({
                     "location": location,
                     "acceptance": acceptance,
+                    "shared_with": shared_with,
                 }))
                 .unwrap(),
             )
@@ -395,7 +406,15 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
         ("S3", aws, aws_invite),
         ("S3, detected settings", detected, detected_invite),
         ("Google Cloud Storage", gcs, gcs_invite),
-        ("Dropbox", dropbox.clone(), account(&dropbox, serde_json::json!("DropboxMount"))),
+        (
+            "Dropbox",
+            dropbox.clone(),
+            account(
+                &dropbox,
+                serde_json::json!("DropboxMount"),
+                serde_json::json!({"address":"dan@example.com","id":"dbid:5d0c8e2a7b1f4c3e9a64"}),
+            ),
+        ),
         (
             "OneDrive",
             onedrive.clone(),
@@ -403,6 +422,7 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
                 &onedrive,
                 serde_json::json!({"OneDriveShare": {"token":
                     "u!aHR0cHM6Ly8xZHJ2Lm1zL2YvYy8wMTIzNDU2Nzg5YWJjZGVmL0VhQmNEZUZnSGlKa0xtTm9QcVJzVHVW"}}),
+                serde_json::json!({"address":"dan@example.com","id":"0123456789abcdef"}),
             ),
         ),
         (
@@ -412,6 +432,7 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
                 &icloud,
                 serde_json::json!({"CloudKitShare": {"url":
                     "https://www.icloud.com/share/0AbCdEfGhIjKlMnOpQrStUvWx#Household"}}),
+                serde_json::Value::Null,
             ),
         ),
     ]
@@ -450,9 +471,37 @@ fn typical_codes_keep_their_lengths() {
             ("S3", 258, Some(367), 423),
             ("S3, detected settings", 335, Some(444), 500),
             ("Google Cloud Storage", 306, Some(481), 537),
-            ("Dropbox", 257, None, 314),
-            ("OneDrive", 303, None, 500),
+            ("Dropbox", 257, None, 393),
+            ("OneDrive", 303, None, 564),
             ("iCloud", 372, None, 538),
         ]
+    );
+}
+
+/// An account invite's code names the account the folder was shared with, as
+/// the provider names it, spelled as the inviting person typed it only to be
+/// normalized (§13.2).
+#[tokio::test]
+async fn an_account_invite_code_names_the_account_it_was_shared_with() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = ana
+        .sync
+        .create_invite(
+            coven_format::admin::MemberRole::Member,
+            InviteAccess::ProviderAccount { email: "Dan@Example.com ".into() },
+            InviteLifetime::SevenDays,
+        )
+        .await
+        .unwrap();
+    let CodeInfo::Invite(info) = decode_code_info(invite.shown_code()).unwrap() else {
+        panic!("an invite code");
+    };
+    let shared = info.shared_with.expect("a Dropbox or OneDrive invite names its account");
+    assert_eq!(shared.address(), "dan@example.com");
+    assert_eq!(
+        shared.id(),
+        Some(coven_storage::test_utils::account_id("dan@example.com").as_str())
     );
 }

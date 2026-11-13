@@ -1458,6 +1458,9 @@ tables = [
     # Reads the account label through a connection of its own, as the
     # provider connector does through its folders.
     "MemoryStorage::account_label",
+    # Reads the signed-in account's id the same way, before a join keeps
+    # its sign-in.
+    "MemoryStorage::signed_in_account",
     "MemoryStorage::with_transfers",
     "MemoryStorage::connect",
     "MemoryStorage::shared_connection",

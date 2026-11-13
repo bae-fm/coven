@@ -858,3 +858,130 @@ async fn a_join_request_whose_create_reply_was_lost_ends_as_settled() {
     assert_eq!(creates(), before, "the retry sent no second request");
     owner.close().await;
 }
+
+// A join checks the account its invite shared the folder with (§13.2).
+
+fn other_account(owner: &Owner) -> Arc<MemoryStorage> {
+    Arc::new(MemoryStorage::for_recipient(&owner.storage, "eve@example.com").unwrap())
+}
+
+#[tokio::test]
+async fn a_join_signed_in_as_another_account_is_refused_and_keeps_nothing() {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        let owner = Owner::new(provider, false).await;
+        let invite = owner.invite().await;
+        let install = Installation::new();
+        let store = owner.directory.id();
+        let result = join_with_invite(
+            install.authenticated_builder(&owner, other_account(&owner)).await,
+            invite.shown_code(),
+            crate::tests::carol_joins(invite.shown_code()),
+            "Carol's phone",
+            |_| {},
+            &JoinControl::new(),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(BootstrapError::WrongAccount { invited, signed_in })
+                if invited == "join@example.com" && signed_in == "eve@example.com"),
+            "{:?}",
+            result.err()
+        );
+        // Nothing was accepted or sent, and no sign-in was kept.
+        assert!(!owner.storage.joined("join@example.com").await);
+        assert!(!owner.storage.joined("eve@example.com").await);
+        assert!(
+            crate::tests::no_request(&owner.storage, &crate::tests::request_path(&invite)).await
+        );
+        assert!(install.only_kept_sign_in(store).await.is_none());
+        // The join is listed, to resume with another sign-in.
+        let builder = install.builder(&owner, owner.recipient());
+        let listed = builder.unfinished_joins().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].metadata.store_id, store);
+        assert_eq!(
+            listed[0].shared_with.as_ref().map(coven_storage::SharedWith::address),
+            Some("join@example.com")
+        );
+        // Cancelling it removes the installation.
+        builder.discard_unfinished_installation(store).await.unwrap();
+        install.absent(store).await;
+        assert!(saved_code(&install, store).is_none());
+        owner.close().await;
+    }
+}
+
+#[tokio::test]
+async fn resuming_with_the_invited_account_joins_after_a_wrong_one() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let control = JoinControl::new();
+    let wrong = join_with_invite(
+        install.authenticated_builder(&owner, other_account(&owner)).await,
+        invite.shown_code(),
+        crate::tests::carol_joins(invite.shown_code()),
+        "Carol's phone",
+        |_| {},
+        &control,
+    )
+    .await;
+    assert!(matches!(wrong, Err(BootstrapError::WrongAccount { .. })));
+    let resumed = install.authenticated_builder(&owner, owner.recipient()).await.resume_join(
+        store,
+        |_| {},
+        &control,
+    );
+    let (result, _) = owner.join_and_approve(resumed, &control, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn a_resume_signed_in_as_another_account_is_refused_and_the_kept_sign_in_stays() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    let kept = install.only_kept_sign_in(store).await.expect("a waiting join keeps its sign-in");
+    let refused = install
+        .authenticated_builder(&owner, other_account(&owner))
+        .await
+        .resume_join(store, |_| {}, &JoinControl::new())
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::WrongAccount { signed_in, .. })
+            if signed_in == "eve@example.com"),
+        "{:?}",
+        refused.err()
+    );
+    let after = install.only_kept_sign_in(store).await.expect("the kept sign-in stays");
+    assert_eq!(after.access_token.as_str(), kept.access_token.as_str());
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn the_invited_accounts_refused_mount_ends_the_join_with_nothing_left() {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        let owner = Owner::new(provider, false).await;
+        let invite = owner.invite().await;
+        let install = Installation::new();
+        let store = owner.directory.id();
+        owner.storage.revoke_access("join@example.com").await.unwrap();
+        let result = join_with_invite(
+            install.authenticated_builder(&owner, owner.recipient()).await,
+            invite.shown_code(),
+            crate::tests::carol_joins(invite.shown_code()),
+            "Carol's phone",
+            |_| {},
+            &JoinControl::new(),
+        )
+        .await;
+        assert!(matches!(result, Ok(None)), "{provider:?}: {:?}", result.err());
+        assert!(saved_code(&install, store).is_none());
+        install.absent(store).await;
+        owner.close().await;
+    }
+}

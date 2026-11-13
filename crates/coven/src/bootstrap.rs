@@ -622,7 +622,8 @@ async fn prepare_and_load(
                 terms,
                 held.clone(),
                 parks.clone(),
-            )?;
+            )
+            .await?;
             (
                 joining.identity(),
                 data,

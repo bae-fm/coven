@@ -238,7 +238,14 @@ impl OneDriveStorage {
                     }
                     (None, None) => crate::invitation::InvitationAcceptance::Granted,
                 };
-                return Ok(Some(StorageInvitation::new(self.config(), acceptance)?));
+                // By address alone: the permission's user id is not documented
+                // to be the id `/me` returns (Graph's permission and identity
+                // resources say only that it identifies the identity), so the
+                // joining account is compared by its primary address.
+                return Ok(Some(
+                    StorageInvitation::new(self.config(), acceptance)?
+                        .shared_with(crate::SharedWith::new(email, None)?),
+                ));
             }
         }
         Ok(None)
@@ -266,6 +273,9 @@ impl ProviderOps for OneDriveStorage {
     }
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
+    }
+    async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        self.session.identity().await
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;

@@ -27,6 +27,16 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
+    /// Read the signed-in account's provider id and primary address, before a
+    /// join keeps the sign-in (§13.2).
+    async fn signed_in_account(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<crate::ProviderAccount, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Read the signed-in OneDrive root.
     async fn onedrive_root(
         &self,
@@ -222,6 +232,15 @@ impl StorageConnector for ProviderConnector {
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<String, StorageError> {
         self.with_folders(auth, cooldown, |folders| async move { folders.account_label().await })
+            .await
+    }
+
+    async fn signed_in_account(
+        &self,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<crate::ProviderAccount, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move { folders.account_identity().await })
             .await
     }
 

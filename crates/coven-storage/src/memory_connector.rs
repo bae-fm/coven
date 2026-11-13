@@ -98,6 +98,24 @@ impl crate::providers::StorageConnector for MemoryStorage {
         .await
     }
 
+    async fn signed_in_account(
+        &self,
+        auth: crate::ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<crate::ProviderAccount, StorageError> {
+        self.connect(
+            self.config(),
+            auth,
+            self.device,
+            self.publications.clone(),
+            cooldown,
+            self.transfers.clone(),
+        )
+        .await?
+        .account_identity()
+        .await
+    }
+
     async fn prepare_cloudkit(
         &self,
         container: &str,

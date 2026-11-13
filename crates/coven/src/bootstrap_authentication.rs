@@ -64,13 +64,16 @@ impl SignInCustody {
 /// The sign-in a join on Dropbox or OneDrive connects through, kept in
 /// `store`'s device credentials from now until the join ends. A sign-in the
 /// builder holds replaces the kept one once it is shown to grant `location`'s
-/// access; one that doesn't is refused and leaves the kept one. Without one,
-/// the join resumes from the kept sign-in; with neither, the call needs a
-/// sign-in (§13.2).
-pub(super) fn join_sign_in(
-    builder: &CovenBuilder,
+/// access and, for a join, to be the account its invite shared the folder
+/// with (`invited`); one that doesn't is refused and leaves the kept one,
+/// and another account's fails with `BootstrapError::WrongAccount`. Without
+/// one, the join resumes from the kept sign-in; with neither, the call needs
+/// a sign-in (§13.2).
+pub(super) async fn join_sign_in(
+    builder: &mut CovenBuilder,
     store: StoreId,
     location: &StorageConfig,
+    invited: Option<&coven_storage::SharedWith>,
 ) -> Result<(SignInCustody, OAuthTokens), BootstrapError> {
     let provider = location.provider();
     let credentials = crate::builder::device_credentials(
@@ -98,6 +101,24 @@ pub(super) fn join_sign_in(
         }
         .validate()
         .map_err(SyncError::from)?;
+        if let Some(invited) = invited {
+            // One read of the provider's identity API, before anything of
+            // this sign-in is kept or used to accept the share.
+            let signed_in = builder
+                .connector()
+                .signed_in_account(
+                    ProviderAuth::OAuth { tokens: tokens.clone(), custody: held.clone() },
+                    Arc::new(coven_storage::NoCooldown),
+                )
+                .await
+                .map_err(SyncError::from)?;
+            if !invited.is(&signed_in) {
+                return Err(BootstrapError::WrongAccount {
+                    invited: invited.address().to_owned(),
+                    signed_in: signed_in.address,
+                });
+            }
+        }
         // Its refreshes commit there from now on, before any connection uses
         // them (§20.2).
         held.publish(&credentials, |keychains, tokens| {

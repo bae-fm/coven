@@ -100,7 +100,7 @@ pub(crate) async fn restore_device(
 /// kept, its S3 key inside the code, and its sign-in in the store's device
 /// credentials or the builder's.
 pub(crate) async fn resume_replacement(
-    builder: CovenBuilder,
+    mut builder: CovenBuilder,
     store: StoreId,
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
@@ -135,7 +135,8 @@ pub(crate) async fn resume_replacement(
                 RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
             let (data, sign_in) = match storage.location.provider() {
                 provider if provider.signs_in_with_oauth() => {
-                    let (custody, tokens) = join_sign_in(&builder, store, &storage.location)?;
+                    let (custody, tokens) =
+                        join_sign_in(&mut builder, store, &storage.location, None).await?;
                     let data = ConnectionCredentials {
                         location: storage.location,
                         credentials: StorageCredentials::OAuth(tokens),

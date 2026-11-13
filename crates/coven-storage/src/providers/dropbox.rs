@@ -155,6 +155,23 @@ impl DropboxStorage {
         }
         Ok(())
     }
+    /// The invitation to the folder, naming the account the share is with: by
+    /// Dropbox's id when that account's editor access exists, else by the
+    /// address the share went to (§13.2).
+    fn invitation(
+        &self,
+        email: &str,
+        members: &FolderMembers,
+    ) -> Result<StorageInvitation, StorageError> {
+        let id = members.direct.iter().find(|member| member.role == "editor").and_then(|member| {
+            match &member.id {
+                MemberId::Account(id) => Some(id.clone()),
+                MemberId::Invite(_) => None,
+            }
+        });
+        Ok(StorageInvitation::for_account(self.config())?
+            .shared_with(crate::SharedWith::new(email, id)?))
+    }
     async fn members(&self, email: &str, inherited: bool) -> Result<FolderMembers, StorageError> {
         let mut method = "sharing/list_folder_members";
         let mut request = json!({"shared_folder_id":self.namespace()?});
@@ -285,6 +302,9 @@ impl ProviderOps for DropboxStorage {
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
     }
+    async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        self.session.identity().await
+    }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         self.session.set_tokens(tokens).await;
         Ok(())
@@ -391,9 +411,7 @@ impl ProviderOps for DropboxStorage {
         let members = self.members(account, false).await?;
         members.refuse_owner()?;
         if members.direct.iter().any(|member| member.role == "editor") {
-            return Ok(AccessGrant::Granted {
-                invitation: StorageInvitation::for_account(self.config())?,
-            });
+            return Ok(AccessGrant::Granted { invitation: self.invitation(account, &members)? });
         }
         if let Some(member) =
             members.direct.iter().find(|member| matches!(member.id, MemberId::Account(_)))
@@ -409,7 +427,7 @@ impl ProviderOps for DropboxStorage {
         if !members.direct.iter().any(|member| member.role == "editor") {
             return Err(StorageFailure::Protocol.with_source("Dropbox did not grant editor access"));
         }
-        Ok(AccessGrant::Granted { invitation: StorageInvitation::for_account(self.config())? })
+        Ok(AccessGrant::Granted { invitation: self.invitation(account, &members)? })
     }
     async fn join(&self, _invitation: &StorageInvitation) -> Result<(), StorageError> {
         let response = self

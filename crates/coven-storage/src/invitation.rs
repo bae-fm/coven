@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct StorageInvitation {
     location: StorageConfig,
     pub(crate) acceptance: InvitationAcceptance,
+    shared_with: Option<crate::SharedWith>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,11 +25,13 @@ pub(crate) enum InvitationAcceptance {
 struct RecordedInvitation {
     location: StorageConfig,
     acceptance: InvitationAcceptance,
+    shared_with: Option<crate::SharedWith>,
 }
 impl TryFrom<RecordedInvitation> for StorageInvitation {
     type Error = StorageError;
     fn try_from(value: RecordedInvitation) -> Result<Self, Self::Error> {
-        Self::new(value.location, value.acceptance)
+        let invitation = Self::new(value.location, value.acceptance)?;
+        Ok(Self { shared_with: value.shared_with, ..invitation })
     }
 }
 impl std::fmt::Debug for StorageInvitation {
@@ -82,7 +85,17 @@ impl StorageInvitation {
                     .with_source("invitation does not match its provider"))
             }
         }
-        Ok(Self { location, acceptance })
+        Ok(Self { location, acceptance, shared_with: None })
+    }
+    /// This invitation as shared with `account`, which a Dropbox or OneDrive
+    /// invite code carries so the joining device can check the sign-in it
+    /// holds is that account's (§13.2).
+    pub fn shared_with(self, account: crate::SharedWith) -> Self {
+        Self { shared_with: Some(account), ..self }
+    }
+    /// The account the folder was shared with, when the invitation records one.
+    pub fn account(&self) -> Option<&crate::SharedWith> {
+        self.shared_with.as_ref()
     }
     /// Nonsecret location used to construct the joining account's adapter.
     pub fn location(&self) -> &StorageConfig {
@@ -99,21 +112,29 @@ impl StorageInvitation {
     }
     /// Pack the location, then how the recipient accepts it, into an invite
     /// code's storage part (format.md D13). The location's provider fixes
-    /// which acceptance follows: nothing on S3 and Dropbox, an optional
-    /// share token on OneDrive, the share URL on CloudKit.
+    /// which acceptance follows: nothing on S3, an optional share token on
+    /// OneDrive, the share URL on CloudKit; then, on Dropbox and OneDrive,
+    /// the account the folder was shared with.
     pub(crate) fn pack(&self, out: &mut FieldWriter) -> Result<(), coven_format::Error> {
         self.location.pack(out)?;
         match &self.acceptance {
             InvitationAcceptance::Granted
                 if self.location.provider() == CloudProvider::OneDrive =>
             {
-                out.option(None::<&str>, FieldWriter::text)
+                out.option(None::<&str>, FieldWriter::text)?
             }
-            InvitationAcceptance::Granted | InvitationAcceptance::DropboxMount => Ok(()),
+            InvitationAcceptance::Granted | InvitationAcceptance::DropboxMount => (),
             InvitationAcceptance::OneDriveShare { token } => {
-                out.option(Some(token.as_str()), FieldWriter::text)
+                out.option(Some(token.as_str()), FieldWriter::text)?
             }
-            InvitationAcceptance::CloudKitShare { url } => out.text(url.as_str()),
+            InvitationAcceptance::CloudKitShare { url } => out.text(url.as_str())?,
+        }
+        match &self.shared_with {
+            Some(account) => {
+                out.text(account.address())?;
+                out.option(account.id(), FieldWriter::text)
+            }
+            None => Ok(()),
         }
     }
     /// Read an invitation packed by [`Self::pack`], checked as `new` checks one.
@@ -132,7 +153,21 @@ impl StorageInvitation {
                 InvitationAcceptance::CloudKitShare { url: input.secret_text("share URL")? }
             }
         };
-        Self::new(location, acceptance)
+        let invitation = Self::new(location, acceptance)?;
+        match invitation.location.provider() {
+            CloudProvider::Dropbox | CloudProvider::OneDrive => {
+                let address = input.text("shared-with account")?;
+                let id = input.option(|input| input.text("shared-with account id"))?;
+                let shared = crate::SharedWith::new(&address, id)?;
+                // One spelling per account, as for a location.
+                if shared.address() != address {
+                    return Err(StorageFailure::Encoding
+                        .with_source("shared-with account is not in normal form"));
+                }
+                Ok(invitation.shared_with(shared))
+            }
+            CloudProvider::S3 | CloudProvider::CloudKit => Ok(invitation),
+        }
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
         if !self.location.same_location(location) {

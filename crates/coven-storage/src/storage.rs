@@ -162,6 +162,11 @@ pub trait Storage: Send + Sync {
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
+    /// The signed-in account as the provider identifies it: its id and primary
+    /// address, which an invite's shared-with account is compared with.
+    async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
+    }
     /// Largest complete encrypted body the provider takes in one request, in
     /// bytes. Objects past it, or past [`crate::BUFFERED_REQUEST_LIMIT`], go
     /// in parts through resumable or multipart uploads

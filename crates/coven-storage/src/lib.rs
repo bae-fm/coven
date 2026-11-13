@@ -18,6 +18,8 @@ pub use cooldown::{
 mod credentials;
 mod error;
 mod invitation;
+mod provider_account;
+pub use provider_account::{ProviderAccount, SharedWith};
 mod left_upload;
 pub use left_upload::LeftUpload;
 mod object_listing;

@@ -45,6 +45,10 @@ pub trait ProviderOps: Send + Sync {
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
+    /// The signed-in account's id and primary address.
+    async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
+    }
     /// Replace tokens after credential custody commits them.
     async fn set_oauth_tokens(&self, _tokens: OAuthTokens) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth"))

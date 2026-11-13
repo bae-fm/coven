@@ -32,6 +32,15 @@ impl InviteStorage {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("an S3 invite carries the member's key; no other invite does"));
         }
+        let shared = matches!(
+            invitation.location().provider(),
+            CloudProvider::Dropbox | CloudProvider::OneDrive
+        );
+        if shared != invitation.account().is_some() {
+            return Err(StorageFailure::InvalidConfiguration.with_source(
+                "a Dropbox or OneDrive invite names the account it was shared with; no other does",
+            ));
+        }
         if let Some(credentials) = credentials {
             credentials.validate()?;
         }

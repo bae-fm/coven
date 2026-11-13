@@ -181,6 +181,18 @@ fn onedrive_live_sequence() {
         else {
             panic!("OneDrive did not grant race access");
         };
+        // The invite names the recipient by the address Graph's `/me` gives
+        // (§13.2, E.2).
+        let signed_in = writers[1].account_identity().await.unwrap();
+        println!(
+            "OneDrive sharing: shared_with={:?} signed_in={:?}",
+            invitation.account(),
+            signed_in
+        );
+        assert!(invitation
+            .account()
+            .expect("a OneDrive invitation names its account")
+            .is(&signed_in));
         writers[1].join(live.store, &invitation).await.unwrap();
         use crate::providers::tests::sequence_live as suite;
         suite::lost_replies(

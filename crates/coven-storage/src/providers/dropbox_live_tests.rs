@@ -83,6 +83,16 @@ fn dropbox_live_account_sharing() {
             panic!("Dropbox did not grant account access")
         };
         storage.grant_access(&account).await.unwrap();
+        // The invite names the recipient by Dropbox's account id, the one
+        // `get_current_account` gives the recipient (§13.2, E.2).
+        let signed_in = recipient.account_identity().await.unwrap();
+        let shared = invitation.account().expect("a Dropbox invitation names its account");
+        println!(
+            "Dropbox sharing: shared_with_id={:?} signed_in_id={:?}",
+            shared.id(),
+            signed_in.id
+        );
+        assert!(shared.id().is_some() && shared.is(&signed_in));
         recipient.join(live.store, &invitation).await.unwrap();
         recipient.join(live.store, &invitation).await.unwrap();
         assert_eq!(recipient.read(&path).await.unwrap(), b"owner");

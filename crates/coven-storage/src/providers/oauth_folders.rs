@@ -47,6 +47,12 @@ impl OAuthFolders {
         crate::cooldown::observed(self.cooldown.as_ref(), result).await
     }
 
+    pub(super) async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        crate::cooldown::cooling(self.cooldown.as_ref())?;
+        let result = self.session.identity_at(&self.api).await;
+        crate::cooldown::observed(self.cooldown.as_ref(), result).await
+    }
+
     fn require(&self, access: OAuthAccess) -> Result<(), StorageError> {
         if self.access != access {
             return Err(StorageFailure::InvalidConfiguration

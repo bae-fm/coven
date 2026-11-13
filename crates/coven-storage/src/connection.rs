@@ -422,6 +422,16 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         })
         .await
     }
+    async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        self.resent(move || async move {
+            self.cooling()?;
+            self.observed(
+                self.send(RequestKind::Account, 0, self.provider.account_identity()).await,
+            )
+            .await
+        })
+        .await
+    }
     /// During setup a resend refused as an occupied path may have met its
     /// own earlier attempt: a copy publication can store the object, then
     /// have its temporary's deletion refused (§20.6). The object holding

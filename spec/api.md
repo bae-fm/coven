@@ -7914,6 +7914,34 @@ pub struct InviteInfo {
     /// the joining device sends no first request after it, so the app can
     /// say until when it may be used (§13.2).
     pub expires_at: SystemTime,
+    /// On Dropbox and OneDrive, the account the inviting device shared the
+    /// folder with: `address()` is the one the invite went to, normalized
+    /// (trimmed, lowercase), for the app to name before anything connects.
+    /// A join signed in to another account fails with `WrongAccount`. None on
+    /// S3 and CloudKit (§13.2).
+    pub shared_with: Option<SharedWith>,
+}
+
+/// The account an invite shared the folder with (§13.2).
+pub struct SharedWith { /* private */ }
+
+impl SharedWith {
+    /// The address the invite went to, trimmed and lowercase.
+    pub fn address(&self) -> &str;
+    /// Dropbox's id for the account, when the share reported one.
+    pub fn id(&self) -> Option<&str>;
+    /// Whether `signed_in` is that account: by the provider's id when the
+    /// share reported one, so an alias or secondary address of the account is
+    /// never another account; else by primary address.
+    pub fn is(&self, signed_in: &ProviderAccount) -> bool;
+}
+
+/// A sign-in's account as the provider reports it: Dropbox's `account_id` and
+/// `email`, or Graph's `mail` (`userPrincipalName` when `mail` is null) with
+/// no id, the address trimmed and lowercase.
+pub struct ProviderAccount {
+    pub id: Option<String>,
+    pub address: String,
 }
 
 /// Whom an invite admits, fixed by the call that makes it: `create_invite`
@@ -8031,6 +8059,13 @@ pub enum BootstrapError {
     /// installation of the store past its record, or a connected reset
     /// whose kept record is gone.
     NoUnfinishedReplacement(StoreId),
+    /// A join's sign-in is to another account than the one its invite shared
+    /// the folder with (Dropbox, OneDrive). Nothing of that sign-in is kept,
+    /// and nothing is accepted or sent: the join stays listed, to resume with
+    /// a sign-in to the invited account, or to cancel (§13.2). `invited` is
+    /// the address the invite went to, `signed_in` the sign-in's primary
+    /// address.
+    WrongAccount { invited: String, signed_in: String },
     /// The code cannot be used.
     Code(CodeError),
     /// Preparing, publishing or removing the unpublished directory failed.
@@ -8709,8 +8744,12 @@ pub async fn restore_from_saved_code(
 /// published store loads, its storage access lost among them, returns
 /// `BootstrapError::Published` with the open handle: the store stays
 /// published, its sync retries the load, and the app removes it as any store
-/// (§13.2). Returns `None` when the request is declined
-/// or the invite expires, including when it expired before the request was
+/// (§13.2). A sign-in the builder holds to another Dropbox or OneDrive account
+/// than the one the invite shared the folder with (`InviteInfo::shared_with`)
+/// fails the call with `BootstrapError::WrongAccount`, keeping nothing of it
+/// and leaving the join listed. Returns `None` when the request is declined,
+/// the invite expires, or the invited account's first acceptance of the share
+/// is refused, including when it expired before the request was
 /// sent, which then isn't. Dropping the call keeps the unfinished join for
 /// `resume_join`. Cancelling through `control` before the request may have
 /// been sent unmounts a Dropbox folder the join may have mounted, then
@@ -8815,7 +8854,9 @@ impl CovenBuilder {
     /// and name its saved request carries, as
     /// `join_with_invite` does. On Dropbox and OneDrive it connects through the
     /// sign-in the join kept, or a sign-in this builder holds, which replaces
-    /// the kept one once it grants the location's access. With neither, or a
+    /// the kept one once it grants the location's access and is the account
+    /// the invite was shared with (`BootstrapError::WrongAccount` otherwise,
+    /// the kept one staying). With neither, or a
     /// kept one the provider refuses even after its one refresh, it fails with
     /// `OAuthError::Reauthorize` and the join stays unfinished. Returns `None`
     /// when the request was declined or the invite expired, after deleting the

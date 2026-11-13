@@ -36,6 +36,10 @@ fn cloudkit() -> StorageConfig {
     }
 }
 
+fn dan() -> crate::SharedWith {
+    crate::SharedWith::new("dan@example.com", Some("dbid:dan".into())).unwrap()
+}
+
 /// An invite of every provider and acceptance.
 fn invites() -> Vec<InviteStorage> {
     vec![
@@ -49,9 +53,12 @@ fn invites() -> Vec<InviteStorage> {
                 account_label: Some("ana@example.com".into()),
                 folder_label: None,
             })
-            .unwrap(),
+            .unwrap()
+            .shared_with(dan()),
         ),
-        InviteStorage::Account(StorageInvitation::for_account(onedrive()).unwrap()),
+        InviteStorage::Account(
+            StorageInvitation::for_account(onedrive()).unwrap().shared_with(dan()),
+        ),
         InviteStorage::Account(
             StorageInvitation::new(
                 onedrive(),
@@ -59,7 +66,8 @@ fn invites() -> Vec<InviteStorage> {
                     token: SecretText::new("u!share-token".into()),
                 },
             )
-            .unwrap(),
+            .unwrap()
+            .shared_with(crate::SharedWith::new("dan@example.com", None).unwrap()),
         ),
         InviteStorage::Account(
             StorageInvitation::new(
@@ -95,6 +103,7 @@ fn every_providers_invite_round_trips_canonically() {
             _ => panic!("the invite changed kind"),
         };
         assert_eq!(actual.location(), expected.location());
+        assert_eq!(actual.account(), expected.account());
         let acceptance = |invitation: &StorageInvitation| match &invitation.acceptance {
             InvitationAcceptance::Granted => "granted".to_owned(),
             InvitationAcceptance::DropboxMount => "mount".to_owned(),
@@ -152,12 +161,12 @@ fn the_provider_fixes_what_follows_the_location() {
         .iter()
         .map(|invite| invite.encode().unwrap().as_bytes()[location(invite)..].to_vec())
         .collect();
-    // S3: the key; Dropbox: nothing; OneDrive: no share token, or one;
-    // CloudKit: the share URL.
+    // S3: the key; Dropbox: the shared-with account; OneDrive: no share token,
+    // or one, then the shared-with account; CloudKit: the share URL.
     assert_eq!(tails[0], b"\0\0\0\x02id\0\0\0\x06secret");
-    assert_eq!(tails[1], b"");
-    assert_eq!(tails[2], b"\0");
-    assert_eq!(tails[3], b"\x01\0\0\0\x0du!share-token");
+    assert_eq!(tails[1], b"\0\0\0\x0fdan@example.com\x01\0\0\0\x08dbid:dan");
+    assert_eq!(tails[2], b"\0\0\0\0\x0fdan@example.com\x01\0\0\0\x08dbid:dan");
+    assert_eq!(tails[3], b"\x01\0\0\0\x0du!share-token\0\0\0\x0fdan@example.com\0");
     assert_eq!(tails[4], b"\0\0\0\x27https://www.icloud.com/share/0abc#store");
 }
 
@@ -218,4 +227,51 @@ fn the_format_fixtures_storage_part_is_this_encoding() {
         matches!(&decoded, InviteStorage::S3 { invitation, .. } if invitation.location() == &s3_location())
     );
     assert_eq!(decoded.encode().unwrap().as_bytes(), fixture.storage.as_bytes());
+}
+
+#[test]
+fn dropbox_and_onedrive_invites_carry_the_account_and_no_other_does() {
+    let dropbox = || {
+        StorageInvitation::for_account(StorageConfig::Dropbox {
+            location: DropboxLocation::SharedFolder { namespace_id: "1".into() },
+            account_label: None,
+            folder_label: None,
+        })
+        .unwrap()
+    };
+    let refused = |storage: InviteStorage| {
+        assert_eq!(storage.encode().err().unwrap().failure(), StorageFailure::InvalidConfiguration);
+    };
+    refused(InviteStorage::Account(dropbox()));
+    refused(InviteStorage::Account(StorageInvitation::for_account(onedrive()).unwrap()));
+    refused(InviteStorage::S3 {
+        invitation: StorageInvitation::for_account(s3_location()).unwrap().shared_with(dan()),
+        credentials: key(),
+    });
+    refused(InviteStorage::Account(
+        StorageInvitation::new(
+            cloudkit(),
+            InvitationAcceptance::CloudKitShare {
+                url: SecretText::new("https://www.icloud.com/share/0abc#store".into()),
+            },
+        )
+        .unwrap()
+        .shared_with(dan()),
+    ));
+}
+
+#[test]
+fn a_reader_refuses_an_account_in_another_spelling() {
+    let invite = InviteStorage::Account(
+        StorageInvitation::for_account(onedrive())
+            .unwrap()
+            .shared_with(crate::SharedWith::new("dan@example.com", None).unwrap()),
+    );
+    let bytes = invite.encode().unwrap();
+    let bytes = bytes.as_bytes();
+    // The address is the last text before the id's absence tag.
+    let at = bytes.windows(15).position(|window| window == b"dan@example.com").unwrap();
+    let mut shouted = bytes.to_vec();
+    shouted[at..at + 3].copy_from_slice(b"DAN");
+    assert_eq!(InviteStorage::decode(&shouted).err().unwrap().failure(), StorageFailure::Encoding);
 }

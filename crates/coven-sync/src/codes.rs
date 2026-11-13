@@ -2,7 +2,9 @@
 
 use coven_format::codes::{InviteAdmits, InviteCode, PairingCode, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
-use coven_storage::{CloudProvider, InviteStorage, OAuthAccess, RestoreStorage, StorageConfig};
+use coven_storage::{
+    CloudProvider, InviteStorage, OAuthAccess, RestoreStorage, SharedWith, StorageConfig,
+};
 
 /// The three codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +71,11 @@ pub struct InviteInfo {
     /// When the invite ends, by the inviting device's clock, to the second:
     /// the joining device sends no first request after it (§13.2).
     pub expires_at: std::time::SystemTime,
+    /// On Dropbox and OneDrive, the account the inviting device shared the
+    /// folder with: the app can name it before anything connects, and the
+    /// join refuses a sign-in to another account (§13.2). None on S3 and
+    /// CloudKit.
+    pub shared_with: Option<coven_storage::SharedWith>,
 }
 
 /// Store, member and provider facts shared by every code kind.
@@ -139,7 +146,7 @@ impl CodeError {
 
 /// Decode and validate the complete code before returning public metadata.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
-    let (code, location, carries_s3_key) = decode(code)?;
+    let (code, location, carries_s3_key, shared_with) = decode(code)?;
     let metadata = |store_id, member| CodeMetadata {
         store_id,
         member,
@@ -156,6 +163,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
             inviter: code.inviter,
             admits: code.admits,
             expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
+            shared_with,
         }),
         DecodedCode::Pairing(code) => CodeInfo::Pairing(PairingInfo {
             metadata: metadata(code.store, code.member),
@@ -206,13 +214,13 @@ enum DecodedCode {
     clippy::map_err_ignore,
     reason = "a code that does not decode is Invalid, whichever field failed"
 )]
-fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool), CodeError> {
+fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool, Option<SharedWith>), CodeError> {
     if text.starts_with(RestoreCode::TEXT_PREFIX) {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
             RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
         let carries_s3_key = storage.s3_key.is_some();
-        Ok((DecodedCode::Restore(code), storage.location, carries_s3_key))
+        Ok((DecodedCode::Restore(code), storage.location, carries_s3_key, None))
     } else if text.starts_with(InviteCode::TEXT_PREFIX) {
         let code = InviteCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         // Decoding checks that an S3 invite, and only one, carries a whole key.
@@ -221,13 +229,18 @@ fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool), CodeError> {
                 InviteStorage::Account(invitation) => (invitation, false),
                 InviteStorage::S3 { invitation, .. } => (invitation, true),
             };
-        Ok((DecodedCode::Invite(code), invitation.location().clone(), carries_s3_key))
+        Ok((
+            DecodedCode::Invite(code),
+            invitation.location().clone(),
+            carries_s3_key,
+            invitation.account().cloned(),
+        ))
     } else if text.starts_with(PairingCode::TEXT_PREFIX) {
         let code = PairingCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
             RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
         let carries_s3_key = storage.s3_key.is_some();
-        Ok((DecodedCode::Pairing(code), storage.location, carries_s3_key))
+        Ok((DecodedCode::Pairing(code), storage.location, carries_s3_key, None))
     } else {
         Err(CodeError::Invalid)
     }

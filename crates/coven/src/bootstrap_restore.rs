@@ -257,7 +257,7 @@ pub(crate) async fn unfinished_restores(
 
 /// Continue an unfinished restore from its record (`CovenBuilder::resume_restore`).
 pub(crate) async fn resume_restore(
-    builder: CovenBuilder,
+    mut builder: CovenBuilder,
     store: StoreId,
     on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
@@ -272,7 +272,8 @@ pub(crate) async fn resume_restore(
     let (data, sign_in) = match storage.location.provider() {
         // The sign-in the restore kept, or a new one the builder holds.
         provider if provider.signs_in_with_oauth() => {
-            let (custody, tokens) = join_sign_in(&builder, store, &storage.location)?;
+            let (custody, tokens) =
+                join_sign_in(&mut builder, store, &storage.location, None).await?;
             let data = ConnectionCredentials {
                 location: storage.location,
                 credentials: StorageCredentials::OAuth(tokens),

@@ -20,8 +20,8 @@ pub(super) struct Joining {
 /// Restore or fix the request, then obtain credentials for the invite's
 /// location: S3 invites carry them, Dropbox and OneDrive use the sign-in the
 /// join keeps on the device beside its code, and CloudKit the Apple account.
-pub(super) fn prepare_request(
-    builder: &CovenBuilder,
+pub(super) async fn prepare_request(
+    builder: &mut CovenBuilder,
     directory: &StoreDir,
     code: &InviteCode,
     terms: &RequestTerms,
@@ -53,7 +53,9 @@ pub(super) fn prepare_request(
             // The sign-in is kept only once the code is: a kept sign-in
             // always belongs to a listed join.
             _ => {
-                let (custody, tokens) = join_sign_in(builder, code.store, invitation.location())?;
+                let (custody, tokens) =
+                    join_sign_in(builder, code.store, invitation.location(), invitation.account())
+                        .await?;
                 (invitation, StorageCredentials::OAuth(tokens), custody)
             }
         },
@@ -114,8 +116,17 @@ impl Joining {
         }
         status(BootstrapStatus::Connecting);
         self.identity.record_acceptance()?;
-        sync.accept_join(&self.invitation).await?;
-        Ok(true)
+        match sync.accept_join(&self.invitation).await {
+            Ok(()) => Ok(true),
+            // A refusal for the invited account's own access, which the
+            // sign-in was shown to be: the invite ended (§13.2).
+            Err(SyncError::Storage(error))
+                if self.invitation.account().is_some() && error.failure().share_refused() =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Send the request once, once the share is accepted, and wait for its

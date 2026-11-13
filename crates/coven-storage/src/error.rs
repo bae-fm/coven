@@ -314,6 +314,14 @@ impl From<StorageError> for StorageCheckError {
 }
 
 impl StorageFailure {
+    /// Whether the provider answered, to accepting an invite's share, that the
+    /// account may not use the location or that the share or location is gone.
+    /// A refused sign-in (`Authentication`) is not: signing in again can mend
+    /// it.
+    pub fn share_refused(self) -> bool {
+        matches!(self, Self::PermissionDenied | Self::NotFound | Self::ContainerNotFound)
+    }
+
     /// Retain the diagnostic or native cause alongside this classification.
     pub fn with_source(
         self,

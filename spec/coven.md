@@ -4697,6 +4697,7 @@ while either invite is open (§14.2), whichever of Ana's devices made it.
 | the store's first key id, from creation | identifying the store's first key |
 | Ana's device id, and the latest slot it had applied when making the invite | which device's approval Dan's phone trusts, and where it starts reading |
 | on S3, an access key made for Dan | reaching storage; Ana makes it in the provider's console (§20.10) |
+| on Dropbox and OneDrive, the account the folder was shared with: the address it went to and, on Dropbox, Dropbox's id for the account when the share reports one | Dan's phone checks the sign-in is that account's before it keeps it or accepts the share (below), and the app can name the account before anything connects |
 
 **Fixing the member id.** Ana chooses the member id before showing the invite,
 with the call that makes it. `create_invite` invites a new person: coven makes a
@@ -5003,6 +5004,36 @@ rather than reuse them.
 - It sends no first request once the invite has expired by its own clock: the
   code carries the expiry, and the join ends as an expired one does, leaving
   nothing. No device would ever answer that request.
+- On Dropbox and OneDrive it reads the account it is signed in as, and compares
+  it with the account the invite shared the folder with, before it keeps the
+  sign-in or accepts the share. Ana's invite went to the address she typed;
+  Dan's phone may be signed in to another Dropbox account altogether. A
+  different account fails the call with `BootstrapError::WrongAccount`, naming
+  both, and keeps nothing of that sign-in: nothing is accepted or sent, and the
+  join stays listed, so Dan signs in to the right account and resumes, or
+  cancels. On Dropbox the comparison is by Dropbox's own id for the account
+  when Ana's share reported one (`account_id` in the folder's member list,
+  against `account_id` from `get_current_account`, which Dropbox documents as
+  the account's unique and stable ID), so Dan's second address or an alias of
+  his account is never read as another account. A share sent to an address
+  that has no account yet carries the address alone. On OneDrive the
+  comparison is always by address: Microsoft's Graph documentation does not
+  say that the user id a permission lists is the id `/me` returns, for
+  personal or for work and school accounts, so an id could read Dan's own
+  account as another. The address compared is the primary one of the account
+  Dan is signed in as (`/me`'s `mail`, else `userPrincipalName`), as
+  Dropbox's `get_current_account` gives it: neither API lists the others, so
+  a OneDrive share sent to an alias of Dan's account reads as another account
+  until a live run (E.2) shows what Graph returns for one. Without the check,
+  the refusal Dan's phone meets on accepting is one reply for an ended invite
+  and for a wrong account, and any answer to it is wrong for one of them
+  ([`unchecked_refusal_misjudged`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+  iCloud tells an app no Apple ID, so nothing is compared there.
+- A refusal of the first acceptance (Dropbox's `not_a_member` or `invalid_id`
+  on mounting, OneDrive's refusal to redeem the share) by the account just
+  shown to be the invited one means the invite ended: the join ends as a
+  declined one, leaving nothing. An iCloud acceptance's refusal stays an error
+  until what iCloud does with another Apple ID is known.
 - It records that it is accepting the share before it accepts. On Dropbox,
   accepting mounts Household in Dan's Dropbox, which counts its full size
   against his space (§20.9). Dan cancels before sending: his phone unmounts
@@ -5023,9 +5054,9 @@ rather than reuse them.
   there already is left alone. Once the invite has expired by its own clock it
   sends nothing, and the join ends as an expired one does.
 - A request the provider refused was never stored, so the retry sends it again.
-- Provider permission errors reach the app, even when they come from access being
-  taken back after a decline or expiry. A request it can't read is not a request
-  that's absent.
+- Past the first acceptance, provider permission errors reach the app, even when
+  they come from access being taken back after a decline or expiry. A request it
+  can't read is not a request that's absent.
 
 **Picking up after a restart.** Dan closes the app while he waits, or his phone
 stops it in the background. The saved keys and request are encrypted with the
@@ -5045,8 +5076,9 @@ uses it, so a restart never starts from a token Dropbox has already rejected.
 If Dropbox refuses the kept sign-in even after that refresh, resuming fails with
 `OAuthError::Reauthorize`. The listed join names the sign-in it needs, and Dan
 signs in once more. A sign-in the app holds when it resumes replaces the kept
-one, once it is shown to grant the shared folder's access; one that doesn't is
-refused and leaves the kept one. The saved code and the kept sign-in are deleted
+one, once it is shown to grant the shared folder's access and to be the account
+the invite was shared with; one that doesn't is refused, a different account
+with `WrongAccount`, and leaves the kept one. The saved code and the kept sign-in are deleted
 when the join is declined or expires; when it finishes, the sign-in becomes the
 store's credentials and the code is deleted.
 
@@ -12250,6 +12282,29 @@ place is distinct from every coven path.
 - Listings of published objects exclude the temporary namespace, unfinished
   uploads included.
 
+**The invited account.** A join compares the account it is signed in as with
+the account an invite shared the folder with (§13.2). The sources:
+
+- Dropbox: `account_id` in `get_current_account`'s reply, which the Python SDK's
+  `Account` documents as "the user's unique and stable Dropbox ID", and in
+  `UserInfo` of `sharing/list_folder_members`, "the account ID of the user".
+- OneDrive: `/me`'s `mail`, else `userPrincipalName`. Graph's
+  [permission](https://learn.microsoft.com/en-us/graph/api/resources/permission?view=graph-rest-1.0)
+  and
+  [identity](https://learn.microsoft.com/en-us/graph/api/resources/identity?view=graph-rest-1.0)
+  resources describe a grantee's `user.id` only as an identifier, and do not
+  say it is `/me`'s `id`; so coven compares OneDrive accounts by address.
+
+Two live runs confirm what the documentation leaves open, each with the two
+accounts of the sharing tests (`COVEN_LIVE_DROPBOX_ENV` and
+`COVEN_LIVE_DROPBOX_B_ENV`, or the OneDrive pair):
+
+| Run | Shows |
+|---|---|
+| `dropbox_live_account_sharing` | an invitation made for the second account names the account id `get_current_account` gives that account |
+| `onedrive_live_sequence` | an invitation made for the second account's address matches the address `/me` gives that account, personal and work or school accounts alike |
+| either, an invitation made for an alias or secondary address of the second account | whether Dropbox still names the account's id (the comparison then holds), and what address `/me` returns on OneDrive (the comparison then reads another account, which this run shows) |
+
 ### E.3 S3 settings and profiles
 
 **The settings menu.** `S3Settings` (api.md E5) holds one value per behaviour:
@@ -13876,6 +13931,7 @@ pass's failure, kept for its retry.
 | `Conflict` | a racer's condition was refused; for a shared temporary, a retryable answer | E.6, E.10 |
 | `Corrupted` | two reads of the same bytes of an immutable object, a slot, a file or a snapshot, disagreed: a fault on the way changed one; it retries as a failed read does | §6.5, §19.1 |
 | `StorageFailure::StoreExists` | another creation already holds slot 1; setup is undone | §10.3 |
+| `BootstrapError::WrongAccount` | a join's sign-in is to another Dropbox or OneDrive account than the one its invite shared the folder with; nothing is kept, accepted or sent | §13.2 |
 | `StorageSetupError::Cancelled` | the app cancelled setup before its point of no return, and setup undid what it wrote | §11.6, §20.8 |
 | `StorageSetupError::SetupRunning` | another setup call is running on this device, or a setup past its point of no return is still finishing | §20.8 |
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |

@@ -39,6 +39,18 @@ pub enum BootstrapError {
     /// connected reset's kept record is gone.
     #[error("no replacement is under way for store {0}")]
     NoUnfinishedReplacement(StoreId),
+    /// A join was signed in to another account than the one its invite
+    /// shared the folder with. Nothing of that sign-in is kept and nothing is
+    /// accepted or sent: the join stays listed, to resume with a sign-in to
+    /// the invited account, or to cancel (§13.2).
+    #[error("the invite was shared with {invited}, but the sign-in is {signed_in}")]
+    WrongAccount {
+        /// The account the invite shared the folder with, as the inviting
+        /// device recorded it.
+        invited: String,
+        /// The account the sign-in is, by its primary address.
+        signed_in: String,
+    },
     /// The code cannot be used for this operation.
     #[error(transparent)]
     Code(#[from] CodeError),

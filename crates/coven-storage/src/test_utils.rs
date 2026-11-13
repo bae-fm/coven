@@ -57,6 +57,11 @@ impl Object {
 /// The account holding a fake store, as `account()` reports it to its owner.
 const OWNER_ACCOUNT: &str = "owner@example.test";
 
+/// The id the fake gives the account with this address.
+pub fn account_id(address: &str) -> String {
+    format!("id:{}", address.to_ascii_lowercase())
+}
+
 #[derive(Clone)]
 enum Account {
     Owner,
@@ -554,6 +559,11 @@ impl ProviderOps for MemoryProvider {
             Account::Recipient(account) => account.clone(),
         })
     }
+    /// The fake's id for an account is its address behind `id:`.
+    async fn account_identity(&self) -> Result<crate::ProviderAccount, StorageError> {
+        let address = ProviderOps::account(self).await?;
+        Ok(crate::ProviderAccount { id: Some(account_id(&address)), address })
+    }
     async fn s3_access_key_id(&self) -> Option<String> {
         self.s3_key.lock().await.as_ref().map(|key| key.access_key_id.clone())
     }
@@ -789,6 +799,7 @@ impl ProviderOps for MemoryProvider {
         if let Some(failure) = self.state.lock().await.faults.grant_failure {
             return Err(failure.into());
         }
+        let shared = crate::SharedWith::new(account, Some(account_id(account)))?;
         let invitation = match self.config.provider() {
             CloudProvider::CloudKit => StorageInvitation::new(
                 self.config(),
@@ -803,6 +814,10 @@ impl ProviderOps for MemoryProvider {
                 },
             )?,
             _ => StorageInvitation::for_account(self.config())?,
+        };
+        let invitation = match self.config.provider() {
+            CloudProvider::Dropbox | CloudProvider::OneDrive => invitation.shared_with(shared),
+            _ => invitation,
         };
         self.state
             .lock()
