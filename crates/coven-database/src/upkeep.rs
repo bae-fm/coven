@@ -12,8 +12,10 @@
 //! timeout; the next wake tries again. Any other failure stops the upkeep
 //! for good, so the thread fails the handle with it: every later call and
 //! live query reports it until the store is reopened, rather than the store
-//! staying open without its upkeep. A panic in a run is a bug in coven, and
-//! ends the process.
+//! staying open without its upkeep. A panic in a run is a bug in coven: it
+//! goes to the store's bug sink and fails the handle the same way, as
+//! `DbError::StoreFailed` carrying it, so the thread never ends in a way no
+//! one hears of.
 
 use crate::observation::{CommitObserver, HandleFailure};
 use crate::DbError;
@@ -92,8 +94,8 @@ impl<U: Upkeep> UpkeepThread<U> {
         self.halt();
         let shared = self.shared.clone();
         drop(self);
-        // A panic on the thread ends the process (`serve`), so it always
-        // returned, and let go of its part.
+        // A panic on the thread is caught (`serve`), so it always returned,
+        // and let go of its part.
         Arc::into_inner(shared)
             .expect("only the upkeep holds its state once its thread ends")
             .upkeep
@@ -111,7 +113,7 @@ impl<U: Upkeep> UpkeepThread<U> {
         };
         self.shared.closing.store(true, Ordering::Release);
         thread.thread().unpark();
-        // A panic on the thread ends the process, so it always returns.
+        // A panic on the thread is caught, so it always returns.
         thread.join().expect("the upkeep's thread returns");
     }
 }
@@ -134,9 +136,9 @@ struct Serving<U> {
 impl<U: Upkeep> Serving<U> {
     /// Run at each wake until the store closes or a run fails. A panic is a
     /// bug in coven: rather than leave the store open without its upkeep,
-    /// it ends the process, whose crash report carries the panic.
+    /// the handle fails with it, and the store's bug sink hears it (E15).
     fn serve(self) {
-        let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+        let served = coven_foundation::task::caught_sync(U::THREAD, || loop {
             std::thread::park();
             if self.shared.closing.load(Ordering::Acquire) {
                 return;
@@ -152,11 +154,10 @@ impl<U: Upkeep> Serving<U> {
                     return;
                 }
             }
-        }));
-        if let Err(panic) = served {
-            let message = coven_foundation::task::panic_message(panic.as_ref());
-            tracing::error!(%message, thread = U::THREAD, "coven's upkeep panicked, a bug; ending the process");
-            std::process::abort()
+        });
+        if let Err(bug) = served {
+            tracing::error!(%bug, thread = U::THREAD, "coven's upkeep panicked, a bug; failing the handle");
+            self.handle.fail_with_bug(bug);
         }
     }
 }

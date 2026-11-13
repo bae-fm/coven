@@ -367,8 +367,10 @@ pub enum Audience {
   checkpointing or committing, is tried again at the next commit; any other
   failure fails the handle with `DbError::CheckpointFailed` until the store is
   reopened. The thread starts as the store opens and closing stops and joins
-  it, so no runtime's shutdown ends it; a checkpoint that panics ends the
-  process.
+  it, so no runtime's shutdown ends it; a checkpoint that panics fails the
+  handle with the bug, which the bug sink hears once, and every later call and
+  live query fails with `DbError::StoreFailed` carrying it until the store is
+  reopened (E15).
 - `sqlite_settings()` on either handle reads back the settings SQLite has in
   effect, which every connection shares. SQLite lowers `mmap_size` and
   `threads` to the limits it was built with, and the readback shows the lowered

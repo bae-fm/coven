@@ -322,56 +322,33 @@ async fn checkpointer_failure(
     failure
 }
 
-/// The child process of the test below: a store whose checkpoint panics.
-#[test]
-fn panicking_checkpoint_store() {
-    let Ok(path) = std::env::var("COVEN_CHECKPOINT_PANIC_FILE") else {
-        return;
+/// A panic in a checkpoint is a bug in coven. The store can't stay open with
+/// no checkpointer while its WAL grows without bound, so the handle fails with
+/// the bug: the bug sink hears it once, every later call and live query fails
+/// with `StoreFailed` carrying it, and the process lives on. Closing the handle
+/// and opening the store again starts a checkpointer that checkpoints again
+/// (§4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_checkpoint_fails_the_handle_with_its_bug_and_a_reopen_checkpoints_again() {
+    let bugs = coven_foundation::task::HeardBugs::shared();
+    let store = TestStore::reporting_to(bugs.clone());
+    let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
+    let failure = checkpointer_failure(&db, || panic!("the checkpoint broke")).await;
+    let DbError::StoreFailed(bug) = &failure else {
+        panic!("{failure:?}");
     };
-    let path = std::path::Path::new(&path);
-    let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
-        coven_foundation::task::HeardBugs::shared(),
-    );
-    let store = coven_foundation::id_source::StoreId(
-        uuid::Uuid::parse_str(&std::env::var("COVEN_CHECKPOINT_PANIC_STORE").unwrap()).unwrap(),
-    );
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async {
-        let db =
-            blobs_in(layout.store_dir(&store), checkpointed_at_100_pages()).open().await.unwrap();
-        let mut tries = faulted(&db, || panic!("the checkpoint broke"));
-        checkpointed(&db, &mut tries).await;
-        // The panic ends the process before this wait does.
-        tokio::time::timeout(HANG_GUARD, std::future::pending::<()>())
-            .await
-            .expect_err("a pending future never ends");
-        panic!("the store stayed open with no checkpointer");
-    });
-}
+    assert_eq!(bug.operation, "coven WAL checkpoint");
+    assert_eq!(bug.message, "the checkpoint broke");
+    assert!(matches!(insert(&db).await, Err(DbError::StoreFailed(later)) if later == *bug));
+    assert!(matches!(db.read(|_| Ok(())).await, Err(DbError::StoreFailed(later)) if later == *bug));
+    assert_eq!(bugs.take(), std::slice::from_ref(bug), "the sink hears the bug once");
+    db.close().await.unwrap();
 
-/// A panic in a checkpoint is a bug in coven. Rather than leave the store
-/// open with no checkpointer while its WAL grows without bound, it ends the
-/// process (§4).
-#[test]
-fn a_panicking_checkpoint_ends_the_process() {
-    let store = TestStore::new();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "wal_checkpoints::tests::panicking_checkpoint_store", "--nocapture"])
-        .env("COVEN_CHECKPOINT_PANIC_FILE", store.database_path())
-        .env("COVEN_CHECKPOINT_PANIC_STORE", store.id().to_string())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("the checkpoint broke"), "{stderr}");
-    assert!(!stderr.contains("the store stayed open"), "{stderr}");
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        assert_eq!(output.status.signal(), Some(6), "SIGABRT: {stderr}");
-    }
-    #[cfg(not(unix))]
-    assert!(!output.status.success(), "{stderr}");
+    let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
+    let mut restarts = db.report_checkpoints();
+    checkpointed(&db, &mut restarts).await;
+    add(&db).await;
+    db.close().await.unwrap();
 }
 
 /// A checkpoint SQLite fails other than on a busy or locked database stops

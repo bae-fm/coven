@@ -892,9 +892,16 @@ closes. It runs on no runtime of the app's. Ben's music app opened its store
 on a runtime it shut down when its import window closed, and kept the store
 open; a checkpointer that was that runtime's task would have ended with it,
 and the WAL would have grown with every later write. A checkpoint that
-panics is a bug in coven, and it ends the process, whose crash report carries
-the panic: the store must not stay open with no one checkpointing it. A
-system that refuses the thread fails the open with `DbError::UpkeepThread`.
+panics is a bug in coven. The store must not stay open with no one
+checkpointing it, so the thread fails the handle with the bug: the bug goes to
+the app's bug sink once, and every later call and live query fails with
+`DbError::StoreFailed` carrying it until the store is reopened (E15), as after
+any failure that fails a handle. Closing the failed handle and opening the
+store again starts a new checkpointer, which copies the WAL the next commit
+past the threshold wakes it to. Coven never reopens by itself: a panic that
+happened once will likely happen again, and the app shows the failure and
+offers the reopen. A system that refuses the thread fails the open with
+`DbError::UpkeepThread`.
 
 On Windows a store's path is verbatim (`\\?\D:\…`), and SQLite takes a
 path that starts `\\` for a network share. There it locks the WAL's
@@ -985,7 +992,8 @@ again only as it reads the schema, so the run also creates and drops a table
 of coven's in its transaction. Every connection, the read-only readers among
 them and the run's own, then reads the schema and plans with the new
 statistics from its next statement. The thread lives as long as the store,
-and a panic in it ends the process, as with the checkpointing thread. A check
+and a panic in it fails the handle with the bug, as with the checkpointing
+thread. A check
 or run that fails other than on a busy or locked database stops it, and the
 handle fails with `DbError::StatisticsFailed` and SQLite's cause until the
 store is reopened: the planner would otherwise plan with statistics that no
