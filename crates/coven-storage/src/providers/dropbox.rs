@@ -480,7 +480,7 @@ impl ProviderOps for DropboxStorage {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
@@ -500,7 +500,7 @@ impl ProviderOps for DropboxStorage {
         Ok(UploadSession {
             device,
             location: self.config(),
-            target: target.clone(),
+            path: path.clone(),
             total,
             confirmed: 0,
             part_size: crate::session::DROPBOX_PART_SIZE,
@@ -574,13 +574,7 @@ impl ProviderOps for DropboxStorage {
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        let mode = match session.target() {
-            UploadTarget::Create(_) => json!("add"),
-            UploadTarget::Replace(previous) => {
-                json!({".tag":"update", "update":previous.replace_token})
-            }
-        };
-        let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path().absolute(),"mode":mode,"autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),ByteProgress::unread(),None, Some(publication)).await?;
+        let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path().absolute(),"mode":"add","autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),ByteProgress::unread(),None, Some(publication)).await?;
         let value = http::json(PROVIDER, response).await?;
         check_file(&value, session.path(), session.total)?;
         session.state = SessionState::Complete;

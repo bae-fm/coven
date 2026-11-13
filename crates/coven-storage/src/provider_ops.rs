@@ -129,12 +129,12 @@ pub trait ProviderOps: Send + Sync {
     }
     /// Remove exclusive grants and return grants that still reach the account.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
-    /// Begin a nonempty upload with its original publication condition, for
-    /// `device`, whose reserved folder holds its temporaries (D10).
+    /// Begin a nonempty create-once upload at `path`, for `device`, whose
+    /// reserved folder holds its temporaries (D10).
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: DeviceId,
     ) -> Result<UploadSession, StorageError>;
@@ -203,21 +203,6 @@ pub trait ProviderOps: Send + Sync {
         store: StoreId,
         through: u64,
     ) -> Result<Vec<LeftUpload>, StorageError>;
-    /// Whether this provider dates an unfinished floor session's start so
-    /// that one begun before the current floor's publication can be told
-    /// apart (Appendix E.10). Asking sends nothing.
-    fn dates_floor_sessions(&self) -> bool {
-        false
-    }
-    /// The unfinished sessions at the floor's path begun before `floor`, the
-    /// current floor, was published: each observed an older revision, so
-    /// none can publish. Asked only where [`Self::dates_floor_sessions`].
-    async fn superseded_floor_uploads(
-        &self,
-        _floor: &StoredObject,
-    ) -> Result<Vec<LeftUpload>, StorageError> {
-        Ok(Vec::new())
-    }
     /// What S3 detection run `run` left in `store`'s `.coven-check` prefix
     /// (§20.7): its unfinished multipart uploads, then its probes. Only S3
     /// detects, so elsewhere no run left anything.

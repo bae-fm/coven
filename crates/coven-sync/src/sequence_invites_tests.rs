@@ -260,10 +260,16 @@ async fn each_lifetime_expires_on_the_inviting_device() {
         assert_eq!(inviter, "Ana");
         group.clock.set(invite.expires_at - Duration::from_secs(1));
         ana.sync.pass().await.unwrap();
-        assert_eq!(ana.database().operations().await.unwrap().len(), 1);
+        let waiting = |operations: Vec<coven_database::OperationRecord>| {
+            operations
+                .iter()
+                .filter(|record| !crate::sequence_sync::sequence_retention::is_live_body(record))
+                .count()
+        };
+        assert_eq!(waiting(ana.database().operations().await.unwrap()), 1);
         group.clock.set(invite.expires_at);
         ana.sync.pass().await.unwrap();
-        assert!(ana.database().operations().await.unwrap().is_empty());
+        assert_eq!(waiting(ana.database().operations().await.unwrap()), 0);
         ana.database().close().await.unwrap();
     }
 }

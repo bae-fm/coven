@@ -76,9 +76,9 @@ impl Database {
         .await
     }
 
-    /// Reserve the path number of a snapshot attempt about to be prepared:
-    /// the next of this device's snapshot sequence, never reused, which §19.3
-    /// compares with its stored snapshots.
+    /// Reserve the path number of a snapshot attempt or a floor body about to
+    /// be prepared: the next of this device's sequence, never reused, which
+    /// §19.3 compares with its stored snapshots.
     pub async fn reserve_snapshot_number(&self) -> Result<std::num::NonZeroU64, DbError> {
         self.call(move |inner| {
             inner

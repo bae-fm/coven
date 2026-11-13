@@ -179,7 +179,7 @@ impl S3Storage {
         publication: Option<&PublicationRequest>,
     ) -> Result<(), StorageError> {
         let mut result = Ok(());
-        for (listed, id, _) in self.unfinished_uploads(key, publication).await? {
+        for (listed, id) in self.unfinished_uploads(key, publication).await? {
             if listed == key {
                 result = with_cleanup(result, self.abort_multipart(key, &id, publication).await);
             }
@@ -267,10 +267,7 @@ impl S3Storage {
                 &self.session_key(session)?,
                 Destination::Object(session.path()),
                 condition,
-                match session.target() {
-                    UploadTarget::Create(_) => None,
-                    UploadTarget::Replace(previous) => Some(&previous.replace_token),
-                },
+                None,
             )
             .await;
         let result = match result.map_err(s3_error) {

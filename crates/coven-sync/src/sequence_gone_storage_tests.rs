@@ -40,6 +40,29 @@ async fn the_device_that_deletes_a_gone_devices_files_ends_its_uploads() {
     }
 }
 
+/// Ana's phone wrote a floor body that no floor names, then Ana's laptop
+/// removed it. The laptop lists the gone phone's floor folder with its
+/// snapshot folders and deletes every body the floor does not name (§16.6).
+#[tokio::test]
+async fn a_gone_devices_floor_bodies_the_floor_does_not_name_go() {
+    let group = Group::new();
+    let phone = group.device(1).await;
+    group.create(&phone).await;
+    let laptop = group.laptop(&phone).await;
+    let unnamed = ObjectPath::floor_body(
+        group.store,
+        phone.sync.device,
+        std::num::NonZeroU64::new(77).unwrap(),
+    );
+    group.storage.plant(&unnamed, b"a floor body its write never named").await.unwrap();
+    laptop.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    assert!(group.storage.status(&unnamed).await.unwrap().is_none());
+    for device in [&phone, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// The phone keeps running until it reads its removal, and its key keeps
 /// working: after the laptop's pass ended its uploads and listed its
 /// snapshot folders, the phone starts another upload and stores a snapshot

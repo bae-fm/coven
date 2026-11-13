@@ -15,15 +15,12 @@ use tokio::{sync::Barrier, task::JoinSet};
 /// detected settings, which cannot see that a race needs copy publication.
 /// Version 6 observes whether a publishing copy's reply describes the object
 /// as a HEAD after it does; that evidence never decides the verdict.
-/// Version 7 observes whether the service dates an unfinished upload's start
-/// in order with publications; that certifies only the floor rule of
-/// Appendix E.10, never the verdict.
-pub(super) const SUITE_VERSION: u32 = 7;
+/// Version 8 no longer observes whether the service dates an unfinished
+/// upload's start: no floor session sits at a shared name.
+pub(super) const SUITE_VERSION: u32 = 8;
 
 #[path = "s3_copy_reply_live.rs"]
 mod copy_reply;
-#[path = "s3_initiation_live.rs"]
-mod initiation;
 #[path = "s3_race.rs"]
 mod races;
 
@@ -599,8 +596,6 @@ async fn s3_certification() {
     passed &= case(&settings, &["listing_lag"], profile, listing_lag).await.is_some();
     // Separate evidence: a copy reply that falls short leaves status to HEAD.
     copy_reply::report(&settings, profile).await;
-    // Separate evidence: it certifies only ending superseded floor sessions.
-    let initiation = initiation::report(&settings, profile).await;
     let after = settings.connect(Some(profile)).provider().bucket_versioning().await;
     match after {
         Ok(state) => {
@@ -621,7 +616,6 @@ async fn s3_certification() {
         &settings.config,
         detection.versioning.as_ref().unwrap(),
         if passed { Some(&date[..10]) } else { None },
-        initiation,
     );
     println!("certification suite={SUITE_VERSION} {}", if passed { "PASS" } else { "FAIL" });
     assert!(passed, "S3 certification failed; see §20 lines above");
@@ -632,7 +626,6 @@ fn print_profile(
     config: &StorageConfig,
     versioning: &S3BucketVersioning,
     date: Option<&str>,
-    initiation: bool,
 ) {
     let StorageConfig::S3 { endpoint, profile, .. } = config else { unreachable!() };
     // Only the hostname is source data, never a URL's credentials, path or query.
@@ -656,7 +649,6 @@ fn print_profile(
     } else {
         "Uncertified"
     };
-    let initiation = if initiation { certification.as_str() } else { "Uncertified" };
     let copy_publication = match p.copy_publication {
         S3CopyPublication::Never => "S3CopyPublication::Never".into(),
         S3CopyPublication::Multipart(condition) => {
@@ -667,7 +659,7 @@ fn print_profile(
         }
     };
     println!(
-        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        copy_publication: {copy_publication},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n    upload_initiation: Certification::{initiation},\n}},",
+        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        copy_publication: {copy_publication},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n}},",
         p.signing, p.single_put, p.multipart_timestamp, p.checksums, p.listing,
         p.revision, p.response_headers, p.request_checksums,
     );

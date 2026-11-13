@@ -85,7 +85,7 @@ impl S3Storage {
         listing: S3Listing,
     ) -> Result<EmptiedS3Bucket, StorageError> {
         let uploads = self.unfinished_uploads(prefix, None).await?;
-        for (key, id, _) in &uploads {
+        for (key, id) in &uploads {
             self.abort_multipart(key, id, None).await?;
         }
         let keys = self.keys_under(prefix, listing).await?;

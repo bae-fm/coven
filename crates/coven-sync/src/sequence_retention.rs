@@ -39,6 +39,14 @@ enum Retention {
     OwnListing,
     Capture(FloorCapture),
     Floor(FloorArtifact),
+    /// A floor body the floor names, of this device or of a device gone for
+    /// good whose files this device deletes: delete it once the floor names
+    /// another (§16.6).
+    LiveBody {
+        device: DeviceId,
+        #[serde(with = "coven_database::slot_json")]
+        number: Slot,
+    },
     Delete {
         #[serde(with = "coven_database::slot_json")]
         next: Slot,
@@ -88,7 +96,15 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        for record in self.database.operations().await? {
+        // A floor body is deleted once the floor names another, so those
+        // checks follow any floor write this pass makes.
+        let mut records = self.database.operations().await?;
+        records.sort_by_key(|record| {
+            let live = serde_json::from_slice::<Retention>(&record.data)
+                .is_ok_and(|work| matches!(work, Retention::LiveBody { .. }));
+            (record.kind == operation_kind::SEQUENCE_RETENTION && live, record.id)
+        });
+        for record in records {
             if record.kind != operation_kind::SEQUENCE_RETENTION
                 || !self.operation_ready(&record, ring).await?
             {
@@ -149,6 +165,7 @@ impl SequenceSync {
         let mut pending_snapshots = Vec::new();
         let mut pending_listings = BTreeSet::new();
         let mut own_listing = false;
+        let mut live_bodies = BTreeSet::new();
         for record in self.database.operations().await? {
             if record.kind != operation_kind::SEQUENCE_RETENTION {
                 continue;
@@ -161,7 +178,24 @@ impl SequenceSync {
                     pending_listings.insert(device);
                 }
                 Retention::OwnListing => own_listing = true,
+                Retention::LiveBody { device, number } => {
+                    live_bodies.insert((device, number));
+                }
                 Retention::Delete { .. } => (),
+            }
+        }
+        // A floor body of a device gone for good that the floor names is
+        // deleted once the floor names another.
+        if let Some((device, number)) = session.floor.as_ref().map(|floor| floor.body()) {
+            if gone.contains(&device) && live_bodies.insert((device, number)) {
+                self.database
+                    .start_operation(NewOperation {
+                        kind: operation_kind::SEQUENCE_RETENTION.into(),
+                        data: serde_json::to_vec(&Retention::LiveBody { device, number })?,
+                        started_by: operation_kind::COVEN.into(),
+                        pauses_writes: false,
+                    })
+                    .await?;
             }
         }
         if !gone.is_empty() {
@@ -424,8 +458,10 @@ impl SequenceSync {
             .map(|copy| copy.path.slot_number().expect("copy slot"))
             .collect();
         let copies = copies.into_iter().collect();
+        let number = Slot::from(self.database.reserve_snapshot_number().await?);
         Ok(Some(Retention::Capture(FloorCapture {
             previous: session.floor.as_ref().map(|floor| floor.object().clone()),
+            number,
             previous_first,
             first,
             announcements: named,
@@ -467,6 +503,19 @@ impl SequenceSync {
             self.database.finish_operation(record.id).await?;
             return Ok(());
         }
+        if let Retention::LiveBody { device, number } = work {
+            // The floor was read by this pass. A body it still names stays; once
+            // it names another, nothing can read this one again.
+            if session.floor.as_ref().is_some_and(|floor| floor.body() == (device, number)) {
+                return Ok(());
+            }
+            self.state.check()?;
+            self.storage
+                .delete(&ObjectPath::floor_body(self.store(), device, number.into()))
+                .await?;
+            self.database.finish_operation(record.id).await?;
+            return Ok(());
+        }
         if let Retention::Capture(capture) = &work {
             let artifact = self.capture_floor(capture, ring, member).await?;
             work = Retention::Floor(artifact);
@@ -501,7 +550,7 @@ impl SequenceSync {
                     }
                 }
                 if confirmed.is_none() && !same_revision {
-                    self.cleanup_floor(artifact).await?;
+                    self.cleanup_floor(artifact, session.floor.as_ref()).await?;
                     self.database.finish_operation(record.id).await?;
                     return Ok(());
                 }
@@ -531,14 +580,33 @@ impl SequenceSync {
                         )) =>
                     {
                         self.read_forward(session, ring, member).await?;
-                        self.cleanup_floor(artifact).await?;
+                        self.cleanup_floor(artifact, session.floor.as_ref()).await?;
                         self.database.finish_operation(record.id).await?;
                         return Ok(());
                     }
                     Err(error) => return Err(error),
                 }
             }
-            self.cleanup_floor(artifact).await?;
+            self.cleanup_floor(artifact, session.floor.as_ref()).await?;
+            // The floor names this body until another replaces it, and then
+            // this device deletes it.
+            if session
+                .floor
+                .as_ref()
+                .is_some_and(|floor| floor.body() == (self.device, artifact.capture.number))
+            {
+                self.database
+                    .start_operation(NewOperation {
+                        kind: operation_kind::SEQUENCE_RETENTION.into(),
+                        data: serde_json::to_vec(&Retention::LiveBody {
+                            device: self.device,
+                            number: artifact.capture.number,
+                        })?,
+                        started_by: operation_kind::COVEN.into(),
+                        pauses_writes: false,
+                    })
+                    .await?;
+            }
             work = Retention::Delete {
                 next: previous_first,
                 first: confirmed.expect("successful or observed floor"),
@@ -558,15 +626,29 @@ impl SequenceSync {
             record.last_step = update.last_step;
             self.database.advance_operation(update).await?;
         }
-        // A claim's session left at a slot this device has applied, or a
-        // floor session begun before the floor now published, can never
+        // A claim's session left at a slot this device has applied can never
         // publish, whoever began it, and nothing else would end it (§17.10).
         self.state.check()?;
         self.storage.end_settled_claims(self.store(), session.through).await?;
-        self.storage.end_superseded_floor_sessions(self.store()).await?;
         self.database.finish_operation(record.id).await?;
         Ok(())
     }
+}
+
+/// Whether a journaled operation is a floor write in progress.
+#[cfg(test)]
+pub(crate) fn is_floor_write(record: &OperationRecord) -> bool {
+    matches!(
+        serde_json::from_slice::<Retention>(&record.data),
+        Ok(Retention::Capture(_) | Retention::Floor(_))
+    )
+}
+
+/// Whether a journaled operation only waits to delete the floor body the
+/// floor named when it was journaled.
+#[cfg(test)]
+pub(crate) fn is_live_body(record: &OperationRecord) -> bool {
+    matches!(serde_json::from_slice::<Retention>(&record.data), Ok(Retention::LiveBody { .. }))
 }
 
 #[cfg(test)]

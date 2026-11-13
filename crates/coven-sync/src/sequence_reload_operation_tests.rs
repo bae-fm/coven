@@ -99,7 +99,13 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
         !older_circle_coverage,
         "{result:?}"
     );
-    assert!(ben.database().operations().await.unwrap().is_empty());
+    assert!(ben
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(crate::sequence_sync::sequence_retention::is_live_body));
     assert_eq!(ben.database().applied_slot().await.unwrap(), old_target);
     ben.sync.reload_from_snapshot().await.unwrap();
     assert!(ben.database().applied_slot().await.unwrap() >= floor.header.first.get() - 1);
@@ -114,7 +120,13 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
             .reads_circle(circle.unwrap().0, &ben.identity.member(),));
     }
     assert_eq!(rows(ben.database()).await, rows(ana.database()).await);
-    assert!(ben.database().operations().await.unwrap().is_empty());
+    assert!(ben
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(crate::sequence_sync::sequence_retention::is_live_body));
     ana.database().close().await.unwrap();
     ben.database().close().await.unwrap();
 }

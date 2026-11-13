@@ -86,8 +86,8 @@ pub enum StorageFailure {
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
-    /// A buffered floor replacement exceeds this provider's single-request limit.
-    /// Recorded replacements use `Storage::begin_replace` instead.
+    /// A floor pointer replacement exceeds this provider's single-request
+    /// limit. The pointer is small, so it never goes up in parts.
     SingleRequestTooLarge {
         /// Encrypted body length in bytes.
         size: u64,

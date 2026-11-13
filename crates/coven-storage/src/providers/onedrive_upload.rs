@@ -128,7 +128,7 @@ impl OneDriveStorage {
         UploadSession {
             device,
             location: self.config(),
-            target: UploadTarget::Create(path.clone()),
+            path: path.clone(),
             total,
             confirmed: 0,
             part_size: crate::session::ONEDRIVE_PART_SIZE,

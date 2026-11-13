@@ -1,4 +1,4 @@
-use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError, StorageFailure, StoredObject};
+use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError, StorageFailure};
 use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use coven_foundation::id_source::DeviceId;
@@ -15,39 +15,6 @@ pub(crate) const S3_MAX_PARTS: usize = 10_000;
 pub(crate) const S3_REQUEST_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 /// S3 part sizes are whole multiples of this.
 const S3_PART_UNIT: u64 = 8 * 1024 * 1024;
-
-/// The one condition under which all uploaded bytes may become visible.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UploadTarget {
-    /// Publish only while the path is absent.
-    Create(ObjectPath),
-    /// Publish only while this floor revision still occupies the path.
-    Replace(StoredObject),
-}
-impl UploadTarget {
-    /// The encrypted object's destination.
-    pub fn path(&self) -> &ObjectPath {
-        match self {
-            Self::Create(path) => path,
-            Self::Replace(previous) => &previous.path,
-        }
-    }
-    pub(crate) fn check(&self) -> Result<(), StorageError> {
-        if let Self::Replace(previous) = self {
-            if !previous.path.is_replaceable() {
-                return Err(StorageFailure::InvalidPath.into());
-            }
-            previous.check(&previous.path)?;
-        }
-        Ok(())
-    }
-    pub(crate) fn error(&self, error: StorageError) -> StorageError {
-        match self {
-            Self::Create(_) => error,
-            Self::Replace(_) => error.replacement(),
-        }
-    }
-}
 
 /// A provider upload recorded by the caller's operation (§17.9, §11).
 /// The destination retains its original absent/revision condition across retries.
@@ -79,7 +46,7 @@ pub struct UploadSession {
     /// session sit in that device's reserved folder (D10).
     pub(crate) device: DeviceId,
     pub(crate) location: StorageConfig,
-    pub(crate) target: UploadTarget,
+    pub(crate) path: ObjectPath,
     pub(crate) total: u64,
     pub(crate) confirmed: u64,
     pub(crate) part_size: usize,
@@ -93,7 +60,7 @@ pub struct UploadSession {
 struct RecordedUploadSession {
     device: DeviceId,
     location: StorageConfig,
-    target: UploadTarget,
+    path: ObjectPath,
     total: u64,
     confirmed: u64,
     part_size: usize,
@@ -106,7 +73,7 @@ impl TryFrom<RecordedUploadSession> for UploadSession {
         let session = Self {
             device: recorded.device,
             location: recorded.location,
-            target: recorded.target,
+            path: recorded.path,
             total: recorded.total,
             confirmed: recorded.confirmed,
             part_size: recorded.part_size,
@@ -142,9 +109,6 @@ pub(crate) enum SessionState {
     OneDrive {
         temporary: uuid::Uuid,
         upload: OneDriveUpload,
-    },
-    OneDriveReplacement {
-        url: SecretText,
     },
     CloudKit {
         id: SecretText,
@@ -347,11 +311,7 @@ impl UploadSession {
     }
     /// The destination encrypted-object path.
     pub fn path(&self) -> &ObjectPath {
-        self.target.path()
-    }
-    /// The original publication condition, retained by every resumed session.
-    pub fn target(&self) -> &UploadTarget {
-        &self.target
+        &self.path
     }
     /// Bytes confirmed by the provider; only these may advance the operation.
     pub fn confirmed_bytes(&self) -> u64 {
@@ -462,7 +422,7 @@ impl UploadSession {
     }
     /// Read a recording only if its provider, destination, state and progress agree.
     /// Validation covers the location, state variant, nonempty identifiers, part
-    /// counts and sizes, and confirmed byte offset; replacement requires a floor.
+    /// counts and sizes, and confirmed byte offset.
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: RecordedUploadSession = crate::secret_json::decode(bytes)?;
@@ -470,7 +430,11 @@ impl UploadSession {
     }
     fn validate(&self) -> Result<(), StorageError> {
         self.location.validate()?;
-        self.target.check()?;
+        // The floor pointer is one small record replaced in one request; no
+        // session targets it.
+        if self.path.is_replaceable() {
+            return Err(StorageFailure::InvalidPath.into());
+        }
         if self.part_size == 0
             || self.total == 0
             || self.confirmed > self.total
@@ -515,10 +479,7 @@ impl UploadSession {
                 }
             }
             SessionState::Dropbox { id } if provider == CloudProvider::Dropbox => nonempty(id)?,
-            SessionState::OneDrive { upload, .. }
-                if provider == CloudProvider::OneDrive
-                    && matches!(self.target, UploadTarget::Create(_)) =>
-            {
+            SessionState::OneDrive { upload, .. } if provider == CloudProvider::OneDrive => {
                 match upload {
                     OneDriveUpload::Planned { .. } => {
                         if self.confirmed != 0 {
@@ -555,21 +516,10 @@ impl UploadSession {
                     | OneDriveUpload::Refused => {}
                 }
             }
-            SessionState::OneDriveReplacement { url }
-                if provider == CloudProvider::OneDrive
-                    && matches!(self.target, UploadTarget::Replace(_)) =>
-            {
-                transfer_url(url)?;
-                if self.confirmed == self.total {
-                    return Err(StorageFailure::InvalidPart.into());
-                }
-            }
             SessionState::CloudKit { id } if provider == CloudProvider::CloudKit => {
                 check_cloudkit_id(id.as_str())?
             }
-            SessionState::VerifyPublished
-                if provider == CloudProvider::Dropbox && !self.path().is_replaceable() =>
-            {
+            SessionState::VerifyPublished if provider == CloudProvider::Dropbox => {
                 if self.confirmed == self.total {
                     return Err(StorageFailure::InvalidPart.into());
                 }

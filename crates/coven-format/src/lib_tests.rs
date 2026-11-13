@@ -18,7 +18,7 @@ fn every_object_and_snapshot_section_has_pinned_bytes() {
 
 /// Every fixture `fixtures/generate-deterministic.py` writes.
 #[cfg(not(windows))]
-const GENERATED_FIXTURES: [&str; 30] = [
+const GENERATED_FIXTURES: [&str; 31] = [
     "snapshot-settlement-claims.hex",
     "sealed-refused-writes-slot.hex",
     "sealed-reset-ignored-writes-slot.hex",
@@ -44,6 +44,7 @@ const GENERATED_FIXTURES: [&str; 30] = [
     "sealed-write.hex",
     "sealed-writes-slot.hex",
     "sealed-floor.hex",
+    "sealed-floor-pointer.hex",
     "v1.hex",
     "file.hex",
     "file-reference.txt",

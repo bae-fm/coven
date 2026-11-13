@@ -32,27 +32,33 @@ async fn independent_sealings_of_the_same_floor_differ_and_both_authenticate() {
             .await
             .unwrap();
         let artifact = ana.sync.capture_floor(capture, &group.ring, &ana.identity).await.unwrap();
-        sealed.push(
-            ana.sync
-                .artifact_file(&capture.name)
-                .unwrap()
-                .open_reader()
-                .unwrap()
-                .read_at(0, artifact.size as usize)
-                .unwrap(),
-        );
-        ana.sync.cleanup_floor(&artifact).await.unwrap();
+        let body = ana
+            .sync
+            .artifact_file(&capture.name)
+            .unwrap()
+            .open_reader()
+            .unwrap()
+            .read_at(0, artifact.size as usize)
+            .unwrap();
+        sealed.push((
+            capture.body_path(group.store, ana.sync.device),
+            body,
+            artifact.pointer.clone(),
+        ));
+        ana.sync.cleanup_floor(&artifact, None).await.unwrap();
         ana.database().finish_operation(record).await.unwrap();
     }
-    assert_ne!(sealed[0], sealed[1]);
+    assert_ne!(sealed[0].0, sealed[1].0, "each sealing takes a number of its own");
+    assert_ne!(sealed[0].1, sealed[1].1);
     let path = ObjectPath::floor(group.store);
     let mut previous: Option<crate::floor_object::FloorObject> = None;
     let mut ring = group.ring.clone();
-    for bytes in sealed {
+    for (body_path, body, pointer) in sealed {
+        group.storage.create(&body_path, &body).await.unwrap();
         match &previous {
-            Some(floor) => group.storage.replace(floor.object(), &bytes).await.unwrap(),
+            Some(floor) => group.storage.replace(floor.object(), &pointer).await.unwrap(),
             None => {
-                group.storage.create(&path, &bytes).await.unwrap();
+                group.storage.create(&path, &pointer).await.unwrap();
             }
         }
         let floor = crate::floor_object::FloorObject::read(
@@ -125,7 +131,12 @@ async fn a_lost_floor_reply_deletes_nothing_until_the_floor_is_observed() {
             + crate::sequence_sync::sequence_retention::GRACE
             + std::time::Duration::from_secs(1),
     );
-    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    ana.storage
+        .set_faults(Faults {
+            lose_reply_at: [ObjectPath::floor(group.store)].into(),
+            ..Faults::none()
+        })
+        .await;
     // Retention alone, so the lost reply is the floor's: a whole pass would
     // first take a snapshot of the slots grace has now passed.
     let mut session = ana.sync.session.lock().await;
@@ -149,7 +160,7 @@ async fn a_lost_floor_reply_deletes_nothing_until_the_floor_is_observed() {
     );
     ana.sync.pass().await.unwrap();
     assert!(group.storage.status(&path).await.unwrap().is_none());
-    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert!(ana.sync.database.operations().await.unwrap().iter().all(super::is_live_body));
     ana.sync.database.close().await.unwrap();
 }
 
@@ -174,7 +185,12 @@ async fn a_lost_floor_reply_accepts_a_newer_floor_written_past_the_applied_slots
             + crate::sequence_sync::sequence_retention::GRACE
             + std::time::Duration::from_secs(1),
     );
-    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    ana.storage
+        .set_faults(Faults {
+            lose_reply_at: [ObjectPath::floor(group.store)].into(),
+            ..Faults::none()
+        })
+        .await;
     // Retention alone, so the lost reply is the floor's.
     let mut session = ana.sync.session.lock().await;
     ana.sync.retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity).await.unwrap();
@@ -229,7 +245,12 @@ async fn a_lost_floor_reply_confirms_a_floor_moved_past_the_applied_slots() {
     let grace = crate::sequence_sync::sequence_retention::GRACE;
     let second = std::time::Duration::from_secs(1);
     group.clock.set(std::time::UNIX_EPOCH + grace + second);
-    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    ana.storage
+        .set_faults(Faults {
+            lose_reply_at: [ObjectPath::floor(group.store)].into(),
+            ..Faults::none()
+        })
+        .await;
     // Retention alone, so the lost reply is the floor's.
     let mut session = ana.sync.session.lock().await;
     ana.sync.retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity).await.unwrap();
@@ -353,7 +374,7 @@ async fn a_failed_snapshot_deletion_resumes_its_recorded_body_after_reopening() 
     let records = ana.database().operations().await.unwrap();
     let operation = records
         .iter()
-        .find(|record| record.kind == "sequence-retention")
+        .find(|record| record.kind == "sequence-retention" && !super::is_live_body(record))
         .expect("failed snapshot deletion must retain its journal")
         .id;
     let pending =
@@ -418,7 +439,7 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
     let trace = ana.storage.request_trace().split_off(traced);
     let refused = trace
         .iter()
-        .position(|request| *request == MemoryRequest::Other("finish_upload"))
+        .position(|request| *request == MemoryRequest::Replace(floor_path.clone()))
         .expect("the pass attempts the floor replacement");
     assert!(
         trace[refused..]
@@ -427,12 +448,16 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
         "the refusal rereads the floor"
     );
     assert_eq!(group.storage.status(&floor_path).await.unwrap().unwrap(), first_floor);
+    // The refused write deleted the body it had uploaded; the first floor's
+    // body stays.
+    let own = coven_storage::ObjectPrefix::device_floors(group.store, ana.sync.device);
+    assert_eq!(group.storage.list(&own).await.unwrap().len(), 1);
     assert_eq!(
         ana.sync.session.lock().await.floor.as_ref().map(|floor| floor.object().clone()),
         Some(first_floor.clone())
     );
     assert!(group.storage.status(&covered).await.unwrap().is_some());
-    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert!(ana.sync.database.operations().await.unwrap().iter().all(super::is_live_body));
 
     // The refused pass also published a growth snapshot; the next floor
     // names it once it passes grace.
@@ -445,7 +470,7 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
     let second_floor = group.storage.status(&floor_path).await.unwrap().unwrap();
     assert_ne!(second_floor, first_floor);
     assert!(group.storage.status(&covered).await.unwrap().is_none());
-    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert!(ana.sync.database.operations().await.unwrap().iter().all(super::is_live_body));
     assert_eq!(rows(&ana.sync.database).await.len(), 2);
     ana.sync.database.close().await.unwrap();
 }
@@ -525,7 +550,7 @@ async fn a_failed_slot_deletion_stays_journaled_and_the_next_floor_does_not_wait
         .await
         .unwrap()
         .into_iter()
-        .filter(|record| record.kind == "sequence-retention")
+        .filter(|record| record.kind == "sequence-retention" && !super::is_live_body(record))
         .collect();
     let [kept] = retention.as_slice() else {
         panic!("only the failed deletion stays journaled: {retention:?}");
@@ -853,67 +878,6 @@ async fn a_floor_write_ends_the_sessions_left_at_applied_slots() {
     let left: Vec<_> =
         group.storage.unfinished_uploads().await.into_iter().map(|(_, path)| path).collect();
     assert_eq!(left, [slot(through + 5)]);
-    ana.database().close().await.unwrap();
-}
-
-/// Another device began writing the floor and stopped before it finished.
-/// Once Ana's floor is published, that session observed an older floor and
-/// can never publish, so the pass that wrote Ana's floor ends it (§17.10).
-#[tokio::test]
-async fn a_floor_write_ends_the_floor_sessions_it_superseded() {
-    use coven_merge::Audience;
-    let group = Group::new();
-    let ana = group.device(1).await;
-    group.create(&ana).await;
-    let other = group.storage.with_device(coven_foundation::id_source::DeviceId(99));
-    other.started_upload(&ObjectPath::floor(group.store)).await.unwrap();
-    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(10));
-    ana.sync.snapshot(Audience::Store).await.unwrap();
-    ana.sync.pass().await.unwrap();
-    assert!(group.storage.status(&ObjectPath::floor(group.store)).await.unwrap().is_some());
-    assert!(group.storage.unfinished_uploads().await.is_empty());
-    ana.database().close().await.unwrap();
-}
-
-/// §16.6: a floor write journaled while Ana's older snapshot was the newest
-/// lands only after her newer one has passed grace. The floor it publishes
-/// names the older body, so the pass that lands it keeps that body: a new
-/// device starts from every body the stored floor names.
-#[tokio::test]
-async fn a_floor_landing_after_a_newer_snapshot_passed_grace_keeps_the_bodies_it_names() {
-    use coven_merge::Audience;
-    let group = Group::new();
-    let ana = group.device(1).await;
-    group.create(&ana).await;
-    let floor = ObjectPath::floor(group.store);
-    insert(ana.database(), "older", "in the snapshot the floor names").await;
-    ana.sync.pass().await.unwrap();
-    ana.sync.snapshot(Audience::Store).await.unwrap();
-    ana.storage.set_faults(Faults { drop_part: true, ..Faults::none() }).await;
-    ana.sync.pass().await.unwrap();
-    ana.storage.set_faults(Faults::none()).await;
-    assert!(group.storage.status(&floor).await.unwrap().is_none(), "the floor write waits");
-
-    insert(ana.database(), "newer", "in the snapshot that replaces it").await;
-    ana.sync.pass().await.unwrap();
-    ana.sync.snapshot(Audience::Store).await.unwrap();
-    assert!(group.storage.status(&floor).await.unwrap().is_none(), "the floor write waits");
-    group.clock.set(
-        std::time::UNIX_EPOCH
-            + crate::sequence_sync::sequence_retention::GRACE
-            + std::time::Duration::from_secs(1),
-    );
-    ana.sync.pass().await.unwrap();
-
-    let named = stored_floor(&ana).await.header.snapshots;
-    assert!(!named.is_empty());
-    let history = ana.sync.session.lock().await.history.clone();
-    for slot in named {
-        let path =
-            crate::snapshot_object::path(group.store, &history.announcements[&slot].snapshot)
-                .unwrap();
-        assert!(group.storage.status(&path).await.unwrap().is_some(), "the floor names {path:?}");
-    }
     ana.database().close().await.unwrap();
 }
 

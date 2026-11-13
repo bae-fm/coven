@@ -25,9 +25,24 @@ impl ObjectPath {
             .strip_prefix("seq/")
             .map(|number| number.parse::<NonZeroU64>().expect("validated slot").into())
     }
-    /// The store's conditionally replaced floor (§16.4).
+    /// The store's conditionally replaced floor pointer (§16.4).
     pub fn floor(store: StoreId) -> Self {
         Self(format!("{store}/floor"))
+    }
+    /// One floor body, created once at a number of its writing device's own
+    /// (§16.4).
+    pub fn floor_body(store: StoreId, device: DeviceId, number: NonZeroU64) -> Self {
+        Self(format!("{store}/floors/{}/{number}", device.0))
+    }
+    /// The writer and number a floor body's path names.
+    pub fn floor_body_id(&self) -> Option<(DeviceId, NonZeroU64)> {
+        match self.relative().split('/').collect::<Vec<_>>().as_slice() {
+            ["floors", device, number] => Some((
+                DeviceId(device.parse().expect("validated device id")),
+                number.parse().expect("validated number"),
+            )),
+            _ => None,
+        }
     }
     /// The identity carried by a snapshot path.
     pub fn snapshot_id(&self) -> Option<crate::admin::SnapshotId> {
@@ -89,15 +104,15 @@ impl ObjectPath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    /// Only the floor can be replaced (D10).
+    /// Only the floor pointer can be replaced (D10).
     pub fn is_replaceable(&self) -> bool {
         self.relative() == "floor"
     }
-    /// The device named by a snapshot or uploaded file path.
+    /// The device named by a snapshot, floor body or uploaded file path.
     pub fn device(&self) -> Option<DeviceId> {
         let parts: Vec<_> = self.relative().split('/').collect();
         match parts.as_slice() {
-            ["files", device, _] | ["snapshots", _, device, _] => {
+            ["files", device, _] | ["floors", device, _] | ["snapshots", _, device, _] => {
                 Some(DeviceId(device.parse().expect("validated device id")))
             }
             _ => None,
@@ -142,6 +157,7 @@ impl TryFrom<String> for ObjectPath {
             ["snapshots", audience, device, n] => {
                 audience.parse::<Audience>().is_ok() && decimal(device, false) && decimal(n, true)
             }
+            ["floors", device, n] => decimal(device, false) && decimal(n, true),
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", device, GONE] => decimal(device, false),
             ["join-requests", device, invite] => decimal(device, false) && canonical_uuid(invite),
@@ -178,6 +194,10 @@ impl ObjectPrefix {
     /// Every snapshot, of every audience and device (§16).
     pub fn snapshots(store: StoreId) -> Self {
         Self(format!("{store}/snapshots/"))
+    }
+    /// The floor bodies one device wrote (§16.6).
+    pub fn device_floors(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/floors/{}/", device.0))
     }
     /// Every stored file.
     pub fn files(store: StoreId) -> Self {
@@ -237,8 +257,10 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
     let parts: Vec<_> = parts.collect();
     let valid = match parts.as_slice() {
         [] => true,
-        ["seq" | "snapshots" | "files" | "join-requests"] => true,
-        ["files", device] | ["join-requests", device] => decimal(device, false),
+        ["seq" | "snapshots" | "files" | "floors" | "join-requests"] => true,
+        ["files", device] | ["floors", device] | ["join-requests", device] => {
+            decimal(device, false)
+        }
         ["snapshots", audience] => audience.parse::<Audience>().is_ok(),
         ["snapshots", audience, device] => {
             audience.parse::<Audience>().is_ok() && decimal(device, false)

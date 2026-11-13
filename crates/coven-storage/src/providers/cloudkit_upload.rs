@@ -46,7 +46,7 @@ fn check_record(record: &Record, session: &UploadSession) -> Result<u64, Storage
 impl CloudKitStorage {
     pub(super) fn prepare_upload(
         &self,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
@@ -55,7 +55,7 @@ impl CloudKitStorage {
         Ok(UploadSession {
             device,
             location: self.config(),
-            target: target.clone(),
+            path: path.clone(),
             total,
             confirmed: 0,
             part_size: PART_SIZE,
@@ -199,12 +199,7 @@ impl CloudKitStorage {
             Publication::Aborted => return Err(StorageFailure::SessionExpired.into()),
             Publication::Published => self.confirm_publication(session).await?,
             Publication::Pending => {
-                let (mut object, obsolete) = match session.target() {
-                    UploadTarget::Create(path) => (self.object(path, session.total), vec![]),
-                    UploadTarget::Replace(previous) => {
-                        self.replacement_object(previous, session.total).await?
-                    }
-                };
+                let (mut object, obsolete) = (self.object(session.path(), session.total), vec![]);
                 object.set_text("upload", &root);
                 upload.set_text("state", "published");
                 upload.set_reference("owner", &self.record_id(session.path().as_str()));

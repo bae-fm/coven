@@ -329,12 +329,12 @@ impl ProviderOps for CloudKitStorage {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
-        self.prepare_upload(target, total, device)
+        self.prepare_upload(path, total, device)
     }
     async fn resume_upload(
         &self,

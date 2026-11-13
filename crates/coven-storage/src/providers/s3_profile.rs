@@ -93,11 +93,6 @@ pub(super) struct CataloguedProfile {
     /// Separate evidence: a sequential or unversioned run cannot certify this.
     pub(super) versioned_buckets: Certification<'static>,
     pub(super) certification: Certification<'static>,
-    /// Separate evidence, from suite 7: the service lists each unfinished
-    /// upload's `Initiated` time, never earlier than a publication that
-    /// finished before the upload began (Appendix E.6). Without it, a floor
-    /// session can't be told from one begun after the floor it would replace.
-    pub(super) upload_initiation: Certification<'static>,
 }
 
 /// Every catalogued service; hosted ones match hostnames in this order.
@@ -130,7 +125,6 @@ const AWS: CataloguedProfile = CataloguedProfile {
     },
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Uncertified,
-    upload_initiation: Certification::Uncertified,
 };
 // Suite 5 passed GCS's generation-conditioned copy publication with
 // versioning disabled on 2026-10-14, and suite 6 on 2026-10-28; no versioned
@@ -151,7 +145,6 @@ const GCS: CataloguedProfile = CataloguedProfile {
     },
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
-    upload_initiation: Certification::Uncertified,
 };
 // Detected by certification suite 1; the raw observations are in spec/storage-certification.md.
 // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
@@ -163,7 +156,6 @@ const R2: CataloguedProfile = CataloguedProfile {
     settings: S3Settings { checksums: S3Checksums::UnstatedIgnored, ..PLAIN },
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed { date: "2026-10-14", suite: 5 },
-    upload_initiation: Certification::Uncertified,
 };
 // Self-hosted services are reached at arbitrary endpoints and selected only by
 // name. The raw observations are in spec/storage-certification.md.
@@ -180,7 +172,6 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     settings: S3Settings { checksums: S3Checksums::Absent, request_checksums: false, ..PLAIN },
     versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
-    upload_initiation: Certification::Uncertified,
 };
 // SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
 // concurrent conditional multipart completions both succeeded. Suite 5
@@ -205,7 +196,6 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     },
     versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
-    upload_initiation: Certification::Uncertified,
 };
 
 // Ceph RGW 20.2.4 has the same detected settings as RustFS. It passed suite 5
@@ -219,7 +209,6 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     settings: RUSTFS.settings,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
-    upload_initiation: Certification::Uncertified,
 };
 
 // Versity Gateway 1.9.0 (POSIX backend) detected the plain S3 settings and
@@ -232,7 +221,6 @@ const VERSITY_GW: CataloguedProfile = CataloguedProfile {
     settings: PLAIN,
     versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
-    upload_initiation: Certification::Uncertified,
 };
 
 impl CataloguedProfile {
@@ -273,13 +261,6 @@ impl Selected {
             Self::Custom(settings) => Some(settings),
             Self::Undetected => None,
         }
-    }
-    /// Whether the service dates an unfinished upload's start so that floor
-    /// sessions begun before the current floor can be ended (Appendix E.10):
-    /// only a catalogued profile certified for it.
-    pub(super) fn dates_upload_initiation(self) -> bool {
-        matches!(self, Self::Catalogued(profile)
-            if matches!(profile.upload_initiation, Certification::Passed { .. }))
     }
 }
 

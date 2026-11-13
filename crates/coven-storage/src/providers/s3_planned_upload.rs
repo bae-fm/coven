@@ -36,39 +36,20 @@ impl S3Storage {
     /// start may have begun, which can never publish: no record names it, and
     /// once anything is published at the name create-once refuses every other
     /// completion. The plan starts fresh at the same name without waiting on
-    /// it, and whoever applies the name ends it (Appendix E.10). A floor
-    /// replacement also starts fresh while the floor still has the revision it
-    /// observed, and otherwise conflicts (§16.6).
+    /// it, and whoever applies the name ends it (Appendix E.10).
     pub(super) async fn restart_shared_plan(
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        let observed = match session.target() {
-            UploadTarget::Create(_) => None,
-            UploadTarget::Replace(previous) => Some(previous.replace_token.clone()),
-        };
-        let blocked = match self.completed(session).await {
-            Ok(()) => return Ok(()),
-            Err(error) => error,
-        };
-        let empty = blocked.failure() == StorageFailure::SessionExpired;
-        let fresh = match observed {
-            None if empty => true,
-            None => return Err(blocked),
-            Some(_) if !empty && blocked.failure() != StorageFailure::AlreadyExists => {
-                return Err(blocked)
+        match self.completed(session).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.failure() == StorageFailure::SessionExpired => {
+                if let SessionState::S3Planned { started, .. } = &mut session.state {
+                    *started = PlanStart::Unstarted;
+                }
+                Ok(())
             }
-            Some(token) => self
-                .status(session.path())
-                .await?
-                .is_some_and(|current| current.replace_token == token),
-        };
-        if !fresh {
-            return Err(StorageFailure::Conflict.with_source(blocked));
+            Err(error) => Err(error),
         }
-        if let SessionState::S3Planned { started, .. } = &mut session.state {
-            *started = PlanStart::Unstarted;
-        }
-        Ok(())
     }
 }

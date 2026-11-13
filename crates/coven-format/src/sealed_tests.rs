@@ -472,7 +472,11 @@ mod sequence {
         assert_eq!(copies[1].object, hex(include_str!("../fixtures/sealed-circle-key.hex")));
         assert_eq!(copies[0].slot.get(), 2);
         assert_eq!(copies[0].object, hex(include_str!("../fixtures/sealed-store-key.hex")));
-        let path = crate::path::ObjectPath::floor(f::STORE_ID);
+        let path = crate::path::ObjectPath::floor_body(
+            f::STORE_ID,
+            coven_foundation::id_source::DeviceId(1),
+            3.try_into().unwrap(),
+        );
         let plain = open_stream(&bytes, prefix_length, path.as_str()).unwrap();
         let mut input = plain.as_slice();
         let mut frames = FrameDecoder::new(None);

@@ -30,8 +30,8 @@ Creates past it, or
 past 32 MiB on any provider (`goes_in_parts`), use
 resumable or multipart transfer for every object family, including writes and
 snapshots. Transfer failure aborts the unfinished session; `StorageError::Cleanup`
-retains both causes if abort fails too. Floor replacements use one conditional request; an oversized replacement
-returns `SingleRequestTooLarge` before any mutation. This is a provider transfer
+retains both causes if abort fails too. Floor pointer replacements use one conditional request; an oversized
+replacement returns `SingleRequestTooLarge` before any mutation. This is a provider transfer
 limit, not a format bound.
 For crash continuation, callers begin a session, commit its secret
 recording, and retain the bytes. Resume asks the provider for confirmed progress;

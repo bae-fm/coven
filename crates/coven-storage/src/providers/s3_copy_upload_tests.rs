@@ -603,7 +603,7 @@ pub(super) fn condition_holds(state: &Remote, key: &str, headers: &HeaderMap) ->
 }
 
 #[tokio::test]
-async fn recorded_floor_uploads_keep_each_s3_profiles_revision_condition() {
+async fn competing_floor_pointer_writes_keep_each_s3_profiles_revision_condition() {
     for profile in profile::PROFILES {
         let state = Arc::new(Mutex::new(Remote {
             gcs: profile.settings.signing == S3Signing::GoogleHmac,
@@ -615,7 +615,7 @@ async fn recorded_floor_uploads_keep_each_s3_profiles_revision_condition() {
             Arc::new(profile_provider(&server.url, profile.settings)),
             STORE_ID,
         )
-        .conditional_floor_upload()
+        .conditional_floor_replace()
         .await;
         let state = state.lock().unwrap();
         assert!(state.uploads.is_empty());

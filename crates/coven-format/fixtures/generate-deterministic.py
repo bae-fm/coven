@@ -731,7 +731,7 @@ def main():
         snapshot_id(store_audience(), 1, 1) + u64(9) + u32(2) + b"\x01" + u32(2) + hashlib.sha256(snapshot).digest()), claim=9)
     circle_announcement = bounded_slot(sodium, 9, 3, frame(15,
         snapshot_id(circle_audience(CIRCLE), 1, 1) + u64(8) + u32(0) + b"\x00" + hashlib.sha256(circle_snapshot).digest()), claim=8)
-    path = STORE_TEXT + b"floor"
+    path = STORE_TEXT + b"floors/1/3"
     prefix = bytes([39, 0, 1]) + bytes([1]) * 16 + u64(6)
     prefix += collection([u64(2) + text(store_key), u64(8) + text(circle_key)])
     plaintext = frame(12, u64(1) + u64(11) + u64(6) + collection([u64(10), u64(9)]))
@@ -741,6 +741,11 @@ def main():
         body += sealed_chunk(sodium, encryption_key(17), path, prefix, 0, index,
                              plaintext[start:start + 65536], bytes([0x70 + index]) * 24)
     floor = signed(sodium, path, body)
+    # The pointer at the floor's own path names that body by writer, number and digest.
+    path = STORE_TEXT + b"floor"
+    prefix = bytes([42, 0, 1]) + bytes([1]) * 16 + u64(6) + u64(1) + u64(3) + hashlib.sha256(floor).digest()
+    pointer = signed(sodium, path, prefix + sealed_chunk(
+        sodium, encryption_key(17), path, prefix, 0, 0, frame(19, u64(1) + u64(11)), bytes([0x72]) * 24))
     # Refused and reset-ignored parts still carry the device's included claim.
     # Section 4 holds each part's record, then its changes: the fixture
     # write's part is the third record and its row change the fourth.
@@ -779,6 +784,7 @@ def main():
         ("sealed-refused-writes-slot.hex", refused_slot),
         ("sealed-reset-ignored-writes-slot.hex", reset_ignored_slot),
         ("sealed-floor.hex", floor),
+        ("sealed-floor-pointer.hex", pointer),
         ("sealed-join-request.hex", join_object),
         ("sealed-store-key.hex", store_key),
         ("sealed-circle-key.hex", circle_key),

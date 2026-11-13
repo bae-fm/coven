@@ -549,9 +549,13 @@ proofs() {
 
     if proof_selected storage || crate_selected coven-storage; then
         runner=$(runner storage floorUploadRunner)
-        step "Rust / Lean conditional floor uploads"
+        step "Rust / Lean conditional floor pointer replacement"
         COVEN_FLOOR_UPLOAD_LEAN="$runner" exact_ignored coven-storage --all-features -- \
             connection::test_utils::memory_upload::tests::conditional_floor_upload_matches_lean
+        runner=$(runner storage floorPointerRunner)
+        step "Rust / Lean floor pointer and bodies"
+        COVEN_FLOOR_POINTER_LEAN="$runner" exact_ignored coven-storage --all-features -- \
+            connection::test_utils::memory_upload::tests::floor_pointer_matches_lean
         runner=$(runner storage createRunner)
         step "Rust / Lean provider create-once tests"
         COVEN_CREATE_LEAN="$runner" exact_ignored coven-storage --all-features -- \

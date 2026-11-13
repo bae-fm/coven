@@ -957,11 +957,11 @@ mod sequence {
 }
 
 #[tokio::test]
-async fn recorded_floor_uploads_keep_dropbox_revision_conditions() {
+async fn competing_floor_pointer_writes_keep_dropbox_revision_conditions() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
-        .conditional_floor_upload()
+        .conditional_floor_replace()
         .await;
 }
 

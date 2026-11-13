@@ -12,7 +12,7 @@ fn upload_sessions_encode_without_capacity_growth() {
             location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
             folder_label: None,
         },
-        target: UploadTarget::Create(ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)),
+        path: ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN),
         total: 42,
         confirmed: 0,
         part_size: 8 * 1024 * 1024,
@@ -28,7 +28,7 @@ fn upload_sessions_encode_without_capacity_growth() {
 }
 
 #[test]
-fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
+fn a_recording_never_targets_the_floor_pointer() {
     for state in
         [SessionState::Dropbox { id: SecretText::new("upload".into()) }, SessionState::Complete]
     {
@@ -39,15 +39,17 @@ fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
                 location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
                 folder_label: None,
             },
-            target: UploadTarget::Create(ObjectPath::floor(STORE_ID)),
+            path: ObjectPath::floor(STORE_ID),
             total: 1,
             confirmed: 1,
             part_size: 8 * 1024 * 1024,
             state,
         };
+        assert!(matches!(session.encode(),
+            Err(error) if error.failure() == StorageFailure::InvalidPath));
         let bytes = serde_json::to_vec(&session).unwrap();
-        let restored = UploadSession::decode(&bytes).unwrap();
-        assert_eq!(restored.target(), session.target());
+        assert!(matches!(UploadSession::decode(&bytes),
+            Err(error) if error.failure() == StorageFailure::InvalidPath));
     }
 }
 
@@ -55,7 +57,7 @@ fn recording(location: StorageConfig, state: SessionState, part_size: usize) -> 
     UploadSession {
         device: DeviceId(42),
         location,
-        target: UploadTarget::Create(ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)),
+        path: ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN),
         total: 16 * 1024 * 1024 + 1,
         confirmed: 0,
         part_size,

@@ -546,10 +546,10 @@ async fn a_cancellation_refused_by_the_sessions_own_condition_is_not_a_cleanup_f
 }
 
 #[tokio::test]
-async fn recorded_floor_uploads_keep_onedrive_revision_conditions() {
+async fn competing_floor_pointer_writes_keep_onedrive_revision_conditions() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
-        .conditional_floor_upload()
+        .conditional_floor_replace()
         .await;
 }

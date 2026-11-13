@@ -43,6 +43,7 @@ fn all_layouts_are_canonical_and_store_scoped() {
     for path in [
         ObjectPath::slot(STORE_ID, NonZeroU64::MIN),
         ObjectPath::floor(STORE_ID),
+        ObjectPath::floor_body(STORE_ID, device, NonZeroU64::MIN),
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, NonZeroU64::MIN),
         ObjectPath::snapshot(STORE_ID, Audience::Circle(CircleId(id)), device, NonZeroU64::MIN),
         ObjectPath::file(STORE_ID, device, ObjectId(id)),
@@ -185,4 +186,24 @@ fn each_devices_uploads_sit_in_a_reserved_folder_naming_it() {
     assert!(ObjectPath::parse(&session).is_err());
     assert!(validate_directory(&folder).is_err());
     assert_ne!(device_uploads(STORE_ID, DeviceId(4)), folder);
+}
+
+#[test]
+fn a_floor_body_has_its_writers_own_numbered_name() {
+    let device = DeviceId(42);
+    let body = ObjectPath::floor_body(STORE_ID, device, NonZeroU64::new(7).unwrap());
+    assert_eq!(body.as_str(), format!("{STORE_ID}/floors/42/7"));
+    assert_eq!(body.device(), Some(device));
+    assert_eq!(body.floor_body_id(), Some((device, NonZeroU64::new(7).unwrap())));
+    assert!(!body.is_replaceable());
+    assert_eq!(ObjectPath::floor(STORE_ID).floor_body_id(), None);
+    assert!(ObjectPrefix::device_floors(STORE_ID, device).contains(&body));
+    assert!(!ObjectPrefix::device_floors(STORE_ID, DeviceId(4)).contains(&body));
+    validate_directory(&format!("{STORE_ID}/floors")).unwrap();
+    validate_directory(&format!("{STORE_ID}/floors/42")).unwrap();
+    for tail in
+        ["floors", "floors/42", "floors/42/0", "floors/042/1", "floors/42/01", "floors/42/1/x"]
+    {
+        assert!(ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(), "{tail}");
+    }
 }

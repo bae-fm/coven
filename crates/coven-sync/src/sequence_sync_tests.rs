@@ -837,7 +837,10 @@ mod differential {
                         + std::time::Duration::from_secs(1),
                 );
                 ana.storage
-                    .set_faults(Faults { lose_completion_reply: true, ..Faults::none() })
+                    .set_faults(Faults {
+                        lose_reply_at: [ObjectPath::floor(group.store)].into(),
+                        ..Faults::none()
+                    })
                     .await;
                 let mut session = ana.sync.session.lock().await;
                 ana.sync

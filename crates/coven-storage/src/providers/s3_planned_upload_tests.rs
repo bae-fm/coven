@@ -100,40 +100,6 @@ async fn a_marked_plan_finding_another_object_at_its_shared_slot_finds_it_taken(
     assert_eq!(storage.read(&path).await.unwrap(), b"peer");
 }
 
-/// A marked floor replacement whose start's reply was lost starts fresh while
-/// the floor still has the revision it observed, and conflicts once the floor
-/// has changed, which retention settles by reading the floor (§16.6).
-#[tokio::test]
-async fn a_marked_floor_replacement_starts_fresh_only_while_the_floor_is_unchanged() {
-    for changed in [false, true] {
-        let (_server, storage, state) = planned_fixture().await;
-        let floor = ObjectPath::floor(STORE_ID);
-        storage.create(&floor, b"old").await.unwrap();
-        let previous = storage.status(&floor).await.unwrap().unwrap();
-        let mut upload = storage.begin_replace(&previous, 4).await.unwrap();
-        let permit = storage.admit_part(&mut upload, b"next").unwrap();
-        let recorded = upload.encode().unwrap();
-        state.lock().unwrap().lose_initiation_reply = true;
-        storage.send_part(permit, &mut upload, &ByteProgress::unread()).await.unwrap_err();
-        if changed {
-            storage.replace(&previous, b"newer").await.unwrap();
-        }
-        let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
-        if changed {
-            assert_eq!(
-                storage.resume_upload(&mut restored).await.unwrap_err().failure(),
-                StorageFailure::Conflict
-            );
-            assert_eq!(storage.read(&floor).await.unwrap(), b"newer");
-            continue;
-        }
-        storage.resume_upload(&mut restored).await.unwrap();
-        storage.upload_part(&mut restored, b"next").await.unwrap();
-        storage.finish_upload(&mut restored).await.unwrap();
-        assert_eq!(storage.read(&floor).await.unwrap(), b"next");
-    }
-}
-
 /// A claim's recording names its upload at the slot before the first part
 /// starts it. The device stops, or the part is refused, before any request
 /// starts the upload: nothing exists at the slot, and the restored recording

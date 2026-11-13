@@ -32,9 +32,7 @@ pub(crate) async fn upload_bytes(
     if !goes_in_parts(storage, bytes.len() as u64) {
         return single_request.await;
     }
-    let mut session = storage
-        .begin_upload_checked(&crate::UploadTarget::Create(path.clone()), bytes.len() as u64)
-        .await?;
+    let mut session = storage.begin_upload_checked(path, bytes.len() as u64).await?;
     let upload = async {
         while let Some(part) = session.parts_to_send().first().cloned() {
             let confirmed = session.confirmed_bytes();

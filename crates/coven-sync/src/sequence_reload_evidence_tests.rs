@@ -185,15 +185,19 @@ fn sealed_stream(
     (bytes, *digest.as_bytes())
 }
 
-/// A floor with `header`, `copies` and `announcements`, sealed with the
-/// store key `device` holds and signed by `signer`.
-fn sealed_floor(
+/// A floor with `header`, `copies` and `announcements`, planted in storage:
+/// the body sealed with the store key `device` holds and signed by `signer`
+/// at a body number `device` never used, and the pointer naming it, signed by
+/// the same `signer` as `header.author` at `header.at`.
+async fn plant_floor(
+    group: &Group,
     device: &Device,
     header: coven_format::floor::FloorHeader,
     copies: &[coven_format::floor::OriginalSlot],
     announcements: &[coven_format::floor::OriginalSlot],
     signer: &MemberIdentity,
-) -> Vec<u8> {
+) {
+    use coven_format::floor_pointer::{FloorPointerHeader, FloorPointerPrefix};
     let ring = device.sync.keys.read().unwrap().unwrap();
     let key = ring.store_key_ids().next().unwrap();
     let (mut routing, mut prefix) = coven_format::sealed_floor::FloorPrefixEncoder::start(
@@ -206,14 +210,31 @@ fn sealed_floor(
         prefix.extend(routing.copy(copy).unwrap());
     }
     routing.finish().unwrap();
+    let pointer_header = FloorPointerHeader { author: header.author, at: header.at };
+    let first = header.first;
     let (mut frames, mut plain) = coven_format::floor::FloorFrames::start(header).unwrap();
     for announcement in announcements {
         plain.extend(frames.announcement(announcement).unwrap());
     }
     plain.extend(frames.end().unwrap());
-    let path = ObjectPath::floor(device.sync.store());
-    let key = crate::write_seal::derive(&ring, &Audience::Store, key).unwrap();
-    sealed_stream(&path, &prefix, None, key, &plain, signer).0
+    let number = coven_merge::slot(9999);
+    let body_path = ObjectPath::floor_body(device.sync.store(), device.sync.device, number.into());
+    let derived = || crate::write_seal::derive(&ring, &Audience::Store, key).unwrap();
+    let (body, digest) = sealed_stream(&body_path, &prefix, None, derived(), &plain, signer);
+    let pointer_prefix =
+        FloorPointerPrefix { key, first, device: device.sync.device, number, body: digest }
+            .encode()
+            .unwrap();
+    let (pointer, _) = sealed_stream(
+        &ObjectPath::floor(device.sync.store()),
+        &pointer_prefix,
+        None,
+        derived(),
+        &pointer_header.encode().unwrap(),
+        signer,
+    );
+    group.storage.plant(&body_path, &body).await.unwrap();
+    group.storage.plant(&ObjectPath::floor(device.sync.store()), &pointer).await.unwrap();
 }
 
 /// Ana's store with a note of 64 KiB, her laptop and `earlier`, compacted:
@@ -378,10 +399,9 @@ async fn a_store_snapshots_original_slots_are_checked_at_their_paths_and_give_th
     .unwrap();
     let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
     let named = [coven_format::floor::OriginalSlot { slot, object: announcement.clone() }];
-    let floor = sealed_floor(&ana, floor.header, &floor.copies, &named, &ana.identity);
     group.storage.plant(&path, &snapshot).await.unwrap();
     group.storage.plant(&slot_path, &announcement).await.unwrap();
-    group.storage.plant(&ObjectPath::floor(group.store), &floor).await.unwrap();
+    plant_floor(&group, &ana, floor.header, &floor.copies, &named, &ana.identity).await;
 
     let moved_path = ObjectPath::slot(group.store, to.try_into().unwrap());
     restore_refused(&group, &ana, |damaged| damaged.path == moved_path.as_str()).await;
@@ -413,9 +433,9 @@ async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
     let plant = |header: coven_format::floor::FloorHeader,
                  copies: Vec<coven_format::floor::OriginalSlot>,
                  signer: &MemberIdentity| {
-        let bytes = sealed_floor(&ana, header, &copies, &floor.announcements, signer);
-        let (storage, path) = (group.storage.clone(), path.clone());
-        async move { storage.plant(&path, &bytes).await.unwrap() }
+        let (group, ana, announcements) = (&group, &ana, &floor.announcements);
+        let signer = signer.clone();
+        async move { plant_floor(group, ana, header, &copies, announcements, &signer).await }
     };
 
     plant(floor.header.clone(), floor.copies.clone(), &ana.identity).await;

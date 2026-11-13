@@ -61,6 +61,9 @@ pub struct Faults {
     pub lose_initiation_reply: bool,
     /// Publish the next upload but lose the completion reply.
     pub lose_completion_reply: bool,
+    /// Store the next create or replacement at each of these paths, then
+    /// lose its reply, once per path.
+    pub lose_reply_at: BTreeSet<ObjectPath>,
     /// Refuse this many upload aborts, retaining the pending bytes.
     pub abort_failures: usize,
     /// Expire all pending sessions before the next call.
@@ -118,6 +121,7 @@ impl Faults {
             lose_part_reply: false,
             lose_initiation_reply: false,
             lose_completion_reply: false,
+            lose_reply_at: BTreeSet::new(),
             expire_uploads: false,
             abort_failures: 0,
             overwrite_create: false,

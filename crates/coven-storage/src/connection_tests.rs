@@ -54,15 +54,14 @@ async fn floor_replacement_guards_preserve_the_previous_object() {
     );
     assert_eq!(storage.request_count(), before);
     assert_eq!(storage.read(&path).await.unwrap(), b"floor");
-    let immutable = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    storage.create(&immutable, b"slot").await.unwrap();
-    let immutable = storage.status(&immutable).await.unwrap().unwrap();
-    assert!(matches!(storage.begin_replace(&immutable, 4).await,
-        Err(error) if error.failure() == StorageFailure::InvalidPath));
-    let session = storage.begin_replace(&previous, 4).await.unwrap();
+    // No upload session targets the floor pointer.
+    assert!(matches!(storage.begin_upload(&previous.path, 4).await,
+        Err(error) if error.failure() == StorageFailure::InvalidPart));
+    let vacant = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
+    let session = storage.begin_upload(&vacant, 4).await.unwrap();
     let mut recorded: serde_json::Value =
         serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
-    recorded["target"]["Replace"]["path"] = serde_json::json!(immutable.path);
+    recorded["path"] = serde_json::json!(previous.path);
     assert!(matches!(UploadSession::decode(&serde_json::to_vec(&recorded).unwrap()),
         Err(error) if error.failure() == StorageFailure::InvalidPath));
     storage.abort_upload(&session).await.unwrap();
@@ -142,7 +141,6 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
             storage.replace(&floor_state, &[0; 17]).await.err().unwrap(),
             StorageFailure::SingleRequestTooLarge { size: 17, limit: 16 },
         ),
-        (storage.begin_replace(&previous, 4).await.err().unwrap(), StorageFailure::InvalidPath),
         (storage.begin_upload(&path, 0).await.err().unwrap(), StorageFailure::InvalidPart),
         (storage.upload_part(&mut session, &[]).await.err().unwrap(), StorageFailure::InvalidPart),
     ] {

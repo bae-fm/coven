@@ -95,10 +95,6 @@ pub(crate) struct S3Storage {
     bucket: String,
     ids: IdSourceRef,
     settings: S3Settings,
-    /// Whether the profile is certified to date an unfinished upload's start,
-    /// so floor sessions begun before the current floor can be ended
-    /// (Appendix E.10).
-    floor_sessions_dated: bool,
     #[cfg(test)]
     single_request_limit: u64,
 }
@@ -144,11 +140,7 @@ impl S3Storage {
             StorageFailure::InvalidConfiguration
                 .with_source("an uncatalogued S3 endpoint needs settings detected at setup"),
         )?;
-        let dated = profile::select(endpoint.as_ref(), profile.as_ref())?.dates_upload_initiation();
-        let mut storage =
-            Self::with_settings(config, credentials, clock, ids, cooldown, settings, http)?;
-        storage.floor_sessions_dated = dated;
-        Ok(storage)
+        Self::with_settings(config, credentials, clock, ids, cooldown, settings, http)
     }
     /// Connect with explicit settings; detection probes candidates this way.
     fn with_settings(
@@ -210,7 +202,6 @@ impl S3Storage {
             config,
             ids,
             settings,
-            floor_sessions_dated: false,
             #[cfg(test)]
             single_request_limit: crate::session::S3_REQUEST_LIMIT,
         })
@@ -528,7 +519,7 @@ impl ProviderOps for S3Storage {
     async fn begin_upload(
         &self,
         _publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
@@ -545,7 +536,7 @@ impl ProviderOps for S3Storage {
         Ok(UploadSession {
             device,
             location: self.config(),
-            target: target.clone(),
+            path: path.clone(),
             total,
             confirmed: 0,
             part_size,
@@ -709,10 +700,7 @@ impl ProviderOps for S3Storage {
         }
         let mut request = self.completion(session)?;
         if self.settings.copy_publication == S3CopyPublication::Never {
-            request = match session.target() {
-                UploadTarget::Create(_) => request.if_none_match("*"),
-                UploadTarget::Replace(previous) => request.if_match(&previous.replace_token),
-            };
+            request = request.if_none_match("*");
         }
         let result = request.customize().interceptor(publication.clone()).send().await;
         match result {
@@ -753,16 +741,6 @@ impl ProviderOps for S3Storage {
         through: u64,
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         self.settled_claims(store, through).await
-    }
-    fn dates_floor_sessions(&self) -> bool {
-        // A copy profile stages a floor session in its device's folder.
-        self.floor_sessions_dated && self.settings.copy_publication.multipart().is_none()
-    }
-    async fn superseded_floor_uploads(
-        &self,
-        floor: &StoredObject,
-    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
-        self.superseded_floor(floor).await
     }
     async fn detection_leftovers(
         &self,

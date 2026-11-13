@@ -646,7 +646,9 @@ impl ProviderOps for MemoryProvider {
         };
         let created = object.metadata(path, self.time_resolution);
         state.objects.insert(path.clone(), object);
-        if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
+        if std::mem::replace(&mut state.faults.lose_completion_reply, false)
+            || state.faults.lose_reply_at.remove(path)
+        {
             return Err(StorageFailure::Network.into());
         }
         state.refused_after_storing(self.config.provider())?;
@@ -685,7 +687,9 @@ impl ProviderOps for MemoryProvider {
                 stored_at: self.storage_time()?,
             },
         );
-        if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
+        if std::mem::replace(&mut state.faults.lose_completion_reply, false)
+            || state.faults.lose_reply_at.remove(path)
+        {
             return Err(StorageFailure::Network.into());
         }
         state.refused_after_storing(self.config.provider())
@@ -866,11 +870,11 @@ impl ProviderOps for MemoryProvider {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
-        self.memory_begin_upload(publication, target, total, device).await
+        self.memory_begin_upload(publication, path, total, device).await
     }
     async fn device_uploads(
         &self,
@@ -885,15 +889,6 @@ impl ProviderOps for MemoryProvider {
         through: u64,
     ) -> Result<Vec<LeftUpload>, StorageError> {
         self.memory_settled_claim_uploads(store, through).await
-    }
-    fn dates_floor_sessions(&self) -> bool {
-        true
-    }
-    async fn superseded_floor_uploads(
-        &self,
-        floor: &StoredObject,
-    ) -> Result<Vec<LeftUpload>, StorageError> {
-        self.memory_superseded_floor_uploads(floor).await
     }
     async fn end_left_upload(&self, upload: &LeftUpload) -> Result<(), StorageError> {
         self.memory_end_left_upload(upload).await

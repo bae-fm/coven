@@ -675,7 +675,13 @@ async fn cancelling_a_reload_keeps_its_selected_target_and_waiting_writes() {
     ben.sync.reload_from_snapshot().await.unwrap();
     assert_eq!(ben.database().applied_slot().await.unwrap(), target);
     assert_eq!(rows(ben.database()).await.len(), 2);
-    assert!(ben.database().operations().await.unwrap().is_empty());
+    assert!(ben
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(crate::sequence_sync::sequence_retention::is_live_body));
     ana.database().close().await.unwrap();
     ben.database().close().await.unwrap();
 }

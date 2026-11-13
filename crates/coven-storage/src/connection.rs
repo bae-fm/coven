@@ -309,21 +309,21 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
 
     pub(crate) async fn begin_upload_checked(
         &self,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        target.check()?;
-        if total == 0 {
+        // The floor pointer is one small record replaced in one request: no
+        // upload session targets it.
+        if path.is_replaceable() || total == 0 {
             return Err(StorageFailure::InvalidPart.into());
         }
-        let publication = self.publication(target.path())?;
+        let publication = self.publication(path)?;
         self.send(
             RequestKind::Upload,
             0,
-            self.provider.begin_upload(&publication, target, total, self.device),
+            self.provider.begin_upload(&publication, path, total, self.device),
         )
         .await
-        .map_err(|error| target.error(error))
     }
     /// Admit `bytes` as `session`'s next part, sending nothing: the session
     /// names this location, the part fits it, and its destination can be
@@ -365,7 +365,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                 self.provider.upload_part(&publication, session, bytes, part.end, &sent),
             )
             .await;
-        result.map_err(|error| session.target.error(error))
+        result
     }
     pub(crate) async fn finish_upload_checked(
         &self,
@@ -377,7 +377,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         let result = self
             .send(RequestKind::Upload, 0, self.provider.finish_upload(&publication, session))
             .await;
-        result.map_err(|error| session.target.error(error))
+        result
     }
     pub(crate) async fn abort_upload_checked(
         &self,
@@ -498,25 +498,6 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         })
         .await
     }
-    async fn end_superseded_floor_sessions(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<(), StorageError> {
-        if !self.provider.dates_floor_sessions() {
-            return Ok(());
-        }
-        let Some(floor) = self.status(&ObjectPath::floor(store)).await? else {
-            return Ok(());
-        };
-        self.cooling()?;
-        let left = self
-            .observed(
-                self.send(RequestKind::List, 0, self.provider.superseded_floor_uploads(&floor))
-                    .await,
-            )
-            .await?;
-        self.end_left(&left).await
-    }
     async fn end_settled_claims(
         &self,
         store: coven_foundation::id_source::StoreId,
@@ -585,19 +566,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         self.cooling()?;
-        self.observed(self.begin_upload_checked(&UploadTarget::Create(path.clone()), total).await)
-            .await
-    }
-    async fn begin_replace(
-        &self,
-        previous: &StoredObject,
-        total: u64,
-    ) -> Result<UploadSession, StorageError> {
-        self.cooling()?;
-        self.observed(
-            self.begin_upload_checked(&UploadTarget::Replace(previous.clone()), total).await,
-        )
-        .await
+        self.observed(self.begin_upload_checked(path, total).await).await
     }
     async fn restart_upload(&self, expired: &UploadSession) -> Result<UploadSession, StorageError> {
         self.cooling()?;
@@ -609,7 +578,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             if matches!(expired.state, crate::session::SessionState::S3Restart { .. }) {
                 self.abort_upload_checked(expired).await?;
             }
-            self.begin_upload_checked(expired.target(), expired.total_bytes()).await
+            self.begin_upload_checked(expired.path(), expired.total_bytes()).await
         }
         .await;
         self.observed(result).await
@@ -623,7 +592,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             let result = self
                 .send(RequestKind::Upload, 0, self.provider.resume_upload(&publication, session))
                 .await;
-            result.map_err(|error| session.target.error(error))
+            result
         }
         .await;
         self.observed(result).await
@@ -669,7 +638,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
                 self.provider.send_independent_part(&publication, session, offset, bytes, &sent),
             )
             .await;
-        self.observed(result.map_err(|error| session.target.error(error))).await
+        self.observed(result).await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.cooling()?;

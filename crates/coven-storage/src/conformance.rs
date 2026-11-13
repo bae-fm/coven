@@ -385,9 +385,10 @@ impl Conformance {
 }
 
 impl Conformance {
-    /// Competing recorded floor uploads keep the original absent/revision
-    /// condition through parts, serialization, resumption and publication.
-    pub async fn conditional_floor_upload(&self) {
+    /// Competing pointer writes keep the original absent/revision condition:
+    /// of two writers that observed the same state of the floor, one stores
+    /// its bytes and the other is refused, and the loser's bytes never appear.
+    pub async fn conditional_floor_replace(&self) {
         let storage = &self.storage;
         let path = ObjectPath::floor(self.store);
         for seeded in [false, true] {
@@ -395,53 +396,33 @@ impl Conformance {
                 storage.create(&path, b"previous").await.unwrap();
             }
             let previous = storage.status(&path).await.unwrap();
-            // Ask the provider for its part boundary before constructing the
-            // contending transfers; aborting this empty session publishes nothing.
-            let probe = match &previous {
-                Some(previous) => storage.begin_replace(previous, 1).await.unwrap(),
-                None => storage.begin_upload(&path, 1).await.unwrap(),
+            let first = async {
+                match &previous {
+                    Some(previous) => storage.replace(previous, b"first").await,
+                    None => storage.create(&path, b"first").await.map(drop),
+                }
             };
-            let part_size = probe.part_size();
-            storage.abort_upload(&probe).await.unwrap();
-            let total = part_size as u64 + 1;
-            let mut uploads = Vec::new();
-            for _ in 0..2 {
-                uploads.push(match &previous {
-                    Some(previous) => storage.begin_replace(previous, total).await.unwrap(),
-                    None => storage.begin_upload(&path, total).await.unwrap(),
-                });
-            }
-            for (index, upload) in uploads.iter_mut().enumerate() {
-                storage.upload_part(upload, &vec![index as u8; part_size]).await.unwrap();
-                assert_eq!(storage.status(&path).await.unwrap(), previous);
-                let target = upload.target().clone();
-                *upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
-                storage.resume_upload(upload).await.unwrap();
-                assert_eq!(upload.confirmed_bytes(), part_size as u64);
-                assert_eq!(upload.target(), &target);
-            }
-            storage.upload_part(&mut uploads[0], b"a").await.unwrap();
-            storage.finish_upload(&mut uploads[0]).await.unwrap();
-            let result = match storage.upload_part(&mut uploads[1], b"b").await {
-                Ok(()) => storage.finish_upload(&mut uploads[1]).await,
-                Err(error) => Err(error),
+            let second = async {
+                match &previous {
+                    Some(previous) => storage.replace(previous, b"second").await,
+                    None => storage.create(&path, b"second").await.map(drop),
+                }
             };
-            let error = result.unwrap_err();
+            let (first, second) = tokio::join!(first, second);
+            let (winner, loser) = match (first, second) {
+                (Ok(()), Err(error)) => (b"first".to_vec(), error),
+                (Err(error), Ok(())) => (b"second".to_vec(), error),
+                other => panic!("exactly one writer stores its bytes: {other:?}"),
+            };
             assert_eq!(
-                error.own_failure(),
+                loser.own_failure(),
                 Some(if seeded { StorageFailure::Conflict } else { StorageFailure::AlreadyExists })
             );
-            for upload in &uploads {
-                storage.abort_upload(upload).await.unwrap();
-            }
-            let mut expected = vec![0; part_size];
-            expected.push(b'a');
-            assert_eq!(storage.read(&path).await.unwrap(), expected);
+            assert_eq!(storage.read(&path).await.unwrap(), winner);
             let current = storage.status(&path).await.unwrap().unwrap();
             if let Some(previous) = previous {
                 assert_ne!(current.revision, previous.revision);
             }
-            // The next buffered replacement must also retire a multipart floor.
             storage.replace(&current, b"last").await.unwrap();
             assert_eq!(storage.read(&path).await.unwrap(), b"last");
             storage.delete(&path).await.unwrap();

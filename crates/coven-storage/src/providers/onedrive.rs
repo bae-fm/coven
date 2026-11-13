@@ -443,27 +443,19 @@ impl ProviderOps for OneDriveStorage {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
-        match target {
-            UploadTarget::Create(path) => Ok(self.plan_temporary(path, total, device)),
-            UploadTarget::Replace(previous) => {
-                self.begin_replacement(publication, previous, total, device).await
-            }
-        }
+        Ok(self.plan_temporary(path, total, device))
     }
     async fn resume_upload(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        match session.target() {
-            UploadTarget::Create(_) => self.resume_temporary(publication, session).await,
-            UploadTarget::Replace(_) => self.resume_replacement(session).await,
-        }
+        self.resume_temporary(publication, session).await
     }
     async fn upload_part(
         &self,
@@ -473,23 +465,14 @@ impl ProviderOps for OneDriveStorage {
         end: u64,
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
-        match session.target() {
-            UploadTarget::Create(_) => self.send_part(publication, session, bytes, end, sent).await,
-            UploadTarget::Replace(_) => {
-                self.replacement_part(publication, session, bytes, end).await
-            }
-        }
+        self.send_part(publication, session, bytes, end, sent).await
     }
     async fn finish_upload(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        match session.target() {
-            UploadTarget::Create(_) => self.publish_temporary(publication, session).await,
-            // The last fragment publishes; the connection accepts Complete before this call.
-            UploadTarget::Replace(_) => Err(StorageFailure::InvalidPart.into()),
-        }
+        self.publish_temporary(publication, session).await
     }
     async fn device_uploads(
         &self,
@@ -515,10 +498,7 @@ impl ProviderOps for OneDriveStorage {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        match session.target() {
-            UploadTarget::Create(_) => self.abort_temporary(publication, session).await,
-            UploadTarget::Replace(_) => self.cancel_replacement(replace::url(session)?).await,
-        }
+        self.abort_temporary(publication, session).await
     }
 }
 fn body_headers(body: &Body) -> Vec<(&'static str, String)> {

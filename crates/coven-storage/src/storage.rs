@@ -160,11 +160,11 @@ pub trait Storage: Send + Sync {
     /// Largest complete encrypted body the provider takes in one request, in
     /// bytes. Objects past it, or past [`crate::BUFFERED_REQUEST_LIMIT`], go
     /// in parts through resumable or multipart uploads
-    /// ([`crate::goes_in_parts`]). Buffered floor replacements accept
+    /// ([`crate::goes_in_parts`]). Floor pointer replacements accept
     /// complete bodies up to this limit; OneDrive stages
     /// the body in a revision-bound session before conditional publication.
-    /// Callers retaining sessions across crashes record `begin_upload` or
-    /// `begin_replace` sessions.
+    /// Callers retaining sessions across crashes record `begin_upload`
+    /// sessions.
     /// S3 uses 5 GiB, Dropbox 150 MiB and OneDrive 250,000,000 bytes.
     /// CloudKit uses bounded 8 MiB assets.
     fn single_request_limit(&self) -> u64;
@@ -340,17 +340,9 @@ pub trait Storage: Send + Sync {
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
-    /// This also creates an absent floor without exposing partial bytes.
     async fn begin_upload(
         &self,
         path: &ObjectPath,
-        total: u64,
-    ) -> Result<UploadSession, StorageError>;
-    /// Begin a floor upload bound to this observed native revision.
-    /// Record it before sending parts; restarting never adopts a newer revision.
-    async fn begin_replace(
-        &self,
-        previous: &StoredObject,
         total: u64,
     ) -> Result<UploadSession, StorageError>;
     /// Begin a fresh recorded session after resumption or publication reports
@@ -366,14 +358,7 @@ pub trait Storage: Send + Sync {
         if matches!(expired.state, crate::session::SessionState::S3Restart { .. }) {
             self.abort_upload(expired).await?;
         }
-        match expired.target() {
-            crate::UploadTarget::Create(path) => {
-                self.begin_upload(path, expired.total_bytes()).await
-            }
-            crate::UploadTarget::Replace(previous) => {
-                self.begin_replace(previous, expired.total_bytes()).await
-            }
-        }
+        self.begin_upload(expired.path(), expired.total_bytes()).await
     }
     /// Refresh a recorded session from the provider after interruption.
     /// Persist the returned state even on failure, as with `finish_upload`.
@@ -436,15 +421,6 @@ pub trait Storage: Send + Sync {
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
     /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
-    /// End every unfinished session at `store`'s floor begun before the
-    /// current floor was published, whoever began it (§17.10): each observed
-    /// an older revision, so none can publish. Only where the provider dates
-    /// a session's start, certified per S3 profile (Appendix E.6); elsewhere
-    /// it sends nothing.
-    async fn end_superseded_floor_sessions(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<(), StorageError>;
     /// End every unfinished session at slots 1 to `through` of `store`,
     /// which this device has applied, whoever began it (§17.10): create-once
     /// refuses each of them there, so none can ever publish, and a claimant

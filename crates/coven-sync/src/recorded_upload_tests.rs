@@ -65,7 +65,7 @@ impl Storage for PlannedStorage {
         self.0.lock().unwrap().push("plan");
         UploadSession::decode(&serde_json::to_vec(&json!({
             "device": coven_storage::test_utils::DEVICE,
-            "location": self.config(), "target": {"Create": path}, "total": total, "confirmed": 0,
+            "location": self.config(), "path": path, "total": total, "confirmed": 0,
             "part_size": 24 * 320 * 1024,
             "state": {"OneDrive": {"temporary": "00000000-0000-0000-0000-000000000001", "upload": {"Planned": {}}}}
         })).unwrap())
@@ -128,12 +128,6 @@ impl Storage for PlannedStorage {
     async fn abort_upload(&self, _: &UploadSession) -> Result<(), StorageError> {
         unreachable!()
     }
-    async fn end_superseded_floor_sessions(
-        &self,
-        _: coven_foundation::id_source::StoreId,
-    ) -> Result<(), StorageError> {
-        unreachable!()
-    }
     async fn end_settled_claims(
         &self,
         _: coven_foundation::id_source::StoreId,
@@ -157,9 +151,6 @@ impl Storage for PlannedStorage {
         unreachable!()
     }
     async fn replace(&self, _: &StoredObject, _: &[u8]) -> Result<(), StorageError> {
-        unreachable!()
-    }
-    async fn begin_replace(&self, _: &StoredObject, _: u64) -> Result<UploadSession, StorageError> {
         unreachable!()
     }
     async fn status(&self, _: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
@@ -197,7 +188,7 @@ async fn identity_and_native_capability_are_saved_before_their_first_use() {
         let storage = PlannedStorage(events.clone());
         let mut source = RecordingSource { events: events.clone(), fail_save, saves: 0 };
         let path = ObjectPath::slot(coven_storage::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
-        let result = upload(&storage, &UploadTarget::Create(path), 4, None, &mut source).await;
+        let result = upload(&storage, &path, 4, None, &mut source).await;
         let expected = match fail_save {
             None => {
                 assert!(matches!(result, Ok(Uploaded::Stored(None))));
@@ -290,9 +281,8 @@ async fn a_part_refused_before_any_request_leaves_the_saved_plan_unmarked() {
             _ => raw.with_publication_gate(Arc::new(CatchingUp(lever.clone()))),
         };
         let path = ObjectPath::slot(coven_storage::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
-        let target = UploadTarget::Create(path.clone());
         let mut source = ClosingSource { saved: Vec::new(), lever: lever.clone() };
-        let error = upload(&storage, &target, 4, None, &mut source).await.unwrap_err();
+        let error = upload(&storage, &path, 4, None, &mut source).await.unwrap_err();
         assert_eq!(error.failure(), refusal);
         assert_eq!(source.saved.len(), 1, "only the plan was saved");
         assert!(storage.unfinished_uploads().await.is_empty(), "nothing was started");
@@ -300,7 +290,7 @@ async fn a_part_refused_before_any_request_leaves_the_saved_plan_unmarked() {
         let mut source =
             RecordingSource { events: Arc::new(Mutex::new(Vec::new())), fail_save: None, saves: 0 };
         lever.store(false, std::sync::atomic::Ordering::SeqCst);
-        let stored = upload(&storage, &target, 4, Some(plan), &mut source).await.unwrap();
+        let stored = upload(&storage, &path, 4, Some(plan), &mut source).await.unwrap();
         assert!(matches!(stored, Uploaded::Stored(None)));
         assert_eq!(storage.read(&path).await.unwrap(), b"data");
     }
@@ -339,7 +329,6 @@ async fn a_start_refused_as_it_goes_out_saves_its_plan_unmarked() {
         .unwrap()
         .with_publication_gate(Arc::new(CatchingUp(behind.clone())));
     let path = ObjectPath::slot(coven_storage::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
-    let target = UploadTarget::Create(path.clone());
     let (started, waiting) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
     storage
@@ -355,8 +344,7 @@ async fn a_start_refused_as_it_goes_out_saves_its_plan_unmarked() {
         behind.store(true, std::sync::atomic::Ordering::SeqCst);
         resume.send(()).unwrap();
     };
-    let (refused, ()) =
-        tokio::join!(upload(&storage, &target, 4, None, &mut source), falling_behind);
+    let (refused, ()) = tokio::join!(upload(&storage, &path, 4, None, &mut source), falling_behind);
     assert_eq!(refused.unwrap_err().failure(), StorageFailure::CatchUpRequired);
     assert!(storage.unfinished_uploads().await.is_empty(), "nothing was started");
     assert_eq!(source.saved.len(), 3, "the plan, marked, then unmarked again");
@@ -365,7 +353,7 @@ async fn a_start_refused_as_it_goes_out_saves_its_plan_unmarked() {
     behind.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut source =
         RecordingSource { events: Arc::new(Mutex::new(Vec::new())), fail_save: None, saves: 0 };
-    let stored = upload(&storage, &target, 4, Some(plan), &mut source).await.unwrap();
+    let stored = upload(&storage, &path, 4, Some(plan), &mut source).await.unwrap();
     assert!(matches!(stored, Uploaded::Stored(None)));
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }

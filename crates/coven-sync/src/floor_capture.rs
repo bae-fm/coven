@@ -3,8 +3,10 @@ use super::*;
 use crate::sealed_stream::StreamSealer;
 use coven_format::{
     floor::{FloorFrames, FloorHeader, OriginalSlot},
+    floor_pointer::{FloorPointerHeader, FloorPointerPrefix},
     sealed_floor::FloorPrefixEncoder,
 };
+use coven_foundation::id_source::DeviceId;
 use coven_foundation::id_source::KeyId;
 use std::{
     collections::BTreeMap,
@@ -13,7 +15,13 @@ use std::{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct FloorCapture {
+    /// The pointer this write observed, which its replacement is conditional
+    /// on; none while the store has no floor.
     pub(super) previous: Option<StoredObject>,
+    /// The number of this write's body among this device's floor bodies,
+    /// never used before (§16.4).
+    #[serde(with = "coven_database::slot_json")]
+    pub(super) number: Slot,
     /// The previous floor's `first`, or 1 without one. This floor's deletions
     /// start there: the slots below it are the previous floor's deletions.
     #[serde(with = "coven_database::slot_json")]
@@ -31,8 +39,24 @@ pub(super) struct FloorCapture {
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct FloorArtifact {
     pub(super) capture: FloorCapture,
+    /// The body's size, and the digest of its complete bytes.
     pub(super) size: u64,
+    pub(super) digest: [u8; 32],
+    /// The pointer's complete sealed bytes, naming the body by digest.
+    pub(super) pointer: Vec<u8>,
+    /// The body's upload session, once recorded.
     pub(super) session: Option<coven_storage::UploadSession>,
+}
+
+impl FloorCapture {
+    /// Where this write's body goes.
+    pub(super) fn body_path(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: DeviceId,
+    ) -> ObjectPath {
+        ObjectPath::floor_body(store, device, self.number.into())
+    }
 }
 
 /// Feed the existing frame encoder one original at a time. Neither the complete
@@ -66,6 +90,35 @@ impl Read for FloorPlaintext {
     }
 }
 impl SequenceSync {
+    /// The pointer naming the body of `digest`, sealed and signed once: a
+    /// retried replacement sends these same bytes.
+    fn seal_pointer(
+        &self,
+        capture: &FloorCapture,
+        digest: [u8; 32],
+        ring: &StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<Vec<u8>, SyncError> {
+        let prefix = FloorPointerPrefix {
+            key: capture.key,
+            first: capture.first,
+            device: self.device,
+            number: capture.number,
+            body: digest,
+        };
+        let header = FloorPointerHeader { author: self.device, at: capture.at };
+        let (mut sealer, mut bytes) = StreamSealer::start(
+            ObjectPath::floor(self.store()),
+            prefix.encode()?,
+            None,
+            crate::write_seal::derive(ring, &Audience::Store, capture.key)?,
+        );
+        bytes.extend(sealer.chunk(&header.encode()?)?);
+        let (signature, _, _) = sealer.finish(member);
+        bytes.extend_from_slice(signature.as_bytes());
+        Ok(bytes)
+    }
+
     #[expect(clippy::map_err_ignore, reason = "a copy count past u32 cannot be framed")]
     pub(super) async fn capture_floor(
         &self,
@@ -115,7 +168,7 @@ impl SequenceSync {
             ended: false,
         };
         let (mut sealer, start) = StreamSealer::start(
-            ObjectPath::floor(self.store()),
+            capture.body_path(self.store(), self.device),
             prefix,
             None,
             crate::write_seal::derive(ring, &Audience::Store, capture.key)?,
@@ -133,10 +186,12 @@ impl SequenceSync {
             }
             writer.append(&sealer.chunk(&chunk)?).await?;
         }
-        let (signature, _, size) = sealer.finish(member);
+        let (signature, digest, size) = sealer.finish(member);
         writer.append(signature.as_bytes()).await?;
         writer.finish().await?;
-        Ok(FloorArtifact { capture: capture.clone(), size, session: None })
+        let digest = *digest.as_bytes();
+        let pointer = self.seal_pointer(capture, digest, ring, member)?;
+        Ok(FloorArtifact { capture: capture.clone(), size, digest, pointer, session: None })
     }
 }
 

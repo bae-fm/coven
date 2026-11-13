@@ -20,9 +20,7 @@ impl MemoryStart<'_> {
 
 pub(super) struct Pending {
     device: coven_foundation::id_source::DeviceId,
-    /// When the session began, by the provider's clock.
-    begun: coven_format::value::StorageTime,
-    target: UploadTarget,
+    path: ObjectPath,
     total: u64,
     pub(super) bytes: Vec<u8>,
     /// An independent session's parts, by index from zero: each kept once,
@@ -32,7 +30,7 @@ pub(super) struct Pending {
 }
 impl Pending {
     fn check(&self, session: &UploadSession) -> Result<(), StorageError> {
-        if self.target != session.target
+        if self.path != session.path
             || self.total != session.total
             || self.part_size != session.part_size
         {
@@ -91,25 +89,12 @@ fn owns_name(session: &UploadSession) -> bool {
 /// End every session at a planned one's name it owns: one its first part
 /// started, whose start's reply was lost or never recorded.
 fn end_planned(state: &mut MemoryState, session: &UploadSession) {
-    state.uploads.retain(|_, pending| pending.target.path() != session.path());
+    state.uploads.retain(|_, pending| pending.path != session.path);
 }
 
-fn check_target(state: &MemoryState, target: &UploadTarget) -> Result<(), StorageError> {
-    match target {
-        UploadTarget::Create(path) => {
-            if state.objects.contains_key(path) && !state.faults.overwrite_create {
-                return Err(StorageFailure::AlreadyExists.into());
-            }
-        }
-        UploadTarget::Replace(previous) => {
-            if state
-                .objects
-                .get(&previous.path)
-                .is_none_or(|object| object.revision.to_string() != previous.replace_token)
-            {
-                return Err(StorageFailure::Conflict.into());
-            }
-        }
+fn check_free(state: &MemoryState, path: &ObjectPath) -> Result<(), StorageError> {
+    if state.objects.contains_key(path) && !state.faults.overwrite_create {
+        return Err(StorageFailure::AlreadyExists.into());
     }
     Ok(())
 }
@@ -139,11 +124,7 @@ impl MemoryStorage {
         &self,
     ) -> Vec<(coven_foundation::id_source::DeviceId, ObjectPath)> {
         let state = self.provider.state.lock().await;
-        state
-            .uploads
-            .values()
-            .map(|pending| (pending.device, pending.target.path().clone()))
-            .collect()
+        state.uploads.values().map(|pending| (pending.device, pending.path.clone())).collect()
     }
 }
 
@@ -159,9 +140,7 @@ impl MemoryProvider {
         Ok(state
             .uploads
             .iter()
-            .filter(|(_, pending)| {
-                pending.device == device && pending.target.path().store() == store
-            })
+            .filter(|(_, pending)| pending.device == device && pending.path.store() == store)
             .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
             .collect())
     }
@@ -179,28 +158,9 @@ impl MemoryProvider {
             .uploads
             .iter()
             .filter(|(_, pending)| {
-                let path = pending.target.path();
+                let path = &pending.path;
                 path.store() == store
                     && path.slot_number().is_some_and(|slot| slot.get() <= through)
-            })
-            .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
-            .collect())
-    }
-    /// The sessions at `floor`'s path begun in an earlier second than its
-    /// publication: the deterministic provider dates each session's start,
-    /// as a certified S3 profile does.
-    pub(super) async fn memory_superseded_floor_uploads(
-        &self,
-        floor: &StoredObject,
-    ) -> Result<Vec<LeftUpload>, StorageError> {
-        self.before(MemoryRequest::Other("superseded_floor_uploads")).await?;
-        let state = self.state.lock().await;
-        Ok(state
-            .uploads
-            .iter()
-            .filter(|(_, pending)| {
-                pending.target.path() == &floor.path
-                    && pending.begun.seconds() < floor.stored_at.seconds()
             })
             .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
             .collect())
@@ -220,19 +180,19 @@ impl MemoryProvider {
     pub(super) async fn memory_begin_upload(
         &self,
         publication: &PublicationRequest,
-        target: &UploadTarget,
+        path: &ObjectPath,
         total: u64,
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("begin_upload")).await?;
-        self.refuse_file_upload(target.path()).await?;
-        check_target(&*self.state.lock().await, target)?;
+        self.refuse_file_upload(path).await?;
+        check_free(&*self.state.lock().await, path)?;
         // The caller records the plan; the first part starts the session.
         Ok(UploadSession {
             device,
             location: self.config(),
-            target: target.clone(),
+            path: path.clone(),
             total,
             confirmed: 0,
             part_size: self.part_size,
@@ -260,7 +220,7 @@ impl MemoryProvider {
                 // A shared name aborts nothing: its destination decides. A
                 // plan finding it empty starts fresh beside the stray its lost
                 // start may have begun, which can never publish.
-                check_target(&state, session.target())?;
+                check_free(&state, session.path())?;
             }
             session.state = SessionState::MemoryPlanned { started: PlanStart::Unstarted };
             return Ok(());
@@ -419,8 +379,7 @@ impl MemoryProvider {
             id,
             Pending {
                 device: session.device,
-                begun: self.storage_time()?,
-                target: session.target.clone(),
+                path: session.path.clone(),
                 total: session.total,
                 bytes: Vec::new(),
                 parts: BTreeMap::new(),
@@ -463,16 +422,10 @@ impl MemoryProvider {
         if !whole || session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        check_target(&state, session.target())?;
-        if matches!(session.target(), UploadTarget::Replace(_))
-            && state.faults.refuse_replacements > 0
-        {
-            state.faults.refuse_replacements -= 1;
-            return Err(StorageFailure::Conflict.into());
-        }
+        check_free(&state, session.path())?;
         let revision = state.next_id()?;
         let pending = state.uploads.remove(&id).ok_or(StorageFailure::SessionExpired)?;
-        let path = pending.target.path().clone();
+        let path = pending.path.clone();
         state.objects.insert(
             path,
             Object {

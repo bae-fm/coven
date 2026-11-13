@@ -139,7 +139,7 @@ impl S3Storage {
         use crate::left_upload::Left;
         let prefix = namespace(store, run);
         let mut left = Vec::new();
-        for (key, id, _) in self.unfinished_uploads(&prefix, None).await? {
+        for (key, id) in self.unfinished_uploads(&prefix, None).await? {
             left.push(crate::LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
         }
         for key in self.keys_under(&prefix, S3Listing::V1).await? {

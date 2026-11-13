@@ -26,7 +26,7 @@ impl S3Storage {
             // listed, and a session kept when its path names the device.
             ObjectPrefix::snapshots(store).as_str().to_owned(),
         ] {
-            for (key, id, _) in self.unfinished_uploads(&prefix, None).await? {
+            for (key, id) in self.unfinished_uploads(&prefix, None).await? {
                 let named = key.starts_with(&folder)
                     || ObjectPath::parse(&key).is_ok_and(|path| path.device() == Some(device));
                 if named {
@@ -53,41 +53,13 @@ impl S3Storage {
         }
         let mut left = Vec::new();
         let slots = ObjectPrefix::slots(store);
-        for (key, id, _) in self.unfinished_uploads(slots.as_str(), None).await? {
+        for (key, id) in self.unfinished_uploads(slots.as_str(), None).await? {
             let settled = ObjectPath::parse(&key)
                 .ok()
                 .and_then(|path| path.slot_number())
                 .is_some_and(|slot| slot.get() <= through);
             if settled {
                 left.push(LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
-            }
-        }
-        Ok(left)
-    }
-
-    /// The unfinished multipart uploads at the floor's key begun before
-    /// `floor`, the current floor, was published, compared in whole seconds
-    /// with a strictly earlier second: each observed an older revision, so
-    /// none can publish. Only a profile certified to date an upload's start
-    /// reaches this (Appendix E.6); a listing without the date there is a
-    /// protocol failure.
-    pub(super) async fn superseded_floor(
-        &self,
-        floor: &StoredObject,
-    ) -> Result<Vec<LeftUpload>, StorageError> {
-        let key = floor.path.as_str();
-        let published = floor.stored_at.seconds();
-        let mut left = Vec::new();
-        for (listed, id, initiated) in self.unfinished_uploads(key, None).await? {
-            if listed != key {
-                continue;
-            }
-            let initiated = initiated
-                .ok_or(StorageFailure::Protocol.with_source("S3 listed no upload start"))?;
-            let begun = u64::try_from(initiated.secs())
-                .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-            if begun < published {
-                left.push(LeftUpload(Left::S3Multipart { key: listed, id: SecretText::new(id) }));
             }
         }
         Ok(left)
@@ -107,15 +79,15 @@ impl S3Storage {
         }
     }
 
-    /// Every unfinished multipart upload under `prefix`: its key, upload id
-    /// and, where the service lists it, when it began. The requests count
+    /// Every unfinished multipart upload under `prefix`: its key and upload
+    /// id. The requests count
     /// under `publication` when one is given. A page that doesn't say
     /// whether another follows is a protocol failure, never the last.
     pub(super) async fn unfinished_uploads(
         &self,
         prefix: &str,
         publication: Option<&PublicationRequest>,
-    ) -> Result<Vec<(String, String, Option<aws_sdk_s3::primitives::DateTime>)>, StorageError> {
+    ) -> Result<Vec<(String, String)>, StorageError> {
         let mut key_marker = None;
         let mut upload_marker = None;
         let mut uploads = Vec::new();
@@ -137,7 +109,7 @@ impl S3Storage {
                 let key = metadata::required(upload.key(), "S3 upload listing omitted key")?;
                 crate::object_listing::listed_within(key, prefix)?;
                 let id = metadata::required(upload.upload_id(), "S3 upload listing omitted id")?;
-                uploads.push((key.to_owned(), id.to_owned(), upload.initiated().copied()));
+                uploads.push((key.to_owned(), id.to_owned()));
             }
             if !page
                 .is_truncated()

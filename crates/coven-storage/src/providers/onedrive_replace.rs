@@ -1,14 +1,8 @@
-//! Replace the floor through an upload session bound to the observed revision.
+//! Replace the floor pointer through an upload session bound to the observed
+//! revision, in one call.
 use super::*;
 use crate::session::ONEDRIVE_PART_SIZE;
 use crate::transfer::with_cleanup;
-
-pub(super) fn url(session: &UploadSession) -> Result<&str, StorageError> {
-    match &session.state {
-        SessionState::OneDriveReplacement { url } => Ok(url.as_str()),
-        _ => Err(StorageFailure::SessionMismatch.into()),
-    }
-}
 
 impl OneDriveStorage {
     /// A direct PUT /content does not exclude competing replacements. A native
@@ -40,49 +34,6 @@ impl OneDriveStorage {
         Ok(SecretText::new(url.into()))
     }
 
-    pub(super) async fn begin_replacement(
-        &self,
-        publication: &PublicationRequest,
-        previous: &StoredObject,
-        total: u64,
-        device: coven_foundation::id_source::DeviceId,
-    ) -> Result<UploadSession, StorageError> {
-        let url = self.replacement_url(publication, previous, false).await?;
-        Ok(UploadSession {
-            device,
-            location: self.config(),
-            target: UploadTarget::Replace(previous.clone()),
-            total,
-            confirmed: 0,
-            part_size: ONEDRIVE_PART_SIZE,
-            state: SessionState::OneDriveReplacement { url },
-        })
-    }
-
-    pub(super) async fn resume_replacement(
-        &self,
-        session: &mut UploadSession,
-    ) -> Result<(), StorageError> {
-        let response =
-            self.session.send(Method::GET, url(session)?, &[], Body::Empty, false).await?;
-        let (value, receipt) =
-            http::json_response(PROVIDER, response).await.map_err(replacement_error)?;
-        session.confirmed = upload::next_offset(
-            &value["nextExpectedRanges"],
-            session.confirmed,
-            session.total,
-            || {
-                http::invalid_response(
-                    PROVIDER,
-                    receipt.status(),
-                    receipt.headers().clone(),
-                    receipt.body().to_vec(),
-                )
-            },
-        )?;
-        Ok(())
-    }
-
     async fn replacement_fragment(
         &self,
         publication: &PublicationRequest,
@@ -101,33 +52,7 @@ impl OneDriveStorage {
         acknowledged(response, previous, end, total).await
     }
 
-    pub(super) async fn replacement_part(
-        &self,
-        publication: &PublicationRequest,
-        session: &mut UploadSession,
-        bytes: &[u8],
-        end: u64,
-    ) -> Result<(), StorageError> {
-        let UploadTarget::Replace(previous) = session.target() else {
-            return Err(StorageFailure::SessionMismatch.into());
-        };
-        self.replacement_fragment(
-            publication,
-            previous,
-            url(session)?,
-            session.confirmed,
-            session.total,
-            bytes,
-        )
-        .await?;
-        session.confirmed = end;
-        if end == session.total {
-            session.state = SessionState::Complete;
-        }
-        Ok(())
-    }
-
-    pub(super) async fn cancel_replacement(&self, url: &str) -> Result<(), StorageError> {
+    async fn cancel_replacement(&self, url: &str) -> Result<(), StorageError> {
         let response = self.session.send(Method::DELETE, url, &[], Body::Empty, false).await?;
         if response.status().as_u16() == 404 {
             return Ok(());
