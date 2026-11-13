@@ -17,6 +17,7 @@ mod operation_outcome;
 mod operation_steps;
 pub use operation_steps::OperationSteps;
 mod operation_types;
+mod pairing_types;
 mod pending;
 mod pending_encoding;
 mod recorded_upload;
@@ -76,6 +77,7 @@ pub use joiner::Joiner;
 pub use joining_identity::{ended_for, record_ending, sealed_join_request, JoiningIdentity};
 pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
+pub use pairing_types::{Pairing, PairingEnd, PairingId, PairingRequest, PairingStatus};
 pub use pending::{
     FileMissingReason, FileSourceFailure, LocalFailure, PendingReason, PendingRecord,
     PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
@@ -91,7 +93,7 @@ pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::NewInvite;
 pub use sequence_sync::sequence_join::{JoinOutcome, JoinPoll};
-pub use sequence_sync::sequence_pairings::{pairings_opened, MadePairing};
+pub use sequence_sync::sequence_pairings::{pairing_status, pairings_opened};
 pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{

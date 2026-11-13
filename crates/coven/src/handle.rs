@@ -40,6 +40,8 @@ mod transfers;
 #[path = "handle_uploads.rs"]
 mod uploads;
 
+#[path = "handle_pairing.rs"]
+mod handle_pairing;
 #[path = "handle_writes.rs"]
 mod writes;
 

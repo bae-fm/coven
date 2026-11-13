@@ -134,6 +134,7 @@ pub use coven_sync::{
     FileStream, FilesMode, PinProgress, QueuedUpload, ReadProgress, TransferLimits, UploadPhase,
     UploadProgress, UploadQueue, UploadSettings,
 };
+pub use coven_sync::{Pairing, PairingEnd, PairingId, PairingRequest, PairingStatus};
 
 #[cfg(any(test, doctest))]
 #[path = "application_api_tests.rs"]

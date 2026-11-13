@@ -2,7 +2,8 @@
 
 use crate::sequence_sync::make_retry_due;
 use crate::sequence_sync::sequence_invites::{approve_request, end_invite, make_invite, NewInvite};
-use crate::sequence_sync::sequence_pairings::{self, MadePairing};
+use crate::sequence_sync::sequence_pairings;
+use crate::{Pairing, PairingId, PairingRequest};
 use crate::{RetryWaits, SequenceState, SyncError};
 use coven_crypto::{custody::KeySession, MemberIdentity};
 use coven_database::{OperationId, SqlContext};
@@ -180,7 +181,7 @@ impl OperationSteps {
         &self,
         sql: &SqlContext<'_, '_>,
         key: Option<coven_storage::S3Credentials>,
-    ) -> Result<MadePairing, SyncError> {
+    ) -> Result<Pairing, SyncError> {
         let location =
             coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
         let made = sequence_pairings::make_pairing(
@@ -197,7 +198,7 @@ impl OperationSteps {
     }
 
     /// Approve exactly this checked request, as a step of a write (§13.2):
-    /// `shown` is the request the app was shown, which the pairing compares
+    /// `request` is the one the app was shown, which the pairing compares
     /// with the one it holds before it seals the member's current private
     /// pair to that request's sealing key and journals the handover. Once
     /// the write commits, a pass is asked for, which puts the handover in the
@@ -206,16 +207,14 @@ impl OperationSteps {
     pub fn approve_pairing(
         &self,
         sql: &SqlContext<'_, '_>,
-        pairing: InviteId,
-        shown: &[u8],
+        request: &PairingRequest,
     ) -> Result<(), SyncError> {
         sequence_pairings::approve_request(
             sql,
             self.directory.id(),
             self.clock.now(),
             &self.held()?,
-            pairing,
-            shown,
+            request,
         )?;
         self.pass_after_commit(sql);
         Ok(())
@@ -229,10 +228,9 @@ impl OperationSteps {
     pub fn decline_pairing(
         &self,
         sql: &SqlContext<'_, '_>,
-        pairing: InviteId,
-        shown: &[u8],
+        request: &PairingRequest,
     ) -> Result<(), SyncError> {
-        sequence_pairings::decline_request(sql, self.clock.now(), pairing, shown)?;
+        sequence_pairings::decline_request(sql, self.clock.now(), request)?;
         self.pass_after_commit(sql);
         Ok(())
     }
@@ -245,7 +243,7 @@ impl OperationSteps {
     pub fn end_pairing(
         &self,
         sql: &SqlContext<'_, '_>,
-        pairing: InviteId,
+        pairing: PairingId,
     ) -> Result<(), SyncError> {
         sequence_pairings::end_pairing(sql, pairing)?;
         self.pass_after_commit(sql);

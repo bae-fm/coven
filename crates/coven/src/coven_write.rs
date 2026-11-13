@@ -351,6 +351,44 @@ impl<'write> CovenWrite<'write> {
         self.steps.cancel_invite(&self.sql, *invite)
     }
 
+    /// Starts a pairing to add another of this member's devices, and returns
+    /// its id and codes (§13.2, E10). The write checks that this device is
+    /// registered and its member active in the slots it has applied, fixes
+    /// a fresh secret and an expiry 30 minutes from now, and journals the
+    /// pairing, with or without storage; it shares and claims nothing. On S3
+    /// `key`, the key this device connects with, goes in the QR code and not
+    /// in the shared one; an S3 pairing without it fails with
+    /// `InvalidConfiguration`. Made by a device that isn't registered, or
+    /// whose member isn't active, it fails with `Rejected(NotAllowed)`.
+    pub fn start_pairing(&self, key: Option<S3Credentials>) -> Result<Pairing, SyncError> {
+        self.steps.start_pairing(&self.sql, key)
+    }
+
+    /// Approves exactly this checked request (§13.2, E10): the write seals
+    /// this member's current private pair to the request's sealing key and
+    /// journals that handover, with or without storage, and claims no slot.
+    /// Once it commits, a pass puts the handover in the request's place. A
+    /// request the pairing no longer shows, and a pairing that has ended or
+    /// expired, fail with `InvitationChanged`.
+    pub fn approve_pairing(&self, request: &PairingRequest) -> Result<(), SyncError> {
+        self.steps.approve_pairing(&self.sql, request)
+    }
+
+    /// Declines exactly this checked request: the pairing ends as declined,
+    /// and a pass puts its marker in the request's place. A request the
+    /// pairing no longer shows, an approved pairing, and one that has ended
+    /// or expired, fail with `InvitationChanged`.
+    pub fn decline_pairing(&self, request: &PairingRequest) -> Result<(), SyncError> {
+        self.steps.decline_pairing(&self.sql, request)
+    }
+
+    /// The screen showing the pairing's code closed: ends the pairing at
+    /// whatever stage it is, and forgets it. A pairing that has ended is only
+    /// forgotten; one already forgotten changes nothing.
+    pub fn end_pairing(&self, pairing: PairingId) -> Result<(), SyncError> {
+        self.steps.end_pairing(&self.sql, pairing)
+    }
+
     /// Acknowledges a finished operation's outcome, in this write, so it
     /// leaves `coven_operations` (§11.4, E6). An app row that names the
     /// operation changes in the same write. One still running fails with

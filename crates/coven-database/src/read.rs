@@ -39,6 +39,12 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.app_query(sql, params, map)
     }
 
+    /// The journal's rows of `kind`, oldest first, as this read sees them:
+    /// the internal query a status that follows one operation live runs.
+    pub fn operations_of_kind(&self, kind: &str) -> Result<Vec<crate::OperationRecord>, DbError> {
+        crate::operation::of_kind(self.database, kind)
+    }
+
     /// Where this device keeps the bytes of `file`, while its record says
     /// it is on this device only.
     pub(crate) fn device_only_source(

@@ -15,7 +15,7 @@ use std::time::Duration;
 impl SequenceSync {
     /// Start a pairing as the app's write step does, on a location that holds
     /// no S3 key.
-    async fn start_pairing(&self) -> Result<MadePairing, SyncError> {
+    async fn start_pairing(&self) -> Result<crate::Pairing, SyncError> {
         let location = self.storage.config().clone();
         coven_storage::record_config(&self.directory, &location)?;
         let steps = self.operation_steps();
@@ -23,18 +23,29 @@ impl SequenceSync {
     }
 
     async fn approve_request(&self, pairing: InviteId, shown: &[u8]) -> Result<(), SyncError> {
-        let (steps, shown) = (self.operation_steps(), shown.to_vec());
-        self.database.write_as(move |sql| steps.approve_pairing(&sql, pairing, &shown)).await
+        let (steps, shown) = (self.operation_steps(), shown_request(pairing, shown));
+        self.database.write_as(move |sql| steps.approve_pairing(&sql, &shown)).await
     }
 
     async fn decline_request(&self, pairing: InviteId, shown: &[u8]) -> Result<(), SyncError> {
-        let (steps, shown) = (self.operation_steps(), shown.to_vec());
-        self.database.write_as(move |sql| steps.decline_pairing(&sql, pairing, &shown)).await
+        let (steps, shown) = (self.operation_steps(), shown_request(pairing, shown));
+        self.database.write_as(move |sql| steps.decline_pairing(&sql, &shown)).await
     }
 
     async fn end_pairing(&self, pairing: InviteId) -> Result<(), SyncError> {
         let steps = self.operation_steps();
-        self.database.write_as(move |sql| steps.end_pairing(&sql, pairing)).await
+        self.database.write_as(move |sql| steps.end_pairing(&sql, pairing.into())).await
+    }
+}
+
+/// The request the app was shown, as the pairing's status presents it.
+fn shown_request(pairing: InviteId, record: &[u8]) -> PairingRequest {
+    let Object::JoinRequest(read) = Object::decode(record).unwrap() else { panic!("a request") };
+    PairingRequest {
+        pairing: pairing.into(),
+        device_name: read.device_name,
+        confirmation: ConfirmationNumber::of(pairing, &read.keys),
+        record: record.to_vec(),
     }
 }
 
@@ -48,9 +59,9 @@ struct Pairing {
 async fn started(ana: &Device) -> Pairing {
     let made = ana.sync.start_pairing().await.unwrap();
     let code = read_pairing_code(&made.shared_code).unwrap();
-    assert_eq!(code.pairing, made.id);
+    assert_eq!(code.pairing, InviteId::from(made.id));
     let path = code.request_path();
-    Pairing { id: made.id, code, path }
+    Pairing { id: code.pairing, code, path }
 }
 
 /// The new device's request, answering `pairing` with fresh `keys` as `device`.

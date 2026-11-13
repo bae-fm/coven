@@ -13,7 +13,7 @@ use super::sequence_invites::{
 };
 use super::{SequenceSync, Session};
 use crate::sequence_sync::OperationState;
-use crate::SyncError;
+use crate::{Pairing, PairingEnd, PairingId, PairingRequest, PairingStatus, SyncError};
 use coven_crypto::{InviteSecret, MemberIdentity, SecretText};
 use coven_database::{
     operation_kind, DbError, Journal, NewOperation, OperationId, OperationRecord, SqlContext,
@@ -27,19 +27,6 @@ use std::time::{Duration, SystemTime};
 /// How long a pairing lives after it is made, by the showing device's clock
 /// (§13.2).
 pub(crate) const LIFETIME: Duration = Duration::from_secs(30 * 60);
-
-/// How a pairing ended, as the app is shown it (§13.2).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum PairingEnd {
-    /// This device applied the new device's add-device entry.
-    Added { device: DeviceId, name: String },
-    /// The person declined the request.
-    Declined,
-    /// The request failed a check.
-    Refused,
-    /// The pairing's lifetime ended first.
-    Expired,
-}
 
 /// Where a pairing is, as its journal row encodes it.
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,19 +122,6 @@ impl PairingWork {
     }
 }
 
-/// A pairing a write made: what the screen that adds a device shows.
-pub struct MadePairing {
-    /// The pairing's id, which names its request's path.
-    pub id: InviteId,
-    /// The code to show as a QR code. On S3 it carries the key this device
-    /// connects with.
-    pub qr_code: String,
-    /// The code to copy or share as text: the same, but with no key.
-    pub shared_code: String,
-    /// When the pairing ends, by this device's clock.
-    pub expires_at: SystemTime,
-}
-
 /// Make a pairing, as a step of a write (§13.2). The write checks that this
 /// device is registered and its member active in the slots this device has
 /// applied, fixes a fresh secret and the codes, and journals the pairing,
@@ -163,7 +137,7 @@ pub(crate) fn make_pairing(
     now: SystemTime,
     location: &coven_storage::StorageConfig,
     key: Option<S3Credentials>,
-) -> Result<MadePairing, SyncError> {
+) -> Result<Pairing, SyncError> {
     let expires_at = now.checked_add(LIFETIME).ok_or(
         StorageFailure::InvalidConfiguration
             .with_source("the clock cannot represent the pairing's expiry"),
@@ -214,8 +188,8 @@ pub(crate) fn make_pairing(
             started_by: "start_pairing".into(),
             pauses_writes: false,
         })?;
-        Ok(MadePairing {
-            id,
+        Ok(Pairing {
+            id: id.into(),
             qr_code: qr_code.as_str().to_owned(),
             shared_code: shared_code.as_str().to_owned(),
             expires_at,
@@ -224,8 +198,8 @@ pub(crate) fn make_pairing(
 }
 
 /// Approve exactly this checked request, as a step of a write (§13.2), with
-/// or without storage: `shown` is the request's plaintext the app was shown.
-/// The step compares it with the request the pairing holds and seals the
+/// or without storage: `request` is the one the app was shown. The step
+/// compares its record with the request the pairing holds and seals the
 /// member's current private pair, as `held` has it, to that request's
 /// sealing key only when they are the same; a different request is refused,
 /// never sealed to. The handover's bytes are fixed here, so a retry of the
@@ -237,18 +211,17 @@ pub(crate) fn approve_request(
     store: coven_foundation::id_source::StoreId,
     now: SystemTime,
     held: &MemberIdentity,
-    pairing: InviteId,
-    shown: &[u8],
+    request: &PairingRequest,
 ) -> Result<OperationId, SyncError> {
     sql.journal_step(|journal| {
-        let (record, mut work) = pairing_record(journal, pairing)?;
+        let (record, mut work) = pairing_record(journal, request.pairing.into())?;
         if work.expired(now) {
             return Err(SyncError::InvitationChanged);
         }
         let PairingState::Waiting { request: Some(stored) } = &work.state else {
             return Err(SyncError::InvitationChanged);
         };
-        if stored != shown {
+        if *stored != request.record {
             return Err(SyncError::InvitationChanged);
         }
         let stored = stored.clone();
@@ -272,16 +245,15 @@ pub(crate) fn approve_request(
 pub(crate) fn decline_request(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
-    pairing: InviteId,
-    shown: &[u8],
+    request: &PairingRequest,
 ) -> Result<OperationId, SyncError> {
     sql.journal_step(|journal| {
-        let (record, mut work) = pairing_record(journal, pairing)?;
+        let (record, mut work) = pairing_record(journal, request.pairing.into())?;
         if work.expired(now) {
             return Err(SyncError::InvitationChanged);
         }
         match &work.state {
-            PairingState::Waiting { request: Some(stored) } if stored == shown => (),
+            PairingState::Waiting { request: Some(stored) } if *stored == request.record => (),
             _ => return Err(SyncError::InvitationChanged),
         }
         work.end(PairingEnd::Declined);
@@ -296,10 +268,10 @@ pub(crate) fn decline_request(
 /// has ended is forgotten as it is; one already forgotten changes nothing.
 pub(crate) fn end_pairing(
     sql: &SqlContext<'_, '_>,
-    pairing: InviteId,
+    pairing: PairingId,
 ) -> Result<Option<OperationId>, SyncError> {
     sql.journal_step(|journal| {
-        let (record, mut work) = match pairing_record(journal, pairing) {
+        let (record, mut work) = match pairing_record(journal, pairing.into()) {
             Ok(found) => found,
             Err(SyncError::InvitationChanged) => return Ok(None),
             Err(error) => return Err(error),
@@ -330,6 +302,55 @@ fn pairing_record(
         }
     }
     Err(SyncError::InvitationChanged)
+}
+
+impl PairingWork {
+    /// Where the pairing is for the app, or `None` once the app has closed
+    /// the screen: the pairing is forgotten even while its marker is on its way.
+    fn status(&self) -> Result<Option<PairingStatus>, SyncError> {
+        let present = |bytes: &[u8]| -> Result<PairingRequest, SyncError> {
+            let request = decode_request(bytes)?;
+            Ok(PairingRequest {
+                pairing: self.id.into(),
+                device_name: request.device_name,
+                confirmation: coven_crypto::ConfirmationNumber::of(self.id, &request.keys),
+                record: bytes.to_vec(),
+            })
+        };
+        Ok(Some(match &self.state {
+            PairingState::Waiting { request } => {
+                PairingStatus::Waiting { request: request.as_deref().map(present).transpose()? }
+            }
+            PairingState::Approving { request, .. } | PairingState::HandedOver { request } => {
+                PairingStatus::Approved { request: present(request)? }
+            }
+            PairingState::Ending { how } | PairingState::Ended { how } => {
+                PairingStatus::Ended(how.clone())
+            }
+            PairingState::Forgetting => return Ok(None),
+        }))
+    }
+}
+
+/// The status of `pairing`, from its journal row: an internal query that a
+/// live query follows. `None` for a pairing this device never made or has
+/// forgotten (E10).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored request that does not decode is a damaged journal row, whichever field failed"
+)]
+pub fn pairing_status(
+    sql: coven_database::SqlReadContext<'_>,
+    pairing: PairingId,
+) -> Result<Option<PairingStatus>, DbError> {
+    for record in sql.operations_of_kind(operation_kind::PAIRING)? {
+        let work: PairingWork =
+            serde_json::from_slice(&record.data).map_err(DbError::StateEncoding)?;
+        if work.id == InviteId::from(pairing) {
+            return work.status().map_err(|_| DbError::DamagedDatabase);
+        }
+    }
+    Ok(None)
 }
 
 /// Opening the store ends every pairing a closed handle or a crash left: no

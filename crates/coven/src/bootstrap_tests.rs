@@ -840,6 +840,9 @@ mod authentication;
 #[path = "restore_credentials_tests.rs"]
 mod restore_credentials;
 
+#[path = "handle_pairing_tests.rs"]
+mod handle_pairing;
+
 #[path = "bootstrap_join_tests.rs"]
 mod join;
 
