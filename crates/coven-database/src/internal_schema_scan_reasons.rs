@@ -129,8 +129,10 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("a pass that clears storage for devices gone for good reads every one it cleared"),
 ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
     Some("operations() returns every unfinished journal entry"),
-("operation.rs", "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 ORDER BY id", "_coven_operations") =>
-    Some("the transaction that stops this device for good ends every invite and every operation an invite started, among the unfinished journal entries"),
+("operation.rs", "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 OR kind=?2 ORDER BY id", "_coven_operations") =>
+    Some("the transaction that stops this device for good ends every invite, every pairing and every operation an invite started, among the unfinished journal entries"),
+("audience_database.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", "_coven_columns") =>
+    Some("once per breaking run: list every synced table, to copy each one's rows into the per-audience check"),
 ("snapshot_conflicts.rs", _, "i" | "b") =>
     Some("a reload visits each row it installed, or had before, once; each lookup of the device's own records is indexed"),
 ("snapshot_files.rs", _, "c" | "p" | "d" | "temp._coven_install_stored" | "temp._coven_install_references") =>
