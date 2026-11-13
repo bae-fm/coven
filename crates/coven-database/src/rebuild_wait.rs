@@ -8,21 +8,6 @@ use crate::{DbError, PendingValue, StoreState};
 use coven_merge::Audience;
 use std::time::SystemTime;
 
-/// Split the audiences `reload` names into the circles this device must
-/// rebuild (below `breaking`, the device's newest breaking version, and not
-/// deleted) and the rest, which reload from snapshots as they always have.
-pub(crate) fn split(
-    state: &StoreState,
-    reload: &[Audience],
-    breaking: u32,
-) -> (Vec<Audience>, Vec<Audience>) {
-    reload.iter().cloned().partition(|audience| {
-        breaking > 0
-            && matches!(audience, Audience::Circle(_))
-            && state.awaits_raise(audience, breaking)
-    })
-}
-
 /// End the wait of every circle `state` no longer lets this device read, or
 /// deleted: there is nothing to rebuild.
 pub(crate) fn release(db: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {

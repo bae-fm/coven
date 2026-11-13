@@ -522,7 +522,6 @@ impl SequenceSync {
         session: &mut Session,
         slot: Slot,
         required: &[Audience],
-        rebuilds: Vec<Audience>,
         history: History,
         ring: &StoreKeyring,
         member: &MemberIdentity,
@@ -622,7 +621,7 @@ impl SequenceSync {
                 .state
                 .readable_audiences(&member.member())
                 .into_iter()
-                .filter(|audience| !required.contains(audience) && !rebuilds.contains(audience))
+                .filter(|audience| !required.contains(audience))
                 .map(ReloadStart::Current),
         );
         let target = starts
@@ -639,7 +638,7 @@ impl SequenceSync {
             .install_selected(
                 session,
                 starts,
-                ReloadInputs { target, history, through, operation: None, rebuilds },
+                ReloadInputs { target, history, through, operation: None, rebuilds: Vec::new() },
                 &mut ring,
                 member,
                 floor.as_ref(),

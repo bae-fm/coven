@@ -9237,12 +9237,6 @@ raise built on them, covering the rebuild slot, counts like any other
 - **Writes into the circle.** Until the rebuild commits, they fail with
   `AudienceReloading`, as during any load (§16.5). After it, they wait for the
   circle's raise, as writes made after a migration do (§18.5).
-- **A slot that also loads other audiences.** A slot can make a circle below
-  the device's version readable and, together, make the store or a circle at
-  the device's version readable. The circle below waits for its rebuild as
-  above; the others load from their snapshots as any newly readable audience
-  does, in the same commit that applies the slot, and the marker is queued in
-  that commit.
 - **A marker whose history is gone.** If retention has removed the slots after
   the snapshots the rebuild would start from while the marker was in flight,
   the device queues a new marker, read through the slot it has applied then,

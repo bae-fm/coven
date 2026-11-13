@@ -39,19 +39,13 @@ fn only_circles_below_the_breaking_version_are_rebuilt() {
     let state = state(&[(1, 0), (2, 2), (3, 0)], &[3]);
     let orchard = Audience::Circle(circle(2));
     let gone = Audience::Circle(circle(3));
-    let split = |reload: &[Audience], breaking| split(&state, reload, breaking);
-    assert_eq!(split(&[garden()], 2), (vec![garden()], vec![]));
-    assert_eq!(split(&[garden()], 1), (vec![garden()], vec![]));
-    assert_eq!(split(std::slice::from_ref(&orchard), 2), (vec![], vec![orchard.clone()]));
-    assert_eq!(split(std::slice::from_ref(&gone), 2), (vec![], vec![gone.clone()]));
-    assert_eq!(split(&[garden()], 0), (vec![], vec![garden()]), "no breaking migration ran");
-    assert_eq!(split(&[], 2), (vec![], vec![]));
-    assert_eq!(
-        split(&[Audience::Store, garden()], 2),
-        (vec![garden()], vec![Audience::Store]),
-        "a store being loaded reloads, and a circle below the version waits for its rebuild"
-    );
-    assert_eq!(split(&[garden(), orchard.clone()], 2), (vec![garden()], vec![orchard]));
+    let rebuilds = |audience: &Audience, breaking| state.rebuilt_by(audience, breaking);
+    assert!(rebuilds(&garden(), 2));
+    assert!(rebuilds(&garden(), 1));
+    assert!(!rebuilds(&orchard, 2), "a circle at the version reloads");
+    assert!(!rebuilds(&gone, 2), "a deleted circle reloads");
+    assert!(!rebuilds(&garden(), 0), "no breaking migration ran");
+    assert!(!rebuilds(&Audience::Store, 2), "the store reloads");
 }
 
 fn index() -> Migration {

@@ -218,7 +218,7 @@ impl Database {
                         change,
                         state,
                         boundary,
-                        reload: vec![],
+                        reload: None,
                         provider_access: Vec::new(),
                     }),
                 },

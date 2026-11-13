@@ -483,17 +483,17 @@ impl SequenceSync {
             return Ok(());
         }
         let mut reloads = Vec::new();
-        let mut rebuilds = Vec::new();
         if let SlotContent::Admin { effect: Some(effect), .. } = &mut incoming.content {
             effect.provider_access = history.provider_access(member.member())?;
             // A circle below this device's version waits for its rebuild
             // instead of reloading (§18.3).
             let breaking = self.database.breaking_version().await?;
-            (rebuilds, reloads) = effect.reload.iter().cloned().partition(|audience| {
-                breaking > 0
-                    && matches!(audience, Audience::Circle(_))
-                    && history.state.awaits_raise(audience, breaking)
-            });
+            reloads = effect
+                .reload
+                .iter()
+                .filter(|audience| !history.state.rebuilt_by(audience, breaking))
+                .cloned()
+                .collect();
         }
         // A reload persists the audience gates before any replacement body is
         // read, and keeps the keys after it loads.
@@ -523,9 +523,7 @@ impl SequenceSync {
             | (
                 coven_database::ApplyOutcome::Waiting(coven_database::WriteWait::Reload(_)),
                 false,
-            ) => {
-                self.reload_activation(session, at, &reloads, rebuilds, history, ring, member).await
-            }
+            ) => self.reload_activation(session, at, &reloads, history, ring, member).await,
             (coven_database::ApplyOutcome::Waiting(wait), _) => {
                 Err(SyncError::Pending(Box::new(PendingRecord::new(
                     PendingSubject::Slot(at),
@@ -624,6 +622,39 @@ impl History {
         Ok(history)
     }
 
+    /// The audience an admin change makes this member read anew: the store on
+    /// the member's admission, the boundary's audience on a raise or reset, a
+    /// circle the member is added to. One change names at most one.
+    fn reload_of(
+        &self,
+        effect: &coven_database::AdminEffect,
+        member: &coven_foundation::id_source::MemberId,
+    ) -> Option<Audience> {
+        use coven_format::admin::StoreChange::{AddCircleMember, AdmitMember, RaiseSchema, Reset};
+        match &effect.change {
+            AdmitMember { .. }
+                if self.state.store.is_some()
+                    && !crate::effects::belongs(&self.state, &Audience::Store, member)
+                    && crate::effects::belongs(&effect.state, &Audience::Store, member) =>
+            {
+                Some(Audience::Store)
+            }
+            RaiseSchema { .. } | Reset { .. } => effect
+                .boundary
+                .as_ref()
+                .map(|boundary| boundary.snapshot().audience.clone())
+                .filter(|audience| crate::effects::belongs(&effect.state, audience, member)),
+            AddCircleMember { circle, .. }
+                if self.state.circles.contains_key(circle)
+                    && effect.state.readable_circles(member).contains(circle)
+                    && !self.state.readable_circles(member).contains(circle) =>
+            {
+                Some(Audience::Circle(*circle))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn consume(
         &mut self,
         received: ReceivedSlot,
@@ -646,30 +677,7 @@ impl History {
                 let effect = match validated {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
-                            if self.state.store.is_some()
-                                && !crate::effects::belongs(&self.state, &Audience::Store, &member)
-                                && crate::effects::belongs(&effect.state, &Audience::Store, &member)
-                            {
-                                effect.reload.push(Audience::Store);
-                            }
-                            if let Some(boundary) = &effect.boundary {
-                                if crate::effects::belongs(
-                                    &effect.state,
-                                    &boundary.snapshot().audience,
-                                    &member,
-                                ) {
-                                    effect.reload.push(boundary.snapshot().audience.clone());
-                                }
-                            }
-                            for circle in effect
-                                .state
-                                .readable_circles(&member)
-                                .difference(&self.state.readable_circles(&member))
-                            {
-                                if self.state.circles.contains_key(circle) {
-                                    effect.reload.push(Audience::Circle(*circle));
-                                }
-                            }
+                            effect.reload = self.reload_of(effect, &member);
                             self.accept_admin(slot, &received.header, effect);
                         }
                         effect

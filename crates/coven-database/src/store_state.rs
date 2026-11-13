@@ -86,6 +86,15 @@ impl StoreState {
         !self.deleted(audience) && self.reached(audience) < version
     }
 
+    /// Whether `audience`, which a slot makes readable to a device whose
+    /// newest breaking migration is `breaking`, is a circle the device must
+    /// rebuild rather than load: below that version and not deleted (§18.3).
+    pub fn rebuilt_by(&self, audience: &Audience, breaking: u32) -> bool {
+        breaking > 0
+            && matches!(audience, Audience::Circle(_))
+            && self.awaits_raise(audience, breaking)
+    }
+
     /// Whether `circle` is one this state doesn't hold, or deleted: a change
     /// aimed at it meets a gone target (§10.4, §15.9).
     pub fn gone_circle(&self, circle: &CircleId) -> bool {

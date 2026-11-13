@@ -387,7 +387,7 @@ pub(crate) fn checked_change(
         change: change.clone(),
         state: next,
         boundary,
-        reload: Vec::new(),
+        reload: None,
         provider_access: Vec::new(),
     }))
 }

@@ -57,9 +57,11 @@ pub struct AdminEffect {
     pub state: StoreState,
     /// The activated snapshot for a raise or reset.
     pub boundary: Option<crate::Boundary>,
-    /// Audiences requiring replacement data. `apply_slot` records their wait
-    /// without consuming the slot; `load_snapshots` installs it with their data.
-    pub reload: Vec<coven_merge::Audience>,
+    /// The audience requiring replacement data: one change makes at most one.
+    /// `apply_slot` records its wait without consuming the slot, or, for a
+    /// circle below the device's breaking version, applies the slot and gates
+    /// the circle for its rebuild; `load_snapshots` installs the data.
+    pub reload: Option<coven_merge::Audience>,
     /// Provider work recorded atomically with this state.
     pub provider_access: Vec<crate::ProviderAccessChange>,
 }
@@ -119,20 +121,18 @@ pub(crate) fn apply<P: crate::PendingValue>(
         // don't reload: the slot applies, and each waits for its rebuild.
         let mut rebuilding = Vec::new();
         if let SlotContent::Admin { effect: Some(effect), .. } = &incoming.content {
-            let (rebuild, rest) = crate::rebuild_wait::split(
-                &effect.state,
-                &effect.reload,
-                crate::raise_capture::breaking_version(db)?,
-            );
-            rebuilding = rebuild;
-            // The circles that wait for a rebuild don't hold the slot back:
-            // it applies, or is loaded, with them gated (§18.3).
-            if let Some(audience) = rest.first() {
-                authenticate()?;
-                for required in &rest {
-                    crate::reload_gate::require_reload::<P>(db, required)?;
+            if let Some(audience) = &effect.reload {
+                if effect.state.rebuilt_by(audience, crate::raise_capture::breaking_version(db)?) {
+                    // The circle doesn't hold the slot back: it applies with
+                    // the circle gated (§18.3).
+                    rebuilding.push(audience.clone());
+                } else {
+                    authenticate()?;
+                    crate::reload_gate::require_reload::<P>(db, audience)?;
+                    return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(
+                        audience.clone(),
+                    )));
                 }
-                return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(audience.clone())));
             }
         }
         crate::download_stage::begin(db)?;
