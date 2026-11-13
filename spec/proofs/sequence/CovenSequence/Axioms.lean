@@ -44,6 +44,7 @@ import SequenceApply
 
 #print axioms CovenSequence.CopyOrder.audience_complete
 #print axioms CovenSequence.CopyOrder.store_copy_precedes_need
+#print axioms CovenSequence.CopyOrder.admission_carries_own_copy
 #print axioms CovenSequence.CopyOrder.copy_precedes_need_inside
 #print axioms CovenSequence.CopyOrder.need_introduced
 #print axioms CovenSequence.CopyOrder.stuck_scan_finds_copy
@@ -211,6 +212,10 @@ import SequenceApply
 #print axioms CovenSequence.CircleLifecycle.member_removal_deletes
 #print axioms CovenSequence.CircleLifecycle.deleted_at_slot
 #print axioms CovenSequence.CircleLifecycle.deleted_stays
+#print axioms CovenSequence.CircleLifecycle.admission_makes_circle
+#print axioms CovenSequence.CircleLifecycle.used_circle_refuses_admission
+#print axioms CovenSequence.CircleLifecycle.admission_repeat_unchanged
+#print axioms CovenSequence.CircleLifecycle.recovery_keeps_old_circles
 #print axioms CovenSequence.WriteVersion.step_version
 #print axioms CovenSequence.WriteVersion.version_mono
 #print axioms CovenSequence.WriteVersion.waiting_part_counts
@@ -535,6 +540,8 @@ import SequenceApply
 
 #print axioms CovenSequence.Admission.admission_never_exposes
 #print axioms CovenSequence.Admission.member_has_device
+#print axioms CovenSequence.Admission.admitted_has_circle
+#print axioms CovenSequence.Admission.split_circle_leaves_member_without
 #print axioms CovenSequence.Admission.removal_stops_admitted_device
 #print axioms CovenSequence.Admission.split_approval_exposes
 #print axioms CovenSequence.Admission.removal_strands_admitted_join

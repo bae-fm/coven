@@ -17,7 +17,9 @@ audience with which sealing key (`Keys.Current`), as `effects.rs` and
 `circle_effects.rs` keep it. An entry's `required` copies are what Rust's
 `required_copies` gives it. An admission, which admits or recovers a member
 (§13.2), carries those copies in its own slot (`carried`); any other entry's
-sit below it. `legal` says a slot followed the rules at its position: an
+sit below it. The admission also makes the member's circle: it introduces the
+circle's key, with a copy to the member alone, in the same slot, so a circle's
+first reader has its copy from the slot that makes the circle. `legal` says a slot followed the rules at its position: an
 entry's required copies sit below it, or in its own slot for an admission,
 and every key that seals the slot is introduced. The claim loop makes that the
 state of the slot just before the entry, whatever raced it: an operation reads
@@ -60,13 +62,15 @@ neither: a member's device shares the member's keys (§12.2). -/
 inductive Change (Aud Mem : Type) where
   /-- Slot 1: the first member, with its sealing key, and the first store key. -/
   | create (key : Key Aud) (hash sealing : Nat)
-  /-- An admission adding member `m` with its sealing key (§13.2). -/
-  | admit (m : Mem) (admin : Bool) (sealing : Nat)
+  /-- An admission adding member `m` with its sealing key, and the circle of
+  `key`'s audience, which `m` alone reads (§13.2). -/
+  | admit (m : Mem) (admin : Bool) (sealing : Nat) (key : Key Aud) (hash : Nat)
   | removeMember (m : Mem)
   /-- A member's own replacement of its keys, or an admin's (§12.3). -/
   | replaceKeys (m : Mem) (sealing : Nat)
-  /-- An admission recovering member `m` with a new sealing key (§13.2). -/
-  | recover (m : Mem) (sealing : Nat)
+  /-- An admission recovering member `m` with a new sealing key, and a new
+  circle of `key`'s audience, which `m` alone reads (§13.2). -/
+  | recover (m : Mem) (sealing : Nat) (key : Key Aud) (hash : Nat)
   | createCircle (key : Key Aud) (hash : Nat)
   | addToCircle (circle : Aud) (m : Mem)
   /-- Removing `m` from `circle` introduces the circle's replacement key in the
@@ -96,7 +100,8 @@ variable {Aud Mem : Type} [DecidableEq Aud] [DecidableEq Mem]
 /-- The slot's event in `Keys`' projection. -/
 def Slot.event : Slot Aud Mem → Event Aud Mem
   | .entry _ _ (.create key hash _) | .entry _ _ (.createCircle key hash)
-  | .entry _ _ (.rotate key hash) | .entry _ _ (.leaveCircle _ _ key hash) =>
+  | .entry _ _ (.rotate key hash) | .entry _ _ (.leaveCircle _ _ key hash)
+  | .entry _ _ (.admit _ _ _ key hash) | .entry _ _ (.recover _ _ key hash) =>
     .introduce key hash
   | .copy _ route => .copy route
   | _ => .other
@@ -113,13 +118,17 @@ def Roster.seat (r : Roster Aud Mem) (a : Aud) (m : Mem) (value : Option Nat) : 
 def Roster.apply (store : Aud) (r : Roster Aud Mem) (author : Mem) : Change Aud Mem → Roster Aud Mem
   | .create _ _ c =>
     { r.seat store author (some c) with people := author :: r.people, admins := author :: r.admins }
-  | .admit m admin c =>
-    { r.seat store m (some c) with
+  | .admit m admin c key _ =>
+    { (r.seat store m (some c)).seat key.audience m (some c) with
       people := m :: r.people, admins := if admin then m :: r.admins else r.admins }
   | .removeMember m => { r with current := fun a x => if x = m then none else r.current a x }
-  | .replaceKeys m c | .recover m c =>
+  | .replaceKeys m c =>
     { r with
       current := fun a x => if x = m then (r.current a x).map (fun _ => c) else r.current a x }
+  | .recover m c key _ =>
+    ({ r with
+      current := fun a x => if x = m then (r.current a x).map (fun _ => c) else r.current a x }
+        : Roster Aud Mem).seat key.audience m (some c)
   | .createCircle key _ => r.seat key.audience author (r.current store author)
   | .addToCircle a m => r.seat a m (r.current store m)
   | .leaveCircle a m _ _ => r.seat a m none
@@ -145,11 +154,16 @@ entry, against the state just before its slot. Adding or recovering a member
 sends only the keys the acting device holds (§12.1). -/
 def required (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (author : Mem) :
     Change Aud Mem → List (Route Aud Mem)
-  | .admit m _ c =>
-    (h.introductions.filter fun i => decide (i.key.audience = store)).map fun i => ⟨i.key, m, c⟩
-  | .replaceKeys m c | .recover m c =>
+  | .admit m _ c key _ =>
+    (h.introductions.filter fun i => decide (i.key.audience = store)).map (fun i => ⟨i.key, m, c⟩)
+      ++ [⟨key, m, c⟩]
+  | .replaceKeys m c =>
     (h.introductions.filter fun i => decide (i.key.audience = store) ||
       ((r.current i.key.audience m).isSome && held h author i.key)).map fun i => ⟨i.key, m, c⟩
+  | .recover m c key _ =>
+    (h.introductions.filter fun i => decide (i.key.audience = store) ||
+      ((r.current i.key.audience m).isSome && held h author i.key)).map (fun i => ⟨i.key, m, c⟩)
+      ++ [⟨key, m, c⟩]
   | .createCircle key _ =>
     match r.current store author with
     | some c => [⟨key, author, c⟩]
@@ -163,20 +177,29 @@ def required (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (author : 
   | .leaveCircle a m key _ => routes (r.seat a m none).current r.people key
   | _ => []
 
+/-- A circle audience no one has used: no key was introduced for it and no
+member reads it (§15.5). -/
+def circleFree (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (key : Key Aud) : Bool :=
+  decide (key.audience ≠ store) &&
+    h.introductions.all (fun i => decide (i.key.audience ≠ key.audience)) &&
+    r.people.all (fun m => (r.current key.audience m).isNone)
+
 /-- Who may make an entry (§10.1), as `checked_change` decides it. Creation is
 slot 1's alone. -/
 def allowed (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (author : Mem) :
     Change Aud Mem → Bool
   | .create .. => false
-  | .admit m _ _ =>
-    (r.current store author).isSome && decide (author ∈ r.admins) && decide (m ∉ r.people)
+  | .admit m _ _ key _ =>
+    (r.current store author).isSome && decide (author ∈ r.admins) && decide (m ∉ r.people) &&
+      circleFree store h r key
   | .removeMember m =>
     (r.current store author).isSome && decide (author ∈ r.admins) && (r.current store m).isSome
   | .replaceKeys m _ =>
     (r.current store author).isSome && (decide (author = m) || decide (author ∈ r.admins)) &&
       (r.current store m).isSome
-  | .recover m _ =>
-    (r.current store author).isSome && decide (author ∈ r.admins) && (r.current store m).isSome
+  | .recover m _ key _ =>
+    (r.current store author).isSome && decide (author ∈ r.admins) && (r.current store m).isSome &&
+      circleFree store h r key
   | .createCircle key _ =>
     (r.current store author).isSome && decide (key.audience ≠ store) &&
       h.introductions.all (fun i => decide (i.key.audience ≠ key.audience)) &&
@@ -203,8 +226,9 @@ required copies, one per key, all to the member it admits or recovers. -/
 def carried (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) :
     Slot Aud Mem → List (Route Aud Mem)
   | .copy _ route => [route]
-  | .entry author _ (.admit m admin c) => required store h r author (.admit m admin c)
-  | .entry author _ (.recover m c) => required store h r author (.recover m c)
+  | .entry author _ (.admit m admin c key hash) =>
+    required store h r author (.admit m admin c key hash)
+  | .entry author _ (.recover m c key hash) => required store h r author (.recover m c key hash)
   | _ => []
 
 /-- One slot's step of the key projection: introductions from `Keys`, and the
@@ -259,6 +283,20 @@ theorem introduction_at (store : Aud) (seq : Nat → Slot Aud Mem) (i : Introduc
   rw [keysAt_introductions]
   exact introduction_slot _ i n
 
+/-- **An admission's slot carries its member's circle key copy.** The
+introduction of the circle's key and the copy to the member's sealing key sit
+in the one slot that admits or recovers the member, so the circle's first
+reader has its copy from the slot that makes the circle (§13.2). -/
+theorem admission_carries_own_copy (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem)
+    (author m : Mem) (outer key : Key Aud) (admin : Bool) (c hash : Nat) :
+    (⟨key, m, c⟩ : Route Aud Mem) ∈
+        carried store h r (.entry author outer (.admit m admin c key hash)) ∧
+      (⟨key, m, c⟩ : Route Aud Mem) ∈
+        carried store h r (.entry author outer (.recover m c key hash)) ∧
+      (Slot.entry author outer (.admit m admin c key hash)).event = .introduce key hash ∧
+      (Slot.entry author outer (.recover m c key hash)).event = .introduce key hash := by
+  simp [carried, required, Slot.event]
+
 /-- A slot follows the rules at its position. Metadata may use any accepted
 store key, exposed or not (§12.2), and the new key may encrypt its own
 introduction (§12.1). A write's slot needs a usable store key on each attempt,
@@ -309,22 +347,32 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
     RosterOk store (r.apply store author change) := by
   cases change with
   | create key hash c => simp [allowed] at yes
-  | admit m admin c =>
-    simp only [allowed, Bool.and_eq_true, decide_eq_true_eq] at yes
+  | admit m admin c key hash =>
+    simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at yes
+    obtain ⟨⟨_, fresh⟩, ⟨⟨notStore, _⟩, _⟩⟩ := yes
     constructor
     · intro a x v hv
       simp only [Roster.apply, seat_current] at hv ⊢
       split at hv
       · rename_i same; exact List.mem_cons.mpr (Or.inl same.2)
-      · exact List.mem_cons_of_mem _ (ok.people a x v hv)
+      · split at hv
+        · rename_i same; exact List.mem_cons.mpr (Or.inl same.2)
+        · exact List.mem_cons_of_mem _ (ok.people a x v hv)
     · intro a x v hv
       simp only [Roster.apply, seat_current] at hv ⊢
+      have no : ¬ (store = key.audience ∧ x = m) := fun e => notStore e.1.symm
+      simp only [no, ite_false]
       split at hv
-      · rename_i same; simp [same.2, hv]
-      · by_cases fresh : x = m
-        · subst fresh
-          exact absurd (ok.people a x v hv) yes.2
-        · simp [fresh, ok.sealing a x v hv]
+      · rename_i same
+        cases hv
+        simp [same.2]
+      · split at hv
+        · rename_i same
+          cases hv
+          simp [same.2]
+        · rename_i n1 n2
+          have different : x ≠ m := fun e => fresh (e ▸ ok.people a x v hv)
+          simp [different, ok.sealing a x v hv]
   | removeMember m =>
     constructor
     · intro a x v hv
@@ -337,7 +385,37 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
       split at hv
       · cases hv
       · rename_i different; simp [different, ok.sealing a x v hv]
-  | replaceKeys m c | recover m c =>
+  | recover m c key hash =>
+    simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at yes
+    obtain ⟨⟨_, known⟩, ⟨⟨notStore, _⟩, _⟩⟩ := yes
+    obtain ⟨w₀, hw₀⟩ := Option.isSome_iff_exists.mp known
+    constructor
+    · intro a x v hv
+      simp only [Roster.apply, seat_current] at hv ⊢
+      split at hv
+      · rename_i same; rw [same.2]; exact ok.people _ _ _ hw₀
+      · split at hv
+        · rename_i same
+          obtain ⟨w, hw, _⟩ := Option.map_eq_some_iff.mp hv
+          exact ok.people a x w hw
+        · exact ok.people a x v hv
+    · intro a x v hv
+      simp only [Roster.apply, seat_current] at hv ⊢
+      have no : ¬ (store = key.audience ∧ x = m) := fun e => notStore e.1.symm
+      simp only [no, ite_false]
+      split at hv
+      · rename_i same
+        cases hv
+        obtain ⟨_, hx⟩ := same
+        subst hx
+        simp [hw₀]
+      · split at hv
+        · rename_i same
+          subst same
+          obtain ⟨w, hw, eq⟩ := Option.map_eq_some_iff.mp hv
+          simp [ok.sealing a x w hw, eq]
+        · rename_i different; simp [different, ok.sealing a x v hv]
+  | replaceKeys m c =>
     constructor
     · intro a x v hv
       simp only [Roster.apply] at hv ⊢
@@ -484,7 +562,7 @@ def Complete (h : History Aud Mem) (r : Roster Aud Mem) (a : Aud) : Prop :=
 
 /-- A replacement's or recovery's author reads `a` whenever its target does. -/
 def Inside (r : Roster Aud Mem) (a : Aud) : Slot Aud Mem → Prop
-  | .entry author _ (.replaceKeys m _) | .entry author _ (.recover m _) =>
+  | .entry author _ (.replaceKeys m _) | .entry author _ (.recover m _ _ _) =>
     (r.current a m).isSome = true → (r.current a author).isSome = true
   | _ => True
 
@@ -532,19 +610,40 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
     obtain ⟨allow, copies, -, -⟩ := legal_entry yes
     cases change with
     | create key hash c => simp [allowed] at allow
-    | admit m admin c =>
+    | admit m admin c key hash =>
+      simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq,
+        List.all_eq_true, Option.isNone_iff_eq_none] at allow
+      obtain ⟨⟨_, _⟩, ⟨⟨notStore, unused⟩, empty⟩⟩ := allow
       intro i hi ha x v hv
-      simp only [advance, Slot.event, step] at hi ⊢
+      simp only [advance, Slot.event, step, carried] at hi ⊢
       simp only [Roster.after, Roster.apply, seat_current] at hv
-      split at hv
-      · rename_i same
-        obtain ⟨hs, hx⟩ := same
-        cases hv
-        subst hx
-        apply List.mem_append_left
-        simp only [carried, required]
-        exact List.mem_map.mpr ⟨i, List.mem_filter.mpr ⟨hi, by simp [ha, hs]⟩, rfl⟩
-      · exact List.mem_append_right _ (done i hi ha x v hv)
+      rcases List.mem_cons.mp hi with rfl | old
+      · simp only at ha
+        split at hv
+        · rename_i same
+          cases hv
+          obtain ⟨_, hx⟩ := same
+          subst hx
+          exact List.mem_append_left _ (by simp [required])
+        · split at hv
+          · rename_i _ same
+            exact absurd (ha.trans same.1) notStore
+          · have hx := ok.people _ x v hv
+            rw [← ha, empty x hx] at hv
+            cases hv
+      · split at hv
+        · rename_i same
+          exact absurd (ha.trans same.1) (unused i old)
+        · split at hv
+          · rename_i _ same
+            cases hv
+            obtain ⟨hs, hx⟩ := same
+            subst hx
+            apply List.mem_append_left
+            simp only [required]
+            exact List.mem_append_left _
+              (List.mem_map.mpr ⟨i, List.mem_filter.mpr ⟨old, by simp [ha, hs]⟩, rfl⟩)
+          · exact List.mem_append_right _ (done i old ha x v hv)
     | removeMember m =>
       intro i hi ha x v hv
       simp only [advance, Slot.event, step, carried, List.nil_append] at hi ⊢
@@ -564,14 +663,37 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
           simp [ha, reads, holds]) i hi ha x v hv
       simp only [carried, List.nil_append]
       simpa only [List.mem_append, or_self] using this
-    | recover m c =>
+    | recover m c key hash =>
+      simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq,
+        List.all_eq_true, Option.isNone_iff_eq_none] at allow
+      obtain ⟨⟨_, _⟩, ⟨⟨notStore, unused⟩, empty⟩⟩ := allow
       intro i hi ha x v hv
-      simp only [advance, Slot.event, step] at hi ⊢
-      simp only [Roster.after, Roster.apply] at hv
-      exact keys_follow_replacement done inside _ (fun i hi ha reads holds => by
-        simp only [carried, required]
-        refine List.mem_map.mpr ⟨i, List.mem_filter.mpr ⟨hi, ?_⟩, rfl⟩
-        simp [ha, reads, holds]) i hi ha x v hv
+      simp only [advance, Slot.event, step, carried] at hi ⊢
+      simp only [Roster.after, Roster.apply, seat_current] at hv
+      rcases List.mem_cons.mp hi with rfl | old
+      · simp only at ha
+        split at hv
+        · rename_i same
+          cases hv
+          obtain ⟨_, hx⟩ := same
+          subst hx
+          exact List.mem_append_left _ (by simp [required])
+        · split at hv
+          · obtain ⟨w, hw, -⟩ := Option.map_eq_some_iff.mp hv
+            have hx := ok.people _ x w hw
+            rw [← ha, empty x hx] at hw
+            cases hw
+          · have hx := ok.people _ x v hv
+            rw [← ha, empty x hx] at hv
+            cases hv
+      · split at hv
+        · rename_i same
+          exact absurd (ha.trans same.1) (unused i old)
+        · exact keys_follow_replacement done inside _ (fun i hi ha reads holds => by
+            simp only [required]
+            exact List.mem_append_left _
+              (List.mem_map.mpr ⟨i, List.mem_filter.mpr ⟨hi, by simp [ha, reads, holds]⟩, rfl⟩))
+            i old ha x v hv
     | createCircle key hash =>
       simp only [allowed, Bool.and_eq_true, decide_eq_true_eq, ne_eq, List.all_eq_true,
         Option.isSome_iff_exists, Option.isNone_iff_eq_none] at allow
@@ -742,11 +864,11 @@ theorem store_copy_precedes_need {store : Aud} {seq : Nat → Slot Aud Mem} {n :
       have allow := (legal_entry yes).1
       simp only [allowed, Bool.and_eq_true] at allow
       exact fun _ => allow.1.1
-    | recover m c =>
+    | recover m c key hash =>
       rw [hs] at yes
       have allow := (legal_entry yes).1
       simp only [allowed, Bool.and_eq_true] at allow
-      exact fun _ => allow.1.1
+      exact fun _ => allow.1.1.1
     | _ => trivial
   | _ => trivial
 

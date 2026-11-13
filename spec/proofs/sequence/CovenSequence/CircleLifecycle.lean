@@ -22,6 +22,12 @@ this model is concrete and stands alone, and the Rust test
 - A deleted circle never changes again: no later entry adds a member to it,
   renames it or takes its deletion back (`deleted_stays`).
 
+- An admission makes its member's circle in the slot that admits them
+  (§13.2): `admit` for a new person, `recover` for a recovered member, whose
+  old circle no device can read. A circle id already used, live or deleted,
+  refuses the entry (`used_circle_refuses_admission`); the entry's repeat
+  changes nothing once the circle holds the member (`admission_repeat_unchanged`).
+
 The store's admin authority over a removal is `Authority`'s. That the author's
 device is active and acts for the author is §10's check, made with the
 author's standing before these rules; the model takes the standing alone.
@@ -58,6 +64,12 @@ inductive Entry (M C : Type) where
   | circle (author : M) (change : Change M C)
   /-- The store's removal of a member, which an admin makes (`Authority`). -/
   | removeMember (member : M)
+  /-- An admin's admission of a new person, who comes with a circle named
+  `name` that they alone are in. -/
+  | admit (author : M) (member : M) (circle : C) (name : String)
+  /-- An admin's recovery of a member who lost their keys, who comes with a
+  new circle named `name` that they alone are in. -/
+  | recover (author : M) (member : M) (circle : C) (name : String)
 
 /-- Why a check refuses an entry, as `OperationRejection` names it:
 `NotAllowed`, or `TargetGone` naming the circle or the member. -/
@@ -139,9 +151,31 @@ def removalEffect (s : State M C) (k : Nat) (m : M) : Outcome M C :=
   | .active => .applied { s.leave k m (fun _ => true) with
       standing := fun m' => if m' = m then .removed else s.standing m' }
 
+/-- A live circle `c` with exactly this name and `m` among its members: the
+circle an earlier application of the same admission made. -/
+def madeFor (s : State M C) (c : C) (m : M) (name : String) : Bool :=
+  match s.circles c with
+  | some x => (s.deleted c).isNone && decide (m ∈ x.members) && decide (x.name = name)
+  | none => false
+
+/-- An admission or a recovery. A new person must be unknown and the circle's
+id unused; a recovered member must be active and the circle's id unused. The
+same entry again, once the circle holds the member under that name, changes
+nothing. -/
+def admissionEffect (s : State M C) (author m : M) (c : C) (name : String)
+    (recovery : Bool) : Outcome M C :=
+  if s.standing author ≠ .active then .refused .notAllowed
+  else if madeFor s c m name && decide (s.standing m = .active) then .unchanged
+  else if s.standing m ≠ (if recovery then .active else .absent) then .refused .goneMember
+  else if (s.circles c).isSome then .refused .goneCircle
+  else .applied { s.set c ⟨name, [m]⟩ with
+    standing := fun m' => if m' = m then .active else s.standing m' }
+
 def effect (s : State M C) (k : Nat) : Entry M C → Outcome M C
   | .circle author change => changeEffect s k author change
   | .removeMember m => removalEffect s k m
+  | .admit author m c name => admissionEffect s author m c name false
+  | .recover author m c name => admissionEffect s author m c name true
 
 /-- The state a slot commits: a refused entry, or one already in place, leaves
 it as it was. -/
@@ -170,7 +204,8 @@ def stateAt (init : State M C) (seq : Nat → Option (Entry M C)) : Nat → Stat
 
 /-- The name an entry gives circle `c` if its check accepts it. -/
 def naming (c : C) : Entry M C → Option String
-  | .circle _ (.create c' n) | .circle _ (.rename c' n) => if c' = c then some n else none
+  | .circle _ (.create c' n) | .circle _ (.rename c' n)
+  | .admit _ _ c' n | .recover _ _ c' n => if c' = c then some n else none
   | _ => none
 
 /-- The name after an entry that gives circle `c` the name `named`, if any:
@@ -211,12 +246,44 @@ def Names (s : State M C) (c : C) (named : Option String) : Outcome M C → Prop
   | .unchanged => ∀ n, named = some n → (s.circles c).map (·.name) = some n
   | .applied next => (next.circles c).map (·.name) = named.or ((s.circles c).map (·.name))
 
+theorem admission_names (s : State M C) (a m : M) (c c' : C) (n : String) (rec : Bool) :
+    Names s c (if c' = c then some n else none) (admissionEffect s a m c' n rec) := by
+  unfold admissionEffect
+  by_cases active : s.standing a ≠ .active
+  · rw [if_pos active]; trivial
+  · rw [if_neg active]
+    by_cases made : (madeFor s c' m n && decide (s.standing m = .active)) = true
+    · rw [if_pos made]
+      intro n' named
+      by_cases same : c' = c
+      · subst c'
+        simp only [ite_true, Option.some.injEq] at named
+        subst n'
+        cases h : s.circles c with
+        | none => simp [madeFor, h] at made
+        | some x =>
+          simp [madeFor, h] at made
+          simp [made.1.2]
+      · simp [same] at named
+    · rw [if_neg made]
+      by_cases standing : s.standing m ≠ (if rec = true then .active else .absent)
+      · rw [if_pos standing]; trivial
+      · rw [if_neg standing]
+        by_cases used : (s.circles c').isSome = true
+        · rw [if_pos used]; trivial
+        · rw [if_neg used]
+          by_cases same : c' = c
+          · subst c'; simp [Names, State.set]
+          · simp [Names, State.set, same, Ne.symm same]
+
 theorem effect_names (s : State M C) (k : Nat) (e : Entry M C) (c : C) :
     Names s c (naming c e) (effect s k e) := by
   cases e with
   | removeMember m =>
     simp only [naming, effect, removalEffect]
     split <;> simp [Names, leave_name]
+  | admit a m c' n => exact admission_names s a m c c' n false
+  | recover a m c' n => exact admission_names s a m c c' n true
   | circle a change =>
     by_cases active : s.standing a = .active
     · cases change with
@@ -391,6 +458,26 @@ theorem set_moves (s : State M C) (k : Nat) (c c' : C) (x : Circle M)
   · have stay := Move.stay (k := k) (s.circles c, s.deleted c)
     simpa [State.set, same] using stay
 
+theorem admission_moves (s : State M C) (k : Nat) (a m : M) (c' : C) (n : String) (rec : Bool)
+    (next : State M C) (applied : admissionEffect s a m c' n rec = .applied next) (c : C) :
+    Move k (s.circles c, s.deleted c) (next.circles c, next.deleted c) := by
+  unfold admissionEffect at applied
+  by_cases active : s.standing a ≠ .active
+  · rw [if_pos active] at applied; cases applied
+  · rw [if_neg active] at applied
+    by_cases made : (madeFor s c' m n && decide (s.standing m = .active)) = true
+    · rw [if_pos made] at applied; cases applied
+    · rw [if_neg made] at applied
+      by_cases standing : s.standing m ≠ (if rec = true then .active else .absent)
+      · rw [if_pos standing] at applied; cases applied
+      · rw [if_neg standing] at applied
+        by_cases used : (s.circles c').isSome = true
+        · rw [if_pos used] at applied; cases applied
+        · rw [if_neg used] at applied
+          cases applied
+          have none : s.circles c' = none := by simpa using used
+          exact set_moves s k c c' ⟨n, [m]⟩ (fun _ => by rw [none]; exact .make _ _ (by simp))
+
 /-- Each circle moves as `Move` allows at every applied entry. -/
 theorem effect_moves (s : State M C) (k : Nat) (e : Entry M C) (next : State M C)
     (applied : effect s k e = .applied next) (c : C) :
@@ -402,6 +489,8 @@ theorem effect_moves (s : State M C) (k : Nat) (e : Entry M C) (next : State M C
     · cases applied
     · cases applied
     · cases applied; exact leave_moves s k m (fun _ => true) c
+  | admit a m c' n => exact admission_moves s k a m c' n false next applied c
+  | recover a m c' n => exact admission_moves s k a m c' n true next applied c
   | circle a change =>
     simp only [effect, changeEffect] at applied
     split at applied
@@ -660,5 +749,75 @@ theorem deleted_stays (init : State M C) (seq : Nat → Option (Entry M C)) (wf 
         have kept := step_keeps_deleted (stateAt init seq i) (i + 1) (seq (i + 1)) c
           (wf_at init seq wf i) still
         exact ⟨kept.1.trans prior.1, kept.2.trans prior.2⟩
+
+/-! ## Admissions make their member's circle -/
+
+/-- **An admission makes its member's circle.** An admission or a recovery
+that applies leaves the member active and alone in the circle it names, whose
+id no circle, live or deleted, held before; a new person was unknown, and a
+recovered member active. -/
+theorem admission_makes_circle (s : State M C) (a m : M) (c : C) (n : String) (rec : Bool)
+    (next : State M C) (applied : admissionEffect s a m c n rec = .applied next) :
+    s.standing a = .active ∧ s.circles c = none ∧
+      next.circles c = some ⟨n, [m]⟩ ∧ next.standing m = .active ∧
+      s.standing m = (if rec = true then .active else .absent) := by
+  unfold admissionEffect at applied
+  by_cases active : s.standing a ≠ .active
+  · rw [if_pos active] at applied; cases applied
+  · rw [if_neg active] at applied
+    by_cases made : (madeFor s c m n && decide (s.standing m = .active)) = true
+    · rw [if_pos made] at applied; cases applied
+    · rw [if_neg made] at applied
+      by_cases standing : s.standing m ≠ (if rec = true then .active else .absent)
+      · rw [if_pos standing] at applied; cases applied
+      · rw [if_neg standing] at applied
+        by_cases used : (s.circles c).isSome = true
+        · rw [if_pos used] at applied; cases applied
+        · rw [if_neg used] at applied
+          cases applied
+          refine ⟨by simpa using active, by simpa using used, ?_, ?_, by simpa using standing⟩
+          · simp [State.set]
+          · simp
+
+/-- **A circle id already used refuses an admission** (§13.2): live or deleted,
+a circle under the id leaves a new person unknown and the store unchanged. -/
+theorem used_circle_refuses_admission (s : State M C) (k : Nat) (a m : M) (c : C) (n : String)
+    (active : s.standing a = .active) (unknown : s.standing m = .absent)
+    (used : (s.circles c).isSome) :
+    effect s k (.admit a m c n) = .refused .goneCircle := by
+  have notMade : (madeFor s c m n && decide (s.standing m = .active)) = false := by simp [unknown]
+  simp [effect, admissionEffect, active, notMade, unknown, used]
+
+/-- The same admission again, once its circle holds the member under the name
+it gave, changes nothing (§13.2): the check that finds an admission already
+done requires the circle too. -/
+theorem admission_repeat_unchanged (s : State M C) (k : Nat) (a m : M) (c : C) (n : String)
+    (x : Circle M) (active : s.standing a = .active) (member : s.standing m = .active)
+    (made : s.circles c = some x) (live : s.deleted c = none) (held : m ∈ x.members)
+    (named : x.name = n) :
+    effect s k (.admit a m c n) = .unchanged ∧ effect s k (.recover a m c n) = .unchanged := by
+  simp [effect, admissionEffect, active, madeFor, made, live, held, named, member]
+
+/-- A recovered member's new circle is made beside their old one, which
+stays as it was. -/
+theorem recovery_keeps_old_circles (s : State M C) (a m : M) (c d : C) (n : String)
+    (next : State M C) (applied : admissionEffect s a m c n true = .applied next)
+    (other : d ≠ c) : next.circles d = s.circles d := by
+  have := admission_makes_circle s a m c n true next applied
+  unfold admissionEffect at applied
+  by_cases active : s.standing a ≠ .active
+  · rw [if_pos active] at applied; cases applied
+  · rw [if_neg active] at applied
+    by_cases made : (madeFor s c m n && decide (s.standing m = .active)) = true
+    · rw [if_pos made] at applied; cases applied
+    · rw [if_neg made] at applied
+      by_cases standing : s.standing m ≠ (if true = true then .active else .absent)
+      · rw [if_pos standing] at applied; cases applied
+      · rw [if_neg standing] at applied
+        by_cases used : (s.circles c).isSome = true
+        · rw [if_pos used] at applied; cases applied
+        · rw [if_neg used] at applied
+          cases applied
+          simp [State.set, other]
 
 end CovenSequence.CircleLifecycle

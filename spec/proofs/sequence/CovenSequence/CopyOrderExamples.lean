@@ -21,9 +21,17 @@ def giftsKey : Key Nat := ⟨gifts, 2⟩
 def nextStoreKey : Key Nat := ⟨household, 3⟩
 def nextGiftsKey : Key Nat := ⟨gifts, 4⟩
 
+/-- The circles an admission makes for the member it admits: each member's
+own, and the new one a recovery gives Ben. -/
+def benCircleKey : Key Nat := ⟨2, 7⟩
+def carolCircleKey : Key Nat := ⟨3, 8⟩
+def danCircleKey : Key Nat := ⟨4, 9⟩
+def benNewCircleKey : Key Nat := ⟨5, 10⟩
+
 /-- Ana is an admin outside Gifts. Carol made Gifts, added Ben, and wrote to it
 at slot 9. Ben loses his devices, and Ana recovers him at slot 10, her
-admission carrying what she holds: the store key. Carol's next write chose the
+admission carrying what she holds: the store key, and the new circle's key,
+which only Ben reads. Carol's next write chose the
 Gifts key and lost slot 10 to the recovery, and her device stops before it
 reads why. Ana's next pass replaces the store key the recovery exposed, at
 slots 11 to 14. Carol's device comes back: a pass sends its writes first, so
@@ -33,14 +41,14 @@ its first attempt (§6.3). The same pass then replaces the Gifts key, at slots
 def recovery : Nat → CopyOrder.Slot Nat Nat
   | 1 => .entry ana storeKey (.create storeKey 100 10)
   | 2 => .copy storeKey ⟨storeKey, ana, 10⟩
-  | 3 => .entry ana storeKey (.admit ben false 20)
-  | 4 => .entry ana storeKey (.admit carol false 30)
+  | 3 => .entry ana storeKey (.admit ben false 20 benCircleKey 300)
+  | 4 => .entry ana storeKey (.admit carol false 30 carolCircleKey 301)
   | 5 => .copy storeKey ⟨giftsKey, carol, 30⟩
   | 6 => .entry carol storeKey (.createCircle giftsKey 200)
   | 7 => .copy storeKey ⟨giftsKey, ben, 20⟩
   | 8 => .entry carol storeKey (.addToCircle gifts ben)
   | 9 => .writes storeKey [giftsKey]
-  | 10 => .entry ana storeKey (.recover ben 21)
+  | 10 => .entry ana storeKey (.recover ben 21 benNewCircleKey 302)
   | 11 => .copy storeKey ⟨nextStoreKey, ana, 10⟩
   | 12 => .copy storeKey ⟨nextStoreKey, ben, 21⟩
   | 13 => .copy storeKey ⟨nextStoreKey, carol, 30⟩
@@ -97,13 +105,14 @@ def thirdKey : Key Nat := ⟨household, 6⟩
 /-- Ben rotates the store key while Ana admits Dan: the admission lands among
 the rotation's copies, and Ben, reading it before his next claim, sends Dan his
 too. Then Dan replaces his keys among the next rotation's copies, after one of
-them went to his old sealing key, and Ben sends one to his new one. -/
+them went to his old sealing key, and Ben sends one to his new one. His
+replacement carries his own circle's key too, which only he holds. -/
 def races : Nat → CopyOrder.Slot Nat Nat
   | 1 => .entry ana storeKey (.create storeKey 100 10)
   | 2 => .copy storeKey ⟨storeKey, ana, 10⟩
-  | 3 => .entry ana storeKey (.admit ben true 20)
+  | 3 => .entry ana storeKey (.admit ben true 20 benCircleKey 300)
   | 4 => .copy storeKey ⟨secondKey, ana, 10⟩
-  | 5 => .entry ana storeKey (.admit dan false 40)
+  | 5 => .entry ana storeKey (.admit dan false 40 danCircleKey 303)
   | 6 => .copy storeKey ⟨secondKey, ben, 20⟩
   | 7 => .copy storeKey ⟨secondKey, dan, 40⟩
   | 8 => .entry ben storeKey (.rotate secondKey 201)
@@ -111,21 +120,22 @@ def races : Nat → CopyOrder.Slot Nat Nat
   | 10 => .copy storeKey ⟨thirdKey, dan, 40⟩
   | 11 => .copy storeKey ⟨storeKey, dan, 41⟩
   | 12 => .copy storeKey ⟨secondKey, dan, 41⟩
-  | 13 => .entry dan storeKey (.replaceKeys dan 41)
-  | 14 => .copy storeKey ⟨thirdKey, ben, 20⟩
-  | 15 => .copy storeKey ⟨thirdKey, dan, 41⟩
-  | 16 => .entry ben storeKey (.rotate thirdKey 202)
+  | 13 => .copy storeKey ⟨danCircleKey, dan, 41⟩
+  | 14 => .entry dan storeKey (.replaceKeys dan 41)
+  | 15 => .copy storeKey ⟨thirdKey, ben, 20⟩
+  | 16 => .copy storeKey ⟨thirdKey, dan, 41⟩
+  | 17 => .entry ben storeKey (.rotate thirdKey 202)
   | _ => .copy thirdKey ⟨thirdKey, ana, 10⟩
 
-theorem races_follow : Follows household races 17 := by
+theorem races_follow : Follows household races 18 := by
   refine ⟨⟨ana, storeKey, 100, 10, rfl, rfl, rfl⟩, ?_⟩
-  have all : ∀ k, k < 18 → 3 ≤ k → legal household (keysAt household races (k - 1))
+  have all : ∀ k, k < 19 → 3 ≤ k → legal household (keysAt household races (k - 1))
       (rosterAt household races (k - 1)) (races k) = true := by decide +kernel
   exact fun k three below => all k (by omega) three
 
 /-- Dan's copy of the newest key sits below the first slot it seals. -/
 theorem races_keep_order :
-    ∃ t, 0 < t ∧ t < 17 ∧ (⟨thirdKey, dan, 41⟩ : Route Nat Nat) ∈ carriedAt household races t :=
+    ∃ t, 0 < t ∧ t < 18 ∧ (⟨thirdKey, dan, 41⟩ : Route Nat Nat) ∈ carriedAt household races t :=
   store_copy_precedes_need races_follow (by omega) (by omega) (by decide) rfl (by decide +kernel)
 
 /-- A rotation that kept the routes it first read lands without Dan's copy, and

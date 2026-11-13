@@ -728,4 +728,27 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (json% {"kind": "circleLifecycle", "people": [1], "active": [1], "circles": [1],
     "histories": [[{"kind": "add", "author": 1, "circle": 1, "member": 2}]]})
 
+-- Ana (1) admits Dan (4) with his circle 1, and an admission of Eve (5) under
+-- the same circle id is refused as gone. The same admission again changes
+-- nothing. Ana recovers Ben (2) with a new circle 2, and a recovery of Eve,
+-- unknown, is refused as a gone member.
+#eval do
+  let out ← run (json% {"kind": "circleLifecycle", "people": [1, 2, 3, 4, 5],
+    "active": [1, 2, 3], "circles": [1, 2], "histories": [[
+      {"kind": "admit", "author": 1, "member": 4, "circle": 1, "name": "Dan"},
+      {"kind": "admit", "author": 1, "member": 5, "circle": 1, "name": "Eve"},
+      {"kind": "admit", "author": 1, "member": 4, "circle": 1, "name": "Dan"},
+      {"kind": "recover", "author": 1, "member": 2, "circle": 2, "name": "Ben"},
+      {"kind": "recover", "author": 1, "member": 5, "circle": 2, "name": "Eve"}]]})
+  for (i, outcome) in [((0 : Nat), "applied"), (1, "goneCircle"), (2, "unchanged"),
+      (3, "applied"), (4, "goneMember")] do
+    checkField out ["0", toString i, "outcome"] (toJson outcome)
+  checkField out ["0", "0", "circles"]
+    (json% [[1, {"name": "Dan", "members": [4], "deleted": null}], [2, null]])
+  checkField out ["0", "0", "standing"]
+    (json% [[1, "active"], [2, "active"], [3, "active"], [4, "active"], [5, "absent"]])
+  checkField out ["0", "3", "circles"]
+    (json% [[1, {"name": "Dan", "members": [4], "deleted": null}],
+      [2, {"name": "Ben", "members": [2], "deleted": null}]])
+
 end SequenceTests

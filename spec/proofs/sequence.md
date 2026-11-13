@@ -345,6 +345,12 @@ before it, a slot below carries a copy to the member's current sealing key.
   recovery of a reader comes from another reader. That holds of the store, so
   a store key's copy is always first, an admitted member's in its admission;
   for a circle it is the premise of `copy_precedes_need_inside`.
+- `admission_carries_own_copy`: an admission or a recovery also makes the
+  member's circle, so its slot introduces the circle's key and carries a copy
+  to the member's sealing key; the circle's audience is unused before it
+  (`circleFree`), and the member alone reads it. The circle's first reader has
+  its copy from the slot that makes the circle, and the claims above are
+  unchanged.
 - `leave_selects_new_key`: the entry that removes a member from a circle
   introduces the circle's replacement key, and the copies it requires sit below
   it, to the readers who remain (`required`'s `leaveCircle` case; an entry whose
@@ -548,6 +554,14 @@ others stay is refused as `NotAllowed` (`mayLeave`).
 - `deleted_stays`: once deleted, a circle keeps its record, with no members,
   and its deletion slot at every later prefix, so no later entry adds a member
   to it or takes the deletion back.
+- `admission_makes_circle`, `used_circle_refuses_admission`,
+  `admission_repeat_unchanged`, `recovery_keeps_old_circles`: an admission of
+  a new person or a recovery of a member makes the member's circle in its own
+  slot, with the member alone in it; an id already used, live or deleted,
+  refuses the entry; the same entry again changes nothing once the circle holds
+  the member under that name; and a recovery leaves the member's older
+  circles as they were. The Rust differential runs `admit` and `recover`
+  histories through the same reader.
 
 These hold for every start whose circles keep `Wf`: a deleted circle was made
 and has no members, and a live one has a member. A store with no circles

@@ -15,6 +15,14 @@ def readEntry (people circles : List Nat) (j : Json) : Except String (Entry Nat 
     return m
   match ← j.getObjValAs? String "kind" with
   | "removeMember" => return .removeMember (← person "member")
+  | "admit" | "recover" =>
+    let kind ← j.getObjValAs? String "kind"
+    let c ← nat j "circle"
+    if c ∉ circles then throw s!"circle {c} is not in circles"
+    let author ← person "author"
+    let member ← person "member"
+    let name ← j.getObjValAs? String "name"
+    return if kind == "admit" then .admit author member c name else .recover author member c name
   | kind =>
     let author ← person "author"
     let c ← nat j "circle"
