@@ -124,3 +124,72 @@ async fn a_rebuild_starts_the_store_from_a_reset_body() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben, on the old app, makes Garden and adds Cy; Ana's app migrates and
+/// raises the store, so the floor she publishes holds a store snapshot at the
+/// new version beside Garden's at the old one. Cy, on the new app, meets that
+/// floor, which makes Garden readable to him at the old version: his
+/// database, at the newer one, can't hold that snapshot, so Garden waits for
+/// its rebuild and holds none of it (§18.3).
+#[tokio::test]
+async fn a_floor_reload_leaves_a_circle_below_the_version_gated_for_its_rebuild() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let cy = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &cy).await;
+    cy.sync.pass().await.unwrap();
+    let applied = cy.database().applied_slot().await.unwrap();
+    let garden = ben.sync.create_circle("Garden".into()).await.unwrap();
+    pin(ben.database(), EARLY, garden, "early").await;
+    ben.sync.pass().await.unwrap();
+    ben.sync.snapshot(Audience::Circle(garden)).await.unwrap();
+    ben.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: cy.identity.member(),
+        })
+        .await
+        .unwrap();
+    // The store's snapshot at the old version covers all of that.
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    // Ben stays on the old app: Ana's marker would stop him.
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let cy = group.reopen(cy).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 2);
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    group.clock.set(floor_clock());
+    {
+        let mut session = ana.sync.session.lock().await;
+        let mut ring = ana.sync.ring(&mut session, &ana.identity).await.unwrap();
+        ana.sync.retain_sequence(&mut session, &mut ring, &ana.identity).await.unwrap();
+    }
+    let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
+    assert!(floor.header.first.get() > applied + 1);
+
+    cy.sync.pass().await.unwrap();
+    assert!(pins(cy.database()).await.is_empty(), "Garden's old rows are not in his database");
+    assert!(cy
+        .database()
+        .rebuilds_waiting()
+        .await
+        .unwrap()
+        .contains_key(&Audience::Circle(garden)));
+    for _ in 0..6 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert_eq!(pins(cy.database()).await, [(EARLY.to_string(), "early".to_string())]);
+    for device in [&ana, &ben, &cy] {
+        device.sync.database.close().await.unwrap();
+    }
+}

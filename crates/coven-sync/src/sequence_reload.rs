@@ -435,11 +435,21 @@ impl SequenceSync {
                 }
             }
         }
+        let breaking = self.database.breaking_version().await?;
         loop {
             let mut tentative_ring = ring.clone();
             let (history, store_snapshot) = self
                 .floor_start(&floor, &mut tentative_ring, member, progress.as_deref_mut())
                 .await?;
+            // A circle below this database's version takes no snapshot of the
+            // floor, which holds it at that lower version: it waits for its
+            // rebuild, as a circle made readable by a slot does (§18.3).
+            let rebuilds: Vec<Audience> = history
+                .state
+                .readable_audiences(&member.member())
+                .into_iter()
+                .filter(|audience| history.state.rebuilt_by(audience, breaking))
+                .collect();
             let mut starts = vec![ReloadStart::Stored(store_snapshot)];
             let selected = async {
                 for original in floor.announcements.iter().skip(1) {
@@ -451,7 +461,8 @@ impl SequenceSync {
                         &history.state,
                         &announcement.snapshot.audience,
                         &member.member(),
-                    ) {
+                    ) && !rebuilds.contains(&announcement.snapshot.audience)
+                    {
                         starts.push(ReloadStart::Stored(
                             self.select(
                                 announcement.clone(),
@@ -483,7 +494,7 @@ impl SequenceSync {
                         history,
                         through: floor.header.at,
                         operation: None,
-                        rebuilds: Vec::new(),
+                        rebuilds: rebuilds.clone(),
                     },
                     &mut tentative_ring,
                     member,

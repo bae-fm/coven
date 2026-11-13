@@ -9317,6 +9317,10 @@ raise built on them, covering the rebuild slot, counts like any other
 - **Writes into the circle.** Until the rebuild commits, they fail with
   `AudienceReloading`, as during any load (§16.5). After it, they wait for the
   circle's raise, as writes made after a migration do (§18.5).
+- **A floor load.** Loading the floor's snapshots takes none of a circle
+  below the device's version: the floor holds it at that version, and the
+  database is at a newer one. The circle waits for its rebuild as one a slot
+  made readable does, and the load queues the marker its rebuild runs under.
 - **A marker whose history is gone.** If retention has removed the slots after
   the snapshots the rebuild would start from while the marker was in flight,
   the device queues a new marker, read through the slot it has applied then,
