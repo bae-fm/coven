@@ -141,6 +141,7 @@ impl Database {
                                 &writers,
                                 files,
                                 inner.raise_operation.as_deref(),
+                                inner.clock.now(),
                                 authenticate,
                             )
                         })
@@ -233,6 +234,20 @@ impl Database {
                 .readers
                 .acquire_reader()
                 .with_reader(crate::reload_gate::reloading_audiences)
+        })
+        .await
+    }
+
+    /// The circles waiting for their rebuild (§18.3), each with the migration
+    /// write the rebuild runs under, which this device queued when it started
+    /// reading the circle. Their parts pass unread and writes into them fail
+    /// with `AudienceReloading` until the rebuild commits.
+    pub async fn rebuilds_waiting(
+        &self,
+    ) -> Result<std::collections::BTreeMap<coven_merge::Audience, coven_merge::WriteId>, DbError>
+    {
+        self.call(move |inner| {
+            inner.access.readers.acquire_reader().with_reader(crate::reload_gate::rebuilding)
         })
         .await
     }

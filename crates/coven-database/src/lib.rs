@@ -257,6 +257,7 @@ mod forget_records;
 mod published;
 mod published_migration;
 mod queued_writes;
+mod rebuild_wait;
 mod reload_gate;
 mod sequence;
 mod sequence_apply;

@@ -168,6 +168,18 @@ pub(crate) fn raise_to(
     Ok(true)
 }
 
+/// A marker queued behind the writes a waiting raise captured: the raise's
+/// prefix now runs through it, so no raise goes out ahead of it (§18.4).
+pub(crate) fn follow(db: &DatabaseConnection, marker: WriteId) -> Result<(), DbError> {
+    for capture in captures(db, marker.device)? {
+        db.internal_execute(
+            "UPDATE _coven_raise_captures SET through=?1 WHERE audience=?2 AND version=?3",
+            params![marker.number.to_be_bytes(), capture.audience, capture.version],
+        )?;
+    }
+    crate::pending::end_captured_raise_waits(db, marker.number)
+}
+
 pub(crate) fn prepare(
     db: &DatabaseConnection,
     _schema: &WriteSchema,

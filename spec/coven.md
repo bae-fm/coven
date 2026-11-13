@@ -9146,7 +9146,10 @@ migrates them itself. It starts once its migration write's marker has a slot
 (§18.4); until the rebuild commits, it passes the circle's parts unopened, as
 it did before it could read the circle, and goes on applying the rest of the
 store. The migration write is one the rebuild has of its own: the device
-queues it when it starts reading the circle (§18.4).
+queues it when it starts reading the circle (§18.4). The slot that makes the
+circle readable applies like any other, and in the same commit the device
+gates writes into the circle, records that the circle waits for its rebuild,
+and queues that write's marker, so no pass stops on the circle.
 
 1. In a database of its own, it runs the app's migrations up to the version
    before the first breaking migration past the circle's version, and declares
@@ -9167,10 +9170,11 @@ queues it when it starts reading the circle (§18.4).
 3. It runs the breaking migrations over that database, checked as any run is,
    and makes the migration write with the header the device queued for the
    rebuild: its number, its timestamp and the rebuild slot as the slot it read
-   through (§18.4). A header that isn't a migration at the version the run
-   reaches, this device's next write in the database, newer than every write
-   it holds and read through the slot the database has applied, is refused
-   before any statement runs. Cells the migration changed are set by that
+   through (§18.4). A header that isn't a migration write at a version the run
+   reaches (its newest breaking migration's, or a later one the app has since
+   reached by additions), this device's next write in the database, newer than
+   every write it holds and read through the slot the database has applied, is
+   refused before any statement runs. Cells the migration changed are set by that
    write.
 4. It reads on, as a device that held the circle through the rebuild slot,
    migrated and went on reading would: it applies the slots after the rebuild
@@ -9315,7 +9319,11 @@ it has then applied, with a timestamp newer than every write it holds, whether
 or not it ran the breaking step on this open (Carol's phone, which joined with
 its app already at version 2, queues one too). The rebuild starts only once
 that marker has a slot, runs the migration under the write's header, and reads
-on as a holder does (§18.3).
+on as a holder does (§18.3). A circle that waits when the device's app runs
+another breaking migration is rebuilt to that migration's version, under that
+migration's write, which has read through every slot applied before it. A
+circle the device stops reading while it waits, by removal or deletion, stops
+waiting.
 
 The changes can't ride on a write that read less than the rows they are
 computed from. A write's change wins only over what the write read and is

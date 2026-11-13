@@ -160,6 +160,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("once per migration: carry all unique constraints through schema changes"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
+("reload_gate.rs", "SELECT audience,marker FROM _coven_data_reloads WHERE marker IS NOT NULL", "_coven_data_reloads") =>
+    Some("applying a slot leaves unread the parts of every audience awaiting its rebuild"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>
     Some("snapshot coverage records each device's last consumed claim"),
 ("merge_store.rs", "SELECT timestamp,number FROM _coven_writes INDEXED BY sqlite_autoindex__coven_writes_1 WHERE (slot<=?1 OR ({WRITE_DEVICE_SQL}=?2 AND number<?3)) ORDER BY timestamp DESC LIMIT 1", "_coven_writes") =>

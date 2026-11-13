@@ -63,7 +63,15 @@ pub(crate) fn run<'a>(
     // Each version's file references: the registered ones, carried through
     // each step's renames, then the final declarations (§18.1).
     if let Installation::Rebuilding(header) = &origin.2 {
-        check_rebuild_header(database, origin.0, supported, header)?;
+        let breaking = migrations
+            .iter()
+            .filter(|m| {
+                m.version > current
+                    && matches!(m.kind, crate::migration::MigrationKind::Breaking(_))
+            })
+            .map(|m| m.version)
+            .max();
+        check_rebuild_header(database, origin.0, breaking, supported, header)?;
     }
     let mut files = crate::file_table::registered_columns(database)?;
     let mut before = Schema::read(database, &files)?;
@@ -253,12 +261,15 @@ pub(crate) fn run<'a>(
 }
 
 /// Refuse, before any statement runs, a rebuild's migration write header that
-/// is not this device's next write in the rebuild's store, a migration at the
-/// version the run reaches, read through the slot the store has applied: the
-/// merge counts a write's changes only over what it read (§18.3).
+/// is not this device's next write in the rebuild's store, a migration at a
+/// version the run reaches (its newest breaking migration's, or a later one
+/// the device's app has since reached by additions), read through the slot the
+/// store has applied: the merge counts a write's changes only over what it read
+/// (§18.3).
 fn check_rebuild_header(
     database: &DatabaseConnection,
     device: DeviceId,
+    breaking: Option<u32>,
     supported: u32,
     header: &coven_format::write::WriteHeader,
 ) -> Result<(), DbError> {
@@ -266,8 +277,13 @@ fn check_rebuild_header(
     if header.disposition != WriteDisposition::Migration {
         return refuse("it is not a migration write");
     }
-    if header.schema_version != supported {
-        return refuse("it is not at the version the run reaches");
+    let Some(breaking) = breaking else {
+        return refuse("the run has no breaking migration");
+    };
+    if header.schema_version < breaking || header.schema_version > supported {
+        return refuse(
+            "it is not at a version the run reaches after its newest breaking migration",
+        );
     }
     if header.position.device != device {
         return refuse("it is another device's write");

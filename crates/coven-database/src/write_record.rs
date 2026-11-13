@@ -435,6 +435,20 @@ pub(crate) fn changed_under(
     )
 }
 
+/// The empty migration write a device queues when it starts reading a circle
+/// below its breaking version, which its rebuild of the circle runs under: read
+/// through the slot applied now, newer than every write the device holds
+/// (§18.4).
+pub(crate) fn rebuild_marker(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    now: SystemTime,
+) -> Result<WriteRecord, DbError> {
+    let mut record = unordered(database, device, now, BTreeMap::new(), BTreeMap::new())?;
+    record.header.disposition = WriteDisposition::Migration;
+    Ok(record)
+}
+
 fn unordered(
     database: &DatabaseConnection,
     device: DeviceId,

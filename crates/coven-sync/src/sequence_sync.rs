@@ -481,36 +481,41 @@ impl SequenceSync {
         if at.get() <= session.through {
             return Ok(());
         }
+        let mut reloads = Vec::new();
         if let SlotContent::Admin { effect: Some(effect), .. } = &mut incoming.content {
             effect.provider_access = history.provider_access(member.member())?;
-            if !effect.reload.is_empty() {
-                let required = effect.reload.clone();
-                // Persist the audience gates before reading any replacement body.
-                self.database
-                    .apply_slot::<PendingRecord, _, _>(
-                        incoming,
-                        history.writers(self.device),
-                        || Ok(()),
-                    )
-                    .await?;
-                return self.reload_activation(session, at, &required, history, ring, member).await;
-            }
+            reloads = effect.reload.clone();
         }
-        self.keys.persist(ring)?;
+        // A reload persists the audience gates before any replacement body is
+        // read, and keeps the keys after it loads.
+        if reloads.is_empty() {
+            self.keys.persist(ring)?;
+        }
         let result = self
             .database
             .apply_slot::<PendingRecord, _, _>(incoming, history.writers(self.device), || Ok(()))
             .await
             .map_err(|error| crate::write_object::database_failure(&self.path(at), error))?;
-        match result {
-            coven_database::ApplyOutcome::Applied
-            | coven_database::ApplyOutcome::AlreadyApplied => {
+        match (result, reloads.is_empty()) {
+            // The database applied the slot whole: no audience in it needs
+            // replacement data, and a circle below this device's version
+            // waits for its rebuild instead (§18.3).
+            (coven_database::ApplyOutcome::Applied, _)
+            | (coven_database::ApplyOutcome::AlreadyApplied, true) => {
+                if !reloads.is_empty() {
+                    self.keys.persist(ring)?;
+                }
                 session.through = at.get();
                 session.history = history;
                 self.check_binding(session, member)?;
                 Ok(())
             }
-            coven_database::ApplyOutcome::Waiting(wait) => {
+            (coven_database::ApplyOutcome::AlreadyApplied, false)
+            | (
+                coven_database::ApplyOutcome::Waiting(coven_database::WriteWait::Reload(_)),
+                false,
+            ) => self.reload_activation(session, at, &reloads, history, ring, member).await,
+            (coven_database::ApplyOutcome::Waiting(wait), _) => {
                 Err(SyncError::Pending(Box::new(PendingRecord::new(
                     PendingSubject::Slot(at),
                     match wait {

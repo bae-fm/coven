@@ -345,6 +345,11 @@ impl DatabaseConnection {
                     // later app write; with no store there is no shared version to
                     // raise, and an installation that loads its store has no marker.
                     let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
+                    // A circle still waiting for its rebuild is rebuilt to this
+                    // migration's version, under this migration's write.
+                    if let Some(marker) = marker {
+                        crate::reload_gate::follow(db, marker)?;
+                    }
                     let captured = match marker {
                         Some(marker) => {
                             crate::raise_capture::capture(db, &schema, marker, supported)?

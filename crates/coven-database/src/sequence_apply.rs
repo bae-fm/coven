@@ -101,6 +101,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     writers: &crate::Writers,
     files: &crate::file_write::WriteFiles<'_>,
     raises: Option<&crate::migration::MigrationOperation>,
+    now: std::time::SystemTime,
     authenticate: impl FnOnce() -> Result<(), DbError>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     crate::download::source_wait(db.stream_transaction(|db| {
@@ -114,8 +115,17 @@ pub(crate) fn apply<P: crate::PendingValue>(
         if applied.checked_add(1) != Some(incoming.slot.get()) || incoming.header.after > applied {
             return Err(DbError::SequenceGap { applied, received: incoming.slot });
         }
+        // Circles that became readable below this device's breaking version
+        // don't reload: the slot applies, and each waits for its rebuild.
+        let mut rebuilding = Vec::new();
         if let SlotContent::Admin { effect: Some(effect), .. } = &incoming.content {
-            if let Some(audience) = effect.reload.first() {
+            if let Some(circles) = crate::rebuild_wait::rebuilt(
+                &effect.state,
+                &effect.reload,
+                crate::raise_capture::breaking_version(db)?,
+            ) {
+                rebuilding = circles;
+            } else if let Some(audience) = effect.reload.first() {
                 authenticate()?;
                 for required in &effect.reload {
                     crate::reload_gate::require_reload::<P>(db, required)?;
@@ -154,6 +164,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                         && effect.state.store.is_some();
                     crate::sequence::cutoff(db, incoming.slot, &effect.change)?;
                     crate::store_state_tables::replace(db, &effect.state)?;
+                    crate::rebuild_wait::release(db, &effect.state)?;
                     if created {
                         crate::raise_capture::capture_created(db, schema)?;
                     }
@@ -187,6 +198,9 @@ pub(crate) fn apply<P: crate::PendingValue>(
         authenticate()?;
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         crate::sequence::set_applied(db, incoming.slot.get())?;
+        if !rebuilding.is_empty() {
+            crate::rebuild_wait::begin::<P>(db, schema, now, &rebuilding)?;
+        }
         crate::forget_records::forget(db, writers)?;
         let refold = if whole {
             crate::queued_writes::Refold::Whole
@@ -256,6 +270,11 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         "INSERT INTO _coven_write_slots(slot,size) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
         rusqlite::params![slot.get().to_be_bytes(), stored],
     )?;
+    // The parts of a circle awaiting its rebuild pass unread.
+    let gated: BTreeSet<_> = match &staging {
+        Staging::Next(_) => crate::reload_gate::rebuilding(db)?.into_keys().collect(),
+        Staging::Reload(_) => BTreeSet::new(),
+    };
     let mut previous = None;
     for write in writes {
         header.check_write(&write.header().header)?;
@@ -298,7 +317,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 write,
                 slot,
                 cutoff.is_some(),
-                |_| true,
+                |audience| !gated.contains(audience),
                 Some(reach),
             )?,
             Staging::Reload(coverage) => crate::download_stream::stage_selected(

@@ -7,7 +7,8 @@ macro_rules! coven_data_reloads_tables {
             "
             CREATE TABLE _coven_data_reloads (
                 audience TEXT PRIMARY KEY NOT NULL,
-                subject BLOB NOT NULL
+                subject BLOB NOT NULL,
+                marker BLOB
             ) STRICT, WITHOUT ROWID;
         "
         );

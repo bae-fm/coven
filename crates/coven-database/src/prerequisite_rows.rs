@@ -61,7 +61,7 @@ fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
 const UPLOADS: &[&str] = &["record"];
 const UPLOAD_KEYS: &[&str] = &["sealing_keys"];
 const UPLOAD_CLAIMS: &[&str] = &["claim"];
-const DATA_RELOADS: &[&str] = &["subject"];
+const DATA_RELOADS: &[&str] = &["subject", "marker"];
 const PROVIDER_ACCESS: &[&str] = &["intended", "granted", "invitation", "operation", "target"];
 const OPERATIONS: &[&str] = &["kind", "last_step", "data", "started_by"];
 

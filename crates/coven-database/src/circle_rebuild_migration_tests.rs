@@ -421,16 +421,15 @@ async fn rebuilding_app(
     statement: &'static str,
     old_writes: OldWrites,
 ) -> (TestStore, Database) {
+    rebuilding_app_with(holder, filled_migrations(statement, old_writes)).await
+}
+
+async fn rebuilding_app_with(holder: &Holder, migrations: Vec<Migration>) -> (TestStore, Database) {
     let store = TestStore::with_ids(&SequentialIds::new());
     assert_eq!(store.device(), holder.store.device());
     // Its store loads from storage next, so it queues no migration write of
     // its own beside the holder's.
-    let app = store
-        .builder(filled_tables(), filled_migrations(statement, old_writes))
-        .loading_store()
-        .open()
-        .await
-        .unwrap();
+    let app = store.builder(filled_tables(), migrations).loading_store().open().await.unwrap();
     (store, app)
 }
 
@@ -449,7 +448,11 @@ async fn a_header_the_rebuilds_store_cannot_make_is_refused_before_any_statement
         ),
         (
             WriteHeader { schema_version: 1, ..good.clone() },
-            "it is not at the version the run reaches",
+            "it is not at a version the run reaches after its newest breaking migration",
+        ),
+        (
+            WriteHeader { schema_version: 3, ..good.clone() },
+            "it is not at a version the run reaches after its newest breaking migration",
         ),
         (
             WriteHeader {
@@ -624,6 +627,23 @@ async fn a_failed_export_leaves_no_folder_and_no_staged_records() {
     assert!(matches!(error, RebuildError::Database(_)), "{error:?}");
     assert!(!rebuild_folder(&store).exists());
     assert_eq!(app.staged_snapshot_records().await.unwrap(), 0);
+    holder.db.close().await.unwrap();
+    app.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_marker_queued_before_a_later_addition_serves_the_rebuild() {
+    let holder = holder().await;
+    let (holder, marker) = holder.migrated(filled_migrations(FILL, OldWrites::Drop)).await;
+    assert_eq!(marker.header.schema_version, 2);
+    let mut migrations = filled_migrations(FILL, OldWrites::Drop);
+    migrations.push(Migration::addition(3, "extra", "CREATE TABLE extra(id TEXT)"));
+    let (_store, app) = rebuilding_app_with(&holder, migrations).await;
+    let mut rebuild = rebuild_through_applied(&app, &holder).await;
+    rebuild.migrate(marker.header).await.unwrap();
+    let scratch = rebuild.database.as_ref().unwrap();
+    assert_eq!(scratch.schema_version().await.unwrap(), 3, "the run reaches the app's version");
+    rebuild.discard().await.unwrap();
     holder.db.close().await.unwrap();
     app.close().await.unwrap();
 }
