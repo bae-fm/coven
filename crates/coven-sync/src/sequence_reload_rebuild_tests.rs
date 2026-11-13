@@ -675,3 +675,70 @@ async fn a_circle_made_ahead_of_the_store_is_rebuilt_with_the_store_migrated_alo
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben rebuilds Garden at version 2, and his app migrates again, to version 4,
+/// before his raise of Garden goes out. The second migration captures Garden
+/// as it captures any audience he holds, so his raise is the rows migrated
+/// from 2 to 4, and Ana, who held Garden at version 1 and updates after it,
+/// loads it and holds the same rows (§18.3, §18.5).
+#[tokio::test]
+async fn a_second_breaking_migration_after_a_rebuild_captures_the_rebuilt_circle() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    pin(ana.database(), EARLY, garden, "early").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    // His app doesn't publish raises yet, so the rebuilt Garden stays captured.
+    group.raises.store(false, std::sync::atomic::Ordering::SeqCst);
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    // Stop when Ben has installed the rebuilt Garden and holds its capture,
+    // before the raise is published.
+    let circle = Audience::Circle(garden);
+    let mut captured = false;
+    for _ in 0..12 {
+        ben.sync.pass().await.unwrap();
+        let captures = ben.database().raise_captures().await.unwrap();
+        if captures.iter().any(|capture| capture.audience == circle) {
+            captured = true;
+            break;
+        }
+    }
+    assert!(captured, "the rebuild installed Garden with a capture");
+    assert_eq!(ben.sync.database.store_state().await.unwrap().reached(&circle), 0);
+
+    let held = ben.sync.keys.read().unwrap().unwrap();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    group.version.store(4, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ben.sync.keys.persist(&held).unwrap();
+    for _ in 0..10 {
+        ben.sync.pass().await.unwrap();
+    }
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&circle), 4);
+    assert_eq!(state.schema[&circle].snapshot.device, ben.sync.device);
+    assert!(ben.database().raise_captures().await.unwrap().is_empty());
+    assert_eq!(pins(ben.database()).await, [(EARLY.to_string(), "early".to_string())]);
+
+    let ana = group.reopen(ana).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert_eq!(pins(ana.database()).await, pins(ben.database()).await);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
