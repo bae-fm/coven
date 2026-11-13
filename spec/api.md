@@ -7596,8 +7596,9 @@ pub enum ProviderSignOut {
   request waits for the admin's decision, with its confirmation number: a code
   someone else saw could be used before the person's, so no request is
   approved on its own.
-- Making an invite is a step of the app's write (`CovenWrite::create_invite`),
-  with or without storage: it returns the invite's id, the member id it fixes
+- Making an invite is a step of the app's write (`CovenWrite::create_invite`
+  for a new person, `CovenWrite::add_device_for` for a member who lost every
+  device), with or without storage: it returns the invite's id, the member id it fixes
   and its operation, and the invite is listed from the write's commit as
   `InviteStage::Granting`. A pass checks it again against the history it
   catches up with, grants its access and fixes its code. A check that
@@ -7697,14 +7698,14 @@ pub enum ProviderSignOut {
   waiting counts toward the doubling as it does without a guard, so a wait
   that resumes after the guard drops continues the doubling where it is. A
   provider cooldown still holds every check.
-- Before `create_invite` makes any provider change, an App-folder Dropbox
+- Before `create_invite` or `add_device_for` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
   relocation, outside this operation.
 - Inviting the account that holds the store fails with `InviteeIsStoreOwner`.
   CloudKit identifies this case from the saved share: it saves the share, then
   refuses when the returned participants contain no added invitee. The share
   may have changed, but this refusal retains no unwanted participant.
-- A replacement invite fixes an existing active id before the requester
+- An `add_device_for` invite fixes an existing active id before the requester
   generates keys. Approval claims one admission that rebinds the id to the
   exact signed request's new pair and registers the request's device, its
   prefix carrying copies of every store key and the held circle keys, and on
@@ -7723,7 +7724,7 @@ pub enum ProviderSignOut {
 - One of the person's devices adds another by pairing
   ([§13.2](coven.md#132-adding-a-person-invites)): an invite to its own
   member, whose approval hands over the member's private pair instead of
-  claiming an admission. `CovenHandle::start_pairing` makes one, a write of its
+  claiming an admission. `CovenHandle::add_device` makes one, a write of its
   own, with or without storage, and returns its id and codes at once: any
   registered device of an active member may, and a device that isn't fails
   with `Rejected(NotAllowed)`. Nothing is shared or granted, and no slot is
@@ -7733,7 +7734,7 @@ pub enum ProviderSignOut {
   `shared_code`, the one to copy or share, carries none. On other providers
   the two are the same text.
 - A pairing lives while the screen showing its code is open: the app calls
-  `end_pairing` when it closes, which ends it if it hasn't ended and forgets
+  `end_add_device` when it closes, which ends it if it hasn't ended and forgets
   it. Opening the store ends and forgets every pairing it finds, left by a
   closed handle or a crash: no screen can show one then. A pairing also ends
   when the person declines its request, when its request fails a check, when
@@ -7744,18 +7745,18 @@ pub enum ProviderSignOut {
   in a pass, as an ended invite's does. A stop for good of this device ends
   and forgets its pairings in the transaction that applies it, leaving their
   paths to the gone device's marker sweep (§14.1). Nothing lists a device's
-  pairings; `subscribe_pairing` follows one, by its id, from its start until it is
+  pairings; `follow_add_device` follows one, by its id, from its start until it is
   forgotten, and reports how it ended until then.
 - While a pairing waits, every pass looks for its request, with no doubling
   wait: the app holds `sync_often` while the code shows (E5). A request that
   passes the checks an invite's makes, with `joiner` the member's own device,
-  waits for the person with its confirmation number. `approve_pairing` takes
+  waits for the person with its confirmation number. `approve_add_device` takes
   exactly that request, a write of its own, with or without storage: it seals
   the member's current private pair, as this device holds it, to the
   request's sealing key, and journals that handover; a pass puts it in the
   request's place. An expired pairing, or a request the pairing no longer
   shows, fails with `InvitationChanged`. Once approved, declining fails the
-  same way, and `end_pairing` still ends it.
+  same way, and `end_add_device` still ends it.
 - On the new device, `join_with_pairing` holds the whole pairing in one call.
   It makes its installation, connects with the person's own sign-in, or on S3
   the key the code carries or the one the app supplies, sends its request
@@ -7874,7 +7875,7 @@ pub enum CodeInfo {
     /// A restore code reveals no name before loading.
     Restore(CodeMetadata),
     /// An invite carries the store's name captured when the admin made it
-    /// and whether it adds a new person or recovers a member.
+    /// and whom it admits: a new person or a member's new keys.
     Invite(InviteInfo),
     /// A pairing code reveals no name either, and holds no keys.
     Pairing(PairingInfo),
@@ -7905,38 +7906,42 @@ pub struct InviteInfo {
     /// invite, for the joining person's screens to say whom to tell the code
     /// and whom they wait for (§13.2).
     pub inviter: String,
-    /// Which `Joiner` a join with this code takes: a new person's name or a
-    /// recovery (§13.2).
-    pub kind: InviteKind,
+    /// Whom a join with this code gives: a new person's name, or none for a
+    /// member's new keys. The join call reads it from the code and takes no
+    /// such input (§13.2).
+    pub admits: InviteAdmits,
     /// When the invite ends, by the inviting device's clock, to the second:
     /// the joining device sends no first request after it, so the app can
     /// say until when it may be used (§13.2).
     pub expires_at: SystemTime,
 }
 
-/// What an invite is for, fixed when the admin makes it (§13.2, §13.3).
-pub enum InviteKind {
+/// Whom an invite admits, fixed by the call that makes it: `create_invite`
+/// admits a new person, `add_device_for` a member's new keys (§13.2, §13.3).
+/// The invite code carries it as one byte.
+pub enum InviteAdmits {
     /// A new person: the join's request carries the name they typed.
     NewPerson,
-    /// An existing member getting access again: their profile already has a
-    /// name, so the request carries none.
-    Recovery,
+    /// An existing member's new keys: their profile already has a name, so
+    /// the request carries none.
+    MemberKeys,
 }
 
 /// Who a join request is for, and the only place a new person's name lives
-/// before the store keeps it (§13.2).
+/// before the store keeps it (§13.2). The admin's app reads it from the
+/// request (`JoinRequest::joiner`).
 pub enum Joiner {
     /// A new person, with the name they typed. It follows the format's `name`
     /// rule (format.md D2): an empty one fails the call with
     /// `SyncError::Format` before anything is written.
     NewPerson { name: String },
-    /// An existing member, whose profile already has a name.
-    Recovery,
+    /// An existing member's new keys, whose profile already has a name.
+    MemberKeys,
 }
 
 impl Joiner {
-    /// The kind of invite this request answers.
-    pub fn kind(&self) -> InviteKind;
+    /// What the invite this request answers admits.
+    pub fn admits(&self) -> InviteAdmits;
 }
 
 /// Facts that either code carries, without secrets or a store name.
@@ -7982,9 +7987,9 @@ pub enum CodeError {
     /// restore code for a store being restored in place, or an invite code
     /// saved for another store's join.
     WrongStore { expected: StoreId, actual: StoreId },
-    /// A join's `Joiner` is not the kind the invite is for: a name for a
-    /// recovery invite, or a recovery for a new person's.
-    WrongJoiner { expected: InviteKind, actual: InviteKind },
+    /// A join's person is not the one the invite admits: a name for an
+    /// invite that admits a member's new keys, or none for a new person's.
+    WrongJoiner { expected: InviteAdmits, actual: InviteAdmits },
 }
 
 /// Filesystem failures while reserving, publishing or cancelling a new device.
@@ -8132,19 +8137,22 @@ impl CovenHandle {
     /// Any registered device of an active member may; one that isn't fails
     /// with `Rejected(NotAllowed)`. It fixes this device's member, a fresh
     /// secret and an expiry 30 minutes from now, by this device's clock, and
-    /// shares and claims nothing. On S3, `Pairing::qr_code` carries the key
+    /// shares and claims nothing. On S3, `AddDevice::qr_code` carries the key
     /// this device connects with, read from its custody; one holding no S3
     /// key fails with `StorageFailure::InvalidConfiguration`, and a locked
     /// keychain with
     /// SyncError::SecureStorage(KeyError::KeychainTemporarilyUnavailable).
-    pub async fn start_pairing(&self) -> Result<Pairing, SyncError>;
+    pub async fn add_device(&self) -> Result<AddDevice, SyncError>;
 
-    /// The pairing's status, from its start until `end_pairing` forgets it;
+    /// The pairing's status, from its start until `end_add_device` forgets it;
     /// None for a pairing this device never made or has forgotten.
-    pub async fn pairing(&self, pairing: PairingId) -> CovenResult<Option<PairingStatus>>;
+    pub async fn add_device_status(
+        &self,
+        pairing: AddDeviceId,
+    ) -> CovenResult<Option<AddDeviceStatus>>;
 
     /// The same internal query, live (E4), for the screen that shows the code.
-    pub fn subscribe_pairing(&self, pairing: PairingId) -> LiveQuery<Option<PairingStatus>>;
+    pub fn follow_add_device(&self, pairing: AddDeviceId) -> LiveQuery<Option<AddDeviceStatus>>;
 
     /// Approves exactly this checked request, in a write of its own, with or
     /// without storage: it seals the member's current private pair, as this
@@ -8152,26 +8160,37 @@ impl CovenHandle {
     /// handover, which a pass puts in the request's place. It claims no slot.
     /// A request the pairing no longer shows, or a pairing that has ended or
     /// expired by now, fails with InvitationChanged.
-    pub async fn approve_pairing(&self, request: &PairingRequest) -> Result<(), SyncError>;
+    pub async fn approve_add_device(&self, request: &AddDeviceRequest) -> Result<(), SyncError>;
 
     /// Declines exactly this checked request, in a write of its own, with or
     /// without storage: the pairing ends as declined, and a pass puts its
     /// marker in the request's place. A request the pairing no longer shows,
     /// an approved pairing, and one that has ended or expired, fail with
     /// InvitationChanged.
-    pub async fn decline_pairing(&self, request: &PairingRequest) -> Result<(), SyncError>;
+    pub async fn decline_add_device(&self, request: &AddDeviceRequest) -> Result<(), SyncError>;
 
     /// The screen showing the pairing's code closed: ends the pairing, in a
     /// write of its own, with or without storage, at whatever stage it is,
     /// approved included, and forgets it. A pass then puts its marker in the
     /// place of its request or handover. A pairing that has already ended
     /// is only forgotten; one already forgotten succeeds and changes nothing.
-    pub async fn end_pairing(&self, pairing: PairingId) -> Result<(), SyncError>;
+    pub async fn end_add_device(&self, pairing: AddDeviceId) -> Result<(), SyncError>;
 
-    /// Makes an invite, in a write of its own (`CovenWrite::create_invite`).
+    /// Makes an invite for a new person, in a write of its own
+    /// (`CovenWrite::create_invite`).
     pub async fn create_invite(
         &self,
-        target: InviteTarget,
+        role: MemberRole,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+        inviter: String,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
+
+    /// Makes an invite that adds a device to a member who lost every device,
+    /// in a write of its own (`CovenWrite::add_device_for`).
+    pub async fn add_device_for(
+        &self,
+        member: MemberId,
         access: InviteAccess,
         lifetime: InviteLifetime,
         inviter: String,
@@ -8193,22 +8212,36 @@ impl CovenHandle {
 }
 
 impl CovenWrite<'_> {
-    /// Fixes a fresh member id or an existing active replacement target, as
-    /// an admin, and returns the invite's id, that member id and the
+    /// Invites a new person, as an admin: fixes a fresh member id, to be
+    /// added with `role`, and returns the invite's id, that member id and the
     /// invite's operation. The write checks the invite against the applied
     /// state, offline too: one made by a device that isn't a registered
-    /// admin fails with `Rejected(NotAllowed)`, a replacement of a member who
-    /// isn't active with `Rejected(TargetGone)`. A pass then checks it again,
+    /// admin fails with `Rejected(NotAllowed)`. A pass then checks it again,
     /// grants its access and fixes its code, which `coven_invites` shows. It
     /// expires `lifetime` after it is made, by this device's clock. The invite
     /// carries `inviter`, the inviting admin's name, which follows the
     /// format's `name` rule (format.md D2): an empty one fails the call with
-    /// `SyncError::Format` before any provider change. Replacement preserves
-    /// role, circle memberships and device ids; changed provider access is
-    /// separate.
+    /// `SyncError::Format` before any provider change.
     pub fn create_invite(
         &self,
-        target: InviteTarget,
+        role: MemberRole,
+        access: InviteAccess,
+        lifetime: InviteLifetime,
+        inviter: String,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
+
+    /// Adds a device to `member`, an active member who lost every device, as
+    /// an admin (§13.3). It is an invite as `create_invite` makes it, listed,
+    /// checked, granted, cancelled and approved the same way, and returns the
+    /// same: the invite's id, the member's id and the invite's operation.
+    /// Approval rebinds the member's id to the requester's new pair, so the
+    /// member's role, circle memberships and device ids stay; changed
+    /// provider access is separate. A member who isn't active fails with
+    /// `Rejected(TargetGone)`, and this device's own member with
+    /// `Rejected(NotAllowed)`; the other failures are `create_invite`'s.
+    pub fn add_device_for(
+        &self,
+        member: MemberId,
         access: InviteAccess,
         lifetime: InviteLifetime,
         inviter: String,
@@ -8253,14 +8286,6 @@ impl CovenWrite<'_> {
     pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
-/// The admin's choice, fixed before sharing the invite (§13.2, §13.3).
-pub enum InviteTarget {
-    /// A new person. The invite carries no name: the person types theirs
-    /// when they join, and their request carries it (`Joiner::NewPerson`).
-    NewMember { role: MemberRole },
-    ReplaceMemberKeys { member: MemberId },
-}
-
 /// How the invited person reaches storage (§13.2).
 pub enum InviteAccess {
     /// Dropbox, OneDrive or iCloud: the store is shared with
@@ -8288,8 +8313,8 @@ pub struct Invite {
     /// or its grant waits or is refused.
     pub operation: OperationId,
     pub member: MemberId,
-    /// Whether the invite adds a new person or recovers a member.
-    pub kind: InviteKind,
+    /// Whether the invite admits a new person or a member's new keys.
+    pub admits: InviteAdmits,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries; never a secret (§14.3).
     pub access: MemberAccess,
@@ -8333,8 +8358,9 @@ pub struct JoinRequest {
     /// The name the new device gave itself, for the admin to check.
     pub device_name: String,
     /// Who asks: a new person with the name they typed, which the approval
-    /// shows, or a recovery. The request's kind always matches its invite's:
-    /// the inviting device refuses any other, as a failed check (§13.2).
+    /// shows, or a member's new keys. The request always names the person its
+    /// invite admits: the inviting device refuses any other, as a failed
+    /// check (§13.2).
     pub joiner: Joiner,
     pub provider_account_email: Option<String>,
     /// Computed from the invite id and `keys`; the requester's phone shows the
@@ -8350,11 +8376,11 @@ pub struct ConfirmationNumber(pub u32);
 
 /// A pairing's UUID, which names its request's path in an invite's place
 /// (§13.2, format.md D10).
-pub struct PairingId(pub Uuid);
+pub struct AddDeviceId(pub Uuid);
 
-/// A pairing `start_pairing` made: what the screen that adds a device shows.
-pub struct Pairing {
-    pub id: PairingId,
+/// A pairing `add_device` made: what the screen that adds a device shows.
+pub struct AddDevice {
+    pub id: AddDeviceId,
     /// The code to show as a QR code, behind a tap. On S3 it carries the key
     /// this device connects with, so the new device asks for none: whoever
     /// sees it reaches the storage as this member until the key is replaced
@@ -8370,20 +8396,20 @@ pub struct Pairing {
 /// Where a pairing is (§13.2). The app offers approving and declining only
 /// for a request that is `Waiting`, and ends the pairing when its screen
 /// closes, whatever its status.
-pub enum PairingStatus {
+pub enum AddDeviceStatus {
     /// Waiting for a request, then with the checked request, for the person
     /// to compare its number and decide.
-    Waiting { request: Option<PairingRequest> },
+    Waiting { request: Option<AddDeviceRequest> },
     /// The person approved `request`: its handover is on its way to the
     /// request's place, or there, waiting for the new device to register.
-    Approved { request: PairingRequest },
+    Approved { request: AddDeviceRequest },
     /// The pairing has ended, its marker in place or on its way; the app
     /// shows how until it ends the pairing and forgets it.
-    Ended(PairingEnd),
+    Ended(AddDeviceEnd),
 }
 
 /// How a pairing ended (§13.2).
-pub enum PairingEnd {
+pub enum AddDeviceEnd {
     /// This device applied the new device's add-device entry.
     Added { device: DeviceId, name: String },
     /// The person declined the request.
@@ -8395,9 +8421,9 @@ pub enum PairingEnd {
     Expired,
 }
 
-/// A checked pairing request, as `PairingStatus` shows it (§13.2).
-pub struct PairingRequest {
-    pub pairing: PairingId,
+/// A checked pairing request, as `AddDeviceStatus` shows it (§13.2).
+pub struct AddDeviceRequest {
+    pub pairing: AddDeviceId,
     /// The name the new device gave itself, for the person to check.
     pub device_name: String,
     /// Computed from the pairing id and the request's keys; the new device
@@ -8672,12 +8698,12 @@ pub async fn restore_from_saved_code(
 ///
 /// On the new person's device: makes their member keys, keeps the code in
 /// this device's keychain, writes a join request to storage, and waits for
-/// approval. The request carries `joiner`: the name the person typed, for an
-/// invite of kind `NewPerson`, or `Recovery`. A `joiner` of the other kind
-/// than the code's `InviteInfo::kind` fails the call with
-/// `CodeError::WrongJoiner` before anything changes, and one that differs from
-/// the unfinished join's saved request, or a device name that does, with
-/// `SyncError::InvitationChanged`. Once it finds its admission, it commits the store's custody and
+/// approval. The request carries `name`: the name the person typed, when the
+/// invite admits a new person, or none when it admits a member's new keys, as
+/// the code's `InviteInfo::admits` says. A `name` of the other sort fails the
+/// call with `CodeError::WrongJoiner` before anything changes, and one that
+/// differs from the unfinished join's saved request, or a device name that
+/// does, with `SyncError::InvitationChanged`. Once it finds its admission, it commits the store's custody and
 /// publishes the store, which no longer lists as a join, then loads it,
 /// reporting `Loading`, and returns the open store. A failure while the
 /// published store loads, its storage access lost among them, returns
@@ -8699,7 +8725,7 @@ pub async fn restore_from_saved_code(
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
-    joiner: Joiner,
+    name: Option<String>,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
@@ -8786,7 +8812,7 @@ impl CovenBuilder {
     pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError>;
 
     /// Continues an unfinished join from its saved code and the device name
-    /// and `Joiner` its saved request carries, as
+    /// and name its saved request carries, as
     /// `join_with_invite` does. On Dropbox and OneDrive it connects through the
     /// sign-in the join kept, or a sign-in this builder holds, which replaces
     /// the kept one once it grants the location's access. With neither, or a
@@ -8916,23 +8942,23 @@ Example, adding Ana's laptop by pairing. On her phone, while Add device shows:
 
 ```rust
 let _often = handle.sync_often(Duration::from_secs(5));
-let pairing = handle.start_pairing().await?;
+let pairing = handle.add_device().await?;
 // On S3 the QR code holds the key the phone uses; the shared code holds none.
 show_blurred_qr_code(&pairing.qr_code);
 offer_to_share(&pairing.shared_code);
-let mut status = handle.subscribe_pairing(pairing.id);
+let mut status = handle.follow_add_device(pairing.id);
 while let Some(now) = status.next().await {
     match now? {
-        Some(PairingStatus::Waiting { request: Some(request) }) => {
+        Some(AddDeviceStatus::Waiting { request: Some(request) }) => {
             // "Add Ana's laptop?" with the number the laptop shows.
             if confirm(&request.device_name, &request.confirmation).await {
-                handle.approve_pairing(&request).await?;
+                handle.approve_add_device(&request).await?;
             } else {
-                handle.decline_pairing(&request).await?;
+                handle.decline_add_device(&request).await?;
             }
         }
-        Some(PairingStatus::Ended(PairingEnd::Added { name, .. })) => show_added(&name),
-        Some(PairingStatus::Ended(_)) => show_ended(),
+        Some(AddDeviceStatus::Ended(AddDeviceEnd::Added { name, .. })) => show_added(&name),
+        Some(AddDeviceStatus::Ended(_)) => show_ended(),
         _ => {}
     }
     if screen_closed() {
@@ -8940,7 +8966,7 @@ while let Some(now) = status.next().await {
     }
 }
 // Closing the screen ends the pairing, whatever its status.
-handle.end_pairing(pairing.id).await?;
+handle.end_add_device(pairing.id).await?;
 ```
 
 On the laptop:
@@ -9072,7 +9098,7 @@ Example, Ana adding Carol. On Ana's phone:
 ```rust
 let (invite, _, _) = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member },
+        MemberRole::Member,
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
         InviteLifetime::SevenDays,
     )
@@ -9119,7 +9145,7 @@ match join_with_invite(
     builder,
     &scanned,
     // The name Carol typed on the screen after she scanned the code.
-    Joiner::NewPerson { name: "Carol".into() },
+    Some("Carol".into()),
     "Carol's phone",
     |step| show_step(step),
     &control,

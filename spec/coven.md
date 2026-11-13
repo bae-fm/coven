@@ -3853,7 +3853,7 @@ These calls, and the work passes do for them, follow the rule:
 | Rotating a key, a schema raise, a snapshot, resetting an audience (§11.5, §16, §18, §19.4) | its operation, step by step | the claim of its first copy or announcement |
 | Joining by invite (`join_with_invite`, `resume_join`, §13.2) | the saved request and the invite code on the device, kept before the request may be sent | the request's create: from then on the join ends only by approval, decline or expiry |
 | Restoring on a new device (`restore_from_code`, `restore_from_saved_code`, §13.1) | the restore's record on the device, then its registration's operation | the record, kept just before the registration's claim |
-| Pairing, on the showing device (`start_pairing`, §13.2) | the pairing's operation | none: it claims no slot, and ending it replaces its request or handover with its marker |
+| Pairing, on the showing device (`add_device`, §13.2) | the pairing's operation | none: it claims no slot, and ending it replaces its request or handover with its marker |
 | Pairing, on the new device (`join_with_pairing`, §13.2) | nothing until its restore's record, then the restore's | the record, as a restore's |
 | Replacing this device's installation (`reset_device`, `restore_device`, §19.3) | the replacement's record in the store's directory and its kept entry, then its registration's operation | the record, kept just before the registration's claim |
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
@@ -4689,7 +4689,7 @@ while either invite is open (§14.2), whichever of Ana's devices made it.
 | store id and location | finding the store |
 | current store name, copied when the invite is made | showing which store the invite is for |
 | the inviter's name, as Ana's app gives it when it makes the invite | telling Dan whom to ask: his phone can't read who is who until it is let in |
-| whether it adds a new person or recovers an existing member (§13.3) | which join request Dan's phone sends: a new person's carries the name Dan typed, a recovery's none |
+| whom it admits: a new person, or an existing member's new keys (§13.3) | which join request Dan's phone sends: a new person's carries the name Dan typed, a member's new keys' none |
 | when it expires, to the second | Dan's phone sends no first request after it |
 | invite id | the join request's path |
 | the chosen member id | fixed by Ana before she shows the invite |
@@ -4698,28 +4698,32 @@ while either invite is open (§14.2), whichever of Ana's devices made it.
 | Ana's device id, and the latest slot it had applied when making the invite | which device's approval Dan's phone trusts, and where it starts reading |
 | on S3, an access key made for Dan | reaching storage; Ana makes it in the provider's console (§20.10) |
 
-**Fixing the member id.** Ana chooses the member id before showing the invite. For
-a new person coven makes a fresh id and Ana picks the role. To recover an existing
-member (§13.3), Ana selects that active member instead, and their role and circles
-are kept. Dan can't pick a different target.
+**Fixing the member id.** Ana chooses the member id before showing the invite,
+with the call that makes it. `create_invite` invites a new person: coven makes a
+fresh id and Ana picks the role. `add_device_for` adds a device to an existing
+member who lost every device (§13.3): Ana selects that active member, and their
+role and circles are kept. Dan can't pick a different target. The invite code
+carries which of the two it is, and no call takes that as an input.
 
 **The join request** lives at `<store>/join-requests/<device>/<invite id>`,
 under the id of the device that made the invite, which the code carries. It
 holds the invite id, the chosen member id, both of Dan's new public keys, and
 his phone's device id and name, and who is asking: a new person, with the name
-they typed, or a recovery, which carries none because the member's profile
-already has one. The device id is the joining installation's own, fixed when
+they typed, or a member's new keys, which carries none because the member's
+profile already has one. The device id is the joining installation's own, fixed when
 the join begins. The provider sees only an encrypted object under the
-inviting device's id and the invite's id. Dan's phone knows from the code
-whether the invite adds a new person or recovers a member, and refuses to
-begin with the other kind of request, before it changes anything.
+inviting device's id and the invite's id. Dan's phone reads from the code
+whether the invite admits a new person or a member's new keys, and refuses to
+begin with the other person's request, before it changes anything. The join
+call gives the name the person typed, or none, and the code says which it
+must be.
 
 **Approving.** Ana's phone opens the request and checks it:
 
 - the signature verifies with the signing key the request supplies;
 - the member id matches the invite;
-- the kind matches the invite: a request for a new person's invite carries a
-  name, and one for a recovery's carries none;
+- the person matches what the invite admits: a request for a new person's
+  invite carries a name, and one for a member's new keys carries none;
 - both keys are fresh: no entry in the history her phone has caught up with
   bound either one to a member, current or past (§12.3);
 - the device id is fresh: that history registers no device with it.
@@ -4769,7 +4773,7 @@ the binding's outcome in `coven_operations` beside an approval
 
 **The admission.** Approval claims exactly one slot. Its entry records exactly
 the pair and device it checked: *admit member* for a fresh id, or *recover
-member* for an existing one, each registering the device the request names
+member* for an existing one (`add_device_for`), each registering the device the request names
 (format.md [D6](format.md#d6-admin-entries)). A request that changes
 afterwards needs a new approval. The slot's clear prefix carries the copies
 for Dan's exact sealing key: every store key in history, and, when recovering
@@ -4800,7 +4804,7 @@ invite carries in the same entry.
 **Making the invite** is a step of a write (§4), with or without storage. Ana's
 app makes Dan's invite and its own row about inviting him in one write. The
 write checks the invite against the slots her phone has applied: she must be a
-registered admin, and a member it recovers must be active. It fixes the member
+registered admin, and a member `add_device_for` names must be active. It fixes the member
 id and the secret, journals the invite, and returns its id. A pass then catches
 up and checks the invite again before granting anything: a slot Ana's phone
 hadn't read yet may have taken away her role, or her account's hold on the
@@ -4859,7 +4863,7 @@ never send a write again
 [`cancelled_share_strands_claim`](proofs/sequence/CovenSequence/InviteClaims.lean)).
 
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
-ended: whether it adds a new person or recovers a member, the access granted,
+ended: whether it admits a new person or a member's new keys, the access granted,
 when it expires, the operation
 that names its pending record, and where each is: granting its access, waiting
 for its request or Ana's decision with the code to show again, or approving
@@ -4942,7 +4946,7 @@ app records the profile when it next opens Household. The app reads the name
 through the handle, and acknowledges it in the write that records the
 profile, or its request for one, so the two commit together. Acknowledging
 again changes nothing. Removing the store removes the name with it. A
-recovery's request carries no name (§13.3), and its store keeps none. Kept
+request for a member's new keys carries no name (§13.3), and its store keeps none. Kept
 only in the saved request, the name would go as the join publishes, and Dan
 would have to type it again.
 
@@ -4993,8 +4997,8 @@ exact bytes in a local directory not yet published to the app, encrypted with th
 invite secret and tied to the store, the invite and the chosen member id. These
 are not his keys' final custody. Restarting with the same invite, device name and person
 reuses them, and the same device id; a call that gives another name, or a
-recovery where a name was given, fails with `InvitationChanged` rather than
-reuse them.
+name where the invite admits a member's new keys, fails with `InvitationChanged`
+rather than reuse them.
 
 - It sends no first request once the invite has expired by its own clock: the
   code carries the expiry, and the join ends as an expired one does, leaving
@@ -5221,11 +5225,11 @@ made outside coven.
 Recovering an existing member keeps their role, circles and device records.
 The admission rebinds their pair and registers the new installation's fresh
 device; the member's earlier devices are gone for good from that slot
-(§14.1). Cleaning up a recovery invite takes back only what that invite newly
+(§14.1). Cleaning up an `add_device_for` invite takes back only what that invite newly
 granted, never the member's existing access, and the usual checks on shared
 accounts and other grants still apply (§14.2).
 
-A recovery invite on S3 carries the member's new key, and the admission
+An `add_device_for` invite on S3 carries the member's new key, and the admission
 records it as the member's access in the same entry. If Ben removed the
 member meanwhile, the caught-up history refuses the admission before it is
 claimed, and the invite ends as a refused approval does. Ana deletes the key
@@ -5241,7 +5245,7 @@ last (§13.1). So her phone *pairs* the laptop instead: it is an invite to Ana's
 own member, whose approval hands over her keys rather than admitting anyone.
 Ana opens Add device on her phone:
 
-1. Her phone, the *showing device*, makes the pairing, in a write of its own,
+1. Her phone, the *showing device*, makes the pairing (`add_device`), in a write of its own,
    and shows its *pairing code* as a QR code: the store's location, Ana's
    member id, the pairing's id and a one-time secret.
 2. The laptop scans it, signs in to Ana's Dropbox, makes a fresh pair of its
@@ -5421,7 +5425,7 @@ when it has loaded, and Ana's other devices show it.
   database as it carries an open invite, ended, so the new installation puts its
   marker in place, under the old device's id.
 - **A request that answers the wrong way.** A request carrying a person's name,
-  or answering as a recovery, fails the pairing's checks, as does one whose keys
+  or answering for a member's new keys, fails the pairing's checks, as does one whose keys
   or device id history knows, and the pairing ends. An invite likewise refuses
   a request that answers as the member's own device.
 - **Several pairings.** Each Add device screen makes its own, with its own id,
@@ -5430,8 +5434,8 @@ when it has loaded, and Ana's other devices show it.
 #### 13.3 Losing everything
 
 Ben loses every device and his restore code. An admin invites him again, to his
-*existing* member id. Approving recovers him in one admission, which replaces
-his keys and registers his new device:
+*existing* member id, with `add_device_for`. Approving recovers him in one
+admission, which replaces his keys and registers his new device:
 
 - his role, circles and existing device ids stay attached to his id; those
   devices are gone for good;

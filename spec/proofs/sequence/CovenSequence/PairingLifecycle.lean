@@ -6,7 +6,7 @@ person's devices adds another"), the object at the request's one path, and the
 new device that asks. Every writer that acts on them is a step:
 
 - the app's write steps: approving the request it was shown, declining it,
-  and ending the pairing (`end_pairing`, which closing Add device calls).
+  and ending the pairing (`end_add_device`, which closing Add device calls).
   Each reads and decides in its own transaction;
 - the expiry, which reads and decides in one transaction too;
 - a sync pass, which reads the pairing's row, does storage work with no
@@ -117,7 +117,7 @@ structure World where
   access : Nat
   deriving DecidableEq, Repr
 
-/-- The pairing just made by the app's write (`start_pairing`). -/
+/-- The pairing just made by the app's write (`add_device`). -/
 def made : World where
   row := some ⟨.waiting none, 0⟩
   pending := none
@@ -263,7 +263,7 @@ inductive Act where
   /-- The app approves the request it was shown, by its key. -/
   | approve (key : Nat)
   | decline
-  /-- The app ends the pairing (`end_pairing`), or acknowledges that it ended. -/
+  /-- The app ends the pairing (`end_add_device`), or acknowledges that it ended. -/
   | close
   /-- Whoever saw the code writes a request. -/
   | send (key : Nat) (ok : Bool)

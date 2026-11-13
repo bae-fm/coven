@@ -1614,11 +1614,11 @@ joiner       u8, then a name for a new person
 - `device` is the joining installation's own id, fixed when the join begins.
   An invite's approval registers it (D6); a paired device registers it itself,
   with its own add-device entry.
-- `joiner` says who asks. Tag 0 is a recovery: the member already has a
+- `joiner` says who asks. Tag 0 is a member's new keys: the member already has a
   profile, so the request carries no name. Tag 1 is a new person, followed by
   the name they typed, which the admin sees with the request and the app makes
   their profile with (§13.2). Tag 2 is the member's own new device, asking to
-  be paired, with no name. Any other tag is refused. The invite's `kind` fixes
+  be paired, with no name. Any other tag is refused. The invite's `admits` fixes
   whether a request may carry tag 0 or tag 1, and a pairing takes tag 2 alone;
   the device that made it refuses any other.
 
@@ -2493,7 +2493,7 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | inviter:name | kind:u8 | expires_at:u64 | invite:uuid |
+`store:uuid | name:name | inviter:name | admits:u8 | expires_at:u64 | invite:uuid |
 member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
 read_through:u64 | storage:bytes`:
 
@@ -2501,7 +2501,7 @@ read_through:u64 | storage:bytes`:
 store            uuid
 name             name
 inviter          name
-kind             u8
+admits           u8
 expires_at       u64
 invite           uuid
 member           MemberId
@@ -2516,7 +2516,7 @@ storage          bytes
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
 | `inviter` | the inviting admin's name, as the app gave it when it made the invite: the joining device can't read who is who until it is let in, so its screens name whom to tell the code and whom it waits for (§13.2) |
-| `kind` | 0 when the invite adds a new person, 1 when it recovers an existing member, who already has a profile. It fixes which `joiner` the request carries (D8); the code carries no person's name, which the joining person types and their request carries (§13.2) |
+| `admits` | 0 when the invite admits a new person, 1 when it admits an existing member's new keys, the member already having a profile. It fixes which `joiner` the request carries (D8); the code carries no person's name, which the joining person types and their request carries (§13.2) |
 | `expires_at` | when the invite ends, in whole seconds since the Unix epoch by the inviting device's clock: the joining device sends no first request after it (§13.2) |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |
