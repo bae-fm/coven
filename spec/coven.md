@@ -7954,6 +7954,16 @@ pending record shows the failure meanwhile (§19.1). Nothing is undone: the
 held write keeps its file, and the writes wait. Every failure that stops a
 bound upload stops writes slots too, so the hold adds no failure of its own.
 
+**When the file can't come back.** Ana's cover can't upload and never will:
+its bytes are gone, or the account stays full. Nothing sends the writes behind
+it until the file is stored, since sending them would publish a row whose bytes
+never arrive. The way out is a write of the app's that leaves the file with no
+reference, by deleting the row or pointing it elsewhere ("Later writes"
+above): the file's record goes, its upload retires and the hold ends. The held
+write, every later one and that write go out in one slot, and no other device
+sees the file. The app finds the stuck file in `coven_pending` and
+`coven_uploads`. Coven never ends the hold itself.
+
 **Edge cases.**
 
 - **A raise marker between them.** A breaking migration run while a write is

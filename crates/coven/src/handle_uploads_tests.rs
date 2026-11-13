@@ -172,6 +172,47 @@ async fn a_held_write_and_every_later_one_wait_for_the_file_and_arrive_with_it()
     network.close().await;
 }
 
+/// Ana's cover can't upload, and the account stays full: her write and the
+/// rating after it wait for it. She gives up the cover by deleting its row,
+/// which leaves the file with no reference, so its record goes, the upload
+/// retires and the hold ends (§17.4). Her passes send the cover's write, the
+/// rating and the delete in one slot; Ben sees the rating and no cover, and
+/// the file never reached storage.
+#[tokio::test]
+async fn deleting_the_row_of_a_cover_that_cannot_upload_ends_its_hold() {
+    let network = household().await;
+    let (ana, ben) = (&network.devices[0], &network.devices[1]);
+    stopped(ana).await;
+    let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
+    note(ana, "rating").await;
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
+    ana.storage.set_faults(faults).await;
+    ana.handle.start_sync().await.unwrap();
+    upload_failed(ana, StorageFailure::QuotaExceeded).await;
+    network.sync(0).await;
+    assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 2);
+
+    ana.handle
+        .write(|sql| {
+            sql.execute("DELETE FROM covers WHERE id='album'", [])?;
+            Ok::<_, CovenError>(())
+        })
+        .await
+        .unwrap();
+    wait_for_sent(&ana.handle).await;
+    assert!(ana.handle.uploads().await.unwrap().files.is_empty());
+    let slot = ben.handle.applied_slot().await;
+    network.sync(1).await;
+    assert!(covers(ben).await.is_empty());
+    assert_eq!(notes(ben).await, ["rating"]);
+    assert_eq!(ben.handle.applied_slot().await, slot + 1);
+    assert!(ana.handle.file_ref(cover).await.is_err());
+    network.close().await;
+}
+
 /// A network failure of a bound upload retries under backoff by itself, as
 /// a trailing upload's does, uploads paused or not: the writes wait
 /// meanwhile, and go once it succeeds, with no call of the app's. The
