@@ -40,7 +40,7 @@ const GENERATED_FIXTURES: [&str; 31] = [
     "sealed-join-request.hex",
     "sealed-snapshot.hex",
     "sealed-store-key.hex",
-    "sealed-admin.hex",
+    "sealed-creation.hex",
     "sealed-write.hex",
     "sealed-writes-slot.hex",
     "sealed-floor.hex",

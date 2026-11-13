@@ -22,6 +22,8 @@ pub(crate) async fn apply_write(
 ) -> Result<coven_database::ApplyOutcome, coven_database::DbError> {
     use coven_database::{DownloadedPartStream, DownloadedWriteStream, IncomingSlot, SlotContent};
     let position = record.header.position;
+    // After an applied creation the write's slot follows it.
+    let at = position.number.max(database.applied_slot().await? + 1);
     let encoder = coven_format::write_stream::WriteEncoder::new(&record)?;
     let stream = DownloadedWriteStream {
         header: encoder.header().clone(),
@@ -37,7 +39,7 @@ pub(crate) async fn apply_write(
     database
         .apply_slot::<crate::PendingRecord, _, _>(
             IncomingSlot {
-                slot: coven_merge::slot(position.number),
+                slot: coven_merge::slot(at),
                 digest: [1; 32],
                 header: coven_format::sequence::SlotHeader {
                     device: position.device,
@@ -45,7 +47,7 @@ pub(crate) async fn apply_write(
                     author: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(
                         position.device.0 as u128,
                     )),
-                    after: position.number - 1,
+                    after: at - 1,
                 },
                 content: SlotContent::Writes { size: 1, writes: vec![stream] },
             },

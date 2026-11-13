@@ -90,7 +90,7 @@ spaces only separate fields for reading. Example times are UTC.
 | · admin entry slot | | one membership or settings change | D6, D9 |
 | · writes slot | | one device's queued writes, each an inner write | D5, D9 |
 | · key copy slot | | one audience key sealed to one member | D9, D11 |
-| · admission slot | | an admin entry admitting a member and registering their first device, with that member's key copies | D6, D9, D11 |
+| · admission slot | | an admin entry admitting a member and registering their first device, or creating the store, with that member's key copies | D6, D9, D11 |
 | · snapshot announcement slot | | a snapshot's id, coverage, breaking version, purpose and hash | D9 |
 | Inner write | inside a writes slot | one write: a header, then one part per audience | D5, D9 |
 | Floor pointer | `<store>/floor` | the first kept slot, and the newest floor body's writer, number and digest | D8, D9 |
@@ -264,7 +264,7 @@ reads.
 | `SealingKey` | 32 bytes | An X25519 public key. |
 | `Timestamp` | `ms:u48 \| counter:u16 \| device:u64` | 16 bytes. Byte order is timestamp order ([§7.2](coven.md#72-timestamps)). |
 | `WriteId` | `device:u64 \| number:u64` | The number is at least 1, assigned at local commit. |
-| `Slot` | `u64` | A slot is at least 1. A consumed cursor, such as `read_through`, may be zero. |
+| `Slot` | `u64` | A slot is at least 1. A consumed cursor, such as a snapshot's coverage, may be zero. |
 | `SnapshotId` | `audience:Audience \| device:DeviceId \| number:u64` | Names a snapshot's D10 path. The number is positive and only identifies an object. |
 | `Audience` | `0`, or `1 \| circle:uuid` | The store sorts first, then circles by id. |
 | `Value` | `0` NULL, `1 \| i64`, `2 \| u64` (IEEE 754 bits), `3 \| text`, `4 \| bytes` | NaN and negative zero are refused. |
@@ -502,7 +502,9 @@ has at least one.
 containing slot comes after `read_through`, and an earlier own write is in an
 earlier slot or in this batch. `read_through` is never below that of the
 device's last landed write: a device's applied slot never goes back
-([coven.md §7.1](coven.md#71-causality)).
+([coven.md §7.1](coven.md#71-causality)). It is at least 1: every device
+applies slot 1 before its first write, and a write in a slot with
+`read_through` 0 is invalid.
 
 ### D5.2 Schema versions: what the receiver decides
 
@@ -532,8 +534,7 @@ rewriting that object.
 - **Cut-off.** A removal or replacement in a lower slot consumes the writes
   without effect (§14.1).
 - **Signature.** The original write is authenticated with its device owner's
-  signing key at `read_through`. The exception is §7.1's creation binding: the
-  first device's pre-setup writes at zero.
+  signing key at `read_through`, which is at least 1.
 - **Reads never go back.** A write whose `read_through` is below that of its
   device's last landed write is invalid, and its slot is refused, as a
   repeated write number is. Forgetting kept records relies on it
@@ -891,7 +892,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 
 | Tag | Change | Fields |
 | --- | --- | --- |
-| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes` |
+| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes`; only in an admission slot |
 | 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name`; only in an admission slot |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
@@ -926,6 +927,11 @@ what it needs to check itself.
 - Check the slot's signature with that key, and check the store id against the
   path's.
 - It records no storage access. Set up storage does, once storage exists.
+- It is an admission slot: its clear prefix carries one box, the creator's own
+  copy of the store key the entry introduces, routed to the creator's id and
+  the `admin` pair's sealing key (D9). The slot's own body is sealed with that
+  key. The device decides these bytes when it creates the store, before any
+  storage exists, and keeps them as its attempt at slot 1 (§10.3).
 
 ### Rules for each change
 
@@ -1778,7 +1784,7 @@ Every member can read the device and claim number; the provider can't.
 | Slot kind | Body |
 | --- | --- |
 | admin | one D6 frame |
-| admission | one D6 frame: admit-member or recover-member, and no other |
+| admission | one D6 frame: admit-member, recover-member or create-store, and no other |
 | writes | `count:u64`, at least 1, then `length:u64 \| inner write` for each queued write, the length positive and within the body: in strictly increasing write-number order, all by the header's device, with no omitted unconfirmed predecessor |
 | key copy | one empty kind-16 frame |
 | announcement | one kind-15 frame: `snapshot:SnapshotId \| covers:u64 \| breaking_version:u32 \| purpose:Purpose \| digest:32 bytes` |
@@ -1882,6 +1888,9 @@ ephemeral:32 bytes | nonce:24 bytes | ciphertext:bytes | tag:16 bytes
   `slot_kind`, `key`, the box's index in `copies` as a `u32`, and its routing.
 - An admission's boxes are in increasing order of `(audience, key)`, with no
   duplicates.
+- The slot that creates the store is an admission by this layout. Its boxes
+  are the creator's, routed to the author and the entry's `admin` sealing key,
+  and name exactly the keys the entry introduces, each once.
 
 ### The floor pointer (kind 42)
 

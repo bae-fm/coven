@@ -2133,8 +2133,8 @@ Two things order writes, and they answer different questions:
 
 Causality answers "what had the author seen?" Each write records `read_through`,
 the last slot its device had applied when it was made. Its *past* is every write
-in slots up to `read_through`, plus the same device's earlier writes. Slot zero
-means it had read no published history.
+in slots up to `read_through`, plus the same device's earlier writes. Every
+device applies slot 1 before its first write, so `read_through` is at least 1.
 
 That record never changes, even if the write is sent much later. Catching up
 doesn't change it, and claiming a later slot doesn't enlarge it.
@@ -2157,12 +2157,11 @@ Each write is checked against its author's view:
   stood at the write's `read_through`. That state must authorize the device, the
   member, and each circle part. If evidence is still missing, the device waits; a
   bad signature or missing authority refuses the slot.
-- **The first device's offline writes.** Writes the first device made before
-  setting up storage have `read_through` 0 and are checked against slot 1's
-  record of the store's creation. No other device can write at zero: a store a
-  join published refuses a synced write until the state it has applied
-  registers its device (`DbError::NotRegistered`, §13.4), so no write is
-  recorded below the slot that registered its device.
+- **Registered before writing.** A write's `read_through` is at least the slot
+  that registered its device: the first device applies slot 1 when it creates
+  the store (§10.3), and a store a join published refuses a synced write until
+  the state it has applied registers its device (`DbError::NotRegistered`,
+  §13.4). A write with `read_through` 0 is refused.
 - **Reads never go back.** Ben's write 9 landed with `read_through` 21. If his
   write 10 then arrives with `read_through` 18, it claims not to have seen what
   his own earlier write saw. A genuine device never makes such a write: its
@@ -3438,7 +3437,7 @@ device, which is how coven notices a restored backup posing as the original
 
 | Action | Who may do it |
 |---|---|
-| Create the store | the first device, which becomes the first admin (§10.3) |
+| Create the store | the first device, which becomes the first admin, at creation (§10.3) |
 | Set up storage | the store's first admin, once (§10.3) |
 | Rename the store | an admin |
 | Add or remove a member, change a role | an admin |
@@ -3506,47 +3505,59 @@ names (§13.2).
 
 #### 10.3 Creating a store
 
-`create_store` first makes the local database and initializes the member's
-custody before making the store visible. If the directory sync then fails,
-coven closes the handle through its normal close path and waits for release.
-It returns `StoreCreationError::PublishedButNotSynced`, naming the store and
-the directory-sync failure with its source (api.md E1). The complete store
-stays on disk, and the app reopens it with `open`. No creation error carries
-an open handle, so retaining an error cannot keep the store locked.
+`create_store` first makes the local database, initializes the member's custody
+and decides slot 1, all before making the store visible. If the directory sync
+then fails, coven closes the handle through its normal close path and waits for
+release. It returns `StoreCreationError::PublishedButNotSynced`, naming the
+store and the directory-sync failure with its source (api.md E1). The complete
+store stays on disk, and the app reopens it with `open`. No creation error
+carries an open handle, so retaining an error cannot keep the store locked.
 
-Slot 1 creates the store and registers its first device and its first admin.
-Since nobody is a member yet, slot 1 carries its author's public key, and that key
-verifies its signature. The store id in slot 1 must match its path.
+Slot 1 creates the store. It registers the first admin and their first device
+and introduces the first store key. Since nobody is a member yet, slot 1
+carries its author's public key, and that key verifies its signature. Its clear
+prefix carries the creator's copy of every key it introduces, sealed to the
+creator's sealing key, as an admission carries a joiner's (§13.2). The store id
+in slot 1 must match its path.
+
+Slot 1 is decided when the store is created, on the device, before any storage
+exists. Ana makes Household on her laptop, offline. `create_store` sets up her
+member keys and the first store key in custody, builds slot 1, keeps its exact
+bytes as the laptop's attempt at slot 1, and applies it. Ana is Household's
+admin and her laptop its device from that moment: she rates, makes playlists
+and renames the store before Household has any storage. If creation fails at
+any step, no store is visible and custody holds nothing for it. No other device
+can claim slot 1 first, since none knows the store's id until slot 1 is
+published. A copy of the laptop's directory could, and §19.3's checks catch it.
 
 Slot 1 records no storage access: the storage doesn't exist when the store is
-created. A *Set up storage* entry records how the store's first admin reaches
-storage, and that fixes how every member does. Ana creates Household from her
-Dropbox account, so every member reaches Household from a provider account, and
-Ana's is the account that holds it (§20.9). On S3, the entry records Ana's key,
-and every member reaches the store with an S3 key (§14.3). An entry giving a
-member the other kind of access is refused, and so is any access entry,
-admission or invite share before Set up storage: until then the store has no
-kind of access to keep to. Without that, an admin recorded with an S3 key on
-Household's folder would count as one who changes its sharing, which only the
-account holding the folder can do. Set up storage needs an admin author and
-applies once; the same author recording the same credential again is
-satisfied.
+created. Setting up storage publishes slot 1, then records how its creator
+reaches storage in a *Set up storage* entry, and that fixes how every member
+does. Ana sets Household up from her Dropbox account, so every member reaches
+Household from a provider account, and Ana's is the account that holds it
+(§20.9). On S3, the entry records Ana's key, and every member reaches the store
+with an S3 key (§14.3). An entry giving a member the other kind of access is
+refused, and so is any access entry, admission or invite share before Set up
+storage: until then the store has no kind of access to keep to. Without that,
+an admin recorded with an S3 key on Household's folder would count as one who
+changes its sharing, which only the account holding the folder can do. Set up
+storage needs an admin author and applies once; the same author recording the
+same credential again is satisfied.
 
 Ana sets up Household on Dropbox:
 
-1. Her phone sets up her member keys in custody (OS keychain by default, §12.4).
-2. Setup journals itself, then checks Dropbox (§20.8). Until it claims anything
+1. Setup journals itself, then checks Dropbox (§20.8). Until it claims anything
    she can cancel it, and it undoes what it wrote (§11.6).
-3. It claims slot 1, which creates the store with the store id and name she
-   gave and registers her phone and Ana as admin.
-4. It holds the first store key and claims its sealed copy to Ana next, at slot 2
-   (§12.1).
-5. It claims Set up storage at the next slot, slot 3 when nothing came between.
-6. Setup succeeds once the three slots are confirmed, and only then saves the
-   location, sign-in and restore code on her phone.
+2. It sends slot 1's kept bytes, settling the claim as §5.1 does.
+3. It claims Set up storage at the next slot, slot 2 when nothing came between.
+4. Setup succeeds once both are confirmed, and only then saves the location,
+   sign-in and restore code on her laptop.
 
-If another creation already holds slot 1, setup is undone and fails with
-`StorageFailure::StoreExists`.
+If another device's bytes already hold slot 1, setup is undone and fails with
+`StorageFailure::StoreExists`; the store stays on the laptop as it was,
+unsynced, and a later setup meets the same slot 1 and fails too. If the laptop's directory
+was copied and the copy sent its own slot 1 first, the laptop's attempt finds
+its own device id on other bytes, and setup stops with `DeviceIdInUse` (§19.3).
 
 Creation supplies the store's id and initial name. Settings supplied later when
 setting up from the store must match its id; a mismatch fails with
@@ -3772,8 +3783,8 @@ it; bytes merely sent don't advance it.
 #### 11.6 Every call that writes to storage in steps
 
 Admin actions aren't the only calls that write to storage more than once.
-Setting up storage checks the provider, claims a bucket and slot 1, and saves
-the location and sign-in on the device. Restoring, joining and resetting a
+Setting up storage checks the provider, claims a bucket, sends slot 1 and claims
+Set up storage, and saves the location and sign-in on the device. Restoring, joining and resetting a
 device publish objects and claim slots, and save what they made on the device.
 A crash or a cancel between two of those steps must never leave a half-done
 state that the person has to find, and fix by running the call again with the
@@ -3869,7 +3880,7 @@ These calls, and the work passes do for them, follow the rule:
 | Deleting a store from the device (`discard_store`, and the last step of `delete_store`, api.md [E1](api.md#e1-opening)) | the store's directory, renamed to its deletion name | none: it writes nothing to storage, and only goes forward |
 | Deleting a store from the device and leaving it (`delete_store`, api.md [E1](api.md#e1-opening)) | the deletion's record in the store's directory, then the removal's operation | the record, kept just before the removal's journal |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
-| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating, which setup sends before it claims Set up storage; the `Set access` claim, or committing, when reconnecting |
+| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating, which setup sends as creation kept it, before it claims Set up storage; the `Set access` claim, or committing, when reconnecting |
 | Detecting S3 settings (`detect_s3_settings`, and setup's detection, §20.7) | the run's record, kept before its first probe until a cleanup confirms its probes and uploads gone | none: it writes only probes nothing refers to |
 
 #### 11.7 What the proofs cover
@@ -3962,8 +3973,8 @@ admission, nor the admission without them (§13.2). Each copy's sealed box sits 
 clear part of its slot, sealed to its recipient alone; no second layer of
 encryption wraps it. The rest of the copy's slot, only an acknowledgement, is
 encrypted with a store key already accepted. The new key may encrypt its own
-introduction. Store creation is the one exception: slot 1 sets up the first
-member and keys, and the creator's copy follows at slot 2 (§10.3).
+introduction. Store creation holds the rule in one slot too: slot 1's prefix
+carries the creator's copies of every key it introduces (§10.3).
 
 Opening a copy:
 
@@ -4203,7 +4214,8 @@ journal files.
   A join's sealed identity goes the same way as its store is published. Each
   copy's name carries its file's, with a random end, so two saves never share
   one.
-- Store creation sets up the member in custody before publishing the store.
+- Store creation sets up the member and the keys slot 1 introduces in custody
+  before publishing the store.
 - A device keeps every earlier private sealing key it still needs to open old
   copies, or has those keys copied to its current sealing key instead.
 - The app can keep its own secrets, such as an API token, in separate keychain
@@ -10309,14 +10321,13 @@ laptop in place from her current restore code instead (§13.1).
   unsent edits may have been lost, including after reopening. If the notice can't
   be stored, the reset fails: coven never hands back a working handle that hides
   the discarded installation.
-  A reset with no storage connected fails before its swap and the store opens
-  as before. A connected reset has recorded its replacement by then, so the
+  A reset of a store that never set up storage fails with `NoStorage` before its
+  swap and the store opens as before. A connected reset has recorded its replacement by then, so the
   store refuses opens with `ReplacementUnfinished` (`by: Reset`) until the
   next reset finishes it and commits the notice.
-- A reset with no storage connected creates an empty database with a fresh id,
-  preserving its local creation name and its detection runs' records. That
-  name must be readable before anything moves, like the other required
-  settings. Competing first setups still contend for slot 1 (§10.3).
+- A reset of a store that never set up storage is refused with `NoStorage`,
+  changing nothing: there is nothing in storage to load, and the creation names
+  the device a reset would replace (§10.3).
 - **Deleting what resets kept.** `CovenHandle::delete_discarded_devices`
   ([api.md E5](api.md#e5-storage-and-sync)) removes every archive, each
   installation an earlier reset moved aside, then syncs the store's
@@ -10683,8 +10694,8 @@ It is enforced like this:
   A retried creation that already wrote under `<store>/`, S3 detection's
   probes included, passes.
 - Then, after S3 detection and the provider check pass (§20.8), first setup
-  passes its point of no return (§11.6) and claims the location, before slot 1
-  and before committing the location: it creates `coven-location` at the
+  passes its point of no return (§11.6) and claims the location, before sending
+  slot 1 and before committing the location: it creates `coven-location` at the
   location's root once, with the same create-once request slots use. Its
   complete bytes are the store id as a lowercase hyphenated UUID, 36 ASCII
   bytes with no newline ([format.md D10](format.md#the-location-marker)).
@@ -11132,8 +11143,8 @@ refers to; what a detection run a crash cut leaves, the next detection or
 connection at that bucket removes (§20.7).
 
 - **The point of no return** is recording the first claim setup is about to
-  send: the location marker or slot 1 when it creates the store (the
-  `CreatingStore` step), or `Set access` when a reconnect records changed access
+  send: the location marker or, when it creates the store, slot 1 as creation
+  kept it (the `CreatingStore` step), or `Set access` when a reconnect records changed access
   (`RecordingAccess`). A reconnect with nothing to record passes it as it
   commits. A cancel from then on is answered that setup is finishing.
 - **Only finishing commits.** The location, the sign-in and the restore code
@@ -11143,9 +11154,9 @@ connection at that bucket removes (§20.7).
   delete, the setup stands and is activated, and the call fails with the
   keychain's failure so its caller knows the provider's secrets are still
   kept; opening the store deletes them too.
-  So an undone reconnect leaves the device's earlier connection as it was. A
-  creation keeps the store key slot 1 introduces just before the point, and
-  an undo forgets it.
+  So an undone reconnect leaves the device's earlier connection as it was. An
+  undone creation leaves the store as creation made it: slot 1 and its store
+  key stay on the device.
 - **After a crash.** Opening the store undoes a setup that hadn't reached the
   point of no return; its outcome is `Undone(Interrupted)`. One past it stays
   running, and the first connection attempt after opening, which starting sync
@@ -11818,7 +11829,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 
 | Table | Holds |
 |---|---|
-| `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
+| `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before a joined store has loaded, the name its invite carried, as set by the slot the invite names (§13.2) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
 | `_coven_queued_dismissals` | the rows each waiting write's dismissals name, recorded with the write, so a slot finds the rows each waiting write changes without reading its record (§6.2) |
@@ -13514,6 +13525,7 @@ Write-ups explain each model and state its assumptions:
 | Each followed audience stays at the state of a sequence prefix in storage that satisfies the coverage and snapshot rules | `read_ok` | `proofs/sequence/CovenSequence/Reader.lean` | §5, §16.4 |
 | (same) | `dev_ok` | `proofs/sequence/CovenSequence/Device.lean` | §5 |
 | For one slot, in storage that only grows (no slot deleted), with every attempt's bytes unique to it: the claimant whose bytes fill the slot concludes it won, every other claimant that concludes anything concludes it lost, and both conclusions stay true | `conclude_correct`, `exactly_one_claimant` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
+| A device that applied its own attempt at a slot before claiming it, as store creation does slot 1, and concludes it won, finds storage holding exactly the applied bytes forever, so its applied slot is every reader's; one that concludes it lost finds other bytes there forever | `applied_attempt_won` | `proofs/sequence/CovenSequence/Claim.lean` | §10.3 |
 | *Body.* Without the byte comparison, a batch lands twice | `no_compare_lands_twice` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* Refusing a write whose `read_through` is below that of an earlier landed write of its device keeps every landed order checked; in a checked order, a write a device lands after one that read past a slot read past it too | `receive_checked`, `later_reads_past` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §7.1, §16.7 |
 | *Body.* An operation that forgets its claim on restart lands twice | `forgetful_lands_twice` | `proofs/sequence/CovenSequence/Operation.lean` | §5.1, §11.1 |
@@ -13616,7 +13628,7 @@ Write-ups explain each model and state its assumptions:
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | A copy opened before its key's introduction is held as tentative and not accepted; once the introduction applies, the device ends as if it had applied the introduction first: the key accepted when its material matches the commitment, a stop when it doesn't | `copy_order_agrees` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
 | The copies an audience still needs, of every key introduced for it to each current member's current sealing key, give every current member every older key once published; then none is needed, so a retry sends none, and they expose no key | `needed_complete`, `needed_after_none`, `needed_exposes_nothing` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
-| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation's slot 2 is the exception §12.1 names | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
+| *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation holds the rule in its one slot, whose prefix carries the creator's copy (§12.1) | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
 | An admission or a recovery makes the member's circle in its own slot: the slot introduces the circle's key and carries the member's copy of it, so the circle's first reader has its copy from the slot that makes the circle | `admission_carries_own_copy` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §13.2, §15.5 |
 | A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |

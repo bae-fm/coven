@@ -40,7 +40,6 @@ impl Fixture {
         self.handle
             .setup_s3_storage(
                 self.storage.config(),
-                "Test device",
                 "member-key".into(),
                 SecretText::new("secret".into()),
                 |_| {},
@@ -497,8 +496,11 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     handle.close().await.unwrap();
 }
 
+/// A store that never set up storage has nothing in storage to load, and its
+/// creation names the device a reset would replace: the reset is refused with
+/// `NoStorage` and changes nothing (§19.3).
 #[tokio::test]
-async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id() {
+async fn a_store_that_never_set_up_storage_refuses_a_reset_and_changes_nothing() {
     let f = Fixture::new().await;
     f.handle
         .write(|sql| {
@@ -508,36 +510,21 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
         .await
         .unwrap();
     f.handle.close().await.unwrap();
-    let old = f.directory.settings().unwrap().device_id;
-    assert_eq!(custody(&f).device_id().unwrap(), Some(old));
+    let old = f.directory.settings().unwrap();
     let before = f.storage.request_count();
-    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
-    let reset = handle.device_reset().await.unwrap().unwrap();
-    assert_eq!(reset.old_device, old);
-    assert_ne!(reset.new_device, old);
-    assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
-    assert_eq!(custody(&f).device_id().unwrap(), Some(reset.new_device));
-    assert!(notes(&handle).await.is_empty());
+    let refused = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await;
+    assert!(
+        matches!(refused, Err(BootstrapError::Sync(SyncError::NoStorage))),
+        "{:?}",
+        refused.map(drop)
+    );
+    assert_eq!(f.directory.settings().unwrap(), old);
+    assert_eq!(custody(&f).device_id().unwrap(), Some(old.device_id));
+    assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.storage.request_count(), before);
-    handle.close().await.unwrap();
     let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
-    assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
-    assert!(notes(&handle).await.is_empty());
-    handle.close().await.unwrap();
-}
-
-/// Ana's app is killed while it detects her bucket's settings, before she
-/// has set up storage, and she resets the store. The replacement keeps the
-/// cut run's record, so her next detection there still cleans up after it
-/// (§19.3, §20.7).
-#[tokio::test]
-async fn an_unconnected_reset_carries_a_cut_detection_run() {
-    let f = Fixture::new().await;
-    let cut = f.connector.detect(&f.handle, f.storage.config(), true).await;
-    f.handle.close().await.unwrap();
-    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
-    let next = f.connector.detect(&handle, f.storage.config(), false).await;
-    assert_eq!(next.earlier, [cut.run]);
+    assert_eq!(handle.device_reset().await.unwrap(), None);
+    assert_eq!(notes(&handle).await, ["unsent"]);
     handle.close().await.unwrap();
 }
 
@@ -578,38 +565,6 @@ async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys(
     let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), None);
     handle.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_unconnected_reset_resumes_with_the_local_creation_name() {
-    let f = Fixture::new().await;
-    f.handle.close().await.unwrap();
-    assert!(matches!(
-        reopen(&f).interrupt_after_swap().reset_device(f.directory.id(), "Phone", |_| ()).await,
-        Err(BootstrapError::Cancelled)
-    ));
-    let reset = f.directory.unfinished_replacement().unwrap().unwrap().reset;
-    assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
-    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
-    assert_eq!(handle.store_name().await.unwrap(), "Reset");
-    assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
-    handle.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
-    let f = Fixture::new().await;
-    f.handle.close().await.unwrap();
-    let old = f.directory.settings().unwrap();
-    std::fs::write(f.directory.database_path(), b"damaged database").unwrap();
-    assert!(matches!(
-        reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await,
-        Err(BootstrapError::Store(CovenError::Database(DbError::DamagedDatabase)))
-    ));
-    assert_eq!(std::fs::read(f.directory.database_path()).unwrap(), b"damaged database");
-    assert_eq!(f.directory.settings().unwrap(), old);
-    assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
-    assert!(!loading_area(&f).exists());
 }
 
 /// Ana replaces Carol's member keys with a pair Carol prepared elsewhere.
@@ -897,45 +852,30 @@ async fn a_reset_completes_when_the_replaced_journal_is_damaged() {
 }
 
 /// A reset whose notice can't be stored fails and hands back no handle, so
-/// no working handle hides the discarded installation (§19.3). An unconnected
-/// reset fails before its swap and leaves the store as it was; a connected
-/// one fails once its replacement is recorded, so the store refuses opens
-/// until the next reset finishes it. Either way the next reset records the
-/// notice.
+/// no working handle hides the discarded installation (§19.3). The reset
+/// fails once its replacement is recorded, so the store refuses opens until
+/// the next reset finishes it, and the next reset records the notice.
 #[tokio::test]
 async fn a_reset_whose_notice_cannot_be_stored_returns_no_handle() {
-    for connected in [true, false] {
-        let f = Fixture::new().await;
-        if connected {
-            f.setup().await.unwrap();
-            synced(&f.handle).await;
-            uploaded(&f, "kept").await;
-        }
-        f.handle.close().await.unwrap();
-        let old = f.directory.settings().unwrap().device_id;
-        let failed = reopen(&f)
-            .fail_device_reset_notice()
-            .reset_device(f.directory.id(), "Phone", |_| ())
-            .await;
-        assert!(failed.is_err(), "{connected}: a handle came back");
-        let opened = reopen(&f).open(f.directory.id(), |_| ()).await;
-        if connected {
-            let store = f.directory.id();
-            assert!(
-                matches!(&opened, Err(CovenError::Lock(StoreLockError::ReplacementUnfinished {
-                    store: named, by: ReplacedBy::Reset
-                })) if *named == store),
-                "{:?}",
-                opened.map(drop)
-            );
-        } else {
-            let handle = opened.unwrap();
-            assert_eq!(handle.device_reset().await.unwrap(), None);
-            assert_eq!(f.directory.settings().unwrap().device_id, old);
-            handle.close().await.unwrap();
-        }
-        let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
-        assert_eq!(handle.device_reset().await.unwrap().unwrap().old_device, old);
-        handle.close().await.unwrap();
-    }
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap().device_id;
+    let failed =
+        reopen(&f).fail_device_reset_notice().reset_device(f.directory.id(), "Phone", |_| ()).await;
+    assert!(failed.is_err(), "a handle came back");
+    let opened = reopen(&f).open(f.directory.id(), |_| ()).await;
+    let store = f.directory.id();
+    assert!(
+        matches!(&opened, Err(CovenError::Lock(StoreLockError::ReplacementUnfinished {
+            store: named, by: ReplacedBy::Reset
+        })) if *named == store),
+        "{:?}",
+        opened.map(drop)
+    );
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap().unwrap().old_device, old);
+    handle.close().await.unwrap();
 }

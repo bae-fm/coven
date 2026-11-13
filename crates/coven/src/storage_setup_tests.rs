@@ -31,7 +31,13 @@ impl Phone {
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-        let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+        let created = builder(&app, &storage)
+            .id_source(Arc::new(UuidIds))
+            .create_store("Household", "Ana's phone")
+            .await
+            .unwrap();
+        let directory = app.store_dir(&created.store_id());
+        created.close().await.unwrap();
         let handle = builder(&app, &storage).open(directory.id(), |_| ()).await.unwrap();
         Self { app, storage, directory, handle, _root: root }
     }
@@ -50,7 +56,6 @@ impl Phone {
             handle
                 .setup_s3_storage(
                     config,
-                    "Ana's phone",
                     "member-key".into(),
                     SecretText::new("secret".into()),
                     |_| {},
@@ -126,13 +131,13 @@ impl Phone {
 
 /// Ana's phone is killed while setup checks Household's provider, before
 /// anything is claimed: right after the journal, after detection, after the
-/// provider check, or once it kept the store key. Reopening undoes the setup
-/// and says so: no location, no store key, none of setup's credentials,
-/// nothing created, and `coven_operations` lists it undone. Setting up again
-/// then works.
+/// or after the provider check. Reopening undoes the setup and says so: no
+/// location, none of setup's credentials, nothing in storage, and
+/// `coven_operations` lists it undone. The store's key stays, as creation made
+/// it, and setting up again then works.
 #[tokio::test]
 async fn a_setup_cut_before_its_point_of_no_return_is_undone_as_the_store_opens() {
-    for at in [SetupStop::Journaled, SetupStop::Detected, SetupStop::Checked, SetupStop::KeyKept] {
+    for at in [SetupStop::Journaled, SetupStop::Detected, SetupStop::Checked] {
         let mut phone = Phone::new().await;
         phone.crash_at(at);
         phone.setup().await.unwrap_err();
@@ -142,7 +147,7 @@ async fn a_setup_cut_before_its_point_of_no_return_is_undone_as_the_store_opens(
         assert!(!phone.candidate_kept(), "{at:?}");
         assert_eq!(phone.handle.storage_config().await.unwrap(), None, "{at:?}");
         assert!(!phone.created().await, "{at:?}");
-        assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Locked, "{at:?}");
+        assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Available, "{at:?}");
 
         phone.setup().await.unwrap();
         assert!(phone.created().await, "{at:?}");
@@ -220,7 +225,7 @@ async fn cancelling_before_the_point_of_no_return_undoes_setup() {
     assert!(!phone.created().await);
     assert!(!phone.candidate_kept());
     assert_eq!(phone.handle.storage_config().await.unwrap(), None);
-    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Available);
     phone.handle.close().await.unwrap();
 }
 
@@ -243,23 +248,26 @@ async fn cancelling_before_setup_journals_itself_undoes_it() {
     assert!(!phone.created().await);
     assert!(!phone.candidate_kept());
     assert_eq!(phone.handle.storage_config().await.unwrap(), None);
-    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Available);
     phone.handle.close().await.unwrap();
 }
 
-/// Creating claims the store at slot 1, the creator's key copy at slot 2 and
-/// Set up storage at slot 3, which records Ana's S3 key as her access
-/// (§10.3); nothing follows.
+/// Creating sends slot 1, which creation decided with the creator's key copy
+/// in its prefix, byte for byte, and claims Set up storage at slot 2, which
+/// records Ana's S3 key as her access (§10.3); nothing follows.
 #[tokio::test]
-async fn creating_claims_the_store_the_key_copy_and_set_up_storage() {
+async fn creating_sends_the_kept_slot_1_and_claims_set_up_storage() {
     let phone = Phone::new().await;
+    let kept = kept_slot_1(&phone).await;
     phone.setup().await.unwrap();
-    for number in 1..=3 {
+    let first = ObjectPath::slot(phone.directory.id(), NonZeroU64::MIN);
+    assert_eq!(phone.storage.read(&first).await.unwrap(), kept);
+    for number in 1..=2 {
         let path = ObjectPath::slot(phone.directory.id(), NonZeroU64::new(number).unwrap());
         assert!(phone.storage.status(&path).await.unwrap().is_some(), "slot {number}");
     }
-    let fourth = ObjectPath::slot(phone.directory.id(), NonZeroU64::new(4).unwrap());
-    assert!(phone.storage.status(&fourth).await.unwrap().is_none());
+    let third = ObjectPath::slot(phone.directory.id(), NonZeroU64::new(3).unwrap());
+    assert!(phone.storage.status(&third).await.unwrap().is_none());
     let members = phone.handle.members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(
@@ -380,6 +388,22 @@ async fn setup_acting_at(
     setup.await
 }
 
+/// The bytes creation kept as the phone's attempt at slot 1.
+async fn kept_slot_1(phone: &Phone) -> Vec<u8> {
+    phone
+        .handle
+        .test_database()
+        .read_current_attempt::<_, SyncError, _>(|chunks| {
+            let mut kept = Vec::new();
+            for chunk in chunks {
+                kept.extend(chunk?);
+            }
+            Ok(kept)
+        })
+        .await
+        .unwrap()
+}
+
 /// The slot numbers storage holds for the phone's store.
 async fn stored_slots(phone: &Phone) -> Vec<u64> {
     let objects = phone.storage.list(&ObjectPrefix::all(phone.directory.id())).await.unwrap();
@@ -429,9 +453,9 @@ async fn a_setup_whose_slot_1_reply_is_lost_settles_that_claim() {
 
 /// Ana's first setup, past its point of no return, finds the bucket claimed
 /// for another store as it claims it: the claim is refused with
-/// `OwnLocationRequired`, and setup undoes what it made, keeping no store
-/// key, location or credentials, claiming no slot and listing itself undone
-/// (E5, §11.6, §20.3).
+/// `OwnLocationRequired`, and setup undoes what it made, keeping no location or
+/// credentials, claiming no slot and listing itself undone; the store creation
+/// made stays on the phone, unsynced (E5, §11.6, §20.3).
 #[tokio::test]
 async fn a_setup_whose_claim_is_refused_undoes_what_it_made() {
     let phone = Phone::new().await;
@@ -440,7 +464,7 @@ async fn a_setup_whose_claim_is_refused_undoes_what_it_made() {
     };
     let result = setup_acting_at(&phone, SetupStop::Claiming, taking).await;
     assert!(own_location_required(result.as_ref().unwrap_err()), "{result:?}");
-    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(phone.handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert!(phone.handle.storage_config().await.unwrap().is_none());
     let custody = phone.app.store_keychain(phone.directory.id());
     assert!(custody.storage_credentials().unwrap().is_none());
@@ -485,7 +509,6 @@ async fn setup_names_the_first_device_and_a_reconnect_keeps_its_name() {
         .handle
         .setup_s3_storage(
             phone.storage.config(),
-            "Another name",
             "member-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -532,7 +555,7 @@ async fn setup(
     opened: &Opened,
     location: StorageConfig,
 ) -> Result<StorageSetup, StorageSetupError> {
-    opened.handle.setup_oauth_storage(location, "Laptop", |_| {}).await
+    opened.handle.setup_oauth_storage(location, |_| {}).await
 }
 
 /// Ana creates Household in her shared folder; Ben's Garden is then refused

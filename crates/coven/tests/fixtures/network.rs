@@ -127,7 +127,6 @@ impl Network {
             CloudProvider::S3 => handle
                 .setup_s3_storage(
                     storage.config(),
-                    "Device 0",
                     "owner-key".into(),
                     SecretText::new("secret".into()),
                     |_| {},
@@ -135,9 +134,9 @@ impl Network {
                 .await
                 .unwrap(),
             CloudProvider::CloudKit => {
-                handle.setup_cloudkit_storage("container", "Device 0", |_| {}).await.unwrap()
+                handle.setup_cloudkit_storage("container", |_| {}).await.unwrap()
             }
-            _ => handle.setup_oauth_storage(storage.config(), "Device 0", |_| {}).await.unwrap(),
+            _ => handle.setup_oauth_storage(storage.config(), |_| {}).await.unwrap(),
         };
         let network = Self {
             _sign_in: sign_in,

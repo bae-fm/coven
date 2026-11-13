@@ -301,17 +301,11 @@ async fn create(
     let handle = configured(Coven::in_memory(root.into()).builder(), library)
         .clock(clock.clone())
         .storage_connector(storage.clone())
-        .create_store("Library")
+        .create_store("Library", "Test device")
         .await
         .unwrap();
     handle
-        .setup_s3_storage(
-            storage.config(),
-            "Ana's laptop",
-            "key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(storage.config(), "key".into(), SecretText::new("secret".into()), |_| {})
         .await
         .unwrap();
     handle.start_sync().await.unwrap();

@@ -66,7 +66,7 @@ it. It returns the person's restore code and starts syncing.
 
 ```rust
 match handle
-    .setup_s3_storage(storage, "Ana's laptop", access_key_id, SecretText::new(secret), show_setup_step)
+    .setup_s3_storage(storage, access_key_id, SecretText::new(secret), show_setup_step)
     .await
 {
     Ok(setup) => {
@@ -117,7 +117,7 @@ request, checks the redirect, exchanges the code and keeps the tokens.
 ```rust
 handle.authenticate(OAuthAccess::OneDrive).await?;
 handle
-    .setup_oauth_storage(StorageConfig::OneDrive { drive_id, folder_id }, "Ana's laptop", show_setup_step)
+    .setup_oauth_storage(StorageConfig::OneDrive { drive_id, folder_id }, show_setup_step)
     .await?;
 ```
 
@@ -148,7 +148,7 @@ CloudKit administrators could also do it
 
 CloudKit is built into coven on Apple platforms. The app supplies its container
 identifier and the iCloud entitlement for it, and calls
-`setup_cloudkit_storage(container, device_name, on_progress)`. The store is a zone in the
+`setup_cloudkit_storage(container, on_progress)`. The store is a zone in the
 owner's private database, shared with members through a CloudKit share. Other
 platforms refuse CloudKit at setup with `StorageFailure::ProviderUnavailable`.
 

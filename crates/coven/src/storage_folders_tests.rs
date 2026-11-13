@@ -205,7 +205,7 @@ impl Fixture {
                     .migrations(vec![])
                     .storage_connector(connector.clone()),
             )
-            .create_store("Household")
+            .create_store("Household", "Test device")
             .await
             .unwrap();
         Self { _root: root, app, handle, sign_in, fake, storage, connector, clock }
@@ -319,11 +319,7 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
     f.expect_labels(&created.storage, "ana@example.com", "Household", 0).await;
-    let setup = f
-        .handle
-        .setup_oauth_storage(created.storage.clone(), "Ana's laptop", |_| {})
-        .await
-        .unwrap();
+    let setup = f.handle.setup_oauth_storage(created.storage.clone(), |_| {}).await.unwrap();
     let recorded = recorded(created.storage, "ana@example.com", "Household");
     assert_eq!(setup.connection.storage, recorded);
     assert_eq!(f.handle.storage_config().await.unwrap(), Some(recorded));
@@ -382,11 +378,7 @@ async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
     f.expect_labels(&dropbox("123"), "ana@example.com", "Household", 1).await;
-    let setup = f
-        .handle
-        .setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop", |_| {})
-        .await
-        .unwrap();
+    let setup = f.handle.setup_oauth_storage(folders[0].storage.clone(), |_| {}).await.unwrap();
     let recorded = recorded(dropbox("123"), "ana@example.com", "Household");
     assert_eq!(setup.connection.storage, recorded);
     assert_eq!(f.handle.storage_config().await.unwrap(), Some(recorded));
@@ -600,7 +592,7 @@ async fn remote_onedrive_folders_use_the_target_drive_and_item_ids() {
     );
     // The folder's own item, on the drive that holds it, names it.
     f.expect_labels(&folders[0].storage, "ana@example.com", "Family", 0).await;
-    f.handle.setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop", |_| {}).await.unwrap();
+    f.handle.setup_oauth_storage(folders[0].storage.clone(), |_| {}).await.unwrap();
     assert_eq!(
         f.handle.storage_config().await.unwrap(),
         Some(recorded(folders[0].storage.clone(), "ana@example.com", "Family"))
@@ -746,7 +738,7 @@ async fn setup_records_the_account_and_folder_and_signing_in_again_refreshes_onl
                 }
                 _ => recorded(location.clone(), "untrusted@example.com", "Untrusted"),
             };
-            let setup = f.handle.setup_oauth_storage(passed, "Ana's laptop", |_| {}).await.unwrap();
+            let setup = f.handle.setup_oauth_storage(passed, |_| {}).await.unwrap();
             let recorded = recorded(location.clone(), label, folder);
             assert_eq!(setup.connection.storage, recorded);
             assert_eq!(f.handle.storage_config().await.unwrap(), Some(recorded));
@@ -780,7 +772,7 @@ async fn setup_records_the_account_and_folder_and_signing_in_again_refreshes_onl
             _ => unreachable!(),
         };
         assert!(matches!(
-            f.handle.setup_oauth_storage(elsewhere, "Laptop", |_| {}).await,
+            f.handle.setup_oauth_storage(elsewhere, |_| {}).await,
             Err(StorageSetupError::LocationChangeUnsupported)
         ));
         f.fake.consumed();
@@ -800,7 +792,7 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
         let access = location.oauth_access().unwrap();
         f.handle.authenticate(access).await.unwrap();
         f.expect_labels(&location, "ana@example.com", "Household", 0).await;
-        f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
+        f.handle.setup_oauth_storage(location.clone(), |_| {}).await.unwrap();
         let code = f.handle.restore_code().await.unwrap();
         let keychain = f.app.store_keychain(f.handle.store_id());
         let credentials = keychain.storage_credentials().unwrap().unwrap();
@@ -809,10 +801,8 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
         let committed = f.handle.storage_config().await.unwrap();
         f.fake.expect(account_reply(location.provider(), "ignored", 1).status(503));
         assert_eq!(
-            failure(
-                f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap_err()
-            )
-            .failure(),
+            failure(f.handle.setup_oauth_storage(location.clone(), |_| {}).await.unwrap_err())
+                .failure(),
             StorageFailure::Network
         );
         assert_eq!(f.handle.storage_config().await.unwrap(), committed);
@@ -823,7 +813,7 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
             credentials.as_bytes()
         );
         f.expect_labels(&location, "ana@work.example", "Family", 1).await;
-        f.handle.setup_oauth_storage(location, "Laptop", |_| {}).await.unwrap();
+        f.handle.setup_oauth_storage(location, |_| {}).await.unwrap();
         f.fake.consumed();
         f.handle.close().await.unwrap();
     }
@@ -840,8 +830,7 @@ async fn onedrive_uses_the_principal_name_when_mail_is_absent() {
         let mut reply = account_reply(CloudProvider::OneDrive, "ignored", 0);
         reply.value = value;
         f.fake.expect(reply);
-        let setup =
-            f.handle.setup_oauth_storage(drive("household"), "Laptop", |_| {}).await.unwrap();
+        let setup = f.handle.setup_oauth_storage(drive("household"), |_| {}).await.unwrap();
         assert_eq!(
             setup.connection.storage,
             recorded(drive("household"), "ana@example.com", "Household")
@@ -865,8 +854,7 @@ async fn malformed_accounts_fail_before_setup_publishes_anything() {
         reply.value = value;
         f.fake.expect(reply);
         assert_eq!(
-            failure(f.handle.setup_oauth_storage(location, "Laptop", |_| {}).await.unwrap_err())
-                .failure(),
+            failure(f.handle.setup_oauth_storage(location, |_| {}).await.unwrap_err()).failure(),
             StorageFailure::Protocol
         );
         assert_eq!(f.handle.storage_config().await.unwrap(), None);
@@ -885,12 +873,11 @@ async fn refreshing_during_account_lookup_commits_the_replacement_tokens() {
             f.handle.authenticate(location.oauth_access().unwrap()).await.unwrap();
             if reconnect {
                 f.expect_labels(&location, "ana@example.com", "Household", 0).await;
-                f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
+                f.handle.setup_oauth_storage(location.clone(), |_| {}).await.unwrap();
             }
             f.fake.expect(account_reply(location.provider(), "ignored", 0).status(401));
             f.fake.expect(account_reply(location.provider(), "ana@work.example", 1));
-            let setup =
-                f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
+            let setup = f.handle.setup_oauth_storage(location.clone(), |_| {}).await.unwrap();
             assert_eq!(
                 setup.connection.storage,
                 recorded(location.clone(), "ana@work.example", "Household")
@@ -919,7 +906,7 @@ async fn each_connection_reads_the_folders_name_again() {
         let f = Fixture::new(location.clone()).await;
         f.handle.authenticate(location.oauth_access().unwrap()).await.unwrap();
         f.expect_labels(&location, "ana@example.com", "Household", 0).await;
-        f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
+        f.handle.setup_oauth_storage(location.clone(), |_| {}).await.unwrap();
         f.fake.consumed();
         f.handle.close().await.unwrap();
         f.storage.rename_folder("Family").await;

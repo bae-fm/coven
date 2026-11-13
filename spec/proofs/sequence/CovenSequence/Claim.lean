@@ -111,6 +111,25 @@ theorem conclude_correct [DecidableEq B] {t u w : Store B} {n : Nat} {own : B} {
       · refine ⟨fun h => ?_, fun _ => ⟨b, hb, huw n b hu⟩⟩
         simp [conclude, hb] at h
 
+/-- **A claimant that applied its own attempt before claiming.** Store creation
+decides slot 1 and applies it on the device before any storage exists
+(§10.3). The device's applied slot `n` is `own`, the bytes it will send. If it
+concludes `won`, storage holds exactly `own` at `n` forever, so the applied
+slot is every reader's slot, then and later. If it concludes `lost`, storage
+holds other bytes there forever, so what the device applied never matches the
+store's slot (setup fails with `StoreExists` and the store stays unsynced). It
+never concludes anything else that matters: `retry` sends the same bytes
+again. -/
+theorem applied_attempt_won [DecidableEq B] {t u w : Store B} {n : Nat} {own : B} {r : Reply}
+    {applied : Nat → Option B} (applies : applied n = some own)
+    (hr : Permitted t n own r) (htu : Extends t u) (huw : Extends u w) :
+    (conclude own r (u n) = .won → w n = applied n) ∧
+    (conclude own r (u n) = .lost → ∃ b, w n = some b ∧ w n ≠ applied n) := by
+  obtain ⟨won, lost⟩ := conclude_correct hr htu huw
+  refine ⟨fun h => by rw [won h, applies], fun h => ?_⟩
+  obtain ⟨b, hne, hw⟩ := lost h
+  exact ⟨b, hw, by rw [hw, applies]; intro e; exact hne (Option.some.inj e)⟩
+
 /-- A run of creates from the empty store: each element is a claimant
 creating a slot with its attempt's bytes `enc a n`. -/
 def runStore {A : Type} (enc : A → Nat → B) : List (Nat × A) → Store B

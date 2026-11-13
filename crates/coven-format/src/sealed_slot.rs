@@ -34,9 +34,10 @@ pub enum SlotKind {
     KeyCopy(CopyBox),
     /// An immutable snapshot's announcement.
     Announcement,
-    /// The entry admitting a member and registering their first device, with
-    /// that member's boxes, all to one recipient and sealing key, in
-    /// increasing `(audience, key)` order (§13.2).
+    /// The entry admitting a member and registering their first device, or
+    /// creating the store and its first admin, with that member's boxes, all
+    /// to one recipient and sealing key, in increasing `(audience, key)`
+    /// order (§10.3, §13.2).
     Admission(Vec<CopyBox>),
 }
 impl SlotKind {
@@ -62,12 +63,16 @@ impl SlotKind {
         )
     }
     /// Check the opened second frame against the clear kind. Only an
-    /// admission holds an admit-member or recover-member change, and it
-    /// holds nothing else (D6).
+    /// admission holds an admit-member, recover-member or create-store
+    /// change, and it holds nothing else (D6).
     pub fn check_frame(&self, frame: &SlotFrame) -> Result<(), Error> {
         let admits = matches!(
             frame,
-            SlotFrame::Admin(StoreChange::AdmitMember { .. } | StoreChange::RecoverMember { .. })
+            SlotFrame::Admin(
+                StoreChange::AdmitMember { .. }
+                    | StoreChange::RecoverMember { .. }
+                    | StoreChange::CreateStore { .. }
+            )
         );
         require(
             match (self, frame) {

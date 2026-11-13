@@ -75,17 +75,11 @@ async fn notes_store_builder(
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, body TEXT NOT NULL);",
         )])
         .storage_connector(storage.clone())
-        .create_store("Notes")
+        .create_store("Notes", "Test device")
         .await
         .unwrap();
     handle
-        .setup_s3_storage(
-            storage.config(),
-            "Ana's laptop",
-            "key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(storage.config(), "key".into(), SecretText::new("secret".into()), |_| {})
         .await
         .unwrap();
     handle.start_sync().await.unwrap();

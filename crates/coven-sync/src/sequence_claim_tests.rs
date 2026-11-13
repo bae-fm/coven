@@ -15,11 +15,11 @@ async fn a_lost_create_reply_settles_exact_bytes_without_a_second_slot() {
     assert!(matches!(ana.sync.pass().await, Err(SyncError::Storage(_))));
     assert!(ana.sync.database.current_claim().await.unwrap().is_some());
     ana.sync.pass().await.unwrap();
-    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), 4);
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), 3);
     assert!(ana.sync.database.current_claim().await.unwrap().is_none());
     assert!(group
         .storage
-        .status(&ObjectPath::slot(group.store, 5.try_into().unwrap()))
+        .status(&ObjectPath::slot(group.store, 4.try_into().unwrap()))
         .await
         .unwrap()
         .is_none());
@@ -280,7 +280,7 @@ async fn equal_claim_numbers_from_two_copies_at_one_slot_are_not_contention() {
 }
 
 #[tokio::test]
-async fn a_competing_first_setup_reports_that_the_store_exists() {
+async fn another_devices_slot_1_makes_setup_report_that_the_store_exists() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -301,9 +301,10 @@ async fn a_competing_first_setup_reports_that_the_store_exists() {
         matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::StoreExists),
         "{result:?}"
     );
+    // Ana's laptop keeps the store it created, unsynced.
     assert_eq!(
         ana.sync.database.store_state().await.unwrap().members.keys().copied().collect::<Vec<_>>(),
-        [ben.identity.member()]
+        [ana.identity.member()]
     );
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
@@ -805,14 +806,16 @@ async fn a_claim_refused_before_its_first_part_goes_on_from_its_plan() {
     ana.database().close().await.unwrap();
 }
 
-/// The first device's writes made before storage was set up read nothing and
-/// are checked against slot 1's record of the store's creation; no other
-/// device can write at zero (§7.1).
+/// The first device applies slot 1 when it creates the store, so its writes
+/// before storage was set up read through it and are checked against slot 1's
+/// record of the store's creation; a write reading nothing is refused for
+/// every device (§7.1).
 #[tokio::test]
-async fn the_first_devices_offline_writes_at_zero_check_against_the_creation() {
+async fn the_first_devices_writes_before_storage_read_through_the_creation() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
+    crate::creation::tests::decide_for(&group, &ana).await.unwrap();
     insert(ana.database(), "offline", "before storage").await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
@@ -822,8 +825,11 @@ async fn the_first_devices_offline_writes_at_zero_check_against_the_creation() {
     assert_eq!(rows(ana.database()).await, rows(ben.database()).await);
 
     let history = ana.sync.session.lock().await.history.clone();
-    let (member, _) = history.owner(ana.sync.device, 0).expect("the first device writes at zero");
+    let first = history.added(ana.sync.device).expect("slot 1 registers the first device");
+    assert_eq!(first, 1);
+    let (member, _) = history.owner(ana.sync.device, first).expect("it writes once it read slot 1");
     assert_eq!(member, ana.identity.member());
+    assert!(matches!(history.owner(ana.sync.device, 0), Err(Refusal::NotAuthorized)));
     assert!(matches!(history.owner(ben.sync.device, 0), Err(Refusal::NotAuthorized)));
     // Once the device has been added, reading slot 1 is enough for its own.
     assert!(history.owner(ben.sync.device, history.added(ben.sync.device).unwrap()).is_ok());

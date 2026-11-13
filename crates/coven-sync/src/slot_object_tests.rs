@@ -197,7 +197,7 @@ fn slot_one_is_verified_with_the_key_it_carries() {
     let path = coven_format::test_utils::slot_path(1);
     let ring = StoreKeyring::new(coven_format::test_utils::store_key());
     let creation = || SlotFrame::Admin(coven_format::test_utils::creation_change());
-    let signed = coven_format::test_utils::bounded_slot(1, 1, SlotKind::Admin, creation());
+    let signed = coven_format::test_utils::creation_slot();
 
     let received = open_bounded(signed.clone(), &path, &ring, &History::default()).unwrap();
     assert!(matches!(received.body, SlotBody::Bounded { frame, .. } if frame == creation()));

@@ -163,7 +163,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     for name in ["token", "device-id", "discarded"] {
         assert_eq!(replacement.host_secret(name).unwrap(), None);
     }
-    assert_eq!(replacement.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(replacement.store_key_state().unwrap(), StoreKeyState::Available);
     assert_ne!(identity(&app, directory.id()).member(), member);
     replacement.close().await.unwrap();
 }
@@ -263,18 +263,12 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
     let builder = || {
         app.builder().synced_tables(vec![]).migrations(vec![]).storage_connector(storage.clone())
     };
-    let handle = builder().create_store("Household").await.unwrap();
+    let handle = builder().create_store("Household", "Test device").await.unwrap();
     let directory = app.store_dir(&handle.store_id());
     assert_eq!(handle.storage_config().await.unwrap(), None);
     assert_eq!(Coven::storage_config(&directory).await.unwrap(), None);
     let setup = handle
-        .setup_s3_storage(
-            storage.config(),
-            "Ana's phone",
-            "key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(storage.config(), "key".into(), SecretText::new("secret".into()), |_| {})
         .await
         .unwrap();
     let expected = Some(setup.connection.storage);
@@ -284,13 +278,7 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
     *bucket = "another-bucket".into();
     assert!(matches!(
         handle
-            .setup_s3_storage(
-                wrong,
-                "Ana's phone",
-                "key".into(),
-                SecretText::new("secret".into()),
-                |_| {}
-            )
+            .setup_s3_storage(wrong, "key".into(), SecretText::new("secret".into()), |_| {})
             .await,
         Err(StorageSetupError::LocationChangeUnsupported)
     ));
@@ -321,11 +309,11 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
 async fn device_id_is_available_before_setup_and_survives_reopen() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
-    let handle = builder(&app).create_store("Household").await.unwrap();
+    let handle = builder(&app).create_store("Household", "Test device").await.unwrap();
     let store = handle.store_id();
     let device = handle.device_id();
     assert_eq!(handle.clone().device_id(), device);
-    assert!(handle.members().await.unwrap().is_empty());
+    assert_eq!(handle.members().await.unwrap().len(), 1);
     handle.close().await.unwrap();
     assert_eq!(handle.device_id(), device);
     let handle = builder(&app).open(store, |_| ()).await.unwrap();
@@ -556,7 +544,7 @@ fn calls_on_a_runtime_that_shut_down_are_shutdowns() {
             "{:?}",
             opened.map(drop)
         );
-        let created = builder(&app).create_store("Work").await;
+        let created = builder(&app).create_store("Work", "Test device").await;
         assert!(
             matches!(created, Err(StoreCreationError::Shutdown(Shutdown { .. }))),
             "{:?}",

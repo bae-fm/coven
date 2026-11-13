@@ -1,9 +1,5 @@
 use super::*;
-use crate::{
-    sealed_slot::{SlotKind, SlotObjectPrefix},
-    sealed_write::WriteObjectPrefix,
-    Object,
-};
+use crate::{sealed_write::WriteObjectPrefix, Object};
 
 #[test]
 fn recorded_write_format_round_trips_the_fixture_prefix() {
@@ -22,12 +18,10 @@ fn recorded_entry_format_encodes_both_its_frame_and_envelope() {
     let format = FormatVersion::decode(&frame).unwrap();
     assert_eq!(format.number(), 1);
     assert_eq!(Object::decode(&frame).unwrap().encode_in(format).unwrap(), frame);
-    let prefix = SlotObjectPrefix {
-        format,
-        kind: SlotKind::Admin,
-        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
-    };
-    let bytes = crate::tests::hex(include_str!("../fixtures/sealed-admin.hex"));
+    let bytes = crate::tests::hex(include_str!("../fixtures/sealed-creation.hex"));
+    let prefix = crate::sealed_slot::BoundedSlot::decode(&bytes).unwrap().prefix;
+    assert_eq!(prefix.format, format);
+    assert_eq!(prefix.key, coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])));
     let encoded = prefix.encode().unwrap();
     assert_eq!(encoded, bytes[..encoded.len()]);
 }

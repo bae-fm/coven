@@ -334,7 +334,6 @@ async fn a_write_before_setup_waits_until_the_first_pass_sends_it() {
     storage.hold_next_request_of(MemoryRequest::Read(next, None), started, resumed).await;
     dan.setup_s3_storage(
         storage.config(),
-        "Dan's laptop",
         "member-key".into(),
         SecretText::new("secret".into()),
         |_| {},

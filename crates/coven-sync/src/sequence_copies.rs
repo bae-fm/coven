@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// The copies `change` sends before its entry, when `author`'s device
 /// holding `ring` makes it. An admission carries its own in its slot, each
 /// key once, in `(audience, key)` order (format.md D9).
-pub(super) fn required_copies(
+pub(crate) fn required_copies(
     history: &History,
     ring: &StoreKeyring,
     change: &StoreChange,
@@ -34,6 +34,14 @@ pub(super) fn required_copies(
             .into_iter()
             .filter(|route| route.member != *member)
             .collect(),
+        // Store creation carries the creator's copy of the first store key
+        // (§10.3).
+        StoreChange::CreateStore { key, admin, .. } => vec![KeyCopyPrefix {
+            audience: Audience::Store,
+            key: *key,
+            member: author,
+            sealing: admin.sealing,
+        }],
         StoreChange::CreateCircle { circle, key, .. } => vec![KeyCopyPrefix {
             audience: Audience::Circle(*circle),
             key: *key,
@@ -75,9 +83,15 @@ pub(super) fn required_copies(
     }
 }
 
-/// Whether `change` is an admission's entry, whose slot carries its copies.
+/// Whether `change` is an admission's or a creation's entry, whose slot
+/// carries its copies.
 pub(super) fn admits(change: &StoreChange) -> bool {
-    matches!(change, StoreChange::AdmitMember { .. } | StoreChange::RecoverMember { .. })
+    matches!(
+        change,
+        StoreChange::AdmitMember { .. }
+            | StoreChange::RecoverMember { .. }
+            | StoreChange::CreateStore { .. }
+    )
 }
 
 /// An admission's clear prefix: each of `copies`, in order, sealed for its
@@ -87,7 +101,7 @@ pub(super) fn admits(change: &StoreChange) -> bool {
 /// An admission whose slot, with `plaintext` bytes of body, would exceed a
 /// slot's size is refused with `AdmissionTooLarge`, also before anything is
 /// claimed (format.md D2).
-pub(super) fn admission_prefix(
+pub(crate) fn admission_prefix(
     ring: &StoreKeyring,
     path: &coven_storage::ObjectPath,
     store_key: coven_foundation::id_source::KeyId,

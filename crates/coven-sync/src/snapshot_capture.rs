@@ -65,7 +65,6 @@ impl crate::sequence_sync::sequence_operations::SequenceOperation {
             OperationStep::Preparing
             | OperationStep::Copy(_)
             | OperationStep::Claiming
-            | OperationStep::CreatorCopy(_)
             | OperationStep::Applied(_)
             | OperationStep::Satisfied => None,
         }

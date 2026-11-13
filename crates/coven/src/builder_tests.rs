@@ -64,10 +64,10 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .build()
             .unwrap(),
     );
-    let member = MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(0x4d))).unwrap();
     let scoped = Arc::new(StoreKeychain::new(app.builder().keychain().unwrap(), directory.id()));
     let identity = Arc::new(KeyringCustody::<MemberIdentity>::new(scoped.clone()));
-    identity.persist(&member).unwrap();
+    // The identity creation made is the store's creator.
+    let member = identity.unlock().unwrap().unwrap();
     let keys = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped));
     let open = || {
         app.builder()
@@ -83,7 +83,6 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle
         .setup_s3_storage(
             storage.config(),
-            "Owner",
             "owner-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -326,7 +325,6 @@ mod recovery {
                 CloudProvider::S3 => handle
                     .setup_s3_storage(
                         config.clone(),
-                        "Original",
                         "owner".into(),
                         SecretText::new("secret".into()),
                         |_| {},
@@ -334,11 +332,11 @@ mod recovery {
                     .await
                     .unwrap(),
                 CloudProvider::CloudKit => {
-                    handle.setup_cloudkit_storage("test", "Original", |_| {}).await.unwrap()
+                    handle.setup_cloudkit_storage("test", |_| {}).await.unwrap()
                 }
                 _ => {
                     handle.authenticate(config.oauth_access().unwrap()).await.unwrap();
-                    handle.setup_oauth_storage(config.clone(), "Original", |_| {}).await.unwrap()
+                    handle.setup_oauth_storage(config.clone(), |_| {}).await.unwrap()
                 }
             };
             assert_eq!(setup.restore_code.as_str(), handle.restore_code().await.unwrap());
@@ -499,7 +497,7 @@ async fn a_builder_left_alone_runs_one_upload_and_one_download_at_a_time() {
         .synced_tables(tables())
         .namespaces(namespaces())
         .migrations(migrations())
-        .create_store("Household")
+        .create_store("Household", "Test device")
         .await
         .unwrap();
     let limits = handle.transfer_limits();
@@ -523,7 +521,6 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     handle
         .setup_s3_storage(
             storage.config(),
-            "Phone",
             "owner".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -546,7 +543,6 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     handle
         .setup_s3_storage(
             storage.config(),
-            "Phone",
             "owner".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -572,7 +568,7 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
     };
     let builder =
         || app.builder().synced_tables(vec![]).migrations(vec![]).sqlite_settings(settings.clone());
-    let handle = builder().create_store("Recipes").await.unwrap();
+    let handle = builder().create_store("Recipes", "Test device").await.unwrap();
     let chosen = |effect: SqliteSettingsInEffect| {
         (effect.cache_size, effect.wal_autocheckpoint, effect.page_size, effect.auto_vacuum)
     };
@@ -607,7 +603,7 @@ async fn the_apps_collations_reach_both_handles_from_creation() {
             )])
             .collation("reversed", 1, |left: &str, right: &str| right.cmp(left))
     };
-    let handle = builder().create_store("Recipes").await.unwrap();
+    let handle = builder().create_store("Recipes", "Test device").await.unwrap();
     handle
         .write(|sql| {
             sql.execute(
@@ -651,7 +647,7 @@ async fn the_apps_functions_reach_both_handles_from_creation() {
                 Ok(arguments.get::<String>(0)?.to_lowercase())
             })
     };
-    let handle = builder().create_store("Recipes").await.unwrap();
+    let handle = builder().create_store("Recipes", "Test device").await.unwrap();
     handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')", [])?;
@@ -742,7 +738,8 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
             assert_eq!(found, Some(class), "{}", path.display());
         }
     };
-    let created = builder(FileProtection::CompleteUnlessOpen).create_store("Household").await;
+    let created =
+        builder(FileProtection::CompleteUnlessOpen).create_store("Household", "Test device").await;
     if support == ProtectionSupport::Locked {
         // While the device is locked, the store's record, made
         // `CompleteUnlessOpen`, can't be opened again: the creation says so,
@@ -755,7 +752,7 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
         assert!(app.stores().await.unwrap().is_empty());
         // A store made without a class can't be opened for use with
         // `Complete` while the device is locked.
-        let plain_handle = plain().create_store("Work").await.unwrap();
+        let plain_handle = plain().create_store("Work", "Test device").await.unwrap();
         let id = plain_handle.store_id();
         plain_handle.close().await.unwrap();
         let opened = builder(FileProtection::Complete).open(id, |_| ()).await;
@@ -793,11 +790,12 @@ async fn refused_on_a_volume_without_classes(
     plain: impl Fn() -> CovenBuilder,
     builder: impl Fn(FileProtection) -> CovenBuilder,
 ) {
-    let created = builder(FileProtection::CompleteUnlessOpen).create_store("Household").await;
+    let created =
+        builder(FileProtection::CompleteUnlessOpen).create_store("Household", "Test device").await;
     let error = created.map(drop).unwrap_err();
     assert!(refused_class(&error), "{error:?}");
     assert!(app.stores().await.unwrap().is_empty());
-    let handle = plain().create_store("Household").await.unwrap();
+    let handle = plain().create_store("Household", "Test device").await.unwrap();
     let id = handle.store_id();
     handle.close().await.unwrap();
     let error = builder(FileProtection::Complete).open(id, |_| ()).await.map(drop).unwrap_err();

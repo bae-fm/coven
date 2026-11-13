@@ -69,7 +69,6 @@ async fn set_up(
     let setup = handle
         .setup_s3_storage(
             storage.config(),
-            "Dan's phone",
             "dan-key".into(),
             SecretText::new("secret".into()),
             |_| {},

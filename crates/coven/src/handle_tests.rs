@@ -170,7 +170,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     let handle = builder(&app)
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("session")
+        .create_store("session", "Test device")
         .await
         .unwrap();
     let directory = app.store_dir(&handle.store_id());
@@ -207,7 +207,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     ));
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
     assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
-    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
     let failed: CovenResult<()> = handle
         .test_staged_write(
@@ -264,7 +264,7 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
     let directory = app.create_closed_store("closed", Arc::new(UuidIds)).await.unwrap();
     let original = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     let handle = original.clone();
-    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     original.close().await.unwrap();
     assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));
     assert!(matches!(
@@ -276,7 +276,6 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
                     endpoint: None,
                     profile: None,
                 },
-                "Device",
                 "member".into(),
                 SecretText::new("secret".into()),
                 |_| {}
@@ -294,14 +293,13 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
                     },
                     folder_label: None
                 },
-                "Device",
                 |_| {}
             )
             .await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(
-        handle.setup_cloudkit_storage("container", "Device", |_| {}).await,
+        handle.setup_cloudkit_storage("container", |_| {}).await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(
@@ -329,9 +327,11 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
     let app = Coven::in_memory(root.path().to_owned());
     let directory = app.create_closed_store("members", Arc::new(UuidIds)).await.unwrap();
     let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
-    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    // The creator is a member from creation, with no access recorded yet.
     let members = handle.members().await.unwrap();
-    assert!(members.is_empty());
+    assert_eq!(members.len(), 1);
+    assert!(members[0].is_self && members[0].access.is_none());
     assert_eq!(
         handle.subscribe_members().next().await.expect("the live query answers").unwrap(),
         members
@@ -366,7 +366,7 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         let (resume, resumed) = tokio::sync::oneshot::channel();
         storage.hold_next_listing(ObjectPrefix::all(directory.id()), entered, resumed).await;
         {
-            let setup = handle.setup_s3_storage(config.clone(), "Device", "member".into(), SecretText::new("secret".into()), |_| {});
+            let setup = handle.setup_s3_storage(config.clone(), "member".into(), SecretText::new("secret".into()), |_| {});
             tokio::pin!(setup);
             tokio::select! {
                 result = &mut setup => panic!("setup finished while its provider check was held: {result:?}"),
@@ -402,14 +402,13 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
         .storage_connector(connector.clone())
-        .create_store("session")
+        .create_store("session", "Test device")
         .await
         .unwrap();
     let member = identity.keys.lock().unwrap().as_ref().unwrap().member();
     handle
         .setup_s3_storage(
             storage.config(),
-            "Owner",
             "owner-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -503,7 +502,7 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
     let handle = builder(&app)
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("session")
+        .create_store("session", "Test device")
         .await
         .unwrap();
     let clone = handle.clone();

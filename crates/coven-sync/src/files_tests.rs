@@ -4,6 +4,7 @@ use coven_database::{
     Namespace, Provenance, RowIdentity, SyncedTable,
 };
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     clock::{ClockRef, ClosureClock},
     files::StoreDirectories,
@@ -98,6 +99,21 @@ impl Fixture {
             Namespace::new("covers", Provenance::AppProvided, 1 << 30),
         ];
         let database = builder(&directory, &ids, &clock, &namespaces).open().await.unwrap();
+        // The store's creation is applied before any write: every write reads
+        // through slot 1 (§7.1).
+        crate::decide_creation(
+            &database,
+            crate::Creation {
+                store: directory.id(),
+                name: "files".into(),
+                device: directory.settings().unwrap().device_id,
+                device_name: "Files".into(),
+                member: &coven_format::test_utils::identity(),
+                ring: &coven_crypto::StoreKeyring::new(coven_format::test_utils::store_key()),
+            },
+        )
+        .await
+        .unwrap();
         let storage = Arc::new(storage.build().unwrap());
         let send = ready_state();
         let waits =

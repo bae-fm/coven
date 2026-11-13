@@ -15,7 +15,7 @@ async fn a_restored_device_opens_its_copy_loads_the_sequence_and_registers() {
     ana.sync.pass().await.unwrap();
     let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     assert!(laptop.sync.keys.read().unwrap().is_none());
-    assert!(matches!(laptop.sync.pass().await.unwrap(), SequenceStatus::Synced { through: 4 }));
+    assert!(matches!(laptop.sync.pass().await.unwrap(), SequenceStatus::Synced { through: 3 }));
     assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
     laptop.sync.register_device("Ana's laptop".into(), None).await.unwrap();
     insert(&laptop.sync.database, "b", "from the laptop").await;

@@ -68,8 +68,8 @@ custody follows the same lifetime: `unlock` is called once, `persist` reuses
 what `unlock` unlocked, `forget` removes the keys, and `close` erases what it
 holds in memory.
 
-`create_store` puts the new member's keys in identity custody before publishing
-anything. Restoring takes them from the restore code; joining makes them. Opening
+`create_store` puts the new member's keys and the first store key in custody before
+publishing anything. Restoring takes them from the restore code; joining makes them. Opening
 an existing store never makes new keys.
 
 `handle.store_key_state()` says whether this session holds the store key

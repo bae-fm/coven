@@ -60,10 +60,7 @@ fn floor_refuses_duplicate_future_missing_wrong_kind_and_reordered_evidence() {
     }
     let (mut writer, _) = FloorFrames::start(header()).unwrap();
     assert!(writer.announcement(&announcement(7)).is_err());
-    let wrong = OriginalSlot {
-        slot: slot(9),
-        object: f::bounded_slot(1, 1, SlotKind::Admin, SlotFrame::Admin(f::creation_change())),
-    };
+    let wrong = OriginalSlot { slot: slot(9), object: f::creation_slot() };
     assert!(writer.announcement(&wrong).is_err());
     writer.announcement(&announcement(9)).unwrap();
     assert!(writer.announcement(&announcement(9)).is_err());

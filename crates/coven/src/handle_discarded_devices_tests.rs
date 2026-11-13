@@ -12,6 +12,7 @@ struct Fixture {
     app: Coven,
     clock: Arc<FixedClock>,
     connector: Arc<crate::tests::Connector>,
+    storage: Arc<MemoryStorage>,
     directory: StoreDir,
     _root: tempfile::TempDir,
 }
@@ -23,8 +24,8 @@ impl Fixture {
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(MemoryStorage::builder().clock(clock.clone()).build().unwrap());
         let directory = app.create_closed_store("Kept", Arc::new(UuidIds)).await.unwrap();
-        let connector = crate::tests::Connector::new(storage);
-        Self { app, clock, connector, directory, _root: root }
+        let connector = crate::tests::Connector::new(storage.clone());
+        Self { app, clock, connector, storage, directory, _root: root }
     }
 
     fn builder(&self) -> CovenBuilder {
@@ -38,6 +39,22 @@ impl Fixture {
                 "notes",
                 "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
             )])
+    }
+
+    /// Set the store up on the fixture's storage, as a reset needs, and
+    /// close it.
+    async fn connect(&self) {
+        let handle = self.open().await;
+        handle
+            .setup_s3_storage(
+                self.storage.config(),
+                "member-key".into(),
+                SecretText::new("secret".into()),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        handle.close().await.unwrap();
     }
 
     async fn open(&self) -> CovenHandle {
@@ -86,7 +103,7 @@ async fn notes(handle: &CovenHandle) -> Vec<String> {
 #[tokio::test]
 async fn deleting_removes_the_archive_a_reset_kept_and_the_store_still_works() {
     let f = Fixture::new().await;
-    f.open().await.close().await.unwrap();
+    f.connect().await;
     let handle = f.reset().await;
     note(&handle, "before").await;
     assert_eq!(f.archives().len(), 1);
@@ -103,7 +120,7 @@ async fn deleting_removes_the_archive_a_reset_kept_and_the_store_still_works() {
 #[tokio::test]
 async fn deleting_removes_the_archives_of_every_reset() {
     let f = Fixture::new().await;
-    f.open().await.close().await.unwrap();
+    f.connect().await;
     f.reset().await.close().await.unwrap();
     let handle = f.reset().await;
     assert_eq!(f.archives().len(), 2);
@@ -121,7 +138,7 @@ async fn deleting_with_no_archive_succeeds_and_can_repeat() {
     note(&handle, "kept").await;
     handle.close().await.unwrap();
     let f = Fixture::new().await;
-    f.open().await.close().await.unwrap();
+    f.connect().await;
     let handle = f.reset().await;
     handle.delete_discarded_devices().await.unwrap();
     handle.delete_discarded_devices().await.unwrap();
@@ -136,7 +153,7 @@ async fn deleting_with_no_archive_succeeds_and_can_repeat() {
 async fn a_deletion_that_stops_partway_leaves_the_archive_for_the_next_call() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new().await;
-    f.open().await.close().await.unwrap();
+    f.connect().await;
     let handle = f.reset().await;
     let archive = f.archives().remove(0);
     let stuck = archive.join("stuck");

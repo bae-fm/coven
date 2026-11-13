@@ -57,7 +57,6 @@ pub(crate) enum OperationStep {
     Preparing,
     Copy(#[serde(with = "route")] KeyCopyPrefix),
     Claiming,
-    CreatorCopy(#[serde(with = "coven_database::slot_json")] Slot),
     Capturing(Capture),
     Uploading(SnapshotArtifact),
     Announcing(SnapshotArtifact),
@@ -167,6 +166,42 @@ impl SequenceSync {
             "settle operations",
             self.database.bugs().clone(),
             settling,
+        )
+        .await?
+    }
+
+    /// Send the slot 1 a store's creation decided, as the attempt it kept,
+    /// and settle it (§10.3). Answers `StoreExists` once another device's
+    /// bytes hold slot 1, and nothing when the creation is already
+    /// published.
+    pub async fn publish_creation(self: &std::sync::Arc<Self>) -> Result<(), SyncError> {
+        let owner = self.clone();
+        let publishing = async move {
+            let mut session = owner.session.lock().await;
+            let member =
+                owner.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            let mut ring = owner.ring(&mut session, &member).await?;
+            owner.read_forward(&mut session, &mut ring, &member).await?;
+            owner.settle_open(&mut session, &mut ring, &member).await?;
+            let Some(id) = owner
+                .journaled(|request| {
+                    matches!(request, Request::Change(StoreChange::CreateStore { .. }))
+                })
+                .await?
+            else {
+                return Ok(());
+            };
+            owner.retry_operation(id).await?;
+            owner
+                .run_administration(&mut session, &mut ring, &member, id)
+                .await
+                .and_then(crate::operation_outcome::into_slot)
+                .map(drop)
+        };
+        coven_foundation::task::spawn_completing(
+            "publish a store's creation",
+            self.database.bugs().clone(),
+            publishing,
         )
         .await?
     }
@@ -518,18 +553,7 @@ impl SequenceSync {
                             .expect("slot");
                         step = match step {
                             OperationStep::Copy(_) => OperationStep::Preparing,
-                            OperationStep::Claiming
-                                if matches!(
-                                    request,
-                                    Request::Change(StoreChange::CreateStore { .. })
-                                ) =>
-                            {
-                                OperationStep::CreatorCopy(slot)
-                            }
                             OperationStep::Claiming => OperationStep::Applied(slot),
-                            OperationStep::CreatorCopy(creation) => {
-                                OperationStep::Applied(creation)
-                            }
                             OperationStep::Announcing(artifact)
                                 if artifact.capture.purpose == Purpose::Ordinary =>
                             {
@@ -553,6 +577,15 @@ impl SequenceSync {
                             ))
                             .await?;
                         continue;
+                    }
+                    // Slot 1 was decided and applied when the store was
+                    // created: another device's bytes holding it leave
+                    // this store unable to ever sync, and every attempt
+                    // to send it says so (§10.3).
+                    ClaimSettlement::NotLanded
+                        if matches!(request, Request::Change(StoreChange::CreateStore { .. })) =>
+                    {
+                        return Err(coven_storage::StorageFailure::StoreExists.into());
                     }
                     ClaimSettlement::NotLanded => {
                         if claim
@@ -590,10 +623,7 @@ impl SequenceSync {
                     _ => unreachable!("settled create"),
                 }
             }
-            let validation = if matches!(step, OperationStep::CreatorCopy(_)) {
-                self.check_binding(session, member)?;
-                Ok(true)
-            } else if self.awaits_access_key(member, &request).await {
+            let validation = if self.awaits_access_key(member, &request).await {
                 // A key this connection doesn't hold: the call that journaled
                 // the entry never took it (§14.3).
                 Ok(false)
@@ -764,29 +794,20 @@ impl SequenceSync {
         request: &Request,
         step: &OperationStep,
     ) -> Result<(), SyncError> {
+        // The store's creation is sealed once, when the store is created
+        // (`creation`); an operation of it with no attempt to send has lost
+        // its slot.
+        if matches!(request, Request::Change(StoreChange::CreateStore { .. })) {
+            return Err(coven_database::DbError::Invariant {
+                what: "a store's creation journals the attempt at its slot 1",
+            }
+            .into());
+        }
         let path = self.path(next_slot(session.through)?);
-        let store_key = match request {
-            Request::Change(StoreChange::CreateStore { key, .. }) => *key,
-            _ => session.history.metadata_key(ring)?,
-        };
+        let store_key = session.history.metadata_key(ring)?;
         let (frame, kind) = match step {
-            OperationStep::Copy(_) | OperationStep::CreatorCopy(_) => {
-                let route = match step {
-                    OperationStep::Copy(route) => route.clone(),
-                    OperationStep::CreatorCopy(_) => {
-                        let Request::Change(StoreChange::CreateStore { key, admin, .. }) = request
-                        else {
-                            unreachable!("creation owns its first key copy");
-                        };
-                        KeyCopyPrefix {
-                            audience: Audience::Store,
-                            key: *key,
-                            member: member.member(),
-                            sealing: admin.sealing,
-                        }
-                    }
-                    _ => unreachable!("copy step"),
-                };
+            OperationStep::Copy(route) => {
+                let route = route.clone();
                 let copy = seal_copy(ring, &path, store_key, BoxPlace::KeyCopy, route)?;
                 (SlotFrame::KeyCopy, SlotKind::KeyCopy(copy))
             }

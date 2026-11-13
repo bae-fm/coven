@@ -530,10 +530,8 @@ impl StorageConnections {
     pub(crate) async fn setup_oauth(
         self: &Arc<Self>,
         storage: StorageConfig,
-        device_name: &str,
         progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
-        let device_name = device_name.to_owned();
         let call = self.start_setup()?;
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
@@ -562,7 +560,7 @@ impl StorageConnections {
                     (owner.codes.provider_auth(data.credentials), None)
                 }
             };
-            let journal = owner.begin_setup(call, &device_name, &auth.credentials()).await?;
+            let journal = owner.begin_setup(call, &auth.credentials()).await?;
             let setup = owner.run_setup(journal, async |journal| {
                 owner
                     .check_new_location(journal, &storage, auth.clone(), &waits, &mut progress)
@@ -592,11 +590,9 @@ impl StorageConnections {
     pub(crate) async fn setup_cloudkit(
         self: &Arc<Self>,
         container: &str,
-        device_name: &str,
         progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
         let container = container.to_owned();
-        let device_name = device_name.to_owned();
         let call = self.start_setup()?;
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
@@ -607,8 +603,7 @@ impl StorageConnections {
             }) {
                 return Err(StorageSetupError::LocationChangeUnsupported);
             }
-            let journal =
-                owner.begin_setup(call, &device_name, &StorageCredentials::CloudKit).await?;
+            let journal = owner.begin_setup(call, &StorageCredentials::CloudKit).await?;
             owner
                 .run_setup(journal, async |journal| {
                     let storage = match recorded {
@@ -677,10 +672,6 @@ impl StorageConnections {
             return Err(StorageSetupError::LocationChangeUnsupported);
         }
         Ok(())
-    }
-
-    fn persist_keys(&self, ring: &StoreKeyring) -> Result<(), KeyError> {
-        self.with_keys(|keys| keys.persist(ring))
     }
 
     fn forget_keys(&self) -> Result<(), KeyError> {

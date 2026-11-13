@@ -792,7 +792,7 @@ mod fixture_mutations {
     )]
     fn every_sequence_envelope_fixture_decodes_all_truncations_and_bit_changes() {
         for text in [
-            include_str!("../fixtures/sealed-admin.hex"),
+            include_str!("../fixtures/sealed-creation.hex"),
             include_str!("../fixtures/sealed-announcement.hex"),
             include_str!("../fixtures/sealed-circle-announcement.hex"),
         ] {

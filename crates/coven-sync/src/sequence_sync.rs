@@ -148,6 +148,38 @@ impl SequenceSync {
         })
     }
 
+    /// Decide this device's slot 1 in its database, as creating the store
+    /// does, and rebuild the session from the applied slots as opening does.
+    #[cfg(test)]
+    pub(crate) async fn decide_creation(
+        &self,
+        name: &str,
+        device_name: &str,
+        ring: &StoreKeyring,
+    ) -> Result<(), SyncError> {
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        crate::decide_creation(
+            &self.database,
+            crate::Creation {
+                store: self.store(),
+                name: name.into(),
+                device: self.device,
+                device_name: device_name.into(),
+                member: &member,
+                ring,
+            },
+        )
+        .await?;
+        let originals = self.database.original_slots().await?;
+        let identity = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.keys.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let history = History::restore(&originals, self.store(), &mut ring, &identity)?;
+        let mut session = self.session.lock().await;
+        session.through = self.database.applied_slot().await?;
+        session.history = history;
+        Ok(())
+    }
+
     /// Use candidate credentials while retaining this installation's exact
     /// progress and serialization. Failed setup can keep the old provider
     /// without replaying history the candidate already applied.

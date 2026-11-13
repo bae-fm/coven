@@ -70,6 +70,13 @@ impl Fixture {
             app.keychain.clone(),
             directory.id(),
         ))));
+        // The identity creation made is the store's creator: the store's
+        // history binds it.
+        let created = Custody::<MemberIdentity>::unlock(&KeyringCustody::new(Arc::new(
+            StoreKeychain::new(app.keychain.clone(), directory.id()),
+        )))
+        .unwrap()
+        .unwrap();
         let f = Self {
             app,
             directory,
@@ -78,14 +85,13 @@ impl Fixture {
             connector: crate::tests::Connector::new(storage.clone()),
             storage,
             keys,
-            member: member(17),
+            member: created,
             _root: root,
         };
         let handle = f.open().await;
         handle
             .setup_s3_storage(
                 f.storage.config(),
-                "Owner",
                 "owner-key".into(),
                 SecretText::new("secret".into()),
                 |_| {},
@@ -581,7 +587,7 @@ async fn a_store_opens_over_the_keychain_its_installation_saved() {
             .migrations(vec![Migration::addition(1, "records", SCHEMA)])
     };
     let app = Coven::in_memory(app_dir.path().into());
-    let handle = builder(&app).create_store("Kept").await.unwrap();
+    let handle = builder(&app).create_store("Kept", "Test device").await.unwrap();
     let store = handle.store_id();
     note(&handle, "kept".into()).await;
     handle.close().await.unwrap();

@@ -64,7 +64,6 @@ impl Fixture {
         self.handle
             .setup_s3_storage(
                 self.storage.config(),
-                "Test device",
                 "member-key".into(),
                 SecretText::new("secret".into()),
                 |_| {},
@@ -428,7 +427,6 @@ async fn recorded_setup(
     handle
         .setup_s3_reporting(
             f.storage.config(),
-            "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
             progress,
@@ -485,7 +483,7 @@ async fn setup_reports_each_step_it_runs() {
 async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
     let f = Fixture::new().await;
     assert_eq!(f.handle.test_sync_status().latest().await.state, SyncState::NotSynced);
-    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
     let connected = f.setup().await.unwrap();
     assert_eq!(connected.connection.key_state, StoreKeyState::Available);
     synced(&f.handle).await;
@@ -776,6 +774,15 @@ async fn repeated_setup_and_sync_requests_do_not_deadlock_credential_refresh() {
     f.handle.close().await.unwrap();
 }
 
+/// The store keys creation kept in the fixture's custody, for a custom
+/// custody that opens the store holding them.
+fn created_keys(f: &Fixture) -> Option<StoreKeyring> {
+    let custody = coven_crypto::custody::KeyringCustody::new(Arc::new(
+        f.app.store_keychain(f.directory.id()),
+    ));
+    Custody::<StoreKeyring>::unlock(&custody).unwrap()
+}
+
 struct RefusePersist {
     keys: std::sync::Mutex<Option<StoreKeyring>>,
     refuse: AtomicBool,
@@ -796,7 +803,6 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
         .handle
         .setup_s3_storage(
             config.clone(),
-            "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -816,13 +822,7 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
     .await
     .unwrap();
     let error = handle
-        .setup_s3_storage(
-            config,
-            "Test device",
-            "member-key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(config, "member-key".into(), SecretText::new("secret".into()), |_| {})
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "storage location change is unsupported");
@@ -831,7 +831,6 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
     handle
         .setup_s3_storage(
             f.storage.config(),
-            "Ignored",
             "member-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -868,17 +867,17 @@ async fn setup_rejects_overwriting_providers_before_committing() {
     assert!(
         matches!(f.setup().await.unwrap_err(), StorageSetupError::Check(StorageCheckError::ProviderCheck { check: StorageCheck::CreateOnce, source }) if source.failure() == StorageFailure::Protocol)
     );
-    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert!(matches!(f.handle.restore_code().await, Err(SyncError::NoStorage)));
     assert_eq!(f.handle.test_sync_status().latest().await.state, SyncState::NotSynced);
     assert!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap().is_empty());
-    assert!(f.handle.members().await.unwrap().is_empty());
+    let members = f.handle.members().await.unwrap();
+    assert!(members.len() == 1 && members[0].access.is_none(), "{members:?}");
     assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), None);
     f.storage.set_faults(Faults::none()).await;
     f.handle
         .setup_s3_storage(
             f.storage.config(),
-            "Another name",
             "another-key".into(),
             SecretText::new("another secret".into()),
             |_| {},
@@ -902,7 +901,6 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         .handle
         .setup_s3_storage(
             f.storage.config(),
-            "Ignored name",
             "replacement".into(),
             SecretText::new("new secret".into()),
             |_| {},
@@ -958,7 +956,7 @@ async fn setup_with_an_account_other_than_the_one_holding_the_store_is_refused()
     let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
     let handle =
         builder(&app, clock.clone(), storage.clone()).open(directory.id(), |_| ()).await.unwrap();
-    handle.setup_cloudkit_storage(&container, "Ana's Mac", |_| {}).await.unwrap();
+    handle.setup_cloudkit_storage(&container, |_| {}).await.unwrap();
     let owner = handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().access;
     let coven_storage::AccessGrant::Granted { invitation } =
         storage.grant_access("ana@work.example").await.unwrap()
@@ -970,7 +968,7 @@ async fn setup_with_an_account_other_than_the_one_holding_the_store_is_refused()
     let code = handle.restore_code().await.unwrap();
     handle.close().await.unwrap();
     let handle = builder(&app, clock, work).open(directory.id(), |_| ()).await.unwrap();
-    let result = handle.setup_cloudkit_storage(&container, "Ana's Mac", |_| {}).await;
+    let result = handle.setup_cloudkit_storage(&container, |_| {}).await;
     assert!(matches!(result, Err(StorageSetupError::StoreOwner)), "{result:?}");
     assert_eq!(handle.restore_code().await.unwrap(), code);
     let members = handle.members().await.unwrap();

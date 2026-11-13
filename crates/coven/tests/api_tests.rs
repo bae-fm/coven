@@ -72,13 +72,12 @@ async fn application_tests_use_memory_storage_through_the_facade() {
         .synced_tables(vec![])
         .migrations(vec![])
         .storage_connector(storage.clone())
-        .create_store("Household")
+        .create_store("Household", "Test device")
         .await
         .unwrap();
     handle
         .setup_s3_storage(
             storage.config(),
-            "Ana's laptop",
             "key".into(),
             coven::SecretText::new("secret".into()),
             |_| {},

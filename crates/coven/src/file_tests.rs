@@ -75,7 +75,7 @@ async fn an_uncached_file_body_waits_for_the_download_limit_and_a_pass_does_not(
             .namespaces(files_namespace())
             .migrations(vec![Migration::addition(1, "files", FILES)])
             .open(directory.id(), |_| ()).await.unwrap();
-        handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into()), |_| {}).await.unwrap();
+        handle.setup_s3_storage(memory.config(), "key".into(), SecretText::new("secret".into()), |_| {}).await.unwrap();
         hold_passes(&handle).await;
         let ids = stage_rows(&handle, 2, |id| vec![id; 2048].into()).await;
         handle.retry_uploads_now().await.unwrap();
@@ -155,7 +155,6 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         handle
             .setup_s3_storage(
                 memory.config(),
-                "Test device",
                 "key".into(),
                 SecretText::new("secret".into()),
                 |_| {},
@@ -406,20 +405,15 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
 }
 
 #[tokio::test]
-async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
+async fn a_restored_install_of_a_never_synced_store_refuses_a_reset() {
     let original_dir = tempfile::tempdir().unwrap();
     let original = Coven::in_memory(original_dir.path().into());
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let directory = original.create_closed_store("restored", ids.clone()).await.unwrap();
     let handle = builder(&original, ids.clone()).open(directory.id(), |_| ()).await.unwrap();
-    let note = ids.new_id().to_string();
-    let row = ids.new_id().to_string();
-    let old = thumbnail(&handle, &note, &row, b"old".to_vec(), true).await;
-    let old = handle.file_ref(old).await.unwrap();
     handle.close().await.unwrap();
-    // Backup bytes survive, but the new installation has no device-only entry.
-    // Opening refuses; an approved reset makes a new device, and nothing of
-    // the old copy is renumbered (§19.3).
+    // Backup bytes survive, but the new installation has no device-only entry,
+    // so opening refuses (§19.3).
     let restored = Coven::in_memory(original_dir.path().into());
     let old_device = directory.settings().unwrap().device_id;
     assert!(matches!(
@@ -427,25 +421,21 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         Err(CovenError::DeviceKeyMissing { .. })
     ));
     assert_eq!(directory.unfinished_replacement().unwrap(), None);
-    let handle = builder(&restored, ids.clone())
-        .reset_device(directory.id(), "Restored", |_| ())
-        .await
-        .unwrap();
-    let reset = handle.device_reset().await.unwrap().unwrap();
-    assert_eq!(reset.old_device, old_device);
-    assert_eq!(directory.settings().unwrap().device_id, reset.new_device);
-    // The discarded copy's unsent rows and files do not come back.
-    assert!(handle.file_ref(old.id()).await.is_err());
-    let new = thumbnail(&handle, &note, &row, b"new".to_vec(), true).await;
-    let new = handle.file_ref(new).await.unwrap();
-    assert_ne!(old.id(), new.id());
-    assert_eq!(new.place(), FilePlace::DeviceOnly { device: reset.new_device });
-    assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
-    handle.close().await.unwrap();
-    let handle = builder(&restored, ids).open(directory.id(), |_| ()).await.unwrap();
-    assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
-    assert_eq!(handle.file_ref(new.id()).await.unwrap(), new);
-    handle.close().await.unwrap();
+    // The store never set up storage, so there is nothing a new device could
+    // load: the reset is refused and changes nothing (§19.3).
+    let refused =
+        builder(&restored, ids.clone()).reset_device(directory.id(), "Restored", |_| ()).await;
+    assert!(
+        matches!(refused, Err(BootstrapError::Sync(SyncError::NoStorage))),
+        "{:?}",
+        refused.map(drop)
+    );
+    assert_eq!(directory.settings().unwrap().device_id, old_device);
+    assert_eq!(directory.unfinished_replacement().unwrap(), None);
+    assert!(matches!(
+        builder(&restored, ids).open(directory.id(), |_| ()).await,
+        Err(CovenError::DeviceKeyMissing { .. })
+    ));
 }
 
 #[tokio::test]
@@ -472,7 +462,6 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     handle
         .setup_s3_storage(
             storage.config(),
-            "Laptop",
             "owner".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -627,7 +616,6 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     handle
         .setup_s3_storage(
             storage.config(),
-            "Laptop",
             "owner".into(),
             SecretText::new("secret".into()),
             |_| {},

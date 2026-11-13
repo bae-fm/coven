@@ -412,15 +412,6 @@ pub(super) async fn open_swapped(
     }
 }
 
-/// Close the swapped installation's database after a failure, leaving the
-/// swap for the next call to finish.
-pub(super) async fn undo(
-    error: BootstrapError,
-    database: Database,
-) -> Result<CovenHandle, BootstrapError> {
-    combine(Err(error), close(database).await)
-}
-
 async fn close(database: Database) -> Result<(), BootstrapError> {
     close_database(&database).await
 }

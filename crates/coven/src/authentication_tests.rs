@@ -140,7 +140,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
             .unwrap(),
     );
     let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
-        .create_store("Account")
+        .create_store("Account", "Test device")
         .await
         .unwrap();
     let directory = app.store_dir(&handle.store_id());
@@ -148,7 +148,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let person = PersonEntries::new(keychain.clone(), directory.id());
 
     assert!(matches!(
-        handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await,
+        handle.setup_oauth_storage(storage.config(), |_| {}).await,
         Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 0);
@@ -171,10 +171,10 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     ));
     sign_in.presenter.cancel.store(false, Ordering::SeqCst);
     storage.set_online(false);
-    assert!(handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.is_err());
+    assert!(handle.setup_oauth_storage(storage.config(), |_| {}).await.is_err());
     assert!(scoped.storage_credentials().unwrap().is_none());
     storage.set_online(true);
-    handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.unwrap();
+    handle.setup_oauth_storage(storage.config(), |_| {}).await.unwrap();
     let bytes = scoped.storage_credentials().unwrap().unwrap();
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(bytes.as_bytes()).unwrap()
     else {
@@ -229,7 +229,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let handle =
         builder(&app, clock, storage.clone(), &sign_in).open(directory.id(), |_| ()).await.unwrap();
     assert!(matches!(
-        handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await,
+        handle.setup_oauth_storage(storage.config(), |_| {}).await,
         Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     handle.close().await.unwrap();
@@ -259,11 +259,11 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
     );
     let mut builder = builder(&app, clock.clone(), storage.clone(), &sign_in);
     builder.authenticate(coven_storage::OAuthAccess::OneDrive).await.unwrap();
-    let handle = builder.create_store("Account").await.unwrap();
+    let handle = builder.create_store("Account", "Test device").await.unwrap();
     let store = handle.store_id();
 
     assert!(matches!(
-        handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await,
+        handle.setup_oauth_storage(storage.config(), |_| {}).await,
         Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     handle
@@ -273,7 +273,7 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
         .await
         .unwrap();
     storage.reject_access_token("access-1").await;
-    handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.unwrap();
+    handle.setup_oauth_storage(storage.config(), |_| {}).await.unwrap();
     assert_eq!(sign_in.request_count(), 3);
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 2);
     // Setup commits the session's refreshed sign-in, not the rejected one.
@@ -359,8 +359,8 @@ async fn a_failed_or_dropped_sign_in_keeps_the_prior_one() {
 
     // The first sign-in is what setup commits: no new presentation, and the
     // tokens of the one successful exchange.
-    let handle = builder.create_store("Account").await.unwrap();
-    handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.unwrap();
+    let handle = builder.create_store("Account", "Test device").await.unwrap();
+    handle.setup_oauth_storage(storage.config(), |_| {}).await.unwrap();
     assert_eq!(sign_in.presentation_count(), 2);
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(
         StoreKeychain::new(keychain, handle.store_id())
@@ -399,7 +399,7 @@ mod provider_access_tests {
                 MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),
             );
             let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
-                .create_store("Account")
+                .create_store("Account", "Test device")
                 .await
                 .unwrap();
             let directory = app.store_dir(&handle.store_id());
@@ -413,7 +413,7 @@ mod provider_access_tests {
             let handle = builder.open(self.directory.id(), |_| ()).await.unwrap();
 
             handle.authenticate(self.storage.config().oauth_access().unwrap()).await.unwrap();
-            handle.setup_oauth_storage(self.storage.config(), "Laptop", |_| {}).await.unwrap();
+            handle.setup_oauth_storage(self.storage.config(), |_| {}).await.unwrap();
             handle
         }
         fn credentials(&self) -> SecretBytes {
@@ -472,7 +472,7 @@ mod provider_access_tests {
             location: DropboxLocation::SharedFolder { namespace_id: "other-level".into() },
             folder_label: None,
         };
-        let error = handle.setup_oauth_storage(shared, "Laptop", |_| {}).await.unwrap_err();
+        let error = handle.setup_oauth_storage(shared, |_| {}).await.unwrap_err();
         assert_eq!(error.to_string(), "storage location change is unsupported");
         assert_eq!(fixture.storage.request_count(), before);
         assert_eq!(handle.restore_code().await.unwrap(), code);
@@ -499,8 +499,10 @@ async fn dropping_sign_in_while_presenting_or_exchanging_cancels_it_and_keeps_th
             .build()
             .unwrap(),
     );
-    let handle =
-        builder(&app, clock, storage.clone(), &sign_in).create_store("Account").await.unwrap();
+    let handle = builder(&app, clock, storage.clone(), &sign_in)
+        .create_store("Account", "Test device")
+        .await
+        .unwrap();
     let scoped = StoreKeychain::new(keychain, app.store_dir(&handle.store_id()).id());
     let access = || coven_storage::OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox);
     handle.authenticate(access()).await.unwrap();
@@ -530,7 +532,7 @@ async fn dropping_sign_in_while_presenting_or_exchanging_cancels_it_and_keeps_th
     assert!(scoped.storage_credentials().unwrap().is_none(), "a dropped sign-in commits nothing");
 
     // The call lock is free, and the sign-in setup commits is the first one.
-    handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.unwrap();
+    handle.setup_oauth_storage(storage.config(), |_| {}).await.unwrap();
     let StorageCredentials::OAuth(tokens) =
         StorageCredentials::decode(scoped.storage_credentials().unwrap().unwrap().as_bytes())
             .unwrap()

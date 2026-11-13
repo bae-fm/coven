@@ -163,14 +163,6 @@ impl History {
         device: DeviceId,
         through: u64,
     ) -> Result<(MemberId, SigningKey), Refusal> {
-        // Only slot one's device may author offline originals before setup.
-        let through = if through == 0
-            && self.devices.get(&device).is_some_and(|changes| changes.contains_key(&1))
-        {
-            1
-        } else {
-            through
-        };
         let device = at(&self.devices, &device, through).ok_or(Refusal::NotAuthorized)?;
         let member = at(&self.members, &device.member, through).ok_or(Refusal::NotAuthorized)?;
         if !device.active() || member.removed {
@@ -181,7 +173,7 @@ impl History {
 
     /// The slot whose entry added `device`. Each of its writes is checked
     /// against a state that has it (`owner`), so each read through that
-    /// slot, except slot one's offline writes, which read nothing.
+    /// slot.
     pub(crate) fn added(&self, device: DeviceId) -> Option<u64> {
         self.devices.get(&device)?.keys().next().copied()
     }
@@ -318,7 +310,7 @@ impl History {
     ) -> Result<SigningKey, Refusal> {
         let (member, signer) =
             self.owner(header.header.position.device, header.header.read_through)?;
-        let through = header.header.read_through.max(1);
+        let through = header.header.read_through;
         if !header.parts.iter().all(|part| self.belonged(&part.audience, &member, through)) {
             return Err(Refusal::NotAuthorized);
         }
@@ -411,7 +403,7 @@ impl History {
         let (StoreChange::AdmitMember { member, keys, .. }
         | StoreChange::RecoverMember { member, keys, .. }) = change
         else {
-            unreachable!("an admission's kind holds only an admit or recover change")
+            return self.validate_creation(header, change, copies, effect);
         };
         let introduced: BTreeSet<KeyId> = self
             .introductions
@@ -437,6 +429,31 @@ impl History {
                 }
         });
         if !routed || copied != introduced {
+            return Err(OperationRejection::NotAllowed);
+        }
+        Ok(effect)
+    }
+
+    /// Validate the copies a store's creation carries, after its entry: they
+    /// all go to the creator at the sealing key the entry binds, and name
+    /// exactly the store key the entry introduces (§10.3, format.md D6).
+    fn validate_creation(
+        &self,
+        header: &SlotHeader,
+        change: &StoreChange,
+        copies: &[CopyBox],
+        effect: Option<AdminEffect>,
+    ) -> Result<Option<AdminEffect>, OperationRejection> {
+        let StoreChange::CreateStore { admin, key, .. } = change else {
+            unreachable!("an admission's kind holds only an admit, recover or create-store change")
+        };
+        let introduced = BTreeSet::from([(Audience::Store, *key)]);
+        let copied: BTreeSet<(Audience, KeyId)> =
+            copies.iter().map(|copy| (copy.routing.audience.clone(), copy.routing.key)).collect();
+        let routed = copies.iter().all(|copy| {
+            copy.routing.member == header.author && copy.routing.sealing == admin.sealing
+        });
+        if !routed || copied != introduced || copies.len() != introduced.len() {
             return Err(OperationRejection::NotAllowed);
         }
         Ok(effect)

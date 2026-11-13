@@ -140,13 +140,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, Coven, CovenHandle) {
         .await
         .unwrap();
     handle
-        .setup_s3_storage(
-            memory.config(),
-            "Laptop",
-            "owner".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(memory.config(), "owner".into(), SecretText::new("secret".into()), |_| {})
         .await
         .unwrap();
     // The first pass after setup ends synced.
@@ -625,7 +619,7 @@ async fn closing_reports_several_failures_chained() {
         .synced_tables(Vec::new())
         .migrations(Vec::new())
         .key_custody(CustodyChoice::Custom(Arc::new(PanicsOnClose)))
-        .create_store("session")
+        .create_store("session", "Test device")
         .await
         .unwrap();
     let clone = handle.clone();

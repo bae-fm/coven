@@ -280,6 +280,13 @@ impl SequenceSync {
             self.follow_person_entries(&session.history, &history, member)?;
             self.apply(session, incoming, history, ring, member).await?;
             input.release().await?;
+        } else if let Some(input) =
+            crate::object_input::ObjectInput::retained(&self.database, path).await?
+        {
+            // Applied before it was claimed, as a store's creation is
+            // (§10.3), or installed by a reload: the bytes kept for applying
+            // are no longer needed.
+            input.release().await?;
         }
         if matches!(claim.work, ClaimWork::Writes(_)) {
             self.database.finish_claim(None).await?;

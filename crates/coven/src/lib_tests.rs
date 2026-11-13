@@ -488,7 +488,6 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
         .handle
         .setup_s3_storage(
             network.devices[1].storage.config(),
-            "Device 1",
             "replacement-key".into(),
             SecretText::new("replacement-secret".into()),
             |_| {},

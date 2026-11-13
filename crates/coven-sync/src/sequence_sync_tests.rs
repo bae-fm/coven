@@ -40,6 +40,9 @@ impl Device {
             .await
             .unwrap();
     }
+    pub(crate) fn device_id(&self) -> coven_foundation::id_source::DeviceId {
+        self.sync.device
+    }
     pub(crate) fn database(&self) -> &Database {
         &self.sync.database
     }
@@ -390,19 +393,13 @@ impl Group {
         ana: &Device,
         access: coven_format::MemberAccess,
     ) -> Result<(), SyncError> {
-        // Setup claims a location that holds one store before slot 1.
+        // Creation decides slot 1 on the device; setup claims a location that
+        // holds one store, then sends it and claims Set up storage.
+        if ana.sync.database.applied_slot().await? == 0 {
+            crate::creation::tests::decide_for(self, ana).await?;
+        }
         self.storage.claim_location(self.store).await?;
-        let key = self.ring.store_key_ids().next().unwrap();
-        ana.sync
-            .administer(StoreChange::CreateStore {
-                store: self.store,
-                name: "sequence tests".into(),
-                admin: ana.identity.keys().public_keys(),
-                device_name: "Ana".into(),
-                key,
-                key_hash: self.ring.store_key(key).unwrap().hash(),
-            })
-            .await?;
+        ana.sync.publish_creation().await?;
         ana.sync.administer(StoreChange::SetUpStorage { access }).await
     }
     /// Ana admits `ben` as an admin, with access of the store's kind: on S3

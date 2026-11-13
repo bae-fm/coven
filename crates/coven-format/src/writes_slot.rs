@@ -58,6 +58,8 @@ pub fn check_write(
     header: &WriteHeader,
 ) -> Result<(), Error> {
     slot.check_write(header)?;
+    // Every device applies slot 1 before its first write (D5.1).
+    require(header.read_through >= 1, "slot write read-through", Rule::Coverage)?;
     require(
         previous.is_none_or(|number| number < header.position.number),
         "batch write order",

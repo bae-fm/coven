@@ -2,6 +2,7 @@ import CovenSequence
 import SequenceApply
 
 #print axioms CovenSequence.Claim.conclude_correct
+#print axioms CovenSequence.Claim.applied_attempt_won
 #print axioms CovenSequence.Claim.occupant_claimed
 #print axioms CovenSequence.Claim.exactly_one_claimant
 #print axioms CovenSequence.Claim.no_compare_lands_twice

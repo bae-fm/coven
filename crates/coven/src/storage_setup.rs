@@ -80,8 +80,6 @@ pub(crate) enum SetupStop {
     Detected,
     /// The provider check is done.
     Checked,
-    /// A creation's store key is kept in custody.
-    KeyKept,
     /// Its row is past the point of no return.
     Claiming,
     /// What it claims has landed.
@@ -146,28 +144,21 @@ pub(super) fn with_cleanup(operation: StorageSetupError, cleanup: SyncError) -> 
 }
 
 /// Settle a setup a crash cut, as the store opens (§11.6). One before its
-/// point of no return is undone: a creation's store key and its credentials
-/// go, and `coven_operations` lists it undone. One past it stays for the first connection to finish.
+/// point of no return is undone: its credentials go, and `coven_operations`
+/// lists it undone. One past it stays for the first connection to finish.
 /// Credentials a finished setup left behind go too. Answers whether a setup
 /// is finishing.
 pub(crate) async fn settle_opened(
     database: &coven_database::Database,
     keychain: &Arc<StoreKeychain>,
-    keys: &Arc<KeySession<StoreKeyring>>,
 ) -> Result<bool, SyncError> {
     let running = SetupJournal::running(database).await?;
     if running.as_ref().is_some_and(|journal| journal.location().is_some()) {
         return Ok(true);
     }
-    let creating = running.as_ref().is_some_and(SetupJournal::creating);
-    let (kept, held) = (keychain.clone(), keys.clone());
+    let kept = keychain.clone();
     let bugs = database.bugs().clone();
     crate::task::blocking_completing("undo storage setup's local state", bugs, move || {
-        // Before the point of no return nothing claimed the store key a
-        // creation kept.
-        if creating {
-            held.forget()?;
-        }
         if kept.setup_credentials()?.is_some() {
             kept.delete_setup_credentials()?;
         }
@@ -278,14 +269,11 @@ impl StorageConnections {
     pub(super) async fn begin_setup(
         &self,
         call: SetupCall,
-        device_name: &str,
         credentials: &StorageCredentials,
     ) -> Result<SetupJournal, StorageSetupError> {
         self.reached(SetupStop::Called).await?;
         let creating = self.codes.location().await.map_err(setup_error)?.is_none();
-        let journal = SetupJournal::start(&self.database, creating, device_name)
-            .await
-            .map_err(setup_error)?;
+        let journal = SetupJournal::start(&self.database, creating).await.map_err(setup_error)?;
         match call.journaled() {
             Ok(false) => {}
             Ok(true) => return Err(self.undo_setup(&journal, StorageSetupError::Cancelled).await),
@@ -343,11 +331,6 @@ impl StorageConnections {
             error => OperationOutcome::Undone(UndoCause::Failed { error: error.to_string() }),
         };
         let undone = async {
-            // Before the point of no return nothing claimed the store key a
-            // creation kept.
-            if journal.creating() {
-                self.forget_keys()?;
-            }
             self.keychain.delete_setup_credentials()?;
             journal.end(&self.database, outcome).await?;
             *lock_unpoisoned(&self.setup) = SetupRun::Idle;
@@ -438,11 +421,6 @@ impl StorageConnections {
         progress.done(1);
         self.reached(SetupStop::Checked).await?;
         self.check_cancel()?;
-        if journal.creating() {
-            // A custody failure here still undoes setup with nothing claimed.
-            self.keep_creation_key().map_err(setup_error)?;
-            self.reached(SetupStop::KeyKept).await?;
-        }
         let mut live = self.live.lock().await;
         let sync = self.sequence(storage.clone(), &live).await.map_err(setup_error)?;
         // The claims, and the catch-up an existing store needs, are the
@@ -578,10 +556,7 @@ impl StorageConnections {
             let claimed = if journal.creating() {
                 progress.begin(StorageSetupStep::CreatingStore, 1);
                 match setup.claim_location(self.store()).await {
-                    Ok(()) => {
-                        self.claim_creation(&claiming, access, journal.device_name(), progress)
-                            .await
-                    }
+                    Ok(()) => self.claim_creation(&claiming, access, progress).await,
                     Err(error) => Err(error.into()),
                 }
             } else {
@@ -649,51 +624,19 @@ impl StorageConnections {
     }
 
     /// Create the store, once its location is claimed where it holds one
-    /// store (§20.3): keep its first store key, then claim slot 1, the
-    /// creator's key copy and Set up storage (§10.3). A crash may have left the creation journaled or
-    /// applied: it is settled first, and an applied one claims nothing more.
+    /// store (§20.3): send the slot 1 creation decided, then claim Set up
+    /// storage (§10.3). A crash may have left either sent or applied: they
+    /// are settled first, and an applied one claims nothing more.
     async fn claim_creation(
         &self,
         sync: &Arc<SequenceSync>,
         access: coven_format::MemberAccess,
-        device_name: &str,
         progress: &mut ProgressReport<StorageSetupStep>,
     ) -> Result<Option<coven_merge::Slot>, SyncError> {
-        let member = self.identity.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
-        let ring = self.keep_creation_key()?;
-        let key = ring.store_key_ids().next().ok_or(StorageFailure::MemberKeysMissing)?;
-        let key_hash = ring.store_key(key)?.hash();
-        sync.settle_operations().await?;
-        if self.database.store_state().await?.store.is_none() {
-            sync.administer_at(coven_format::admin::StoreChange::CreateStore {
-                store: self.store(),
-                name: self.database.store_name().await.map_err(SyncError::from)?,
-                admin: member.keys().public_keys(),
-                device_name: device_name.into(),
-                key,
-                key_hash,
-            })
-            .await?;
-        }
-        // Set up storage follows the creation it needs, normally the next
-        // slot after the creator's key copy; one a crash left applied claims
-        // nothing more (§10.3).
+        sync.publish_creation().await?;
         sync.administer_at(coven_format::admin::StoreChange::SetUpStorage { access }).await?;
         progress.done(1);
         Ok(Some(coven_merge::Slot::FIRST))
-    }
-
-    /// The store key a creation's slot 1 introduces, kept in custody before
-    /// setup's point of no return: the creator's sequence owner seals slot 1
-    /// and its key copy with the store key custody holds. One kept by this
-    /// setup, or by one a crash cut, is the same key.
-    fn keep_creation_key(&self) -> Result<StoreKeyring, SyncError> {
-        let ring = match self.with_keys(|keys| keys.read())? {
-            Some(ring) => ring,
-            None => StoreKeyring::new(coven_crypto::StoreKey::generate(KeyId(self.ids.new_id()))?),
-        };
-        self.persist_keys(&ring)?;
-        Ok(ring)
     }
 
     /// Record changed access for an existing device (§10.1, §14.2), once a
@@ -720,8 +663,7 @@ impl StorageConnections {
     }
 
     /// Undo a setup whose claim was refused before anything it claimed
-    /// landed: the store key it kept for a creation no claim can still use
-    /// goes, then its credentials, and its row ends with the refusal
+    /// landed: its credentials go, and its row ends with the refusal
     /// (§11.2, §11.6).
     async fn refuse_setup(&self, journal: &SetupJournal, error: SyncError) -> SyncError {
         let outcome = match &error {
@@ -730,12 +672,6 @@ impl StorageConnections {
             error => OperationOutcome::Undone(UndoCause::Failed { error: error.to_string() }),
         };
         let undone = async {
-            if journal.creating()
-                && self.database.current_claim().await?.is_none()
-                && self.database.store_state().await?.store.is_none()
-            {
-                self.forget_keys()?;
-            }
             self.keychain.delete_setup_credentials()?;
             journal.end(&self.database, outcome).await?;
             *lock_unpoisoned(&self.setup) = SetupRun::Idle;

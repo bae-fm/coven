@@ -52,7 +52,7 @@ async fn an_authenticated_floor_fixture_coexists_with_undeleted_original_slots()
     let device = group.device(1).await;
     let identity = f::identity();
     let mut ring = group.ring.clone();
-    let first = hex(include_str!("../../coven-format/fixtures/sealed-admin.hex"));
+    let first = hex(include_str!("../../coven-format/fixtures/sealed-creation.hex"));
     let second = hex(include_str!("../../coven-format/fixtures/sealed-store-key.hex"));
     let floor = hex(include_str!("../../coven-format/fixtures/sealed-floor.hex"));
     let pointer = hex(include_str!("../../coven-format/fixtures/sealed-floor-pointer.hex"));

@@ -29,8 +29,9 @@ those copies). A slot here is what landed; `Follows` ranges over every
 interleaving of its devices, so two admins racing, a member joining
 mid-rotation and a replacement landing among a rotation's copies are all
 histories of `Follows`, not cases of their own
-(`CopyOrderExamples.races_follow`). Store creation is the exception §12.1
-names: slot 1 sets up the first member and key, whose copy follows at slot 2.
+(`CopyOrderExamples.races_follow`). Store creation holds the rule in its one
+slot, as an admission does: slot 1 sets up the first member and key and carries
+the creator's copy of that key (§10.3, §12.1).
 
 `CopyPrecedesNeed` fails. An admin outside a circle who recovers a member can
 send only the keys it holds (`required`, §12.1), so a circle's key has
@@ -221,11 +222,13 @@ def before (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) (author : Me
   | .admit .. | .recover .. => []
   | change => required store h r author change
 
-/-- The copies a slot carries: a key-copy slot's one, and an admission's
-required copies, one per key, all to the member it admits or recovers. -/
+/-- The copies a slot carries: a key-copy slot's one, an admission's required
+copies, one per key, all to the member it admits or recovers, and the store's
+creation's, the creator's copy of the first store key (§10.3). -/
 def carried (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) :
     Slot Aud Mem → List (Route Aud Mem)
   | .copy _ route => [route]
+  | .entry author _ (.create key _ c) => [⟨key, author, c⟩]
   | .entry author _ (.admit m admin c key hash) =>
     required store h r author (.admit m admin c key hash)
   | .entry author _ (.recover m c key hash) => required store h r author (.recover m c key hash)
@@ -315,19 +318,19 @@ def legal (store : Aud) (h : History Aud Mem) (r : Roster Aud Mem) : Slot Aud Me
     decide (outer.audience = store) && introduced h outer && !exposed h r.current outer &&
       parts.all (introduced h)
 
-/-- Every slot through `n` followed the rules: slots 1 and 2 are the store's
-creation, and each later slot was legal at its position. -/
+/-- Every slot through `n` followed the rules: slot 1 is the store's creation,
+which carries its creator's copy of the first store key, and each later slot
+was legal at its position. -/
 def Follows (store : Aud) (seq : Nat → Slot Aud Mem) (n : Nat) : Prop :=
-  (∃ x key hash c, key.audience = store ∧ seq 1 = .entry x key (.create key hash c) ∧
-    seq 2 = .copy key ⟨key, x, c⟩) ∧
-  ∀ k, 3 ≤ k → k ≤ n →
+  (∃ x key hash c, key.audience = store ∧ seq 1 = .entry x key (.create key hash c)) ∧
+  ∀ k, 2 ≤ k → k ≤ n →
     legal store (keysAt store seq (k - 1)) (rosterAt store seq (k - 1)) (seq k) = true
 
 /-- **The claim.** For every slot `s` after creation, every key `s` needs, and
 every member who reads that key's audience just before `s`: a copy of the key
 sealed to the member's current sealing key sits in a slot below `s`. -/
 def CopyPrecedesNeed (store : Aud) (seq : Nat → Slot Aud Mem) (n : Nat) : Prop :=
-  ∀ s, 3 ≤ s → s ≤ n → ∀ key ∈ (seq s).needs, ∀ m c,
+  ∀ s, 2 ≤ s → s ≤ n → ∀ key ∈ (seq s).needs, ∀ m c,
     (rosterAt store seq (s - 1)).current key.audience m = some c →
     ∃ t, 0 < t ∧ t < s ∧ ⟨key, m, c⟩ ∈ carriedAt store seq t
 
@@ -511,46 +514,38 @@ theorem legal_entry {store : Aud} {h : History Aud Mem} {r : Roster Aud Mem} {au
 /-- The roster every slot through `n` of a followed history leaves. -/
 theorem roster_ok {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat} (hf : Follows store seq n) :
     RosterOk store (rosterAt store seq n) := by
-  obtain ⟨⟨x, key, hash, c, _, s1, s2⟩, later⟩ := hf
-  have first : RosterOk store (rosterAt store seq 2) := by
+  obtain ⟨⟨x, key, hash, c, _, s1⟩, later⟩ := hf
+  have first : RosterOk store (rosterAt store seq 1) := by
     constructor <;> intro a m v hv <;>
-      simp only [rosterAt, s1, s2, Roster.after, Roster.apply, seat_current] at hv ⊢
+      simp only [rosterAt, s1, Roster.after, Roster.apply, seat_current] at hv ⊢
     · split at hv
       · rename_i same; simp [same.2]
       · cases hv
     · split at hv
       · rename_i same; simp [same.2, hv]
       · cases hv
-  have up : ∀ j, j + 2 ≤ n → RosterOk store (rosterAt store seq (j + 2)) := by
+  have up : ∀ j, j + 1 ≤ n → RosterOk store (rosterAt store seq (j + 1)) := by
     intro j
     induction j with
     | zero => exact fun _ => first
     | succ j ih =>
       intro below
       have ok := ih (by omega)
-      have yes := later (j + 3) (by omega) below
-      simp only [show j + 3 - 1 = j + 2 by omega] at yes
-      cases hs : seq (j + 3) with
+      have yes := later (j + 2) (by omega) below
+      simp only [show j + 2 - 1 = j + 1 by omega] at yes
+      cases hs : seq (j + 2) with
       | entry author outer change =>
         rw [hs] at yes
         have := apply_ok store ok _ author change (legal_entry yes).1
         simpa [rosterAt, hs, Roster.after] using this
       | copy outer route => simpa [rosterAt, hs, Roster.after] using ok
       | writes outer parts => simpa [rosterAt, hs, Roster.after] using ok
-  by_cases two : 2 ≤ n
-  · have := up (n - 2) (by omega)
-    rwa [show n - 2 + 2 = n by omega] at this
-  · have : n = 0 ∨ n = 1 := by omega
-    rcases this with rfl | rfl
-    · exact ⟨fun _ _ _ h => by simp [rosterAt] at h, fun _ _ _ h => by simp [rosterAt] at h⟩
-    · constructor <;> intro a m v hv <;>
-        simp only [rosterAt, s1, Roster.after, Roster.apply, seat_current] at hv ⊢
-      · split at hv
-        · rename_i same; simp [same.2]
-        · cases hv
-      · split at hv
-        · rename_i same; simp [same.2, hv]
-        · cases hv
+  by_cases one : 1 ≤ n
+  · have := up (n - 1) (by omega)
+    rwa [show n - 1 + 1 = n by omega] at this
+  · have : n = 0 := by omega
+    subst this
+    exact ⟨fun _ _ _ h => by simp [rosterAt] at h, fun _ _ _ h => by simp [rosterAt] at h⟩
 
 /-! ## Every reader of an audience has a copy of each of its keys -/
 
@@ -764,24 +759,24 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
 
 /-- **Every reader has its copies.** In a followed history where every
 replacement or recovery of a reader of `a` comes from another of them, at every
-prefix from creation's copy on, each key introduced for `a` has a copy to each
+prefix from creation on, each key introduced for `a` has a copy to each
 reader's current sealing key. -/
 theorem audience_complete {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
     (hf : Follows store seq n) (a : Aud)
-    (inside : ∀ k, 3 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k)) :
-    ∀ k, 2 ≤ k → k ≤ n → Complete (keysAt store seq k) (rosterAt store seq k) a := by
-  have up : ∀ j, j + 2 ≤ n →
-      Complete (keysAt store seq (j + 2)) (rosterAt store seq (j + 2)) a := by
+    (inside : ∀ k, 2 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k)) :
+    ∀ k, 1 ≤ k → k ≤ n → Complete (keysAt store seq k) (rosterAt store seq k) a := by
+  have up : ∀ j, j + 1 ≤ n →
+      Complete (keysAt store seq (j + 1)) (rosterAt store seq (j + 1)) a := by
     intro j
     induction j with
     | zero =>
       intro _
-      obtain ⟨⟨x, key, hash, c, _, s1, s2⟩, _⟩ := hf
+      obtain ⟨⟨x, key, hash, c, _, s1⟩, _⟩ := hf
       intro i hi ha m v hv
-      simp only [keysAt, advance, s1, s2, Slot.event, step, carried, List.mem_cons,
+      simp only [keysAt, advance, s1, Slot.event, step, carried, List.mem_cons,
         List.not_mem_nil, or_false, List.append_nil] at hi ⊢
       subst hi
-      simp only [rosterAt, s1, s2, Roster.after, Roster.apply, seat_current] at hv
+      simp only [rosterAt, s1, Roster.after, Roster.apply, seat_current] at hv
       split at hv
       · rename_i same
         cases hv
@@ -790,25 +785,25 @@ theorem audience_complete {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
     | succ j ih =>
       intro below
       have done := ih (by omega)
-      have yes := hf.2 (j + 3) (by omega) below
-      have side := inside (j + 3) (by omega) below
-      simp only [show j + 3 - 1 = j + 2 by omega] at yes side
-      have prior : Follows store seq (j + 2) := ⟨hf.1, fun i h1 h2 => hf.2 i h1 (by omega)⟩
-      exact step_complete (roster_ok prior) done (j + 3) (seq (j + 3)) yes side
-  intro k two below
-  have := up (k - 2) (by omega)
-  rwa [show k - 2 + 2 = k by omega] at this
+      have yes := hf.2 (j + 2) (by omega) below
+      have side := inside (j + 2) (by omega) below
+      simp only [show j + 2 - 1 = j + 1 by omega] at yes side
+      have prior : Follows store seq (j + 1) := ⟨hf.1, fun i h1 h2 => hf.2 i h1 (by omega)⟩
+      exact step_complete (roster_ok prior) done (j + 2) (seq (j + 2)) yes side
+  intro k one below
+  have := up (k - 1) (by omega)
+  rwa [show k - 1 + 1 = k by omega] at this
 
 theorem need_met {store a : Aud} {seq : Nat → Slot Aud Mem} {n : Nat} (hf : Follows store seq n)
-    (inside : ∀ k, 3 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k))
-    {s : Nat} (three : 3 ≤ s) (below : s ≤ n) {key : Key Aud} (need : key ∈ (seq s).needs)
+    (inside : ∀ k, 2 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k))
+    {s : Nat} (two : 2 ≤ s) (below : s ≤ n) {key : Key Aud} (need : key ∈ (seq s).needs)
     (audience : key.audience = a) {m : Mem} {c : Nat}
     (reads : (rosterAt store seq (s - 1)).current key.audience m = some c) :
     ∃ t, 0 < t ∧ t < s ∧ ⟨key, m, c⟩ ∈ carriedAt store seq t := by
   have done := audience_complete hf a inside (s - 1) (by omega) (by omega)
   have prior : Follows store seq (s - 1) := ⟨hf.1, fun j h1 h2 => hf.2 j h1 (by omega)⟩
   have ok := roster_ok prior
-  have yes := hf.2 s three below
+  have yes := hf.2 s two below
   have sent : (⟨key, m, c⟩ : Route Aud Mem) ∈ (keysAt store seq (s - 1)).copies := by
     have fromIntroduced : introduced (keysAt store seq (s - 1)) key = true →
         (⟨key, m, c⟩ : Route Aud Mem) ∈ (keysAt store seq (s - 1)).copies := by
@@ -850,11 +845,11 @@ sealed to its current sealing key below the slot: whatever raced, a member
 admitted mid-rotation or a replacement among a rotation's copies. An admitted
 member's copies sit in its admission's own slot, below every slot it reads. -/
 theorem store_copy_precedes_need {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
-    (hf : Follows store seq n) {s : Nat} (three : 3 ≤ s) (below : s ≤ n) {key : Key Aud}
+    (hf : Follows store seq n) {s : Nat} (two : 2 ≤ s) (below : s ≤ n) {key : Key Aud}
     (need : key ∈ (seq s).needs) (audience : key.audience = store) {m : Mem} {c : Nat}
     (reads : (rosterAt store seq (s - 1)).current store m = some c) :
     ∃ t, 0 < t ∧ t < s ∧ ⟨key, m, c⟩ ∈ carriedAt store seq t := by
-  refine need_met hf (fun k h1 h2 => ?_) three below need audience (audience ▸ reads)
+  refine need_met hf (fun k h1 h2 => ?_) two below need audience (audience ▸ reads)
   have yes := hf.2 k h1 h2
   cases hs : seq k with
   | entry author outer change =>
@@ -877,9 +872,9 @@ recovered a member.** When every replacement or recovery of a reader of an
 audience comes from another reader of it, the claim holds in full. -/
 theorem copy_precedes_need_inside {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
     (hf : Follows store seq n)
-    (inside : ∀ a k, 3 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k)) :
-    CopyPrecedesNeed store seq n := fun _ three below _ need _ _ reads =>
-  need_met hf (inside _) three below need rfl reads
+    (inside : ∀ a k, 2 ≤ k → k ≤ n → Inside (rosterAt store seq (k - 1)) a (seq k)) :
+    CopyPrecedesNeed store seq n := fun _ two below _ need _ _ reads =>
+  need_met hf (inside _) two below need rfl reads
 
 /-! ## A stuck reader scans ahead
 
@@ -908,9 +903,9 @@ every key a slot after creation needs has an applied introduction at or below
 the slot: its store key and its parts' keys below it, or the slot's own
 rotation. -/
 theorem need_introduced {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
-    (hf : Follows store seq n) {s : Nat} (three : 3 ≤ s) (below : s ≤ n) {key : Key Aud}
+    (hf : Follows store seq n) {s : Nat} (two : 2 ≤ s) (below : s ≤ n) {key : Key Aud}
     (need : key ∈ (seq s).needs) : introduced (keysAt store seq s) key = true := by
-  have yes := hf.2 s three below
+  have yes := hf.2 s two below
   have up := fun known =>
     introduced_mono (store := store) (seq := seq) (show s - 1 ≤ s by omega) (key := key) known
   cases hs : seq s with
@@ -946,12 +941,12 @@ or an admission. The copy may sit above `s`
 (`CopyOrderExamples.copy_precedes_need_fails`), so only a reader that scans
 past its stop finds it. -/
 theorem stuck_scan_finds_copy {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
-    (hf : Follows store seq n) {s : Nat} (three : 3 ≤ s) (below : s ≤ n) {key : Key Aud}
+    (hf : Follows store seq n) {s : Nat} (two : 2 ≤ s) (below : s ≤ n) {key : Key Aud}
     (need : key ∈ (seq s).needs) {m : Mem} {c : Nat}
     (reads : (rosterAt store seq n).current key.audience m = some c)
     (owed : Complete (keysAt store seq n) (rosterAt store seq n) key.audience) :
     ∃ t, 0 < t ∧ t ≤ n ∧ ⟨key, m, c⟩ ∈ carriedAt store seq t := by
-  have known := introduced_mono below (need_introduced hf three below need)
+  have known := introduced_mono below (need_introduced hf two below need)
   simp only [introduced, List.any_eq_true, decide_eq_true_eq] at known
   obtain ⟨i, hi, hk⟩ := known
   have sent := owed i hi (by rw [hk]) m c reads
@@ -986,7 +981,7 @@ Then `m` no longer reads `a`; the key is the first attempt's choice for `writer`
 (the newest usable key, not one exposed to anyone who left); and no copy of it
 is routed to `m`, whatever sealing keys `m` retains. -/
 theorem leave_selects_new_key {store : Aud} {seq : Nat → Slot Aud Mem} {n : Nat}
-    (hf : Follows store seq n) {k : Nat} (three : 3 ≤ k) (below : k ≤ n)
+    (hf : Follows store seq n) {k : Nat} (two : 2 ≤ k) (below : k ≤ n)
     {author : Mem} {outer : Key Aud} {a : Aud} {m : Mem} {key : Key Aud} {hash : Nat}
     (hs : seq k = .entry author outer (.leaveCircle a m key hash))
     (freshIntro : ∀ i ∈ (keysAt store seq (k - 1)).introductions, i.key ≠ key)
@@ -999,7 +994,7 @@ theorem leave_selects_new_key {store : Aud} {seq : Nat → Slot Aud Mem} {n : Na
       some ⟨key, hash, k⟩ ∧
     ∀ cs, ¬ RoutedTo (keysAt store seq k) m cs key := by
   obtain ⟨j, rfl⟩ : ∃ j, k = j + 1 := ⟨k - 1, by omega⟩
-  have yes := hf.2 (j + 1) three below
+  have yes := hf.2 (j + 1) two below
   rw [hs] at yes
   obtain ⟨allow, -, -, -⟩ := legal_entry yes
   simp only [allowed, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at allow

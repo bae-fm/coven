@@ -86,12 +86,13 @@ let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .namespaces(namespaces())
     .migrations(migrations())
-    .create_store("Household")
+    .create_store("Household", "Ana's phone")
     .await?;
 ```
 
-`create_store` makes Ana's member keys and puts them in the OS keychain, then
-creates the store on the phone. It needs no network. On later launches the app
+`create_store` makes Ana's member keys and the first store key and puts them in
+the OS keychain, then creates the store on the phone with Ana as its admin and
+her phone as its first device. It needs no network. On later launches the app
 opens the same store:
 
 ```rust
@@ -145,7 +146,6 @@ handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
 let setup = handle
     .setup_oauth_storage(
         StorageConfig::Dropbox { location: DropboxLocation::SharedFolder { namespace_id } },
-        "Ana's phone",
         show_setup_step,
     )
     .await?;

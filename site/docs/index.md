@@ -106,7 +106,7 @@ let handle = Coven::builder(layout.clone())
         SyncedTable::new("tags", RowIdentity::SharedKey),
     ])
     .migrations(vec![Migration::addition(1, "initial", SCHEMA)])
-    .create_store("Household")
+    .create_store("Household", "Ana's phone")
     .await?;
 ```
 
@@ -146,7 +146,6 @@ handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
 let setup = handle
     .setup_oauth_storage(
         StorageConfig::Dropbox { location: DropboxLocation::SharedFolder { namespace_id } },
-        "Ana's phone",
         show_setup_step,
     )
     .await?;

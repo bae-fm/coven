@@ -198,6 +198,11 @@ pub fn creation_change() -> StoreChange {
         device_name: "D".into(),
     }
 }
+/// The slot-one fixture creating the store: an admission-kind slot whose
+/// prefix carries the creator's copy of the first store key (D6, D9).
+pub fn creation_slot() -> Vec<u8> {
+    hex::decode(include_str!("../fixtures/sealed-creation.hex").trim()).unwrap()
+}
 /// A member-removal admin change.
 pub fn member_removal() -> StoreChange {
     StoreChange::RemoveMember { member: other_member_id() }
@@ -372,12 +377,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
     records.push(SnapshotRecord::Evidence(write_evidence()));
     records.push(SnapshotRecord::Admin(crate::floor::OriginalSlot {
         slot: slot(1),
-        object: bounded_slot(
-            1,
-            1,
-            crate::sealed_slot::SlotKind::Admin,
-            crate::sequence::SlotFrame::Admin(creation_change()),
-        ),
+        object: creation_slot(),
     }));
     records.push(SnapshotRecord::KeyCopy(crate::floor::OriginalSlot {
         slot: slot(2),

@@ -278,3 +278,50 @@ fn admission_fixture_is_a_signed_slot_whose_box_opens_at_its_index() {
         }
     });
 }
+
+/// Ana's device creates the store at slot 1: the prefix is an admission's,
+/// carrying her own copy of the store key at index 0, and the body is the
+/// entry creating the store (D6, D9, D11).
+#[test]
+fn creation_fixture_is_an_admission_slot_whose_box_opens_for_its_creator() {
+    let bytes = f::creation_slot();
+    let path = f::slot_path(1);
+    let check = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+        let envelope = BoundedSlot::decode(bytes)?;
+        let SlotKind::Admission(copies) = &envelope.prefix.kind else {
+            return Err("expected an admission".into());
+        };
+        let [copy] = copies.as_slice() else {
+            return Err("expected one copy".into());
+        };
+        let context = SlotObjectPrefix::copy_context(
+            envelope.prefix.format,
+            envelope.prefix.key,
+            BoxPlace::Admission(0),
+            &copy.routing,
+        )?;
+        let key = copy.open_store_key(&f::identity(), path.as_str(), &context)?;
+        assert_eq!(key.id(), f::store_key().id());
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&bytes[..bytes.len() - 64]);
+        f::member().signing.verify_object(path.as_str(), &hash.finish(), &envelope.signature)?;
+        let plain = f::store_key().derive().open_object_chunk(
+            path.as_str(),
+            &envelope.prefix.encode()?,
+            0,
+            0,
+            envelope.chunk,
+        )?;
+        let (_, frame) = SlotFrame::decode(&plain, &path)?;
+        envelope.prefix.kind.check_frame(&frame)?;
+        assert_eq!(frame, SlotFrame::Admin(f::creation_change()));
+        assert_eq!(envelope.encode()?, bytes);
+        Ok(())
+    };
+    check(&bytes).unwrap();
+    crate::tests::mutations(&bytes, |changed| {
+        if changed != bytes {
+            assert!(check(changed).is_err());
+        }
+    });
+}

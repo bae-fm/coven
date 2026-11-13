@@ -17,7 +17,7 @@ fn open(bytes: &[u8], path: &str) -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn slot_routing_and_encrypted_claim_header_are_authenticated() {
     for (slot, kind, frame) in [
-        (1, SlotKind::Admin, SlotFrame::Admin(f::creation_change())),
+        (3, SlotKind::Admin, SlotFrame::Admin(f::member_removal())),
         (7, SlotKind::Announcement, SlotFrame::Announcement(f::announcement())),
     ] {
         let bytes = f::bounded_slot(slot, slot, kind, frame);
@@ -138,8 +138,8 @@ fn admission_prefix_holds_ordered_boxes_to_one_recipient() {
     assert!(SlotObjectPrefix::decode(&bytes[..bytes.len() - 1]).is_err());
 }
 
-/// Only an admission holds an admit-member or recover-member change, and it
-/// holds nothing else (D6, D9).
+/// Only an admission holds an admit-member, recover-member or create-store
+/// change, and it holds nothing else (D6, D9).
 #[test]
 fn admit_and_recover_changes_belong_to_admissions_only() {
     let admission = SlotKind::Admission(vec![admission_box(coven_merge::Audience::Store, 1, 9)]);
@@ -148,6 +148,7 @@ fn admit_and_recover_changes_belong_to_admissions_only() {
             change,
             crate::admin::StoreChange::AdmitMember { .. }
                 | crate::admin::StoreChange::RecoverMember { .. }
+                | crate::admin::StoreChange::CreateStore { .. }
         );
         let frame = SlotFrame::Admin(change);
         assert_eq!(admission.check_frame(&frame).is_ok(), admits);

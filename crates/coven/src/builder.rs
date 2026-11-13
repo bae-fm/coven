@@ -317,18 +317,20 @@ impl CovenBuilder {
         self
     }
 
-    /// Create and open a store, initializing its member in the chosen custody
-    /// before publication. Cancellation does not interrupt creation or rollback.
-    /// Errors carry no handle; a published store is closed before returning.
-    pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError> {
-        let name = name.to_owned();
+    /// Create and open a store, initializing its member, first store key and
+    /// slot 1 before publication; `device_name` names this installation.
+    /// Cancellation does not interrupt creation or rollback. Errors carry no
+    /// handle; a published store is closed before returning.
+    pub async fn create_store(
+        self,
+        name: &str,
+        device_name: &str,
+    ) -> Result<CovenHandle, StoreCreationError> {
+        let (name, device_name) = (name.to_owned(), device_name.to_owned());
         let bugs = self.directories.bugs().clone();
-        crate::task::spawn_completing(
-            "create the store",
-            bugs,
-            creation::create(self, name, coven_foundation::files::BootstrapStore::publish),
-        )
-        .await?
+        let publish = coven_foundation::files::BootstrapStore::publish;
+        let creating = creation::create(self, name, device_name, publish);
+        crate::task::spawn_completing("create the store", bugs, creating).await?
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
@@ -761,7 +763,7 @@ struct OpeningStore {
     keychain: Arc<StoreKeychain>,
 }
 
-struct OpeningOwners {
+pub(crate) struct OpeningOwners {
     transfers: Arc<coven_storage::TransferBudget>,
     /// The store's watch of the device's network, from opening to closing.
     network: coven_foundation::network_watch::NetworkWatch,
@@ -833,10 +835,9 @@ impl OpeningStore {
         let configured = location.is_connected();
         // A setup a crash cut is undone, or left for the first connection
         // to finish, before the handle exists (§11.6).
-        let finishing =
-            Box::pin(crate::storage::settle_opened(&database, &owners.keychain, &owners.keys))
-                .await
-                .map_err(CovenError::from)?;
+        let finishing = Box::pin(crate::storage::settle_opened(&database, &owners.keychain))
+            .await
+            .map_err(CovenError::from)?;
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
         Box::pin(crate::storage::record_opened(&database, &owners.clock, location, None))
@@ -989,11 +990,10 @@ mod tests;
 #[path = "builder_creation.rs"]
 mod creation;
 
-#[path = "builder_read_only.rs"]
-mod read_only;
-
 #[path = "bootstrap.rs"]
 mod bootstrap;
+#[path = "builder_read_only.rs"]
+mod read_only;
 pub use bootstrap::{
     join_with_invite, join_with_pairing, restore_from_code, restore_from_saved_code,
     BootstrapError, BootstrapStatus, JoinControl,

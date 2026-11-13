@@ -1583,6 +1583,7 @@ tables = [
 "crates/coven-sync/src/sequence_operations.rs" = [
     "SequenceSync::submit",
     "SequenceSync::settle_operations",
+    "SequenceSync::publish_creation",
 ]
 "crates/coven-sync/src/sequence_keys.rs" = ["SequenceSync::run_key"]
 
@@ -1644,7 +1645,7 @@ tables = [
     # device kept (§19.3).
     "resume_replacement",
 ]
-"crates/coven/src/bootstrap_reset.rs" = ["reset_device", "reset_unconnected"]
+"crates/coven/src/bootstrap_reset.rs" = ["reset_device"]
 "crates/coven/src/builder.rs" = [
     "CovenBuilder::authenticate",
     "CovenBuilder::connector",
@@ -1672,7 +1673,7 @@ tables = [
     "OpeningOwners::into_handle",
     "OpeningStore::open",
 ]
-"crates/coven/src/builder_creation.rs" = ["create", "prepare"]
+"crates/coven/src/builder_creation.rs" = ["create", "prepare", "undo_blocking"]
 "crates/coven/src/builder_read_only.rs" = ["CovenBuilder::open_read_only"]
 # The app's stores on this device, with the OS keychain it builds once at
 # startup and the platform's network, and what it builds over them.

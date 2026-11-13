@@ -188,19 +188,12 @@ impl CovenHandle {
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
-        device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError> {
         let (progress, watched) = tokio::sync::watch::channel(None);
-        let setup = self.setup_s3_reporting(
-            storage,
-            device_name,
-            access_key_id,
-            secret_access_key,
-            progress,
-        );
+        let setup = self.setup_s3_reporting(storage, access_key_id, secret_access_key, progress);
         coven_foundation::progress::forward(watched, setup, on_progress).await
     }
 
@@ -209,14 +202,11 @@ impl CovenHandle {
     pub(crate) async fn setup_s3_reporting(
         &self,
         storage: StorageConfig,
-        device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
         progress: crate::storage::SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
-        self.storage
-            .setup_s3(storage, device_name, access_key_id, secret_access_key, progress)
-            .await
+        self.storage.setup_s3(storage, access_key_id, secret_access_key, progress).await
     }
     /// Probe the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
@@ -242,11 +232,10 @@ impl CovenHandle {
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
-        device_name: &str,
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError> {
         let (progress, watched) = tokio::sync::watch::channel(None);
-        let setup = self.storage.setup_oauth(storage, device_name, progress);
+        let setup = self.storage.setup_oauth(storage, progress);
         coven_foundation::progress::forward(watched, setup, on_progress).await
     }
     /// Set up native iCloud storage in the entitled container. Coven obtains the
@@ -256,11 +245,10 @@ impl CovenHandle {
     pub async fn setup_cloudkit_storage(
         &self,
         container: &str,
-        device_name: &str,
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError> {
         let (progress, watched) = tokio::sync::watch::channel(None);
-        let setup = self.storage.setup_cloudkit(container, device_name, progress);
+        let setup = self.storage.setup_cloudkit(container, progress);
         coven_foundation::progress::forward(watched, setup, on_progress).await
     }
     /// Cancel the storage setup running on this store (§11.6). Before its
@@ -688,6 +676,11 @@ impl CovenHandle {
         subject: coven_database::RetrySubject,
     ) -> coven_database::test_utils::Followed<Option<coven_database::RetryWait>, DbError> {
         coven_database::test_utils::Followed::new(self.database.subscribe_retry_wait(subject))
+    }
+    /// The store's database, for tests that read what the owners keep.
+    #[cfg(test)]
+    pub(crate) fn test_database(&self) -> &coven_database::Database {
+        &self.database
     }
     /// Follow membership and audience state as passes apply it.
     #[cfg(test)]

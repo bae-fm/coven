@@ -636,6 +636,22 @@ def admission(sodium):
     return signed(sodium, path, prefix + body)
 
 
+def creation(sodium):
+    """Ana's device creating the store at slot 1: the entry registers her and
+    her device, and the prefix carries her copy of the store key at index 0
+    (D6, D9, D11)."""
+    path = STORE_TEXT + b"seq/1"
+    key_id = bytes([1]) * 16
+    routing = b"\x00" + key_id + ANA + sealing_public(sodium, 0x33)
+    fixed = bytes([33, 0, 1, 4]) + key_id
+    sealed = anonymous_box(sodium, b"store", path, fixed + u32(0) + routing,
+                           key_id + bytes([17]) * 32, 0x33, 0x55, 0x44)
+    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:]
+    plaintext = slot_header(1, 1) + frame(4, changes(sodium)[0])
+    body = chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext)
+    return signed(sodium, path, prefix + body)
+
+
 def copies(sodium):
     store_key_id = bytes([1]) * 16
     store = key_copy(sodium, STORE_TEXT + b"seq/2", b"\x00", store_key_id,
@@ -690,7 +706,7 @@ def main():
     tail = signature(sodium, context(b"coven/write-header-signature/v1", path, prefix, header_chunk, b""), 0x33)
     migration = signed(sodium, path, prefix + header_chunk + tail)
 
-    entry_object = bounded_slot(sodium, 1, 0, frames[0])
+    entry_object = creation(sodium)
     # The inner object remains fixed when the batch claims another slot.
     writes_slot = seal_writes_slot(sodium, 6, 5, [write, migration])
     # Separate histories whose covered writes were refused or ignored by reset.
@@ -779,7 +795,7 @@ def main():
         ("sealed-circle-snapshot.hex", circle_snapshot),
         ("sealed-announcement.hex", announcement),
         ("sealed-circle-announcement.hex", circle_announcement),
-        ("sealed-admin.hex", entry_object),
+        ("sealed-creation.hex", entry_object),
         ("sealed-snapshot.hex", snapshot),
         ("sealed-writes-slot.hex", writes_slot),
         ("sealed-refused-writes-slot.hex", refused_slot),

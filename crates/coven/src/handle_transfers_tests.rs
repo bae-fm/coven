@@ -37,13 +37,7 @@ async fn paused_store(
             .await
             .unwrap();
     handle
-        .setup_s3_storage(
-            memory.config(),
-            "Ana's phone",
-            "key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(memory.config(), "key".into(), SecretText::new("secret".into()), |_| {})
         .await
         .unwrap();
     // The first pass after setup ends synced.

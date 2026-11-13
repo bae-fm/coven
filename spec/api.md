@@ -2525,10 +2525,18 @@ impl CovenBuilder {
         F: Fn(&FunctionArguments<'_>) -> SqliteResult<T> + Send + Sync + 'static,
         T: Into<types::Value>;
 
-    /// Creates an open store and its member in the chosen custody before
-    /// publication; cancellation does not interrupt creation or rollback.
-    /// Errors carry no handle; a published store is closed before returning.
-    pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError>;
+    /// Creates an open store before publication: its member and first store
+    /// key in the chosen custody, and slot 1 sealed, kept as this device's
+    /// attempt at it and applied, so the creator is the store's first admin
+    /// and `device_name` names its first device from the start (§10.3).
+    /// Cancellation does not interrupt creation or rollback. Errors carry no
+    /// handle; a published store is closed before returning, and a store that
+    /// is not published leaves nothing in custody.
+    pub async fn create_store(
+        self,
+        name: &str,
+        device_name: &str,
+    ) -> Result<CovenHandle, StoreCreationError>;
 
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening always migrates coven's tables before the app's schema, then
@@ -2551,6 +2559,8 @@ impl CovenBuilder {
     /// Replaces this copy with a new device loaded from storage when the app
     /// chooses: a damaged database (§19.3), a missing device entry, or another
     /// copy using this id (§19.3). Uses saved settings and custody; no salvage.
+    /// A store that never set up storage has nothing to load: the call fails
+    /// with `NoStorage`, changing nothing.
     /// Checks storage and keys, then loads beside the old copy, which moves
     /// aside only once loading is complete. Saved member keys that history
     /// has replaced fail with MemberKeysReplaced and change nothing. Just
@@ -2897,7 +2907,7 @@ let handle = coven.builder()
         Namespace::new("thumbnails", Provenance::AppProvided, 256 << 20),
     ])
     .migrations(migrations())                       // E13
-    .create_store("Household")
+    .create_store("Household", "Ana's laptop")
     .await?;
 ```
 
@@ -2907,7 +2917,6 @@ Example, choosing a not-shared Dropbox store when both app keys are registered:
 handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await?;
 handle.setup_oauth_storage(
     StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
-    "Ana's phone",
     |progress| show_setup_step(progress),
 ).await?;
 // A shared choice uses DropboxAccess::FullDropbox and
@@ -4261,7 +4270,7 @@ while let Some(Ok(values)) = lost.next().await {
     `LocationChangeUnsupported`; setup does not relocate a store already used by other devices. The
     member whose account holds the store reconnects with that account; another account fails with
     `StoreOwner` (§20.9).
-  - Creating claims slot 1, the creator’s key-copy slot, then Set up storage (§10.3). Waiting
+  - Creating sends slot 1, which `create_store` kept, then claims Set up storage (§10.3). Waiting
     writes then claim a writes slot through ordinary sync.
   - Setup can take a while: it may wait out a minute of rate limits, and a
     reconnect loads what other devices published. So it reports its steps to
@@ -4272,8 +4281,8 @@ while let Some(Ok(values)) = lost.next().await {
     detects settings (`DetectingSettings`). iCloud prepares a new store's
     zone (`PreparingZone`); Dropbox and OneDrive read the account's name
     (`ReadingAccount`). Every setup then connects, reads a Dropbox or OneDrive
-    folder's name and web address, and checks the provider (`Connecting`). Creating claims
-    slot 1 (`CreatingStore`). Reconnecting
+    folder's name and web address, and checks the provider (`Connecting`). Creating sends
+    slot 1 and claims Set up storage (`CreatingStore`). Reconnecting
     loads with loading's own steps and counts (`Loading`, §13.4), then
     publishes changed access (`RecordingAccess`). A step other than `Loading`
     is one unit, done when it ends.
@@ -5672,7 +5681,6 @@ impl CovenHandle {
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
-        device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
         on_progress: impl Fn(Progress<StorageSetupStep>),
@@ -5702,7 +5710,6 @@ impl CovenHandle {
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
-        device_name: &str,
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
@@ -5712,7 +5719,6 @@ impl CovenHandle {
     pub async fn setup_cloudkit_storage(
         &self,
         container: &str,
-        device_name: &str,
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
@@ -6111,7 +6117,7 @@ let StorageConfig::S3 { profile, .. } = &mut storage else { unreachable!() };
 *profile = Some(S3Profile::Custom(settings));
 
 let secret = SecretText::new(secret_access_key);
-match handle.setup_s3_storage(storage, device_name, access_key_id, secret, show_setup_step).await {
+match handle.setup_s3_storage(storage, access_key_id, secret, show_setup_step).await {
     Ok(setup) => {
         remember(setup.connection.storage);
         show_blurred_qr_code(setup.restore_code.as_str());
@@ -7606,10 +7612,12 @@ pub enum ProviderSignOut {
   approved on its own.
 - Making an invite is a step of the app's write (`CovenWrite::create_invite`
   for a new person, `CovenWrite::add_device_for` for a member who lost every
-  device), with or without storage: it returns the invite's id, the member id it fixes
-  and its operation, and the invite is listed from the write's commit as
-  `InviteStage::Granting`. A pass checks it again against the history it
-  catches up with, grants its access and fixes its code. A check that
+  device). It needs storage: before setup recorded a location it fails with
+  `SyncError::NoStorage` and journals nothing. Otherwise it returns the
+  invite's id, the member id it fixes and its operation, and the invite is
+  listed from the write's commit as `InviteStage::Granting`. A pass checks it
+  again against the history it catches up with, grants its access and fixes
+  its code. A check that
   refuses it, such as the admin's role taken away meanwhile, and a grant that
   fails for a reason a retry can fix (`Network`, `RateLimited`, a server
   error) are the invite's pending record under its operation in

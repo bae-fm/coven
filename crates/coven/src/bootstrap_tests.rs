@@ -826,7 +826,6 @@ async fn setting_up_again_loads_what_other_devices_published() {
         .handle
         .setup_s3_storage(
             owner.storage.config(),
-            "Ana’s phone",
             key.access_key_id,
             key.secret_access_key,
             |progress| seen.lock().unwrap().push(progress),

@@ -134,7 +134,7 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
             )),
         )))
         .key_custody(CustodyChoice::Custom(Arc::new(RefusePersist {
-            keys: std::sync::Mutex::new(None),
+            keys: std::sync::Mutex::new(created_keys(&f)),
             refuse: AtomicBool::new(true),
         })))
         .open(f.directory.id(), |_| ())
@@ -144,7 +144,6 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
         handle
             .setup_s3_storage(
                 f.storage.config(),
-                "Device",
                 "replacement".into(),
                 SecretText::new("secret".into()),
                 |_| {}
@@ -295,41 +294,6 @@ async fn a_dropped_key_call_finishes_before_its_connection_closes() {
     f.handle.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
-    let f = Fixture::new().await;
-    f.handle.close().await.unwrap();
-    let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
-        .key_custody(CustodyChoice::Custom(Arc::new(RefusePersist {
-            keys: std::sync::Mutex::new(None),
-            refuse: AtomicBool::new(true),
-        })))
-        .open(f.directory.id(), |_| ())
-        .await
-        .unwrap();
-    let setup = |key: &str| {
-        handle.setup_s3_storage(
-            f.storage.config(),
-            "Test device",
-            key.into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
-    };
-    assert!(setup("original").await.is_err());
-    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(handle.restore_code().await.is_err());
-    assert_eq!(handle.test_sync_status().latest().await.state, SyncState::NotSynced);
-    let first = ObjectPath::slot(f.directory.id(), 1.try_into().unwrap());
-    assert!(f.storage.status(&first).await.unwrap().is_none());
-    // Nothing was claimed, so another key sets the store up.
-    setup("changed").await.unwrap();
-    assert!(f.storage.status(&first).await.unwrap().is_some());
-    let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
-    assert_eq!(me.devices.len(), 1);
-    handle.close().await.unwrap();
-}
-
 /// Store key custody whose forgetting panics, as a bug in an app's custody
 /// would.
 struct PanicsForgetting(std::sync::Mutex<Option<StoreKeyring>>);
@@ -354,15 +318,17 @@ impl Custody<StoreKeyring> for PanicsForgetting {
 async fn a_panicking_key_forget_fails_with_its_bug() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
+    let seeded = created_keys(&f);
     let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
-        .key_custody(CustodyChoice::Custom(Arc::new(PanicsForgetting(std::sync::Mutex::new(None)))))
+        .key_custody(CustodyChoice::Custom(Arc::new(PanicsForgetting(std::sync::Mutex::new(
+            seeded,
+        )))))
         .open(f.directory.id(), |_| ())
         .await
         .unwrap();
     handle
         .setup_s3_storage(
             f.storage.config(),
-            "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -489,7 +455,6 @@ async fn unlocking_reads_no_member_key_custody_and_starts_no_sync() {
     handle
         .setup_s3_storage(
             f.storage.config(),
-            "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
             |_| {},
@@ -543,7 +508,6 @@ async fn reconnect_with(
         .handle
         .setup_s3_storage(
             f.storage.config(),
-            "Test device",
             key.into(),
             SecretText::new(format!("{key} secret")),
             |progress| steps.lock().unwrap().push(progress.step),

@@ -129,6 +129,11 @@ slot means send the same bytes again.
 - `conclude_correct`: a claimant that concludes `won` holds the slot forever.
   One that concludes `lost` sees other bytes there forever, so its own create
   can never land.
+- `applied_attempt_won`: a claimant that applied its own attempt before
+  claiming (store creation's slot 1, §10.3) and concludes `won` finds storage
+  holding exactly the applied bytes forever, so its applied slot is every
+  reader's. One that concludes `lost` finds other bytes there forever, so its
+  applied slot never matches the store's.
 - `occupant_claimed`: every occupied slot holds the bytes of a claimant that
   created it.
 - `exactly_one_claimant`: with bytes unique per attempt, every occupied slot has
@@ -273,8 +278,9 @@ separate from both authorization and introduction.
 - `routes_current`, `routes_complete`, `rotation_effect`: the rotation plan
   copies the generated key to each listed current audience member's exact
   credential, then introduces it in the following slot. The member list must
-  include every current audience member. Store creation's introduction-before-
-  creator-copy exception is represented by ordinary sequence events.
+  include every current audience member. Store creation's slot carries the
+  creator's copy of its first key, so the copy stands in history with the
+  introduction, as an admission's do.
 - `rotation_unexposed`, `rotation_usable`, `rotation_selected`: when the key
   is fresh even among tentative copies, membership remains fixed during those
   slots, and the writer holds its generated material, completed rotation makes
@@ -330,18 +336,18 @@ stops there, and reading in order never reaches a later copy (`keyless_stops`). 
 reads each audience with which sealing key, as `effects.rs` and
 `circle_effects.rs` keep it. `required` is Rust's `required_copies`. An
 admission, admitting or recovering a member (§13.2), carries those copies in
-its own slot (`carried`); the projection takes a slot's copies from what it
-carries, a key-copy slot's one or an admission's. `legal` says a slot followed
+its own slot (`carried`), and so does creation; the projection takes a slot's copies from what it
+carries, a key-copy slot's one, an admission's or the creation's. `legal` says a slot followed
 the rules at its position: any other entry's required copies are in the prefix
 before it, which `operation_outcome` gives when validation asks for them, and
 every key sealing the slot is introduced. `Follows` is a history of legal slots
-after creation's two. `CopyPrecedesNeed` is the claim: for every slot after
+after creation, which carries its creator's copy. `CopyPrecedesNeed` is the claim: for every slot after
 creation, every key it needs and every member reading that key's audience just
 before it, a slot below carries a copy to the member's current sealing key.
 
 - `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside`:
   every key introduced for an audience has a copy to each reader's current
-  sealing key, at every prefix from slot 2 on, when each replacement or
+  sealing key, at every prefix from slot 1 on, when each replacement or
   recovery of a reader comes from another reader. That holds of the store, so
   a store key's copy is always first, an admitted member's in its admission;
   for a circle it is the premise of `copy_precedes_need_inside`.

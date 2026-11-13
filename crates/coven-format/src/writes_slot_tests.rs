@@ -12,6 +12,10 @@ fn batch_checks_device_read_through_and_original_write_order() {
     future.read_through = 8;
     assert!(check_write(&slot, None, &future).is_err());
     check_write(&slot, None, &header).unwrap();
+    // Every device applies slot 1 before its first write (D5.1).
+    let mut unread = header.clone();
+    unread.read_through = 0;
+    assert!(check_write(&slot, None, &unread).is_err());
     assert!(check_write(&slot, Some(header.position.number), &header).is_err());
     assert!(check_write(&slot, Some(header.position.number + 1), &header).is_err());
     check_write(&slot, Some(header.position.number - 1), &header).unwrap();

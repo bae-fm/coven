@@ -16,8 +16,6 @@ use serde::{Deserialize, Serialize};
 struct SetupWork {
     /// Creating the store: no location was recorded when setup began.
     creating: bool,
-    /// The name this device registers with, when setup creates the store.
-    device_name: String,
     step: SetupStep,
 }
 
@@ -41,13 +39,8 @@ pub struct SetupJournal {
 impl SetupJournal {
     /// Journal a setup before its first write to storage, listed in
     /// `coven_operations` as `StorageSetup` from this commit on.
-    pub async fn start(
-        database: &Database,
-        creating: bool,
-        device_name: &str,
-    ) -> Result<Self, SyncError> {
-        let work =
-            SetupWork { creating, device_name: device_name.into(), step: SetupStep::Checking };
+    pub async fn start(database: &Database, creating: bool) -> Result<Self, SyncError> {
+        let work = SetupWork { creating, step: SetupStep::Checking };
         let id = database
             .start_listed_operation(
                 NewOperation {
@@ -83,11 +76,6 @@ impl SetupJournal {
     /// Whether setup creates the store, rather than reconnecting to it.
     pub fn creating(&self) -> bool {
         self.work.creating
-    }
-
-    /// The name this device registers with.
-    pub fn device_name(&self) -> &str {
-        &self.work.device_name
     }
 
     /// Where setup claims, once past its point of no return.

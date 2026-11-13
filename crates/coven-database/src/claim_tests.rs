@@ -139,7 +139,7 @@ impl IdSource for FixtureDevice {
 async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
     let snapshots = include_str!("../../coven-format/fixtures/snapshot-settlement-claims.hex");
     let slots = [
-        (1, 1, include_str!("../../coven-format/fixtures/sealed-admin.hex")),
+        (1, 1, include_str!("../../coven-format/fixtures/sealed-creation.hex")),
         (2, 2, include_str!("../../coven-format/fixtures/sealed-store-key.hex")),
         (6, 5, include_str!("../../coven-format/fixtures/sealed-writes-slot.hex")),
         (9, 8, include_str!("../../coven-format/fixtures/sealed-circle-announcement.hex")),

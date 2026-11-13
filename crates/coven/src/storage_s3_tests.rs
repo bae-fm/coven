@@ -177,13 +177,7 @@ async fn setup(
     location: StorageConfig,
 ) -> Result<StorageSetup, StorageSetupError> {
     handle
-        .setup_s3_storage(
-            location,
-            "Test device",
-            "member-key".into(),
-            SecretText::new("secret".into()),
-            |_| {},
-        )
+        .setup_s3_storage(location, "member-key".into(), SecretText::new("secret".into()), |_| {})
         .await
 }
 

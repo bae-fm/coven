@@ -2,6 +2,8 @@
 
 mod chunk_reader;
 mod circle_effects;
+mod creation;
+pub use creation::{decide_creation, Creation};
 mod effects;
 mod error;
 mod failure_log;

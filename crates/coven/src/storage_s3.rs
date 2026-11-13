@@ -10,14 +10,12 @@ impl StorageConnections {
     pub(crate) async fn setup_s3(
         self: &Arc<Self>,
         storage: StorageConfig,
-        device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
         progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
         require_s3(&storage)?;
         let credentials = S3Credentials { access_key_id, secret_access_key };
-        let device_name = device_name.to_owned();
         let call = self.start_setup()?;
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
@@ -25,9 +23,8 @@ impl StorageConnections {
             let recorded = owner.codes.location().await.map_err(setup_error)?;
             let config = recorded_s3(storage, recorded.as_ref());
             owner.check_location(&config).await?;
-            let journal = owner
-                .begin_setup(call, &device_name, &StorageCredentials::S3(credentials.clone()))
-                .await?;
+            let journal =
+                owner.begin_setup(call, &StorageCredentials::S3(credentials.clone())).await?;
             owner
                 .run_setup(journal, async |journal| {
                     let auth = ProviderAuth::S3(credentials.clone());
