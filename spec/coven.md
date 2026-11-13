@@ -6182,7 +6182,10 @@ gives it a fresh id.
 - **Records stay.** Merge records, lost values and the evidence of where each
   value came from are kept, for old writes still arriving and for loading
   snapshots. Devices outside Gifts see the deletion entry, not values.
-  Dismissing a lost value follows the ordinary write and owner rules.
+  Dismissing a lost value follows the ordinary write and owner rules, so
+  dismissing a deleted circle's lost value is a write into that circle and
+  fails with `DeletedCircle`, whether or not the device is still in the circle
+  (`NotInCircle` never replaces it). Its lost values stay listed.
 - **Files.** Applying the deletion releases local records of where values came
   from that no visible row can name again. The circle's file records are taken
   out with its rows (§17.2) and never come back, so a device forgets each of

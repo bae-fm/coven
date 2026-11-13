@@ -4,7 +4,7 @@ use coven_merge::{Timestamp, WriteId};
 
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{Database, Migration, SyncedTable};
+use crate::{Database, DbError, Migration, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 
 const CIRCLE: &str = "00000000-0000-4000-8000-00000000000a";
@@ -251,6 +251,34 @@ async fn a_file_written_into_a_deleted_circle_is_refused_as_deleted() {
         .await
         .unwrap_err();
     assert!(matches!(moved, crate::DbError::DeletedCircle(id) if id == circle()), "{moved:?}");
+    assert_eq!(contents(&db), before);
+    db.close().await.unwrap();
+}
+
+/// A deleted circle's rows are taken out, and their lost values stay listed
+/// with the deletion as their cause. Dismissing one is refused as the
+/// circle's deletion, also for a device that is not in the circle (§15.9).
+#[tokio::test]
+async fn a_deleted_circles_lost_values_stay_listed_and_dismissal_names_the_deletion() {
+    let store = TestStore::new();
+    let db = store.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
+    store.join_circle(&db, circle());
+    sql(&db, "INSERT INTO roots VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','gift')").await.unwrap();
+    let slot = crate::tests::delete_circle(&db, circle()).await.unwrap();
+    leave_circle(&db);
+    assert_eq!(count(&db, "roots"), 0);
+    let lost = db.lost_values().await.unwrap();
+    assert!(!lost.is_empty());
+    for value in &lost {
+        assert_eq!(
+            value.replaced_by,
+            crate::Replacement::Rules(vec![crate::RemovalRule::DeletedCircle { entry: slot }])
+        );
+    }
+    let before = contents(&db);
+    let refused = db.dismiss_lost_values(&lost).await.unwrap_err();
+    assert!(matches!(refused, DbError::DeletedCircle(id) if id == circle()), "{refused:?}");
+    assert_eq!(db.lost_values().await.unwrap(), lost);
     assert_eq!(contents(&db), before);
     db.close().await.unwrap();
 }
