@@ -521,4 +521,62 @@ async fn the_requests_pair_is_nowhere_on_the_new_device_while_it_waits() {
     scene.close().await;
 }
 
+/// Ana's phone shows the pairing and approves the laptop; Ana's other device
+/// then removes the phone. Its pass deletes what the phone left at the
+/// request's path, handover included, and puts the phone's gone marker in the
+/// store: the laptop's next check ends the call with nothing left on it.
+#[tokio::test]
+async fn a_showing_device_removed_while_a_handover_waits_ends_the_call() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let phone_install = Installation::new();
+    let phone = phone_install.restore(&owner).await;
+    phone.start_sync().await.unwrap();
+    let pairing = phone.start_pairing().await.unwrap();
+    let path = coven_sync::read_pairing_code(&pairing.shared_code).unwrap().request_path();
+    let pass = || async {
+        match phone.retry_now().await.unwrap().await {
+            RetryOutcome::Synced { .. } => {}
+            outcome => panic!("the phone's pass: {outcome:?}"),
+        }
+    };
+    let laptop = Installation::new();
+    let control = JoinControl::new();
+    let (status, _, mut waits) = recording();
+    let joining = join_with_pairing(
+        laptop.authenticated_builder(&owner, owner.storage.clone()).await,
+        &pairing.qr_code,
+        None,
+        "Ana’s laptop",
+        status,
+        &control,
+    );
+    let responding = async {
+        waits.wait_for(|waiting| *waiting).await.unwrap();
+        control.parked_from_now().await;
+        pass().await;
+        let Some(PairingStatus::Waiting { request: Some(request) }) =
+            phone.pairing(pairing.id).await.unwrap()
+        else {
+            panic!("the phone offers the laptop's request")
+        };
+        phone.approve_pairing(&request).await.unwrap();
+        pass().await;
+        assert!(Handover::decode(&owner.storage.read(&path).await.unwrap()).is_ok());
+        let (removal, _) = owner.handle.remove_device(phone.device_id()).await.unwrap();
+        crate::tests::landed(&owner.handle, removal).await;
+        owner.pass_now().await;
+        owner.pass_now().await;
+        assert!(
+            matches!(owner.storage.read(&path).await, Err(error) if error.failure() == StorageFailure::NotFound),
+            "the handover is still in storage"
+        );
+        control.check_often(Duration::ZERO)
+    };
+    let (result, _guard) = join_with_response(joining, responding).await;
+    assert!(matches!(result, Ok(None)), "{:?}", result.err());
+    laptop.absent(owner.directory.id()).await;
+    phone.close().await.unwrap();
+    owner.close().await;
+}
+
 const MEMBER_KEYS_MAGIC: &[u8] = b"CVMK\x01";
