@@ -12,7 +12,7 @@
 # a lint or toolchain file is staged or nothing is. It runs the landing's own
 # clippy (`--all-targets --all-features -D warnings`), so a denied lint such as
 # `map_err_ignore` or a call `clippy.toml` bans fails the hook, not the landing.
-# It skips the build without features.
+# Both modes also build each selected package without features.
 set -euo pipefail
 
 if [ "$#" -ne 0 ]; then
@@ -88,10 +88,6 @@ cargo deny check advisories bans licenses
 
 step "cargo clippy ${packages[*]} --all-targets --all-features"
 scripts/cargo.sh clippy "${packages[@]}" --all-targets --all-features -- -D warnings
-
-if [ "$MODE" = quick ]; then
-    exit 0
-fi
 
 # Clippy's build turns every feature on, test-utils among them, so code a
 # test-only feature gates by mistake compiles there. Each crate's own build,
