@@ -335,3 +335,7 @@ impl SequenceSync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_reload_rebuild_tests.rs"]
+mod tests;
