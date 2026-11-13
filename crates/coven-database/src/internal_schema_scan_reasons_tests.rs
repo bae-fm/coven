@@ -575,7 +575,11 @@ mod source {
         // number.
         if matches!(
             file,
-            "write_commit.rs" | "write_commit_store.rs" | "file_queue.rs" | "file_moves.rs"
+            "write_commit.rs"
+                | "write_commit_store.rs"
+                | "file_queue.rs"
+                | "file_moves.rs"
+                | "published.rs"
         ) && sql.contains("{values}")
         {
             let columns = sql.split_once('(').and_then(|(_, rest)| rest.split_once(')')).unwrap().0;
@@ -584,6 +588,9 @@ mod source {
         }
         if file == "merge_store.rs" && sql.contains("{values}") {
             return vec![sql.replace("{values}", "(?,?),(?,?)")];
+        }
+        if file == "published.rs" && sql.contains("{}") && sql.contains("VALUES {}") {
+            return vec![sql.replacen("{}", "(?,?,?),(?,?,?)", 1)];
         }
         if file == "row_queries.rs" && sql.contains("{values}") {
             return vec![sql.replace("{values}", "(?,?,?),(?,?,?)")];

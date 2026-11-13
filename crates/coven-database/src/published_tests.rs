@@ -28,6 +28,12 @@ pub(crate) fn scan_reason(
     relation: &str,
 ) -> Option<&'static str> {
     match (file, template, relation) {
+("published.rs", template, "2" | "k")
+    if template.starts_with("WITH k(t,k,a) AS (VALUES {}) ") =>
+    Some("a write's rows are the statement's own values"),
+("published.rs", template, "2-ROW")
+    if template.starts_with("INSERT INTO _coven_published_") && template.contains("VALUES {values}") =>
+    Some("the statement's own rows to insert"),
 ("published.rs", "SELECT EXISTS(SELECT 1 FROM _coven_published)", "_coven_published") =>
     Some("the counted projection marker has at most one row"),
 ("published.rs", "DELETE FROM {table}", table) if sql == format!("DELETE FROM {table}") =>
@@ -855,5 +861,91 @@ async fn a_slot_reaches_every_row_of_the_queued_writes_it_reaches() {
     TestStore::register(&db, ben, 2);
     crate::tests::remote_write_beside_queue(&db, artist_insert("prince")).await;
     assert_eq!(albums(&db), ["purple"], "Ana's delete of Ben's artist is refused");
+    db.close().await.unwrap();
+}
+
+/// The kept record of `table` row `id`, as stored.
+fn kept_record(database: &crate::Database, table: &str, id: &str) -> Option<Vec<u8>> {
+    let key = crate::tests::text_key(id);
+    database.inspect_writer(|db| {
+        db.query(
+            "SELECT record FROM _coven_published_rows WHERE table_name=?1 AND key=?2",
+            rusqlite::params![table, key],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .unwrap()
+        .pop()
+    })
+}
+
+/// A write that reaches a row an earlier unsent write kept aside, and a row
+/// no write reached, keeps the new row's empty state and leaves the first
+/// row's kept record as it was: the first capture wins. A slot putting every
+/// kept row back then finds both.
+#[tokio::test]
+async fn a_write_beside_a_kept_row_keeps_the_first_capture_and_the_new_rows_empty_state() {
+    let store = TestStore::new();
+    let migrations = vec![Migration::addition(
+        1,
+        "notes",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+    )];
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('a','counted')").await.unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE notes SET title='first' WHERE id='a'").await.unwrap();
+    let first = kept_record(&db, "notes", "a").expect("the edit kept the counted row");
+    sql(&db, "UPDATE notes SET title='second' WHERE id='a'; INSERT INTO notes VALUES('b','new')")
+        .await
+        .unwrap();
+    assert_eq!(kept_record(&db, "notes", "a"), Some(first));
+    let new_row = db
+        .inspect_writer(|db| {
+            crate::published::kept_state(db, &crate::tests::store_row("notes", "b")).unwrap()
+        })
+        .expect("the new row is kept");
+    assert_eq!(new_row.generation(), 0);
+    assert!(new_row.cells().is_empty());
+    assert_eq!(published(&db, "notes"), 2);
+    let put_back = db.inspect_writer_schema(|db, schema| {
+        db.transaction(|db| crate::published::restore(db, schema)).unwrap()
+    });
+    assert_eq!(
+        put_back,
+        [crate::tests::store_row("notes", "a"), crate::tests::store_row("notes", "b")].into()
+    );
+    assert_eq!(published(&db, "notes"), 0);
+    db.close().await.unwrap();
+}
+
+/// Keeping aside the rows of a 500-row write takes a handful of statements,
+/// not a few for each row.
+#[tokio::test]
+async fn a_write_keeps_its_rows_aside_a_chunk_at_a_time() {
+    let store = TestStore::new();
+    let migrations = vec![Migration::addition(
+        1,
+        "notes",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+    )];
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('counted','Ben')").await.unwrap();
+    count_own(&db).await;
+    let before = db.inspect_writer(|writer| writer.profiled_statements()).len();
+    sql(
+        &db,
+        "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<499)
+           INSERT INTO notes SELECT 'unsent '||i,'Ana' FROM n",
+    )
+    .await
+    .unwrap();
+    let kept = db
+        .inspect_writer(|writer| writer.profiled_statements())
+        .into_iter()
+        .skip(before)
+        .filter(|statement| statement.sql.contains("_coven_published"))
+        .count();
+    assert_eq!(published(&db, "notes"), 500);
+    assert!(kept <= 10, "{kept} statements kept 500 rows aside");
     db.close().await.unwrap();
 }

@@ -1768,6 +1768,13 @@ that CHECK. A snapshot her device writes while her writes wait shows the album:
 under the new rules the slots alone no longer take it out. A result kept from
 the old rules would still hide it.
 
+The device keeps aside the rows of a write a chunk of 500 at a time: one
+statement reads which of them are kept already, and one each keeps their
+records, the writes those name, their losses and their creations and file
+references. A row kept already keeps what it kept, so the first capture wins.
+Keeping aside a 500-row write's rows took five statements for each row, and now
+takes under ten in all.
+
 Keeping aside every row instead made each slot applied beside an unsent write
 rebuild the whole store: over 8 s for each of Ben's slots once his library held
 81,000 rows, so an import that took 29 s with nothing waiting took over an hour.

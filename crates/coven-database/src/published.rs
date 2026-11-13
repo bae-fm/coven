@@ -25,7 +25,24 @@ pub(crate) fn exists(db: &DatabaseConnection) -> Result<bool, DbError> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published)", [], |r| r.get(0))
 }
 
-/// Preserve each affected row once, before provisional changes reach it.
+/// How many rows one statement of `capture_rows` covers.
+const CAPTURE_CHUNK: usize = 500;
+
+/// A `VALUES` list of `count` row identities, each `(table, key, audience)`.
+fn identity_values(count: usize) -> String {
+    vec!["(?,?,?)"; count].join(",")
+}
+
+/// The parameters of `identity_values` for `rows`.
+fn identity_parameters<'r>(rows: &[&'r RowId]) -> Vec<&'r dyn rusqlite::ToSql> {
+    rows.iter()
+        .flat_map(|row| [&row.table as &dyn rusqlite::ToSql, &row.key, &row.audience])
+        .collect()
+}
+
+/// Preserve each affected row once, before provisional changes reach it. A
+/// row kept already keeps what it kept: the first capture wins. Rows are kept
+/// aside a chunk at a time, so a write's rows share each statement.
 pub(crate) fn capture_rows<'a>(
     db: &DatabaseConnection,
     store: &MergeStore<'_>,
@@ -35,38 +52,115 @@ pub(crate) fn capture_rows<'a>(
         "INSERT INTO _coven_published(singleton) VALUES(1) ON CONFLICT DO NOTHING",
         [],
     )?;
-    for row in rows {
-        let audience = &row.audience;
-        let kept:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3)",params![row.table,row.key,audience],|r|r.get(0))?;
-        if kept {
+    let rows: BTreeSet<&RowId> = rows.into_iter().collect();
+    let rows: Vec<&RowId> = rows.into_iter().collect();
+    for chunk in rows.chunks(CAPTURE_CHUNK) {
+        let kept: BTreeSet<RowId> = db
+            .query(
+                &format!(
+                    "WITH k(t,k,a) AS (VALUES {}) SELECT k.t,k.k,k.a FROM k CROSS JOIN _coven_published_rows p ON p.table_name=k.t AND p.key=k.k AND p.audience=k.a",
+                    identity_values(chunk.len())
+                ),
+                rusqlite::params_from_iter(identity_parameters(chunk)),
+                crate::row_queries::read_identity,
+            )?
+            .into_iter()
+            .collect();
+        let new: Vec<&RowId> = chunk.iter().copied().filter(|row| !kept.contains(*row)).collect();
+        if new.is_empty() {
             continue;
         }
         #[cfg(any(test, feature = "test-utils"))]
-        db.record_work(|work| work.published_rows += 1);
-        put_row(db, store.row_without_losses(row)?.state)?;
-        keep_losses(db, row)?;
-        db.internal_execute("INSERT INTO _coven_published_creations SELECT * FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",params![row.table,row.key,audience])?;
-        db.internal_execute("INSERT INTO _coven_published_file_refs(table_name,key,audience,device,object) SELECT table_name,key,?3,device,object FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key,audience])?;
+        db.record_work(|work| work.published_rows += new.len());
+        let states = new
+            .iter()
+            .map(|row| Ok(store.row_without_losses(row)?.state))
+            .collect::<Result<Vec<_>, DbError>>()?;
+        put_rows(db, &states)?;
+        keep_losses(db, &new)?;
+        db.internal_execute(
+            &format!(
+                "WITH k(t,k,a) AS (VALUES {}) INSERT INTO _coven_published_creations SELECT c.* FROM k CROSS JOIN _coven_creations c ON c.table_name=k.t AND c.key=k.k AND c.audience=k.a",
+                identity_values(new.len())
+            ),
+            rusqlite::params_from_iter(identity_parameters(&new)),
+        )?;
+        db.internal_execute(
+            &format!(
+                "WITH k(t,k,a) AS (VALUES {}) INSERT INTO _coven_published_file_refs(table_name,key,audience,device,object) SELECT f.table_name,f.key,k.a,f.device,f.object FROM k CROSS JOIN _coven_row_file_refs f ON f.table_name=k.t AND f.key=k.k WHERE true ON CONFLICT DO NOTHING",
+                identity_values(new.len())
+            ),
+            rusqlite::params_from_iter(identity_parameters(&new)),
+        )?;
     }
     Ok(())
 }
 
 /// Keep a row's record in the counted state, under the row it names.
 pub(crate) fn put_row(db: &DatabaseConnection, state: RowState<Value>) -> Result<(), DbError> {
-    let row = state.row().clone();
-    name_writes(
+    put_rows(db, &[state])
+}
+
+/// Keep each state's record in the counted state, under the row it names, and
+/// name the writes they hold.
+fn put_rows(db: &DatabaseConnection, states: &[RowState<Value>]) -> Result<(), DbError> {
+    use crate::insert_rows::{insert_rows, value};
+    let mut ordinals = BTreeMap::new();
+    let mut names = Vec::new();
+    for state in states {
+        let row = state.row();
+        let writes: BTreeSet<_> = state
+            .generations()
+            .values()
+            .copied()
+            .chain(state.cells().values().map(|cell| cell.write))
+            .collect();
+        for write in writes {
+            let ordinal = match ordinals.get(&write) {
+                Some(ordinal) => *ordinal,
+                None => {
+                    let ordinal = crate::snapshot_state::ordinal(db, write)?;
+                    ordinals.insert(write, ordinal);
+                    ordinal
+                }
+            };
+            names.push(vec![
+                value(&row.table)?,
+                value(&row.key)?,
+                value(&row.audience)?,
+                value(&ordinal)?,
+            ]);
+        }
+    }
+    insert_rows(
         db,
-        &row,
-        state.generations().values().copied().chain(state.cells().values().map(|cell| cell.write)),
+        4,
+        &names,
+        |values| {
+            format!("INSERT INTO _coven_published_writes(table_name,key,audience,write_id) VALUES {values} ON CONFLICT DO NOTHING")
+        },
+        |_| Ok(()),
     )?;
-    db.internal_execute(
-        "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
-        params![
-            row.table,
-            row.key,
-            &row.audience,
-            encoded(merge_fields::encode_merge_row(&MergeRow { state }))?
-        ],
+    let mut records = Vec::with_capacity(states.len());
+    for state in states {
+        let row = state.row();
+        records.push(vec![
+            value(&row.table)?,
+            value(&row.key)?,
+            value(&row.audience)?,
+            value(&encoded(merge_fields::encode_merge_row(&MergeRow { state: state.clone() }))?)?,
+        ]);
+    }
+    insert_rows(
+        db,
+        4,
+        &records,
+        |values| {
+            format!(
+                "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES {values}"
+            )
+        },
+        |_| Ok(()),
     )?;
     Ok(())
 }
@@ -102,16 +196,24 @@ fn name_writes(
     Ok(())
 }
 
-/// Keep `row`'s losses beside its record. Whether the row shows, and the
-/// removal loss that holds it out, are the current rules' outcome: the
+/// Keep the losses of `rows` beside their records. Whether a row shows, and
+/// the removal loss that holds it out, are the current rules' outcome: the
 /// counted removal view works them out again under whatever schema reads
 /// them (`removals`). Only what no rule decides is kept: frozen losses, and
 /// the cells concurrent writes displaced.
-fn keep_losses(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
-    let audience = &row.audience;
-    db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND NOT (l.replacement_kind='rules' AND l.frozen=0)",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
-        put_loss(db, &crate::loss_record::read(r)?)
-    })
+fn keep_losses(db: &DatabaseConnection, rows: &[&RowId]) -> Result<(), DbError> {
+    for chunk in rows.chunks(CAPTURE_CHUNK) {
+        db.for_each(
+            &format!(
+                "WITH k(t,k,a) AS (VALUES {}) {} WHERE (l.audience,l.table_name,l.key) IN (SELECT a,t,k FROM k) AND NOT (l.replacement_kind='rules' AND l.frozen=0)",
+                identity_values(chunk.len()),
+                crate::loss_record::SELECT
+            ),
+            rusqlite::params_from_iter(identity_parameters(chunk)),
+            |r| put_loss(db, &crate::loss_record::read(r)?),
+        )?;
+    }
+    Ok(())
 }
 
 /// Preserve once, before a queued migration write's losses reach them, the
@@ -140,7 +242,7 @@ pub(crate) fn capture_dropped<'a>(
             "INSERT INTO _coven_published_dropped(table_name,key,audience) VALUES(?1,?2,?3)",
             params![row.table, row.key, audience],
         )?;
-        keep_losses(db, row)?;
+        keep_losses(db, &[row])?;
     }
     Ok(())
 }
