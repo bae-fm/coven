@@ -111,18 +111,37 @@ pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbE
 /// (§10.3), or the name a join's invite carried, current at the slot the
 /// inviting device had applied, for a store a join published before it
 /// loaded (§13.2). Once the applied history has created the store, its name
-/// is the one the slots set.
+/// is the one the slots set. `joined` marks a store a join published: its
+/// device is registered only by the admission its first load applies, and
+/// until then it refuses synced writes (`awaiting_registration`).
 pub(crate) fn name_before_creation(
     database: &DatabaseConnection,
     store: StoreId,
     name: &str,
     named_at: Slot,
+    joined: bool,
 ) -> Result<(), DbError> {
     database.internal_execute(
-        "INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,0) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name,named_at=excluded.named_at WHERE created=0",
-        params![store, name, named_at.get().to_be_bytes().as_slice()],
+        "INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,0,?4) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name,named_at=excluded.named_at,joined=excluded.joined WHERE created=0",
+        params![store, name, named_at.get().to_be_bytes().as_slice(), joined],
     )?;
     Ok(())
+}
+
+/// Whether this store was published by a join and the state it has applied
+/// does not yet register `device`. A synced write made now would record the
+/// slot it had applied, below the registration, and every other device would
+/// refuse it for lack of a device to author it (§7.1, §13.4).
+pub(crate) fn awaiting_registration(
+    database: &DatabaseConnection,
+    device: DeviceId,
+) -> Result<bool, DbError> {
+    database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_store WHERE singleton=1 AND joined=1)
+            AND NOT EXISTS(SELECT 1 FROM _coven_devices WHERE device=?1)",
+        [device],
+        |r| r.get(0),
+    )
 }
 
 /// Whether the applied history has created the store.
@@ -192,7 +211,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
 }
 pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
+        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,1,0) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
     }
     for table in [
         "_coven_circle_deletions",

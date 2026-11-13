@@ -472,3 +472,98 @@ async fn discarding_a_joined_store_removes_its_persons_name() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// Carol's phone has published Household but not applied its admission, so
+/// her device is not registered. A write with a synced change would record
+/// the slot she had applied, zero, and Ana's device would refuse it, and the
+/// slot that carries it, for want of a device to author it. The write fails
+/// at commit instead, leaving the rows as they were, and no write waits to be sent; a write to
+/// a table of the device's own commits. Once the first load has applied her
+/// registration, the same write commits and Ana's device takes it (§7.1,
+/// §13.4).
+#[tokio::test]
+async fn a_joined_store_refuses_synced_writes_until_its_registration_has_applied() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, _member) = owner
+        .join_and_approve(joining, &control, |_| async {
+            owner
+                .storage
+                .set_faults(coven_storage::test_utils::Faults {
+                    read_failures: [(
+                        ObjectPath::slot(store, 1.try_into().unwrap()),
+                        StorageFailure::PermissionDenied,
+                    )]
+                    .into(),
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
+        })
+        .await;
+    let Err(BootstrapError::Published { handle, .. }) = result else {
+        panic!("the admitted join is a store that couldn't load: {:?}", result.err())
+    };
+    let early = handle
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('early',?1)",
+                coven_database::params![vec![9_u8]],
+            )?;
+            Ok::<_, CovenError>(())
+        })
+        .await;
+    assert!(matches!(early, Err(CovenError::Database(DbError::NotRegistered))), "{early:?}");
+    assert_eq!(rows_of(&handle).await, Vec::<String>::new());
+    // A table of the device's own is written as before.
+    let own = handle
+        .write(|sql| {
+            sql.acknowledge_joined_invitee()?;
+            Ok::<_, CovenError>(())
+        })
+        .await;
+    assert!(own.is_ok(), "{own:?}");
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    handle.start_sync().await.unwrap();
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+    let late = handle
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('late',?1)",
+                coven_database::params![vec![9_u8]],
+            )?;
+            Ok::<_, CovenError>(())
+        })
+        .await;
+    assert!(late.is_ok(), "{late:?}");
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+    owner.pass_now().await;
+    assert!(owner.rows().await.iter().any(|(id, _)| id == "late"));
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+async fn rows_of(handle: &CovenHandle) -> Vec<String> {
+    handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query(
+                "SELECT id FROM notes WHERE id NOT IN ('before','after') ORDER BY id",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}

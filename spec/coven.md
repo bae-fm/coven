@@ -2150,7 +2150,10 @@ Each write is checked against its author's view:
   bad signature or missing authority refuses the slot.
 - **The first device's offline writes.** Writes the first device made before
   setting up storage have `read_through` 0 and are checked against slot 1's
-  record of the store's creation. No other device can write at zero.
+  record of the store's creation. No other device can write at zero: a store a
+  join published refuses a synced write until the state it has applied
+  registers its device (`DbError::NotRegistered`, §13.4), so no write is
+  recorded below the slot that registered its device.
 - **Reads never go back.** Ben's write 9 landed with `read_through` 21. If his
   write 10 then arrives with `read_through` 18, it claims not to have seen what
   his own earlier write saw. A genuine device never makes such a write: its
@@ -5506,11 +5509,15 @@ everything is encrypted.
   credentials and make it visible, without closing or moving the database,
   except a join's, which coven commits and makes visible once the join has
   found its admission, before it loads (§13.2). So the app's first commits
-  are made against the installed membership and rows (§2.1), except on a
-  joined store before its first load has installed anything. Those commit
-  against what the device holds, which is nothing yet, as writes during a
-  device's reload after a long absence do, and are judged when the load
-  installs (§16.5).
+  are made against the installed membership and rows (§2.1). A joined store
+  that has not yet applied its device's registration, which its admission
+  carries, refuses a write with a synced change, `DbError::NotRegistered`,
+  and nothing commits or queues. Such a write would record the slot it had
+  applied, zero, and every other device checks a write against its author's
+  device and member as they stood at that slot (§7.1), so each would refuse
+  it, and with it the writes slot that carries it. Writes to device-only
+  tables are unaffected. The same write is made again once the load has
+  applied the registration.
 - **The commit only goes forward.** It writes the device's custody for the
   store one value at a time: the location, the store keys, the member's keys,
   the device id and the credentials, with the person's restore code. Those go
@@ -13624,6 +13631,7 @@ maps them are with each provider in Appendix E.
 | `DbError::UpkeepThread` | the system refused a thread of coven's upkeep, the one that checkpoints a WAL or the one that keeps the planner's statistics, so the store did not open | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
+| `DbError::NotRegistered` | a synced write on a store a join published, before the state it has applied registers its device | §7.1, §13.4 |
 | `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |
 | `DeletedCircle` | a new local write or a migration writing into a deleted circle; also the cause named by its rows' lost values | §15.9, §18.4 |
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |

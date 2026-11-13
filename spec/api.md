@@ -1553,6 +1553,11 @@ pub enum DbError {
     AudienceReloading(Audience),
     /// This device has exhausted its local write identities (§4).
     WriteNumberExhausted,
+    /// A write with a synced change on a store a join published, before the
+    /// state its device has applied registers the device (§7.1, §13.4).
+    /// Nothing committed; the write is made again once the first load has
+    /// applied the registration. Device-only tables are written freely.
+    NotRegistered,
 
     /// Self-replacement has paused app writes while queued objects settle
     /// and the new binding and custody are installed (§12.3, E9).

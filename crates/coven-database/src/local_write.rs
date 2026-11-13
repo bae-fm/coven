@@ -90,6 +90,11 @@ impl DatabaseConnection {
                                 },
                             )
                         })?;
+                    if record.is_some()
+                        && crate::store_state_tables::awaiting_registration(database, device)?
+                    {
+                        return Err(DbError::NotRegistered.into());
+                    }
                     // The paths its record updates move off, read before
                     // the write applies.
                     let replaced = match &record {

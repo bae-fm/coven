@@ -333,6 +333,10 @@ pub enum DbError {
     /// A local write targets a circle this member is not in or the store does not have (§15).
     #[error("not a member of circle {0}")]
     NotInCircle(coven_foundation::id_source::CircleId),
+    /// A write with a synced change on a store a join published, before the
+    /// state its device has applied registers the device (§7.1, §13.4).
+    #[error("this device is not registered yet")]
+    NotRegistered,
     /// This audience still exposes its previous data while its selected boundary reloads (§16.5).
     #[error("audience {0:?} is reloading")]
     AudienceReloading(coven_merge::Audience),

@@ -7,7 +7,7 @@
 /// (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
+        "INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1,0);
          INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
          INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
          INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;

@@ -17,6 +17,7 @@ impl Database {
                         inner.access.directory.id(),
                         &name,
                         coven_merge::Slot::FIRST,
+                        false,
                     )
                 })
             })
@@ -43,6 +44,7 @@ impl Database {
                         inner.access.directory.id(),
                         &name,
                         named_at,
+                        true,
                     )?;
                     match &invitee {
                         Some(invitee) => crate::joined_invitee::keep(db, invitee),
