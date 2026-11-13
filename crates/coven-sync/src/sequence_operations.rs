@@ -119,7 +119,7 @@ impl SequenceOperation {
         match &self.request {
             Request::Key(target) => target.kind(),
             Request::Copy(_) => crate::OperationKind::SendKeyCopy,
-            Request::Change(change) => operation_kind(change),
+            Request::Change(change) => crate::OperationKind::of(change),
             Request::Snapshot(request) => match request.purpose {
                 Purpose::Ordinary => crate::OperationKind::WriteSnapshot,
                 Purpose::Raise(_) => crate::OperationKind::SchemaChange,
@@ -967,32 +967,6 @@ mod change {
 }
 fn parent_owned(record: &OperationRecord) -> bool {
     record.started_by == operation_kind::INVITE
-}
-
-fn operation_kind(change: &StoreChange) -> crate::OperationKind {
-    use crate::OperationKind as K;
-    match change {
-        StoreChange::CreateStore { .. } => K::CreateStore,
-        StoreChange::RenameStore { .. } => K::RenameStore,
-        StoreChange::AdmitMember { .. }
-        | StoreChange::RecoverMember { .. }
-        | StoreChange::AddInviteShare { .. }
-        | StoreChange::EndInviteShare { .. } => K::Invite,
-        StoreChange::RemoveMember { .. } => K::RemoveMember,
-        StoreChange::ChangeRole { .. } => K::SetRole,
-        StoreChange::SetAccess { .. } => K::SetAccess,
-        StoreChange::ReplaceMemberKeys { .. } => K::ReplaceMemberKeys,
-        StoreChange::AddDevice { .. } => K::AddDevice,
-        StoreChange::RemoveDevice { .. } => K::RemoveDevice,
-        StoreChange::CreateCircle { .. } => K::CreateCircle,
-        StoreChange::RenameCircle { .. } => K::RenameCircle,
-        StoreChange::DeleteCircle { .. } => K::DeleteCircle,
-        StoreChange::AddCircleMember { .. } => K::AddCircleMember,
-        StoreChange::RemoveCircleMember { .. } => K::RemoveCircleMember,
-        StoreChange::RotateKey { .. } => K::RotateKey,
-        StoreChange::RaiseSchema { .. } => K::SchemaChange,
-        StoreChange::Reset { .. } => K::Reset,
-    }
 }
 
 #[cfg(test)]

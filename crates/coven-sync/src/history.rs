@@ -105,6 +105,9 @@ pub(crate) struct History {
     pub(crate) bindings: Vec<Binding>,
     /// Every invite share a counted entry recorded, ended or not.
     pub(crate) invite_shares: BTreeMap<InviteId, InviteShare>,
+    /// The member who set up the store's storage and the access they
+    /// recorded, once a counted Set up storage applied (§10.3).
+    pub(crate) storage: Option<(MemberId, MemberAccess)>,
     members: BTreeMap<MemberId, BTreeMap<u64, StoreMember>>,
     devices: BTreeMap<DeviceId, BTreeMap<u64, StoreDevice>>,
     circles: BTreeMap<CircleId, BTreeMap<u64, StoreCircle>>,
@@ -132,9 +135,12 @@ fn changed<K: Ord + Clone, V: PartialEq + Clone>(
 }
 
 impl History {
+    /// Every access a member's state held, with the slot that recorded it.
     pub(crate) fn recorded_access(&self) -> impl Iterator<Item = (MemberId, u64, &MemberAccess)> {
         self.members.iter().flat_map(|(id, changes)| {
-            changes.iter().map(move |(at, value)| (*id, *at, &value.access))
+            changes.iter().filter_map(move |(at, value)| {
+                value.access.as_ref().map(|access| (*id, *at, access))
+            })
         })
     }
 
@@ -289,13 +295,12 @@ impl History {
     /// storage through it, or an open invite share names it (§14.2).
     pub(crate) fn account_intended(&self, account: &str) -> bool {
         let access = MemberAccess::ProviderAccount(account.to_owned());
-        self.state
-            .members
-            .values()
-            .any(|member| !member.removed && member.access.same_credential(&access))
-            || self
-                .open_invite_shares()
-                .any(|share| MemberAccess::same_account(&share.account, account))
+        self.state.members.values().any(|member| {
+            !member.removed
+                && member.access.as_ref().is_some_and(|held| held.same_credential(&access))
+        }) || self
+            .open_invite_shares()
+            .any(|share| MemberAccess::same_account(&share.account, account))
     }
 
     pub(crate) fn belonged(&self, audience: &Audience, member: &MemberId, through: u64) -> bool {
@@ -329,6 +334,19 @@ impl History {
         if let StoreChange::RemoveMember { member } = change {
             if self.holds_store(*member) {
                 return Err(OperationRejection::StoreOwner);
+            }
+        }
+        // Set up storage applies once; the same author recording the same
+        // credential again is satisfied (§10.3). Until it applies, no access
+        // entry, admission or invite share can: `access_allowed` and
+        // `holds_store` need the kind of access it records.
+        if let StoreChange::SetUpStorage { access } = change {
+            if let Some((member, set)) = &self.storage {
+                return if *member == header.author && set.same_credential(access) {
+                    Ok(None)
+                } else {
+                    Err(OperationRejection::NotAllowed)
+                };
             }
         }
         let effect = effects::checked_change(
@@ -438,6 +456,9 @@ impl History {
             self.bindings.push(Binding { member, keys, device: header.device });
         }
         match &effect.change {
+            StoreChange::SetUpStorage { access } => {
+                self.storage = Some((header.author, access.clone()));
+            }
             StoreChange::AddInviteShare { invite, account } => {
                 self.invite_shares.insert(
                     *invite,

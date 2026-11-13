@@ -28,7 +28,6 @@ pub(crate) fn household() -> StoreState {
         store: StoreId(uuid::Uuid::from_u128(10)),
         name: "household".into(),
         admin: keys(1),
-        access: access(1),
         device_name: "Ana".into(),
         key: KeyId(uuid::Uuid::from_u128(11)),
         key_hash: [1; 32],
@@ -44,10 +43,21 @@ pub(crate) fn household() -> StoreState {
     .unwrap()
     .unwrap()
     .state;
-    checked_change(
+    let state = checked_change(
         &state,
         &header(1, 1, 1),
         slot(2),
+        &StoreChange::SetUpStorage { access: access(1) },
+        &BTreeMap::new(),
+        &[],
+    )
+    .unwrap()
+    .unwrap()
+    .state;
+    checked_change(
+        &state,
+        &header(1, 1, 2),
+        slot(3),
         &admit(2, MemberRole::Admin, 2),
         &BTreeMap::new(),
         &[],
@@ -87,7 +97,7 @@ fn repeating_an_active_member_requires_the_exact_binding() {
     use coven_format::MemberAccess;
     for recorded in [access(2), MemberAccess::ProviderAccount("Ben@example.com".into())] {
         let mut state = household();
-        state.members.get_mut(&id(2)).unwrap().access = recorded.clone();
+        state.members.get_mut(&id(2)).unwrap().access = Some(recorded.clone());
         let request = |keys, role, access, device| StoreChange::AdmitMember {
             member: id(2),
             keys,
@@ -502,14 +512,14 @@ mod sequence_differential {
                     store: group.store,
                     name: "sequence tests".into(),
                     admin: keys(1),
-                    access: access(1),
                     device_name: "Ana".into(),
                     key,
                     key_hash: group.ring.store_key(key).unwrap().hash(),
                 },
                 1,
             ),
-            (header(1, 1, 1), admit(2, MemberRole::Admin, 2), 1),
+            (header(1, 1, 1), StoreChange::SetUpStorage { access: access(1) }, 1),
+            (header(1, 1, 2), admit(2, MemberRole::Admin, 2), 1),
         ];
         for (header, change, seed) in initial {
             let state = db.store_state().await.unwrap();
@@ -535,8 +545,8 @@ mod sequence_differential {
                 Action::Register(_, m) => *m,
                 _ => before.devices.get(&DeviceId(*author)).map_or(2, |d| d.member.0.as_u128()),
             };
-            let hdr = header(*author, member, i as u64 + 2);
-            let at = slot(i as u64 + 3);
+            let hdr = header(*author, member, i as u64 + 3);
+            let at = slot(i as u64 + 4);
             let change = action.change(&before, (i + 10) as u8);
             let checked = checked_change(&before, &hdr, at, &change, &BTreeMap::new(), &[]);
             // addDevice has no independently supplied target in the Rust format:
@@ -949,4 +959,20 @@ fn a_circle_left_empty_is_deleted_at_that_slot() {
             assert_eq!(apply(&state, 1, change).err(), gone, "a deleted circle is gone");
         }
     }
+}
+
+#[test]
+fn set_up_storage_records_its_authors_access_once_and_only_an_admin_makes_it() {
+    let mut state = household();
+    for member in state.members.values_mut() {
+        member.access = None;
+    }
+    state.members.get_mut(&id(2)).unwrap().role = MemberRole::Member;
+    let set_up = StoreChange::SetUpStorage { access: access(1) };
+    assert!(matches!(apply(&state, 2, set_up.clone()), Err(OperationRejection::NotAllowed)));
+    let next = apply(&state, 1, set_up.clone()).unwrap().unwrap().state;
+    assert_eq!(next.members[&id(1)].access, Some(access(1)));
+    assert_eq!(next.members[&id(2)].access, None);
+    // A state that holds an access already has had its storage set up.
+    assert!(matches!(apply(&next, 1, set_up), Err(OperationRejection::NotAllowed)));
 }

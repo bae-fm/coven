@@ -256,7 +256,7 @@ async fn dropping_a_key_waiter_does_not_interrupt_key_installation_or_publicatio
     synced_since(&handle, f.clock.now()).await;
     assert_connected_key(&f, "retained", "retained-secret").await;
     let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
-    assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: "retained".into() });
+    assert_eq!(me.access, Some(MemberAccess::S3AccessKey { access_key_id: "retained".into() }));
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle.close().await.unwrap();
 }
@@ -291,7 +291,7 @@ async fn a_dropped_key_call_finishes_before_its_connection_closes() {
     stopping.await.unwrap().unwrap();
     assert_connected_key(&f, "retained", "retained-secret").await;
     let me = f.handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
-    assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: "retained".into() });
+    assert_eq!(me.access, Some(MemberAccess::S3AccessKey { access_key_id: "retained".into() }));
     f.handle.close().await.unwrap();
 }
 
@@ -422,7 +422,7 @@ async fn a_key_call_cut_at_its_claim_leaves_the_entry_journaled_with_the_key_tak
         .await
         .unwrap();
     let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
-    assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: "replacement".into() });
+    assert_eq!(me.access, Some(MemberAccess::S3AccessKey { access_key_id: "replacement".into() }));
     handle.close().await.unwrap();
 }
 
@@ -652,7 +652,7 @@ async fn a_reconnect_with_another_key_records_set_access_before_committing_it() 
     let ana = members.iter().find(|member| member.is_self).unwrap();
     assert_eq!(
         ana.access,
-        coven_format::MemberAccess::S3AccessKey { access_key_id: "new-key".into() }
+        Some(coven_format::MemberAccess::S3AccessKey { access_key_id: "new-key".into() })
     );
     assert_eq!(custody_key(&f), "new-key");
     f.handle.close().await.unwrap();

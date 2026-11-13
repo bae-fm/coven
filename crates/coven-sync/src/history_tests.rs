@@ -164,7 +164,7 @@ fn key(n: u128) -> KeyId {
     KeyId(uuid::Uuid::from_u128(n))
 }
 
-fn member(n: u128) -> MemberId {
+pub(crate) fn member(n: u128) -> MemberId {
     MemberId(uuid::Uuid::from_u128(n))
 }
 
@@ -229,7 +229,7 @@ fn sequence_key_selection_matches_lean() {
                 id,
                 StoreMember {
                     keys: public,
-                    access: crate::sequence_sync::tests::access("fixture"),
+                    access: Some(crate::sequence_sync::tests::access("fixture")),
                     role: MemberRole::Member,
                     removed: id == member(2) && matches!(mode, 1 | 4),
                 },
@@ -359,11 +359,11 @@ fn sequence_key_selection_matches_lean() {
 /// Ana's phone (device 1) makes Household and admits Ben as an admin with
 /// his phone (device 2); Ana's laptop (device 3) registers. Each entry goes
 /// through the checks a slot's does, so only what they accept counts.
-struct Household {
-    history: History,
+pub(crate) struct Household {
+    pub(crate) history: History,
     slots: u64,
-    ana: MemberId,
-    ben: MemberId,
+    pub(crate) ana: MemberId,
+    pub(crate) ben: MemberId,
 }
 
 impl Household {
@@ -376,17 +376,15 @@ impl Household {
 
     /// Household on a provider that shares it with accounts: Ana's account
     /// holds it, and Ben reaches it from his own.
-    fn shared() -> Self {
+    pub(crate) fn shared() -> Self {
         Self::with_access(account("ana@example.org"), account("ben@example.org"))
     }
 
-    fn with_access(
-        access: coven_format::MemberAccess,
-        ben_access: coven_format::MemberAccess,
-    ) -> Self {
+    /// Household as its creator made it, before any storage is set up.
+    pub(crate) fn created() -> Self {
         let mut household =
             Self { history: History::default(), slots: 0, ana: member(1), ben: member(2) };
-        let (ana, ben) = (household.ana, household.ben);
+        let ana = household.ana;
         household.entry(
             1,
             ana,
@@ -394,12 +392,21 @@ impl Household {
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 name: "Household".into(),
                 admin: coven_format::test_utils::keys_from_seed(1).public_keys(),
-                access,
                 device_name: "Ana's phone".into(),
                 key: key(90),
                 key_hash: [1; 32],
             },
         );
+        household
+    }
+
+    fn with_access(
+        access: coven_format::MemberAccess,
+        ben_access: coven_format::MemberAccess,
+    ) -> Self {
+        let mut household = Self::created();
+        let (ana, ben) = (household.ana, household.ben);
+        household.entry(1, ana, StoreChange::SetUpStorage { access });
         household.entry(
             1,
             ana,
@@ -421,7 +428,7 @@ impl Household {
     }
 
     /// Claim the next slot with `change`, written by `device` for `author`.
-    fn entry(&mut self, device: u64, author: MemberId, change: StoreChange) -> Slot {
+    pub(crate) fn entry(&mut self, device: u64, author: MemberId, change: StoreChange) -> Slot {
         self.slots += 1;
         let slot = slot(self.slots);
         let header = SlotHeader {
@@ -436,7 +443,7 @@ impl Household {
     }
 
     /// Validate `change` as the next slot, written by `device` for `author`.
-    fn check(
+    pub(crate) fn check(
         &self,
         device: u64,
         author: MemberId,
@@ -554,7 +561,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
     assert_eq!(household.history.gone_for_good(DeviceId(6)), None);
     assert_eq!(household.history.state.devices[&DeviceId(6)].member, ben);
     assert_eq!(household.history.state.members[&ben].keys, keys);
-    assert_eq!(household.history.state.members[&ben].access, new_key);
+    assert_eq!(household.history.state.members[&ben].access, Some(new_key));
     // Repeating it is already done; another device or an old pair isn't.
     assert!(household.check(1, ana, recovery.clone()).unwrap().is_none());
     let StoreChange::RecoverMember { member, keys, .. } = recovery else { unreachable!() };
@@ -594,7 +601,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
     );
 }
 
-fn account(email: &str) -> coven_format::MemberAccess {
+pub(crate) fn account(email: &str) -> coven_format::MemberAccess {
     coven_format::MemberAccess::ProviderAccount(email.into())
 }
 
@@ -754,7 +761,7 @@ fn invite(n: u128) -> coven_foundation::id_source::InviteId {
     coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(n))
 }
 
-fn share(n: u128, account: &str) -> StoreChange {
+pub(crate) fn share(n: u128, account: &str) -> StoreChange {
     StoreChange::AddInviteShare { invite: invite(n), account: account.into() }
 }
 
@@ -883,7 +890,7 @@ fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
             id,
             StoreMember {
                 keys: public,
-                access: crate::sequence_sync::tests::access("fixture"),
+                access: Some(crate::sequence_sync::tests::access("fixture")),
                 role: MemberRole::Member,
                 removed,
             },

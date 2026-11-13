@@ -146,9 +146,10 @@ pub struct StoreMember {
     /// The current public pair: the signing key that verifies this member's
     /// objects in this view and the sealing key copies go to (§10, §12.1).
     pub keys: MemberPublicKeys,
-    /// Current access after the applied slot. Revocation also reads superseded
-    /// access from the retained administrative objects (§14.2).
-    pub access: coven_format::MemberAccess,
+    /// Current access after the applied slot, `None` for the store's creator
+    /// until Set up storage records it (§10.3). Revocation also reads
+    /// superseded access from the retained administrative objects (§14.2).
+    pub access: Option<coven_format::MemberAccess>,
     /// The member's role, retained when removed.
     pub role: MemberRole,
     /// Whether a kept removal removed this member.

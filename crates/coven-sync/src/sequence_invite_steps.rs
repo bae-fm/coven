@@ -86,9 +86,8 @@ pub(crate) fn make_invite(
                     return Err(SyncError::Rejected(OperationRejection::NotAllowed));
                 }
                 if let InviteGrant::Account { email } = &grant {
-                    if !existing
-                        .access
-                        .same_credential(&MemberAccess::ProviderAccount(email.clone()))
+                    let account = MemberAccess::ProviderAccount(email.clone());
+                    if !existing.access.as_ref().is_some_and(|held| held.same_credential(&account))
                     {
                         return Err(StorageFailure::InvalidConfiguration
                             .with_source(

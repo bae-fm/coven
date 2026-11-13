@@ -39,9 +39,9 @@ fn leave_circle(db: &Database) {
                 member,
                 crate::store_state::StoreMember {
                     keys: crate::tests::keys(2),
-                    access: coven_format::MemberAccess::S3AccessKey {
+                    access: Some(coven_format::MemberAccess::S3AccessKey {
                         access_key_id: "other-access-key".into(),
-                    },
+                    }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
                 },

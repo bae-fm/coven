@@ -891,7 +891,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 
 | Tag | Change | Fields |
 | --- | --- | --- |
-| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| access:MemberAccess \| device_name:name \| key:uuid \| key_hash:32 bytes` |
+| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes` |
 | 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name`; only in an admission slot |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
@@ -911,6 +911,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 18 | Add invite share | `invite:uuid \| account:text` |
 | 19 | End invite share | `invite:uuid` |
 | 20 | Recover member | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys \| access:Option<MemberAccess> \| device:DeviceId \| device_name:name`; only in an admission slot |
+| 21 | Set up storage | `access:MemberAccess` |
 
 - Tag 12 is unused.
 - A role is `0` admin or `1` member.
@@ -924,6 +925,7 @@ what it needs to check itself.
   first device. Its payload supplies the signing key, in `admin`.
 - Check the slot's signature with that key, and check the store id against the
   path's.
+- It records no storage access. Set up storage does, once storage exists.
 
 ### Rules for each change
 
@@ -951,8 +953,8 @@ invite.
   set-access does. A recovery keeps the member's role, circles and existing
   device records; its earlier devices are gone for good from this slot
   (§14.1).
-- `device` has never been registered. `access` is of the kind creation's
-  `access` has.
+- `device` has never been registered. `access` is of the kind Set up storage's
+  `access` has, so an admission needs Set up storage to have applied.
 - The prefix's copies are all routed to the entry's `member` and
   `keys.sealing`, and name every store key introduced before the slot, each
   once. A circle key copy may follow, for a circle the member belongs to.
@@ -970,16 +972,25 @@ invite.
 - A competing completed replacement requires a new call, not an automatic
   overwrite (§10.4, §12.3).
 
+**Set up storage.** Its author must be an admin, and no Set up storage has
+applied before it; otherwise it is refused. It records `access` as its
+author's own, and `access` is the kind of access every member has from then
+on. The same author recording the same credential again is satisfied and
+changes nothing. Until it applies, admit-member, a recover-member's present
+`access`, set-access and add-invite-share are refused: the store has no kind
+of access to keep to.
+
 **Access.** Set-access changes its author's own access, or an admin's target
 member's S3 key. The named member must be active. Admit-member, a
 recover-member's present `access` and set-access name access of the kind
-creation's `access` has, a provider account or an S3 key; the other kind is
-refused.
+Set up storage's `access` has, a provider account or an S3 key; the other kind
+is refused. A member's access is absent until one of these, or Set up storage,
+records it.
 
-**The account that holds the store.** When creation's `access` is a provider
-account, that account holds the store, and the member reaching storage through
-it can't be removed or move to another account: that remove-member, or that
-set-access, is refused (`StoreOwner`).
+**The account that holds the store.** When Set up storage's `access` is a
+provider account, that account holds the store, and the member reaching storage
+through it can't be removed or move to another account: that remove-member, or
+that set-access, is refused (`StoreOwner`).
 
 **Invite shares** record the provider account an invite shares the store with
 (§13.2).

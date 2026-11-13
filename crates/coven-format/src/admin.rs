@@ -49,7 +49,8 @@ wire_struct!(SnapshotId, audience, device, number);
 pub enum StoreChange {
     /// Create a store, name its first admin and register the writing device.
     /// The entry's author is the first admin's stable id; `admin` supplies
-    /// that member's initial pair, which verifies this entry (D6).
+    /// that member's initial pair, which verifies this entry (D6). It records
+    /// no storage access: `SetUpStorage` does, once storage exists.
     CreateStore {
         /// The store's id.
         store: StoreId,
@@ -57,14 +58,21 @@ pub enum StoreChange {
         name: String,
         /// The first admin's initial public pair.
         admin: MemberPublicKeys,
-        /// The owner’s provider account or public S3 key id.
-        access: crate::MemberAccess,
         /// The first store key, introduced by this entry.
         key: KeyId,
         /// SHA-256 of the exact 32 store-key bytes.
         key_hash: [u8; 32],
         /// The name of the device that wrote this entry, belonging to its author.
         device_name: String,
+    },
+    /// Record how the store's first admin reaches storage, which fixes the
+    /// kind of access every member has and, for a provider account, the
+    /// account that holds the store (§10.3). Applies once, as an admin in the
+    /// preceding state; access entries, admissions and invite shares wait
+    /// for it.
+    SetUpStorage {
+        /// The author's provider account, or the public S3 key id they use.
+        access: crate::MemberAccess,
     },
     /// Set the store name, as an admin in the preceding state (§10).
     RenameStore {
@@ -265,6 +273,7 @@ impl StoreChange {
             }
             Self::RemoveMember { .. }
             | Self::RotateKey { .. }
+            | Self::SetUpStorage { .. }
             | Self::SetAccess { .. }
             | Self::ChangeRole { .. }
             | Self::RemoveDevice { .. }
@@ -296,7 +305,7 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name => crate::wire::get_name, admin, access, device_name => crate::wire::get_name, key, key_hash },
+    0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash },
     1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },
@@ -316,6 +325,7 @@ store_changes!(
     18 => AddInviteShare { invite, account => get_account },
     19 => EndInviteShare { invite },
     20 => RecoverMember { member, expected, keys, access, device, device_name => crate::wire::get_name },
+    21 => SetUpStorage { access },
 );
 
 /// An invite share's provider account, bounded as member access bounds an

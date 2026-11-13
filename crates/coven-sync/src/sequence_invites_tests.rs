@@ -707,14 +707,14 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
     ana.sync.approve_join_request(&requests(&ana).await.remove(0)).await.unwrap();
     assert_eq!(dan.sync.join_outcome(&mut request).await.unwrap(), JoinOutcome::Admitted);
     let members = ana.database().store_state().await.unwrap().members;
-    assert_eq!(members[&invite.member].access, access("ana"));
-    assert_eq!(members[&ana.identity.member()].access, access("ana"));
+    assert_eq!(members[&invite.member].access, Some(access("ana")));
+    assert_eq!(members[&ana.identity.member()].access, Some(access("ana")));
     let removal = coven_format::admin::StoreChange::RemoveMember { member: invite.member };
     ana.sync.administer(removal).await.unwrap();
     let members = ana.database().store_state().await.unwrap().members;
     assert!(members[&invite.member].removed);
     let ana_member = &members[&ana.identity.member()];
-    assert_eq!((ana_member.removed, &ana_member.access), (false, &access("ana")));
+    assert_eq!((ana_member.removed, &ana_member.access), (false, &Some(access("ana"))));
     for device in [&ana, &dan] {
         device.database().close().await.unwrap();
     }

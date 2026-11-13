@@ -409,7 +409,7 @@ def changes(sodium):
     initial_hash = hashlib.sha256(bytes([17]) * 32).digest()
     s3_key = b"\x01" + text(b"fixture-access-key")
     return [
-        b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + s3_key + text(b"D")
+        b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + text(b"D")
         + bytes([1]) * 16 + initial_hash,
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test")
         + u64(2) + text(b"D"),
@@ -433,6 +433,7 @@ def changes(sodium):
         b"\x13" + bytes([0x55]) * 16,
         b"\x14" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34) + b"\x01" + b"\x01"
         + text(b"recovered-key") + u64(3) + text(b"D"),
+        b"\x15" + s3_key,
     ]
 
 

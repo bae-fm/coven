@@ -175,7 +175,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     assert_eq!(info.role, MemberRole::Member);
     assert_eq!(
         info.access,
-        coven_format::MemberAccess::S3AccessKey { access_key_id: "recovery-key".into() }
+        Some(coven_format::MemberAccess::S3AccessKey { access_key_id: "recovery-key".into() })
     );
     assert_eq!(info.devices.len(), 2);
     assert!(info.devices.iter().all(|d| d.state == DeviceState::Active));

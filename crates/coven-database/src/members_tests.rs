@@ -16,7 +16,7 @@ fn access(seed: u8) -> coven_format::MemberAccess {
 }
 
 fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMember) {
-    (member(seed), StoreMember { keys: keys(seed), access: access(seed), role, removed })
+    (member(seed), StoreMember { keys: keys(seed), access: Some(access(seed)), role, removed })
 }
 
 /// Replay state with this device's member 1, member 2 with an active, a
@@ -87,7 +87,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(1),
             keys: keys(1),
             role: MemberRole::Admin,
-            access: access(1),
+            access: Some(access(1)),
             devices: vec![
                 DeviceInfo {
                     id: own,
@@ -108,7 +108,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(2),
             keys: keys(2),
             role: MemberRole::Member,
-            access: access(2),
+            access: Some(access(2)),
             devices: [
                 (20, "phone", DeviceState::Active),
                 (21, "lost", DeviceState::Removed),
@@ -442,5 +442,46 @@ async fn the_apps_sql_finds_a_circle_by_name_and_reads_its_members() {
         members.iter().map(|row| (row.1, row.2)).collect::<Vec<_>>(),
         [(member(1), true), (member(2), false)]
     );
+    db.close().await.unwrap();
+}
+
+/// The store's creator has no storage access until Set up storage records
+/// it: `members()` gives `None`, and the app's SQL has both columns NULL
+/// (§10.3, Appendix C.1).
+#[tokio::test]
+async fn a_member_with_no_recorded_access_has_none_and_null_columns() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let mut state = db.store_state().await.unwrap();
+    state.members = [(
+        member(1),
+        StoreMember { keys: keys(1), access: None, role: MemberRole::Admin, removed: false },
+    )]
+    .into();
+    state.devices =
+        [(own, StoreDevice { member: member(1), name: "mine".into(), state: DeviceState::Active })]
+            .into();
+    db.admin_fixture(
+        coven_format::admin::StoreChange::DeleteCircle {
+            circle: CircleId(uuid::Uuid::from_u128(8)),
+        },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(db.members().await.unwrap()[0].access, None);
+    let columns: Vec<(Option<String>, Option<String>)> = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT account,access_key_id FROM coven_members",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(columns, vec![(None, None)]);
     db.close().await.unwrap();
 }

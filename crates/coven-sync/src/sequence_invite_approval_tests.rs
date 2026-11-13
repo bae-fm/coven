@@ -485,7 +485,7 @@ async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
     let checked = requests(&ana).await;
     ana.sync.approve_join_request(&checked[0]).await.unwrap();
     let state = ana.sync.database.store_state().await.unwrap();
-    assert_eq!(state.members[&carol.member()].access, access("carol-new"));
+    assert_eq!(state.members[&carol.member()].access, Some(access("carol-new")));
     assert_eq!(state.devices[&device].member, carol.member());
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
     assert_eq!(phone.sync.join_outcome(&mut request).await.unwrap(), JoinOutcome::Admitted);

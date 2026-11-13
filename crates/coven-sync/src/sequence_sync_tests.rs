@@ -398,12 +398,12 @@ impl Group {
                 store: self.store,
                 name: "sequence tests".into(),
                 admin: ana.identity.keys().public_keys(),
-                access,
                 device_name: "Ana".into(),
                 key,
                 key_hash: self.ring.store_key(key).unwrap().hash(),
             })
-            .await
+            .await?;
+        ana.sync.administer(StoreChange::SetUpStorage { access }).await
     }
     /// Ana admits `ben` as an admin, with access of the store's kind: on S3
     /// the key "ben", elsewhere an account named for his member id, so each

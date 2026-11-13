@@ -12,11 +12,11 @@ use coven_foundation::id_source::MemberId;
 use std::collections::BTreeSet;
 
 impl History {
-    /// The access the store was created with (slot 1). Its kind is the
+    /// The access Set up storage recorded, once it applied. Its kind is the
     /// store's: an account holds the store, or each member has an S3 key
     /// (§10.3).
     pub(crate) fn store_access(&self) -> Option<&MemberAccess> {
-        self.recorded_access().find_map(|(_, at, access)| (at == 1).then_some(access))
+        self.storage.as_ref().map(|(_, access)| access)
     }
 
     /// Whether `member` administers the storage: on a store an account
@@ -30,7 +30,7 @@ impl History {
     }
 
     /// Whether `member` is active and reaches storage through the account
-    /// the store was created in, the account that holds it (§20.9). No
+    /// Set up storage recorded, the account that holds the store (§20.9). No
     /// account holds an S3 store.
     pub(crate) fn holds_store(&self, member: MemberId) -> bool {
         let Some(created @ MemberAccess::ProviderAccount(_)) = self.store_access() else {
@@ -38,7 +38,8 @@ impl History {
         };
         self.state
             .active_member(&member)
-            .is_some_and(|current| created.same_credential(&current.access))
+            .and_then(|current| current.access.as_ref())
+            .is_some_and(|current| created.same_credential(current))
     }
 
     /// Whether `member` may reach storage with `access` (format.md D6): it

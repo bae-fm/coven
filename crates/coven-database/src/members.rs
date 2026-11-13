@@ -15,8 +15,9 @@ pub struct MemberInfo {
     /// Current store role.
     pub role: MemberRole,
     /// How the member reaches storage: their provider account, or the id of
-    /// the S3 key they use, never its secret (§14.3).
-    pub access: coven_format::MemberAccess,
+    /// the S3 key they use, never its secret (§14.3). `None` for the store's
+    /// creator before Set up storage records theirs (§10.3).
+    pub access: Option<coven_format::MemberAccess>,
     /// Every registered device, including removed and replaced ids.
     pub devices: Vec<DeviceInfo>,
     /// Whether this is the local member.

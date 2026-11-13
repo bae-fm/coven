@@ -766,7 +766,7 @@ async fn setup_records_the_account_and_folder_and_signing_in_again_refreshes_onl
             let state = f.handle.store_state().await;
             assert_eq!(
                 state.members[&decoded.member].access,
-                coven_format::MemberAccess::ProviderAccount("owner@example.test".into())
+                Some(coven_format::MemberAccess::ProviderAccount("owner@example.test".into()))
             );
             if let Some(previous) = previous_code {
                 assert_ne!(code, previous);

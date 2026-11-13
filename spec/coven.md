@@ -3431,6 +3431,7 @@ device, which is how coven notices a restored backup posing as the original
 | Action | Who may do it |
 |---|---|
 | Create the store | the first device, which becomes the first admin (§10.3) |
+| Set up storage | the store's first admin, once (§10.3) |
 | Rename the store | an admin |
 | Add or remove a member, change a role | an admin |
 | Add a device | the member it belongs to, from that new device itself; a joining person's first device, the admin whose approval admits them (§13.2) |
@@ -3509,14 +3510,19 @@ Slot 1 creates the store and registers its first device and its first admin.
 Since nobody is a member yet, slot 1 carries its author's public key, and that key
 verifies its signature. The store id in slot 1 must match its path.
 
-Slot 1 also records how its author reaches storage, and that fixes how every
-member does. Ana creates Household from her Dropbox account, so every member
-reaches Household from a provider account, and Ana's is the account that holds
-it (§20.9). On S3, slot 1 records Ana's key, and every member reaches the store
-with an S3 key (§14.3). An entry giving a member the other kind of access is
-refused. Without that, an admin recorded with an S3 key on Household's folder
-would count as one who changes its sharing, which only the account holding
-the folder can do.
+Slot 1 records no storage access: the storage doesn't exist when the store is
+created. A *Set up storage* entry records how the store's first admin reaches
+storage, and that fixes how every member does. Ana creates Household from her
+Dropbox account, so every member reaches Household from a provider account, and
+Ana's is the account that holds it (§20.9). On S3, the entry records Ana's key,
+and every member reaches the store with an S3 key (§14.3). An entry giving a
+member the other kind of access is refused, and so is any access entry,
+admission or invite share before Set up storage: until then the store has no
+kind of access to keep to. Without that, an admin recorded with an S3 key on
+Household's folder would count as one who changes its sharing, which only the
+account holding the folder can do. Set up storage needs an admin author and
+applies once; the same author recording the same credential again is
+satisfied.
 
 Ana sets up Household on Dropbox:
 
@@ -3527,7 +3533,8 @@ Ana sets up Household on Dropbox:
    gave and registers her phone and Ana as admin.
 4. It holds the first store key and claims its sealed copy to Ana next, at slot 2
    (§12.1).
-5. Setup succeeds once both slots are confirmed, and only then saves the
+5. It claims Set up storage at the next slot, slot 3 when nothing came between.
+6. Setup succeeds once the three slots are confirmed, and only then saves the
    location, sign-in and restore code on her phone.
 
 If another creation already holds slot 1, setup is undone and fails with
@@ -3577,10 +3584,13 @@ renames, so loading one recovers the name at its covered prefix.
   and store renames authorised, and an admin always present. It also proves
   that the name follows the applied renames and agrees at equal prefixes, that
   only a circle's members act on it, and that provider access is set by its
-  member, or by an admin for an S3 key, and only to the kind slot 1 recorded.
-  It takes as given that the store's owner can't be removed or move their
-  access (§10.1), and that slot 1 carries the key that verifies it and the
-  store id its path names (§10.3): checks of signatures and bytes (§22).
+  member, or by an admin for an S3 key, and only to the kind Set up storage
+  recorded, never before it. It proves that Set up storage has an admin author
+  and applies at most once, and that no admission, access entry or invite share
+  applies before it. It takes as given that the store's owner can't be removed
+  or move their access (§10.1), and that slot 1 carries the key that verifies
+  it and the store id its path names (§10.3): checks of signatures and bytes
+  (§22).
 
 ### 11. Admin operations
 
@@ -3851,7 +3861,7 @@ These calls, and the work passes do for them, follow the rule:
 | Deleting a store from the device (`discard_store`, and the last step of `delete_store`, api.md [E1](api.md#e1-opening)) | the store's directory, renamed to its deletion name | none: it writes nothing to storage, and only goes forward |
 | Deleting a store from the device and leaving it (`delete_store`, api.md [E1](api.md#e1-opening)) | the deletion's record in the store's directory, then the removal's operation | the record, kept just before the removal's journal |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
-| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
+| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating, which setup sends before it claims Set up storage; the `Set access` claim, or committing, when reconnecting |
 | Detecting S3 settings (`detect_s3_settings`, and setup's detection, §20.7) | the run's record, kept before its first probe until a cleanup confirms its probes and uploads gone | none: it writes only probes nothing refers to |
 
 #### 11.7 What the proofs cover
@@ -13412,7 +13422,9 @@ Write-ups explain each model and state its assumptions:
 | A store rename requires an admin in the preceding state; a non-admin rename is refused without changing the name | `applied_rename_authorized`, `non_admin_rename_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
 | The current name is the creation name followed by applied renames; equal prefixes give equal names | `name_is_latest_applied`, `name_prefix` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
 | A circle action applies only from a device whose member belongs to the circle in the preceding state; an admin outside it is refused | `applied_circle_action_by_member`, `outside_circle_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1 |
-| Provider access is set by its own member, or by an admin for an S3 key, and only to the kind of access slot 1 recorded; an entry of the other kind is refused | `applied_access_authorized`, `other_kind_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1, §10.3 |
+| Provider access is set by its own member, or by an admin for an S3 key, and only to the kind of access Set up storage recorded before it; an entry of the other kind is refused | `applied_access_authorized`, `other_kind_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.1, §10.3 |
+| No access change, invite share or admission applies before Set up storage | `access_before_storage_refused`, `share_before_storage_refused`, `admission_before_storage_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3, §10.4 |
+| Set up storage is made by an admin and applies once: an applied one found no recorded kind, and no later one applies | `storage_by_admin`, `storage_set_once`, `second_storage_refused`, `later_storage_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3, §10.4 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
 | An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo, of an action refused or already satisfied, leaves no entry bytes or deletable artifacts | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §10.4, §11.2, §11.7, §18.8 |

@@ -432,7 +432,7 @@ async fn a_second_key_runs_a_refused_ones_entry_first_and_ends_as_the_members_ke
         .await
         .unwrap();
     let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
-    assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: "second".into() });
+    assert_eq!(me.access, Some(MemberAccess::S3AccessKey { access_key_id: "second".into() }));
     assert_key(&install, directory.id(), &second);
     handle.close().await.unwrap();
     owner.close().await;

@@ -1,8 +1,11 @@
+use crate::history::tests::{account, member, share, Household};
 use crate::sequence_sync::tests::*;
+use crate::OperationRejection;
 use coven_format::{
     admin::{MemberRole, StoreChange},
     MemberAccess,
 };
+use coven_foundation::id_source::DeviceId;
 
 /// Ana's account holds Household on Dropbox; Ben, an admin with his own
 /// account, removes Dan. Only Ana's device changes sharing, and Ben's can't
@@ -116,4 +119,95 @@ async fn retained_grants_stay_one_record_per_account_whoever_removed_the_member(
     for device in [&ana, &ben, &dan] {
         device.database().close().await.unwrap();
     }
+}
+
+fn admit_ben(access: coven_format::MemberAccess) -> StoreChange {
+    StoreChange::AdmitMember {
+        member: member(2),
+        keys: coven_format::test_utils::keys_from_seed(2).public_keys(),
+        role: MemberRole::Admin,
+        access,
+        device: DeviceId(2),
+        device_name: "Ben's phone".into(),
+    }
+}
+
+/// The store's creator is a member with no storage access until Set up
+/// storage records it; before it, nobody is admitted, given access or
+/// invited, since the store has no kind of access to keep to (§10.3).
+#[test]
+fn no_access_entry_admission_or_invite_share_applies_before_set_up_storage() {
+    let household = Household::created();
+    let ana = household.ana;
+    assert_eq!(household.history.state.members[&ana].access, None);
+    assert_eq!(household.history.store_access(), None);
+    for change in [
+        admit_ben(account("ben@example.org")),
+        admit_ben(crate::sequence_sync::tests::access("ben")),
+        StoreChange::SetAccess { member: ana, access: account("ana@example.org") },
+        StoreChange::SetAccess { member: ana, access: crate::sequence_sync::tests::access("ana") },
+        share(1, "dan@example.org"),
+    ] {
+        assert_eq!(
+            household.check(1, ana, change.clone()).err(),
+            Some(OperationRejection::NotAllowed),
+            "{change:?}"
+        );
+    }
+    let set_up = StoreChange::SetUpStorage { access: account("ana@example.org") };
+    assert!(household.check(1, ana, set_up).unwrap().is_some());
+}
+
+/// Set up storage records its author's access, once. The same author
+/// recording the same credential again is satisfied; any other second entry
+/// is refused (§10.3).
+#[test]
+fn set_up_storage_applies_once() {
+    let mut household = Household::created();
+    let ana = household.ana;
+    let set_up = |email: &str| StoreChange::SetUpStorage { access: account(email) };
+    household.entry(1, ana, set_up("ana@example.org"));
+    assert_eq!(household.history.state.members[&ana].access, Some(account("ana@example.org")));
+    assert_eq!(household.history.store_access(), Some(&account("ana@example.org")));
+    // The same credential spelled another way is the same one.
+    assert!(household.check(1, ana, set_up(" ANA@example.org")).unwrap().is_none());
+    assert_eq!(
+        household.check(1, ana, set_up("ana@work.example")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
+    assert_eq!(
+        household
+            .check(
+                1,
+                ana,
+                StoreChange::SetUpStorage { access: crate::sequence_sync::tests::access("ana") }
+            )
+            .err(),
+        Some(OperationRejection::NotAllowed)
+    );
+    // Ben, admitted after it, is no author of a second one.
+    household.entry(1, ana, admit_ben(account("ben@example.org")));
+    let ben = household.ben;
+    assert_eq!(
+        household.check(2, ben, set_up("ben@example.org")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
+    assert_eq!(
+        household.check(2, ben, set_up("ana@example.org")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
+}
+
+/// The member whose account Set up storage recorded holds the store: they
+/// can't be removed (§10.1, §20.9).
+#[test]
+fn the_member_whose_account_set_up_storage_recorded_holds_the_store() {
+    let household = Household::shared();
+    let ana = household.ana;
+    assert!(household.history.holds_store(ana));
+    assert!(!household.history.holds_store(household.ben));
+    assert_eq!(
+        household.check(2, household.ben, StoreChange::RemoveMember { member: ana }).err(),
+        Some(OperationRejection::StoreOwner)
+    );
 }

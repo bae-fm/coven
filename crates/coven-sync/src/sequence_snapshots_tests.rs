@@ -72,7 +72,7 @@ async fn sealed_slot_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_size
     let session = ana.sync.session.lock().await;
     let (_, announcement) =
         session.history.announcements.last_key_value().expect("growth requests a snapshot");
-    assert_eq!(announcement.covers, 3);
+    assert_eq!(announcement.covers, 4);
     drop(session);
     // The same pass wrote the floor naming the snapshot; the next pass reads
     // that floor's bytes once.
@@ -97,7 +97,7 @@ async fn aged_history_requests_missing_coverage_below_the_growth_threshold() {
     ana.sync.pass().await.unwrap();
     assert_eq!(
         ana.sync.session.lock().await.history.announcements.last_key_value().unwrap().1.covers,
-        3
+        4
     );
     ana.sync.database.close().await.unwrap();
 }

@@ -474,9 +474,22 @@ without changing entry effects or the ordered ledger.
   refused.
 - `applied_access_authorized`, `other_kind_refused`: an applied access change
   was made by its own member, or by an admin for an S3 key, and sets the kind
-  of access slot 1 recorded; one of the other kind is refused. The circle an
-  action names, circle membership in `aux` and the access an entry sets are
-  supplied by `Policy`.
+  of access Set up storage recorded in the state before its slot; one of the
+  other kind is refused. The circle an action names, circle membership in
+  `aux`, the access an entry sets, the kind recorded so far and the operations
+  that are Set up storage or invite shares are supplied by `Policy`.
+- `access_before_storage_refused`, `share_before_storage_refused`,
+  `admission_before_storage_refused`: while no kind is recorded, an access
+  change, an invite share and an admission are refused, whoever makes them.
+  The admission rule, `withAdmissionAccess`, sits over the roles because
+  admissions need an admin before any policy is asked.
+- `storage_by_admin`, `storage_set_once`, `second_storage_refused`: an applied
+  Set up storage had an admin author and found no recorded kind in the state
+  before its slot, and a state that has one refuses another.
+  `later_storage_refused` closes it over a sequence: given `Coherent`, which
+  says an operation `setUp` names records its kind where none was and no
+  operation changes a recorded kind, no Set up storage applies after an
+  applied one.
 
 [`Registration`](sequence/CovenSequence/Registration.lean) proves the device
 rules independently of the supplied authority policy:

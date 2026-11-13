@@ -15,11 +15,11 @@ async fn a_lost_create_reply_settles_exact_bytes_without_a_second_slot() {
     assert!(matches!(ana.sync.pass().await, Err(SyncError::Storage(_))));
     assert!(ana.sync.database.current_claim().await.unwrap().is_some());
     ana.sync.pass().await.unwrap();
-    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), 3);
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), 4);
     assert!(ana.sync.database.current_claim().await.unwrap().is_none());
     assert!(group
         .storage
-        .status(&ObjectPath::slot(group.store, 4.try_into().unwrap()))
+        .status(&ObjectPath::slot(group.store, 5.try_into().unwrap()))
         .await
         .unwrap()
         .is_none());

@@ -247,6 +247,28 @@ async fn cancelling_before_setup_journals_itself_undoes_it() {
     phone.handle.close().await.unwrap();
 }
 
+/// Creating claims the store at slot 1, the creator's key copy at slot 2 and
+/// Set up storage at slot 3, which records Ana's S3 key as her access
+/// (§10.3); nothing follows.
+#[tokio::test]
+async fn creating_claims_the_store_the_key_copy_and_set_up_storage() {
+    let phone = Phone::new().await;
+    phone.setup().await.unwrap();
+    for number in 1..=3 {
+        let path = ObjectPath::slot(phone.directory.id(), NonZeroU64::new(number).unwrap());
+        assert!(phone.storage.status(&path).await.unwrap().is_some(), "slot {number}");
+    }
+    let fourth = ObjectPath::slot(phone.directory.id(), NonZeroU64::new(4).unwrap());
+    assert!(phone.storage.status(&fourth).await.unwrap().is_none());
+    let members = phone.handle.members().await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(
+        members[0].access,
+        Some(coven_format::MemberAccess::S3AccessKey { access_key_id: "member-key".into() })
+    );
+    phone.handle.close().await.unwrap();
+}
+
 /// Ana's app starts setup twice: the second call is refused while the first
 /// runs, so a cancel reaches the setup the app started, and the first
 /// finishes.

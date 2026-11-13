@@ -3680,7 +3680,7 @@ let moved = handle
 | | `removed` | 1 for a former member |
 | | `is_self` | 1 for the member using this device |
 | | `signing`, `sealing` | the member's current public keys, 32 bytes each, read as `[u8; 32]` for `SigningKey::from_bytes` and `SealingKey::from_bytes` |
-| | `account`, `access_key_id` | how they reach storage (§14.3): their provider account, or the id of their S3 key, never its secret; one is NULL, as `MemberAccess` holds one or the other |
+| | `account`, `access_key_id` | how they reach storage (§14.3): their provider account, or the id of their S3 key, never its secret; one is NULL, as `MemberAccess` holds one or the other, and both are NULL for the store's creator until Set up storage records theirs (§10.3) |
 | `coven_devices`: every device a member registered | `device` | the device id's eight big-endian bytes, read as `DeviceId` |
 | | `member` | its member, as in `coven_members` |
 | | `name` | its name from its registration |
@@ -4258,7 +4258,7 @@ while let Some(Ok(values)) = lost.next().await {
     `LocationChangeUnsupported`; setup does not relocate a store already used by other devices. The
     member whose account holds the store reconnects with that account; another account fails with
     `StoreOwner` (§20.9).
-  - Creating claims slot 1, then the creator’s key-copy slot (§10.3). Waiting
+  - Creating claims slot 1, the creator’s key-copy slot, then Set up storage (§10.3). Waiting
     writes then claim a writes slot through ordinary sync.
   - Setup can take a while: it may wait out a minute of rate limits, and a
     reconnect loads what other devices published. So it reports its steps to
@@ -6174,6 +6174,7 @@ pub struct OperationId(pub i64);
 /// The app purpose of an unfinished operation (§11.5, §19.4).
 pub enum OperationKind {
     CreateStore,
+    SetUpStorage,
     RenameStore,
     AddDevice,
     SetRole,
@@ -7443,8 +7444,9 @@ pub struct MemberInfo {
     pub keys: MemberPublicKeys,
     pub role: MemberRole,
     /// The member's provider account, or the id of their S3 key; never a
-    /// secret (§14.3).
-    pub access: MemberAccess,
+    /// secret (§14.3). `None` for the store's creator until Set up storage
+    /// records theirs (§10.3).
+    pub access: Option<MemberAccess>,
     pub devices: Vec<DeviceInfo>,
     /// Whether this is the member using this device.
     pub is_self: bool,

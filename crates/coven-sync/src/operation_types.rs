@@ -18,6 +18,9 @@ pub type OperationError = crate::SyncError;
 pub enum OperationKind {
     /// Create the store's first slot.
     CreateStore,
+    /// Record how the store's first admin reaches storage, which fixes how
+    /// every member does (§10.3).
+    SetUpStorage,
     /// Set the store name.
     RenameStore,
     /// Register this installation.
@@ -77,6 +80,35 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
+    /// The purpose of the operation that claims `change`.
+    pub(crate) fn of(change: &coven_format::admin::StoreChange) -> Self {
+        use coven_format::admin::StoreChange;
+        use OperationKind as K;
+        match change {
+            StoreChange::CreateStore { .. } => K::CreateStore,
+            StoreChange::SetUpStorage { .. } => K::SetUpStorage,
+            StoreChange::RenameStore { .. } => K::RenameStore,
+            StoreChange::AdmitMember { .. }
+            | StoreChange::RecoverMember { .. }
+            | StoreChange::AddInviteShare { .. }
+            | StoreChange::EndInviteShare { .. } => K::Invite,
+            StoreChange::RemoveMember { .. } => K::RemoveMember,
+            StoreChange::ChangeRole { .. } => K::SetRole,
+            StoreChange::SetAccess { .. } => K::SetAccess,
+            StoreChange::ReplaceMemberKeys { .. } => K::ReplaceMemberKeys,
+            StoreChange::AddDevice { .. } => K::AddDevice,
+            StoreChange::RemoveDevice { .. } => K::RemoveDevice,
+            StoreChange::CreateCircle { .. } => K::CreateCircle,
+            StoreChange::RenameCircle { .. } => K::RenameCircle,
+            StoreChange::DeleteCircle { .. } => K::DeleteCircle,
+            StoreChange::AddCircleMember { .. } => K::AddCircleMember,
+            StoreChange::RemoveCircleMember { .. } => K::RemoveCircleMember,
+            StoreChange::RotateKey { .. } => K::RotateKey,
+            StoreChange::RaiseSchema { .. } => K::SchemaChange,
+            StoreChange::Reset { .. } => K::Reset,
+        }
+    }
+
     /// Coven's own work, which no app call retries or discards: a failed
     /// attempt retries under the shared backoff (§11, E5).
     pub(crate) fn coven_owned(self) -> bool {

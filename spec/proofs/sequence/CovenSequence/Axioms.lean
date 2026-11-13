@@ -182,6 +182,14 @@ import SequenceApply
 #print axioms CovenSequence.Authority.outside_circle_refused
 #print axioms CovenSequence.Authority.applied_access_authorized
 #print axioms CovenSequence.Authority.other_kind_refused
+#print axioms CovenSequence.Authority.access_before_storage_refused
+#print axioms CovenSequence.Authority.share_before_storage_refused
+#print axioms CovenSequence.Authority.admission_before_storage_refused
+#print axioms CovenSequence.Authority.storage_by_admin
+#print axioms CovenSequence.Authority.storage_set_once
+#print axioms CovenSequence.Authority.second_storage_refused
+#print axioms CovenSequence.Authority.kind_kept
+#print axioms CovenSequence.Authority.later_storage_refused
 #print axioms CovenSequence.Preparations.ordinary_covers_boundary
 #print axioms CovenSequence.Preparations.preparation_announced
 #print axioms CovenSequence.Preparations.activation_requires_preparation

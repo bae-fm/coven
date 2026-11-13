@@ -14,7 +14,7 @@ fn key(id: &str) -> S3Credentials {
 
 async fn recorded(device: &Device) -> MemberAccess {
     let state = device.sync.database.store_state().await.unwrap();
-    state.active_member(&device.identity.member()).unwrap().access.clone()
+    state.active_member(&device.identity.member()).unwrap().access.clone().unwrap()
 }
 
 async fn slots(device: &Device) -> u64 {

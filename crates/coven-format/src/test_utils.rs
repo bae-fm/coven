@@ -190,7 +190,6 @@ pub fn store_key() -> coven_crypto::StoreKey {
 /// The first admin change, carried by slot one.
 pub fn creation_change() -> StoreChange {
     StoreChange::CreateStore {
-        access: crate::MemberAccess::S3AccessKey { access_key_id: "fixture-access-key".into() },
         store: STORE_ID,
         name: "S".into(),
         admin: member(),
@@ -691,6 +690,9 @@ pub fn store_changes() -> Vec<StoreChange> {
             }),
             device: DeviceId(3),
             device_name: "D".into(),
+        },
+        StoreChange::SetUpStorage {
+            access: crate::MemberAccess::S3AccessKey { access_key_id: "fixture-access-key".into() },
         },
     ]
 }

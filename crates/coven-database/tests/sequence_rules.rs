@@ -480,9 +480,9 @@ async fn the_first_counted_creation_keeps_the_owner() {
                 member(device),
                 StoreMember {
                     keys: coven_format::test_utils::keys_from_seed(seed).public_keys(),
-                    access: coven_format::MemberAccess::S3AccessKey {
+                    access: Some(coven_format::MemberAccess::S3AccessKey {
                         access_key_id: format!("fixture-{device}"),
-                    },
+                    }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
                 },

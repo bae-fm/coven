@@ -118,7 +118,6 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                     store: StoreId(uuid::Uuid::from_bytes([0x10; 16])),
                     name: "S".into(),
                     admin: test_utils::member(),
-                    access: crate::MemberAccess::ProviderAccount("a".into()),
                     device_name: "D".into(),
                     key,
                     key_hash,
@@ -140,7 +139,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                 b"\0\0\0\x01S".to_vec(),
                 admin.signing.as_bytes().to_vec(),
                 admin.sealing.as_bytes().to_vec(),
-                b"\0\0\0\0\x01a\0\0\0\x01D".to_vec(),
+                b"\0\0\0\x01D".to_vec(),
             ]
             .concat();
             let prefixes = [
@@ -172,7 +171,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
 
 #[test]
 fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17, 18, 19, 20];
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17, 18, 19, 20, 21];
     let changes = test_utils::store_changes();
     assert_eq!(changes.len(), tags.len());
     for (change, tag) in changes.into_iter().zip(tags) {
@@ -236,6 +235,23 @@ fn creation_names_its_writing_device() {
 }
 
 #[test]
+fn set_up_storage_carries_only_its_access_at_tag_21() {
+    for (access, payload) in [
+        (crate::MemberAccess::ProviderAccount("a".into()), b"\0\0\0\0\x01a".to_vec()),
+        (
+            crate::MemberAccess::S3AccessKey { access_key_id: "k".into() },
+            b"\x01\0\0\0\x01k".to_vec(),
+        ),
+    ] {
+        let object = frame(StoreChange::SetUpStorage { access });
+        let bytes = object.encode().unwrap();
+        assert_eq!(bytes[HEADER], 21);
+        assert_eq!(bytes[HEADER + 1..], payload);
+        assert_eq!(Object::decode(&bytes).unwrap(), object);
+    }
+}
+
+#[test]
 fn unused_tag_12_is_rejected() {
     let entry = StoreChange::Reset { announcement: slot(7) };
     let mut bytes = Object::Admin(entry).encode().unwrap();
@@ -250,9 +266,11 @@ fn unused_tag_12_is_rejected() {
 fn every_change_fits_one_request_at_its_field_bounds() {
     for mut change in test_utils::store_changes() {
         match &mut change {
-            StoreChange::CreateStore { name, device_name, access, .. } => {
+            StoreChange::CreateStore { name, device_name, .. } => {
                 *name = "n".repeat(1024);
                 *device_name = "d".repeat(1024);
+            }
+            StoreChange::SetUpStorage { access } => {
                 *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
             }
             StoreChange::AdmitMember { access, device_name, .. } => {

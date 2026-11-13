@@ -649,8 +649,8 @@ impl StorageConnections {
     }
 
     /// Create the store, once its location is claimed where it holds one
-    /// store (§20.3): keep its first store key, then claim slot 1 and the
-    /// creator's key copy (§10.3). A crash may have left the creation journaled or
+    /// store (§20.3): keep its first store key, then claim slot 1, the
+    /// creator's key copy and Set up storage (§10.3). A crash may have left the creation journaled or
     /// applied: it is settled first, and an applied one claims nothing more.
     async fn claim_creation(
         &self,
@@ -669,13 +669,16 @@ impl StorageConnections {
                 store: self.store(),
                 name: self.database.store_name().await.map_err(SyncError::from)?,
                 admin: member.keys().public_keys(),
-                access,
                 device_name: device_name.into(),
                 key,
                 key_hash,
             })
             .await?;
         }
+        // Set up storage follows the creation it needs, normally the next
+        // slot after the creator's key copy; one a crash left applied claims
+        // nothing more (§10.3).
+        sync.administer_at(coven_format::admin::StoreChange::SetUpStorage { access }).await?;
         progress.done(1);
         Ok(Some(coven_merge::Slot::FIRST))
     }

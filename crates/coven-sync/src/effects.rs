@@ -139,6 +139,7 @@ pub(crate) fn checked_change(
         | RecoverMember { .. }
         | RemoveMember { .. }
         | ChangeRole { .. }
+        | SetUpStorage { .. }
         | AddInviteShare { .. } => is_admin,
         // Only the device that recorded the share ends it (`History::validate`).
         EndInviteShare { .. } => true,
@@ -168,16 +169,11 @@ pub(crate) fn checked_change(
     }
     let mut next = state.clone();
     match change {
-        CreateStore { store, name, admin, access, device_name, .. } => {
+        CreateStore { store, name, admin, device_name, .. } => {
             next.store = Some(StoreIdentity { id: *store, name: name.clone(), named_at: slot });
             next.members.insert(
                 *author,
-                StoreMember {
-                    keys: *admin,
-                    access: access.clone(),
-                    role: MemberRole::Admin,
-                    removed: false,
-                },
+                StoreMember { keys: *admin, access: None, role: MemberRole::Admin, removed: false },
             );
             next.bound_keys.insert(*admin);
             next.devices.insert(
@@ -188,6 +184,14 @@ pub(crate) fn checked_change(
                     state: DeviceState::Active,
                 },
             );
+        }
+        // The store's storage is set up once. History satisfies a repeat of
+        // the first before it gets here (`History::validate`).
+        SetUpStorage { access } => {
+            if state.members.values().any(|member| member.access.is_some()) {
+                return Err(NotAllowed);
+            }
+            next.members.get_mut(author).expect("active author").access = Some(access.clone());
         }
         RenameStore { name } => {
             let store = next.store.as_mut().expect("authorized store");
@@ -202,7 +206,7 @@ pub(crate) fn checked_change(
                 if !existing.removed
                     && existing.keys == *keys
                     && existing.role == *role
-                    && existing.access == *access
+                    && existing.access.as_ref() == Some(access)
                     && registered_for(state, device, id)
                 {
                     return Ok(None);
@@ -217,7 +221,12 @@ pub(crate) fn checked_change(
             }
             next.members.insert(
                 *id,
-                StoreMember { keys: *keys, access: access.clone(), role: *role, removed: false },
+                StoreMember {
+                    keys: *keys,
+                    access: Some(access.clone()),
+                    role: *role,
+                    removed: false,
+                },
             );
             next.bound_keys.insert(*keys);
             next.devices.insert(
@@ -229,7 +238,9 @@ pub(crate) fn checked_change(
             let target = state.active_member(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
             if target.keys == *keys
                 && registered_for(state, device, id)
-                && access.as_ref().is_none_or(|access| target.access.same_credential(access))
+                && access.as_ref().is_none_or(|access| {
+                    target.access.as_ref().is_some_and(|held| held.same_credential(access))
+                })
             {
                 return Ok(None);
             }
@@ -245,7 +256,7 @@ pub(crate) fn checked_change(
             let recovered = next.members.get_mut(id).expect("checked target");
             recovered.keys = *keys;
             if let Some(access) = access {
-                recovered.access = access.clone();
+                recovered.access = Some(access.clone());
             }
             next.bound_keys.insert(*keys);
             next.devices.insert(
@@ -281,10 +292,10 @@ pub(crate) fn checked_change(
                 .get_mut(id)
                 .filter(|m| !m.removed)
                 .ok_or(TargetGone(EntryTarget::Member(*id)))?;
-            if target.access.same_credential(access) {
+            if target.access.as_ref().is_some_and(|held| held.same_credential(access)) {
                 return Ok(None);
             }
-            target.access = access.clone();
+            target.access = Some(access.clone());
         }
         ReplaceMemberKeys { member: id, expected, keys } => {
             let target = state.active_member(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;

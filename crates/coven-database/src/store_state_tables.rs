@@ -55,7 +55,9 @@ pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreM
                 _ => return Err(damaged(3, Type::Text)),
             },
             removed: stored(row, 4, Type::Integer)?,
-            access: serde_json::from_slice(&stored::<Vec<u8>>(row, 5, Type::Blob)?)
+            access: stored::<Option<Vec<u8>>>(row, 5, Type::Blob)?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()
                 .map_err(|_not_access| damaged(5, Type::Blob))?,
         },
     ))
@@ -237,7 +239,10 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
                 member.keys.sealing.as_bytes().as_slice(),
                 role,
                 member.removed,
-                serde_json::to_vec(&member.access).expect("member access encoding")
+                member
+                    .access
+                    .as_ref()
+                    .map(|access| serde_json::to_vec(access).expect("member access encoding"))
             ],
         )?;
     }

@@ -903,7 +903,7 @@ async fn restoring_with_another_key_records_it() {
     let members = handle.members().await.unwrap();
     assert_eq!(
         members.into_iter().find(|member| member.is_self).unwrap().access,
-        MemberAccess::S3AccessKey { access_key_id: "laptop-key".into() }
+        Some(MemberAccess::S3AccessKey { access_key_id: "laptop-key".into() })
     );
     handle.close().await.unwrap();
     owner.close().await;
