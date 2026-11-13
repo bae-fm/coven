@@ -36,6 +36,25 @@ impl Database {
         }).await
     }
 
+    /// Whether an applied writes slot carries a part for `audience` that no
+    /// ordinary snapshot of it covers yet (§16.2, §16.4).
+    pub async fn audience_holds_parts(
+        &self,
+        audience: coven_merge::Audience,
+    ) -> Result<bool, DbError> {
+        self.call(move |inner| {
+            inner.access.with_committed(|db| {
+                let held: i64 = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _coven_write_slot_audiences WHERE audience=?1)",
+                    rusqlite::params![audience],
+                    |row| row.get(0),
+                )?;
+                Ok(held != 0)
+            })
+        })
+        .await
+    }
+
     /// Headers of waiting plaintext writes, including fixed upload attempts.
     /// Snapshot growth counts these parts before their eventual publication.
     pub async fn waiting_snapshot_headers(
@@ -349,7 +368,9 @@ impl Database {
                     stagings.push(input);
                     crate::SnapshotSource::Stored { id, input: stagings.len() - 1, author }
                 }
-                crate::SnapshotSource::Empty(audience) => crate::SnapshotSource::Empty(audience),
+                crate::SnapshotSource::Empty(audience, covers) => {
+                    crate::SnapshotSource::Empty(audience, covers)
+                }
                 crate::SnapshotSource::Current(audience) => {
                     crate::SnapshotSource::Current(audience)
                 }
@@ -378,8 +399,8 @@ impl Database {
                                     })?;
                                 crate::SnapshotSource::Stored { id, input, author }
                             }
-                            crate::SnapshotSource::Empty(audience) => {
-                                crate::SnapshotSource::Empty(audience)
+                            crate::SnapshotSource::Empty(audience, covers) => {
+                                crate::SnapshotSource::Empty(audience, covers)
                             }
                             crate::SnapshotSource::Current(audience) => {
                                 crate::SnapshotSource::Current(audience)

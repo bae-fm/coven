@@ -785,10 +785,82 @@ theorem kept_candidates_same_first (relevant : List Aud) (catalog : Aud → List
 end Kept
 
 
-/-- An idle circle still needs a snapshot: its membership and boundaries are
-history even when no data-write part belongs to it. -/
-theorem idle_audience_blocks_floor :
+section Bare
+variable {Aud : Type}
+
+/-- The audiences a floor names: those some snapshot is announced for or some
+applied writes slot carries a part for. An audience with neither has an empty
+body that no deleted slot can hold a part of, so it needs no snapshot, bounds
+no `first`, and is named again from the moment it gains a part. -/
+def floorAudiences (needs : Aud → Bool) (introduced : List Aud) : List Aud :=
+  introduced.filter needs
+
+theorem part_audience_is_named (needs : Aud → Bool) (introduced : List Aud) {a : Aud}
+    (ha : a ∈ introduced) (hneeds : needs a = true) : a ∈ floorAudiences needs introduced :=
+  List.mem_filter.mpr ⟨ha, hneeds⟩
+
+/-- **A bare audience never holds the floor back.** When every named
+audience's snapshot covers `cut`, `first` passes `cut`, whatever the audiences
+without parts or snapshots have. -/
+theorem bare_audience_never_blocks (needs : Aud → Bool) (introduced : List Aud)
+    (coverage : Aud → Option Nat) (cut : Nat)
+    (nonempty : floorAudiences needs introduced ≠ [])
+    (covered : ∀ a ∈ introduced, needs a = true → ∃ n, coverage a = some n ∧ cut ≤ n) :
+    ∃ first, floorStart ((floorAudiences needs introduced).map coverage) = some first ∧
+      cut < first := by
+  apply complete_coverage_advances _ cut
+  · simpa using nonempty
+  · intro c hc
+    obtain ⟨a, ha, rfl⟩ := List.mem_map.mp hc
+    obtain ⟨hin, hneeds⟩ := List.mem_filter.mp ha
+    exact covered a hin hneeds
+
+/-- **The floor loses no part.** An audience that holds a part has a name, so
+every slot below the new `first` that carries one of its parts is covered by
+the snapshot the floor names for it; an audience without a part has nothing
+below `first` to lose. `partSlots a` are the slots carrying a part for `a`,
+and are empty for an audience that `needs` no name because it has no part. -/
+theorem floor_loses_no_part (introduced : List Aud) (needs : Aud → Bool)
+    (partSlots : Aud → List Nat) (catalog : Aud → List Snapshot)
+    (usable : Aud → Snapshot → Bool) (grace time current : Nat) (covers : Aud → Nat)
+    (bare : ∀ a, needs a = false → partSlots a = [])
+    (ordered : ∀ a ∈ floorAudiences needs introduced,
+      (catalog a).Pairwise (fun newer older => older.covers ≤ newer.covers))
+    (kept : ∀ a ∈ floorAudiences needs introduced, current ≤ covers a + 1)
+    (named : ∀ a ∈ floorAudiences needs introduced,
+      ∃ s, newest (catalog a) (usable a) = some s ∧ covers a ≤ s.covers) :
+    ∀ a ∈ introduced, ∀ p ∈ partSlots a,
+      p < floorFirst current
+          (selectedCoverage (floorAudiences needs introduced) catalog usable grace time) →
+      ∃ s, newest (catalog a) (usable a) = some s ∧ p ≤ s.covers := by
+  intro a ha p hp hlt
+  cases hneeds : needs a with
+  | false => rw [bare a hneeds] at hp; cases hp
+  | true =>
+    have hmem := part_audience_is_named needs introduced ha hneeds
+    obtain ⟨_, rules⟩ := floor_write_rules (floorAudiences needs introduced) catalog usable
+      grace time current covers ordered kept named
+    obtain ⟨s, hs, _, hfirst⟩ := rules a hmem
+    exact ⟨s, hs, by omega⟩
+
+end Bare
+
+/-- An audience with parts and no snapshot yet holds the floor back, as a
+covered one lets it pass. -/
+theorem part_audience_blocks_floor :
     floorStart [some 10, none] = none ∧ floorStart [some 10, some 8] = some 9 := by
   decide
+
+/-- One audience as a floor write sees it, for the differential. -/
+structure FloorAudience where
+  parts : Bool
+  announced : Bool
+  coverage : Option Nat
+
+def FloorAudience.needed (a : FloorAudience) : Bool := a.parts || a.announced
+
+/-- `first`'s coverage choice for a floor write over `audiences`. -/
+def floorOver (audiences : List FloorAudience) : Option Nat :=
+  floorStart ((floorAudiences FloorAudience.needed audiences).map FloorAudience.coverage)
 
 end CovenSequence.Retention

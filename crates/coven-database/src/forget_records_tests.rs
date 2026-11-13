@@ -413,7 +413,7 @@ async fn reload_from_empty(db: &Database, history: Vec<(u64, WriteRecord)>) {
         })
         .collect();
     let reload = SnapshotReload::<SnapshotStaging, _> {
-        snapshots: vec![SnapshotSource::Empty(Audience::Store)],
+        snapshots: vec![SnapshotSource::Empty(Audience::Store, 0)],
         slots,
         target,
         state: db.store_state().await.unwrap(),

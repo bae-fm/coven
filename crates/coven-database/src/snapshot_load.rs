@@ -105,14 +105,14 @@ pub(crate) fn load<P: crate::PendingValue>(
                     crate::migration_run::forget_audience(database, &id.audience)?;
                     loaded.push(crate::LoadedSnapshot { id, files });
                 }
-                crate::SnapshotSource::Empty(audience) => {
+                crate::SnapshotSource::Empty(audience, covers) => {
                     if !selected.insert(audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
                     crate::snapshot_state::begin(database, &audience)?;
                     crate::ownership::clear_audience(database, &audience)?;
                     crate::download_stage::replace(database, &audience)?;
-                    coverage.loaded(audience, 0)?;
+                    coverage.loaded(audience, covers)?;
                 }
             }
         }

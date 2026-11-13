@@ -53,7 +53,8 @@ pub struct FloorHeader {
     pub at: u64,
     /// First slot the sequence retains.
     pub first: Slot,
-    /// One announcement per required audience, in audience order, store first.
+    /// One announcement per audience that holds a part or has a snapshot, in
+    /// audience order, store first.
     pub snapshots: Vec<Slot>,
 }
 wire_struct!(FloorHeader, author, at, first, snapshots);

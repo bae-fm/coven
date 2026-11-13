@@ -1533,10 +1533,11 @@ paths occur in a snapshot. Loading leaves these local obligations intact.
 ### The floor body (kind 12)
 
 Old slots are deleted once snapshots cover them (§16.6). The floor records what
-was deleted and where to start instead: the first kept slot, and each audience's
-newest applicable snapshot ([§16.4](coven.md#164-the-floor)). Its large part is
-the *body*, at `<store>/floors/<device>/<n>`; the *pointer* at `<store>/floor`
-names the newest body (below).
+was deleted and where to start instead: the first kept slot, and the newest
+applicable snapshot of each audience that holds a part or has one
+([§16.4](coven.md#164-the-floor)). Its large part is the *body*, at
+`<store>/floors/<device>/<n>`; the *pointer* at `<store>/floor` names the newest
+body (below).
 
 ```
 author     DeviceId
@@ -1944,6 +1945,10 @@ needs before it holds any key (§16.4).
 - The floor's signer is `author`, in the state at `at`; `at` covers all
   referenced announcements. The encrypted `author` and `at` fields have no
   authority until verified.
+- Require the announcements to name the store first, then audiences in order,
+  once each, each introduced by `at`, and every audience with an announcement
+  at or before `at`. An introduced audience left out has none: it holds no part,
+  and a loader starts it empty at `first - 1` (§16.4).
 - Verify the floor and the snapshots' historical evidence before committing a
   reload.
 

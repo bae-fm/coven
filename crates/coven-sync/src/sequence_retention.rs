@@ -404,10 +404,23 @@ impl SequenceSync {
                         && session.history.usable(snapshot)
                 })
             };
-            // The floor names every introduced audience; one without any
-            // snapshot leaves the current floor as it is.
+            // The floor names every introduced audience that holds a part or
+            // has a snapshot; one of those without a usable snapshot leaves
+            // the current floor as it is. One with neither has an empty body
+            // that nothing below `first` can hold a part of (§16.4).
             let Some((slot, snapshot)) = candidates().next() else {
-                return Ok(None);
+                let announced = session
+                    .history
+                    .announcements
+                    .values()
+                    .any(|announced| announced.snapshot.audience == audience);
+                if audience == Audience::Store
+                    || announced
+                    || self.database.audience_holds_parts(audience.clone()).await?
+                {
+                    return Ok(None);
+                }
+                continue;
             };
             if let Some(floor) = &session.floor {
                 if floor

@@ -630,8 +630,11 @@ storage meanwhile:
   that slot was deleted.
 - **Floor write:** retention writes the floor record conditionally and never
   backwards. Each audience's snapshot is validly announced with its body
-  stored, and the first kept slot is covered by every introduced audience's
-  snapshot, including idle and deleted circles.
+  stored, and the first kept slot is covered by the snapshot of every
+  introduced audience that holds a part or has a snapshot, including deleted
+  circles. A circle with neither is not named and never holds the floor back
+  (`bare_audience_never_blocks`); the floor still loses no part
+  (`floor_loses_no_part`).
 - **Deletion:** retention then deletes slots below the first kept slot, and
   bodies no floor names and no raise or reset above the floor needs, and none
   a rebuild starts from.
@@ -650,10 +653,16 @@ storage meanwhile:
   the snapshot's coverage, its body, and every slot after.
 - **Uploads:** a body uploaded to a fresh path.
 
-`floorStart` takes one optional coverage per introduced audience.
+`floorStart` takes one optional coverage per named audience.
 `floor_requires_every_audience` rejects missing coverage;
 `complete_coverage_advances` and `floor_covered` establish its bounds.
-`idle_audience_blocks_floor` checks a circle with no data writes.
+`floorAudiences` keeps the introduced audiences that hold a part or have a
+snapshot: `part_audience_blocks_floor` checks one with a part and no snapshot,
+and `bare_audience_never_blocks` that one with neither never matters.
+`floor_loses_no_part` combines the floor write's rules with it: every slot
+below the new `first` that carries a part is covered by the named snapshot of
+its audience. How a device starts a circle the floor doesn't name is not
+modelled.
 
 A floor write makes two selections per audience. `newest` names the newest
 applicable announcement, with no wait: that is where a new device starts.

@@ -68,7 +68,16 @@ impl SequenceSync {
             included.insert(audience.clone());
             previous = Some(audience.clone());
         }
-        if included != required {
+        // The floor names every audience that holds a part or has a snapshot
+        // (§16.4). Parts are visible only to the writer's applied slots, so a
+        // reader checks what it can: nothing named outside the introduced
+        // audiences, and none left out that has an announced snapshot.
+        let skipped_snapshot = required.difference(&included).any(|audience| {
+            history.announcements.iter().any(|(slot, announced)| {
+                slot.get() <= floor.header.at && announced.snapshot.audience == *audience
+            })
+        });
+        if !included.is_subset(&required) || skipped_snapshot {
             return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
         }
         floor.authenticate(history)?;

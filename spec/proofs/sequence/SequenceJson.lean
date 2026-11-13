@@ -389,7 +389,11 @@ def run (j : Json) : Except String Json := do
   | "floorCheck" => readFloorCheck j
   | "joinScan" => readJoinScan j
   | "retention" => readRetention j
-  | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))
+  | "floor" =>
+    let audiences ← (← j.getObjValAs? (List Json) "audiences").mapM fun item => do
+      return (⟨← item.getObjValAs? Bool "parts", ← item.getObjValAs? Bool "announced",
+        ← item.getObjValAs? (Option Nat) "coverage"⟩ : Retention.FloorAudience)
+    return toJson (Retention.floorOver audiences)
   | "selectReload" => readSelectReload j
   | "apply" => readApply j
   | "past" => readPast j

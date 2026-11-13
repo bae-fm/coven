@@ -582,37 +582,60 @@ async fn a_failed_slot_deletion_stays_journaled_and_the_next_floor_does_not_wait
     ana.database().close().await.unwrap();
 }
 
-async fn idle_circle_coverage(compare: bool) {
+/// A floor names an introduced circle only once it has a part or a snapshot:
+/// idle with neither it needs no coverage; with a part and no snapshot it
+/// holds the floor back; covered it is named (§16.4).
+async fn circle_coverage(compare: bool) {
     use coven_merge::Audience;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
     let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
-    let store = ana.sync.snapshot(Audience::Store).await.unwrap();
-    let mut coverage =
-        vec![Some(ana.sync.session.lock().await.history.announcements[&store].covers), None];
-    for covered in [false, true] {
-        if covered {
-            let slot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
-            coverage[1] = Some(ana.sync.session.lock().await.history.announcements[&slot].covers);
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    let mut circle_covers = None;
+    for (phase, expected) in [("idle", true), ("part", false), ("covered", true)] {
+        match phase {
+            "part" => {
+                pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "a part").await;
+                ana.sync.pass().await.unwrap();
+            }
+            "covered" => {
+                let slot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+                circle_covers =
+                    Some(ana.sync.session.lock().await.history.announcements[&slot].covers);
+            }
+            _ => (),
         }
         group.clock.set(
             std::time::UNIX_EPOCH
-                + super::GRACE * if covered { 2 } else { 1 }
-                + std::time::Duration::from_secs(if covered { 2 } else { 1 }),
+                + super::GRACE * if phase == "covered" { 2 } else { 1 }
+                + std::time::Duration::from_secs(if phase == "covered" { 2 } else { 1 }),
         );
         let session = ana.sync.session.lock().await;
+        // Her passes after grace snapshot the store again; the newest one is
+        // past grace by the time of the last phase.
+        let store_covers = session
+            .history
+            .announcements
+            .values()
+            .filter(|announced| announced.snapshot.audience == Audience::Store)
+            .map(|announced| announced.covers)
+            .max()
+            .unwrap();
         let proposal = ana.sync.propose_floor(&session, &group.ring).await.unwrap();
         let first = proposal.map(|proposal| match proposal {
             super::Retention::Capture(capture) => capture.first.get(),
             _ => panic!("expected floor"),
         });
-        assert_eq!(first.is_some(), covered, "an idle introduced circle still needs coverage");
+        assert_eq!(first.is_some(), expected, "{phase}");
         if compare {
-            let input = serde_json::json!({"kind":"floor","coverage":coverage});
+            let input = serde_json::json!({"kind":"floor","audiences":[
+                {"parts":true,"announced":true,"coverage":store_covers},
+                {"parts":phase != "idle","announced":phase == "covered","coverage":circle_covers}]});
             assert_eq!(
                 serde_json::json!(first),
-                crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
+                crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+                "{phase}"
             );
         }
     }
@@ -620,14 +643,14 @@ async fn idle_circle_coverage(compare: bool) {
 }
 
 #[tokio::test]
-async fn idle_circle_requires_floor_coverage() {
-    idle_circle_coverage(false).await;
+async fn a_circle_needs_floor_coverage_once_it_has_a_part() {
+    circle_coverage(false).await;
 }
 
 #[tokio::test]
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_audience_coverage_matches_lean() {
-    idle_circle_coverage(true).await;
+    circle_coverage(true).await;
 }
 
 async fn daily_snapshots(compare: bool) {

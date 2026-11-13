@@ -6632,9 +6632,18 @@ moves `first` to 161 and slots 1 to 160 are deleted (§16.6).
 - **Every named snapshot covers at least `first - 1`,** so nothing deleted is
   lost. A named snapshot usually covers more: the names follow each new
   announcement at once, while `first` waits for grace.
-- **It names every introduced audience:** the store and every circle, including
-  idle and deleted circles and those the writer cannot open. Membership and
-  boundary history matter even without write parts.
+- **It names every introduced audience that holds a part or has a snapshot:**
+  the store, and every circle that some writes slot carries a part for or some
+  snapshot is announced for, including deleted circles and those the writer
+  cannot open. A circle with neither has an empty body: no slot below `first`
+  holds anything of it, so it needs no snapshot and bounds no `first`, and who
+  was in it and when is in the store's snapshot (§16.1). A join approved and
+  never opened makes such a circle, and only the joiner holds its key; if
+  naming it were required, removing that member would stop floors for good. A
+  circle that gains a part is named again from then on.
+  A reader requires the store first, then every audience with an announced
+  snapshot that applies at the floor's `at`, each once in order, and nothing
+  else. It can't check parts: only the writer's own applied slots show them.
 - **Snapshots may cover different slots.** The store's might cover 560 and
   Gifts' 520, with `first` at 501.
 - **It carries the original key-copy boxes** needed to open the store key,
@@ -6700,6 +6709,11 @@ kept slots after them (§13.1, §13.2). Without a floor, it starts at slot 1.
 Reading every kept slot instead would give the same state, but costs a request
 per slot; a returning device, which already holds its slots, reloads only when
 `first` has passed its next slot (§6.1).
+
+A circle it belongs to that the floor doesn't name starts empty at `first - 1`:
+the floor's writer had no part of it in any slot it applied, so none below
+`first` exists, and the kept slots after it supply the rest. The same goes for a
+circle a later slot makes readable to a device that holds the floor.
 
 Its circle keys come from copies in the store snapshot's history and in the
 kept slots. Ben's new phone, recovered by Ana outside Gifts, can find the
@@ -6923,8 +6937,9 @@ would only be tried again.
 
 The rules:
 
-- **Every introduced audience needs checked coverage** (§16.4), even one with
-  no parts in the deleted writes. Missing coverage waits; absent devices do not.
+- **Every introduced audience that holds a part or has a snapshot needs checked
+  coverage** (§16.4); one with neither needs none. Missing coverage waits; absent
+  devices do not.
   The ordinary snapshot must cover the latest raise and reset. An activated
   preparation is not enough: retention waits for an ordinary snapshot covering
   its activating entry.
@@ -13807,7 +13822,7 @@ Write-ups explain each model and state its assumptions:
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Applying the selected announcements places the floor capture after every deleted slot; a needed copy below `first` is captured, while one at or above it remains readable | `capture_covers_floor`, `floor_captures_deleted_copy`, `kept_copy_readable` | `proofs/sequence/CovenSequence/JoinScan.lean` | §16.4, §16.6 |
 | A miss before a claimed copy requires a fresh floor read; even with intervening retention, that read supplies the copy or advances the scan | `miss_requires_refresh`, `raced_miss_recovers` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
-| A floor needs coverage for every introduced audience, even an idle circle; complete coverage places the floor past the covered cut | `floor_requires_every_audience`, `complete_coverage_advances`, `floor_covered`, `idle_audience_blocks_floor` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
+| A floor needs coverage for every introduced audience that holds a part or has a snapshot, and for no other: one with neither never holds it back, an uncovered one with a part does, complete coverage places the floor past the covered cut, and no slot below `first` holds a part its audience's named snapshot doesn't cover | `floor_requires_every_audience`, `complete_coverage_advances`, `floor_covered`, `part_audience_blocks_floor`, `part_audience_is_named`, `bare_audience_never_blocks`, `floor_loses_no_part` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | A slot deletion that fails leaves storage good and holds no later floor write back: each deletion is a storage step of its own, and a floor write takes no premise on the slots below `first` | `store_good`, `stores_good` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |

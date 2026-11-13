@@ -182,7 +182,7 @@ impl SequenceSync {
                 ReloadStart::Stored(snapshot) => {
                     Some((snapshot.announcement().clone(), snapshot.path().clone()))
                 }
-                ReloadStart::Current(_) | ReloadStart::Empty(_) => None,
+                ReloadStart::Current(_) | ReloadStart::Empty(..) => None,
             })
             .collect();
         let first_audience = circle_version.map_or(audience, |_| &Audience::Store);
@@ -368,15 +368,15 @@ impl SequenceSync {
             .iter()
             .map(|start| match start {
                 ReloadStart::Stored(snapshot) => snapshot.authenticate(&session.history).map(Some),
-                ReloadStart::Current(_) | ReloadStart::Empty(_) => Ok(None),
+                ReloadStart::Current(_) | ReloadStart::Empty(..) => Ok(None),
             })
             .collect::<Result<Vec<_>, SyncError>>()?;
         let mut snapshots = Vec::new();
         if starts.store.is_none() {
-            snapshots.push(SnapshotSource::Empty(Audience::Store));
+            snapshots.push(SnapshotSource::Empty(Audience::Store, 0));
         }
         if starts.circle.is_none() && *audience != Audience::Store {
-            snapshots.push(SnapshotSource::Empty(audience.clone()));
+            snapshots.push(SnapshotSource::Empty(audience.clone(), 0));
         }
         for (start, author) in std::mem::take(selected).into_iter().zip(authors) {
             match (start, author) {

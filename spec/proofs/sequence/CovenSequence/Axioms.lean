@@ -377,7 +377,10 @@ import SequenceApply
 #print axioms CovenSequence.Retention.floor_requires_every_audience
 #print axioms CovenSequence.Retention.complete_coverage_advances
 #print axioms CovenSequence.Retention.floor_covered
-#print axioms CovenSequence.Retention.idle_audience_blocks_floor
+#print axioms CovenSequence.Retention.part_audience_blocks_floor
+#print axioms CovenSequence.Retention.part_audience_is_named
+#print axioms CovenSequence.Retention.bare_audience_never_blocks
+#print axioms CovenSequence.Retention.floor_loses_no_part
 #print axioms CovenSequence.missing_key_blocks_reload
 #print axioms CovenSequence.Device.stopped_checks_nothing
 #print axioms CovenSequence.write_history_prefix

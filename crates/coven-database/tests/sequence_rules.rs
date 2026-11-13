@@ -625,7 +625,10 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
     .unwrap();
     let queued = db.read_oldest_upload(|u| Ok::<_, DbError>(u.header)).await.unwrap().unwrap();
     let input = |target| SnapshotReload {
-        snapshots: vec![SnapshotSource::<coven_database::SnapshotStaging>::Empty(Audience::Store)],
+        snapshots: vec![SnapshotSource::<coven_database::SnapshotStaging>::Empty(
+            Audience::Store,
+            0,
+        )],
         slots: vec![IncomingSlot {
             digest: [0x31; 32],
             slot: slot(1),
@@ -704,7 +707,10 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     assert_eq!(db.applied_slot().await.unwrap(), 0);
     assert!(db.last_claims().await.unwrap().is_empty());
     let reload = |target| SnapshotReload {
-        snapshots: vec![SnapshotSource::<coven_database::SnapshotStaging>::Empty(Audience::Store)],
+        snapshots: vec![SnapshotSource::<coven_database::SnapshotStaging>::Empty(
+            Audience::Store,
+            0,
+        )],
         slots: vec![incoming()],
         target,
         state: StoreState::default(),

@@ -355,7 +355,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         .is_err());
     assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);
     db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
-        reload(vec![crate::SnapshotSource::Empty(coven_merge::Audience::Store)]),
+        reload(vec![crate::SnapshotSource::Empty(coven_merge::Audience::Store, 0)]),
         None,
     )
     .await
@@ -363,7 +363,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.record_pending(record(1)).await.unwrap();
     db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
-        reload(vec![crate::SnapshotSource::Empty(coven_merge::Audience::Store)]),
+        reload(vec![crate::SnapshotSource::Empty(coven_merge::Audience::Store, 0)]),
         None,
     )
     .await

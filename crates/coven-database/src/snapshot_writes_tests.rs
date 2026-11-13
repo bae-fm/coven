@@ -588,7 +588,7 @@ async fn a_reload_keeps_no_refused_announcements_original() {
     };
     db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
         crate::SnapshotReload {
-            snapshots: vec![crate::SnapshotSource::Empty(Audience::Store)],
+            snapshots: vec![crate::SnapshotSource::Empty(Audience::Store, 0)],
             slots: vec![announcement(1, false), announcement(2, true)],
             target: 2,
             state,
