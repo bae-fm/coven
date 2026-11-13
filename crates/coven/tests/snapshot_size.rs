@@ -481,7 +481,7 @@ async fn snapshot_growth_with_edit_history() {
                 )])
                 .storage_connector(Arc::new(storage.for_device())),
             &code,
-            None,
+            Some(owner_key()),
             "Ana's phone",
             |_| {},
             &cancel,
