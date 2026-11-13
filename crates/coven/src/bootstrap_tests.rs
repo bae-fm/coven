@@ -248,7 +248,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let control = JoinControl::new();
     // Interrupt successive await points, including database opening and reads.
     // Each next attempt starts immediately, with no approval-timer barrier.
-    for stop_at in 1..=12 {
+    for stop_at in 1..=40 {
         let mut joining = Box::pin(join_with_invite(
             install.builder(&owner, owner.recipient()),
             invite.shown_code(),
@@ -258,16 +258,22 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
             &control,
         ));
         let mut polls = 0;
-        poll_fn(|cx| {
-            assert!(joining.as_mut().poll(cx).is_pending());
-            polls += 1;
-            if polls == stop_at {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
+        // The join may reach its wait for approval in fewer polls than
+        // `stop_at`; nothing wakes it again until the approval timer, so the
+        // attempt also ends when the wait parks.
+        let parked = control.parked_from_now();
+        tokio::select! {
+            () = poll_fn(|cx| {
+                assert!(joining.as_mut().poll(cx).is_pending());
+                polls += 1;
+                if polls == stop_at {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }) => (),
+            () = parked => (),
+        }
         drop(joining);
     }
     let mut joining = Box::pin(join_with_invite(
