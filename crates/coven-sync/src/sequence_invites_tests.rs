@@ -220,12 +220,11 @@ async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline
     assert!(!access.intended);
     assert_eq!(access.granted, Some(false));
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
-    // The revoked share makes the request unreadable, which is not absence:
-    // the provider's permission failure reaches the app (§13.2).
-    let outcome = carol.device.sync.join_outcome(&mut carol.request).await;
-    assert!(
-        matches!(&outcome, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::PermissionDenied),
-        "{outcome:?}"
+    // The revoked share makes the request unreadable before any admission was
+    // found: the join's access is gone, which ends it as declined (§13.2).
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Declined
     );
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();

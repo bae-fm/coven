@@ -214,9 +214,11 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     owner.close().await;
 }
 
-/// The provider refuses the first join request outright, so it stored
-/// nothing: the retry sends it again and is approved, instead of reading the
-/// absent request as a declined invite (§13.2).
+/// The provider refuses the first join request outright for a reason that is
+/// not lost access, so it stored nothing: the retry sends it again and is
+/// approved, instead of reading the absent request as a declined invite
+/// (§13.2). A refusal that says the access is gone ends the join instead
+/// (`a_waiting_join_that_loses_its_access_ends_as_an_ended_invite`).
 #[tokio::test]
 async fn a_refused_join_request_is_sent_again() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -225,7 +227,7 @@ async fn a_refused_join_request_is_sent_again() {
     owner
         .storage
         .set_faults(coven_storage::test_utils::Faults {
-            create_failures: [(path, (StorageFailure::PermissionDenied, 403))].into(),
+            create_failures: [(path, (StorageFailure::Refused, 400))].into(),
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
@@ -243,7 +245,7 @@ async fn a_refused_join_request_is_sent_again() {
         .await;
     assert!(
         matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
-            if error.failure() == StorageFailure::PermissionDenied),
+            if error.failure() == StorageFailure::Refused),
         "{:?}",
         refused.as_ref().err()
     );
@@ -544,7 +546,7 @@ async fn cancel_before_sending(provider: CloudProvider) {
 }
 
 /// Dan's phone mounts Household in his Dropbox, and Dropbox refuses his
-/// request, so it was never sent. Cancelled from a later call, before it
+/// request for a reason that is not lost access, so it was never sent. Cancelled from a later call, before it
 /// sends again, the join unmounts Household before it removes itself: the
 /// cancel knows of the mount only from what the join recorded (§13.2).
 #[tokio::test]
@@ -556,7 +558,7 @@ async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
         .set_faults(coven_storage::test_utils::Faults {
             create_failures: [(
                 crate::tests::request_path(&invite),
-                (StorageFailure::PermissionDenied, 403),
+                (StorageFailure::Refused, 400),
             )]
             .into(),
             ..coven_storage::test_utils::Faults::none()
@@ -576,7 +578,7 @@ async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
         .await;
     assert!(
         matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
-            if error.failure() == StorageFailure::PermissionDenied),
+            if error.failure() == StorageFailure::Refused),
         "{:?}",
         refused.as_ref().err()
     );

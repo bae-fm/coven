@@ -333,7 +333,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
 }
 
 #[tokio::test]
-async fn permission_revocation_while_joining_keeps_the_provider_failure() {
+async fn permission_revocation_while_joining_ends_the_join() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
@@ -355,15 +355,14 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
         _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(joining, revoke).await;
-    assert!(
-        matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied)
-    );
-    // The join stays unfinished with its code and kept sign-in (§13.2).
-    assert!(install.only_kept_sign_in(owner.directory.id()).await.is_some());
+    // The share is gone before the admission was found: the join ends as an
+    // ended invite, leaving no code and no kept sign-in (§13.2).
+    assert!(matches!(result, Ok(None)), "{:?}", result.err());
+    assert!(install.only_kept_sign_in(owner.directory.id()).await.is_none());
     assert!(StoreKeychain::new(install.keychain.clone(), owner.directory.id())
         .invite_code()
         .unwrap()
-        .is_some());
+        .is_none());
     owner.close().await;
 }
 
