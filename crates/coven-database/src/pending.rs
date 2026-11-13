@@ -238,6 +238,16 @@ pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Resul
     })
 }
 
+/// Whether the operation `id` has a pending record.
+pub(crate) fn operation_recorded(
+    db: &DatabaseConnection,
+    id: OperationId,
+) -> Result<bool, DbError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE operation=?1)", [id.0], |r| {
+        r.get(0)
+    })
+}
+
 pub(crate) fn operation<P: PendingValue>(
     db: &DatabaseConnection,
     id: OperationId,

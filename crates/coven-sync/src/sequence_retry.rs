@@ -153,6 +153,24 @@ impl SequenceSync {
         self.record_failure(id, crate::OperationKind::Invite, failure, ring, Some(step)).await
     }
 
+    /// Record a pairing's failed attempt, which read the pairing at `step`,
+    /// as its pending record while the pairing is still at that step. A
+    /// pairing has no doubling wait: the next pass looks again, and the
+    /// provider's cooldown and the connection's backoff still hold (§13.2).
+    pub(crate) async fn record_pairing_error(
+        &self,
+        id: OperationId,
+        step: u32,
+        error: &SyncError,
+    ) -> Result<(), SyncError> {
+        let subject = PendingSubject::Operation { id, kind: crate::OperationKind::Pairing };
+        let reason = self.error_reason(error);
+        self.waits.log_failure(&subject, &reason, error.cause());
+        let pending = PendingRecord { subject, reason, cause: None };
+        self.database.record_operation_retry_at(pending, None, step).await?;
+        Ok(())
+    }
+
     async fn record_failure(
         &self,
         id: OperationId,

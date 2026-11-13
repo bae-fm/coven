@@ -1,15 +1,17 @@
-//! An invite's expiry, a write like approving, declining or cancelling it
-//! (§13.2). The handle that holds the store's writer writes it, with or
+//! An invite's or a pairing's expiry, a write like approving, declining or
+//! cancelling it (§13.2). The handle that holds the store's writer writes it, with or
 //! without a storage connection: opening writes each expiry already past,
 //! and the handle then wakes when this device's wall clock reaches the
-//! earliest open invite's expiry, by running or by being set past it, and
-//! writes it. A clock that can't wait for it fails the handle. The write
+//! earliest open invite's or pairing's expiry, by running or by being set past
+//! it, and writes it. A clock that can't wait for it fails the handle. The write
 //! ends the invite in the journal, which takes it out of `coven_invites`.
 //! Deleting its request and taking back its access is the ended invite's
 //! own work, which a pass does once storage is connected, as for an invite
-//! ended any other way.
+//! ended any other way. A pairing's expiry ends it the same way, and the
+//! pass puts its marker in the place of its request or handover.
 
 use super::InviteWork;
+use crate::sequence_sync::sequence_pairings::PairingWork;
 use crate::{RetryWaits, SequenceState};
 use coven_database::operation_kind;
 use coven_database::{Database, DbError, OperationId};
@@ -137,40 +139,89 @@ pub(crate) async fn expire(
     state: &SequenceState,
 ) -> Result<Option<SystemTime>, DbError> {
     let (ended, next) = write(database, now).await?;
-    for id in &ended {
+    for id in &ended.invites {
         waits.operation_advanced(*id);
     }
-    if !ended.is_empty() {
+    if ended.any() {
         state.request_pass();
     }
     Ok(next)
 }
 
-/// End each invite whose lifetime ended by `now`, in one step on the
-/// writer with reading them: no other write comes between. Returns the
-/// ended invites' operations and the earliest expiry still to come.
+/// The invites and pairings an expiry write ended.
+struct Ended {
+    /// The ended invites' operations, whose waits end.
+    invites: Vec<OperationId>,
+    /// Whether any pairing ended.
+    pairings: bool,
+}
+
+impl Ended {
+    fn any(&self) -> bool {
+        !self.invites.is_empty() || self.pairings
+    }
+}
+
+/// End each invite and pairing whose lifetime ended by `now`, each kind in
+/// one step on the writer with reading them: no other write comes between.
+/// Returns what ended and the earliest expiry still to come.
 async fn write(
     database: &Database,
     now: SystemTime,
-) -> Result<(Vec<OperationId>, Option<SystemTime>), DbError> {
+) -> Result<(Ended, Option<SystemTime>), DbError> {
+    let (invites, invite_next) = write_kind(
+        database,
+        operation_kind::INVITE,
+        move |work: &InviteWork| work.expired(now),
+        InviteWork::end,
+        |work: &InviteWork| work.expires().then_some(work.expires_at),
+    )
+    .await?;
+    let (pairings, pairing_next) = write_kind(
+        database,
+        operation_kind::PAIRING,
+        move |work: &PairingWork| work.expired(now),
+        PairingWork::expire,
+        PairingWork::expiry,
+    )
+    .await?;
+    let next = match (invite_next, pairing_next) {
+        (Some(invite), Some(pairing)) => Some(invite.min(pairing)),
+        (invite, pairing) => invite.or(pairing),
+    };
+    Ok((Ended { invites, pairings: !pairings.is_empty() }, next))
+}
+
+/// End each journaled work of `kind` that `expired`, with `end`, and return
+/// the ended operations and the earliest `expiry` of the rest.
+async fn write_kind<W>(
+    database: &Database,
+    kind: &str,
+    expired: impl Fn(&W) -> bool + Send + 'static,
+    end: impl Fn(&mut W) + Send + 'static,
+    expiry: impl Fn(&W) -> Option<SystemTime> + Send + 'static,
+) -> Result<(Vec<OperationId>, Option<SystemTime>), DbError>
+where
+    W: serde::Serialize + serde::de::DeserializeOwned,
+{
     database
-        .advance_operations(operation_kind::INVITE, move |records| {
+        .advance_operations(kind, move |records| {
             let mut updates = Vec::new();
             let mut ended = Vec::new();
             let mut next: Option<SystemTime> = None;
             for record in records {
-                let mut work: InviteWork =
+                let mut work: W =
                     serde_json::from_slice(&record.data).map_err(DbError::StateEncoding)?;
-                if work.expired(now) {
-                    work.end();
+                if expired(&work) {
+                    end(&mut work);
                     updates.push(
                         record.next_step(
                             serde_json::to_vec(&work).map_err(DbError::StateEncoding)?,
                         )?,
                     );
                     ended.push(record.id);
-                } else if work.expires() {
-                    next = Some(next.map_or(work.expires_at, |at| at.min(work.expires_at)));
+                } else if let Some(at) = expiry(&work) {
+                    next = Some(next.map_or(at, |earlier: SystemTime| earlier.min(at)));
                 }
             }
             Ok((updates, (ended, next)))

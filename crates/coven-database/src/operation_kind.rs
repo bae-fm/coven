@@ -16,6 +16,9 @@ pub const SEQUENCE: &str = "sequence";
 /// An invite, from its code to its end, and the `started_by` of the
 /// operations it starts (§13.2).
 pub const INVITE: &str = invite_kind!();
+/// A pairing on the device that shows its code, from the write that makes it
+/// until the app forgets it (§13.2).
+pub const PAIRING: &str = "pairing";
 /// Granting or revoking a provider account's access (§14.2).
 pub const PROVIDER_ACCESS: &str = "provider-access";
 /// Advancing the floor and deleting the history below it (§16.6).

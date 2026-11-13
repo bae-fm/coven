@@ -126,6 +126,59 @@ impl Database {
         .await
     }
 
+    /// Read the journal's rows of `kind`, then commit the transitions and
+    /// endings `step` makes from them, in one transaction on the writer, as
+    /// `advance_operations` does. An ending removes the row with its pending
+    /// record and retry wait.
+    pub async fn settle_operations<T: Send + 'static>(
+        &self,
+        kind: &str,
+        step: impl FnOnce(
+                &[OperationRecord],
+            ) -> Result<(Vec<OperationUpdate>, Vec<OperationId>, T), DbError>
+            + Send
+            + 'static,
+    ) -> Result<T, DbError> {
+        let kind = kind.to_owned();
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| {
+                    let (updates, finished, concluded) =
+                        step(&crate::operation::of_kind(db, &kind)?)?;
+                    for update in &updates {
+                        crate::operation::advance(db, update)?;
+                    }
+                    for id in finished {
+                        if crate::operation::finish(db, id)? != 1 {
+                            return Err(DbError::OperationChanged(id));
+                        }
+                    }
+                    Ok(concluded)
+                })
+            })
+        })
+        .await
+    }
+
+    /// Advance an operation one step and record the deletion it leaves owed,
+    /// in one transaction: an ended pairing's marker, which goes once a
+    /// request can no longer reach its path (§13.2).
+    pub async fn advance_operation_with_removal(
+        &self,
+        update: OperationUpdate,
+        removal: crate::ObjectRemoval,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    crate::operation::advance(db, &update)?;
+                    crate::object_removals::record(db, &removal)
+                })
+            })
+        })
+        .await
+    }
+
     /// Record member pairs this installation holds, or is about to keep in
     /// custody, before custody keeps them: applying a binding of its member
     /// to a pair not recorded stops it for good (§12.3).

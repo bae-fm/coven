@@ -6219,6 +6219,9 @@ pub enum OperationKind {
     /// Record the invite's share and grant it, approve or decline a join,
     /// and settle the invite, recording its share's end (§13.2).
     Invite,
+    /// Look for a pairing's request, and put its handover or its marker in the
+    /// request's place (§13.2).
+    Pairing,
     /// Snapshot and reset an audience (§19.4).
     Reset,
     /// Set up storage on this device: check the provider, then create the

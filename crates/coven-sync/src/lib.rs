@@ -91,6 +91,7 @@ pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::NewInvite;
 pub use sequence_sync::sequence_join::{JoinOutcome, JoinPoll};
+pub use sequence_sync::sequence_pairings::{pairings_opened, MadePairing};
 pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{

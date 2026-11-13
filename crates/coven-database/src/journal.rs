@@ -36,6 +36,16 @@ impl<'write> Journal<'write> {
         crate::operation::advance(self.files.database, update)
     }
 
+    /// Retire an operation the write's step has ended: its pending record and
+    /// retry wait go with it. An operation that has finished already fails
+    /// with `OperationChanged`.
+    pub fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {
+        if crate::operation::finish(self.files.database, id)? != 1 {
+            return Err(DbError::OperationChanged(id));
+        }
+        Ok(())
+    }
+
     /// Membership and audience state after the applied slots, as this
     /// write sees it.
     pub fn store_state(&self) -> Result<StoreState, DbError> {

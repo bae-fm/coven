@@ -107,6 +107,37 @@ impl Database {
         .await
     }
 
+    /// End the operation's pending record and retry wait while the operation
+    /// is still at `step`, the step the attempt that succeeded read: a writer
+    /// outside the attempt may have moved it on, and the record it then
+    /// holds belongs to a later step. The usual case, with nothing recorded,
+    /// reads without taking the writer.
+    pub async fn clear_operation_pending_at(
+        &self,
+        id: crate::OperationId,
+        step: u32,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let recorded = inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|db| crate::pending::operation_recorded(db, id))?;
+            if !recorded {
+                return Ok(());
+            }
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| {
+                    if crate::operation::find(db, id)?.is_some_and(|row| row.last_step == step) {
+                        crate::pending::clear_operation(db, id)?;
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Every persisted wait, for arming on reopen (§6.7).
     pub async fn retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
         self.call(move |inner| inner.access.readers.acquire_reader().with_reader(retry::read_all))

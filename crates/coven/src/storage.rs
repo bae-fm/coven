@@ -67,7 +67,9 @@ pub(crate) async fn record_opened(
     finished: Option<std::time::SystemTime>,
 ) -> Result<(), SyncError> {
     coven_sync::record_opened(database, location, finished).await.map_err(SyncError::from)?;
-    coven_sync::InviteExpiry::opened(database, clock.now()).await.map_err(SyncError::from)
+    coven_sync::InviteExpiry::opened(database, clock.now()).await.map_err(SyncError::from)?;
+    // No screen shows a pairing a closed handle or a crash left.
+    coven_sync::pairings_opened(database).await.map_err(SyncError::from)
 }
 
 /// A read-only handle publishes nothing.

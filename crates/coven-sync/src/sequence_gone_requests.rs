@@ -47,7 +47,7 @@ impl SequenceSync {
 
     /// Create `device`'s gone marker, then list and delete what else is
     /// under its join requests.
-    async fn end_requests(&self, device: DeviceId) -> Result<(), SyncError> {
+    pub(crate) async fn end_requests(&self, device: DeviceId) -> Result<(), SyncError> {
         let marker = ObjectPath::device_gone(self.store(), device);
         match self.storage.create(&marker, &DeviceGone.encode()).await {
             Ok(_) => (),

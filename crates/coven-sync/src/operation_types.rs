@@ -63,6 +63,9 @@ pub enum OperationKind {
     DeleteCircle,
     /// Share storage and settle an invitation.
     Invite,
+    /// Look for a pairing's request, put its handover or marker in the
+    /// request's place (§13.2).
+    Pairing,
     /// Align one provider account's grants with members and open invitations.
     RevokeAccess,
     /// Replace a member's signing and sealing pair: this member's own, with a

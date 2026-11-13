@@ -241,6 +241,7 @@ impl SequenceSync {
         if self.registered(&session) {
             self.resume_access(&mut session, &mut ring, &member).await?;
             self.resume_invites(&mut session, &mut ring, &member).await?;
+            self.resume_pairings(&session).await?;
             self.end_gone_requests(&session, &member).await?;
             self.resume_member_keys(&mut session, &mut ring).await?;
             let member =
@@ -773,6 +774,8 @@ pub(crate) mod sequence_join;
 mod sequence_keys;
 #[path = "sequence_member_keys.rs"]
 mod sequence_member_keys;
+#[path = "sequence_pairings.rs"]
+pub(crate) mod sequence_pairings;
 pub(crate) use sequence_member_keys::registered;
 #[path = "sequence_operations.rs"]
 pub(crate) mod sequence_operations;

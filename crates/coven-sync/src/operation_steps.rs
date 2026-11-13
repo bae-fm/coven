@@ -2,6 +2,7 @@
 
 use crate::sequence_sync::make_retry_due;
 use crate::sequence_sync::sequence_invites::{approve_request, end_invite, make_invite, NewInvite};
+use crate::sequence_sync::sequence_pairings::{self, MadePairing};
 use crate::{RetryWaits, SequenceState, SyncError};
 use coven_crypto::{custody::KeySession, MemberIdentity};
 use coven_database::{OperationId, SqlContext};
@@ -166,6 +167,95 @@ impl OperationSteps {
         let ended = end_invite(sql, self.clock.now(), invite, None)?;
         self.wake_after_commit(sql, ended);
         Ok(())
+    }
+
+    /// Make a pairing, as a step of a write (§13.2): the write checks that
+    /// this device is registered and its member active in the slots it has
+    /// applied, fixes the pairing's codes and journals it, with or without
+    /// storage. `key` is the S3 key this device connects with, which an S3
+    /// pairing's QR code carries; one without it fails with
+    /// `InvalidConfiguration`. Once the write commits, a pass is asked for,
+    /// which looks for the pairing's request.
+    pub fn start_pairing(
+        &self,
+        sql: &SqlContext<'_, '_>,
+        key: Option<coven_storage::S3Credentials>,
+    ) -> Result<MadePairing, SyncError> {
+        let location =
+            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
+        let made = sequence_pairings::make_pairing(
+            sql,
+            self.device,
+            &self.held()?,
+            self.ids.as_ref(),
+            self.clock.now(),
+            &location,
+            key,
+        )?;
+        self.pass_after_commit(sql);
+        Ok(made)
+    }
+
+    /// Approve exactly this checked request, as a step of a write (§13.2):
+    /// `shown` is the request the app was shown, which the pairing compares
+    /// with the one it holds before it seals the member's current private
+    /// pair to that request's sealing key and journals the handover. Once
+    /// the write commits, a pass is asked for, which puts the handover in the
+    /// request's place. A request the pairing no longer shows, and a pairing
+    /// whose lifetime ended, fail the step with `InvitationChanged`.
+    pub fn approve_pairing(
+        &self,
+        sql: &SqlContext<'_, '_>,
+        pairing: InviteId,
+        shown: &[u8],
+    ) -> Result<(), SyncError> {
+        sequence_pairings::approve_request(
+            sql,
+            self.directory.id(),
+            self.clock.now(),
+            &self.held()?,
+            pairing,
+            shown,
+        )?;
+        self.pass_after_commit(sql);
+        Ok(())
+    }
+
+    /// Decline exactly this checked request, as a step of a write (§13.2):
+    /// the pairing ends as declined, and a pass is asked for, which puts the
+    /// marker in the request's place. A request the pairing no longer shows,
+    /// an approved pairing, and one whose lifetime ended, fail the step with
+    /// `InvitationChanged`.
+    pub fn decline_pairing(
+        &self,
+        sql: &SqlContext<'_, '_>,
+        pairing: InviteId,
+        shown: &[u8],
+    ) -> Result<(), SyncError> {
+        sequence_pairings::decline_request(sql, self.clock.now(), pairing, shown)?;
+        self.pass_after_commit(sql);
+        Ok(())
+    }
+
+    /// The screen showing the pairing's code closed, as a step of a write
+    /// (§13.2): the pairing ends at whatever stage it is and is forgotten
+    /// once a pass has put the marker in the place of its request or
+    /// handover. A pairing that has ended is forgotten as it is; one already
+    /// forgotten changes nothing.
+    pub fn end_pairing(
+        &self,
+        sql: &SqlContext<'_, '_>,
+        pairing: InviteId,
+    ) -> Result<(), SyncError> {
+        sequence_pairings::end_pairing(sql, pairing)?;
+        self.pass_after_commit(sql);
+        Ok(())
+    }
+
+    /// Once the write commits, a pass is asked for.
+    fn pass_after_commit(&self, sql: &SqlContext<'_, '_>) {
+        let state = self.state.clone();
+        sql.after_commit(move || state.request_pass());
     }
 
     /// Once the write commits, the invite's wait ends in this session and a

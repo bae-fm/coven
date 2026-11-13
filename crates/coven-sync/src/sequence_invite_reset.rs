@@ -1,6 +1,7 @@
 //! A device reset keeps provider obligations, without resuming its invitations.
 
 use super::*;
+use crate::sequence_sync::sequence_pairings::PairingWork;
 use coven_database::operation_kind;
 use coven_foundation::files::DeviceReset;
 
@@ -33,6 +34,19 @@ impl SequenceSync {
                     work.state = InviteState::Settled { share: None, end: None, refusal: None };
                     operations.push(NewOperation {
                         kind: operation_kind::INVITE.into(),
+                        data: serde_json::to_vec(&work)?,
+                        started_by: operation_kind::COVEN.into(),
+                        pauses_writes: false,
+                    });
+                }
+                // A pairing's screen is gone with the discarded installation:
+                // the new one puts the marker where the request is, under the
+                // old device's id, and forgets the pairing.
+                operation_kind::PAIRING => {
+                    let mut work = PairingWork::read(record)?;
+                    work.forget();
+                    operations.push(NewOperation {
+                        kind: operation_kind::PAIRING.into(),
                         data: serde_json::to_vec(&work)?,
                         started_by: operation_kind::COVEN.into(),
                         pauses_writes: false,

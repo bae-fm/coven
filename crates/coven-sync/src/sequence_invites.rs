@@ -780,16 +780,29 @@ impl SequenceSync {
     /// A request sent in between the delete and the create is taken too.
     async fn end_request(&self, work: &InviteWork) -> Result<u64, SyncError> {
         let kept_until = kept_until(seconds(work.expires_at)?)?;
-        let marker = InviteEnd { kept_until }.encode();
         let path = ObjectPath::join_request(self.store(), work.device, work.id);
+        self.put_marker(&path, kept_until).await?;
+        Ok(kept_until)
+    }
+
+    /// Put the marker that may go at `kept_until` in the place of whatever
+    /// is at `path`, a request or a pairing's handover, and return once it
+    /// is there: delete, then create it, which a request sent in between
+    /// finds taken, and delete again one that came first.
+    pub(crate) async fn put_marker(
+        &self,
+        path: &ObjectPath,
+        kept_until: u64,
+    ) -> Result<(), SyncError> {
+        let marker = InviteEnd { kept_until }.encode();
         loop {
-            self.storage.delete_if_present(&path).await?;
-            match self.storage.create(&path, &marker).await {
-                Ok(_) => return Ok(kept_until),
+            self.storage.delete_if_present(path).await?;
+            match self.storage.create(path, &marker).await {
+                Ok(_) => return Ok(()),
                 Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                    match self.storage.read(&path).await {
+                    match self.storage.read(path).await {
                         // An earlier attempt's marker, or another device's.
-                        Ok(found) if InviteEnd::decode(&found).is_ok() => return Ok(kept_until),
+                        Ok(found) if InviteEnd::decode(&found).is_ok() => return Ok(()),
                         Ok(_) => (),
                         Err(error) if error.failure() == StorageFailure::NotFound => (),
                         Err(error) => return Err(error.into()),
@@ -903,7 +916,7 @@ fn sharing_refusal(error: &SyncError) -> Option<coven_foundation::sharing::Shari
 /// When the marker of an invite that expires at `expires`, in seconds since
 /// 1970, may go: the retention grace after it (§13.2). A time the marker's
 /// seconds can't hold is refused as the expiry the clock can't represent is.
-fn kept_until(expires: u64) -> Result<u64, SyncError> {
+pub(crate) fn kept_until(expires: u64) -> Result<u64, SyncError> {
     expires.checked_add(super::sequence_retention::GRACE.as_secs()).ok_or_else(|| {
         StorageFailure::InvalidConfiguration
             .with_source("the clock cannot represent when an ended invite's marker may go")
@@ -913,7 +926,7 @@ fn kept_until(expires: u64) -> Result<u64, SyncError> {
 
 /// A time as whole seconds since the Unix epoch, as codes and markers carry
 /// it.
-fn seconds(at: SystemTime) -> Result<u64, SyncError> {
+pub(crate) fn seconds(at: SystemTime) -> Result<u64, SyncError> {
     Ok(at
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| {
@@ -923,7 +936,9 @@ fn seconds(at: SystemTime) -> Result<u64, SyncError> {
         .as_secs())
 }
 
-fn decode_request(bytes: &[u8]) -> Result<coven_format::objects::JoinRequest, SyncError> {
+pub(crate) fn decode_request(
+    bytes: &[u8],
+) -> Result<coven_format::objects::JoinRequest, SyncError> {
     match Object::decode(bytes)? {
         Object::JoinRequest(request) => Ok(request),
         _ => Err(SyncError::InvitationChanged),
@@ -936,7 +951,7 @@ pub(crate) mod tests;
 
 #[path = "sequence_invite_request.rs"]
 mod request;
-use request::Opened;
+pub(crate) use request::{Expected, Opened, RequestChecks};
 
 #[path = "sequence_invite_approval.rs"]
 mod approval;

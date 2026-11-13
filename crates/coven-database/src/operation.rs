@@ -1,6 +1,6 @@
 //! Durable operation records. Sync owns kinds and interprets their data (§11).
 
-use crate::operation_kind::INVITE;
+use crate::operation_kind::{INVITE, PAIRING};
 use crate::{sqlite::DatabaseConnection, DbError};
 
 /// The local, never reused identity of an operation.
@@ -303,7 +303,9 @@ pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
 /// itself when this device claimed it, ends landed at its slot; every other
 /// ends stopped, naming the stop: nothing refused it. An invite ends with the operations it started, its
 /// approval's binding and its access record: their journal rows, open claim
-/// and pending records go, and it leaves `coven_invites` (§13.2).
+/// and pending records go, and it leaves `coven_invites` (§13.2). A pairing's
+/// row goes the same way; it started nothing, and its request or handover is
+/// left to the gone device's marker sweep (§13.2, §14.1).
 pub(crate) fn end_for_good(
     db: &DatabaseConnection,
     stop: crate::DeviceStop,
@@ -313,7 +315,7 @@ pub(crate) fn end_for_good(
 }
 
 /// The app's operations still running, and the journal rows of invites and
-/// of the operations invites started.
+/// of the operations invites started, and of pairings.
 fn journaled_for_good(
     db: &DatabaseConnection,
 ) -> Result<(Vec<OperationId>, Vec<OperationId>), DbError> {
@@ -323,8 +325,8 @@ fn journaled_for_good(
         |r| Ok(OperationId(r.get(0)?)),
     )?;
     let invites = db.query(
-        "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 ORDER BY id",
-        [INVITE],
+        "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 OR kind=?2 ORDER BY id",
+        [INVITE, PAIRING],
         |r| Ok(OperationId(r.get(0)?)),
     )?;
     Ok((running, invites))
