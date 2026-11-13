@@ -206,7 +206,7 @@ impl SequenceSync {
         // bound upload's hold keep later writes waiting (§6.3).
         let sendable = self
             .database
-            .sendable_through::<PendingRecord>()
+            .sendable_through()
             .await?
             .zip(first)
             .filter(|(through, first)| *through >= first.number);

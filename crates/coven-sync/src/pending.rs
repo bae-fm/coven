@@ -135,17 +135,6 @@ pub enum Prerequisite {
     SequenceCatchUp,
     /// This audience must reload.
     Reload(#[serde(with = "crate::pending_encoding::audience")] Audience),
-    /// This audience must be raised to this schema version: a queued write of
-    /// this device's at that version has a part in it, and every device would
-    /// refuse that part until the raise (§18.5).
-    Raise {
-        /// The audience below the write's version.
-        #[serde(with = "crate::pending_encoding::audience")]
-        audience: Audience,
-        /// The version the write is at, this device's newest breaking
-        /// migration.
-        version: u32,
-    },
 }
 
 /// A local invariant or resource failure; immediate calls retain the native cause.
@@ -604,21 +593,6 @@ impl PendingValue for PendingRecord {
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: coven_database::WriteCutoff) -> Self {
         Self::new(PendingSubject::Slot(slot), PendingReason::WritesRefused { cutoff, cause })
-    }
-    fn raise_wait(write: coven_merge::WriteId, audience: Audience, version: u32) -> Self {
-        Self::new(
-            PendingSubject::Write(write),
-            PendingReason::Waits(Prerequisite::Raise { audience, version }),
-        )
-    }
-    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &Audience, u32)> {
-        match (&self.subject, &self.reason) {
-            (
-                PendingSubject::Write(write),
-                PendingReason::Waits(Prerequisite::Raise { audience, version }),
-            ) => Some((*write, audience, *version)),
-            _ => None,
-        }
     }
     type Subject = PendingSubject;
     fn subject(&self) -> &PendingSubject {

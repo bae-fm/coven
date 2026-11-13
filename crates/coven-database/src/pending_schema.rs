@@ -22,10 +22,6 @@ macro_rules! coven_pending_tables {
                 move INTEGER REFERENCES _coven_moves(id),
                 pin TEXT REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
                 cause TEXT,
-                -- The number of this device's write a raise wait holds: a
-                -- capture that takes the write into a raise's prefix ends
-                -- the wait in its own commit (§18.5).
-                raise_write BLOB CHECK(raise_write IS NULL OR length(raise_write)=8),
                 CHECK((device IS NULL)=(object IS NULL)),
                 CHECK((work IS NULL)=(device IS NULL))
             ) STRICT;
@@ -34,7 +30,6 @@ macro_rules! coven_pending_tables {
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_move ON _coven_pending(move) WHERE move IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_pin ON _coven_pending(pin) WHERE pin IS NOT NULL;
-            CREATE INDEX _coven_pending_raise_write ON _coven_pending(raise_write) WHERE raise_write IS NOT NULL;
             -- A download's record ends with the last file over its bytes,
             -- in the transaction that removes it or moves it off them
             -- (§19.1).

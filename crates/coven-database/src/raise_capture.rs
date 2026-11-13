@@ -42,7 +42,6 @@ pub(crate) fn capture(
     for selected in state.readable_audiences(&member) {
         db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![&selected,version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
-    crate::pending::end_captured_raise_waits(db, marker.number)?;
     Ok(true)
 }
 
@@ -72,10 +71,7 @@ pub(crate) fn capture_created(
             .ok_or(DbError::Invariant { what: "a queued write has its header" })?
             .header;
         if header.disposition == coven_format::write::WriteDisposition::Migration {
-            let version = db.schema_version()?;
-            if capture(db, schema, marker, version)? {
-                publish_at(db, version)?;
-            }
+            capture(db, schema, marker, db.schema_version()?)?;
             return Ok(());
         }
     }
@@ -134,7 +130,6 @@ fn capture_circle(
             crate::sequence::applied(db)?.to_be_bytes()
         ],
     )?;
-    crate::pending::end_captured_raise_waits(db, through)?;
     // The migration's journal may have finished with its own raises; passes
     // publish captures while one is open.
     if let Some(operation) = operation {
@@ -189,7 +184,6 @@ pub(crate) fn raise_to(
         "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3",
         params![version, newest.to_be_bytes(), crate::sequence::applied(db)?.to_be_bytes()],
     )?;
-    crate::pending::end_captured_raise_waits(db, newest)?;
     Ok(true)
 }
 
@@ -202,7 +196,7 @@ pub(crate) fn follow(db: &DatabaseConnection, marker: WriteId) -> Result<(), DbE
             params![marker.number.to_be_bytes(), capture.audience, capture.version],
         )?;
     }
-    crate::pending::end_captured_raise_waits(db, marker.number)
+    Ok(())
 }
 
 pub(crate) fn prepare(
@@ -219,74 +213,6 @@ pub(crate) fn prepare(
     Ok(captures(db, device)?
         .into_iter()
         .find(|capture| capture.audience == *selected && capture.version == version))
-}
-
-/// This device's first queued write that waits for a raise: one made at or
-/// after its newest breaking migration, with a part in an audience that
-/// hasn't reached that migration's version and can still be raised
-/// ([`crate::StoreState::awaits_raise`]). Every device would refuse that
-/// part until the audience has, so it waits, and the writes behind it with it
-/// (§18.5). A raise's captured prefix goes out before its raise; while one
-/// waits, it holds everything after it already.
-pub(crate) fn first_ahead(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Option<(u64, Audience)>, DbError> {
-    let breaking = breaking_version(db)?;
-    if breaking == 0 || captured_through(db)?.is_some() {
-        return Ok(None);
-    }
-    let state = crate::store_state_tables::read(db)?;
-    let below = |audience: &Audience| state.awaits_raise(audience, breaking);
-    if !below(&Audience::Store) && !state.circles.keys().any(|c| below(&Audience::Circle(*c))) {
-        return Ok(None);
-    }
-    let queued = db.query(
-        "SELECT number FROM _coven_uploads WHERE device=?1 ORDER BY number",
-        [device],
-        |r| counter(r.get::<_, Vec<u8>>(0)?),
-    )?;
-    for number in queued {
-        let write = crate::upload::queued(db, WriteId { device, number })?
-            .ok_or(DbError::Invariant { what: "a queued write has its header" })?;
-        if write.header.schema_version >= breaking {
-            if let Some(part) = write.parts.iter().find(|part| below(&part.audience)) {
-                return Ok(Some((number, part.audience.clone())));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Record why the queue stops at a write ahead of an audience's version, as
-/// [`first_ahead`] finds it (§18.5).
-pub(crate) fn record_ahead<P: crate::PendingValue>(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<(), DbError> {
-    if let Some((number, audience)) = first_ahead(db, device)? {
-        let write = WriteId { device, number };
-        crate::pending::save(db, &P::raise_wait(write, audience, breaking_version(db)?))?;
-    }
-    Ok(())
-}
-
-/// End every raise wait the installed store state has reached or whose
-/// circle it deleted, in the commit that installs it; a write still below
-/// another audience's version records that wait instead.
-pub(crate) fn end_raise_waits<P: crate::PendingValue>(
-    db: &DatabaseConnection,
-) -> Result<(), DbError> {
-    let state = crate::store_state_tables::read(db)?;
-    for record in crate::pending::read::<P>(db)? {
-        if let Some((write, audience, version)) = record.raise_awaited() {
-            if !state.awaits_raise(audience, version) {
-                crate::pending::clear(db, record.subject())?;
-                record_ahead::<P>(db, write.device)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
@@ -355,16 +281,6 @@ pub(crate) fn require(db: &DatabaseConnection, minimum: u32) -> Result<(), DbErr
     db.internal_execute(
         "UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
         [minimum],
-    )?;
-    Ok(())
-}
-
-/// Wait for this installation's raise to publish at schema `version` before
-/// applying received writes past it (§18.5).
-pub(crate) fn publish_at(db: &DatabaseConnection, version: u32) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_snapshot_schema SET publication=?1 WHERE singleton=1",
-        [version],
     )?;
     Ok(())
 }

@@ -3,7 +3,10 @@ use crate::{DownloadedPartStream, DownloadedWriteStream};
 use coven_format::value::Value;
 use coven_format::write_stream::WriteEncoder;
 use coven_merge::{ColumnValue, Operation};
-use std::{collections::BTreeMap, io::Cursor};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 fn stream(record: &WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     let encoder = WriteEncoder::new(record).unwrap();

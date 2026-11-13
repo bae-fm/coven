@@ -69,9 +69,7 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
     let mut needs = match reason.retry_cause() {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
-            Prerequisite::SequenceCatchUp | Prerequisite::Raise { .. } => {
-                rows(vec![PrerequisiteRows::Slot])
-            }
+            Prerequisite::SequenceCatchUp => rows(vec![PrerequisiteRows::Slot]),
             Prerequisite::Reload(audience) => {
                 rows(vec![PrerequisiteRows::Reload(audience.clone())])
             }

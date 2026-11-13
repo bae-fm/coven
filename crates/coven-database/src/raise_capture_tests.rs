@@ -268,7 +268,6 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
     let store = TestStore::new();
     let db = migrated(&store).await;
     let capture = db.raise_captures().await.unwrap().remove(0);
-    let mut later = records(&db).remove(0);
     // An old-schema write from a peer that has not updated converts as the
     // kept raise will judge it, instead of waiting for that raise (§18.5).
     let outcome = crate::tests::try_remote_update_at(
@@ -294,16 +293,6 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
         SnapshotRecord::Merge(row)
             if row.state.cells()["title"].value.value == Value::Text("remote".into())
     )));
-    // Without a capture of its audience the write still waits for the raise.
-    db.discard_raise_capture(Audience::Store, 2).await.unwrap();
-    let device = coven_foundation::id_source::DeviceId(50_000);
-    later.header.position = WriteId { device, number: 1 };
-    later.header.timestamp =
-        coven_merge::Timestamp::new(later.header.timestamp.milliseconds() + 100, 0, device)
-            .unwrap();
-    later.header.read_through = db.applied_slot().await.unwrap();
-    let waiting = db.receive(later.into()).await.unwrap();
-    assert_eq!(waiting, crate::ApplyOutcome::Waiting(crate::WriteWait::SchemaPublication(2)));
     db.close().await.unwrap();
 }
 
@@ -317,10 +306,7 @@ async fn refreshing_coverage_preserves_the_original_captured_prefix() {
     let again = db.prepare_raise_capture(Audience::Store, 2).await.unwrap().unwrap();
     assert_eq!(again.through, capture.through);
     assert_eq!(again.covers, db.applied_slot().await.unwrap());
-    assert_eq!(
-        db.sendable_through::<crate::pending::tests::Record>().await.unwrap(),
-        Some(capture.through.number)
-    );
+    assert_eq!(db.sendable_through().await.unwrap(), Some(capture.through.number));
     assert_eq!(queue(&db).len(), 1);
     assert_eq!(db.unconfirmed_own_prefix(again.through).await.unwrap(), None);
     assert_eq!(db.prepare_raise_capture(Audience::Store, 3).await.unwrap(), None);
@@ -385,7 +371,7 @@ async fn a_second_breaking_migration_captures_the_writes_between_its_markers() {
     assert_eq!(db.unconfirmed_own_prefix(through).await.unwrap(), None);
     assert_eq!(queue(&db).len(), 1);
     assert_eq!(queue(&db)[0].0, 5);
-    assert_eq!(db.sendable_through::<crate::pending::tests::Record>().await.unwrap(), Some(4));
+    assert_eq!(db.sendable_through().await.unwrap(), Some(4));
     let (header, _) = decode(&raise_frames(&db, 6, 3).await);
     assert_eq!(header.schema_version, 3);
     assert!(db.lost_values().await.unwrap().is_empty());

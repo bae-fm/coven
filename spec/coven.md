@@ -9376,34 +9376,26 @@ it are new-version writes and wait behind it.
   counts only at a version its audience has reached, so every device refuses
   one ahead of it
   ([`ahead_part_refused`](proofs/sequence/CovenSequence/WriteVersion.lean)).
-  An ordinary write made at or after the device's newest breaking migration
-  waits while any audience it has a part in is below that migration's version,
-  and the writes behind it wait with it. Its record says
-  `Waits(Raise { audience, version })`, naming the first such audience, from
-  the pass that finds it held (§19.1). The store state that reaches that
-  version, applied from the raise's slot or loaded with a snapshot, ends the
-  record as it installs, and a write still below another audience's version
-  records that wait in the same commit. A capture that takes the write into a
-  raise's prefix, such as a later breaking migration's, ends the record in
-  the commit that captures it: the write then goes out before that raise. An
-  audience's version never goes down, so once the device has applied the
-  raise, the part counts wherever it lands
-  ([`waiting_part_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
-  Ben's app reached version 2 before Ana added him to Garden, which nobody had
-  raised; his laptop rebuilds Garden and raises it (§18.3), and his pin in
-  Garden waits for that raise, or for Ana's if hers lands first. A pass
-  decides what it sends from the slots it applied before reading, so the pass
-  that applies the raise sends the pin on the next one.
-- **A deleted circle holds no write.** Nobody can raise it, so it stays at
-  its version for good, and a part ahead of it would never count however long
-  it waited
+  A device makes no write into an audience it holds below its own version
+  without a capture: it has either held the audience at the old version, so a
+  migration captured it, or it reads the audience below its version without
+  having held it, and that audience waits for its rebuild (§18.3) and refuses
+  writes with `AudienceReloading` until the rebuild installs. A write made
+  after the migration into a captured audience waits behind the capture's raise
+  and goes out after it, in order. Ben's app reached version 2 before Ana added
+  him to Garden, which nobody had raised; his laptop rebuilds Garden and raises
+  it (§18.3), and his pin in Garden is refused until the rebuild installs, then
+  waits for that raise, or for Ana's if hers lands first. A pass decides what it
+  sends from the slots it applied before reading, so the pass that applies the
+  raise sends the pin on the next one.
+- **A deleted circle needs no raise.** Nobody can raise it, so it stays at its
+  version for good, and a part ahead of it would never count however long it
+  waited
   ([`closed_part_never_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
-  Its parts are taken out wherever they land anyway (§15.9). So a write waits
-  only for audiences that aren't deleted. Applying the deletion ends a record
-  waiting for that circle in the same commit. If the write is still below
-  another audience's version, it records that wait instead. If Ana deletes
-  Garden before anyone raises it, Ben's pin goes out on his next pass and is
-  taken out with Garden's other rows.
+  Its parts are taken out wherever they land anyway (§15.9). Applying the
+  deletion ends the wait of a circle awaiting its rebuild. If Ana deletes
+  Garden before anyone raises it, Ben's pin is taken out with Garden's other
+  rows.
 - **Before uploading the raise snapshot,** the device confirms the captured
   writes and the marker have landed. The snapshot leaves out app writes without a
   slot and includes the migration's effects over the slots it covers. Those are

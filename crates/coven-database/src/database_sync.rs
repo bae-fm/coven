@@ -183,25 +183,12 @@ impl Database {
     }
     /// The newest waiting write this device may send now, read in one
     /// committed state with the queue (§6.3): none past an unpublished
-    /// breaking raise's capture or from a write ahead of an audience's
-    /// version, whose wait it records (§18.5), and none from a write a bound
-    /// upload holds on (§17.4). `None` with no write waiting.
-    pub async fn sendable_through<P: crate::PendingValue>(&self) -> Result<Option<u64>, DbError> {
+    /// breaking raise's capture, and none from a write a bound upload holds
+    /// on (§17.4). `None` with no write waiting.
+    pub async fn sendable_through(&self) -> Result<Option<u64>, DbError> {
         self.call(|inner| {
             let device = inner.access.device;
-            let ahead =
-                inner.access.with_committed(|db| crate::raise_capture::first_ahead(db, device))?;
-            if ahead.is_none() {
-                return inner
-                    .access
-                    .with_committed(|db| crate::upload::sendable_through(db, device));
-            }
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
-                    crate::raise_capture::record_ahead::<P>(db, device)?;
-                    crate::upload::sendable_through(db, device)
-                })
-            })
+            inner.access.with_committed(|db| crate::upload::sendable_through(db, device))
         })
         .await
     }

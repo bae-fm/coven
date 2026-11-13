@@ -350,26 +350,16 @@ impl DatabaseConnection {
                     if let Some(marker) = marker {
                         crate::reload_gate::follow(db, marker)?;
                     }
-                    let captured = match marker {
-                        Some(marker) => {
-                            crate::raise_capture::capture(db, &schema, marker, supported)?
-                        }
-                        None => false,
-                    };
-                    crate::raise_capture::require(db, minimum)?;
-                    if captured {
-                        crate::raise_capture::publish_at(db, supported)?;
+                    if let Some(marker) = marker {
+                        crate::raise_capture::capture(db, &schema, marker, supported)?;
                     }
+                    crate::raise_capture::require(db, minimum)?;
                     true
                 } else {
                     // Only additions: a raise still waiting to publish moves to
                     // this version, captured again at it (§18.5).
                     let device = device.expect("writable migration");
-                    let moved = crate::raise_capture::raise_to(db, tables, device, supported)?;
-                    if moved {
-                        crate::raise_capture::publish_at(db, supported)?;
-                    }
-                    moved
+                    crate::raise_capture::raise_to(db, tables, device, supported)?
                 };
                 if raises {
                     if let Some(operation) = operation.filter(|_| publishes) {

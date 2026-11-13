@@ -26,17 +26,6 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience) -> Self;
-    /// Report this device's queued write held until `audience` is raised to
-    /// `version` (§18.5).
-    fn raise_wait(
-        write: coven_merge::WriteId,
-        audience: coven_merge::Audience,
-        version: u32,
-    ) -> Self;
-    /// The held write, and the audience and version it waits for a raise to,
-    /// if this record is such a wait: a store state that reaches it ends the
-    /// record as it installs.
-    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &coven_merge::Audience, u32)>;
     /// Report one account's unresolved intended sharing change.
     fn provider_access(operation: OperationId, account: String, grant: bool) -> Self;
     /// Stable identity, ordered as the app presents it.
@@ -99,7 +88,7 @@ impl rusqlite::types::FromSql for SubjectKey {
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id,raise_write FROM _coven_pending";
+    "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id FROM _coven_pending";
 
 struct StoredRecord {
     /// Its place in the order the records arose.
@@ -113,7 +102,6 @@ struct StoredRecord {
     build: u128,
     moved: Option<i64>,
     pin: Option<String>,
-    raise_write: Option<Vec<u8>>,
     cause: Option<String>,
 }
 impl StoredRecord {
@@ -137,7 +125,6 @@ impl StoredRecord {
             pin: row.get(9)?,
             cause: row.get(10)?,
             position: row.get(11)?,
-            raise_write: row.get(12)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
@@ -146,7 +133,6 @@ impl StoredRecord {
             || record.operation().map(|id| id.0) != self.operation
             || record.move_of().map(|id| id.0) != self.moved
             || record.pin_of().map(|file| file.to_string()) != self.pin
-            || stored_raise_write(&record) != self.raise_write
             || stored_slot_key(&record) != self.slot_key
             || stored_object(&record)
                 != self
@@ -189,12 +175,12 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
         // nothing: no pin or read can try them again. The cause is the
         // record's, written with it.
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,slot_key,work,device,object,build,move,pin,cause,raise_write)
-             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12
+            "INSERT INTO _coven_pending(subject,value,operation,slot_key,work,device,object,build,move,pin,cause)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,slot_key=excluded.slot_key,work=excluded.work,device=excluded.device,object=excluded.object,build=excluded.build,move=excluded.move,pin=excluded.pin,cause=excluded.cause,raise_write=excluded.raise_write
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,slot_key=excluded.slot_key,work=excluded.work,device=excluded.device,object=excluded.object,build=excluded.build,move=excluded.move,pin=excluded.pin,cause=excluded.cause
              WHERE value!=excluded.value OR build!=excluded.build OR cause IS NOT excluded.cause",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_slot_key(record), work, device, object, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause(), stored_raise_write(record)],
+            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_slot_key(record), work, device, object, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
         )?;
         Ok(())
     })
@@ -332,28 +318,6 @@ fn stored_object<P: PendingValue>(record: &P) -> Option<(&'static str, DeviceId,
 
 fn stored_slot_key<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
     Some(slot_key(record.slot()?, record.ends_when_covered()))
-}
-
-/// The number of the own write a raise wait holds, as `_coven_pending`
-/// keys it.
-fn stored_raise_write<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
-    record.raise_awaited().map(|(write, _, _)| write.number.to_be_bytes().to_vec())
-}
-
-/// End the raise wait of every own write through `through`, in the commit
-/// that captures those writes into a raise's prefix: they go out before the
-/// raise, and wait for none (§18.5).
-pub(crate) fn end_captured_raise_waits(
-    db: &DatabaseConnection,
-    through: u64,
-) -> Result<(), DbError> {
-    db.pending_change(|| {
-        db.internal_execute(
-            "DELETE FROM _coven_pending WHERE raise_write IS NOT NULL AND raise_write<=?1",
-            [through.to_be_bytes().as_slice()],
-        )?;
-        Ok(())
-    })
 }
 
 /// An applied reset clears data-related observations permanently (§19.4).

@@ -49,12 +49,6 @@ impl PendingValue for Record {
     fn reload(_: coven_merge::Audience) -> Self {
         unreachable!("no audience in this test")
     }
-    fn raise_wait(_: coven_merge::WriteId, _: coven_merge::Audience, _: u32) -> Self {
-        unreachable!("no raise in this test")
-    }
-    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &coven_merge::Audience, u32)> {
-        None
-    }
     fn provider_access(_: crate::OperationId, _: String, _: bool) -> Self {
         unreachable!("no operation in this test")
     }

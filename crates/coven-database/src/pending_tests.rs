@@ -57,17 +57,6 @@ impl PendingValue for Record {
             cause: None,
         }
     }
-    fn raise_wait(write: coven_merge::WriteId, _: coven_merge::Audience, _: u32) -> Self {
-        Self {
-            subject: Subject::Slot(write.number),
-            reason: Reason::Missing,
-            operation: None,
-            cause: None,
-        }
-    }
-    fn raise_awaited(&self) -> Option<(coven_merge::WriteId, &coven_merge::Audience, u32)> {
-        None
-    }
     fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
         Self {
             subject: Subject::Slot(slot.get()),
@@ -623,7 +612,7 @@ pub(crate) fn scan_reason(
     match (file, template, relation) {
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id,raise_write FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
 ("pending.rs", "UPDATE _coven_pending SET build=?1", "_coven_pending") =>
     Some("test support: every record becomes another build's"),

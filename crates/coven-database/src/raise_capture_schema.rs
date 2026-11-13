@@ -1,6 +1,6 @@
 //! A breaking migration's raise: the queue prefix captured for each audience
-//! until its snapshot publishes, the oldest schema version whose writes this
-//! installation reads, and the raise it waits to publish (§18.5).
+//! until its snapshot publishes and the oldest schema version whose writes
+//! this installation reads (§18.5).
 
 macro_rules! coven_raises_tables {
     ($visit:ident) => {
@@ -20,10 +20,9 @@ macro_rules! coven_raises_tables {
             "
             CREATE TABLE _coven_snapshot_schema (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                minimum INTEGER NOT NULL CHECK(minimum>=0),
-                publication INTEGER NOT NULL CHECK(publication>=0)
+                minimum INTEGER NOT NULL CHECK(minimum>=0)
             ) STRICT;
-            INSERT INTO _coven_snapshot_schema VALUES(1,0,0);
+            INSERT INTO _coven_snapshot_schema VALUES(1,0);
         "
         );
     };

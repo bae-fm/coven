@@ -153,8 +153,7 @@ pub(crate) fn stage_selected(
     // have read decides nothing (§14.1).
     if !refused {
         crate::write_commit::check_reads(database, &write.header.header)?;
-        if let Some(wait) = crate::download::prerequisite(database, &write.header.header, &opened)?
-        {
+        if let Some(wait) = crate::download::prerequisite(database, &write.header.header)? {
             return Err(crate::DbError::WriteWaiting(wait));
         }
     }

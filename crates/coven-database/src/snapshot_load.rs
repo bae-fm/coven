@@ -59,7 +59,6 @@ pub(crate) fn load<P: crate::PendingValue>(
         }
         crate::sequence::replace_cutoffs(database, cutoffs)?;
         let resets = crate::write_boundary::replace(database, boundaries)?;
-        crate::raise_capture::end_raise_waits::<P>(database)?;
         if !resets.is_empty() {
             crate::pending::reset(database)?;
         }
