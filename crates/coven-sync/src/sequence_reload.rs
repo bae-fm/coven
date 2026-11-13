@@ -448,7 +448,9 @@ impl SequenceSync {
                 .state
                 .readable_audiences(&member.member())
                 .into_iter()
-                .filter(|audience| history.state.rebuilt_by(audience, breaking))
+                .filter(|audience| {
+                    *audience != Audience::Store && history.state.rebuilt_by(audience, breaking)
+                })
                 .collect();
             let mut starts = vec![ReloadStart::Stored(store_snapshot)];
             let selected = async {

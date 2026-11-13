@@ -44,6 +44,9 @@ pub(crate) fn begin<P: PendingValue>(
     let marker = queue_marker(db, schema, now)?;
     for circle in circles {
         crate::reload_gate::require_rebuild::<P>(db, circle, marker.header.position)?;
+        // A holder's capture of the audience, made before the slot that
+        // replaces it, is superseded: the rebuild installs its own.
+        crate::raise_capture::supersede(db, circle)?;
     }
     Ok(())
 }

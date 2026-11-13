@@ -305,6 +305,12 @@ pub(crate) fn loaded(
     Ok(())
 }
 
+/// Every capture of `audience`: a rebuild of it replaces them.
+pub(crate) fn supersede(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_raise_captures WHERE audience=?1", [audience])?;
+    Ok(())
+}
+
 pub(crate) fn discard(
     db: &DatabaseConnection,
     audience: &Audience,

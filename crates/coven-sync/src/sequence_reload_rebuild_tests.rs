@@ -107,7 +107,7 @@ async fn a_rebuild_starts_the_store_from_a_reset_body() {
     let input = ben.database().waiting_snapshot_headers().await.unwrap()[0].header.read_through;
     {
         let session = ben.sync.session.lock().await;
-        let starts = session.history.rebuild_starts(garden, 0, input);
+        let starts = session.history.rebuild_starts(&Audience::Circle(garden), 0, input);
         let store = starts.store.expect("the store has a start");
         assert_eq!(store.purpose, coven_format::sequence::Purpose::Reset);
         assert!(starts.circle.is_some());
@@ -247,7 +247,7 @@ async fn a_rebuild_starts_the_store_from_a_raise_body() {
         let state = &session.history.state;
         assert_eq!(state.reached(&Audience::Circle(garden)), 2);
         assert_eq!(state.reached(&Audience::Store), 4);
-        let starts = session.history.rebuild_starts(garden, 2, input);
+        let starts = session.history.rebuild_starts(&Audience::Circle(garden), 2, input);
         let store = starts.store.expect("the store has a start");
         assert_eq!(store.purpose, coven_format::sequence::Purpose::Raise(2));
     }
@@ -257,6 +257,59 @@ async fn a_rebuild_starts_the_store_from_a_raise_body() {
     assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
     assert_eq!(pins(cy.database()).await, [(EARLY.to_string(), "early".to_string())]);
     for device in [&ana, &ben, &cy] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Cy's app jumps from 1 to 4 before he applies Ana's raise of the store to
+/// 2: its body is at a version his database can't hold. He rebuilds the store
+/// from that body, migrates it to 4 and raises it, and Ana, who updates
+/// afterwards, loads his raise and holds what he holds (§18.3).
+#[tokio::test]
+async fn a_device_ahead_of_the_stores_raise_rebuilds_and_raises_the_store() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let cy = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &cy).await;
+    cy.sync.pass().await.unwrap();
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a1", "before").await;
+    ana.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert_eq!(ana.sync.database.store_state().await.unwrap().reached(&Audience::Store), 2);
+    insert(ana.database(), "00000000-0000-4000-8000-0000000000a2", "after").await;
+    ana.sync.pass().await.unwrap();
+    group.version.store(4, std::sync::atomic::Ordering::SeqCst);
+    let cy = group.reopen(cy).await;
+    cy.sync.pass().await.unwrap();
+    assert!(cy.database().rebuilds_waiting().await.unwrap().contains_key(&Audience::Store));
+    for _ in 0..6 {
+        cy.sync.pass().await.unwrap();
+    }
+    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    let state = cy.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&Audience::Store), 4);
+    assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
+    // Ana's second row landed after the slot his marker read through: a late
+    // write, kept as a lost value where the migration drops old writes.
+    assert_eq!(rows(cy.database()).await.len(), 1);
+    assert_eq!(cy.database().lost_values().await.unwrap().len(), 1);
+    let ana = group.reopen(ana).await;
+    for _ in 0..4 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert_eq!(ana.sync.database.store_state().await.unwrap().reached(&Audience::Store), 4);
+    assert_eq!(rows(ana.database()).await, rows(cy.database()).await);
+    assert_eq!(
+        ana.database().lost_values().await.unwrap(),
+        cy.database().lost_values().await.unwrap()
+    );
+    for device in [&ana, &cy] {
         device.sync.database.close().await.unwrap();
     }
 }

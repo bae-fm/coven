@@ -86,13 +86,13 @@ impl StoreState {
         !self.deleted(audience) && self.reached(audience) < version
     }
 
-    /// Whether `audience`, which a slot makes readable to a device whose
-    /// newest breaking migration is `breaking`, is a circle the device must
-    /// rebuild rather than load: below that version and not deleted (§18.3).
+    /// Whether `audience`, which a slot makes this state ask a device whose
+    /// newest breaking migration is `breaking` to reload, is one the device
+    /// must rebuild rather than load: below that version and not deleted. A
+    /// circle becomes readable below it, and the store itself can be raised
+    /// or reset below it by a device on an older app (§18.3).
     pub fn rebuilt_by(&self, audience: &Audience, breaking: u32) -> bool {
-        breaking > 0
-            && matches!(audience, Audience::Circle(_))
-            && self.awaits_raise(audience, breaking)
+        breaking > 0 && self.awaits_raise(audience, breaking)
     }
 
     /// Whether `circle` is one this state doesn't hold, or deleted: a change

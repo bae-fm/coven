@@ -9356,6 +9356,26 @@ body
 raise built on them, covering the rebuild slot, counts like any other
 ([`rebuilt_raise_counted`](proofs/sequence/CovenSequence/CircleRaise.lean)).
 
+**The store's own rebuild.** The store can sit below a device's app too: a
+device on an app that has gone past a raise of the store can't hold that
+raise's body, or a reset's, at the older version. The device doesn't wait for an older app to update
+and raise the store. It rebuilds the store as it rebuilds a circle: the slot
+that raises or resets the store below the device's version applies with the
+store's rows gated, writes into the store refused with `AudienceReloading`, the
+store's rebuild recorded as waiting, and the device's marker queued, in the one
+commit. A capture of the store the device made when its app migrated is
+dropped there, since the rebuild makes the store's capture when it installs.
+The rebuild reads only the store: it starts from the newest store snapshot at a
+version of at most the store's, which is what a load of the store reads, so
+retention keeps nothing more for it than for a load
+([`store_rebuild_reads_kept`](proofs/sequence/CovenSequence/Retention.lean)),
+and it migrates the store's rows alone, which gives the store's raise body
+prepared at the rebuild slot
+([`rebuilt_store_body`](proofs/sequence/CovenSequence/CircleRaise.lean)). Steps
+2 to 4 below hold with the store as the audience and no circle. A raise of the
+store to the device's version that lands first is loaded as any raise is, and
+ends the wait.
+
 **Edge cases of a rebuild.**
 
 - **Writes into the circle.** Until the rebuild commits, they fail with

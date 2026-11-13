@@ -45,7 +45,8 @@ fn only_circles_below_the_breaking_version_are_rebuilt() {
     assert!(!rebuilds(&orchard, 2), "a circle at the version reloads");
     assert!(!rebuilds(&gone, 2), "a deleted circle reloads");
     assert!(!rebuilds(&garden(), 0), "no breaking migration ran");
-    assert!(!rebuilds(&Audience::Store, 2), "the store reloads");
+    assert!(rebuilds(&Audience::Store, 2), "the store, below the version, is rebuilt");
+    assert!(!rebuilds(&Audience::Store, 0), "no breaking migration ran");
 }
 
 fn index() -> Migration {
@@ -110,6 +111,22 @@ async fn a_waiting_raise_captures_the_marker_too() {
     for capture in db.raise_captures().await.unwrap() {
         assert_eq!(capture.through, marker, "no raise goes out ahead of the rebuild's marker");
     }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn beginning_the_stores_wait_drops_the_capture_the_migration_made_of_it() {
+    let (_store, db) = migrated().await;
+    assert!(db.raise_captures().await.unwrap().iter().any(|c| c.audience == Audience::Store));
+    db.inspect_writer_schema(|connection, schema| {
+        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[Audience::Store])
+            .unwrap();
+    });
+    assert!(
+        db.raise_captures().await.unwrap().iter().all(|c| c.audience != Audience::Store),
+        "the rebuild's install makes the store's capture"
+    );
+    assert!(db.rebuilds_waiting().await.unwrap().contains_key(&Audience::Store));
     db.close().await.unwrap();
 }
 

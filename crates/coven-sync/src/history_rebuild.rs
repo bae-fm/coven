@@ -35,7 +35,7 @@ impl RebuildRead {
 /// The snapshots one circle's rebuild loads, and how far it reads the store.
 pub(crate) struct RebuildStarts {
     /// The circle's newest snapshot covering at most the input slot; None
-    /// when the circle starts empty.
+    /// when the circle starts empty, and always for the store's own rebuild.
     pub(crate) circle: Option<SnapshotAnnouncement>,
     /// The store's newest snapshot, ordinary or the replayed body of a reset,
     /// at a version of at most the circle's, covering at most `store_through`;
@@ -60,15 +60,14 @@ impl RebuildStarts {
 }
 
 impl History {
-    /// What the rebuild of `circle`, at `version`, loads to reach `input`, the
-    /// slot its migration marker read through.
+    /// What the rebuild of `audience`, at `version`, loads to reach `input`,
+    /// the slot its migration marker read through.
     pub(crate) fn rebuild_starts(
         &self,
-        circle: coven_foundation::id_source::CircleId,
+        audience: &Audience,
         version: u32,
         input: u64,
     ) -> RebuildStarts {
-        let audience = Audience::Circle(circle);
         let store_limit = self
             .boundaries
             .iter()
@@ -96,7 +95,8 @@ impl History {
                 .map(|(_, announcement)| announcement.clone())
         };
         RebuildStarts {
-            circle: newest(&audience, input),
+            // The store's own rebuild has only the store's start.
+            circle: (*audience != Audience::Store).then(|| newest(audience, input)).flatten(),
             store: newest(&Audience::Store, store_through),
             store_through,
             store_limit,

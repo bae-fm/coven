@@ -1,7 +1,8 @@
-//! The rebuild of a circle this device reads below its version: in a store of
-//! its own, the circle and the store as they were at the slot the device's
-//! migration marker read through, migrated, read forward to the applied slot,
-//! then installed as the circle's snapshot (§18.3).
+//! The rebuild of a circle, or of the store itself, this device reads below
+//! its version: in a store of its own, the audience and the store as they were
+//! at the slot the device's migration marker read through, migrated, read
+//! forward to the applied slot, then installed as the audience's snapshot
+//! (§18.3).
 
 use super::{release, retained_slot, ReloadStart};
 use crate::{
@@ -14,7 +15,6 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{RebuildDatabase, SnapshotReload, SnapshotSource};
 use coven_format::{sequence::SnapshotAnnouncement, write::WriteHeader};
-use coven_foundation::id_source::CircleId;
 use coven_merge::{Audience, SlotRange};
 use std::sync::Arc;
 
@@ -39,13 +39,10 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         for (audience, marker) in self.database.rebuilds_waiting().await? {
-            let Audience::Circle(circle) = audience else {
-                continue;
-            };
             let Some((header, Some(_))) = self.database.write_header(marker).await? else {
                 continue;
             };
-            self.rebuild(session, ring, member, circle, header).await?;
+            self.rebuild(session, ring, member, audience, header).await?;
         }
         Ok(())
     }
@@ -55,17 +52,19 @@ impl SequenceSync {
         session: &mut Session,
         ring: &StoreKeyring,
         member: &MemberIdentity,
-        circle: CircleId,
+        audience: Audience,
         header: WriteHeader,
     ) -> Result<(), SyncError> {
-        let audience = Audience::Circle(circle);
         let version = session.history.state.reached(&audience);
-        let starts = session.history.rebuild_starts(circle, version, header.read_through);
+        let starts = session.history.rebuild_starts(&audience, version, header.read_through);
         // Retention may have removed the slots after the starts while the
         // marker was in flight: a new marker reads through the slot applied
         // now, and the next pass rebuilds from it.
-        let needed = [&starts.circle, &starts.store]
+        // The store's own rebuild reads only the store's start.
+        let own = (audience != Audience::Store).then_some(&starts.circle);
+        let needed = own
             .into_iter()
+            .chain([&starts.store])
             .map(|start| start.as_ref().map_or(0, |announcement| announcement.covers))
             .min()
             .unwrap_or(0)
@@ -177,10 +176,10 @@ impl SequenceSync {
         )
         .await?;
         let forward = SnapshotReload {
-            snapshots: vec![
-                SnapshotSource::Current(Audience::Store),
-                SnapshotSource::Current(audience.clone()),
-            ],
+            snapshots: std::iter::once(Audience::Store)
+                .chain((*audience != Audience::Store).then(|| audience.clone()))
+                .map(SnapshotSource::Current)
+                .collect(),
             slots,
             target,
             state: at.state.clone(),
@@ -239,7 +238,13 @@ impl SequenceSync {
             ),
             None => (History::default(), 0),
         };
-        let circle_covers = starts.circle.as_ref().map_or(0, |a: &SnapshotAnnouncement| a.covers);
+        // The store's own rebuild has no circle: its slots start where the
+        // store's snapshot ends.
+        let circle_covers = if *audience == Audience::Store {
+            store_covers
+        } else {
+            starts.circle.as_ref().map_or(0, |a: &SnapshotAnnouncement| a.covers)
+        };
         let mut slots = Vec::new();
         self.read_rebuild_slots(
             session,
@@ -264,7 +269,7 @@ impl SequenceSync {
         if starts.store.is_none() {
             snapshots.push(SnapshotSource::Empty(Audience::Store));
         }
-        if starts.circle.is_none() {
+        if starts.circle.is_none() && *audience != Audience::Store {
             snapshots.push(SnapshotSource::Empty(audience.clone()));
         }
         for (start, author) in std::mem::take(selected).into_iter().zip(authors) {
