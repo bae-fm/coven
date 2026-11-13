@@ -536,7 +536,10 @@ impl SequenceSync {
                                 version,
                             })
                         }
-                        _ => PendingReason::Waits(Prerequisite::SequenceCatchUp),
+                        // Missing sources arrive with a later slot's write.
+                        coven_database::WriteWait::Sources(_) => {
+                            PendingReason::Waits(Prerequisite::SequenceCatchUp)
+                        }
                     },
                 ))))
             }
