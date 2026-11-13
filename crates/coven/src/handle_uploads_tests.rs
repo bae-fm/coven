@@ -430,6 +430,10 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
     assert!(ana.handle.store_state().await.schema.is_empty());
 
     ana.storage.set_faults(Faults::none()).await;
+    // The failed attempt's record is committed before the attempt ends, and
+    // a retry asked while it ends is answered by it; the upload worker
+    // parking says it has ended.
+    ana.handle.test_parked().await;
     ana.handle.retry_uploads_now().await.unwrap();
     // The stored cover lets the loop send what waited for it; the step its
     // own commits start waits for a pass.
@@ -571,6 +575,10 @@ async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
     let ana = &network.devices[0];
 
     ana.storage.set_faults(Faults::none()).await;
+    // The failed attempt's record is committed before the attempt ends, and
+    // a retry asked while it ends is answered by it; the upload worker
+    // parking says it has ended.
+    ana.handle.test_parked().await;
     ana.handle.retry_uploads_now().await.unwrap();
     // The stored cover lets the loop send what waited for it; the step its
     // own commits start waits for a pass.
