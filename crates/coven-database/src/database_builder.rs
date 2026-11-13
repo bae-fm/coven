@@ -6,6 +6,16 @@ use coven_foundation::files::StoreDirAccess;
 use crate::{migration::MigrationOperation, AutoVacuum, NewOperation, OpenError, OpenStep};
 use coven_foundation::progress::{ProgressChannel, ProgressReport, ProgressWatch};
 
+/// What opening the store took that a rebuild needs again: the app's
+/// migrations, namespaces and SQLite choices (§18.3).
+#[derive(Clone)]
+pub(crate) struct OpenInputs {
+    pub(crate) migrations: Vec<Migration>,
+    pub(crate) namespaces: Vec<crate::Namespace>,
+    pub(crate) sqlite: crate::SqliteSettings,
+    pub(crate) functions: crate::SqlFunctions,
+}
+
 /// Choices needed to open the database part of a store.
 pub struct DatabaseBuilder {
     directory: StoreDir,
@@ -184,6 +194,12 @@ impl DatabaseBuilder {
             None => Arc::new(UuidIds),
         };
         let started = clock.elapsed();
+        let open_inputs = OpenInputs {
+            migrations: migrations.clone(),
+            namespaces: self.namespaces.clone(),
+            sqlite: self.sqlite.clone(),
+            functions: self.functions.clone(),
+        };
         let path = self.directory.database_path();
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
@@ -375,6 +391,7 @@ impl DatabaseBuilder {
                 statistics,
                 migrations: outcomes,
                 raise_operation: self.migration_operation,
+                open_inputs,
                 clock,
                 ids,
                 copying: Arc::new(Mutex::new(BTreeSet::new())),

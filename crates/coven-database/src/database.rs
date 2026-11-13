@@ -32,10 +32,13 @@ mod operations;
 #[path = "database_provider_access.rs"]
 mod provider_access;
 
+#[path = "circle_rebuild.rs"]
+mod circle_rebuild;
 #[path = "database_file_retention.rs"]
 pub(crate) mod file_retention;
 #[path = "database_snapshots.rs"]
 mod snapshots;
+pub use circle_rebuild::{RebuildDatabase, RebuildError};
 
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "database_operations_tests.rs"]
@@ -168,6 +171,8 @@ pub struct DatabaseInner {
     /// a circle captured after the migration's journal finished opens it
     /// again (§18.3).
     raise_operation: Option<Box<crate::migration::MigrationOperation>>,
+    /// What a rebuild opens its database with (§18.3).
+    open_inputs: builder::OpenInputs,
     clock: ClockRef,
     ids: IdSourceRef,
     /// The names of copies being written, or written and waiting for the

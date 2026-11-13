@@ -9179,7 +9179,11 @@ raise built on them, covering the rebuild slot, counts like any other
   why, as any load does (§16.2, §19.1).
 - **Nothing stays behind.** The rebuild's database goes when the rebuild
   commits or fails. A failed rebuild changes nothing, and the next pass starts
-  it again.
+  it again. The database is a coven store of its own, in the folder `rebuild`
+  of the store's folder, with the store's id and this device's, opened at the
+  circle's version like any store. The store's own reads and writes go on
+  meanwhile. A folder a crash left is removed before the next rebuild opens
+  its own.
 
 **Devices on an older app.** An older app can't apply an audience's newer schema.
 It records `UpdateRequired` and stops at that slot under §5's rule for stuck

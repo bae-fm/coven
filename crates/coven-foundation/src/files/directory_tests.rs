@@ -131,3 +131,37 @@ fn filenames_reject_path_traversal_and_platform_aliases() {
         assert!(FileName::new(good).is_ok(), "refused {good}");
     }
 }
+
+#[tokio::test]
+async fn a_rebuild_directory_is_a_store_of_its_own_with_this_devices_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
+    let store = layout.create_store_dir(StoreId(Uuid::from_u128(5)), &UuidIds).unwrap();
+    let scratch = store.rebuild_directory().await.unwrap();
+    assert_eq!(scratch.id(), store.id());
+    assert_eq!(scratch.settings().unwrap(), store.settings().unwrap());
+    assert_ne!(scratch.database_path(), store.database_path());
+    for area in FileArea::ALL {
+        assert!(scratch.area_path(area).is_dir());
+    }
+    // The scratch is its own store: locking it leaves the real store's lock free.
+    let scratch_lock = scratch.lock_exclusive().unwrap();
+    drop(store.lock_exclusive().unwrap());
+    drop(scratch_lock);
+    store.remove_rebuild_directory().unwrap();
+    assert!(!scratch.area_path(FileArea::Cache).exists());
+    // Absent is removed.
+    store.remove_rebuild_directory().unwrap();
+}
+
+#[tokio::test]
+async fn a_rebuild_directory_replaces_one_a_crash_left() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(root.path().to_owned(), crate::task::HeardBugs::shared());
+    let store = layout.create_store_dir(StoreId(Uuid::from_u128(6)), &UuidIds).unwrap();
+    let left = store.rebuild_directory().await.unwrap();
+    std::fs::write(left.area_path(FileArea::Cache).join("left"), b"left").unwrap();
+    let again = store.rebuild_directory().await.unwrap();
+    assert!(!again.area_path(FileArea::Cache).join("left").exists());
+    store.remove_rebuild_directory().unwrap();
+}

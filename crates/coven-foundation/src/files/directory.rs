@@ -294,6 +294,9 @@ impl StoreDir {
     }
 }
 
+/// The folder of the store's folder that holds a rebuild's store (§18.3).
+const REBUILD: &str = "rebuild";
+
 pub(crate) fn initialize(
     path: &std::path::Path,
     settings: &StoreSettings,
@@ -354,6 +357,17 @@ pub trait StoreDirAccess: Sized {
     /// Remove that database's file and the files SQLite keeps beside it; one
     /// that is absent is already removed.
     fn remove_audience_database(&self) -> Result<(), FileError>;
+    /// The store a rebuild runs in (§18.3): a store of its own in the
+    /// folder `rebuild` of this store's folder, with this store's id and this
+    /// device's, the file areas empty and the class this layout gives the
+    /// store's files. A leftover from a crash goes first, once an instance of
+    /// it in this process has finished closing. The caller removes it with
+    /// [`Self::remove_rebuild_directory`].
+    fn rebuild_directory(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Self, SettingsError>> + Send;
+    /// Remove the folder `rebuild` whole, with its locks; absent is removed.
+    fn remove_rebuild_directory(&self) -> Result<(), FileError>;
     /// The record of a replacement whose swap is under way (§19.3). A record
     /// that remains only because publication was interrupted after removing
     /// the bootstrap marker, with settings already naming the new device, is
@@ -510,6 +524,30 @@ impl StoreDirAccess for StoreDir {
             }
         }
         Ok(())
+    }
+    async fn rebuild_directory(&self) -> Result<StoreDir, SettingsError> {
+        let settings = self.settings()?;
+        let scratch = self.path.join(REBUILD).join(self.id.to_string());
+        lock::closed(&scratch, self.id).await?;
+        self.remove_rebuild_directory()?;
+        let root = self.path.join(REBUILD);
+        for folder in [&root, &scratch] {
+            std::fs::create_dir(folder).map_err(|source| {
+                FileError::at("create the rebuild store's folder", folder, source)
+            })?;
+            self.protection.begin(folder)?;
+        }
+        initialize(&scratch, &settings)?;
+        Ok(StoreDir::new(scratch, self.id, self.protection, self.bugs.clone()))
+    }
+    fn remove_rebuild_directory(&self) -> Result<(), FileError> {
+        let root = self.path.join(REBUILD);
+        match std::fs::remove_dir_all(&root) {
+            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                Err(FileError::at("remove the rebuild store's folder", &root, source))
+            }
+            _ => Ok(()),
+        }
     }
     fn unfinished_replacement(&self) -> Result<Option<super::ReplacementRecord>, SettingsError> {
         super::device_reset::unfinished(&self.path, self.id)

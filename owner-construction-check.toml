@@ -264,6 +264,9 @@ task_types = [
     # One snapshot's staging: its records, from the first batch of its
     # body to the load or file check that reads them.
     "SnapshotStaging",
+    # One rebuild's store, in the real store's folder, until the rebuild
+    # discards it (§18.3).
+    "RebuildDatabase",
     "ReloadStart",
     # One reload's selected streams and installation target.
     "ReloadInputs",
@@ -1779,6 +1782,7 @@ tables = [
 "CopyFolder::clone_handle" = "CopyFolder"
 
 [capability_factories."crates/coven-foundation/src/files/directory.rs"]
+"StoreDir::rebuild_directory" = "StoreDir"
 "StoreDir::lock_read_only" = "StoreReadLock"
 "StoreDir::lock_exclusive" = "StoreLock"
 "StoreDir::lock_for_open" = "StoreLock"
