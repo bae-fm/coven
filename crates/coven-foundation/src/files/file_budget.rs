@@ -10,7 +10,7 @@
 //! leases of one.
 
 use std::{io, num::NonZeroUsize, path::Path, sync::Arc};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[path = "file_budget_tally.rs"]
 mod tally;
@@ -125,18 +125,18 @@ impl FileBudget {
             .ok()
             .filter(|_| count <= size)
             .ok_or(LeaseTooLarge { requested: count, size })?;
-        let places = self.shared.places.clone();
-        let held = match places.clone().try_acquire_many_owned(wanted) {
-            Ok(held) => held,
-            Err(TryAcquireError::NoPermits) => {
+        // The first poll of the acquire puts this lease in the line, so the
+        // wait is recorded only after it: a test that sees the wait knows
+        // every lease it counts is already behind the ones before it.
+        let mut acquire = Box::pin(self.shared.places.clone().acquire_many_owned(wanted));
+        let held = match futures_lite::future::poll_once(&mut acquire).await {
+            Some(held) => held,
+            None => {
                 self.shared.tally.waited();
-                places
-                    .acquire_many_owned(wanted)
-                    .await
-                    .expect("the budget's semaphore is never closed")
+                acquire.await
             }
-            Err(TryAcquireError::Closed) => unreachable!("the budget's semaphore is never closed"),
-        };
+        }
+        .expect("the budget's semaphore is never closed");
         Ok(self.granted(count, held))
     }
 
