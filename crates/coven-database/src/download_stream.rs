@@ -132,12 +132,16 @@ impl PreparedWrite<'_> {
 /// only after all parts authenticate. Before the write merges, or is consumed
 /// refused, `reach` puts back the kept rows it reaches beside the queue
 /// (§6.2); a reload passes none, having put back every kept row first.
+/// `ahead` is the breaking version a rebuild's write above its database's
+/// version needs: the write doesn't wait, and each of its changes is kept as a
+/// frozen lost value (§18.3).
 pub(crate) fn stage_selected(
     database: &crate::sqlite::DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
     write: PreparedWrite<'_>,
     slot: coven_merge::Slot,
     refused: bool,
+    ahead: Option<u32>,
     selected: impl Fn(&coven_merge::Audience) -> bool,
     reach: Option<&mut crate::queued_writes::Reach>,
 ) -> Result<(), crate::DbError> {
@@ -153,8 +157,10 @@ pub(crate) fn stage_selected(
     // have read decides nothing (§14.1).
     if !refused {
         crate::write_commit::check_reads(database, &write.header.header)?;
-        if let Some(wait) = crate::download::prerequisite(database, &write.header.header)? {
-            return Err(crate::DbError::WriteWaiting(wait));
+        if ahead.is_none() {
+            if let Some(wait) = crate::download::prerequisite(database, &write.header.header)? {
+                return Err(crate::DbError::WriteWaiting(wait));
+            }
         }
     }
     if !refused {
@@ -217,6 +223,7 @@ pub(crate) fn stage_selected(
             &original_header.header,
             &opened,
             Some(slot),
+            ahead,
             |audience| Ok(selected(audience)),
         )?;
     }

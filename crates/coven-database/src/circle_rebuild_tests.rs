@@ -199,6 +199,20 @@ fn pin_ids(rebuild: &RebuildDatabase) -> Vec<String> {
     })
 }
 
+/// The rebuild holds exactly one frozen lost value for each pin id in `ids`,
+/// replaced by the breaking version `needed`, in that order.
+async fn assert_kept_as_lost_values(rebuild: &RebuildDatabase, ids: &[&str], needed: u32) {
+    let mut lost = rebuild.database.as_ref().unwrap().lost_values().await.unwrap();
+    lost.sort_by_key(|value| format!("{:?}", value.key));
+    assert_eq!(lost.len(), ids.len(), "{lost:#?}");
+    for (value, id) in lost.iter().zip(ids) {
+        assert_eq!(value.table, "pins");
+        assert_eq!(value.key, crate::RowKey::from(*id));
+        assert!(value.frozen);
+        assert_eq!(value.replaced_by, crate::Replacement::SchemaChange { version: needed });
+    }
+}
+
 /// A reload into the rebuild of the version one `snapshots` and `writes` as
 /// slots after them, with the store state of `source`.
 pub(crate) async fn reload_into(
@@ -273,19 +287,18 @@ async fn a_rebuild_reads_the_store_only_through_its_input_slot() {
 }
 
 #[tokio::test]
-async fn writes_above_the_rebuilds_version_are_refused_not_waited_for() {
-    let store = TestStore::new();
+async fn writes_above_the_rebuilds_version_are_kept_as_lost_values_not_waited_for() {
+    let ids = SequentialIds::new();
+    let store = TestStore::with_ids(&ids);
     let app = open_app(&store).await;
-    let (_source_store, source, circle, store_frames) = version_one().await;
+    let (_source_store, source, circle, store_frames) = version_one_with(&ids).await;
     // A device on the newest app: its writes carry schema version 3.
-    let newest_store = TestStore::new();
+    let newest_store = TestStore::with_ids(&ids);
     let newest = open_app(&newest_store).await;
     newest_store.join_circle(&newest, garden());
-    let mut writes = Vec::new();
-    for audience in [Audience::Store, Audience::Circle(garden())] {
+    for (position, audience) in [(5, Audience::Store), (6, Audience::Circle(garden()))] {
         let statement = format!(
-            "INSERT INTO pins VALUES('00000000-0000-4000-8000-00000000000{}','{audience}','ahead')",
-            writes.len() + 5
+            "INSERT INTO pins VALUES('00000000-0000-4000-8000-00000000000{position}','{audience}','ahead')"
         );
         newest
             .write(move |context| {
@@ -294,10 +307,10 @@ async fn writes_above_the_rebuilds_version_are_refused_not_waited_for() {
             })
             .await
             .unwrap();
-        let write = crate::write::tests::records(&newest).pop().unwrap();
-        assert_eq!(write.header.schema_version, 3);
-        writes.push(write);
     }
+    // Its migration marker comes first, as in the slots the rebuild reads.
+    let writes = crate::write::tests::records(&newest);
+    assert!(writes.iter().all(|write| write.header.schema_version == 3));
     let rebuild = app.open_rebuild(Audience::Circle(garden()), 1).await.unwrap();
     let reload = reload_into(&rebuild, &source, [&store_frames, &circle], &writes).await;
     let through = reload.target;
@@ -307,6 +320,12 @@ async fn writes_above_the_rebuilds_version_are_refused_not_waited_for() {
         ["00000000-0000-4000-8000-000000000001"],
         "neither write's part applies in the rebuild"
     );
+    assert_kept_as_lost_values(
+        &rebuild,
+        &["00000000-0000-4000-8000-000000000005", "00000000-0000-4000-8000-000000000006"],
+        2,
+    )
+    .await;
     rebuild.discard().await.unwrap();
     for db in [newest, source, app] {
         db.close().await.unwrap();
@@ -372,6 +391,10 @@ async fn this_devices_migration_marker_is_consumed_without_waiting() {
     let through = reload.target;
     rebuild.load::<crate::pending::tests::Record, _>(reload, through).await.unwrap();
     assert_eq!(pin_ids(&rebuild), ["00000000-0000-4000-8000-000000000001"]);
+    assert!(
+        rebuild.database.as_ref().unwrap().lost_values().await.unwrap().is_empty(),
+        "the marker has no row changes, so it freezes nothing"
+    );
     rebuild.discard().await.unwrap();
     for db in [newest, source, app] {
         db.close().await.unwrap();
@@ -379,7 +402,8 @@ async fn this_devices_migration_marker_is_consumed_without_waiting() {
 }
 
 #[tokio::test]
-async fn a_write_ahead_of_its_audience_is_refused_and_the_writes_after_it_still_apply() {
+async fn a_write_ahead_of_its_audience_is_kept_as_a_lost_value_and_the_writes_after_it_still_apply()
+{
     let ids = SequentialIds::new();
     for audience in [Audience::Store, Audience::Circle(garden())] {
         let store = TestStore::with_ids(&ids);
@@ -412,9 +436,74 @@ async fn a_write_ahead_of_its_audience_is_refused_and_the_writes_after_it_still_
             ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000007"],
             "{audience}: the ahead write's row is absent and the one after it applies"
         );
+        let ahead_pin = match audience {
+            Audience::Store => "00000000-0000-4000-8000-000000000005",
+            Audience::Circle(_) => "00000000-0000-4000-8000-000000000006",
+        };
+        assert_kept_as_lost_values(&rebuild, &[ahead_pin], 2).await;
         rebuild.discard().await.unwrap();
         for db in [newest, source, app] {
             db.close().await.unwrap();
         }
+    }
+}
+
+const GIFTS: &str =
+    "CREATE TABLE gifts(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL, note TEXT NOT NULL)";
+
+/// The app of version 3 that also adds a synced table, which version 1 and
+/// the rebuild at it don't have.
+async fn open_app_with_gifts(store: &TestStore) -> Database {
+    let both = || {
+        let mut tables = tables();
+        tables.push(
+            SyncedTable::new("gifts", RowIdentity::IndependentUuid).audience_column("audience"),
+        );
+        tables
+    };
+    let mut migrations = migrations(tables());
+    migrations[2] = Migration::addition(3, "gifts", GIFTS);
+    store.builder(both(), migrations).open().await.unwrap()
+}
+
+#[tokio::test]
+async fn a_write_into_a_table_the_rebuilds_version_lacks_is_kept_as_a_lost_value() {
+    let ids = SequentialIds::new();
+    let store = TestStore::with_ids(&ids);
+    let app = open_app_with_gifts(&store).await;
+    let (_source_store, source, circle, store_frames) = version_one_with(&ids).await;
+    let newest_store = TestStore::with_ids(&ids);
+    let newest = open_app_with_gifts(&newest_store).await;
+    newest_store.join_circle(&newest, garden());
+    let statement = format!(
+        "INSERT INTO gifts VALUES('00000000-0000-4000-8000-000000000008','{}','scarf')",
+        Audience::Circle(garden())
+    );
+    newest
+        .write(move |context| {
+            context.execute_batch(&statement)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let write = crate::write::tests::records(&newest)
+        .into_iter()
+        .find(|w| w.header.disposition != coven_format::write::WriteDisposition::Migration)
+        .unwrap();
+    assert_eq!(write.header.schema_version, 3);
+    let rebuild = app.open_rebuild(Audience::Circle(garden()), 1).await.unwrap();
+    let reload = reload_into(&rebuild, &source, [&store_frames, &circle], &[write]).await;
+    let through = reload.target;
+    rebuild.load::<crate::pending::tests::Record, _>(reload, through).await.unwrap();
+    assert_eq!(pin_ids(&rebuild), ["00000000-0000-4000-8000-000000000001"]);
+    let lost = rebuild.database.as_ref().unwrap().lost_values().await.unwrap();
+    assert_eq!(lost.len(), 1, "{lost:#?}");
+    assert_eq!(lost[0].table, "gifts");
+    assert_eq!(lost[0].key, crate::RowKey::from("00000000-0000-4000-8000-000000000008"));
+    assert!(lost[0].frozen);
+    assert_eq!(lost[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
+    rebuild.discard().await.unwrap();
+    for db in [newest, source, app] {
+        db.close().await.unwrap();
     }
 }

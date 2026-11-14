@@ -322,9 +322,20 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         let cutoff =
             crate::sequence::refusal(db, slot, header.device, header.author, write.signer())?;
         // A write above the rebuild's version is ahead of every audience the
-        // rebuild holds, and every device refuses its parts there (§18.5).
-        let ahead = matches!(&staging, Staging::Reload(coverage) if coverage.is_rebuild())
-            && write.header().header.schema_version > db.schema_version()?;
+        // rebuild holds. The rebuild can't hold its changes at its version, so
+        // it keeps them as frozen lost values naming the breaking version the
+        // write needs (§18.3).
+        let schema_version = write.header().header.schema_version;
+        let ahead = match &staging {
+            Staging::Reload(coverage)
+                if coverage.is_rebuild() && schema_version > db.schema_version()? =>
+            {
+                Some(coverage.needed(schema_version).ok_or(DbError::Invariant {
+                    what: "a rebuild knows the breaking migration a write above it needs",
+                })?)
+            }
+            _ => None,
+        };
         if let Some((cutoff, cause)) = cutoff {
             db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
                 rusqlite::params![slot.get().to_be_bytes(), cutoff.get().to_be_bytes()])?;
@@ -346,6 +357,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 write,
                 slot,
                 cutoff.is_some(),
+                None,
                 |audience| !gated.contains(audience),
                 Some(reach),
             )?,
@@ -354,7 +366,8 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 schema,
                 write,
                 slot,
-                cutoff.is_some() || ahead,
+                cutoff.is_some(),
+                ahead,
                 |audience| coverage.needs(audience, slot),
                 None,
             )?,

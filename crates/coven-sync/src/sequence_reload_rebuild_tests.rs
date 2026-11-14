@@ -1,10 +1,13 @@
 //! A circle's rebuild in the pass: the history it starts from and the marker it
 //! restarts under (§16.6, §18.3).
 
+use crate::sequence_sync::sequence_raises::tests::refuse_snapshots;
 use crate::sequence_sync::tests::*;
+use coven_database::Replacement;
 use coven_merge::Audience;
 
 const EARLY: &str = "00000000-0000-4000-8000-000000000001";
+const HELD: &str = "00000000-0000-4000-8000-000000000003";
 const LATE: &str = "00000000-0000-4000-8000-000000000002";
 const ROW: &str = "00000000-0000-4000-8000-0000000000a1";
 
@@ -803,6 +806,117 @@ async fn a_second_breaking_migration_after_a_rebuild_captures_the_rebuilt_circle
         ana.sync.pass().await.unwrap();
     }
     assert_eq!(pins(ana.database()).await, pins(ben.database()).await);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana holds Garden, migrates to 2 and pins `held` in Garden, and updates to
+/// 3: the addition moves her capture over the pin, so it goes out before her
+/// raise, which her refused snapshot creates keep from landing. Ben, on 3
+/// since before, is then added to Garden and rebuilds it at version 1.
+async fn ana_sends_a_pin_ahead_of_garden(
+) -> (Group, Device, Device, coven_foundation::id_source::CircleId) {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    pin(ana.database(), EARLY, garden, "early").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(3, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    pin(ana.database(), HELD, garden, "held").await;
+    group.version.store(3, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let circle = Audience::Circle(garden);
+    ana.storage.set_faults(refuse_snapshots(&group, &ana, &[Audience::Store, circle])).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    (group, ana, ben, garden)
+}
+
+/// What `device` holds of Garden once `raiser`'s raise of it is established:
+/// the early pin as a row, and `held` as a row or as one frozen lost value
+/// replaced by version 2's breaking change.
+async fn assert_held_after_raise(
+    device: &Device,
+    garden: coven_foundation::id_source::CircleId,
+    raiser: &Device,
+    held_as_row: bool,
+) {
+    let state = device.sync.database.store_state().await.unwrap();
+    assert_eq!(state.schema[&Audience::Circle(garden)].snapshot.device, raiser.sync.device);
+    let mut rows = vec![(EARLY.to_string(), "early".to_string())];
+    let lost = device.database().lost_values().await.unwrap();
+    if held_as_row {
+        rows.push((HELD.to_string(), "held".to_string()));
+        assert!(lost.is_empty(), "{lost:#?}");
+    } else {
+        assert_eq!(lost.len(), 1, "{lost:#?}");
+        assert_eq!(lost[0].table, "pins");
+        assert_eq!(lost[0].key, coven_database::RowKey::from(HELD));
+        assert!(lost[0].frozen);
+        assert_eq!(lost[0].replaced_by, Replacement::SchemaChange { version: 2 });
+    }
+    assert_eq!(pins(device.database()).await, rows);
+}
+
+/// Ben's rebuild of Garden reads Ana's pin, made at version 2 and sent before
+/// her raise, above the version he rebuilds at. His raise lands first, and
+/// every device holds the pin as a lost value, not nowhere (§18.3).
+#[tokio::test]
+async fn a_captured_write_ahead_of_a_rebuilt_circle_is_a_lost_value_everywhere() {
+    let (_group, ana, ben, garden) = ana_sends_a_pin_ahead_of_garden().await;
+    for _ in 0..10 {
+        ben.sync.pass().await.unwrap();
+    }
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    for _ in 0..4 {
+        ana.sync.pass().await.unwrap();
+    }
+    ben.sync.pass().await.unwrap();
+    for device in [&ana, &ben] {
+        assert_held_after_raise(device, garden, &ben, false).await;
+    }
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// The same race the other way round: Ben's snapshots of Garden are refused
+/// after his rebuild installs, so Ana's raise is established. It carries her
+/// pin as a row, and loading it replaces Ben's rebuilt lost value.
+#[tokio::test]
+async fn a_writers_raise_landing_before_the_rebuilders_keeps_its_captured_write() {
+    let (group, ana, ben, garden) = ana_sends_a_pin_ahead_of_garden().await;
+    ben.storage.set_faults(refuse_snapshots(&group, &ben, &[Audience::Circle(garden)])).await;
+    for _ in 0..10 {
+        ben.sync.pass().await.unwrap();
+    }
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(3600));
+    for _ in 0..10 {
+        ana.sync.pass().await.unwrap();
+    }
+    ben.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    for _ in 0..10 {
+        ben.sync.pass().await.unwrap();
+    }
+    for device in [&ana, &ben] {
+        assert_held_after_raise(device, garden, &ana, true).await;
+    }
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }

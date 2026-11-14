@@ -867,17 +867,24 @@ async fn store_raise(device: &Device) -> (u32, coven_foundation::id_source::Devi
     (version.number, version.snapshot.device)
 }
 
-/// Faults refusing every store snapshot `device` would create.
-fn refuse_store_snapshots(group: &Group, device: &Device) -> coven_storage::test_utils::Faults {
-    let refused: std::collections::BTreeMap<_, _> = (1..=8)
-        .map(|number| {
-            let path = coven_storage::ObjectPath::snapshot(
-                group.store,
-                Audience::Store,
-                device.sync.device,
-                std::num::NonZeroU64::new(number).unwrap(),
-            );
-            (path, (coven_storage::StorageFailure::Network, 503))
+/// Faults refusing every snapshot `device` would create of `audiences`.
+pub(crate) fn refuse_snapshots(
+    group: &Group,
+    device: &Device,
+    audiences: &[Audience],
+) -> coven_storage::test_utils::Faults {
+    let refused: std::collections::BTreeMap<_, _> = audiences
+        .iter()
+        .flat_map(|audience| {
+            (1..=8).map(move |number| {
+                let path = coven_storage::ObjectPath::snapshot(
+                    group.store,
+                    audience.clone(),
+                    device.sync.device,
+                    std::num::NonZeroU64::new(number).unwrap(),
+                );
+                (path, (coven_storage::StorageFailure::Network, 503))
+            })
         })
         .collect();
     coven_storage::test_utils::Faults {
@@ -930,7 +937,7 @@ async fn a_captured_write_sent_ahead_of_the_raise_is_in_the_writers_raise() {
 async fn a_captured_write_a_racing_raise_covers_is_a_lost_value_everywhere() {
     let group = Group::new();
     let (ana, ben) = ana_writes_between_two_breaking_migrations(&group).await;
-    ana.storage.set_faults(refuse_store_snapshots(&group, &ana)).await;
+    ana.storage.set_faults(refuse_snapshots(&group, &ana, &[Audience::Store])).await;
     ana.sync.pass().await.unwrap();
     for _ in 0..4 {
         ben.sync.pass().await.unwrap();

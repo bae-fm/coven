@@ -345,14 +345,15 @@ impl Database {
         self.load_through::<P, W>(reload, None, None, Some((circle, marker))).await
     }
 
-    /// [`Self::load_snapshots`], for a rebuild's store when `store_through`
-    /// is given: the store's parts in slots after it aren't read, and a write
-    /// above this database's version is refused, not waited for (§18.3).
+    /// [`Self::load_snapshots`], for a rebuild's store when `rebuilding` is
+    /// given: the store's parts in slots after `rebuilding.store_through`
+    /// aren't read, and a write above this database's version is kept as a
+    /// lost value, not waited for (§18.3).
     pub(crate) async fn load_through<P: crate::PendingValue, W>(
         &self,
         reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
         progress: Option<ProgressReport<crate::LoadStep>>,
-        store_through: Option<u64>,
+        rebuilding: Option<crate::snapshot_coverage::Rebuilding>,
         rebuilt: Option<(coven_merge::Audience, coven_merge::WriteId)>,
     ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
@@ -442,7 +443,7 @@ impl Database {
                                 reload,
                                 files,
                                 &mut progress,
-                                store_through,
+                                rebuilding,
                                 inner.joining_write.as_deref(),
                                 inner.clock.now(),
                                 rebuilt.map(|(circle, marker)| crate::snapshot_load::Rebuilt {

@@ -182,6 +182,9 @@ pub(crate) fn records_table(header: &WriteHeader) -> &'static str {
 /// come whole only from its slot, so each captured part it stages is one its
 /// slot opened; the migration write's come from its own records (§18.4).
 ///
+/// `ahead` is the breaking version a rebuild's write above its database's
+/// version needs: every part of it is frozen as lost values.
+///
 /// A write landing in `slot` marks where each change it replaces stopped
 /// being current, and where each of its own that never became current
 /// stopped (§16.7). A queued write folded over the counted state has no slot
@@ -192,6 +195,7 @@ pub(crate) fn stage(
     header: &WriteHeader,
     opened: &[Audience],
     slot: Option<coven_merge::Slot>,
+    ahead: Option<u32>,
     selected: impl Fn(&Audience) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
     let mut captured = Vec::new();
@@ -213,7 +217,8 @@ pub(crate) fn stage(
         .into_iter()
         .collect();
     let opened = &audiences;
-    let interpreter = crate::interpretation::Interpreter::new(database, schema, header, opened)?;
+    let interpreter =
+        crate::interpretation::Interpreter::new(database, schema, header, opened, ahead)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     for audience in opened {
         // One record at a time, past the last: admitting it updates its row.

@@ -132,8 +132,8 @@ impl RebuildDatabase {
     /// The store's parts in slots after `store_through` aren't read: past the
     /// slot before the store's raise beyond the circle's version, the store
     /// holds no rows at the circle's version. A write above the rebuild's
-    /// version is refused, as every device refuses a part ahead of its
-    /// audience (§18.3, §18.5).
+    /// version is kept as a frozen lost value naming the breaking version it
+    /// needs, not waited for (§18.3).
     pub async fn load<P: crate::PendingValue, W>(
         &self,
         reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
@@ -145,7 +145,17 @@ impl RebuildDatabase {
         let Some(database) = &self.database else {
             return Err(DbError::StoreClosed);
         };
-        let loaded = database.load_through::<P, W>(reload, None, Some(store_through), None).await;
+        let rebuilding = crate::snapshot_coverage::Rebuilding {
+            store_through,
+            breaking: self
+                .inputs
+                .migrations
+                .iter()
+                .filter(|m| matches!(m.kind, MigrationKind::Breaking(_)))
+                .map(|m| m.version)
+                .collect(),
+        };
+        let loaded = database.load_through::<P, W>(reload, None, Some(rebuilding), None).await;
         self.parent.local_bytes_changed();
         loaded
     }

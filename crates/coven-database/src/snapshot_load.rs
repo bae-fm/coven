@@ -30,7 +30,7 @@ pub(crate) fn load<P: crate::PendingValue>(
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::WriteFiles<'_>,
     progress: &mut ProgressReport<LoadStep>,
-    store_through: Option<u64>,
+    rebuilding: Option<crate::snapshot_coverage::Rebuilding>,
     joining: Option<&crate::joining_write::JoiningHook>,
     now: std::time::SystemTime,
     rebuilt: Option<Rebuilt<'_>>,
@@ -67,8 +67,10 @@ pub(crate) fn load<P: crate::PendingValue>(
         if !resets.is_empty() {
             crate::pending::reset(database)?;
         }
-        let mut coverage = match store_through {
-            Some(last) => crate::snapshot_coverage::SnapshotCoverage::rebuilding(target, last),
+        let mut coverage = match rebuilding {
+            Some(rebuilding) => {
+                crate::snapshot_coverage::SnapshotCoverage::rebuilding(target, rebuilding)
+            }
             None => crate::snapshot_coverage::SnapshotCoverage::new(target),
         };
         crate::download_stage::begin(database)?;

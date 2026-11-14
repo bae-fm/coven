@@ -59,6 +59,7 @@ impl<'a> Interpreter<'a> {
         schema: &'a WriteSchema,
         header: &WriteHeader,
         audiences: &[Audience],
+        ahead: Option<u32>,
     ) -> Result<Self, DbError> {
         let mut interpreter = Self {
             database,
@@ -78,7 +79,7 @@ impl<'a> Interpreter<'a> {
         for audience in audiences {
             // The part's direct admission before its changes' sources are followed.
             let captured = crate::captured_changes::includes(database, header)?;
-            let admission = match crate::write_boundary::WriteBoundary::part_verdict(
+            let judged = match crate::write_boundary::WriteBoundary::part_verdict(
                 &boundaries,
                 header,
                 audience,
@@ -103,6 +104,18 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 _ => PartAdmission::Judged(Interpretation::Native),
+            };
+            // A rebuild can't hold a change above its version, converted or
+            // not, so it freezes the part (§18.3). Its own migration marker has
+            // no changes to freeze.
+            let admission = match (ahead, judged) {
+                (
+                    Some(version),
+                    PartAdmission::Judged(Interpretation::Native | Interpretation::Convert(_)),
+                ) if header.disposition != WriteDisposition::Migration => {
+                    PartAdmission::Excluded(version)
+                }
+                (_, admission) => admission,
             };
             interpreter.parts.insert(audience.clone(), admission);
         }
