@@ -516,7 +516,14 @@ async fn setup_names_the_first_device_and_a_reconnect_keeps_its_name() {
         .await
         .unwrap();
     assert_eq!(names(phone.handle.members().await.unwrap()), ["Ana's phone"]);
-    assert_eq!(stored_slots(&phone).await, slots);
+    let after = stored_slots(&phone).await;
+    let listed = phone.storage.list(&ObjectPrefix::all(phone.directory.id())).await.unwrap();
+    assert_eq!(
+        after,
+        slots,
+        "slots after the reconnect; storage lists {:?}",
+        listed.iter().map(|object| object.path.clone()).collect::<Vec<_>>()
+    );
     phone.handle.close().await.unwrap();
 }
 

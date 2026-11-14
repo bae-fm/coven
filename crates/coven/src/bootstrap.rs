@@ -955,7 +955,7 @@ fn combine<T>(
 #[cfg(test)]
 fn files_under(path: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
     let mut found = Vec::new();
-    for entry in std::fs::read_dir(path).unwrap() {
+    for entry in std::fs::read_dir(path).unwrap_or_else(|error| panic!("list {path:?}: {error}")) {
         let entry = entry.unwrap();
         let relative = std::path::PathBuf::from(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
@@ -966,7 +966,9 @@ fn files_under(path: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8
             );
             found.push((relative, None));
         } else {
-            found.push((relative, Some(std::fs::read(entry.path()).unwrap())));
+            let bytes = std::fs::read(entry.path())
+                .unwrap_or_else(|error| panic!("read {:?}: {error}", entry.path()));
+            found.push((relative, Some(bytes)));
         }
     }
     found.sort();
