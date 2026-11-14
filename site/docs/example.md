@@ -165,7 +165,7 @@ while let Some(result) = status.next().await {
     show_last_synced(last_synced);
     match state {
         SyncState::Synced => show_line("Synced"),
-        SyncState::Syncing => show_line("Syncing…"),
+        SyncState::Syncing(_) => show_line("Syncing…"),
         SyncState::WaitingToSync(_) => show_line("Waiting to sync"),
         SyncState::Offline(_) | SyncState::OfflineWithUnsentChanges(_) => show_line("Offline"),
         SyncState::SignedOut { .. } => offer_sign_in(),

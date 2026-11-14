@@ -250,8 +250,8 @@ pub struct SyncStatus {
 
 pub enum SyncState {
     NotSynced,                    // no storage location recorded here
-    Syncing,                      // a slot or a bound file is moving
-    WaitingToSync(SyncWait),      // held back, and what holds it
+    Syncing(SyncActivity),        // work that clears by itself: receiving, sending, uploading a bound file
+    WaitingToSync(SyncWait),      // held back for a while, and what holds it
     Synced,                       // nothing waits
     Offline(SyncCause),           // the last pass got no answer from storage
     OfflineWithUnsentChanges(SyncCause), // ... and a write or a bound file is queued
@@ -277,13 +277,15 @@ record that names the state.
 
 `Synced` means nothing waits: the last pass reached the end of the sequence and
 every bound file this device uploads is stored. A bound file, one a write
-waits for, queued with nothing moving waits to sync, and the state names why:
-sync stopped, a provider's cooldown, a slot that can't apply yet, the file's
-own retry, or its turn. A trailing file, such as a track whose write went out
+waits for, queued with nothing holding it is syncing, uploading a bound file;
+while something holds it, the state waits to sync and names why: sync stopped,
+a provider's cooldown, a slot that can't apply yet, or the file's own retry.
+A write in the send queue is syncing, sending, in the same way. A trailing file, such as a track whose write went out
 first, never reaches the state: each queued file has its own phase in
 `handle.uploads()`, which names the pause, a metered network, a failure or its
 turn. A pass held at a slot waiting for a key, or cut short by a cooldown,
-waits to sync too, though nothing is queued. A failure that clears by itself,
+waits to sync too, though nothing is queued; once the cooldown is over its next
+turn is syncing, receiving. A failure that clears by itself,
 such as a server error, is one wait for any pass, slot or bound file: waiting
 to sync, retrying, with the time of the next try. `Offline` describes the last
 attempt, not the connection's history: Ana syncs, then loses Wi-Fi, and her

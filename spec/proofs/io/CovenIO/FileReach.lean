@@ -1,4 +1,4 @@
-import CovenIO.SyncReach
+import CovenIO.Activity
 import CovenStorage.Files
 
 /-!
@@ -9,8 +9,8 @@ queue as the sync state does (`queued`), with no attempt running.
 
 - `staged_queued`, `queue_holds_synced`: staging a file queues its upload, and
   a device with an upload queued doesn't show synced, however the rest stands.
-- `queued_waits`: on an otherwise settled device the upload shows waiting to
-  sync, and it waits its turn.
+- `queued_syncs`: on an otherwise settled device the upload shows syncing,
+  uploading a bound file, for its turn.
 - `completed_empties`, `completed_synced`: once storage confirmed the last
   queued upload, the queue is empty, and the settled device shows synced.
 - `lost_file_fails`: a confirmed absence at a record's path is a lost file, and
@@ -80,41 +80,43 @@ nothing holding it. -/
 structure Settled (f : Facts) : Prop where
   connected : f.storage = .connected
   last : f.last = .synced
-  still : f.moving = false
+  still : f.moved = none
   noWrites : f.unsent = false
   noRecords : f.records = []
   running : f.running = true
   cooling : f.cooling = false
 
-/-- **A queued upload waits its turn.** On a settled device it shows waiting to
-sync, and that is what it waits for. -/
-theorem queued_waits (f : Facts) (s : Files.State) (settled : Settled f)
+/-- **A queued upload is next in line.** On a settled device it shows syncing,
+uploading a bound file: its turn is no wait. -/
+theorem queued_syncs (f : Facts) (s : Files.State) (settled : Settled f)
     (uploads : f.uploads = queued s) (held : s.queue ≠ []) :
-    state f = .waitingToSync ∧ f.waits.head? = some .queued := by
+    state f = .syncing ∧ f.waits = [] ∧ f.activities.head? = some .uploadingBound := by
   obtain ⟨u, rest, eq⟩ := List.exists_cons_of_ne_nil held
   have recorded : f.storage ≠ .none := by rw [settled.connected]; simp
   have loop : f.loop = .synced := by
     simp [Facts.loop, settled.still, Facts.ended, settled.last]
-  constructor
-  · refine (state_iff f recorded _).mpr ⟨(candidate_iff f _).mpr (.inr (.inl ?_)), ?_⟩
-    · exact ⟨⟨.queued, true, false, none⟩, by simp [bound_eq f s uploads, queued, eq], by
-        simp [Upload.candidate]⟩
-    · intro c hc
-      rcases (candidate_iff f c).mp hc with e | ⟨x, mx, hx⟩ | ⟨_, w⟩ | ⟨_, h⟩ | ⟨r, hr, _⟩
-      · rw [← e, loop]; simp [State.rank]
-      · simp only [bound_eq f s uploads, queued, List.mem_map] at mx
-        obtain ⟨_, _, rfl⟩ := mx
-        simp [Upload.candidate] at hx
-        subst hx
-        simp [State.rank]
-      · rw [settled.noWrites] at w; cases w
-      · rw [settled.connected] at h; cases h
-      · rw [settled.noRecords] at hr; cases hr
-  · have blocked : f.blocked = false := by simp [Facts.blocked, settled.last]
-    have free : f.heldAll = none := by
-      simp [Facts.heldAll, settled.running, settled.cooling, blocked]
-    simp [Facts.waits, loop, bound_eq f s uploads, queued, eq, Facts.uploadWait, free,
-      settled.noWrites, Upload.candidate]
+  have blocked : f.blocked = false := by simp [Facts.blocked, settled.last]
+  have free : f.heldAll = none := by
+    simp [Facts.heldAll, settled.running, settled.cooling, blocked]
+  have mem : (⟨.queued, true, false, none⟩ : Upload) ∈ f.bound := by
+    simp [bound_eq f s uploads, queued, eq]
+  have cand : (⟨.queued, true, false, none⟩ : Upload).candidate f.held = some .syncing := by
+    simp [Upload.candidate, Facts.held, free, State.work]
+  refine ⟨?_, ?_, bound_before_write f settled.still _ mem cand⟩
+  · refine (state_iff f recorded _).mpr ⟨(candidate_iff f _).mpr (.inr (.inl ⟨_, mem, cand⟩)), ?_⟩
+    intro c hc
+    rcases (candidate_iff f c).mp hc with e | ⟨x, mx, hx⟩ | ⟨_, w⟩ | ⟨_, h⟩ | ⟨r, hr, _⟩
+    · rw [← e, loop]; simp [State.rank]
+    · simp only [bound_eq f s uploads, queued, List.mem_map] at mx
+      obtain ⟨_, _, rfl⟩ := mx
+      simp [Upload.candidate, Facts.held, free, State.work] at hx
+      subst hx
+      simp [State.rank]
+    · rw [settled.noWrites] at w; cases w
+    · rw [settled.connected] at h; cases h
+    · rw [settled.noRecords] at hr; cases hr
+  · simp [Facts.waits, loop, bound_eq f s uploads, queued, eq, Facts.uploadWait, free,
+      settled.noWrites, Upload.candidate, Facts.held, State.work]
 
 theorem complete_queue (s : Files.State) (r : CovenStorage.Files.Reference)
     (u : CovenStorage.Files.Upload) (h : u ∈ (Files.complete s r).queue) : u ∈ s.queue := by

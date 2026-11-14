@@ -3739,7 +3739,7 @@ let moved = handle
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
-| | `moving` | 1 while a running pass has read a slot it hadn't, or claimed one; opening writes 0 |
+| | `moved` | what a running pass moved last: `read` for a slot it hadn't read, `claimed` for a slot it claimed; NULL while it has moved nothing, and opening writes NULL |
 | | `halted` | 1 once the upload worker's panic has halted sync until the store reopens (E15): no pass writes the row from then on, so the failure the halt wrote stands; opening writes 0 |
 | | `last_synced` | when a pass last reached the end of the sequence, or setup, joining or restoring finished, in milliseconds since the Unix epoch by the store's clock; never earlier than before; NULL until then |
 | | `starts` | how many times sync has started in this installation, the app's starts and the one setup makes alike; each start adds one in the step that starts it, so a trigger hears a start that holds for the reason the last one did, which changes no other column; 0 until sync first starts |
@@ -4615,26 +4615,30 @@ while let Some(Ok(values)) = lost.next().await {
   - Synced means nothing waits, data or files: a pass held back at a slot
     that can't apply yet or by a provider's cooldown waits to sync, with what
     holds it (`SyncWait`); while a file waits in the upload queue the state
-    is syncing as files move, waiting to sync while none does, with what the
-    first waiting file waits for, or failed when its source failed, naming
-    it; while a write waits in the send queue the state is waiting to sync
-    until a pass claims a slot for it, naming what holds every pass, else
-    its turn. A waiting file's wait shows before the write's.
-  - Syncing shows only while a pass has read or claimed a slot, or a file is
-    moving. A pass that finds nothing writes nothing the state reads until it
-    ends, and then only the last synced time when it ends synced again, so
-    an idle store's state doesn't flicker every 30 seconds.
+    is syncing, uploading a bound file, as it moves or waits its turn,
+    waiting to sync while something holds every transfer or the file waits
+    out a retry, with what holds it, or failed when its source failed, naming
+    it; while a write waits in the send queue the state is syncing, sending,
+    when nothing holds the pass or a bound file, else waiting to sync, naming
+    what holds it. A waiting file's wait shows before the write's.
+  - Syncing names its activity (`SyncActivity`): what the running pass moved
+    last, a bound file, a write, or the next pass's turn, in that order. It
+    shows only while one of them holds. A pass that finds nothing writes
+    nothing the state reads until it ends, and then only the last synced time
+    when it ends synced again, so an idle store's state doesn't flicker every
+    30 seconds.
   - The cause is the last pass, as `LastPass` keeps it, or the first pending
     record, in the order they arose, that names the state, with the cause
     `coven_pending` keeps beside it. Signed out with no credentials has none.
   - The last synced time is kept across every state and every reopen, and
     never goes backward.
 - The row holds what the loop knows. Opening writes whether storage is set
-  up there, and that no pass is moving, before the handle exists, and keeps
-  the last pass and the last synced time. Setup, joining and restoring write
-  storage set up and their finish as the last synced time. The loop writes
-  that the pass moved a slot as it first does, and how the pass ended as it
-  ends, before its retries hear the answer. The loop, or the attempt to
+  up there, and that no pass has moved anything, before the handle exists, and
+  keeps the last pass and the last synced time. Setup, joining and restoring
+  write storage set up and their finish as the last synced time. The loop
+  writes what the pass moved as it reads a slot it hadn't or claims one, each
+  time that changes, and how the pass ended as it ends, before its retries
+  hear the answer. The loop, or the attempt to
   connect, that ends on a failure of its own or a panic, in a pass or
   outside one, writes the failure as the last pass and that nothing moves,
   so the state shows it, never syncing. A row that can't be written fails
@@ -4655,7 +4659,7 @@ while let Some(Ok(values)) = lost.next().await {
   handle runs its sync (`Coven::closed_sync_status`, E1). It is the state
   opening shows before sync starts, read from the same facts with what opening
   writes over them: whether a location is recorded and this device holds its
-  credentials, read from the keychain; no pass moving, whatever a process that
+  credentials, read from the keychain; no pass moved, whatever a process that
   ended mid-pass left; sync not running, so a queued write or file waits with
   `SyncWait::NotSyncing`; and nothing sent. The network, which
   coven doesn't watch for a closed store, changes nothing then: what holds
@@ -5943,14 +5947,15 @@ pub struct ClosedSyncStatus {
 pub enum SyncState {
     /// No storage location is recorded on this device.
     NotSynced,
-    /// A running pass has read or claimed a slot, or a bound file is being
-    /// sent.
-    Syncing,
-    /// Nothing moves, and the last pass was held back, at a slot that can't
-    /// apply yet or by a provider's cooldown, or a bound file waits in the
-    /// upload queue, or a write in the send queue: what the pass waits for,
-    /// else what the first such file waits for, else what the write waits
-    /// for.
+    /// Work that clears by itself is under way or next in line, with nothing
+    /// holding it: what the running pass moved last, else a bound file, else
+    /// a write, else the next pass.
+    Syncing(SyncActivity),
+    /// Nothing moves, and something holds the work for a while: the last pass
+    /// was held back, at a slot that can't apply yet or by a provider's
+    /// cooldown, or it, a bound file or a write waits out a retry, or sync
+    /// isn't running: what the pass waits for, else what the first such file
+    /// waits for, else what the write waits for.
     WaitingToSync(SyncWait),
     /// The last pass reached the end of the sequence, every bound file this
     /// device uploads is stored, the send queue is empty, and nothing below
@@ -5982,6 +5987,22 @@ pub enum SyncState {
     Failed(SyncCause),
 }
 
+/// What Syncing is doing, as `Syncing` names it (§19.1): the first of what the
+/// running pass moved last, a bound file moving or next in line, a write next
+/// in line, and the next pass's turn.
+pub enum SyncActivity {
+    /// The running pass reads slots it hadn't, which are changes from other
+    /// devices; or the next pass's turn has come, after a cooldown or a
+    /// newer floor.
+    Receiving,
+    /// A write goes out: the pass claimed a slot for one, or one waits in the
+    /// send queue with nothing holding it.
+    Sending,
+    /// A bound file uploads or waits its turn in the bound lane; the writes
+    /// it holds go out once it is stored.
+    UploadingBoundFile,
+}
+
 /// What waiting to sync waits for, as `WaitingToSync` names it: what holds
 /// every transfer, the pass's and each file's alike, first; then, for a
 /// bound file waiting in the upload queue, what holds that file (§19.1).
@@ -5999,9 +6020,6 @@ pub enum SyncWait {
     /// retry (§6.7); the pending list says why. A pass that got no provider
     /// answer is offline instead.
     Retrying { at: SystemTime },
-    /// Its turn hasn't come: a bound file's, a write's, or the next pass's
-    /// once a cooldown that held the last one is over.
-    Queued,
 }
 
 /// A network a test drives in place of the platform's (E1 `network`, §6.7):

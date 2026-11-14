@@ -4,7 +4,7 @@ import CovenIO.Keep
 import CovenIO.Retired
 import CovenIO.WaitingReopen
 import CovenIO.Wakes
-import CovenIO.SyncState
+import CovenIO.Activity
 import CovenIO.Transfers
 import CovenIO.RetryAnswer
 import Lean
@@ -435,7 +435,11 @@ def waitName : SyncWait → String
   | .coolingDown => "coolingDown"
   | .blocked => "blocked"
   | .retrying => "retrying"
-  | .queued => "queued"
+
+def activityName : Activity → String
+  | .receiving => "receiving"
+  | .sending => "sending"
+  | .uploadingBound => "uploadingBound"
 
 def uploadWaitName : UploadWait → String
   | .notSyncing => "notSyncing"
@@ -459,7 +463,8 @@ private def upload (j : Json) : Except String Upload := do
            retrying := ← j.getObjValAs? Bool "retrying" }
 
 /-- The facts of one case: `storage` (`none`, `signedOut`, `connected`), `last`
-(`synced` or `{"failed": pass failure}`), `moving`, `uploads`, `unsent`,
+(`synced` or `{"failed": pass failure}`), `moved` (`null`, `"read"` or
+`"claimed"`), `uploads`, `unsent`,
 `running`, `cooling`, `paused`, `unmeteredOnly`, `metered`, `keysChanging`,
 `passRetrying` and the pending `records`' reasons. -/
 private def facts (j : Json) : Except String Facts := do
@@ -471,9 +476,11 @@ private def facts (j : Json) : Except String Facts := do
     | _ => pure (LastPass.failed (← passFailure (← lastJson.getObjVal? "failed")))
   let records ← (← j.getObjValAs? (Array Json) "records").toList.mapM reason
   let uploads ← (← j.getObjValAs? (Array Json) "uploads").toList.mapM upload
+  let moved ← match ← j.getObjVal? "moved" with
+    | .null => pure none
+    | m => some <$> named [("read", Moved.read), ("claimed", .claimed)] "moved" (← m.getStr?)
   return {
-    storage, last, passing := false, uploads, records, lastSynced := none
-    moving := ← j.getObjValAs? Bool "moving"
+    storage, last, passing := false, uploads, records, lastSynced := none, moved
     unsent := ← j.getObjValAs? Bool "unsent"
     running := ← j.getObjValAs? Bool "running"
     cooling := ← j.getObjValAs? Bool "cooling"
@@ -484,15 +491,19 @@ private def facts (j : Json) : Except String Facts := do
     passRetrying := ← j.getObjValAs? Bool "passRetrying" }
 
 /-- `SyncState.state` of one set of facts. Reports the state's name as
-`state`, and, for waiting to sync, what it waits for as `wait`: the held-back
-pass's wait, else the first waiting bound upload's. -/
+`state`; for waiting to sync, what it waits for as `wait`: the held-back
+pass's wait, else the first waiting bound upload's; and for syncing, the
+activity it names as `activity`. -/
 def run (j : Json) : Except String Json := do
   let facts ← facts j
   let shown := state facts
   let wait := match shown, facts.waits with
     | .waitingToSync, w :: _ => toJson (waitName w)
     | _, _ => Json.null
-  return Json.mkObj [("state", toJson (stateName shown)), ("wait", wait)]
+  let activity := match shown, facts.activities with
+    | .syncing, a :: _ => toJson (activityName a)
+    | _, _ => Json.null
+  return Json.mkObj [("state", toJson (stateName shown)), ("wait", wait), ("activity", activity)]
 
 /-- `Upload.phase` of each upload of one set of facts, in order: `phase`
 (`uploading`, `stored`, `failed`, `waiting`) and, for waiting, what it waits for

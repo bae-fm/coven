@@ -30,7 +30,8 @@ theorem state_iff (f : Facts) (recorded : f.storage ≠ .none) (s : State) :
 the missing credentials or a pending record. -/
 theorem candidate_iff (f : Facts) (s : State) :
     s ∈ f.candidates ↔ f.loop = s ∨
-      (∃ u ∈ f.bound, u.candidate = some s) ∨ (s = .waitingToSync ∧ f.unsent = true) ∨
+      (∃ u ∈ f.bound, u.candidate f.held = some s) ∨
+      (s = .work f.writeWait.isSome ∧ f.unsent = true) ∨
       (s = .signedOut ∧ f.storage = .signedOut) ∨ ∃ r ∈ f.records, r.state = some s := by
   simp only [Facts.candidates, Facts.rest, Facts.files, Facts.writes, Facts.others,
     List.mem_cons, List.mem_append, List.mem_filterMap]
@@ -57,7 +58,7 @@ every candidate: a connected device whose last pass ended synced, with nothing
 moving, every bound upload stored, no write queued and no record naming a
 state. -/
 theorem synced_iff (f : Facts) :
-    state f = .synced ↔ f.storage = .connected ∧ f.last = .synced ∧ f.moving = false ∧
+    state f = .synced ↔ f.storage = .connected ∧ f.last = .synced ∧ f.moved = none ∧
       (∀ u ∈ f.bound, u.progress = .stored) ∧ f.unsent = false ∧
       ∀ r ∈ f.records, r.state = none := by
   constructor
@@ -69,8 +70,8 @@ theorem synced_iff (f : Facts) :
       have := highest c hc
       cases c <;> simp [State.rank] at this ⊢
     have loop := only f.loop (List.mem_cons_self ..)
-    have still : f.moving = false := by
-      cases mv : f.moving
+    have still : f.moved = none := by
+      cases mv : f.moved
       · rfl
       · simp [Facts.loop, mv] at loop
     refine ⟨?_, ?_, still, synced_bound_stored f h, synced_writes_sent f h, ?_⟩
@@ -111,11 +112,11 @@ theorem synced_iff (f : Facts) :
 def Facts.waitHolds (f : Facts) : SyncWait → Prop
   | .notSyncing => f.running = false
   | .coolingDown => f.running = true ∧ f.cooling = true
-  | .blocked => f.running = true ∧ f.cooling = false ∧ ∃ r, f.last = .failed (.blocked r)
+  | .blocked =>
+      f.running = true ∧ f.cooling = false ∧ f.blocked = true ∧ ∃ r, f.last = .failed (.blocked r)
   | .retrying =>
       f.heldAll = none ∧
         ((∃ u ∈ f.bound, u.retrying = true) ∨ (f.lastRetries = true ∧ f.passRetrying = true))
-  | .queued => f.heldAll = none
 
 theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitHolds w := by
   simp only [Facts.heldAll] at h
@@ -126,62 +127,65 @@ theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitH
       · simp [hr, hc, hb] at h
       · simp [hr, hc, hb] at h
         subst h
-        simp only [Facts.blocked] at hb
-        split at hb
-        · rename_i r e; exact ⟨hr, hc, r, e⟩
-        · cases hb
+        have hb' := hb
+        simp only [Facts.blocked] at hb'
+        split at hb'
+        · rename_i r e; exact ⟨hr, hc, hb, r, e⟩
+        · cases hb'
+
     · simp [hr, hc] at h; subst h; exact ⟨hr, hc⟩
 
 /-- What the next pass waits for, the held-back pass's and a queued write's
-wait, holds: what holds every transfer, else nothing does. -/
-theorem pass_wait_holds (f : Facts) : f.waitHolds f.passWait := by
+wait, holds: what holds every transfer, else the backoff of a failure that
+clears by itself; with neither, no wait is named. -/
+theorem pass_wait_holds (f : Facts) (w : SyncWait) (h : f.passWait = some w) :
+    f.waitHolds w := by
   cases hh : f.heldAll with
   | none =>
-      simp only [Facts.passWait, hh]
+      simp only [Facts.passWait, hh] at h
       by_cases r : (f.lastRetries && f.passRetrying) = true
-      · simp only [r, ite_true, Facts.waitHolds]
+      · simp only [r, ite_true, Option.some.injEq] at h
+        subst h
         exact ⟨hh, .inr (by simpa using r)⟩
-      · simp only [r, Facts.waitHolds]
-        exact hh
-  | some x => simp only [Facts.passWait, hh]; exact held_holds f x hh
+      · simp only [r] at h
+        cases h
+  | some x =>
+      simp only [Facts.passWait, hh, Option.some.injEq] at h
+      subst h
+      exact held_holds f x hh
 
 /-- **Why waiting to sync waits.** Each wait named holds for the fact that
-names it: sync stopped, a cooldown, a slot that can't apply, or, for a queued
-upload, what holds that upload. -/
+names it: sync stopped, a cooldown, a slot that can't apply, a retry, or, for a
+queued upload, what holds that upload. -/
 theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds w := by
   simp only [Facts.waits, List.mem_append, List.mem_filterMap] at h
   rcases h with (pass | ⟨u, mu, hu⟩) | write
   · split at pass
-    · simp only [List.mem_singleton] at pass
-      subst pass
-      exact pass_wait_holds f
+    · exact pass_wait_holds f w (Option.mem_toList.mp pass)
     · simp at pass
   · split at hu
-    · simp only [Option.some.injEq] at hu
-      simp only [Facts.uploadWait] at hu
+    · simp only [Facts.uploadWait] at hu
       cases hh : f.heldAll with
-      | some x => rw [hh] at hu; simp only at hu; subst hu; exact held_holds f _ hh
+      | some x => rw [hh] at hu; simp only [Option.some.injEq] at hu; subst hu; exact held_holds f _ hh
       | none =>
           rw [hh] at hu
           simp only at hu
           split at hu
           · rename_i r
+            simp only [Option.some.injEq] at hu
             subst hu
             exact ⟨hh, .inl ⟨u, mu, r⟩⟩
-          · subst hu
-            exact hh
+          · cases hu
     · simp at hu
   · split at write
-    · simp only [List.mem_singleton] at write
-      subst write
-      exact pass_wait_holds f
+    · exact pass_wait_holds f w (Option.mem_toList.mp write)
     · simp at write
 
 namespace Reached
 
 /-- A device connected and synced, with sync running. -/
 def start : Facts :=
-  ⟨.connected, .synced, false, false, [], false, [], true, false, false, false, false, false,
+  ⟨.connected, .synced, false, none, [], false, [], true, false, false, false, false, false,
     false, none⟩
 
 def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none⟩
@@ -189,7 +193,7 @@ def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none
 /-- The run of the model's events that reaches each state. -/
 def toState : State → List Event
   | .notSynced => [.storage .none none]
-  | .syncing => [.begin, .move]
+  | .syncing => [.begin, .move .read]
   | .waitingToSync => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
   | .synced => [.begin, .finish .synced 1]
   | .offline => [.begin, .finish (.failed .offline) 1]
@@ -210,7 +214,6 @@ def toWait : SyncWait → List Event
   | .coolingDown => [.settings true true false false, .uploads [upload false true]]
   | .blocked => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
   | .retrying => [.uploads [upload true true]]
-  | .queued => [.uploads [upload false true]]
 
 /-- **No state is dead.** Every state shows after some run of the model's
 events from a synced device. -/

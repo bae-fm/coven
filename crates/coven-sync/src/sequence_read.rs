@@ -4,7 +4,7 @@
 use super::{SequenceSync, Session, SlotReading, SlotReads};
 use crate::{slot_object, PendingRecord, Refusal, SequenceStatus, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{LoadStep, SlotContent};
+use coven_database::{LoadStep, PassMove, SlotContent};
 use coven_foundation::progress::ProgressReport;
 use coven_merge::{Slot, SlotRange};
 
@@ -110,7 +110,7 @@ impl SequenceSync {
                         // A slot read moves data: the sync state shows the
                         // pass syncing (§19.1).
                         Ok(Some(input)) => {
-                            self.state.moved();
+                            self.state.moved(PassMove::Read);
                             input
                         }
                         Ok(None) => {

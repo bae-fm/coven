@@ -92,11 +92,14 @@ theorem quiet_shows {f : Facts} (q : Quiet f) (last : LastPass) (now : Nat) :
     (run f [.begin, .finish last now]).map state = some { f with last }.ended := by
   simp only [run, CovenIO.SyncState.step, q.idle, Bool.false_eq_true, ite_false, ite_true,
     Option.bind_some, Option.map_some, Option.some.injEq]
-  simp [state, q.connected, CovenIO.SyncState.top, CovenIO.SyncState.Facts.rest,
-    CovenIO.SyncState.Facts.files, CovenIO.SyncState.Facts.writes,
-    CovenIO.SyncState.Facts.others, CovenIO.SyncState.Facts.loop,
-    CovenIO.SyncState.Facts.ended, CovenIO.SyncState.Facts.unsentWork, CovenIO.SyncState.Facts.bound, q.noUploads,
-    q.noRecords, q.noWrites]
+  cases last <;>
+    simp [state, q.connected, CovenIO.SyncState.top, CovenIO.SyncState.Facts.rest,
+      CovenIO.SyncState.Facts.files, CovenIO.SyncState.Facts.writes,
+      CovenIO.SyncState.Facts.others, CovenIO.SyncState.Facts.loop,
+      CovenIO.SyncState.Facts.ended, CovenIO.SyncState.Facts.unsentWork,
+      CovenIO.SyncState.Facts.bound, CovenIO.SyncState.Facts.passWait,
+      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked,
+      CovenIO.SyncState.Facts.lastRetries, q.noUploads, q.noRecords, q.noWrites]
 
 variable (R : Rules S)
 
@@ -143,7 +146,8 @@ theorem key_wait_reached {st : Store S} {seq : Nat → Slot S} (g : Good R st se
       CovenIO.SyncState.PassFailure.state, CovenIO.SyncState.Reason.state,
       CovenIO.SyncState.Facts.waits, CovenIO.SyncState.Facts.passWait,
       CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked, CovenIO.SyncState.Facts.bound,
-      CovenIO.SyncState.Facts.lastRetries, CovenIO.SyncState.Reason.byItself, q.noUploads,
+      CovenIO.SyncState.Facts.lastRetries, CovenIO.SyncState.Reason.byItself,
+      CovenIO.SyncState.State.work, q.noUploads,
       q.noWrites, q.noRecords, running, cooling]
 
 /-- **A device that can't open a kept slot is held there.** It ends every pass

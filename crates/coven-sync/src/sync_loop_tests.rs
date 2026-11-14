@@ -486,7 +486,7 @@ async fn a_bug_in_the_loops_own_write_reaches_the_sink_once() {
     }
 }
 
-/// A loop that ends in a pass that has moved a slot, on a panic or on a
+/// A loop that ends in a pass that has read a slot, on a panic or on a
 /// failure of its own work, shows the failure: once the last pass records
 /// it nothing moves, so the state is failed, never syncing (§19.1, E15,
 /// IO `failed_worker_shows`).
@@ -496,8 +496,11 @@ async fn a_loop_ending_mid_pass_shows_its_failure() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     for panic in [true, false] {
-        ana.database().record_moving().await.unwrap();
-        assert_eq!(crate::sync_status(ana.database()).await.unwrap().state, SyncState::Syncing);
+        ana.database().record_moved(coven_database::PassMove::Read).await.unwrap();
+        assert_eq!(
+            crate::sync_status(ana.database()).await.unwrap().state,
+            SyncState::Syncing(crate::SyncActivity::Receiving)
+        );
         if panic {
             let bug = coven_foundation::task::Bug::new(
                 "the sync loop",
@@ -578,6 +581,16 @@ fn at(group: &Group, seconds: u64) {
 /// Follow the sync state, as an app does.
 fn follow(device: &Device) -> Followed<SyncStatus, coven_database::DbError> {
     Followed::new(device.sync.database.subscribe_sync_facts(SyncStatus::computed))
+}
+
+/// Wait until the sync status row says the running pass last moved `moved`.
+async fn moved_is(device: &Device, moved: coven_database::PassMove) {
+    let mut row = Followed::new(device.sync.database.subscribe_sync_facts(
+        |facts: coven_database::SyncFacts<PendingRecord>| {
+            Ok::<_, coven_database::DbError>(facts.row.moved)
+        },
+    ));
+    row.wait_for(|row| *row == Some(moved)).await;
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.
@@ -681,8 +694,9 @@ async fn idle_passes_keep_the_state_synced() {
     ana.database().close().await.unwrap();
 }
 
-/// A pass shows syncing once it reads a slot it hadn't, until it ends; one
-/// that claims a slot for a write shows syncing while it sends it (§19.1).
+/// A pass shows syncing, receiving, once it reads a slot it hadn't, until it
+/// ends; one that claims a slot for a write shows syncing, sending, while it
+/// sends it, and the row names which it moved last (§19.1).
 #[tokio::test]
 async fn a_pass_moving_a_slot_shows_syncing_until_it_ends() {
     let group = Group::new();
@@ -703,7 +717,10 @@ async fn a_pass_moving_a_slot_shows_syncing_until_it_ends() {
     let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
     ben_loop.start().await.unwrap();
     observing.await.unwrap();
-    status.wait_for(|status| status.state == SyncState::Syncing).await;
+    status
+        .wait_for(|status| status.state == SyncState::Syncing(crate::SyncActivity::Receiving))
+        .await;
+    moved_is(&ben, coven_database::PassMove::Read).await;
     resume.send(()).unwrap();
     status.wait_for(|status| status.state == SyncState::Synced).await;
     assert_eq!(rows(ben.database()).await, [("a".into(), "read".into())]);
@@ -714,7 +731,10 @@ async fn a_pass_moving_a_slot_shows_syncing_until_it_ends() {
         .await;
     insert(ben.database(), "b", "sent").await;
     starting.await.unwrap();
-    status.wait_for(|status| status.state == SyncState::Syncing).await;
+    status
+        .wait_for(|status| status.state == SyncState::Syncing(crate::SyncActivity::Sending))
+        .await;
+    moved_is(&ben, coven_database::PassMove::Claimed).await;
     resume.send(()).unwrap();
     status.wait_for(|status| status.state == SyncState::Synced).await;
     ben_loop.close().await.unwrap();

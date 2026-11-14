@@ -10081,9 +10081,9 @@ and claims one for Ben's write, and while it does the state is syncing. It
 ends synced, and the time it finished is the last synced time. Thirty seconds
 later an idle pass finds nothing: the state stays synced the whole time, so
 the line doesn't flicker, and only the last synced time moves. Ben edits
-another note: until the next pass claims a slot for it, the state is waiting
-to sync, since his write waits for that pass. Shown synced, it would tell him
-the note is in storage while it is only on his phone.
+another note: from the step that commits it, the state is syncing, sending,
+since his write is next in line for the next pass. Shown synced, it would tell
+him the note is in storage while it is only on his phone.
 
 **Synced means data and bound files.** Sync is the sequence and the files a
 write waits for: a bound file, which holds the writes behind it until it is
@@ -10102,16 +10102,22 @@ the track, until the drive is back and the track uploads (§17.9).
 The state is one of, in the order an app lists them:
 
 - **Not synced:** no storage location is recorded on this device.
-- **Syncing:** a pass has read a slot it hadn't, or claimed one, and is still
-  running; or a bound file is being sent. A pass that finds nothing never
-  shows it.
-- **Waiting to sync:** nothing moves, and the last pass was held back, at a
-  slot that can't apply yet (§5.4) or by a provider's cooldown (§6.7), or a
-  bound file waits in this device's upload queue, or a write in its send
-  queue. It names what the pass waits for, else what the first such file
-  waits for, else what the write waits for: sync isn't running, a provider's
-  cooldown, a slot that can't apply yet, a bound file's own backoff after a
-  failed attempt, or its turn.
+- **Syncing:** work that clears by itself in seconds moves, or is next in line
+  with nothing holding it. It names its activity, the first that holds:
+  *receiving*, when a running pass has read a slot it hadn't; *sending*, when
+  it has claimed a slot for a write; *uploading a bound file*, when a bound
+  file is being sent or waits its turn in the upload queue, since the writes
+  behind it wait on it; *sending*, for a write in the send queue with nothing
+  holding it; and *receiving*, when the next pass's turn has come. A pass that
+  finds nothing never shows it.
+- **Waiting to sync:** a wait that can last minutes or hours holds the work,
+  and nothing moves: the last pass was held back, at a slot that can't apply
+  yet (§5.4) or by a provider's cooldown (§6.7), or it, a bound file or a
+  write waits out a retry, or sync isn't running. It names what the pass
+  waits for, else what the first bound file waits for, else what the write
+  waits for: sync isn't running, a provider's cooldown, a slot that can't
+  apply yet, or the time of the next try after a failed attempt. A turn that
+  hasn't come is never a wait ([`waiting_holds`](proofs/io/CovenIO/Activity.lean)).
 - **Synced:** nothing waits. The last pass reached the end of the sequence,
   every bound file this device uploads is stored, the send queue is empty, and
   nothing below holds.
@@ -10141,8 +10147,8 @@ The state is one of, in the order an app lists them:
 
 The state is computed each time it is read, never stored, from facts that are
 each true on their own: whether a location is recorded and its credentials
-held, how the last pass ended, whether the running pass has read or claimed a
-slot, each bound file in the upload queue, whether the send queue holds a
+held, how the last pass ended, what the running pass moved last, each bound
+file in the upload queue, whether the send queue holds a
 write, and the pending records the state reads: those about the sequence,
 a bound file, coven's own operations and the connection's, never one about
 a trailing file, its move, a download or a pin coven keeps. Each fact names one
@@ -10151,14 +10157,16 @@ of: removed, needs reset, update needed, signed out, no access, folder
 missing, clock wrong, storage full, offline with unsent changes, offline,
 failed, syncing, waiting to sync, synced. The device's own standing comes
 first, since no other fix helps until it is dealt with. Appendix H.3 lists
-which state each fact names.
+which state each fact names, and
+[`syncing_iff`](proofs/io/CovenIO/Activity.lean) says when syncing shows.
 
 - **A wait names no failure.** A slot waiting on another device's key, a
   provider's cooldown, a pending invite, a snapshot not yet taken: none is a
   failure, and none needs the person. A pass held back by one didn't get
   everything in or out, so it waits to sync, naming what holds it: sync
-  stopped, the cooldown, or the slot, and once a cooldown is over, the next
-  pass's turn. It doesn't move the last synced time. Ana's phone reads a
+  stopped, the cooldown, or the slot. Once a cooldown is over the pass's turn
+  has come, which is syncing, receiving, not a wait. It doesn't move the last
+  synced time. Ana's phone reads a
   slot sealed with a key her laptop hasn't delivered yet: she waits to sync
   until the key comes, though nothing of hers is queued.
 - **A wait for a bound file names waiting to sync too.** The same cooldown
@@ -10166,12 +10174,18 @@ which state each fact names.
   storage yet. Which wait it names follows the order above: what holds every
   transfer first, the pass's and each file's alike, then the first waiting
   file's backoff.
-- **A write waits for the next pass.** A write in the send queue goes out
+- **A write goes out with the next pass.** A write in the send queue goes out
   when a pass claims a slot for it, so it waits for what holds every pass,
-  else its turn. A waiting bound file comes first: Carol's note and her
-  cover wait together, and her state names the cover's backoff. Dan writes
-  to his library before he sets up storage: once setup finishes, his writes
-  wait to sync until the first pass sends them.
+  else it is next in line and the state is syncing, sending
+  ([`next_write_sends`](proofs/io/CovenIO/Activity.lean)). The writes behind a
+  bound file go out once it is stored, so a write waits for what holds that
+  file too, and a file's own turn comes first
+  ([`bound_before_write`](proofs/io/CovenIO/Activity.lean)): Carol's note and
+  her cover go out together, and her state is uploading a bound file, or,
+  while the cover waits out a backoff, waiting to sync with the backoff's
+  time. Dan writes to his library before he sets up storage:
+  once setup finishes, his writes are next in line and he is syncing, sending,
+  until the first pass sends them.
 - **The pause and the network never reach the state.** They hold trailing
   files only (§17.4, §17.9), which no state names. Ben's phone leaves Wi-Fi
   with a track queued: his state doesn't change, and the track's phase turns
@@ -14044,12 +14058,13 @@ Write-ups explain each model and state its assumptions:
 | Ben's mixed write 10: its note edit stays frozen and its playlist rename converts; a device's own reads don't exclude | `mixed_write`, `own_reads_do_not_exclude` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | The setter actually replaced decides; partial chains of writes | `actual_setter_decides`, `partial_write_chain` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
-| A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a bound file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a bound file moves, waiting to sync only while nothing moves and a held-back pass, a queued bound file or a queued write names its wait, and synced only once every bound file this device uploads is stored and the send queue is empty, and only after a pass that ended synced; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end, or setup, joining or restoring finishing, changes it; only opening, setup or forgetting changes whether storage is set up, and a pass, the sync loop or the attempt to connect ending on a failure that names a state, or the upload worker's panic, shows that state or one that outranks it, never synced, with every queued upload then waiting for sync to run; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_bound_stored`, `synced_writes_sent`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `network_keeps_state`, `only_setup_changes_storage`, `failed_worker_shows`, `halted_uploads_wait` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a bound file is queued decides, and a write committed while offline changes one into the other with no pass; waiting to sync only while nothing moves, naming the wait of a held-back pass, a queued bound file or a queued write, and synced only once every bound file this device uploads is stored and the send queue is empty, and only after a pass that ended synced; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end, or setup, joining or restoring finishing, changes it; only opening, setup or forgetting changes whether storage is set up, and a pass, the sync loop or the attempt to connect ending on a failure that names a state, or the upload worker's panic, shows that state or one that outranks it, never synced, with every queued upload then waiting for sync to run; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `waiting_not_moving`, `synced_bound_stored`, `synced_writes_sent`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `network_keeps_state`, `only_setup_changes_storage`, `failed_worker_shows`, `halted_uploads_wait` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* A pass ending on a failure that clears by itself and names no state of its own never names failed, and the same failure as the pass's, as a slot's block or as coven's own operation's names the same candidate on a quiet device: waiting to sync, retrying | `self_clearing_waits`, `one_retry` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| *Body.* Syncing shows exactly when an activity is named and no candidate outranks it; waiting to sync shows only while something holds the work or a retry is armed, never for a turn; what the pass moved comes first and a bound file before the writes it holds; a write committed with nothing holding it shows syncing, sending, in that step; each activity is reached | `syncing_iff`, `waiting_holds`, `move_first`, `bound_before_write`, `next_write_sends`, `every_activity` | `proofs/io/CovenIO/Activity.lean` | §19.1 |
 | *Body.* A trailing file never changes the sync state; a file's phase in the upload queue is failed exactly when its record names a state, and its backoff exactly when its record names none and nothing before the backoff holds it; a bound upload is never held by the pause, a metered network or a self-replacement's write pause, and a trailing one waits for the network only while the setting is on, the network metered and nothing but the pause before it; every phase and every wait a file can have is reached by some run of the facts' events | `trailing_keeps_state`, `phase_failed_iff`, `phase_retrying_iff`, `paused_only_trailing`, `metered_holds`, `metered_only_held`, `every_phase` | `proofs/io/CovenIO/Transfers.lean` | §17.4, §17.9 |
 | A state shows exactly when a fact names it and none names one above it; synced shows exactly on a connected device whose last pass ended synced, with nothing moving, every bound upload stored, no write queued and no record naming a state; each wait holds for the fact that names it; every state and every wait is reached by some run of the facts' events | `state_iff`, `candidate_iff`, `synced_iff`, `pass_wait_holds`, `wait_facts`, `every_state`, `every_wait` | `proofs/io/CovenIO/SyncReach.lean` | §19.1 |
 | From a store history: a device with its keys that can open every slot can read to the head and show synced; one without an audience's key at that audience's slot never ends synced from there and shows waiting to sync on the slot; one at a kept slot it can't open shows failed or update needed; one whose reader applied its member's removal or its own shows removed, and a replacement of its member's keys, or a registration in its place, device needs reset | `synced_reached`, `key_wait_reached`, `unopened_reached`, `removal_reached`, `replacement_reached`, `device_removal_reached`, `device_replacement_reached` | `proofs/io/CovenIO/StoreReach.lean` | §5.4, §14.1, §19.1 |
-| From a file history: staging a file queues its upload, and a queued bound upload holds synced off; on an otherwise settled device it shows waiting to sync and waits its turn; once storage confirmed the last queued upload the queue is empty and the device shows synced; a confirmed absence at a record's path is a lost file, whose record keeps the state at failed or what outranks it | `staged_queued`, `queue_holds_synced`, `queued_waits`, `completed_empties`, `completed_synced`, `lost_file_fails` | `proofs/io/CovenIO/FileReach.lean` | §17.9, §19.1 |
+| From a file history: staging a file queues its upload, and a queued bound upload holds synced off; on an otherwise settled device it shows syncing, uploading a bound file, for its turn; once storage confirmed the last queued upload the queue is empty and the device shows synced; a confirmed absence at a record's path is a lost file, whose record keeps the state at failed or what outranks it | `staged_queued`, `queue_holds_synced`, `queued_syncs`, `completed_empties`, `completed_synced`, `lost_file_fails` | `proofs/io/CovenIO/FileReach.lean` | §17.9, §19.1 |
 | A pending record changes only when an attempt records another condition: time passing changes none, an attempt that meets the same condition again changes none, opening keeps every condition and drops only the cause, and a record is gone only when its work settles or the progress it names (a slot, a snapshot's coverage, a move's cancellation, an operation advancing, a raise's capture) or a reset ends it | `time_keeps`, `repeat_keeps`, `reopen_keeps_condition`, `ended_only_by_its_end`, `condition_changes_only_by_save` | `proofs/io/CovenIO/PendingRecords.lean` | §19.1 |
 | *Body.* A refusal judges the stored bytes when it stands only on two reads that agree, so an object whose stored bytes pass is never refused, and a kept copy that is the stored bytes applies; refusing on one read, one fault on the way refuses an honest object for good, while with the second read the next pass applies it | `refusal_judges_stored`, `honest_never_refused`, `stored_copy_applies`, `one_read_refuses_honest`, `fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
 | *Body.* A file's cached copy is kept only once it checked, and only the stored bytes pass an authenticated check, so the stored bytes pass: a file whose cached copy fails its check is never refused, and a copy that passes applies with no read of storage; refused on the copy, a file whose stored bytes pass is refused | `cached_stored_passes`, `damaged_copy_never_refused`, `passing_copy_applies`, `copy_once_refuses_honest` | `proofs/io/CovenIO/Reread.lean` | §17.8, §19.1 |
@@ -14218,14 +14233,16 @@ recorded, comes before them all.
 |---|---|
 | no location recorded | not synced |
 | a location without credentials | signed out |
-| a running pass read or claimed a slot | syncing |
-| a bound file being sent | syncing |
-| a bound file in the upload queue, not being sent, whose record names nothing | waiting to sync |
+| a running pass's last move was a slot it read | syncing, receiving |
+| a running pass's last move was a slot it claimed | syncing, sending |
+| a bound file being sent | syncing, uploading a bound file |
+| a bound file in the upload queue, not being sent, whose record names nothing | syncing, uploading a bound file, for its turn; waiting to sync while something holds every transfer or it waits out a retry |
 | a bound file in the upload queue whose bytes are stored, waiting for the rest of its move | none |
 | a trailing file in the upload queue, in any phase, and a download; a record about either, about a trailing file's move or about a pin coven keeps | none: the file's phase shows it (§17.9) |
-| a write in the send queue | waiting to sync |
+| a write in the send queue | syncing, sending, while nothing holds the pass or a bound file; waiting to sync while something does |
+| the next pass's turn, once nothing holds it: a cooldown that held the last pass is over, or a failure that clears by itself has no backoff armed | syncing, receiving |
 | the last pass synced | synced |
-| the last pass held back by a wait: blocked at a slot whose reason names nothing, or failed with `RateLimited` | waiting to sync |
+| the last pass held back by a wait: blocked at a slot whose reason names nothing, or failed with `RateLimited` while the cooldown holds | waiting to sync |
 | the last pass got no provider response | offline; offline with unsent changes while the send queue holds a write or the upload queue a bound file with bytes to send |
 | the last pass, or a record, failed with `Authentication` | signed out |
 | ... with `PermissionDenied` or `AccessNotGranted` | no access to storage |
@@ -14233,7 +14250,7 @@ recorded, comes before them all.
 | ... with `ContainerNotFound` | storage folder missing |
 | ... with `ClockSkew` | clock wrong |
 | ... with `Bug`, coven's own, whose work retries | failed |
-| ... with a failure that clears by itself and names no state, as the pass's failure, a slot's block, coven's own operation's or a record | none: waiting to sync, retrying, for the pass, a slot or an operation |
+| ... with a failure that clears by itself and names no state, as the pass's failure, a slot's block, coven's own operation's or a record | none: waiting to sync, retrying, while its backoff is armed, for the pass, a slot or an operation |
 | ... with any other `StorageFailure`: one only a person clears with no state of its own, or one that never clears | failed |
 | the last pass `UpdateRequired`; a record's `UpdateRequired` | update needed |
 | the last pass `Removed` or `NotAdmitted`; a record's `Removed` or `NotAdmitted` | removed |
@@ -14251,8 +14268,14 @@ the first that holds: sync isn't running (`NotSyncing`); a provider's
 cooldown holds every request (`CoolingDown`); the last pass is blocked at a
 slot (`Blocked`); the last pass, a slot's application, coven's own operation
 or, for a bound file, its own attempt failed with a failure that clears by
-itself, and it waits out its backoff (`Retrying`); else its turn hasn't come,
-a file's or a write's, or the next pass's once a cooldown is over (`Queued`).
+itself, and it waits out its backoff (`Retrying`). With none of these the
+work's turn has come, and the state is syncing.
+
+What syncing names (`SyncActivity`), the first that holds: the running pass's
+last move, a slot it read (`Receiving`) or claimed (`Sending`); a bound file
+being sent, or next in line with nothing holding it (`UploadingBoundFile`); a
+write in the send queue with nothing holding it (`Sending`); the next pass's
+turn (`Receiving`).
 
 What a file in the upload queue is doing (`UploadPhase`), for each file, a
 trailing one included: an attempt sends it (`Uploading`); storage holds its

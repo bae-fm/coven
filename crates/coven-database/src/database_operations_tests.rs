@@ -88,7 +88,7 @@ impl Database {
             inner.access.with_writer(|writer| {
                 writer.batch(
                     "CREATE TEMP TRIGGER fail_sync_status
-                     BEFORE UPDATE OF last_pass,moving,last_synced ON coven_sync_status
+                     BEFORE UPDATE OF last_pass,moved,last_synced ON coven_sync_status
                      BEGIN SELECT RAISE(ABORT,'injected sync status failure'); END;",
                 )
             })

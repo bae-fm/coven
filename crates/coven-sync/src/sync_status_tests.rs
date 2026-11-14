@@ -4,7 +4,7 @@ use crate::{
     Refusal, RequiredUpdate,
 };
 use crate::{PendingSubject, UploadPhase, UploadWait};
-use coven_database::{EntryTarget, OperationRejection, WriteCutoff};
+use coven_database::{EntryTarget, OperationRejection, PassMove, WriteCutoff};
 use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
 use coven_merge::slot;
 use coven_merge::Audience;
@@ -160,7 +160,7 @@ fn member() -> MemberId {
     MemberId(uuid::Uuid::from_u128(1))
 }
 
-fn key_unavailable() -> PendingReason {
+pub(super) fn key_unavailable() -> PendingReason {
     PendingReason::KeyUnavailable {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::from_u128(2)),
@@ -230,14 +230,14 @@ fn reasons() -> Vec<PendingReason> {
 }
 
 /// The record of the upload of the `n`th file.
-fn upload_record(n: u128, reason: PendingReason) -> PendingRecord {
+pub(super) fn upload_record(n: u128, reason: PendingReason) -> PendingRecord {
     PendingRecord::new(
         PendingSubject::Upload { device: DeviceId(1), object: ObjectId(uuid::Uuid::from_u128(n)) },
         reason,
     )
 }
 
-fn record(reason: PendingReason) -> PendingRecord {
+pub(super) fn record(reason: PendingReason) -> PendingRecord {
     PendingRecord::new(PendingSubject::Slot(slot(7)), reason)
 }
 
@@ -320,7 +320,7 @@ fn pass_json(last: &Option<LastPass>) -> Value {
 fn state_name(state: &SyncState) -> &'static str {
     match state {
         SyncState::NotSynced => "notSynced",
-        SyncState::Syncing => "syncing",
+        SyncState::Syncing(_) => "syncing",
         SyncState::WaitingToSync(_) => "waitingToSync",
         SyncState::Synced => "synced",
         SyncState::Offline(_) => "offline",
@@ -344,7 +344,15 @@ fn wait_name(wait: SyncWait) -> &'static str {
         SyncWait::CoolingDown { .. } => "coolingDown",
         SyncWait::Blocked => "blocked",
         SyncWait::Retrying { .. } => "retrying",
-        SyncWait::Queued => "queued",
+    }
+}
+
+#[deny(clippy::wildcard_enum_match_arm)]
+fn activity_name(activity: SyncActivity) -> &'static str {
+    match activity {
+        SyncActivity::Receiving => "receiving",
+        SyncActivity::Sending => "sending",
+        SyncActivity::UploadingBoundFile => "uploadingBound",
     }
 }
 
@@ -373,11 +381,11 @@ fn phase_json(phase: &UploadPhase) -> Value {
     }
 }
 
-fn connected() -> Facts {
+pub(super) fn connected() -> Facts {
     Facts {
         location: RecordedLocation::Connected(CloudProvider::S3),
         last: None,
-        moving: false,
+        moved: None,
         uploads: Vec::new(),
         queued: false,
         unsent: false,
@@ -392,11 +400,11 @@ fn connected() -> Facts {
 }
 
 /// A bound upload: the state reads these.
-fn upload(progress: Progress) -> Upload {
+pub(super) fn upload(progress: Progress) -> Upload {
     Upload { progress, bound: true, retry_at: None, record: None }
 }
 
-fn offline() -> Option<LastPass> {
+pub(super) fn offline() -> Option<LastPass> {
     Some(LastPass::Offline { failure: StorageFailure::Network, error: "offline".into() })
 }
 
@@ -435,7 +443,11 @@ fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
         "check": "sync_state",
         "storage": storage,
         "last": pass_json(&facts.last),
-        "moving": facts.moving,
+        "moved": match facts.moved {
+            None => Value::Null,
+            Some(PassMove::Read) => json!("read"),
+            Some(PassMove::Claimed) => json!("claimed"),
+        },
         "uploads": uploads,
         "unsent": facts.unsent,
         "running": running,
@@ -456,14 +468,21 @@ fn shown(facts: &Facts) -> Value {
         SyncState::WaitingToSync(wait) => json!(wait_name(*wait)),
         _ => Value::Null,
     };
-    json!({"state": state_name(&state), "wait": wait})
+    let activity = match &state {
+        SyncState::Syncing(activity) => json!(activity_name(*activity)),
+        _ => Value::Null,
+    };
+    json!({"state": state_name(&state), "wait": wait, "activity": activity})
 }
 
 /// Every set of facts the differential test compares: each pass of every
 /// kind with a write queued, a stored file, both or neither; each reason as
 /// a record, as a queued upload's record with and without the record in the
-/// list, and beside a location with no credentials; every location, moving
-/// and upload progress combination, offline; and queued bound uploads under
+/// list, and beside a location with no credentials; every location, move
+/// and upload progress combination, offline; every activity source alone and
+/// in pairs (what the pass moved, a bound upload moving or next in line, a
+/// write, the next pass's turn), under each way sync can be held; and queued
+/// bound uploads under
 /// every wait, one alone or two after a stored one, so the first waiting one
 /// names the wait, with the pause, the setting to move files only on
 /// unmetered networks and the network set any way, with a write queued
@@ -505,13 +524,13 @@ fn cases() -> Vec<Facts> {
         RecordedLocation::SignedOut(CloudProvider::OneDrive),
         RecordedLocation::Connected(CloudProvider::CloudKit),
     ] {
-        for moving in [false, true] {
+        for moved in [None, Some(PassMove::Read), Some(PassMove::Claimed)] {
             for progress in
                 [None, Some(Progress::Moving), Some(Progress::Stored), Some(Progress::Queued)]
             {
                 cases.push(Facts {
                     location,
-                    moving,
+                    moved,
                     uploads: progress.map(upload).into_iter().collect(),
                     last: offline(),
                     ..connected()
@@ -564,6 +583,36 @@ fn cases() -> Vec<Facts> {
             }
         }
     }
+    let limited = Some(LastPass::Failed {
+        failure: StatusFailure::Storage(StorageFailure::RateLimited),
+        error: "slow down".into(),
+    });
+    for sync in [RetrySync::Stopped, RetrySync::Started { cooling_until: None }, cooling] {
+        for last in [None, Some(LastPass::Synced), limited.clone(), offline()] {
+            for moved in [None, Some(PassMove::Read), Some(PassMove::Claimed)] {
+                for unsent in [false, true] {
+                    let mut retrying = upload(Progress::Queued);
+                    retrying.retry_at = Some(UNIX_EPOCH + Duration::from_secs(9));
+                    for uploads in [
+                        Vec::new(),
+                        vec![upload(Progress::Moving)],
+                        vec![upload(Progress::Queued)],
+                        vec![retrying.clone()],
+                        vec![retrying, upload(Progress::Queued)],
+                    ] {
+                        cases.push(Facts {
+                            sync,
+                            last: last.clone(),
+                            moved,
+                            unsent,
+                            uploads,
+                            ..connected()
+                        });
+                    }
+                }
+            }
+        }
+    }
     for case in &mut cases {
         case.queued = case.uploads.iter().any(|upload| upload.progress != Progress::Stored);
     }
@@ -605,282 +654,6 @@ fn the_differential_covers_every_reason() {
     kinds.sort();
     kinds.dedup();
     assert_eq!(kinds.len(), 21, "{kinds:?}");
-}
-
-/// Among candidates of one state, the last pass is the cause, then the first
-/// record in the order the records arose; a location with no credentials is
-/// signed out with no cause, ahead of a pass storage refused (§19.1).
-#[test]
-fn the_cause_is_the_pass_then_the_first_record() {
-    let full = |n| {
-        upload_record(
-            n,
-            PendingReason::Storage {
-                provider: CloudProvider::S3,
-                failure: StorageFailure::QuotaExceeded,
-                answered: true,
-            },
-        )
-    };
-    let pass = LastPass::Failed {
-        failure: StatusFailure::Storage(StorageFailure::QuotaExceeded),
-        error: "full".into(),
-    };
-    let facts = Facts { records: vec![full(1), full(2)], ..connected() };
-    assert_eq!(facts.state(), SyncState::StorageFull(SyncCause::Pending(full(1))));
-    let facts = Facts { last: Some(pass.clone()), ..facts };
-    assert_eq!(facts.state(), SyncState::StorageFull(SyncCause::Pass(pass)));
-    let refused = LastPass::Failed {
-        failure: StatusFailure::Storage(StorageFailure::Authentication),
-        error: "refused".into(),
-    };
-    let facts = Facts {
-        location: RecordedLocation::SignedOut(CloudProvider::Dropbox),
-        last: Some(refused.clone()),
-        ..connected()
-    };
-    assert_eq!(
-        facts.state(),
-        SyncState::SignedOut { provider: CloudProvider::Dropbox, cause: None }
-    );
-    let facts = Facts { location: RecordedLocation::Connected(CloudProvider::Dropbox), ..facts };
-    assert_eq!(
-        facts.state(),
-        SyncState::SignedOut {
-            provider: CloudProvider::Dropbox,
-            cause: Some(SyncCause::Pass(refused))
-        }
-    );
-}
-
-/// Waiting to sync names what holds the first waiting bound upload with its
-/// time: a cooldown's end, or the upload's own retry (§19.1).
-#[test]
-fn a_wait_carries_its_time() {
-    let until = UNIX_EPOCH + Duration::from_secs(60);
-    let at = UNIX_EPOCH + Duration::from_secs(9);
-    let mut retrying = upload(Progress::Queued);
-    retrying.retry_at = Some(at);
-    let facts = Facts { uploads: vec![retrying], ..connected() };
-    assert_eq!(facts.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
-    let facts = Facts { sync: RetrySync::Started { cooling_until: Some(until) }, ..facts };
-    assert_eq!(facts.state(), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
-}
-
-/// Synced means nothing waits. A pass blocked at a slot for a wait, as for
-/// a key another device hasn't delivered, and a pass a provider's cooldown
-/// cut short, wait to sync though no file is queued, naming what holds
-/// them: sync stopped, the cooldown, the slot, or the pass's turn once the
-/// cooldown is over (§19.1).
-#[test]
-fn a_waiting_pass_is_never_synced() {
-    let until = UNIX_EPOCH + Duration::from_secs(60);
-    let stopped = RetrySync::Stopped;
-    let started = RetrySync::Started { cooling_until: None };
-    let cooling = RetrySync::Started { cooling_until: Some(until) };
-    let blocked = LastPass::Blocked { slot: slot(7), reason: key_unavailable(), error: None };
-    let limited = LastPass::Failed {
-        failure: StatusFailure::Storage(StorageFailure::RateLimited),
-        error: "slow down".into(),
-    };
-    let shown =
-        |last: &LastPass, sync| Facts { last: Some(last.clone()), sync, ..connected() }.state();
-    assert_eq!(shown(&blocked, started), SyncState::WaitingToSync(SyncWait::Blocked));
-    assert_eq!(shown(&blocked, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
-    assert_eq!(shown(&blocked, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
-    assert_eq!(shown(&limited, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
-    assert_eq!(shown(&limited, started), SyncState::WaitingToSync(SyncWait::Queued));
-    assert_eq!(shown(&limited, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
-}
-
-/// Synced means nothing waits, writes included. A write in the send queue,
-/// with nothing moving and the last pass synced or none ended here yet,
-/// waits to sync: for what holds every transfer, else its turn. A queued
-/// bound upload's wait comes before the write's (§19.1).
-#[test]
-fn a_queued_write_is_never_synced() {
-    let until = UNIX_EPOCH + Duration::from_secs(60);
-    for last in [None, Some(LastPass::Synced)] {
-        let shown = |sync| Facts { last: last.clone(), unsent: true, sync, ..connected() }.state();
-        assert_eq!(
-            shown(RetrySync::Started { cooling_until: None }),
-            SyncState::WaitingToSync(SyncWait::Queued)
-        );
-        assert_eq!(shown(RetrySync::Stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
-        assert_eq!(
-            shown(RetrySync::Started { cooling_until: Some(until) }),
-            SyncState::WaitingToSync(SyncWait::CoolingDown { until })
-        );
-        // The pause holds trailing uploads only, which the state never
-        // reads: a write beside a paused bound upload waits for its turn.
-        let paused = Facts {
-            last: last.clone(),
-            unsent: true,
-            paused: true,
-            uploads: vec![upload(Progress::Queued)],
-            queued: true,
-            ..connected()
-        };
-        assert_eq!(paused.state(), SyncState::WaitingToSync(SyncWait::Queued));
-        let moving = Facts { last: last.clone(), unsent: true, moving: true, ..connected() };
-        assert_eq!(moving.state(), SyncState::Syncing);
-    }
-}
-
-/// A bug stays failed while its work retries: a record of storage's bug
-/// names failed, as one of a local bug does, never nothing (§19.1, E15).
-#[test]
-fn a_bug_names_failed_while_its_work_retries() {
-    for reason in [
-        PendingReason::Storage {
-            provider: CloudProvider::S3,
-            failure: StorageFailure::Bug,
-            answered: false,
-        },
-        PendingReason::Failed(LocalFailure::Bug),
-    ] {
-        let bugged = upload_record(1, reason);
-        let facts = Facts { records: vec![bugged.clone()], ..connected() };
-        assert_eq!(facts.state(), SyncState::Failed(SyncCause::Pending(bugged)));
-    }
-}
-
-/// The uploads the database reads: the first one sending, the first queued
-/// one with no record, and every one with a record, in queue order
-/// (`sync_facts.rs`).
-fn reduced(queue: &[Upload]) -> Vec<Upload> {
-    let first = |wanted: &dyn Fn(&Upload) -> bool| queue.iter().position(wanted);
-    let sending = first(&|upload| upload.progress == Progress::Moving);
-    let waiting = first(&|upload| upload.progress == Progress::Queued && upload.record.is_none());
-    queue
-        .iter()
-        .enumerate()
-        .filter(|(at, upload)| {
-            upload.record.is_some() || Some(*at) == sending || Some(*at) == waiting
-        })
-        .map(|(_, upload)| upload.clone())
-        .collect()
-}
-
-/// The state from the reduced uploads equals the state from the whole queue,
-/// for every queue of up to three bound uploads over every progress, retry
-/// and record (none, one that names a state, one that names none), under
-/// each way the last pass ended.
-#[test]
-fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
-    let at = |n: u64| UNIX_EPOCH + Duration::from_secs(n);
-    let kinds = [
-        PendingReason::FileUnavailable(FileMissingReason::Lost),
-        PendingReason::Storage {
-            provider: CloudProvider::S3,
-            failure: StorageFailure::QuotaExceeded,
-            answered: false,
-        },
-        PendingReason::Paused,
-        PendingReason::Waits(Prerequisite::SequenceCatchUp),
-    ];
-    let mut alphabet = Vec::new();
-    for progress in [Progress::Moving, Progress::Stored, Progress::Queued] {
-        for retrying in [false, true] {
-            for record in [None, Some(0), Some(1), Some(2)] {
-                alphabet.push((progress, retrying, record));
-            }
-        }
-    }
-    let build = |picks: &[usize]| -> Vec<Upload> {
-        (0_u64..)
-            .zip(picks)
-            .map(|(n, pick)| {
-                let (progress, retrying, record) = alphabet[*pick];
-                Upload {
-                    progress,
-                    bound: true,
-                    retry_at: retrying.then(|| at(10 + n)),
-                    record: record.map(|kind| upload_record(n.into(), kinds[kind].clone())),
-                }
-            })
-            .collect()
-    };
-    let mut queues = vec![Vec::new()];
-    for a in 0..alphabet.len() {
-        queues.push(vec![a]);
-        for b in 0..alphabet.len() {
-            queues.push(vec![a, b]);
-            for c in 0..alphabet.len() {
-                queues.push(vec![a, b, c]);
-            }
-        }
-    }
-    let lasts = [None, offline()];
-    for picks in &queues {
-        let queue = build(picks);
-        for last in &lasts {
-            let whole = Facts {
-                last: last.clone(),
-                uploads: queue.clone(),
-                queued: queue.iter().any(|upload| upload.progress != Progress::Stored),
-                ..connected()
-            };
-            let kept = Facts { uploads: reduced(&queue), ..whole.clone() };
-            assert_eq!(kept.state(), whole.state(), "{queue:?}");
-        }
-    }
-}
-
-/// A closed store's state is the one opening shows before sync starts: the
-/// move and the cooldown a process that ended mid-pass left in its rows
-/// show nothing, so its queued cover waits with sync not running, as a
-/// queued write alone does, and the credentials the keychain holds now
-/// decide signed out (api.md E1, E5).
-#[test]
-fn a_closed_store_shows_what_opening_shows() {
-    let facts = coven_database::SyncFacts::<PendingRecord> {
-        row: coven_database::SyncStatusRow {
-            location: RecordedLocation::Connected("Dropbox".into()),
-            last_pass: Some(serde_json::to_vec(&LastPass::Synced).unwrap()),
-            moving: true,
-            last_synced: Some(UNIX_EPOCH + Duration::from_secs(30)),
-        },
-        retry: coven_database::RetryState {
-            sync: RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(90)) },
-            held: false,
-        },
-        unsent: true,
-        uploads: vec![coven_database::UploadFacts {
-            sending: false,
-            stored: false,
-            retry_at: None,
-            record: None,
-        }],
-        queued: true,
-        records: Vec::new(),
-        paused: false,
-        unmetered_only: false,
-        metered: false,
-        keys_changing: false,
-        pass_retry: None,
-        operation_retries: Vec::new(),
-    };
-    assert_eq!(SyncStatus::computed(facts.clone()).unwrap().state, SyncState::Syncing);
-    let closed = |location| SyncStatus::closed(facts.clone(), location).unwrap();
-    assert_eq!(
-        closed(RecordedLocation::Connected(CloudProvider::Dropbox)),
-        SyncStatus {
-            state: SyncState::WaitingToSync(SyncWait::NotSyncing),
-            last_synced: Some(UNIX_EPOCH + Duration::from_secs(30)),
-        }
-    );
-    assert_eq!(
-        closed(RecordedLocation::SignedOut(CloudProvider::Dropbox)).state,
-        SyncState::SignedOut { provider: CloudProvider::Dropbox, cause: None }
-    );
-    let write_only = coven_database::SyncFacts { uploads: Vec::new(), queued: false, ..facts };
-    assert_eq!(
-        SyncStatus::closed(write_only, RecordedLocation::Connected(CloudProvider::Dropbox))
-            .unwrap()
-            .state,
-        SyncState::WaitingToSync(SyncWait::NotSyncing)
-    );
 }
 
 /// An upload of each kind: bound or trailing, sending, stored or queued, with
@@ -943,50 +716,4 @@ fn io_differential_upload_phase() {
             facts.uploads.iter().map(|upload| phase_json(&facts.upload_phase(upload))).collect();
         assert_eq!(&Value::Array(actual), expected, "{input}");
     }
-}
-
-/// A failure that clears by itself and names no state of its own is one wait
-/// with the time of the next try, whichever way it was met: the pass's own
-/// failure with the provider answering, a slot's application, coven's own
-/// operation, a cooldown over. A pass that got no answer is offline, and a
-/// failure only a person clears keeps its own state (§19.1).
-#[test]
-fn a_failure_that_clears_by_itself_waits_for_its_backoff() {
-    let at = UNIX_EPOCH + Duration::from_secs(5);
-    let network = |answered| PendingReason::Storage {
-        provider: CloudProvider::S3,
-        failure: StorageFailure::Network,
-        answered,
-    };
-    let failed = |failure| LastPass::Failed { failure, error: "503".into() };
-    let blocked = |reason| LastPass::Blocked { slot: slot(7), reason, error: None };
-    let met = [
-        failed(StatusFailure::Storage(StorageFailure::Network)),
-        failed(StatusFailure::Storage(StorageFailure::Conflict)),
-        failed(StatusFailure::Storage(StorageFailure::SessionExpired)),
-        failed(StatusFailure::Storage(StorageFailure::RateLimited)),
-        failed(StatusFailure::Operation(record(network(true)))),
-        failed(StatusFailure::Operation(record(PendingReason::Failed(LocalFailure::Shutdown)))),
-        blocked(network(true)),
-    ];
-    for last in met {
-        let armed = Facts { last: Some(last.clone()), pass_retry: Some(at), ..connected() };
-        assert_eq!(armed.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }), "{last:?}");
-        let turn = Facts { pass_retry: None, ..armed.clone() };
-        assert_eq!(turn.state(), SyncState::WaitingToSync(SyncWait::Queued), "{last:?}");
-        let written = Facts { unsent: true, ..armed };
-        assert_eq!(written.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
-    }
-    let blocked_on_a_key =
-        Facts { last: Some(blocked(key_unavailable())), pass_retry: Some(at), ..connected() };
-    assert_eq!(blocked_on_a_key.state(), SyncState::WaitingToSync(SyncWait::Blocked));
-    let no_answer = Facts { last: offline(), pass_retry: Some(at), ..connected() };
-    assert!(matches!(no_answer.state(), SyncState::Offline(_)), "{:?}", no_answer.state());
-    let refused = failed(StatusFailure::Storage(StorageFailure::Refused));
-    let never = Facts { last: Some(refused), pass_retry: Some(at), ..connected() };
-    assert!(matches!(never.state(), SyncState::Failed(_)), "{:?}", never.state());
-    let operation =
-        failed(StatusFailure::Operation(record(PendingReason::Failed(LocalFailure::Operation))));
-    let failed_for_good = Facts { last: Some(operation), pass_retry: Some(at), ..connected() };
-    assert!(matches!(failed_for_good.state(), SyncState::Failed(_)));
 }

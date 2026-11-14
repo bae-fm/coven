@@ -11,7 +11,7 @@
 //! time; each start of sync adds one to `starts`, so even a start that ends
 //! the way the last one did writes the row; a store-wide worker's panic
 //! halts sync until the store reopens (`halted`), after which no pass writes
-//! the row; the loop writes that its pass moved a slot (`moving`) and how the
+//! the row; the loop writes what its pass moved last, a slot it read or one it claimed (`moved`) and how the
 //! pass ended (`last_pass`, which sync encodes as JSON and the app reads as
 //! `LastPass`), with a synced pass's finish as `last_synced`, in milliseconds
 //! since the Unix epoch by the store's clock. That time never goes backward:
@@ -34,14 +34,14 @@ pub(super) const TABLE: &str = "CREATE TABLE coven_sync_status (
         storage TEXT NOT NULL CHECK(storage IN ('none','signed_out','connected')),
         provider TEXT,
         last_pass BLOB,
-        moving INTEGER NOT NULL CHECK(moving IN (0,1)),
+        moved TEXT CHECK(moved IN ('read','claimed')),
         last_synced INTEGER CHECK(last_synced>=0),
         starts INTEGER NOT NULL CHECK(starts>=0),
         halted INTEGER NOT NULL CHECK(halted IN (0,1)),
         CHECK((storage='none')=(provider IS NULL))
     ) STRICT;
-    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moving,last_synced,starts,halted)
-        VALUES(1,'none',NULL,NULL,0,NULL,0,0);";
+    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moved,last_synced,starts,halted)
+        VALUES(1,'none',NULL,NULL,NULL,NULL,0,0);";
 
 /// Whether a storage location is recorded on this device, and whether this
 /// device holds credentials for it (§19.1), with the location's provider.
@@ -72,6 +72,33 @@ impl<P> RecordedLocation<P> {
     }
 }
 
+/// What a running pass moved: a slot it read that it hadn't, or one it claimed
+/// for a write (§19.1). The sync state shows syncing, receiving or sending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassMove {
+    /// The pass read a slot it hadn't.
+    Read,
+    /// The pass claimed a slot.
+    Claimed,
+}
+
+impl PassMove {
+    fn column(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Claimed => "claimed",
+        }
+    }
+
+    fn from_column(column: &str) -> Result<Self, DbError> {
+        match column {
+            "read" => Ok(Self::Read),
+            "claimed" => Ok(Self::Claimed),
+            _ => Err(DbError::DamagedDatabase),
+        }
+    }
+}
+
 /// `coven_sync_status`'s row as it is read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncStatusRow {
@@ -80,8 +107,8 @@ pub struct SyncStatusRow {
     /// How the last pass ended, as sync encodes it; none until a pass ends
     /// on this device.
     pub last_pass: Option<Vec<u8>>,
-    /// Whether the running pass has read a slot it hadn't, or claimed one.
-    pub moving: bool,
+    /// What the running pass moved last; none while it has moved nothing.
+    pub moved: Option<PassMove>,
     /// When a pass last reached the end of the sequence, or setup, joining
     /// or restoring finished, by the store's clock.
     pub last_synced: Option<SystemTime>,
@@ -108,8 +135,8 @@ fn columns(location: &RecordedLocation<String>) -> (&'static str, Option<&str>) 
 
 /// The row as it stands.
 pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusRow, DbError> {
-    let (storage, provider, last_pass, moving, last_synced) = db.query_row(
-        "SELECT storage,provider,last_pass,moving,last_synced FROM coven_sync_status
+    let (storage, provider, last_pass, moved, last_synced) = db.query_row(
+        "SELECT storage,provider,last_pass,moved,last_synced FROM coven_sync_status
          WHERE singleton=1",
         [],
         |row| {
@@ -117,7 +144,7 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusR
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get(2)?,
-                row.get(3)?,
+                row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
             ))
         },
@@ -131,7 +158,7 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusR
     Ok(SyncStatusRow {
         location,
         last_pass,
-        moving,
+        moved: moved.as_deref().map(PassMove::from_column).transpose()?,
         last_synced: last_synced.map(crate::stored_millis::stored_time).transpose()?,
     })
 }
@@ -150,23 +177,26 @@ pub(crate) fn save_location(
     let finished = finished.map(millis).transpose()?;
     db.internal_execute(
         "UPDATE coven_sync_status SET storage=?1,provider=?2,
-             moving=CASE WHEN ?4 THEN 0 ELSE moving END,
+             moved=CASE WHEN ?4 THEN NULL ELSE moved END,
              halted=CASE WHEN ?4 THEN 0 ELSE halted END,
              last_synced=CASE WHEN ?3 IS NULL THEN last_synced
                  ELSE max(coalesce(last_synced,?3),?3) END
          WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2
-             OR (?4 AND (moving=1 OR halted=1))
+             OR (?4 AND (moved IS NOT NULL OR halted=1))
              OR (?3 IS NOT NULL AND (last_synced IS NULL OR last_synced<?3)))",
         rusqlite::params![storage, provider, finished, opening],
     )?;
     Ok(())
 }
 
-/// Write that the running pass moved a slot.
-pub(crate) fn save_moving(db: &crate::sqlite::DatabaseConnection) -> Result<(), DbError> {
+/// Write what the running pass moved last, when that changes it.
+pub(crate) fn save_moved(
+    db: &crate::sqlite::DatabaseConnection,
+    moved: PassMove,
+) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE coven_sync_status SET moving=1 WHERE singleton=1 AND moving=0 AND halted=0",
-        [],
+        "UPDATE coven_sync_status SET moved=?1 WHERE singleton=1 AND halted=0 AND moved IS NOT ?1",
+        [moved.column()],
     )?;
     Ok(())
 }
@@ -186,8 +216,8 @@ pub(crate) fn save_last_pass(
     last_pass: &[u8],
 ) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE coven_sync_status SET last_pass=?1,moving=0
-         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moving=1)",
+        "UPDATE coven_sync_status SET last_pass=?1,moved=NULL
+         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL)",
         [last_pass],
     )?;
     Ok(())
@@ -201,7 +231,7 @@ pub(crate) fn save_halt(
     last_pass: &[u8],
 ) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE coven_sync_status SET last_pass=?1,moving=0,halted=1 WHERE singleton=1",
+        "UPDATE coven_sync_status SET last_pass=?1,moved=NULL,halted=1 WHERE singleton=1",
         [last_pass],
     )?;
     Ok(())
@@ -217,10 +247,10 @@ pub(crate) fn save_pass_end(
 ) -> Result<(), DbError> {
     let finished = finished.map(millis).transpose()?;
     db.internal_execute(
-        "UPDATE coven_sync_status SET last_pass=?1,moving=0,
+        "UPDATE coven_sync_status SET last_pass=?1,moved=NULL,
              last_synced=CASE WHEN ?2 IS NULL THEN last_synced
                  ELSE max(coalesce(last_synced,?2),?2) END
-         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moving=1
+         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL
              OR (?2 IS NOT NULL AND (last_synced IS NULL OR last_synced<?2)))",
         rusqlite::params![last_pass, finished],
     )?;

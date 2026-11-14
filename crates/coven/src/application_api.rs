@@ -127,8 +127,8 @@ pub use coven_sync::{
     InviteAccess, InviteLifetime, InviteStage, JoinRequest, LastPass, LocalFailure, MemberInfo,
     OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection, PassFailure,
     PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
-    RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure, SyncCause,
-    SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
+    RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure, SyncActivity,
+    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
     WriteCutoff,
 };
 pub use coven_sync::{

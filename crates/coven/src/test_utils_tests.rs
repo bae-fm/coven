@@ -348,7 +348,10 @@ async fn a_live_query_follows_each_sync_status_in_order() {
     entering.await.unwrap();
     assert_eq!(
         status.next().await,
-        SyncStatus { state: SyncState::Syncing, last_synced: before.last_synced }
+        SyncStatus {
+            state: SyncState::Syncing(SyncActivity::Sending),
+            last_synced: before.last_synced
+        }
     );
     release.send(()).unwrap();
     assert_eq!(
@@ -371,11 +374,14 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
     let mut status = handle.test_sync_status();
-    status.wait_for(|status| status.state == SyncState::Syncing).await;
+    status.wait_for(|status| matches!(status.state, SyncState::Syncing(_))).await;
     assert_eq!(read_note(&handle).await, "before sync");
     note(&handle, "during sync".into()).await;
     assert_eq!(read_note(&handle).await, "during sync");
-    assert_eq!(handle.test_sync_status().latest().await.state, SyncState::Syncing);
+    assert_eq!(
+        handle.test_sync_status().latest().await.state,
+        SyncState::Syncing(SyncActivity::Sending)
+    );
     let queued = handle.test_queued_writes().await.unwrap();
     release.send(()).unwrap();
     person(&handle).await;

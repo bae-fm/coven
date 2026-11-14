@@ -223,8 +223,8 @@ offline with unsent changes, signed out, no access to storage, storage full,
 storage folder missing, update needed, removed from the store, device needs
 reset, clock wrong, or failed with no named cause. It is computed from
 facts, never stored: whether a location is recorded and this device holds
-its credentials, how the last pass that reached storage ended, whether the
-running pass has read or claimed a slot, each upload in this device's queue,
+its credentials, how the last pass that reached storage ended, what the
+running pass moved last, each upload in this device's queue,
 of which the bound ones, whose write waits for them, count, whether the send
 queue holds a write, and the pending records the state reads. Each fact names a candidate state or none, and the state is
 the candidate of highest rank: the device's own standing first (removed,
@@ -243,8 +243,7 @@ decides, and `write_while_offline` that a write committed while offline
 changes one into the other in its own step, with no pass.
 `trailing_keeps_state` proves replacing the trailing uploads with any others
 never changes the state, `synced_bound_stored` that synced shows only with every
-bound upload stored, and `syncing_only_moving` that syncing shows only while a
-slot or a bound file moves; `quiet_pass_keeps` that a pass moving nothing leaves the state as it
+bound upload stored; `quiet_pass_keeps` that a pass moving nothing leaves the state as it
 was while it runs, and after it when it ends as the last pass did.
 `last_synced_never_back` proves the time of the last finished sync never
 goes backward, even when the clock does, and `last_synced_kept` that only a
@@ -265,21 +264,33 @@ after `finish` or `halt` with a failure naming a state, the state shown is
 that one or one that outranks it, never synced.
 
 Synced means nothing waits: this device's data and files are in storage.
-`synced_files_stored` proves synced shows only while every upload in the
+`synced_bound_stored` proves synced shows only while every bound upload in the
 queue has its bytes stored: none moving, queued or failed;
 `synced_writes_sent` that it shows only with the send queue empty; and
 `failed_pass_not_synced` that it shows only after a pass that ended synced.
-A pass held back by a wait, an upload queued with nothing moving, and a
-write in the send queue name waiting to sync, and `waiting_not_moving`
-proves that state shows only while no slot and no file moves, with a wait
-to name: the pass's, by `Facts.passWait`, else the first waiting upload's,
-by `Facts.uploadWait`, else the write's, which waits for the next pass as a
-held-back pass does. Both take what holds every transfer first,
-`Facts.heldAll` (sync not running, a provider's cooldown, a blocked pass);
-the next pass then waits its turn, and an upload what holds it alone (the
-pause, for a trailing upload, then a metered network the setting to
-transfer only on unmetered networks holds it on, then its backoff), else its
-turn.
+A pass held back by a wait, an upload held or retrying, and a write in the
+send queue while the next pass is held name waiting to sync, and
+`waiting_not_moving` proves that state shows only while no slot and no file
+moves, with a wait to name: the pass's, by `Facts.passWait`, else the first
+waiting upload's, by `Facts.uploadWait`, else the write's, which waits for the
+next pass as a held-back pass does. Both take what holds every transfer first,
+`Facts.heldAll` (sync not running, a provider's cooldown, a blocked pass); the
+pass then waits out the backoff of a failure that clears by itself, and an
+upload its own backoff. With none of these the turn has come, which is no
+wait: the state is syncing. A trailing upload's own waits (the pause, then a
+metered network the setting to transfer only on unmetered networks holds it
+on, then its backoff, else its turn) are its phase's.
+
+[Activity.lean](io/CovenIO/Activity.lean) names what syncing does, from the same
+facts: the first of what the pass moved last (`move_first`), a bound upload
+moving or next in line, a write next in line, and the next pass's turn.
+`syncing_iff` proves syncing shows exactly when an activity is named and no
+candidate outranks syncing; `waiting_holds` that waiting to sync shows only
+while something holds the work or a retry is armed, never for a turn;
+`bound_before_write` that a bound upload comes before the writes it holds;
+`next_write_sends` that a write committed with nothing holding it shows
+syncing, sending, in the same step; and `every_activity` that each activity is
+reached by a run of the model's events.
 
 Which uploads that setting holds is one definition, `Upload.heldOnMetered`:
 the trailing ones, as the pause holds them. `metered_holds` proves that with
@@ -292,7 +303,7 @@ the network, only what a waiting upload waits for does.
 [SyncReach.lean](io/CovenIO/SyncReach.lean) goes the other way, from the facts
 to the state. `state_iff` proves a state shows exactly when a fact names it and
 none names one above it, and `candidate_iff` says which facts can name one: the
-loop, a download, an upload, a queued write, missing credentials or a pending
+loop, an upload, a queued write, missing credentials or a pending
 record. `synced_iff` unfolds that for synced: a connected device whose last
 pass ended synced, with nothing moving, every upload stored, no write queued
 and no record naming a state. `wait_facts` gives what each wait says of the
@@ -319,8 +330,8 @@ provider or custody answers, what is recorded, or what is moving, and
 [FileReach.lean](io/CovenIO/FileReach.lean) does the same for files, reading the
 upload queue of [`Files`](storage/CovenStorage/Files.lean). `staged_queued` and
 `queue_holds_synced` prove staging a file queues its upload, and a queued upload
-holds synced off. `queued_waits` proves it shows waiting to sync on an otherwise
-settled device, waiting its turn. `completed_empties` and `completed_synced`
+holds synced off. `queued_syncs` proves it shows syncing, uploading a bound
+file, on an otherwise settled device, for its turn. `completed_empties` and `completed_synced`
 prove that once storage confirmed the last queued upload the device shows
 synced. `lost_file_fails` proves a confirmed absence is a lost file, whose record
 keeps the state at failed or what outranks it. What else holds a queued upload
@@ -354,18 +365,20 @@ pause, which hold trailing uploads only; `metered_holds` and
 model's events.
 
 The model takes the facts as given: that the loop records how each pass
-ended and whether it moved a slot, that a loop or attempt ending outside a
+ended and what it moved, that a loop or attempt ending outside a
 pass's end records its failure and that nothing moves, that opening records whether storage is
 set up, and that the live query reads them together in one transaction.
 The `sync_state` case of `ioRunner` takes a set of facts as JSON and
-answers the state's name and, for waiting to sync, its wait; the
+answers the state's name, for waiting to sync its wait, and for syncing its
+activity; the
 `upload_phase` case answers each upload's phase.
 `sync_status::tests::io_differential_sync_state` compares the state coven
 computes with the runner's for each pending reason, each provider failure
 answered or not, each local failure, each way a pass ends, blocked on or
 failed with each reason, each with a write queued or not, and bound
 uploads under each wait, alone and behind a stored one, with a write queued
-beside them or not, and the sync scope's backoff armed or not; the runner is also given trailing uploads of every
+beside them or not, and the sync scope's backoff armed or not, and each
+activity source alone and in pairs under each way sync can be held; the runner is also given trailing uploads of every
 progress and record that coven never sees, so the comparison checks
 `trailing_keeps_state` against the Rust. `sync_status::tests::io_differential_upload_phase`
 compares each upload's phase with the runner's, bound and trailing, under

@@ -13,7 +13,7 @@ use crate::DbError;
 /// loop do. The retry effect's generated `effect` changes with the columns
 /// it is computed from.
 const STATUS_CHANGES: [&str; 2] = [
-    "UPDATE coven_sync_status SET storage=storage,provider=provider,last_pass=last_pass,moving=moving,last_synced=last_synced,starts=starts,halted=halted",
+    "UPDATE coven_sync_status SET storage=storage,provider=provider,last_pass=last_pass,moved=moved,last_synced=last_synced,starts=starts,halted=halted",
     "UPDATE coven_retry_effect SET syncing=syncing,held=held,cooling_until=cooling_until",
 ];
 

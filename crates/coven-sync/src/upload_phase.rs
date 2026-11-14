@@ -17,7 +17,7 @@ impl SyncWait {
             Self::NotSyncing => Some(UploadWait::NotSyncing),
             Self::CoolingDown { until } => Some(UploadWait::CoolingDown { until }),
             Self::Blocked => Some(UploadWait::Sync),
-            Self::Retrying { .. } | Self::Queued => None,
+            Self::Retrying { .. } => None,
         }
     }
 }

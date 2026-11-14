@@ -106,7 +106,8 @@ pub use sequence_sync::sequence_pairings::{pairing_status, pairings_opened};
 pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
-    record_location, record_opened, sync_status, SyncCause, SyncState, SyncStatus, SyncWait,
+    record_location, record_opened, sync_status, SyncActivity, SyncCause, SyncState, SyncStatus,
+    SyncWait,
 };
 
 #[cfg(test)]

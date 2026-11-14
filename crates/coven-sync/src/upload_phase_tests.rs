@@ -14,7 +14,7 @@ fn connected() -> Facts {
     Facts {
         location: RecordedLocation::Connected(CloudProvider::S3),
         last: None,
-        moving: false,
+        moved: None,
         uploads: Vec::new(),
         queued: false,
         unsent: false,

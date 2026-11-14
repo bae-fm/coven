@@ -93,7 +93,7 @@ mod reserved_names;
 mod retry;
 mod stored_millis;
 pub use internal_schema::retry_effect::{RetryState, RetrySync};
-pub use internal_schema::sync_status::{RecordedLocation, SyncStatusRow};
+pub use internal_schema::sync_status::{PassMove, RecordedLocation, SyncStatusRow};
 pub use retry::{RetrySubject, RetryWait};
 pub use stored_millis::stored_time;
 mod row_key;

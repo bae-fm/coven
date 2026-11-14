@@ -10,7 +10,7 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database};
+use coven_database::{ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database, PassMove};
 use coven_format::{
     sealed_slot::{SlotKind, SlotObjectPrefix},
     sealed_write::WriteObjectPrefix,
@@ -114,7 +114,7 @@ impl SequenceSync {
     ) -> Result<ClaimSettlement, SyncError> {
         self.state.check()?;
         // Claiming moves data: the sync state shows the pass syncing (§19.1).
-        self.state.moved();
+        self.state.moved(PassMove::Claimed);
         let claim = self.database.current_claim().await?.ok_or(coven_database::DbError::NoClaim)?;
         let path = claim.attempts.last().expect("claim has an attempt");
         let upload = self.database.claim_upload().await?;

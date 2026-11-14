@@ -382,10 +382,12 @@ impl Database {
         .await
     }
 
-    /// Record that the running pass read a slot it hadn't, or claimed one.
-    /// A failure fails this handle, as `record_opened`'s does.
-    pub async fn record_moving(&self) -> Result<(), DbError> {
-        self.save_sync_status(crate::internal_schema::sync_status::save_moving).await
+    /// Record what the running pass moved last: a slot it read that it
+    /// hadn't, or one it claimed. A failure fails this handle, as
+    /// `record_opened`'s does.
+    pub async fn record_moved(&self, moved: crate::PassMove) -> Result<(), DbError> {
+        self.save_sync_status(move |db| crate::internal_schema::sync_status::save_moved(db, moved))
+            .await
     }
 
     /// Record how the last pass ended, as sync encodes it, when sync failed

@@ -68,13 +68,16 @@ async fn the_upload_read_does_not_scan_the_queue() {
         .collect();
     // `f` is the id-ordered walk under LIMIT 1 over the unstored bound
     // uploads alone, `p` the pending records with an object, `j` the files
-    // in flight; `u`, the outer read of the queue, is only ever searched by
-    // its primary key.
+    // in flight, read once by each of the two walks that leave out the
+    // upload being sent; `u`, the outer read of the queue, is only ever
+    // searched by its primary key, and the retry rows are searched through
+    // their upload index.
     assert_eq!(
         scans,
         [
             "SCAN p USING INDEX _coven_pending_object",
             "SCAN f USING INDEX _coven_file_uploads_bound_unstored",
+            "SCAN j VIRTUAL TABLE INDEX 1:",
             "SCAN j VIRTUAL TABLE INDEX 1:"
         ],
         "{plan:#?}"
@@ -169,9 +172,9 @@ async fn attach(db: &Database, table: &'static str, rows: &[&'static str]) {
 }
 
 /// The facts list the first bound upload sending, the first queued one with
-/// no record and each one with a record, in id order, and no other: the later
-/// queued ones with no record are left out, though the queue holds them
-/// (§19.1).
+/// no record and no retry, the first with no record that waits out a retry,
+/// and each one with a record, in id order, and no other: the later queued
+/// ones with no record are left out, though the queue holds them (§19.1).
 #[tokio::test]
 async fn the_facts_list_the_first_sending_the_first_waiting_and_each_record() {
     let store = TestStore::new();
@@ -202,6 +205,29 @@ async fn the_facts_list_the_first_sending_the_first_waiting_and_each_record() {
         .collect();
     assert_eq!(listed, [(false, false, false), (true, false, false), (false, false, true)]);
     assert!(facts.queued);
+    // Two of the later ones wait out a retry: the first of them is listed
+    // beside the first with no retry, since a retrying upload waits to sync
+    // while one with its turn is syncing, and the state shows the higher.
+    let wait = crate::RetryWait {
+        failures: 1,
+        not_before: std::time::UNIX_EPOCH + std::time::Duration::from_secs(9),
+        wait: std::time::Duration::from_secs(2),
+    };
+    db.inspect_writer(|sql| {
+        for upload in [&queue[1], &queue[3]] {
+            crate::retry::save(sql, crate::RetrySubject::Upload(upload.id), &wait).unwrap();
+        }
+    });
+    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let listed: Vec<_> = facts
+        .uploads
+        .iter()
+        .map(|upload| (upload.sending, upload.record.is_some(), upload.retry_at.is_some()))
+        .collect();
+    assert_eq!(
+        listed,
+        [(false, false, false), (false, false, true), (true, false, false), (false, true, false)]
+    );
 }
 
 /// A trailing upload, its record and its move's record are not sync's: with

@@ -1,6 +1,7 @@
 //! The installation's actual progress, shared with transfer workers.
 
 use crate::{DeviceIdEvidence, PendingRecord, SyncError, SyncFailure};
+use coven_database::PassMove;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::{ObjectPath, PublicationGate, StorageError, StorageFailure};
 use std::collections::BTreeSet;
@@ -33,15 +34,21 @@ impl SequenceStatusWatch {
     }
 }
 
-/// Hears the running pass's first move: the first slot it reads that it
-/// hadn't, or the first it claims (`SequenceState::pass_begins`).
-pub(crate) struct PassMoves(watch::Receiver<bool>);
+/// Hears what the running pass moves: each time the last thing it moved
+/// changes between a slot it read that it hadn't and one it claimed
+/// (`SequenceState::pass_begins`).
+pub(crate) struct PassMoves(watch::Receiver<Option<PassMove>>);
 
 impl PassMoves {
-    /// Resolves once the pass has moved a slot. The loop waiting holds the
-    /// sequence state the pass moves.
-    pub(crate) async fn moved(&mut self) {
-        drop(self.0.wait_for(|moved| *moved).await.expect("the sequence state outlives its pass"));
+    /// Resolves with what the pass moved, at each move the loop hasn't heard.
+    /// The loop waiting holds the sequence state the pass moves.
+    pub(crate) async fn moved(&mut self) -> PassMove {
+        loop {
+            self.0.changed().await.expect("the sequence state outlives its pass");
+            if let Some(moved) = *self.0.borrow_and_update() {
+                return moved;
+            }
+        }
     }
 }
 
@@ -62,9 +69,9 @@ impl Drop for ProviderCheckPermit<'_> {
 /// Shared state of this open installation. It carries no time-based permission.
 pub struct SequenceState {
     status: watch::Sender<SequenceStatus>,
-    /// Whether the running pass has read a slot it hadn't, or claimed one:
-    /// what the sync state shows as syncing (§19.1).
-    moving: watch::Sender<bool>,
+    /// What the running pass moved last, a slot it read that it hadn't or one
+    /// it claimed: what the sync state shows as syncing (§19.1).
+    moving: watch::Sender<Option<PassMove>>,
     registered: Mutex<bool>,
     /// App work outside the database that the next pass serves.
     wake: tokio::sync::Notify,
@@ -80,7 +87,7 @@ impl SequenceState {
     pub fn new() -> Self {
         Self {
             status: watch::channel(SequenceStatus::Opening).0,
-            moving: watch::channel(false).0,
+            moving: watch::channel(None).0,
             registered: Mutex::new(false),
             wake: tokio::sync::Notify::new(),
             often: crate::sync_often::SyncOften::new(),
@@ -107,14 +114,14 @@ impl SequenceState {
     pub(crate) fn subscribe(&self) -> watch::Receiver<SequenceStatus> {
         self.status.subscribe()
     }
-    /// A pass begins, having moved nothing yet: hear its first move.
+    /// A pass begins, having moved nothing yet: hear its moves.
     pub(crate) fn pass_begins(&self) -> PassMoves {
-        self.moving.send_replace(false);
+        self.moving.send_replace(None);
         PassMoves(self.moving.subscribe())
     }
     /// The running pass read a slot it hadn't, or claimed one.
-    pub(crate) fn moved(&self) {
-        self.moving.send_if_modified(|moving| !std::mem::replace(moving, true));
+    pub(crate) fn moved(&self, moved: PassMove) {
+        self.moving.send_if_modified(|moving| moving.replace(moved) != Some(moved));
     }
     /// Ask the running loop for a pass, retained until it waits.
     pub(crate) fn request_pass(&self) {

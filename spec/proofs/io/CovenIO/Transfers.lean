@@ -100,7 +100,7 @@ def Upload.phase (f : Facts) (u : Upload) : Phase :=
 with any others that keep the bound ones leaves the state as it was. -/
 theorem trailing_keeps_state (f : Facts) (us : List Upload)
     (same : us.filter (·.bound) = f.bound) : state { f with uploads := us } = state f :=
-  state_view (by simp [Facts.view, Facts.bound, same])
+  state_view (by simp [Facts.view, Facts.bound, Facts.lastRetries, same])
 
 /-- A file's phase is failed exactly when its record names a state: its
 original or copy missing or changed, its stored bytes lost or refused, or a

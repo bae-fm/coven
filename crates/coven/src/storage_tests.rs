@@ -592,7 +592,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
             .unwrap();
         listing.await.unwrap();
         let mut status = f.handle.test_sync_status();
-        status.wait_for(|status| status.state == SyncState::Syncing).await;
+        status.wait_for(|status| matches!(status.state, SyncState::Syncing(_))).await;
         // Closing and stopping first write that sync isn't running; then
         // they wait for the pass.
         let mut effect = f.handle.test_retry_effect();
@@ -609,7 +609,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
         } else {
             let stopping = crate::tests::stopping(&f.handle);
             effect.wait_for(|effect| *effect == RetryEffect::NotSyncing).await;
-            assert_eq!(f.handle.sync_status().await.unwrap().state, SyncState::Syncing);
+            assert!(matches!(f.handle.sync_status().await.unwrap().state, SyncState::Syncing(_)));
             resume.send(()).unwrap();
             stopping.await.unwrap().unwrap();
             f.connector.counted.released().await;

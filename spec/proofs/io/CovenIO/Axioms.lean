@@ -127,7 +127,12 @@ import CovenIO
 #print axioms CovenIO.SyncState.signed_out_without_credentials
 #print axioms CovenIO.SyncState.offline_unsent_iff
 #print axioms CovenIO.SyncState.offline_iff
-#print axioms CovenIO.SyncState.syncing_only_moving
+#print axioms CovenIO.SyncState.syncing_iff
+#print axioms CovenIO.SyncState.waiting_holds
+#print axioms CovenIO.SyncState.next_write_sends
+#print axioms CovenIO.SyncState.bound_before_write
+#print axioms CovenIO.SyncState.move_first
+#print axioms CovenIO.SyncState.Reached.every_activity
 #print axioms CovenIO.SyncState.waiting_not_moving
 #print axioms CovenIO.SyncState.synced_bound_stored
 #print axioms CovenIO.SyncState.trailing_keeps_state
@@ -172,7 +177,7 @@ import CovenIO
 #print axioms CovenIO.StoreReach.device_replacement_reached
 #print axioms CovenIO.FileReach.staged_queued
 #print axioms CovenIO.FileReach.queue_holds_synced
-#print axioms CovenIO.FileReach.queued_waits
+#print axioms CovenIO.FileReach.queued_syncs
 #print axioms CovenIO.FileReach.completed_empties
 #print axioms CovenIO.FileReach.completed_synced
 #print axioms CovenIO.FileReach.lost_file_fails

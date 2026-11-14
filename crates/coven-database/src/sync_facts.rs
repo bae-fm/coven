@@ -36,10 +36,12 @@ pub struct SyncFacts<P> {
     pub unsent: bool,
     /// The bound uploads the state can show, in queue order: the first one
     /// sending, the first queued one (neither sending nor stored) with no
-    /// record, and every one with a record. The state shows the first
+    /// record and none waiting out a retry, the first with no record that
+    /// does, and every one with a record. The state shows the first
     /// candidate of the highest rank, so no other upload changes it: later
-    /// sending or waiting ones tie with the first, and a stored one names
-    /// none.
+    /// sending ones tie with the first, a later queued one ties with the
+    /// first of its kind (syncing for its turn, waiting for its retry), and a
+    /// stored one names none.
     pub uploads: Vec<UploadFacts<P>>,
     /// Whether the upload queue holds a bound upload with bytes to send,
     /// whether `uploads` lists it or not.
@@ -81,9 +83,10 @@ pub struct UploadFacts<P> {
 
 /// The bound uploads the sync state can show (`SyncFacts::uploads`), each read
 /// from where its kind is small: the uploads with a record from the pending
-/// records, the first one sending from the files in flight, and the first
-/// queued one with no record by walking the bound queue in id order to the
-/// first match. The outer query then reads only those rows, and only bound
+/// records, the first one sending from the files in flight, the first queued
+/// one with no record and no retry by walking the bound queue in id order to
+/// the first match, and the first with no record that waits out a retry from
+/// the retry rows. The outer query then reads only those rows, and only bound
 /// ones.
 pub(crate) const UPLOADS: &str = "SELECT u.id,u.stored,r.not_before,e.id
      FROM _coven_file_uploads AS u
@@ -107,7 +110,18 @@ pub(crate) const UPLOADS: &str = "SELECT u.id,u.stored,r.not_before,e.id
                AND NOT EXISTS(SELECT 1 FROM _coven_pending AS p
                               WHERE p.work='upload' AND p.device=f.device
                                 AND p.object=f.object)
-             ORDER BY f.id LIMIT 1))
+               AND NOT EXISTS(SELECT 1 FROM _coven_retries AS t WHERE t.upload=f.id)
+             ORDER BY f.id LIMIT 1)
+         UNION
+         SELECT MIN(f.id) FROM _coven_retries AS t
+         CROSS JOIN _coven_file_uploads AS f ON f.id=t.upload
+         WHERE t.upload IS NOT NULL
+           AND NOT f.stored AND f.holds IS NOT NULL
+           AND f.id NOT IN (SELECT position FROM coven_sending)
+           AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=f.id)
+           AND NOT EXISTS(SELECT 1 FROM _coven_pending AS p
+                          WHERE p.work='upload' AND p.device=f.device
+                            AND p.object=f.object))
        AND u.holds IS NOT NULL
        AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
      ORDER BY u.id";

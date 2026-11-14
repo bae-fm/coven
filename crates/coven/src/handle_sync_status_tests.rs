@@ -366,11 +366,11 @@ async fn the_first_value_is_the_state_and_the_last_synced_time_is_kept() {
 }
 
 /// Dan writes a note before he sets up storage. Once setup finishes, the note
-/// waits to sync for the first pass, here held before its first request, so
-/// the state doesn't say synced with the note only on his device. Once that
-/// pass sends it, he is synced (§19.1).
+/// is next in line for the first pass, here held before its first request, so
+/// the state says syncing, sending, and never synced with the note only on his
+/// device. Once that pass sends it, he is synced (§19.1).
 #[tokio::test]
-async fn a_write_before_setup_waits_until_the_first_pass_sends_it() {
+async fn a_write_before_setup_is_sending_until_the_first_pass_sends_it() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
     let storage = std::sync::Arc::new(MemoryStorage::builder().build().unwrap());
@@ -405,7 +405,7 @@ async fn a_write_before_setup_waits_until_the_first_pass_sends_it() {
     .await
     .unwrap();
     held.await.unwrap();
-    assert_eq!(dan.sync_status().await.unwrap().state, SyncState::WaitingToSync(SyncWait::Queued));
+    assert_eq!(dan.sync_status().await.unwrap().state, SyncState::Syncing(SyncActivity::Sending));
     assert_eq!(dan.unsent_work().await.unwrap().writes, 1);
     resume.send(()).unwrap();
     dan.test_sync_status().wait_for(|status| status.state == SyncState::Synced).await;

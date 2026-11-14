@@ -276,11 +276,11 @@ async fn ended(sync: &SequenceSync, last: LastPass) -> Result<(), DbError> {
     own_write(sync, last.record_end(&sync.database, sync.clock.now()).await)
 }
 
-/// Run the pass, writing that it moved as it first reads a slot it hadn't,
-/// or claims one: until then the sync state shows what it did before, so a
-/// pass that finds nothing shows nothing (§19.1). A failed write has failed
-/// the store's handle; the pass still finishes, and the failure comes back
-/// beside its result.
+/// Run the pass, writing what it moved as it reads a slot it hadn't or claims
+/// one, each time that changes: until then the sync state shows what it did
+/// before, so a pass that finds nothing shows nothing (§19.1). A failed write
+/// has failed the store's handle; the pass still finishes, and the first
+/// failure comes back beside its result.
 async fn moving_pass(
     sync: &SequenceSync,
     codes: &crate::RestoreCodes,
@@ -288,12 +288,15 @@ async fn moving_pass(
     let mut moves = sync.state.pass_begins();
     let passing = pass(sync, codes);
     tokio::pin!(passing);
-    tokio::select! {
-        biased;
-        passed = &mut passing => (passed, Ok(())),
-        () = moves.moved() => {
-            let written = sync.database.record_moving().await;
-            (passing.await, written)
+    let mut written = Ok(());
+    loop {
+        tokio::select! {
+            biased;
+            passed = &mut passing => return (passed, written),
+            moved = moves.moved() => {
+                let recorded = sync.database.record_moved(moved).await;
+                written = written.and(recorded);
+            }
         }
     }
 }
