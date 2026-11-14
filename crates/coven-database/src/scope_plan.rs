@@ -10,8 +10,9 @@
 //! columns, and equalities with earlier sources of the core or of a core it
 //! sits in, which a write that changes the table looks up
 //! (`scope_lookup.rs`). Values pass
-//! into a subquery, never out of one: whether a subquery finds a row doesn't
-//! narrow the core around it. A subquery in FROM, a CTE and one of the app's
+//! into a subquery: whether a subquery finds a row doesn't narrow the core
+//! around it, and only the column a subquery returns as it is does come out
+//! of one, as an equality with a column around it (`scope_subquery.rs`). A subquery in FROM, a CTE and one of the app's
 //! views are read as cores too, and conditions on their rows pass into them
 //! (`derived.rs`).
 
@@ -20,6 +21,7 @@ use std::collections::BTreeSet;
 use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
 use crate::row_scope::Scopes;
+use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
 use crate::sql::unparenthesized;
@@ -197,51 +199,114 @@ impl Planner {
     /// nothing narrows but whose values others can take, in FROM order.
     fn ordered(mut self) -> Sources {
         let mut order: Vec<usize> = Vec::new();
-        for core in 0..self.cores.len() {
-            let mut remaining = self.cores[core].items.clone();
-            while !remaining.is_empty() {
-                let items = &self.items;
-                let next = remaining
-                    .iter()
-                    .copied()
-                    .find(|item| {
-                        self.edges
-                            .iter()
-                            .any(|edge| edge.member == *item && order.contains(&edge.partner))
-                    })
-                    .or_else(|| {
-                        remaining.iter().copied().find(|item| items[*item].source.term.is_some())
-                    })
-                    .or_else(|| {
-                        remaining.iter().copied().find(|item| items[*item].source.table.is_none())
-                    })
-                    .unwrap_or(remaining[0]);
-                let taken: Vec<Edge> = self
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.member == next && order.contains(&edge.partner))
-                    .cloned()
-                    .collect();
-                for edge in &taken {
-                    self.items[next].source.memberships.push(Membership {
-                        column: edge.column.clone(),
-                        affinity: edge.affinity,
-                        partner: edge.partner,
-                        value: edge.value.clone(),
-                    });
+        let all: Vec<usize> =
+            self.cores.iter().flat_map(|core| core.items.iter().copied()).collect();
+        // The items that have waited, which go as soon as they stop.
+        let mut waited: BTreeSet<usize> = BTreeSet::new();
+        while order.len() < all.len() {
+            let remaining: Vec<usize> =
+                all.iter().copied().filter(|item| !order.contains(item)).collect();
+            let waiting = self.waiting(&order, &remaining);
+            waited.extend(waiting.iter().copied());
+            let released = remaining
+                .iter()
+                .copied()
+                .find(|item| waited.contains(item) && !waiting.contains(item));
+            let free: Vec<usize> =
+                remaining.iter().copied().filter(|item| !waiting.contains(item)).collect();
+            let next = match (released, free.first()) {
+                (Some(released), _) => released,
+                // The first core with an item that may go, as every core
+                // goes in turn when none waits.
+                (None, Some(first)) => {
+                    let core = self.items[*first].core;
+                    let candidates: Vec<usize> = free
+                        .iter()
+                        .copied()
+                        .filter(|item| self.items[*item].core == core)
+                        .collect();
+                    let items = &self.items;
+                    candidates
+                        .iter()
+                        .copied()
+                        .find(|item| {
+                            self.edges
+                                .iter()
+                                .any(|edge| edge.member == *item && order.contains(&edge.partner))
+                        })
+                        .or_else(|| {
+                            candidates
+                                .iter()
+                                .copied()
+                                .find(|item| items[*item].source.term.is_some())
+                        })
+                        .or_else(|| {
+                            candidates
+                                .iter()
+                                .copied()
+                                .find(|item| items[*item].source.table.is_none())
+                        })
+                        .unwrap_or(candidates[0])
                 }
-                // A subquery's, CTE's or view's cores come later, and take
-                // the same values.
-                crate::derived::push_down(&mut self, next, None, taken);
-                remaining.retain(|item| *item != next);
-                order.push(next);
+                // Every item left waits, each on one that waits: the first
+                // goes without the values of partners not placed yet.
+                (None, None) => remaining[0],
+            };
+            let taken: Vec<Edge> = self
+                .edges
+                .iter()
+                .filter(|edge| edge.member == next && order.contains(&edge.partner))
+                .cloned()
+                .collect();
+            for edge in &taken {
+                self.items[next].source.memberships.push(Membership {
+                    column: edge.column.clone(),
+                    affinity: edge.affinity,
+                    partner: edge.partner,
+                    value: edge.value.clone(),
+                });
             }
+            // A subquery's, CTE's or view's cores come later, and take
+            // the same values.
+            crate::derived::push_down(&mut self, next, None, taken);
+            order.push(next);
         }
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),
             order,
             inlined: self.inlined.into_iter().collect(),
         }
+    }
+
+    /// The items of `remaining` that wait: those whose value comes from a
+    /// subquery's source not placed yet, which a column compared with a
+    /// subquery's value takes (`scope_subquery.rs`), and those whose every
+    /// partner waits, which couldn't take their values from a partner that
+    /// is placed after them.
+    fn waiting(&self, order: &[usize], remaining: &[usize]) -> BTreeSet<usize> {
+        let mut waiting: BTreeSet<usize> = remaining
+            .iter()
+            .copied()
+            .filter(|item| {
+                self.edges.iter().any(|edge| {
+                    edge.nested && edge.member == *item && !order.contains(&edge.partner)
+                })
+            })
+            .collect();
+        loop {
+            let starved = remaining.iter().copied().find(|item| {
+                let mut partners =
+                    self.edges.iter().filter(|edge| edge.member == *item).map(|edge| edge.partner);
+                !waiting.contains(item)
+                    && partners.clone().next().is_some()
+                    && partners.all(|partner| waiting.contains(&partner))
+            });
+            match starved {
+                Some(item) => waiting.insert(item),
+                None => break,
+            };
+        }
+        waiting
     }
 
     /// The edge `member_expr = other` gives, written in `core` with `other`
@@ -315,7 +380,7 @@ impl Planner {
                 _ => PartnerValue::Expression(other.to_string()),
             }
         };
-        Some(Edge { member, column, affinity, partner, value })
+        Some(Edge { member, column, affinity, partner, value, nested: false })
     }
 
     /// The item a column name written in `core` belongs to, and the column,
@@ -484,8 +549,11 @@ pub(crate) fn read_select<'a>(
             parts(offset, &mut found);
         }
     }
-    Ok(read_nested(connection, planner, &found, None, ctes)?.map(|()| cores))
+    Ok(read_nested(connection, planner, &found, None, ctes)?.map(|_| cores))
 }
+
+/// The SELECTs read in one core's clauses, each with its arms' cores.
+type Subqueries<'a> = Vec<(&'a Select<'a>, Vec<usize>)>;
 
 /// Read the SELECTs among `found`, each sitting in `parent`.
 fn read_nested<'a>(
@@ -494,24 +562,27 @@ fn read_nested<'a>(
     found: &[Part<'a>],
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<()>> {
+) -> rusqlite::Result<Option<Subqueries<'a>>> {
+    let mut read = Vec::new();
     for part in found {
         match part {
             Part::Name(_) | Part::Collation | Part::Function(..) => {}
             Part::Select(select) => {
-                if read_select(connection, planner, select, parent, ctes)?.is_none() {
+                let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
                     return Ok(None);
-                }
+                };
+                read.push((*select, cores));
             }
             // Its table is read outside any FROM, and so in every row.
             Part::Table => return Ok(None),
         }
     }
-    Ok(Some(()))
+    Ok(Some(read))
 }
 
-/// Read one core, which sits in `parent`: its items, then its
-/// conditions, then the SELECTs in any of its clauses.
+/// Read one core, which sits in `parent`: its items, then the SELECTs in any
+/// of its clauses, then its conditions, which a comparison with a subquery's
+/// value reads the subquery's cores for.
 fn read_core<'a>(
     connection: &Connection,
     planner: &mut Planner,
@@ -527,7 +598,7 @@ fn read_core<'a>(
             for expr in rows.iter().flat_map(|row| row.iter()) {
                 parts(expr, &mut found);
             }
-            return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|()| core));
+            return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|_| core));
         }
         OneSelect::Select {
             columns, from, where_clause, group_by, having, window_clause, ..
@@ -597,9 +668,12 @@ fn read_core<'a>(
     for definition in window_clause.iter().flat_map(|windows| windows.iter()) {
         window_parts(&definition.window, &mut found);
     }
+    let Some(subqueries) = read_nested(connection, planner, &found, Some(core), ctes)? else {
+        return Ok(None);
+    };
     let mut read = Vec::new();
     for (condition, place) in conditions {
-        read.push((read_condition(connection, planner, core, condition)?, place));
+        read.push((read_condition(connection, planner, core, condition, &subqueries)?, place));
     }
     // The conditions a row of NULLs fails come first, as they make LEFT JOINs
     // inner, which the others see.
@@ -618,18 +692,28 @@ fn read_core<'a>(
         let term = planner.items[item].source.term.clone();
         crate::derived::push_down(planner, item, term, Vec::new());
     }
-    Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|()| core))
+    Ok(Some(core))
 }
 
 /// Read one condition of `core` into the terms and edges of the items
-/// it narrows: only the core's own. A condition holding a SELECT
-/// doesn't narrow.
-fn read_condition(
+/// it narrows: only the core's own. A condition holding a SELECT doesn't
+/// narrow, except a column compared with the value a subquery returns,
+/// `subqueries` being the SELECTs the core's clauses hold.
+fn read_condition<'a>(
     connection: &Connection,
     planner: &mut Planner,
     core: usize,
-    condition: &Expr<'_>,
+    condition: &'a Expr<'a>,
+    subqueries: &Subqueries<'a>,
 ) -> rusqlite::Result<Narrowing> {
+    if let Some((member, select)) = compared_subquery(condition) {
+        let cores = subqueries.iter().find(|(read, _)| std::ptr::eq(*read, select));
+        if let Some(edge) =
+            cores.and_then(|(_, cores)| planner.subquery_edge(core, member, select, cores))
+        {
+            return Ok(Narrowing { terms: Vec::new(), edges: vec![edge] });
+        }
+    }
     let mut found = Vec::new();
     parts(condition, &mut found);
     let mut referenced = Vec::new();
@@ -708,6 +792,10 @@ pub(crate) struct Edge {
     pub(crate) affinity: Affinity,
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
+    /// Whether `partner` is the source of a subquery's value that the
+    /// member's column is compared with, which sits in a core inside the
+    /// member's: the member waits for it.
+    pub(crate) nested: bool,
 }
 
 /// `expr` without the `+` and CAST SQLite still reads as the column under

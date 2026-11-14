@@ -785,15 +785,41 @@ compares with columns of the query around it. Ben's album page marks the tracks
 that have no credited artist yet with `NOT EXISTS (SELECT 1 FROM track_artists
 AS c WHERE c.track_id = t.id)`. Coven narrows `track_artists` to the rows whose
 `track_id` is one of this release's track ids, so a credit added to another
-release's track doesn't rerun the page. Values pass into a subquery, never out
-of one: whether a subquery finds a row doesn't narrow the query around it, since
-NOT EXISTS keeps the very rows EXISTS drops, and a condition inside a subquery
-on the outer query's columns alone narrows nothing. A SELECT with no FROM, as
+release's track doesn't rerun the page. Values pass into a subquery: whether a
+subquery finds a row doesn't narrow the query around it, since NOT EXISTS keeps
+the very rows EXISTS drops, and a condition inside a subquery on the outer
+query's columns alone narrows nothing. Only a column the subquery returns as it
+is comes out of one, as the next paragraphs say. A SELECT with no FROM, as
 `SELECT EXISTS (...)`, depends on what its subqueries read, and each arm of a
 UNION, INTERSECT or EXCEPT on the rows its own conditions allow.
 
-A subquery in FROM, a CTE and one of the app's own views are read the same way,
-as queries of their own. A condition on one of their columns that passes a
+A column compared with the value a subquery returns narrows by the subquery's
+source. Ben's album grid shows each album's cover, picked as the cover of the
+album's first release: `WHERE cover.id = (SELECT r.id FROM releases AS r WHERE
+r.album_id = a.id ORDER BY r.album_order, r.id LIMIT 1)`. The value the
+subquery returns is the `id` of a row of `releases`, and coven narrows
+`releases` to the releases of the albums the window shows. So `covers` narrows
+to the covers of those releases, as `JOIN releases AS r ON r.id = cover.id`
+would narrow it, and a cover written for another album's release doesn't rerun
+the window. A cover written for a release of an album the window shows does,
+even when that release isn't the album's first. Coven looks up the release of
+the cover, not the pick: running the pick once for each album the window shows
+would cost more as the window grows, and past 1,000 steps a lookup counts as a
+match. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
+`col IN (SELECT x.c ...)`, where the subquery is one SELECT, with no UNION or
+VALUES, whose single column is a bare column `x.c` of one of its own sources,
+and where both columns have the same affinity and compare by BINARY, as a
+join's do. A subquery returning an expression, as `max(x.c)` or `x.c + 1`, or a
+column of the query around it, returns no row's own value, so it narrows
+nothing, and neither do `NOT IN`, `<>` and `<` with a subquery. The files
+beside the covers narrow the same way: `coven_files.id = cover.file` takes its
+files from the covers. A subquery that names the compared column's own source,
+as `cover.id = (SELECT r.id FROM releases AS r WHERE r.kind = cover.kind)`,
+narrows its own table without the correlation: coven can't read the subquery's
+source before the covers it takes values from.
+
+A subquery in FROM, a CTE and one of the app's own views are read as queries of
+their own. A condition on one of their columns that passes a
 table's column on unchanged narrows that table. Ben's app defines `CREATE VIEW
 album_tracks AS SELECT r.album_id, t.title FROM releases AS r JOIN tracks AS t
 ON t.release_id = r.id`, and its album page reads `SELECT title FROM

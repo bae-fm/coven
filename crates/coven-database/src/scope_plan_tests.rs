@@ -146,7 +146,6 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     for sql in [
         "SELECT value FROM items WHERE id=abs(1)",
         "SELECT value FROM items WHERE id=1 AND EXISTS(SELECT 1 FROM items)",
-        "SELECT value FROM items WHERE id IN (SELECT id FROM items WHERE id=1)",
         "SELECT value FROM items WHERE id=1 AND value NOT IN numbers",
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT value FROM items, n WHERE id=1",
         "SELECT value FROM (SELECT * FROM items LIMIT 5) WHERE id=1",

@@ -414,15 +414,21 @@ fn subquery(
     (format!("SELECT {} FROM {table} {name}{filter}", select.replace("{}", name)), narrows)
 }
 
-/// A condition holding a subquery, correlated with `sources` or not.
+/// A condition holding a subquery, correlated with `sources`, with the
+/// source it tests alone, or with none.
 fn subquery_condition(
     rng: &mut Rng,
     sources: &[(&str, &str)],
     parameters: &mut Vec<SqlValue>,
 ) -> (String, bool) {
-    let outer = if rng.chance(75) { sources } else { &[] };
-    let (_, name) = *rng.pick(sources);
-    match rng.below(4) {
+    let (tested_table, name) = *rng.pick(sources);
+    let tested = [(tested_table, name)];
+    let outer = match rng.below(10) {
+        0..=5 => sources,
+        6 | 7 => &tested,
+        _ => &[],
+    };
+    match rng.below(6) {
         0 => {
             let (sql, narrows) = subquery(rng, "q", outer, "1", parameters);
             (format!("EXISTS ({sql})"), narrows)
@@ -432,12 +438,21 @@ fn subquery_condition(
             (format!("NOT EXISTS ({sql})"), narrows)
         }
         2 => {
-            let (sql, narrows) = subquery(rng, "q", outer, "{}.a", parameters);
-            (format!("{name}.a IN ({sql})"), narrows)
+            // The subquery's column narrows the tested one.
+            let (sql, _) = subquery(rng, "q", outer, "{}.a", parameters);
+            (format!("{name}.a IN ({sql})"), true)
         }
-        _ => {
+        3 => {
             let (sql, narrows) = subquery(rng, "q", outer, "count(*)", parameters);
             (format!("{name}.c >= ({sql})"), narrows)
+        }
+        4 => {
+            let (sql, _) = subquery(rng, "q", outer, "{}.a", parameters);
+            (format!("{name}.a = ({sql} LIMIT 1)"), true)
+        }
+        _ => {
+            let (sql, _) = subquery(rng, "q", outer, "{}.b", parameters);
+            (format!("{name}.b IN ({sql})"), true)
         }
     }
 }

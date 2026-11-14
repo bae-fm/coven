@@ -364,8 +364,9 @@ async fn a_correlated_subquery_narrows_by_the_values_around_it() {
 }
 
 /// A subquery with no names from around it is narrowed by its own
-/// conditions alone, and narrows nothing around it: the releases whose id
-/// a track's subquery gives depend on every release.
+/// conditions alone. Whether it finds a row narrows nothing around it, but
+/// the column it returns narrows the one compared with it: the releases
+/// depend on the release the track's subquery gives.
 #[tokio::test]
 async fn an_uncorrelated_subquery_narrows_itself_alone() {
     let store = TestStore::new();
@@ -376,8 +377,10 @@ async fn an_uncorrelated_subquery_narrows_itself_alone() {
     ] {
         follows(&db, sql, vec![], &[
             ("UPDATE tracks SET release = 'r9' WHERE id = 4", false),
-            ("UPDATE releases SET year = year + 1 WHERE id = 'r1'", true),
+            ("UPDATE releases SET year = year + 1 WHERE id = 'r1'", false),
+            ("UPDATE releases SET year = year + 1 WHERE id = 'r2'", true),
             ("UPDATE tracks SET release = 'r1' WHERE id = 3", true),
+            ("UPDATE releases SET year = year + 1 WHERE id = 'r1'", true),
         ]).await;
         write(&db, "UPDATE tracks SET release = 'r2' WHERE id = 3; UPDATE tracks SET release = 'r3' WHERE id = 4");
     }
