@@ -56,7 +56,7 @@ fn a_column_only_counted_up_in_a_trigger_is_a_counter() {
 fn another_value_set_anywhere_makes_it_no_counter() {
     let bump = "UPDATE v SET version = version + 1;";
     assert_eq!(
-        counters_in(&[(SQL, bump), ("crates/app/src/other.sql", "UPDATE v SET version = 0;")], &[]),
+        counters_in(&[(SQL, bump), ("crates/app/src/other.sql", "UPDATE v SET version = 5;")], &[]),
         Vec::<String>::new()
     );
     assert_eq!(
@@ -92,7 +92,7 @@ fn a_rust_literal_counts_like_a_sql_file() {
         ["crates/app/src/a.rs:2 v.version"]
     );
     assert_eq!(
-        counters_in(&[(SQL, "UPDATE v SET version = 0;")], &[("crates/app/src/a.rs", rust)]),
+        counters_in(&[(SQL, "UPDATE v SET version = 5;")], &[("crates/app/src/a.rs", rust)]),
         Vec::<String>::new()
     );
 }
@@ -183,4 +183,18 @@ fn a_struct_that_is_no_request_has_no_bump() {
 fn request_types_are_the_first_type_argument_through_options_and_collections() {
     // `Query` is named inside `Option<Vec<..>>`: a request.
     assert_eq!(bumps("let y = Query { revision: q.revision + 1, offset: 0, name: n };").len(), 1);
+}
+
+#[test]
+fn a_column_counted_up_and_reset_to_zero_is_a_counter() {
+    // queue.rs: `additions = additions + 1`, and `additions = 0` on start.
+    let sql = "UPDATE q SET additions = additions + 1; UPDATE q SET additions = 0, added = NULL;";
+    assert_eq!(counters_in(&[(SQL, sql)], &[]), ["crates/app/src/schema.sql:1 q.additions"]);
+    assert_eq!(
+        counters_in(
+            &[(SQL, "UPDATE q SET additions = additions + 1; UPDATE q SET additions = ?1;")],
+            &[]
+        ),
+        Vec::<String>::new()
+    );
 }

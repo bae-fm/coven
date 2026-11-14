@@ -4,6 +4,12 @@
 //! those of the standard library and itertools; the type names, those of the
 //! standard collections and `indexmap`.
 //!
+//! Three shapes read code takes from a statement's rows without an iterator
+//! method: `join` (`.get(place)` with a computed key or place, which matches
+//! one statement's rows to another's), `length-branch` (a slice pattern, or
+//! `.len()` compared, which counts and picks the case in Rust) and `drop-row` (`and_then(|row| row.column.map(..))`, which drops the
+//! row when an optional column is empty).
+//!
 //! A callback argument is a closure or the path of a function (`Self::keep`,
 //! `char::is_numeric`): a single name may be a value, as in `line.find(sep)`.
 
@@ -139,6 +145,17 @@ fn collection(ty: &syn::Type) -> Option<String> {
     }
 }
 
+/// Whether an expression is a call of `len` with no arguments, behind
+/// references and conversions of one value (`u32::try_from(x.len())`).
+fn is_len_call(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(inner) => is_len_call(&inner.expr),
+        syn::Expr::Cast(inner) => is_len_call(&inner.expr),
+        syn::Expr::MethodCall(call) => call.method == "len" && call.args.is_empty(),
+        _ => false,
+    }
+}
+
 /// Whether an argument is a closure or the path of a function.
 fn is_callback(argument: &syn::Expr) -> bool {
     match argument {
@@ -152,6 +169,86 @@ fn is_callback(argument: &syn::Expr) -> bool {
                 })
         }
         _ => false,
+    }
+}
+
+/// Methods that take the answer of a lookup that may find nothing.
+const OPTION_CONSUMERS: [&str; 10] = [
+    "ok_or",
+    "ok_or_else",
+    "copied",
+    "cloned",
+    "expect",
+    "unwrap_or",
+    "unwrap_or_default",
+    "unwrap_or_else",
+    "is_some_and",
+    "is_some",
+];
+
+/// Whether an expression is `x.get(key)` with a computed key: a lookup of one
+/// collection's row by what another's gave. A column read (`row.get(first)?`,
+/// `row.get::<_, T>(name)`) answers a `Result`, so no option method follows it.
+fn is_lookup(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(inner) => is_lookup(&inner.expr),
+        syn::Expr::MethodCall(call) => {
+            call.method == "get"
+                && call.turbofish.is_none()
+                && call.args.len() == 1
+                && !is_literal(&call.args[0])
+        }
+        _ => false,
+    }
+}
+
+/// Whether an expression is a literal, a number or a string, possibly negated.
+fn is_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(_) => true,
+        syn::Expr::Unary(inner) => is_literal(&inner.expr),
+        syn::Expr::Paren(inner) => is_literal(&inner.expr),
+        syn::Expr::Reference(inner) => is_literal(&inner.expr),
+        _ => false,
+    }
+}
+
+/// Whether a closure's body maps a value the closure was given: `|row|
+/// row.column.map(..)` or `|(a, b)| b.map(..)`.
+fn drops_empty_row(argument: &syn::Expr) -> bool {
+    let syn::Expr::Closure(closure) = argument else { return false };
+    let mut body = closure.body.as_ref();
+    while let syn::Expr::Block(block) = body {
+        match block.block.stmts.as_slice() {
+            [syn::Stmt::Expr(inner, None)] => body = inner,
+            _ => return false,
+        }
+    }
+    let syn::Expr::MethodCall(call) = body else { return false };
+    if call.method != "map" || !matches!(call.args.first(), Some(syn::Expr::Closure(_))) {
+        return false;
+    }
+    let mut receiver = call.receiver.as_ref();
+    while let syn::Expr::Field(field) = receiver {
+        receiver = &field.base;
+    }
+    let syn::Expr::Path(path) = receiver else { return false };
+    let Some(name) = path.path.get_ident() else { return false };
+    let mut bound = Vec::new();
+    for input in &closure.inputs {
+        pattern_names(input, &mut bound);
+    }
+    bound.iter().any(|bound| name == bound)
+}
+
+fn pattern_names(pattern: &syn::Pat, names: &mut Vec<syn::Ident>) {
+    match pattern {
+        syn::Pat::Ident(ident) => names.push(ident.ident.clone()),
+        syn::Pat::Tuple(tuple) => tuple.elems.iter().for_each(|inner| pattern_names(inner, names)),
+        syn::Pat::Type(typed) => pattern_names(&typed.pat, names),
+        syn::Pat::Reference(inner) => pattern_names(&inner.pat, names),
+        syn::Pat::Paren(inner) => pattern_names(&inner.pat, names),
+        _ => {}
     }
 }
 
@@ -206,6 +303,10 @@ impl RowWork<'_> {
             (Shape::Aggregate, format!("aggregates with `{name}`"))
         } else if PICK_WITH_CALLBACK.contains(&name) && callback {
             (Shape::Pick, format!("picks with `{name}`"))
+        } else if OPTION_CONSUMERS.contains(&name) && is_lookup(&node.receiver) {
+            (Shape::Join, "joins by a key or place with `get`".to_string())
+        } else if name == "and_then" && arguments == 1 && drops_empty_row(&node.args[0]) {
+            (Shape::DropRow, "drops the row when an optional column is empty".to_string())
         } else {
             return;
         };
@@ -266,7 +367,32 @@ impl<'ast> Visit<'ast> for RowWork<'_> {
                 }
             }
         }
+        let compares = matches!(
+            node.op,
+            syn::BinOp::Eq(_)
+                | syn::BinOp::Ne(_)
+                | syn::BinOp::Lt(_)
+                | syn::BinOp::Le(_)
+                | syn::BinOp::Gt(_)
+                | syn::BinOp::Ge(_)
+        );
+        if compares && [&node.left, &node.right].into_iter().any(|side| is_len_call(side)) {
+            self.hit(
+                Shape::LengthBranch,
+                node.span().start().line,
+                "compares how many rows there are with `len`".to_string(),
+            );
+        }
         visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_pat_slice(&mut self, node: &'ast syn::PatSlice) {
+        self.hit(
+            Shape::LengthBranch,
+            node.span().start().line,
+            "branches on how many rows a slice holds".to_string(),
+        );
+        visit::visit_pat_slice(self, node);
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {

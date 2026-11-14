@@ -117,7 +117,14 @@ fn remedy(rule: &str, shape: Shape) -> String {
         Shape::KeptState => {
             "a read starts from the database every time: drop the state and read it in SQL; a value no table holds that changes many times a second travels on a keyed stream."
         }
-        Shape::Sort | Shape::Filter | Shape::Group | Shape::Aggregate | Shape::Pick => {
+        Shape::Sort
+        | Shape::Filter
+        | Shape::Group
+        | Shape::Aggregate
+        | Shape::Pick
+        | Shape::Join
+        | Shape::LengthBranch
+        | Shape::DropRow => {
             "the statement filters, sorts, joins, groups, counts and sums, in the same query or its own live query beside it; a read returns what the screen shows."
         }
     };

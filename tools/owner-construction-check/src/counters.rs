@@ -3,7 +3,8 @@
 //!
 //! - `counter`: a column some statement sets to itself plus a positive integer
 //!   (`UPDATE t SET c = c + 1`, an upsert's `DO UPDATE SET c = c + 1`) and
-//!   that no statement anywhere sets to anything else. Count tables that
+//!   that no statement anywhere sets to anything else, a reset to zero or
+//!   `NULL` aside. Count tables that
 //!   decrement, upserts that copy `excluded.c` and columns set to bound values
 //!   are none. The SQL read is that of every `.sql` file and every production
 //!   string literal, as the database rule reads it.
@@ -51,7 +52,7 @@ fn column_sets(code: &CrateCode) -> BTreeMap<String, ColumnSets> {
                     if sets.first_increment.as_ref().is_none_or(|first| place < *first) {
                         sets.first_increment = Some(place);
                     }
-                } else {
+                } else if !assignment.reset {
                     sets.set_otherwise = true;
                 }
             }

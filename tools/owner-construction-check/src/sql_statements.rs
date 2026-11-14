@@ -58,6 +58,8 @@ pub(crate) struct Assignment {
     pub(crate) table: String,
     pub(crate) column: String,
     pub(crate) increment: bool,
+    /// Whether the value is the literal zero or `NULL`: a reset.
+    pub(crate) reset: bool,
     /// The byte offset of the column's name in the text.
     pub(crate) at: usize,
 }
@@ -316,6 +318,7 @@ fn set_list(words: &[Located], start: usize, table: &str, found: &mut Vec<Assign
         found.push(Assignment {
             table: table.to_string(),
             increment: is_increment(&words[value..end], &column),
+            reset: is_reset(&words[value..end]),
             column,
             at: words[index].at,
         });
@@ -324,6 +327,12 @@ fn set_list(words: &[Located], start: usize, table: &str, found: &mut Vec<Assign
             _ => return,
         }
     }
+}
+
+/// Whether a value is the literal zero or `NULL`.
+fn is_reset(value: &[Located]) -> bool {
+    matches!(value, [only] if matches!(&only.word, Word::Name(name)
+        if name == "null" || (!name.is_empty() && name.chars().all(|digit| digit == '0'))))
 }
 
 /// Whether a value is the column plus a positive integer literal.

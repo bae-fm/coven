@@ -233,6 +233,13 @@ pub(crate) enum Shape {
     RequestBump,
     /// A comparison with a fixed limit, which picks one read path over another.
     Cutoff,
+    /// Rust joining one statement's rows to another's by a key or a place.
+    Join,
+    /// A branch on how many rows a slice holds, the count and the case done in
+    /// Rust.
+    LengthBranch,
+    /// A row dropped in Rust because one of its optional columns is empty.
+    DropRow,
 }
 
 impl Shape {
@@ -249,6 +256,9 @@ impl Shape {
             Shape::Counter => "counter",
             Shape::RequestBump => "request-bump",
             Shape::Cutoff => "cutoff",
+            Shape::Join => "join",
+            Shape::LengthBranch => "length-branch",
+            Shape::DropRow => "drop-row",
         }
     }
 }

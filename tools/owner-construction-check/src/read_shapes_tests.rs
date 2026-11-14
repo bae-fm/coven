@@ -263,6 +263,7 @@ fn read(sql: &SqlReadContext<'_>, rows: Vec<u8>, ids: Vec<u8>, q: &mut Query) {
             "crates/app/src/reads.rs:9: read picks with `any` (pick)".to_string(),
             "crates/app/src/reads.rs:12: read adds one to the request's `revision` to run the query again (request-bump)".to_string(),
             "crates/app/src/reads.rs:11: read compares with `>` against the constant LIMIT (cutoff)".to_string(),
+            "crates/app/src/reads.rs:11: read compares how many rows there are with `len` (length-branch)".to_string(),
             "crates/app/src/schema.sql:1: v.version is only ever counted up, never set to another value (counter)".to_string(),
             remedy("the statement filters, sorts, joins, groups, counts and sums, in the same query or its own live query beside it; a read returns what the screen shows."),
             remedy("a live query reruns because what it read changed: drop the counter and let the query read the rows whose change it follows."),

@@ -252,3 +252,56 @@ fn a_filter_on_one_optional_value_and_a_workspace_method_named_like_an_iterator_
         hits_in(source).into_iter().map(|hit| (hit.line, hit.shape.id())).collect::<Vec<_>>();
     assert_eq!(found, [(18, "filter"), (19, "aggregate")]);
 }
+
+#[test]
+fn a_get_by_a_computed_key_or_place_is_a_join_and_a_get_by_a_literal_is_not() {
+    // cards_read.rs: `list.get(place)` matches a card's record to a second
+    // statement's rows by index.
+    assert_eq!(
+        shapes("let release = list.get(place).copied().ok_or_else(|| unreadable(place));"),
+        ["join"]
+    );
+    // ledger_rows.rs: a map built from one statement, read with another's key.
+    assert_eq!(shapes("let held = matches.get(&position).cloned().unwrap_or_default();"), ["join"]);
+    assert_eq!(
+        shapes(
+            "let a = row.get(0); let b = row.get(\"catalog\"); let c = row.get::<_, i64>(\"run\");
+             let d = row.get(first + 1)?; let e = row.get(column)?; let f = items.get(i);
+             let g = row.get::<_, Option<String>>(column)?.ok_or_else(missing);"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn a_row_dropped_for_an_empty_column_is_found() {
+    // album.rs: the top row is dropped when its track is NULL.
+    assert_eq!(
+        shapes(
+            "let top = top.and_then(|(release_id, track_id)| {
+                 track_id.map(|track_id| Top { release_id, track_id })
+             });"
+        ),
+        ["drop-row"]
+    );
+    assert_eq!(shapes("let a = rows.and_then(|row| row.track.map(|t| t.id));"), ["drop-row"]);
+    assert_eq!(
+        shapes("let a = rows.and_then(|row| other.map(|t| t.id)); let b = rows.and_then(parse);"),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn a_branch_on_how_many_rows_there_are_is_found() {
+    // mapping_rows.rs: the case of a sheet is its audio slice's length.
+    assert_eq!(
+        shapes("match sheet.audio.as_slice() { [audio] => 1, [_, _, ..] => 2, [] => 0 };"),
+        ["length-branch"; 3]
+    );
+    // An emptiness test guards a statement's input as often as it counts rows.
+    assert_eq!(shapes("if found.is_empty() { return; }"), Vec::<&str>::new());
+    assert_eq!(
+        shapes("if rows.len() > 1 {} if 0 == rows.len() {} let n = rows.len(); let m = u32::try_from(rows.len());"),
+        ["length-branch"; 2]
+    );
+}
