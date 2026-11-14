@@ -60,6 +60,16 @@ impl std::fmt::Display for ReplacedBy {
     }
 }
 
+/// What the fresh device's registration does to the old id (§19.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Registration {
+    /// The fresh device replaces the old id: nothing else uses it.
+    ReplacesOld,
+    /// The fresh device joins its member beside the old id, which another
+    /// installation still uses and keeps (a copy that found its id in use).
+    NewDevice,
+}
+
 /// How far a recorded replacement has come (§19.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplacementPhase {
@@ -79,6 +89,9 @@ pub struct ReplacementRecord {
     pub reset: DeviceReset,
     /// The call that began the replacement and finishes it.
     pub by: ReplacedBy,
+    /// What the registration does to the old id, kept so a resumed
+    /// replacement registers the same entry.
+    pub registration: Registration,
     /// The store's name in the new installation's loaded database. While the
     /// replacement is unfinished the store doesn't open, so listings show this.
     pub name: String,

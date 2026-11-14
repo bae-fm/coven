@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "bootstrap_reset_copy.rs"]
+mod copy;
+
 /// Replace this installation with a new device loaded from storage, whatever
 /// the app's reason: another copy using this device's id, a missing device
 /// entry, or a damaged database (§19.3). Settings, credentials, the
@@ -77,6 +80,9 @@ pub(crate) async fn reset_device(
         .map_err(SyncError::from)?;
     let code = coven_sync::location_code(store, &member, data.location.clone())?;
     let (_, never) = watch::channel(false);
+    // The old database is read only once the checks above passed, so a
+    // reset they refuse leaves its files exactly as they were.
+    let registration = copy::registration_of(&directory).await?;
     // Saved keys that history has replaced are refused before the swap.
     replace::replace_installation(
         builder,
@@ -87,7 +93,7 @@ pub(crate) async fn reset_device(
             sign_in: sign_in.map_or(SignInCustody::None, SignInCustody::Session),
             name: device_name.into(),
         },
-        replace::Replacing::Reset,
+        replace::Replacing::Reset(registration),
         status,
         &never,
     )
@@ -108,11 +114,19 @@ pub(super) async fn carry_discarded_provider_work(
     if database.device_reset().await? == Some(replacement.device_reset()) {
         return Ok(());
     }
-    let path = replacement.discarded_database_path();
-    let records = match coven_database::discarded_operations(path, database.bugs()).await {
-        Ok(records) => records,
-        Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
-        Err(error) => return Err(SyncError::from(error).into()),
+    // A copy that found its id in use owes the provider nothing it carries:
+    // the work owed from before the copies parted is the keeper's, and the
+    // copy granted nothing since (§19.3).
+    let records = match replacement.registration() {
+        Registration::NewDevice => Vec::new(),
+        Registration::ReplacesOld => {
+            let path = replacement.discarded_database_path();
+            match coven_database::discarded_operations(path, database.bugs()).await {
+                Ok(records) => records,
+                Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
+                Err(error) => return Err(SyncError::from(error).into()),
+            }
+        }
     };
     Ok(sync.record_device_reset(replacement.device_reset(), &records).await?)
 }

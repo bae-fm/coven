@@ -4797,8 +4797,9 @@ failed. Instead the app passes Carol's current code to
 - Carol can give up on the laptop's copy instead. `discard_store` deletes the
   store from the laptop, both copies with it, and the laptop's own keychain
   entries. Her restore code and S3 key stay, so she can restore from scratch.
-- As in a reset, the new device registers as replacing the old one, carries the
-  old copy's owed provider cleanup, and reports the reset notice (§19.3).
+- As in a reset of a damaged database, the new device registers as replacing
+  the old one, carries the old copy's owed provider cleanup, and reports the
+  reset notice (§19.3).
 
 #### 13.2 Adding a person: invites
 
@@ -10615,6 +10616,16 @@ removal or a replacement. Coven detects only that evidence, not every clone. Eve
 where a backup forgot an attempt, content-bound nonces keep changed plaintext
 from being sealed with a reused nonce (Appendix D.4).
 
+**The copy records its stop.** A copy stopped on the evidence above writes one
+row, `_coven_device_id_in_use`, naming the slot that showed the other copy, in
+the transaction that ends its app's operations (below). If that write fails, the
+pass fails with its cause and the copy has not stopped yet: the next pass finds
+the same evidence and writes the row again, whole or not at all. The row stays
+until a reset replaces the installation or the store is deleted. Without it
+nothing durable says the copy stopped: the last pass says so only until a later
+pass ends another way, say offline, and a reset could not tell a copy from a
+damaged database.
+
 **What the app is told.** Besides the evidence above, applying a slot that
 replaces this device's id, removes the device or its member, or replaces its
 member's keys stops it and tells the app (§14.1). A stop on the evidence above
@@ -10624,10 +10635,17 @@ invite and pairing it made, as §14.1 describes: the other copy may still land
 them. None of them would ever run on the copy, and its app would follow them
 forever. Restoring never rescues the old installation's queue (§13.1).
 
+A copy stopped on this evidence is the one behind: another installation holds
+the id and keeps sending under it. The app resets the copy with `reset_device`
+without asking the person, since no choice is left to make. The reset registers
+the copy's fresh id as a new device of the same member and replaces nothing, so
+the installation that kept the id carries on (below).
+
 **Resetting a device.** The app can reset the device with
 `CovenBuilder::reset_device` ([api.md E1](api.md#e1-opening)). Coven never
 resets a device on its own. A reset discards the local database and unsent work,
-takes a fresh id, loads storage, registers the new id as replacing the old one,
+takes a fresh id, loads storage, registers the new id as replacing the old one
+(a copy that found its id in use registers it as a new device instead, below),
 and gives the app a notice naming both ids, which says unsent edits may have
 been lost. While it runs, it tells the app how far
 it has come, as restoring and joining do, so the app shows that instead of a
@@ -10635,6 +10653,41 @@ bare spinner.
 
 - Only the same member may replace its device id. Separate new devices may
   replace the same old id; each keeps its own fresh identity.
+- **A copy that found its id in use registers a new device and replaces
+  nothing.** Another installation keeps the old id and still sends under it, so
+  the registration names no old id: the old id stays an active device of the
+  member, and no device's writes are cut off, the keeper's included
+  ([`rejoin_cuts_nothing`](proofs/sequence/CovenSequence/Rejoin.lean)). The
+  reset finds this out from `_coven_device_id_in_use` in the old database,
+  which it reads before it records the replacement, and keeps the choice in its
+  record, so a resumed reset registers the same entry. A reset of a database
+  SQLite reports damaged, or of one with no such row, registers in the old
+  id's place as before. A member removed after the copies parted fails the
+  reset with `Removed(Member)` before its record, changing nothing, and replaced
+  member keys fail it with `MemberKeysReplaced`, as for any reset
+  ([`rejoin_registers`](proofs/sequence/CovenSequence/Rejoin.lean),
+  [`rejoin_refused_for_removed_member`](proofs/sequence/CovenSequence/Rejoin.lean)).
+  The installation that kept the id never finds the copy: once the copy has
+  stopped, no slot signed by the id is one the keeper's journal lacks
+  ([`keeper_never_detects`](proofs/sequence/CovenSequence/Rejoin.lean)).
+- **The copy keeps nothing unsent.** Say Ana's phone, restored from a backup,
+  queued an edit of note 42 while her tablet, the keeper, retitled note 42. Under
+  a fresh id the phone's edit would still read history only up to the parting.
+  Receivers judge a write by its device's registration at the slot it read
+  through, and the fresh id registers after that slot, so they would refuse it
+  (§7.1). Raising what the edit read through would change a record that never
+  changes, and stamping it later would let the phone's edit beat the tablet's
+  newer one. Leaving it as it is fails another way: devices forget a kept record
+  only when every write still to be judged reads past it (§16.7), and a write
+  that reads less could be dropped by a device that forgot the tablet's
+  retitling and applied by one that kept it, so their stores would differ. So
+  the reset discards the unsent writes as every reset does. A restored copy
+  loses the backup's queue, which the installation it came from went on to send
+  itself, and what it wrote before its first pass. A disk clone loses its edits
+  since cloning, made before its first pass online: every write the copy
+  numbered since the parting is unsent
+  ([`detector_landed_nothing`](proofs/sequence/CovenSequence/Rejoin.lean)). The
+  reset's notice says edits may have been lost.
 - **A damaged database** is reset the same way, from saved settings and
   custody. SQLite reports damage when a statement reads a page that doesn't
   hold what it should, and every call whose statement meets it fails with
@@ -10730,7 +10783,11 @@ laptop in place from her current restore code instead (§13.1).
   neither open nor leave the device. Deleting is refused while the call that
   began it is still running. An interrupted deletion finishes as any
   deletion from the device does (§11.6).
-- Only owed provider cleanup carries over: owed revocations of account sharing,
+- Only owed provider cleanup carries over (nothing does for a copy that found
+  its id in use: the work owed from before the copies parted is the keeper's,
+  whose journal holds the same, and the copy granted nothing since, because a
+  grant follows its landed entry (§13.2) and the copy landed none): owed
+  revocations of account sharing,
   the old installation's open invites and pairings, which become owed
   cleanup, and the records of S3 detection runs whose leftovers no cleanup has
   confirmed gone
@@ -12291,6 +12348,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, or the own write a raise wait holds, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
+| `_coven_device_id_in_use` | the one row a copy writes when it stops because another installation uses its device id: the slot that showed it, kept until a reset or deletion (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 
 ### C.2 Storage format versions
@@ -14313,6 +14371,8 @@ Write-ups explain each model and state its assumptions:
 | Settling a claim at a kept slot that holds other bytes signed by this device's id answers another copy, whatever the claim number those bytes carry | `kept_same_id_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3, §19.3 |
 | *Body.* A copy whose next snapshot or floor-body path holds other bytes takes the next number: the slot names the path it landed at, never a burned path, which keeps what it held, and the path it lands at was empty or already held its own bytes | `burned_number_safe`, `keeper_skips_the_restored_copys_body` | `proofs/sequence/CovenSequence/ObjectNumbers.lean` | §16.6, §19.3 |
 | *Body.* A settlement that takes only a claim number at or above its own as another copy misses a copy that reused an earlier number | `earlier_claim_counterexample` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
+| *Body.* A registration that replaces nothing is no cut-off of any device under any key generation, and leaves every other device's batches counting; the fresh id's registration is valid and binds the id to its member when no applied history names it and the member's current keys authorize it, and a member no longer in the store refuses it | `rejoin_cuts_nothing`, `rejoin_registers`, `rejoin_refused_for_removed_member` | `proofs/sequence/CovenSequence/Rejoin.lean` | §19.3 |
+| *Body.* Of two copies of one device id from their parting, the one that finds the other landed no slot since and has every write it numbered since unsent; the other is never stopped once the first is | `detector_landed_nothing`, `keeper_never_detects` | `proofs/sequence/CovenSequence/Rejoin.lean` | §19.3 |
 
 ### G.8 Storage (§20, Appendix E)
 
@@ -14423,14 +14483,14 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `UpdateRequired` | a slot needs a newer schema or format | §5.4, §18.3, C.2 |
 | `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
-| `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
+| `SyncError::DeviceIdInUse` | another installation uses this device's id (the copy records the stop), or a reset registered another installation in its place | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code, or a pairing's handover holding a replaced pair, is used | §12.3, §13.1, §13.2, §14.1 |
 | `SyncError::Removed(Removal)` | this device or its member was removed, or a joined store read to the end of the sequence with its pair bound nowhere in its history (`NeverAdmitted`: the admission that published it was refused); the store stops for good | §13.2, §14.1, §19.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
 | `SyncError::WorkerFailed` | the sync loop, a connection attempt or the upload worker ended on a panic, the sync loop ended on a bug in its own work, or the upload run serving a retry failed on a bug, which the bug sink heard; the retries and calls that waited on that work fail with it | api.md E15 |
 | `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
-| `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |
+| `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this installation with a fresh device id | §17.8, §19.3 |
 
 ### H.3 Status and pending records
 

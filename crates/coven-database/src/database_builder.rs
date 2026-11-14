@@ -548,6 +548,26 @@ pub async fn discarded_operations(
     )
 }
 
+/// The slot a store's database recorded when it stopped because another
+/// installation uses its device id (§19.3), read in place and read-only on a
+/// blocking thread, never opened as a store. A reset reads it before it
+/// records its replacement. A database SQLite reports damaged is
+/// `DamagedDatabase`. Like `discarded_operations`, it reads only coven's
+/// table. A caller that stops waiting leaves the read to finish, and its
+/// panic goes to `bugs` (E15).
+pub async fn read_device_id_in_use(
+    path: std::path::PathBuf,
+    bugs: &coven_foundation::task::BugSinkRef,
+) -> Result<Option<coven_merge::Slot>, DbError> {
+    finish_blocking(
+        blocking_completing("read the device id in use record", bugs.clone(), move || {
+            let db = coven_only(&path, true)?;
+            crate::device_reset::read_in_use(&db)
+        })
+        .await,
+    )
+}
+
 /// Read the name for a local store listing without migrations or a writer.
 /// It reads only coven's `_coven_store_state`, and SQLite looks a collation
 /// or function up only for a statement that uses it, so the app's aren't

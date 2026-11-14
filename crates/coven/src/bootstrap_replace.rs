@@ -11,15 +11,24 @@ pub(crate) type Prepare = Box<dyn FnOnce(BulkSqlContext<'_>) -> CovenResult<()> 
 /// app's step on the new installation, which a resumed restore past its
 /// record no longer has to run.
 pub(super) enum Replacing {
-    Reset,
+    /// A reset, whose registration replaces the old id or, for a copy that
+    /// found its id in use, joins beside it.
+    Reset(Registration),
     Restore(Option<Prepare>),
 }
 
 impl Replacing {
     fn by(&self) -> ReplacedBy {
         match self {
-            Self::Reset => ReplacedBy::Reset,
+            Self::Reset(_) => ReplacedBy::Reset,
             Self::Restore(_) => ReplacedBy::Restore,
+        }
+    }
+
+    fn registration(&self) -> Registration {
+        match self {
+            Self::Reset(registration) => *registration,
+            Self::Restore(_) => Registration::ReplacesOld,
         }
     }
 }
@@ -181,14 +190,17 @@ pub(super) async fn replace_installation(
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
     let by = call.by();
+    let registration = call.registration();
     let prepare = match call {
-        Replacing::Reset => None,
+        Replacing::Reset(_) => None,
         Replacing::Restore(prepare) => prepare,
     };
     let keychain = builder.keychain()?;
     let entries = StoreKeychain::new(keychain.clone(), store);
-    let replacement =
-        builder.directories.begin_replacement(store, by, builder.ids.as_ref()).await?;
+    let replacement = builder
+        .directories
+        .begin_replacement(store, by, registration, builder.ids.as_ref())
+        .await?;
     let swapping = !replacement.is_swapped();
     let loaded = prepare_and_load(
         &mut builder,

@@ -43,7 +43,9 @@ pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
 pub use deletion::IfUnsent;
-pub use device_reset::{DeviceReset, ReplacedBy, ReplacementPhase, ReplacementRecord};
+pub use device_reset::{
+    DeviceReset, Registration, ReplacedBy, ReplacementPhase, ReplacementRecord,
+};
 #[cfg(any(test, feature = "test-utils"))]
 pub use directory::StoreLockProbe;
 pub use directory::{

@@ -310,8 +310,23 @@ pub(crate) fn end_for_good(
     db: &DatabaseConnection,
     stop: crate::DeviceStop,
 ) -> Result<(), DbError> {
+    if stop == crate::DeviceStop::Copied {
+        return Err(DbError::Invariant { what: "a copy's stop records its slot (end_for_copy)" });
+    }
     let (running, invites) = journaled_for_good(db)?;
     end(db, stop, running, invites)
+}
+
+/// `end_for_good` for a copy that found another installation using its
+/// device id at `slot`: the same transaction records the stop, which stays
+/// until a reset replaces the installation or the store is deleted (§19.3).
+pub(crate) fn end_for_copy(
+    db: &DatabaseConnection,
+    slot: coven_merge::Slot,
+) -> Result<(), DbError> {
+    let (running, invites) = journaled_for_good(db)?;
+    end(db, crate::DeviceStop::Copied, running, invites)?;
+    crate::device_reset::record_in_use(db, slot)
 }
 
 /// The app's operations still running, and the journal rows of invites and

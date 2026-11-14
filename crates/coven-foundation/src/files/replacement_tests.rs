@@ -43,8 +43,11 @@ fn archive(f: &Fixture, replacement: &ReplacementStore) -> PathBuf {
 async fn a_resets_archive_holds_no_temporary_copies() {
     let f = store(31);
     let copy = f.store.owned_file(StoreFile::StoreKeys).leave_temporary(b"sealed keys");
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     load(&replacement);
     replacement.swap("Household".into()).unwrap();
     let archive = archive(&f, &replacement);
@@ -58,8 +61,11 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
     for discard in [false, true] {
         let f = store(1);
         let old = f.store.settings().unwrap().device_id;
-        let replacement =
-            f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+        let replacement = f
+            .layout
+            .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+            .await
+            .unwrap();
         let reset = replacement.device_reset();
         assert_eq!(reset.old_device, old);
         assert_ne!(reset.new_device, old);
@@ -87,6 +93,7 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
             Some(ReplacementRecord {
                 reset,
                 by: ReplacedBy::Reset,
+                registration: Registration::ReplacesOld,
                 name: "Household".into(),
                 phase: ReplacementPhase::Swapping,
             })
@@ -138,34 +145,48 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
 #[tokio::test]
 async fn an_unswapped_replacement_resumes_with_its_id_or_is_cancelled() {
     let f = store(2);
-    let first =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let first = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     let reset = first.device_reset();
     load(&first);
     assert!(matches!(
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await,
+        f.layout
+            .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+            .await,
         Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     drop(first);
     // The store opens meanwhile, as before.
     drop(f.store.lock_exclusive().unwrap());
-    let resumed =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let resumed = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     assert_eq!(resumed.device_reset(), reset);
     assert_eq!(std::fs::read(resumed.directory().database_path()).unwrap(), b"new database");
     resumed.cancel().unwrap();
     assert!(!f.path.join(".coven-replacement").exists());
     assert_eq!(std::fs::read(f.store.database_path()).unwrap(), b"old database");
-    let fresh =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let fresh = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     assert_ne!(fresh.device_reset().new_device, reset.new_device);
 }
 
 #[tokio::test]
 async fn a_reader_refuses_the_swap_and_moves_nothing() {
     let f = store(3);
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     load(&replacement);
     let reader = f.store.lock_read_only().unwrap();
     assert!(matches!(
@@ -186,8 +207,11 @@ async fn a_reader_refuses_the_swap_and_moves_nothing() {
 #[tokio::test]
 async fn a_recorded_replacement_refuses_opens_and_resumes_its_load() {
     let f = store(4);
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Restore, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Restore, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     let reset = replacement.device_reset();
     load(&replacement);
     replacement.record("Household".into()).unwrap();
@@ -205,6 +229,7 @@ async fn a_recorded_replacement_refuses_opens_and_resumes_its_load() {
         Some(ReplacementRecord {
             reset,
             by: ReplacedBy::Restore,
+            registration: Registration::ReplacesOld,
             name: "Household".into(),
             phase: ReplacementPhase::Registering,
         })
@@ -213,12 +238,15 @@ async fn a_recorded_replacement_refuses_opens_and_resumes_its_load() {
     assert_eq!(std::fs::read(f.store.database_path()).unwrap(), b"old database");
     let before = walk(&f.path);
     assert!(matches!(
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await,
+        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds).await,
         Err(BootstrapDirectoryError::Lock(error)) if refused(&error)
     ));
     assert_eq!(walk(&f.path), before);
-    let resumed =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Restore, &UuidIds).await.unwrap();
+    let resumed = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Restore, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     assert!(resumed.is_recorded());
     assert!(!resumed.is_swapped());
     assert_eq!(resumed.device_reset(), reset);
@@ -238,8 +266,11 @@ async fn a_recorded_replacement_refuses_opens_and_resumes_its_load() {
 #[tokio::test]
 async fn a_reader_refuses_the_record_and_changes_nothing() {
     let f = store(9);
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     load(&replacement);
     let reader = f.store.lock_read_only().unwrap();
     assert!(matches!(
@@ -258,8 +289,11 @@ async fn a_reader_refuses_the_record_and_changes_nothing() {
 async fn an_abandoned_replacement_leaves_the_old_installation() {
     let f = store(10);
     let old = f.store.settings().unwrap();
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     load(&replacement);
     replacement.record("Household".into()).unwrap();
     replacement.abandon().unwrap();
@@ -274,8 +308,11 @@ async fn an_abandoned_replacement_leaves_the_old_installation() {
 #[tokio::test]
 async fn an_interrupted_swap_is_finished_by_the_next_call() {
     let f = store(5);
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     let reset = replacement.device_reset();
     load(&replacement);
     drop(replacement);
@@ -285,6 +322,7 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
         &ReplacementRecord {
             reset,
             by: ReplacedBy::Reset,
+            registration: Registration::ReplacesOld,
             name: "Household".into(),
             phase: ReplacementPhase::Swapping,
         },
@@ -300,8 +338,11 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
     // Before the marker, only the record keeps the store from listing as
     // finished; it lists with the call that finishes it.
     assert_eq!(f.layout.readable_store_ids().await.unwrap(), [f.store.id()]);
-    let resumed =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let resumed = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     assert!(resumed.is_swapped());
     assert_eq!(resumed.device_reset(), reset);
     let directory = resumed.directory();
@@ -316,8 +357,11 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
 #[tokio::test]
 async fn a_record_left_by_interrupted_publication_begins_a_new_replacement() {
     let f = store(6);
-    let replacement =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     let reset = replacement.device_reset();
     load(&replacement);
     replacement.swap("Household".into()).unwrap();
@@ -328,7 +372,11 @@ async fn a_record_left_by_interrupted_publication_begins_a_new_replacement() {
     assert_eq!(device_reset::read(&f.path).unwrap().map(|record| record.reset), Some(reset));
     assert_eq!(f.store.unfinished_replacement().unwrap(), None);
     drop(f.store.lock_exclusive().unwrap());
-    let next = f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    let next = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
     assert!(!next.is_swapped());
     assert_eq!(next.device_reset().old_device, reset.new_device);
     assert_eq!(device_reset::read(&f.path).unwrap(), None);
@@ -342,14 +390,18 @@ async fn the_other_call_is_refused_by_a_swap_under_way() {
         [(ReplacedBy::Reset, ReplacedBy::Restore), (ReplacedBy::Restore, ReplacedBy::Reset)]
     {
         let f = store(7);
-        let replacement = f.layout.begin_replacement(f.store.id(), began, &UuidIds).await.unwrap();
+        let replacement = f
+            .layout
+            .begin_replacement(f.store.id(), began, Registration::ReplacesOld, &UuidIds)
+            .await
+            .unwrap();
         let reset = replacement.device_reset();
         load(&replacement);
         replacement.swap("Household".into()).unwrap();
         drop(replacement);
         let before = walk(&f.path);
         assert!(matches!(
-            f.layout.begin_replacement(f.store.id(), other, &UuidIds).await,
+            f.layout.begin_replacement(f.store.id(), other, Registration::ReplacesOld, &UuidIds).await,
             Err(BootstrapDirectoryError::Lock(StoreLockError::ReplacementUnfinished { store, by }))
                 if store == f.store.id() && by == began
         ));
@@ -358,7 +410,11 @@ async fn the_other_call_is_refused_by_a_swap_under_way() {
             f.store.lock_exclusive(),
             Err(StoreLockError::ReplacementUnfinished { by, .. }) if by == began
         ));
-        let resumed = f.layout.begin_replacement(f.store.id(), began, &UuidIds).await.unwrap();
+        let resumed = f
+            .layout
+            .begin_replacement(f.store.id(), began, Registration::ReplacesOld, &UuidIds)
+            .await
+            .unwrap();
         assert!(resumed.is_swapped());
         assert_eq!(resumed.device_reset(), reset);
         resumed.publish().unwrap();
@@ -375,7 +431,11 @@ async fn the_other_call_is_refused_by_a_swap_under_way() {
 async fn deletion_removes_an_unfinished_swap_once_its_call_stops() {
     for by in [ReplacedBy::Reset, ReplacedBy::Restore] {
         let f = store(8);
-        let replacement = f.layout.begin_replacement(f.store.id(), by, &UuidIds).await.unwrap();
+        let replacement = f
+            .layout
+            .begin_replacement(f.store.id(), by, Registration::ReplacesOld, &UuidIds)
+            .await
+            .unwrap();
         load(&replacement);
         replacement.swap("Household".into()).unwrap();
         assert!(matches!(
@@ -385,7 +445,7 @@ async fn deletion_removes_an_unfinished_swap_once_its_call_stops() {
         drop(replacement);
         let deletion = f.store.lock_for_deletion().unwrap().unwrap();
         assert!(matches!(
-            f.layout.begin_replacement(f.store.id(), by, &UuidIds).await,
+            f.layout.begin_replacement(f.store.id(), by, Registration::ReplacesOld, &UuidIds).await,
             Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(_)))
         ));
         deletion.remove_directory().unwrap();
@@ -430,8 +490,16 @@ fn removing_the_replaced_installation_leaves_the_runtime_thread_free() {
         tokio::runtime::Builder::new_current_thread().max_blocking_threads(1).build().unwrap();
     runtime.block_on(async {
         let f = store(2);
-        let replacement =
-            f.layout.begin_replacement(f.store.id(), ReplacedBy::Restore, &UuidIds).await.unwrap();
+        let replacement = f
+            .layout
+            .begin_replacement(
+                f.store.id(),
+                ReplacedBy::Restore,
+                Registration::ReplacesOld,
+                &UuidIds,
+            )
+            .await
+            .unwrap();
         load(&replacement);
         replacement.swap("Household".into()).unwrap();
         let archived = archive(&f, &replacement);

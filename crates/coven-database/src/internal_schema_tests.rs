@@ -140,6 +140,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_cutoffs",
                 "_coven_data_reloads",
                 "_coven_device_files",
+                "_coven_device_id_in_use",
                 "_coven_device_reset",
                 "_coven_devices",
                 "_coven_file_candidates",

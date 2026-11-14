@@ -1820,6 +1820,14 @@ keeps; each theorem below reads from it.
   member's current keys authorize it (`Registration.self_registration_valid`);
   `rejoin_refused_for_removed_member`: a member no longer in the store is refused,
   and the copy then reads Removed as today.
+- `rejoin_cuts_nothing`: a registration that replaces nothing is no `Cut` of any
+  device under any key generation, and applying or refusing it leaves `counts`
+  as it was for every device but the fresh one, so the keeper's batches under the
+  old id count on after the copy registers. The copy keeps nothing unsent: a write
+  it made carries the `read_through` of its own reading, before the fresh id's
+  registration, so no receiver could judge it (§7.1, §16.7), and
+  `detector_landed_nothing` says every write it numbered since the parting is
+  unsent.
 - `restored_copy_finds_keeper`: a restored copy reading slot 1, which the keeper
   recorded and the restored copy never did, stops with nothing queued lost.
 

@@ -2632,6 +2632,13 @@ impl CovenBuilder {
     /// Replaces this copy with a new device loaded from storage when the app
     /// chooses: a damaged database (§19.3), a missing device entry, or another
     /// copy using this id (§19.3). Uses saved settings and custody; no salvage.
+    /// A copy that recorded finding another copy using its id registers the
+    /// fresh device as a new device of its member and replaces nothing: the
+    /// other copy keeps the old id. Every other reset registers the fresh
+    /// device in the old id's place. The choice is kept in the reset's record,
+    /// so a resumed call registers the same entry. The unsent writes of the
+    /// copy that found its id in use go with the old installation, as in
+    /// every reset.
     /// A store that never set up storage has nothing to load: the call fails
     /// with `NoStorage`, changing nothing.
     /// Checks storage and keys, then loads beside the old copy, which moves
@@ -5584,7 +5591,8 @@ pub enum SyncError {
     /// having been refused. Syncing stops for good (§13.2, §14.1).
     Removed(Removal),
     /// Another copy uses this device's id; this one sends nothing more.
-    /// Nothing is recorded; `reset_device` is the app's option (§19.3).
+    /// The copy records the stop in its database, which stays until a reset
+    /// or deletion, and `reset_device` takes a fresh id for it (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
     /// Held signing credentials are no longer current for this stable id.
     /// Sending stops; restoring with current keys registers a new device.
@@ -6073,6 +6081,8 @@ impl CovenHandle {
 }
 
 /// A completed replacement of this installation, not a membership removal.
+/// For a copy that found its id in use, `old_device` is the id the other
+/// installation keeps, and the registration replaced nothing.
 pub struct DeviceReset {
     pub old_device: DeviceId,
     pub new_device: DeviceId,

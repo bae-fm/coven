@@ -763,6 +763,14 @@ impl CovenHandle {
         self.database.test_snapshot_section_bytes(id).await
     }
 
+    /// Make writes of the record a copy keeps when it stops on another
+    /// installation's use of its device id fail, as a full disk would, or
+    /// let them succeed again.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_fail_device_id_in_use(&self, fail: bool) -> Result<(), DbError> {
+        self.database.test_fail_device_id_in_use(fail).await
+    }
+
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn test_queued_writes(

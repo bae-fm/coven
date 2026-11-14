@@ -20,8 +20,8 @@ use super::{
     lock,
     protection::Protection,
     settings, BootstrapDirectoryError, BootstrapStore, DeviceReset, DirectoryCreationError,
-    FileError, ReplacedBy, ReplacementPhase, ReplacementRecord, StoreDir, StoreDirAccess,
-    StoreLock, StoreLockError,
+    FileError, Registration, ReplacedBy, ReplacementPhase, ReplacementRecord, StoreDir,
+    StoreDirAccess, StoreLock, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
 use crate::locks::lock_unpoisoned;
@@ -42,6 +42,9 @@ pub struct ReplacementStore {
     id: StoreId,
     reset: DeviceReset,
     by: ReplacedBy,
+    /// What the registration does to the old id: the recorded choice for a
+    /// recorded replacement, else the call's.
+    registration: Registration,
     lease: BootstrapLease,
     /// Keeps every handle out while the new installation loads and swaps in.
     writer: Mutex<Option<StoreLock>>,
@@ -61,6 +64,11 @@ impl ReplacementStore {
     /// The installation being replaced and its fresh successor.
     pub fn device_reset(&self) -> DeviceReset {
         self.reset
+    }
+
+    /// What the fresh device's registration does to the old id.
+    pub fn registration(&self) -> Registration {
+        self.registration
     }
 
     /// Whether the new installation has taken the store's place.
@@ -112,6 +120,7 @@ impl ReplacementStore {
         let record = ReplacementRecord {
             reset: self.reset,
             by: self.by,
+            registration: self.registration,
             name,
             phase: ReplacementPhase::Registering,
         };
@@ -148,6 +157,7 @@ impl ReplacementStore {
                 &ReplacementRecord {
                     reset: self.reset,
                     by: self.by,
+                    registration: self.registration,
                     name,
                     phase: ReplacementPhase::Swapping,
                 },
@@ -247,6 +257,7 @@ pub(super) async fn begin(
     root: &Path,
     id: StoreId,
     by: ReplacedBy,
+    registration: Registration,
     ids: &dyn IdSource,
     protection: Protection,
     bugs: crate::task::BugSinkRef,
@@ -345,6 +356,8 @@ pub(super) async fn begin(
             (DeviceReset { old_device: current.device_id, new_device: new }, Some(loading), None)
         }
     };
+    // A recorded replacement registers the entry it recorded.
+    let registration = recorded.as_ref().map_or(registration, |record| record.registration);
     // Once swapped in, the marker refuses other opens.
     let writer = loading.is_some().then_some(writer);
     Ok(ReplacementStore {
@@ -353,6 +366,7 @@ pub(super) async fn begin(
         id,
         reset,
         by,
+        registration,
         lease,
         writer: Mutex::new(writer),
         readers: Mutex::new(readers),

@@ -125,6 +125,22 @@ impl Database {
         .await
     }
 
+    /// Make every write of the device-id-in-use record fail, as a full disk
+    /// would, or let them succeed again.
+    pub async fn test_fail_device_id_in_use(&self, fail: bool) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.batch(if fail {
+                    "CREATE TEMP TRIGGER fail_device_id_in_use BEFORE INSERT ON _coven_device_id_in_use
+                     BEGIN SELECT RAISE(ABORT,'injected device id record failure'); END;"
+                } else {
+                    "DROP TRIGGER IF EXISTS fail_device_id_in_use;"
+                })
+            })
+        })
+        .await
+    }
+
     /// Make every later write of the retry effect fail, as a full disk would.
     pub async fn test_fail_retry_effect(&self) -> Result<(), DbError> {
         self.call(move |inner| {

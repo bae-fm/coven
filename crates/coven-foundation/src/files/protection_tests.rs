@@ -350,7 +350,12 @@ async fn a_replacement_gives_the_class_to_both_installations() {
     let store = store_with_files(&plain, app_dir.path()).unwrap();
     let replacement = plain
         .file_protection(FileProtection::Complete)
-        .begin_replacement(ID, crate::files::ReplacedBy::Reset, &UuidIds)
+        .begin_replacement(
+            ID,
+            crate::files::ReplacedBy::Reset,
+            crate::files::Registration::ReplacesOld,
+            &UuidIds,
+        )
         .await;
     let area = store.join(".coven-replacement");
     if !keeps_classes(app_dir.path()) {

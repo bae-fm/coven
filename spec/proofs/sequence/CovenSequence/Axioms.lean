@@ -63,6 +63,7 @@ import SequenceApply
 #print axioms CovenSequence.Rejoin.detector_sent_all_occupied
 #print axioms CovenSequence.Rejoin.keeper_never_detects
 #print axioms CovenSequence.Rejoin.rejoin_registers
+#print axioms CovenSequence.Rejoin.rejoin_cuts_nothing
 #print axioms CovenSequence.Rejoin.rejoin_refused_for_removed_member
 #print axioms CovenSequence.Rejoin.restored_copy_finds_keeper
 #print axioms CovenSequence.CopyOrder.reader_holder_sends

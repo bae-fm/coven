@@ -325,6 +325,19 @@ impl Database {
         .await
     }
 
+    /// `end_for_good` for history showing another copy of this installation
+    /// using its device id at `slot`, which also records the stop in the
+    /// same transaction, so a reset can tell this copy from a damaged
+    /// database (§19.3). The record stays until a reset or deletion.
+    pub async fn end_for_copy(&self, slot: coven_merge::Slot) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| crate::operation::end_for_copy(db, slot))
+            })
+        })
+        .await
+    }
+
     /// How the applied state stops this installation for good, if it does:
     /// its device removed or replaced, its member removed, or its member
     /// bound to a pair it doesn't hold (§14.1). `None` while the applied

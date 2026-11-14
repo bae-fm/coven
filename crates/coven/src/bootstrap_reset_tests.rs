@@ -6,19 +6,19 @@ use coven_storage::{
 };
 use std::time::{Duration, UNIX_EPOCH};
 
-struct Fixture {
-    app: Coven,
-    handle: CovenHandle,
-    storage: Arc<MemoryStorage>,
+pub(super) struct Fixture {
+    pub(super) app: Coven,
+    pub(super) handle: CovenHandle,
+    pub(super) storage: Arc<MemoryStorage>,
     /// The connector over `storage` every handle opens with.
-    connector: Arc<crate::tests::Connector>,
-    clock: Arc<FixedClock>,
-    directory: StoreDir,
+    pub(super) connector: Arc<crate::tests::Connector>,
+    pub(super) clock: Arc<FixedClock>,
+    pub(super) directory: StoreDir,
     _root: tempfile::TempDir,
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
@@ -36,7 +36,7 @@ impl Fixture {
         Self { app, handle, storage, connector, clock, directory, _root: root }
     }
 
-    async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
+    pub(super) async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
         self.handle
             .setup_s3_storage(
                 self.storage.config(),
@@ -48,7 +48,7 @@ impl Fixture {
     }
 }
 
-fn builder(
+pub(super) fn builder(
     app: &Coven,
     clock: &Arc<FixedClock>,
     connector: &Arc<crate::tests::Connector>,
@@ -64,7 +64,7 @@ fn builder(
         )])
 }
 
-async fn uploaded(f: &Fixture, id: &'static str) {
+pub(super) async fn uploaded(f: &Fixture, id: &'static str) {
     f.handle
         .write(move |sql| {
             sql.execute("INSERT INTO notes VALUES(?1,'uploaded')", [id])?;
@@ -75,7 +75,7 @@ async fn uploaded(f: &Fixture, id: &'static str) {
     wait_for_sent(&f.handle).await;
 }
 
-async fn notes(handle: &CovenHandle) -> Vec<String> {
+pub(super) async fn notes(handle: &CovenHandle) -> Vec<String> {
     handle
         .read(|sql| {
             Ok::<_, CovenError>(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?)
@@ -84,7 +84,7 @@ async fn notes(handle: &CovenHandle) -> Vec<String> {
         .unwrap()
 }
 
-fn reopen(f: &Fixture) -> CovenBuilder {
+pub(super) fn reopen(f: &Fixture) -> CovenBuilder {
     builder(&f.app, &f.clock, &f.connector)
 }
 
@@ -95,7 +95,7 @@ fn loading_area(f: &Fixture) -> std::path::PathBuf {
 
 /// The installation's id in device-only custody, which a backup doesn't carry
 /// to another device.
-fn custody(f: &Fixture) -> coven_crypto::custody::StoreKeychain {
+pub(super) fn custody(f: &Fixture) -> coven_crypto::custody::StoreKeychain {
     f.app.store_keychain(f.directory.id())
 }
 
@@ -235,9 +235,9 @@ fn sends(f: &Fixture) -> usize {
 }
 
 /// A backup restored after its device uploaded more: another copy used this
-/// device's id. Sync stops sending and says why, recording nothing; the
+/// device's id. Sync stops sending, says why and records the stop; the
 /// database keeps working, reopening finds the same evidence, and calling
-/// reset_device, the app's choice, starts a new device (§19.3).
+/// reset_device registers a new device beside the old id (§19.3).
 #[tokio::test]
 async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let f = Fixture::new().await;
@@ -301,7 +301,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
                 )
             })
             .await;
-        // Reads and local writes still work; nothing is recorded.
+        // Reads and local writes still work; no reset notice is recorded.
         assert_eq!(notes(&handle).await, ["kept"]);
         assert_eq!(handle.device_reset().await.unwrap(), None);
         if opening == 1 {
@@ -318,6 +318,12 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
         assert_eq!(f.directory.settings().unwrap().device_id, old);
     }
     assert_eq!(sends(&f), before);
+    // The stop is in the old database before the app resets the copy.
+    let recorded =
+        coven_database::read_device_id_in_use(f.directory.database_path(), f.directory.bugs())
+            .await
+            .unwrap();
+    assert!(recorded.is_some());
     let handle = reopen(&f).reset_device(f.directory.id(), "Restored phone", |_| ()).await.unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
@@ -325,6 +331,15 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
     // Stored history loads; the copy's unsent edit is discarded.
     assert_eq!(notes(&handle).await, ["kept", "newer"]);
+    // The old id stays an active device and the fresh one joined it under
+    // the name given: the reset replaced nothing.
+    let members = handle.members().await.unwrap();
+    let devices: Vec<_> = members.iter().flat_map(|member| &member.devices).collect();
+    let state = |id| devices.iter().find(|device| device.id == id).map(|device| device.state);
+    assert_eq!(state(old), Some(coven_database::DeviceState::Active), "{devices:?}");
+    assert_eq!(state(reset.new_device), Some(coven_database::DeviceState::Active), "{devices:?}");
+    let named = devices.iter().find(|device| device.id == reset.new_device).unwrap();
+    assert_eq!(named.name, "Restored phone");
     handle.close().await.unwrap();
 }
 

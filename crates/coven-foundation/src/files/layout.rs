@@ -373,10 +373,19 @@ impl StoreDirectories {
         &self,
         id: StoreId,
         by: super::ReplacedBy,
+        registration: super::Registration,
         ids: &dyn IdSource,
     ) -> Result<super::ReplacementStore, super::BootstrapDirectoryError> {
-        super::replacement::begin(&self.stores(), id, by, ids, self.protection, self.bugs.clone())
-            .await
+        super::replacement::begin(
+            &self.stores(),
+            id,
+            by,
+            registration,
+            ids,
+            self.protection,
+            self.bugs.clone(),
+        )
+        .await
     }
 }
 

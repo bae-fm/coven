@@ -9,7 +9,7 @@ use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{
-    BootstrapDirectoryError, BootstrapStore, ReplacedBy, ReplacementStore,
+    BootstrapDirectoryError, BootstrapStore, Registration, ReplacedBy, ReplacementStore,
 };
 use coven_storage::{
     ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageFailure,
@@ -831,8 +831,15 @@ async fn prepare_and_load(
                         }
                         _ => {}
                     }
+                    // A copy that found its id in use leaves the old id to the
+                    // installation that kept it (§19.3).
                     let replaces =
-                        replacement.map(|replacement| replacement.device_reset().old_device);
+                        replacement.and_then(|replacement| match replacement.registration() {
+                            Registration::ReplacesOld => {
+                                Some(replacement.device_reset().old_device)
+                            }
+                            Registration::NewDevice => None,
+                        });
                     let registering = (clock.elapsed(), storage.requests());
                     sync.register_device(device_name, replaces).await?;
                     tracing::info!(

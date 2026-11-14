@@ -362,18 +362,29 @@ impl SequenceSync {
     /// Stop for good on history showing another copy of this installation
     /// using its device id (§19.3), and end what this copy's app journaled
     /// and the invites it made: none would ever run, and no slot applies
-    /// this stop to end them (§14.1). A failed write fails the handle with
-    /// its cause, which every call reports.
+    /// this stop to end them (§14.1). A copy stopped by a slot signed with
+    /// its id records the stop in the same transaction, which a reset reads.
+    /// That write's failure fails the pass with its cause and leaves the
+    /// copy not stopped: the next pass finds the evidence again and writes
+    /// the record again.
     pub(crate) async fn stop_copy(&self, evidence: crate::DeviceIdEvidence) -> SyncError {
-        let stopped = self.state.stop_copy(evidence);
-        let stop = match evidence {
-            crate::DeviceIdEvidence::Replaced => coven_database::DeviceStop::Replaced,
-            crate::DeviceIdEvidence::UnattemptedSlot { .. } => coven_database::DeviceStop::Copied,
+        let ended = match evidence {
+            crate::DeviceIdEvidence::Replaced => {
+                self.database.end_for_good(coven_database::DeviceStop::Replaced).await
+            }
+            crate::DeviceIdEvidence::UnattemptedSlot { slot } => {
+                self.database.end_for_copy(slot).await
+            }
         };
-        if let Err(error) = self.database.end_for_good(stop).await {
-            tracing::error!("a stopped copy's operations stay journaled: {error}");
+        match (ended, evidence) {
+            (Err(error), crate::DeviceIdEvidence::UnattemptedSlot { .. }) => error.into(),
+            (ended, _) => {
+                if let Err(error) = ended {
+                    tracing::error!("a stopped copy's operations stay journaled: {error}");
+                }
+                self.state.stop_copy(evidence)
+            }
         }
-        stopped
     }
 
     /// Whether the applied history ever bound this member id to the pair

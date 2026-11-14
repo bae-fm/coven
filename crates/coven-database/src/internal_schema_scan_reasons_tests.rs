@@ -161,6 +161,7 @@ mod fixture {
                 | "_coven_snapshot_reservation"
                 | "_coven_snapshot_schema"
                 | "_coven_device_reset"
+                | "_coven_device_id_in_use"
                 | "_coven_upload_pause"
                 | "_coven_unmetered_only"
                 | "_coven_write_pause"

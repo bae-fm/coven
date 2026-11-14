@@ -68,7 +68,8 @@ mod retry;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::{
-    closed_sync_facts, discarded_operations, discarded_store_name, read_store_name, DatabaseBuilder,
+    closed_sync_facts, discarded_operations, discarded_store_name, read_device_id_in_use,
+    read_store_name, DatabaseBuilder,
 };
 pub(crate) use call::{finish_blocking, process, start_call};
 

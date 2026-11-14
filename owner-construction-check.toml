@@ -830,6 +830,7 @@ homes = [
     "crates/coven-database/src/device_reset_schema.rs",
 ]
 tables = [
+    "_coven_device_id_in_use",
     "_coven_device_reset",
 ]
 
@@ -1396,6 +1397,9 @@ tables = [
     "DatabaseBuilder::open_read_graph",
     "DatabaseBuilder::open_read_only",
     "discarded_operations",
+    # The record a copy keeps when it stops on its device id in use, read in
+    # place from the old installation's database (§19.3).
+    "read_device_id_in_use",
     # Name reads open temporary read-only connections at the database boundary.
     "read_store_name",
     "discarded_store_name",

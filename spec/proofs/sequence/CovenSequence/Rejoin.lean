@@ -999,6 +999,26 @@ theorem rejoin_refused_for_removed_member (L : Ledger S) (d : S.Dev) (m : S.Mem)
     ledgerValid R L (.admin d (.addDevice d m none)) = false := by
   simp [ledgerValid, structural, gone]
 
+/-- **The rejoin cuts nothing.** A registration `addDevice d m none` replaces no
+device, so no slot of that shape is a `Cut` of any device under any key
+generation: the keeper's batches under the old id count on. Applying it, or
+refusing it, leaves `counts` as it was for every device but `d`, which the
+registration only binds. -/
+theorem rejoin_cuts_nothing (L : Ledger S) (k : Nat) (a d : S.Dev) (m : S.Mem) :
+    (∀ (seq : Nat → Slot S) (j : Nat), seq j = .admin a (.addDevice d m none) →
+      ∀ (e : S.Dev) (g : Nat), ¬ Cut R seq j e g) ∧
+    (∀ (e : S.Dev), e ≠ d → ∀ (g : Nat),
+      counts (ledgerStep R L k (.admin a (.addDevice d m none))) e g = counts L e g) := by
+  refine ⟨?_, ?_⟩
+  · intro seq j hs e g hcut
+    obtain ⟨_, _, hcases⟩ := hcut
+    rcases hcases with ⟨a', hs'⟩ | ⟨a', e', m', hs'⟩ | ⟨a', m', hs', _⟩ |
+      ⟨a', m', hs', _, _⟩ | ⟨a', m', e', hs', _, _⟩ <;> rw [hs] at hs' <;> simp at hs'
+  · intro e hne g
+    by_cases hv : ledgerValid R L (.admin a (.addDevice d m none)) = true
+    · simp [ledgerStep, hv, ledgerEffect, applyEntry, counts, hne]
+    · simp [ledgerStep, hv, refuse, counts]
+
 end Registration
 
 /-! ## A restored backup finds the keeper's slot

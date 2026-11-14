@@ -1,7 +1,9 @@
-//! This installation's completed replacement notice and its reserved counters (§19.3).
+//! This installation's completed replacement notice, and the record that it
+//! stopped because another installation uses its device id (§19.3).
 
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::DeviceReset;
+use coven_merge::Slot;
 
 pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<DeviceReset>, DbError> {
     Ok(database
@@ -22,6 +24,39 @@ pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Resu
         (reset.old_device, reset.new_device),
     )?;
     Ok(())
+}
+
+/// Record the slot that showed another installation using this device's id.
+/// The first record stays: a later pass finding the same evidence changes
+/// nothing.
+pub(crate) fn record_in_use(database: &DatabaseConnection, slot: Slot) -> Result<(), DbError> {
+    database.internal_execute(
+        "INSERT INTO _coven_device_id_in_use(singleton,slot) VALUES(1,?1)
+         ON CONFLICT(singleton) DO NOTHING",
+        [slot.get().to_be_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+/// The slot this installation recorded when it stopped on another
+/// installation's use of its device id, if it did.
+pub(crate) fn read_in_use(database: &DatabaseConnection) -> Result<Option<Slot>, DbError> {
+    let found = database.query(
+        "SELECT slot FROM _coven_device_id_in_use WHERE singleton=1",
+        [],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    found
+        .into_iter()
+        .next()
+        .map(|bytes| {
+            let bytes: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_length| DbError::Invariant { what: "a slot is 8 bytes" })?;
+            Slot::new(u64::from_be_bytes(bytes))
+                .ok_or(DbError::Invariant { what: "a recorded slot is positive" })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
