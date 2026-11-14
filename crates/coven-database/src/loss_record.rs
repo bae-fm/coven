@@ -14,6 +14,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const SELECT: &str = "SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.frozen,l.column_id,c.table_name FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id";
 
+/// `SELECT` over only the losses of the rows a `k(t,k,a)` list names, which the
+/// statement's own `WITH` gives: each listed row is looked up through the row
+/// index, where a plain `WHERE ... IN (SELECT ... FROM k)` scans `k` again.
+pub(crate) fn select_listed() -> String {
+    SELECT.replacen(
+        " FROM _coven_lost l",
+        " FROM k CROSS JOIN _coven_lost l ON l.audience=k.a AND l.table_name=k.t AND l.key=k.k",
+        1,
+    )
+}
+
 /// A table holding loss records: this device's, or the losses a snapshot
 /// view gathers for the counted state it publishes (`snapshot_view::losses`).
 #[derive(Clone, Copy)]

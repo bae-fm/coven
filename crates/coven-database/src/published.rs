@@ -205,9 +205,9 @@ fn keep_losses(db: &DatabaseConnection, rows: &[&RowId]) -> Result<(), DbError> 
     for chunk in rows.chunks(CAPTURE_CHUNK) {
         db.for_each(
             &format!(
-                "WITH k(t,k,a) AS (VALUES {}) {} WHERE (l.audience,l.table_name,l.key) IN (SELECT a,t,k FROM k) AND NOT (l.replacement_kind='rules' AND l.frozen=0)",
+                "WITH k(t,k,a) AS (VALUES {}) {} WHERE NOT (l.replacement_kind='rules' AND l.frozen=0)",
                 identity_values(chunk.len()),
-                crate::loss_record::SELECT
+                crate::loss_record::select_listed()
             ),
             rusqlite::params_from_iter(identity_parameters(chunk)),
             |r| put_loss(db, &crate::loss_record::read(r)?),

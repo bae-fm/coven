@@ -589,7 +589,11 @@ mod source {
             return vec![sql.replace("{values}", "(?,?),(?,?)")];
         }
         if file == "published.rs" && sql.contains("{}") && sql.contains("VALUES {}") {
-            return vec![sql.replacen("{}", "(?,?,?),(?,?,?)", 1)];
+            return vec![sql.replacen("{}", "(?,?,?),(?,?,?)", 1).replacen(
+                "{}",
+                &crate::loss_record::select_listed(),
+                1,
+            )];
         }
         if file == "row_queries.rs" && sql.contains("{values}") {
             return vec![sql.replace("{values}", "(?,?,?),(?,?,?)")];
