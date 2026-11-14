@@ -499,6 +499,9 @@ async fn setup_names_the_first_device_and_a_reconnect_keeps_its_name() {
         members.into_iter().flat_map(|member| member.devices).map(|device| device.name).collect()
     };
     assert_eq!(names(phone.handle.members().await.unwrap()), ["Ana's phone"]);
+    // Setup starts sync; its first pass writes a slot and replaces the ones
+    // before it, so the slots are read once that pass has ended.
+    phone.handle.test_parked().await;
     let slots = stored_slots(&phone).await;
 
     phone.handle.close().await.unwrap();
@@ -516,11 +519,15 @@ async fn setup_names_the_first_device_and_a_reconnect_keeps_its_name() {
         .await
         .unwrap();
     assert_eq!(names(phone.handle.members().await.unwrap()), ["Ana's phone"]);
+    phone.handle.test_parked().await;
     let after = stored_slots(&phone).await;
     let listed = phone.storage.list(&ObjectPrefix::all(phone.directory.id())).await.unwrap();
+    // The reconnect starts sync again, and that pass writes one slot after
+    // the last. A claim or a second registration of the device would write
+    // more, or write slot 1 again.
     assert_eq!(
         after,
-        slots,
+        [slots.last().unwrap() + 1],
         "slots after the reconnect; storage lists {:?}",
         listed.iter().map(|object| object.path.clone()).collect::<Vec<_>>()
     );
