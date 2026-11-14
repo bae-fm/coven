@@ -17,7 +17,8 @@
 //!   shared pointers), a typed parameter or `let`, a `let` of a struct literal
 //!   or a `Type::ctor(..)`, and the return type of a resolved call, with `?`,
 //!   `Result` and `Option` peeled. A receiver of unknown type resolves by the
-//!   method's name when one method of the workspace has it, and passes a
+//!   method's name when one method of the workspace with a closure parameter
+//!   has it and the call passes a closure or function path there, and passes a
 //!   closure to a read callee only when every method of that name with a
 //!   callback at that place takes a read closure.
 //!
@@ -454,7 +455,7 @@ impl Walker<'_, '_> {
                         Some(targets) => self.returned(targets),
                         None => TYPE_PRESERVING.contains(&name.as_str()).then_some(receiver),
                     },
-                    None => self.returned(&self.unique_named(&name)),
+                    None => self.returned(&self.unique_named(&name, &call.args)),
                 }
             }
             syn::Expr::Call(call) => {
@@ -489,10 +490,25 @@ impl Walker<'_, '_> {
         peel(ty, callable.owner.as_deref(), &self.context.index.pointers)
     }
 
-    /// The one method of this name in the workspace, when it is one.
-    fn unique_named(&self, name: &str) -> Vec<usize> {
-        match self.context.index.by_name.get(name) {
-            Some(all) if all.len() == 1 => all.clone(),
+    /// The one method of this name in the workspace that takes a callback
+    /// where the call passes a closure or a function path, when it is one.
+    /// Methods that take no callback are never found by name: `.find(..)`,
+    /// `.cancel()` and `.words()` are as likely std's.
+    fn unique_named(
+        &self,
+        name: &str,
+        arguments: &Punctuated<syn::Expr, syn::Token![,]>,
+    ) -> Vec<usize> {
+        let index = self.context.index;
+        let passes_callback = |callable: &Callable<'_>| {
+            arguments.iter().enumerate().any(|(place, argument)| {
+                callable.takes_callback(place, false) && self.passed(argument).is_some()
+            })
+        };
+        let named = index.by_name.get(name).map_or(&[][..], Vec::as_slice);
+        let mut taking = named.iter().copied().filter(|&id| passes_callback(&index.callables[id]));
+        match (taking.next(), taking.next()) {
+            (Some(only), None) => vec![only],
             _ => Vec::new(),
         }
     }
@@ -727,9 +743,10 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
                 index.methods.get(&(receiver.clone(), name.clone())).cloned().unwrap_or_default(),
                 Vec::new(),
             ),
-            None => {
-                (self.unique_named(&name), index.by_name.get(&name).cloned().unwrap_or_default())
-            }
+            None => (
+                self.unique_named(&name, &node.args),
+                index.by_name.get(&name).cloned().unwrap_or_default(),
+            ),
         };
         let call = Call::Method {
             known: receiver.is_some(),

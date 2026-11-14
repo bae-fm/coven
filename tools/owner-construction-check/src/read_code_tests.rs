@@ -275,16 +275,35 @@ fn a_method_on_an_unknown_receiver_is_followed_by_its_name_only_when_one_method_
         "crates/app/src/a.rs",
         r#"
         struct First; struct Second;
-        impl First { fn shared(&self) {} fn only_here(&self) {} }
-        impl Second { fn shared(&self) {} }
+        impl First { fn shared<F: Fn(u8)>(&self, f: F) {} fn only_here<F: Fn(u8)>(&self, f: F) {} }
+        impl Second { fn shared<F: Fn(u8)>(&self, f: F) {} }
         fn read(sql: &SqlReadContext<'_>) {
             let mystery = unknown_source();
-            mystery.shared();
-            mystery.only_here();
+            mystery.shared(|n| n);
+            mystery.only_here(|n| n);
         }
         "#,
     )]);
     assert_eq!(found, [unit("First::only_here", Why::Reached), unit("read", Why::Root)]);
+}
+
+#[test]
+fn a_method_on_an_unknown_receiver_is_followed_by_its_name_only_when_it_takes_a_closure() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        struct Task; struct Words;
+        impl Task { fn cancel(&self) {} fn each<F: Fn(u8)>(&self, f: F) {} }
+        impl Words { fn find(&self, text: &str) {} }
+        fn read(sql: &SqlReadContext<'_>) {
+            let mystery = unknown_source();
+            mystery.cancel();
+            mystery.find("x");
+            mystery.each(|n| n);
+        }
+        "#,
+    )]);
+    assert_eq!(found, [unit("Task::each", Why::Reached), unit("read", Why::Root)]);
 }
 
 #[test]
