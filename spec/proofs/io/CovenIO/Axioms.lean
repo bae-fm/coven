@@ -141,6 +141,8 @@ import CovenIO
 #print axioms CovenIO.SyncState.file_failures_name_failed
 #print axioms CovenIO.SyncState.failed_pass_not_synced
 #print axioms CovenIO.SyncState.waiting_pass_waits
+#print axioms CovenIO.SyncState.self_clearing_waits
+#print axioms CovenIO.SyncState.one_retry
 #print axioms CovenIO.SyncState.phase_failed_iff
 #print axioms CovenIO.SyncState.phase_retrying_iff
 #print axioms CovenIO.SyncState.paused_only_trailing

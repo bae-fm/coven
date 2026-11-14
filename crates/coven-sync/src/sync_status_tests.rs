@@ -387,6 +387,7 @@ fn connected() -> Facts {
         unmetered_only: false,
         metered: false,
         keys_changing: false,
+        pass_retry: None,
     }
 }
 
@@ -443,6 +444,7 @@ fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
         "unmeteredOnly": facts.unmetered_only,
         "metered": facts.metered,
         "keysChanging": facts.keys_changing,
+        "passRetrying": facts.pass_retry.is_some(),
         "records": records,
     })
 }
@@ -470,14 +472,18 @@ fn shown(facts: &Facts) -> Value {
 /// held.
 fn cases() -> Vec<Facts> {
     let mut cases = Vec::new();
+    let backoff = Some(UNIX_EPOCH + Duration::from_secs(5));
     for last in passes() {
         for (unsent, stored) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
-            cases.push(Facts {
-                last: last.clone(),
-                unsent,
-                uploads: vec![upload(Progress::Stored); stored],
-                ..connected()
-            });
+            for pass_retry in [None, backoff] {
+                cases.push(Facts {
+                    last: last.clone(),
+                    unsent,
+                    uploads: vec![upload(Progress::Stored); stored],
+                    pass_retry,
+                    ..connected()
+                });
+            }
         }
     }
     for (n, reason) in (0_u128..).zip(reasons()) {
@@ -852,6 +858,8 @@ fn a_closed_store_shows_what_opening_shows() {
         unmetered_only: false,
         metered: false,
         keys_changing: false,
+        pass_retry: None,
+        operation_retries: Vec::new(),
     };
     assert_eq!(SyncStatus::computed(facts.clone()).unwrap().state, SyncState::Syncing);
     let closed = |location| SyncStatus::closed(facts.clone(), location).unwrap();
@@ -935,4 +943,50 @@ fn io_differential_upload_phase() {
             facts.uploads.iter().map(|upload| phase_json(&facts.upload_phase(upload))).collect();
         assert_eq!(&Value::Array(actual), expected, "{input}");
     }
+}
+
+/// A failure that clears by itself and names no state of its own is one wait
+/// with the time of the next try, whichever way it was met: the pass's own
+/// failure with the provider answering, a slot's application, coven's own
+/// operation, a cooldown over. A pass that got no answer is offline, and a
+/// failure only a person clears keeps its own state (§19.1).
+#[test]
+fn a_failure_that_clears_by_itself_waits_for_its_backoff() {
+    let at = UNIX_EPOCH + Duration::from_secs(5);
+    let network = |answered| PendingReason::Storage {
+        provider: CloudProvider::S3,
+        failure: StorageFailure::Network,
+        answered,
+    };
+    let failed = |failure| LastPass::Failed { failure, error: "503".into() };
+    let blocked = |reason| LastPass::Blocked { slot: slot(7), reason, error: None };
+    let met = [
+        failed(StatusFailure::Storage(StorageFailure::Network)),
+        failed(StatusFailure::Storage(StorageFailure::Conflict)),
+        failed(StatusFailure::Storage(StorageFailure::SessionExpired)),
+        failed(StatusFailure::Storage(StorageFailure::RateLimited)),
+        failed(StatusFailure::Operation(record(network(true)))),
+        failed(StatusFailure::Operation(record(PendingReason::Failed(LocalFailure::Shutdown)))),
+        blocked(network(true)),
+    ];
+    for last in met {
+        let armed = Facts { last: Some(last.clone()), pass_retry: Some(at), ..connected() };
+        assert_eq!(armed.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }), "{last:?}");
+        let turn = Facts { pass_retry: None, ..armed.clone() };
+        assert_eq!(turn.state(), SyncState::WaitingToSync(SyncWait::Queued), "{last:?}");
+        let written = Facts { unsent: true, ..armed };
+        assert_eq!(written.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
+    }
+    let blocked_on_a_key =
+        Facts { last: Some(blocked(key_unavailable())), pass_retry: Some(at), ..connected() };
+    assert_eq!(blocked_on_a_key.state(), SyncState::WaitingToSync(SyncWait::Blocked));
+    let no_answer = Facts { last: offline(), pass_retry: Some(at), ..connected() };
+    assert!(matches!(no_answer.state(), SyncState::Offline(_)), "{:?}", no_answer.state());
+    let refused = failed(StatusFailure::Storage(StorageFailure::Refused));
+    let never = Facts { last: Some(refused), pass_retry: Some(at), ..connected() };
+    assert!(matches!(never.state(), SyncState::Failed(_)), "{:?}", never.state());
+    let operation =
+        failed(StatusFailure::Operation(record(PendingReason::Failed(LocalFailure::Operation))));
+    let failed_for_good = Facts { last: Some(operation), pass_retry: Some(at), ..connected() };
+    assert!(matches!(failed_for_good.state(), SyncState::Failed(_)));
 }

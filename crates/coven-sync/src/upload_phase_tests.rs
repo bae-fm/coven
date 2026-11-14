@@ -24,6 +24,7 @@ fn connected() -> Facts {
         unmetered_only: false,
         metered: false,
         keys_changing: false,
+        pass_retry: None,
     }
 }
 

@@ -290,6 +290,39 @@ async fn a_photo_taken_offline_shows_unsent_changes() {
     network.close().await;
 }
 
+/// A provider that answers every request with a server error fails Ben's pass
+/// with an answer, not with silence: his state is waiting to sync, retrying
+/// at the sync scope's backoff, never failed and never offline. A pass the
+/// provider never answers is offline, as before (§6.7, §19.1).
+#[tokio::test]
+async fn a_server_error_on_a_pass_waits_to_sync_and_no_answer_is_offline() {
+    let network = household().await;
+    let ben = &network.devices[0];
+    let failing = |response| Faults {
+        fail_next: usize::MAX,
+        failure: StorageFailure::Network,
+        response,
+        ..Faults::none()
+    };
+    ben.storage.set_faults(failing(Some(503))).await;
+    network.clock.set(network.clock.now() + Duration::from_secs(1));
+    let answer = ben.handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Failed(_)), "{answer:?}");
+    let waiting =
+        state(ben, |state| matches!(state, SyncState::WaitingToSync(SyncWait::Retrying { .. })))
+            .await;
+    let SyncState::WaitingToSync(SyncWait::Retrying { at }) = waiting.state else {
+        unreachable!("waited for a retry")
+    };
+    assert!(at > network.clock.now(), "it retries after its backoff: {at:?}");
+    ben.storage.set_faults(failing(None)).await;
+    network.clock.set(at);
+    let answer = ben.handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Failed(PassFailure::Offline { .. })), "{answer:?}");
+    state(ben, |state| matches!(state, SyncState::Offline(_))).await;
+    network.close().await;
+}
+
 /// A store with no storage set up is not synced from its first value. One
 /// whose credentials are gone from the keychain is signed out from its
 /// first value on reopening, naming its provider with no cause, and keeps

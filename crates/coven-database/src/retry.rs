@@ -182,6 +182,24 @@ pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<(RetrySubject, Ret
     .collect()
 }
 
+/// The waits of the journal operations, with the operation each delays.
+pub(crate) fn operations(
+    db: &DatabaseConnection,
+) -> Result<Vec<(OperationId, RetryWait)>, DbError> {
+    db.query(
+        "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries
+         WHERE operation>0",
+        [],
+        read_row,
+    )?
+    .into_iter()
+    .map(|row| match row.decode()? {
+        (RetrySubject::Operation(id), wait) => Ok((id, wait)),
+        _ => Err(DbError::DamagedDatabase),
+    })
+    .collect()
+}
+
 pub(crate) fn find(
     db: &DatabaseConnection,
     subject: RetrySubject,

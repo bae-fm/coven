@@ -58,6 +58,12 @@ pub struct SyncFacts<P> {
     /// Whether a self-replacement of this member's keys pauses writes
     /// (§12.3).
     pub keys_changing: bool,
+    /// When the sync scope's backoff ends, if a failed pass armed one
+    /// (§6.7): the next try of a pass or of a slot's application.
+    pub pass_retry: Option<SystemTime>,
+    /// When each journal operation's own backoff ends: the next try of
+    /// coven's own operation a failed pass names.
+    pub operation_retries: Vec<(crate::OperationId, SystemTime)>,
 }
 
 /// One bound upload in the queue, as the sync state reads it.
@@ -184,6 +190,11 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
         unmetered_only,
         metered,
         keys_changing: crate::operation::writes_paused(db)?,
+        pass_retry: crate::retry::find(db, crate::RetrySubject::Sync)?.map(|wait| wait.not_before),
+        operation_retries: crate::retry::operations(db)?
+            .into_iter()
+            .map(|(id, wait)| (id, wait.not_before))
+            .collect(),
     })
 }
 

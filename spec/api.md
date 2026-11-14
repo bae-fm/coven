@@ -5928,7 +5928,8 @@ pub enum SyncState {
     Removed(SyncCause),
     /// Another copy uses this device's id, or its member keys were replaced.
     NeedsReset(SyncCause),
-    /// Any other failure, or a bound file that can't be uploaded or read,
+    /// A failure only a person clears that has no state of its own, one that
+    /// never clears, a bug, or a bound file that can't be uploaded or read,
     /// whose pending record is the cause.
     Failed(SyncCause),
 }
@@ -5944,8 +5945,11 @@ pub enum SyncWait {
     /// A slot can't apply yet; nothing goes out or comes in until it does
     /// (§5.4).
     Blocked,
-    /// A bound file's last attempt failed, and it retries then, or at the
-    /// person's retry (§6.7); `coven_uploads.pending` says why.
+    /// A failure that clears by itself and names no state of its own, on the
+    /// pass, a slot's application, coven's own operation or a bound file's
+    /// attempt, has failed, and the next try is then, or at the person's
+    /// retry (§6.7); the pending list says why. A pass that got no provider
+    /// answer is offline instead.
     Retrying { at: SystemTime },
     /// Its turn hasn't come: a bound file's, a write's, or the next pass's
     /// once a cooldown that held the last one is over.

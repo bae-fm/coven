@@ -460,8 +460,8 @@ private def upload (j : Json) : Except String Upload := do
 
 /-- The facts of one case: `storage` (`none`, `signedOut`, `connected`), `last`
 (`synced` or `{"failed": pass failure}`), `moving`, `uploads`, `unsent`,
-`running`, `cooling`, `paused`, `unmeteredOnly`, `metered`, `keysChanging` and
-the pending `records`' reasons. -/
+`running`, `cooling`, `paused`, `unmeteredOnly`, `metered`, `keysChanging`,
+`passRetrying` and the pending `records`' reasons. -/
 private def facts (j : Json) : Except String Facts := do
   let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
     "storage" (← j.getObjValAs? String "storage")
@@ -480,7 +480,8 @@ private def facts (j : Json) : Except String Facts := do
     paused := ← j.getObjValAs? Bool "paused"
     unmeteredOnly := ← j.getObjValAs? Bool "unmeteredOnly"
     metered := ← j.getObjValAs? Bool "metered"
-    keysChanging := ← j.getObjValAs? Bool "keysChanging" }
+    keysChanging := ← j.getObjValAs? Bool "keysChanging"
+    passRetrying := ← j.getObjValAs? Bool "passRetrying" }
 
 /-- `SyncState.state` of one set of facts. Reports the state's name as
 `state`, and, for waiting to sync, what it waits for as `wait`: the held-back

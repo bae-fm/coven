@@ -283,9 +283,11 @@ own retry, or its turn. A trailing file, such as a track whose write went out
 first, never reaches the state: each queued file has its own phase in
 `handle.uploads()`, which names the pause, a metered network, a failure or its
 turn. A pass held at a slot waiting for a key, or cut short by a cooldown,
-waits to sync too, though nothing is queued. `Offline` describes the last
+waits to sync too, though nothing is queued. A failure that clears by itself,
+such as a server error, is one wait for any pass, slot or bound file: waiting
+to sync, retrying, with the time of the next try. `Offline` describes the last
 attempt, not the connection's history: Ana syncs, then loses Wi-Fi, and her
-next attempt is offline. A provider error that denies a required read shows no
+next attempt, which gets no answer, is offline. A provider error that denies a required read shows no
 access to storage. A cover whose original went missing while the rest syncs
 shows failed, naming the cover, until it uploads; a missing track shows failed
 in its own phase and leaves the state alone.

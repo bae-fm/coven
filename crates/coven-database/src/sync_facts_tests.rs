@@ -288,3 +288,32 @@ async fn a_completed_bound_upload_is_not_queued_work() {
     let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
     assert!(!facts.queued);
 }
+
+/// The facts hold the sync scope's backoff, when a failed pass armed one, and
+/// no other work's: an upload's wait is its own (§6.7, §19.1).
+#[tokio::test]
+async fn the_facts_hold_the_sync_scopes_backoff() {
+    let store = TestStore::new();
+    let db = open(&store).await;
+    attach(&db, "covers", &["a"]).await;
+    let none = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    assert_eq!(none.pass_retry, None);
+    assert!(none.operation_retries.is_empty());
+    let wait = crate::RetryWait {
+        failures: 1,
+        not_before: std::time::UNIX_EPOCH + std::time::Duration::from_secs(9),
+        wait: std::time::Duration::from_secs(2),
+    };
+    db.inspect_writer(|sql| {
+        crate::retry::save(sql, crate::RetrySubject::Upload(1), &wait).unwrap();
+    });
+    let upload = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    assert_eq!(upload.pass_retry, None);
+    assert_eq!(upload.uploads[0].retry_at, Some(wait.not_before));
+    db.inspect_writer(|sql| {
+        crate::retry::save(sql, crate::RetrySubject::Sync, &wait).unwrap();
+    });
+    let pass = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    assert_eq!(pass.pass_retry, Some(wait.not_before));
+    assert!(pass.operation_retries.is_empty());
+}

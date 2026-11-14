@@ -337,7 +337,11 @@ failing its check, stored bytes lost or refused. `bad_file_fails` proves
 such a record keeps the state at failed or what outranks it. A pass held
 on a wait, such as a slot waiting on another device's key or a provider's
 cooldown, is no failure either: it waits to sync (`waiting_pass_waits`),
-without moving the time of the last finished sync.
+without moving the time of the last finished sync. A failure that clears by
+itself and names no state of its own is one wait: `self_clearing_waits` proves
+a pass ending on it never names failed, and `one_retry` that the same failure
+as the pass's, as a slot's block or as coven's own operation's names the same
+candidate, waiting to sync, retrying, once the sync scope's backoff is armed.
 
 [Transfers.lean](io/CovenIO/Transfers.lean) models what the sync state leaves
 out: the phase of each upload in the queue, the one a host shows where files
@@ -361,7 +365,7 @@ computes with the runner's for each pending reason, each provider failure
 answered or not, each local failure, each way a pass ends, blocked on or
 failed with each reason, each with a write queued or not, and bound
 uploads under each wait, alone and behind a stored one, with a write queued
-beside them or not; the runner is also given trailing uploads of every
+beside them or not, and the sync scope's backoff armed or not; the runner is also given trailing uploads of every
 progress and record that coven never sees, so the comparison checks
 `trailing_keeps_state` against the Rust. `sync_status::tests::io_differential_upload_phase`
 compares each upload's phase with the runner's, bound and trailing, under

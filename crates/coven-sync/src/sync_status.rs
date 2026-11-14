@@ -100,8 +100,10 @@ pub enum SyncWait {
     /// A slot can't apply yet; nothing goes out or comes in until it does
     /// (§5.4).
     Blocked,
-    /// A bound file's last attempt failed, and it retries then, or at the
-    /// person's retry (§6.7); `coven_uploads.pending` says why.
+    /// A failure that clears by itself and names no state of its own, on the
+    /// pass, a slot's application, coven's own operation or a bound file's
+    /// attempt, has failed, and the next try is then, or at the person's
+    /// retry (§6.7); the pending list says why.
     Retrying {
         /// When its backoff ends, by the store's clock.
         at: SystemTime,
@@ -295,34 +297,80 @@ impl PendingReason {
     pub(crate) fn names_a_state(&self) -> bool {
         self.names().is_some()
     }
+
+    /// Whether the reason clears by itself (the model's `Reason.byItself`).
+    fn clears_by_itself(&self) -> bool {
+        self.clears() == Some(crate::pending::Clears::ByItself)
+    }
+
+    /// Whether a pass that met this reason retries under the sync scope's
+    /// backoff: it names no state and clears by itself (the model's
+    /// `PassFailure.retries`).
+    fn retries(&self) -> bool {
+        self.names().is_none() && self.clears_by_itself()
+    }
 }
 
 impl StatusFailure {
     /// The state a pass that failed as a whole names (the model's
-    /// `PassFailure.state` but for offline); none for a provider's cooldown.
+    /// `PassFailure.state` but for offline); none for a failure that clears
+    /// by itself and names no state of its own, a provider's cooldown
+    /// included, on the pass or on coven's own operation.
     #[deny(clippy::wildcard_enum_match_arm)]
     fn names(&self) -> Option<Named> {
         match self {
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
             Self::Removed | Self::NotAdmitted => Some(Named::Removed),
             Self::DeviceIdInUse(_) => Some(Named::NeedsReset),
-            Self::Storage(failure) => storage_names(*failure)
-                .or_else(|| (*failure != StorageFailure::RateLimited).then_some(Named::Failed)),
-            Self::Operation(record) => Some(record.reason.names().unwrap_or(Named::Failed)),
+            Self::Storage(failure) => storage_names(*failure).or_else(|| {
+                (crate::pending::storage_clears(*failure) != crate::pending::Clears::ByItself)
+                    .then_some(Named::Failed)
+            }),
+            Self::Operation(record) => record
+                .reason
+                .names()
+                .or_else(|| (!record.reason.clears_by_itself()).then_some(Named::Failed)),
             Self::Other => Some(Named::Failed),
+        }
+    }
+
+    /// Whether the pass retries under the sync scope's backoff (the model's
+    /// `PassFailure.retries`).
+    fn retries(&self) -> bool {
+        match self {
+            Self::Storage(failure) => {
+                storage_names(*failure).is_none()
+                    && crate::pending::storage_clears(*failure) == crate::pending::Clears::ByItself
+            }
+            Self::Operation(record) => record.reason.retries(),
+            Self::UpdateRequired(_)
+            | Self::Removed
+            | Self::NotAdmitted
+            | Self::DeviceIdInUse(_)
+            | Self::Other => false,
         }
     }
 }
 
 impl LastPass {
+    /// Whether the pass ended on a failure that retries under the sync
+    /// scope's backoff (the model's `Facts.lastRetries`).
+    fn retries(&self) -> bool {
+        match self {
+            Self::Synced | Self::Offline { .. } => false,
+            Self::Blocked { reason, .. } => reason.retries(),
+            Self::Failed { failure, .. } => failure.retries(),
+        }
+    }
+
     /// What this pass says, with no slot moving (the model's `Facts.ended`):
-    /// a pass held back by a wait, at a slot or by a provider's cooldown,
-    /// waits to sync, for what `held` says holds every transfer, else its
-    /// turn; offline is offline with unsent changes while a write or a file
-    /// waits to go out.
-    fn ended(&self, unsent: bool, held: Option<SyncWait>, provider: CloudProvider) -> SyncState {
+    /// a pass held back by a wait, at a slot or by a provider's cooldown, or
+    /// one that failed with a failure that clears by itself, waits to sync,
+    /// for what `wait` says the next pass waits for; offline is offline with
+    /// unsent changes while a write or a file waits to go out.
+    fn ended(&self, unsent: bool, wait: SyncWait, provider: CloudProvider) -> SyncState {
         let cause = || SyncCause::Pass(self.clone());
-        let waiting = || SyncState::WaitingToSync(held.unwrap_or(SyncWait::Queued));
+        let waiting = || SyncState::WaitingToSync(wait);
         match self {
             Self::Synced => SyncState::Synced,
             Self::Offline { .. } if unsent => SyncState::OfflineWithUnsentChanges(cause()),
@@ -399,6 +447,9 @@ pub(crate) struct Facts {
     pub(crate) metered: bool,
     /// A self-replacement of this member's keys pauses writes (§12.3).
     pub(crate) keys_changing: bool,
+    /// When the next try of the pass's failure is, if its backoff is armed:
+    /// the sync scope's, or, for coven's own operation, the operation's.
+    pub(crate) pass_retry: Option<SystemTime>,
 }
 
 /// A state that may show, its cause made only for the one that does.
@@ -438,9 +489,27 @@ impl Facts {
             RetrySync::Started { cooling_until: Some(until) } => {
                 Some(SyncWait::CoolingDown { until })
             }
-            RetrySync::Started { cooling_until: None } => {
-                matches!(self.last, Some(LastPass::Blocked { .. })).then_some(SyncWait::Blocked)
+            RetrySync::Started { cooling_until: None } => match &self.last {
+                // A slot's failure that clears by itself retries instead.
+                Some(LastPass::Blocked { reason, .. }) if !reason.retries() => {
+                    Some(SyncWait::Blocked)
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// What the next pass waits for: what holds every transfer, else the
+    /// backoff of a failure that clears by itself, else its turn, once a
+    /// cooldown that held the last pass is over. A queued write waits for the
+    /// same (the model's `Facts.passWait`).
+    fn pass_wait(&self) -> SyncWait {
+        match (self.held_all(), self.pass_retry) {
+            (Some(held), _) => held,
+            (None, Some(at)) if self.last.as_ref().is_some_and(LastPass::retries) => {
+                SyncWait::Retrying { at }
             }
+            (None, _) => SyncWait::Queued,
         }
     }
 
@@ -495,7 +564,7 @@ impl Facts {
         } else {
             match &self.last {
                 None => SyncState::Synced,
-                Some(last) => last.ended(self.unsent_work(), self.held_all(), provider),
+                Some(last) => last.ended(self.unsent_work(), self.pass_wait(), provider),
             }
         });
         let records = self
@@ -505,9 +574,8 @@ impl Facts {
         let uploads = self.uploads.iter().filter_map(|upload| self.upload(upload));
         // A write goes out with the next pass, so it waits for what holds
         // every pass, else its turn (the model's `Facts.writes`).
-        let writes = self.unsent.then(|| {
-            Candidate::State(SyncState::WaitingToSync(self.held_all().unwrap_or(SyncWait::Queued)))
-        });
+        let writes =
+            self.unsent.then(|| Candidate::State(SyncState::WaitingToSync(self.pass_wait())));
         signed_out
             .into_iter()
             .chain([looping])
@@ -537,6 +605,18 @@ impl Facts {
             .last_pass
             .map(|bytes| serde_json::from_slice(&bytes).map_err(DbError::StateEncoding))
             .transpose()?;
+        let pass_retry = match last.as_ref() {
+            Some(LastPass::Failed { failure: StatusFailure::Operation(record), .. }) => {
+                match record.subject {
+                    crate::PendingSubject::Operation { id, .. } => facts
+                        .operation_retries
+                        .iter()
+                        .find_map(|(operation, at)| (*operation == id).then_some(*at)),
+                    _ => facts.pass_retry,
+                }
+            }
+            _ => facts.pass_retry,
+        };
         let uploads = facts
             .uploads
             .into_iter()
@@ -570,6 +650,7 @@ impl Facts {
             unmetered_only: facts.unmetered_only,
             metered: facts.metered,
             keys_changing: facts.keys_changing,
+            pass_retry,
         };
         Ok((facts, row.last_synced))
     }

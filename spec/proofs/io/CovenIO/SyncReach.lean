@@ -112,7 +112,9 @@ def Facts.waitHolds (f : Facts) : SyncWait → Prop
   | .notSyncing => f.running = false
   | .coolingDown => f.running = true ∧ f.cooling = true
   | .blocked => f.running = true ∧ f.cooling = false ∧ ∃ r, f.last = .failed (.blocked r)
-  | .retrying => f.heldAll = none ∧ ∃ u ∈ f.bound, u.retrying = true
+  | .retrying =>
+      f.heldAll = none ∧
+        ((∃ u ∈ f.bound, u.retrying = true) ∨ (f.lastRetries = true ∧ f.passRetrying = true))
   | .queued => f.heldAll = none
 
 theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitHolds w := by
@@ -134,8 +136,14 @@ theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitH
 wait, holds: what holds every transfer, else nothing does. -/
 theorem pass_wait_holds (f : Facts) : f.waitHolds f.passWait := by
   cases hh : f.heldAll with
-  | none => simp only [Facts.passWait, hh, Option.getD_none]; exact hh
-  | some x => simp only [Facts.passWait, hh, Option.getD_some]; exact held_holds f x hh
+  | none =>
+      simp only [Facts.passWait, hh]
+      by_cases r : (f.lastRetries && f.passRetrying) = true
+      · simp only [r, ite_true, Facts.waitHolds]
+        exact ⟨hh, .inr (by simpa using r)⟩
+      · simp only [r, Facts.waitHolds]
+        exact hh
+  | some x => simp only [Facts.passWait, hh]; exact held_holds f x hh
 
 /-- **Why waiting to sync waits.** Each wait named holds for the fact that
 names it: sync stopped, a cooldown, a slot that can't apply, or, for a queued
@@ -159,7 +167,7 @@ theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds 
           split at hu
           · rename_i r
             subst hu
-            exact ⟨hh, u, mu, r⟩
+            exact ⟨hh, .inl ⟨u, mu, r⟩⟩
           · subst hu
             exact hh
     · simp at hu
@@ -173,7 +181,8 @@ namespace Reached
 
 /-- A device connected and synced, with sync running. -/
 def start : Facts :=
-  ⟨.connected, .synced, false, false, [], false, [], true, false, false, false, false, false, none⟩
+  ⟨.connected, .synced, false, false, [], false, [], true, false, false, false, false, false,
+    false, none⟩
 
 def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none⟩
 

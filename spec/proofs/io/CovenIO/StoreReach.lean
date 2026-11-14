@@ -142,7 +142,8 @@ theorem key_wait_reached {st : Store S} {seq : Nat → Slot S} (g : Good R st se
       CovenIO.SyncState.Facts.loop, CovenIO.SyncState.Facts.ended,
       CovenIO.SyncState.PassFailure.state, CovenIO.SyncState.Reason.state,
       CovenIO.SyncState.Facts.waits, CovenIO.SyncState.Facts.passWait,
-      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked, CovenIO.SyncState.Facts.bound, q.noUploads,
+      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked, CovenIO.SyncState.Facts.bound,
+      CovenIO.SyncState.Facts.lastRetries, CovenIO.SyncState.Reason.byItself, q.noUploads,
       q.noWrites, q.noRecords, running, cooling]
 
 /-- **A device that can't open a kept slot is held there.** It ends every pass

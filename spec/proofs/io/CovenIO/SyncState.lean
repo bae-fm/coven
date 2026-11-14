@@ -198,6 +198,17 @@ def Reason.state : Reason → Option State
   | .missing | .waits | .keyUnavailable | .noStorage | .writesRefused | .providerPending
   | .accountInUse | .accessRemains | .rejected | .paused => none
 
+/-- The reasons that clear by themselves (`PendingReason::clears`): a provider
+failure of that class, a local failure that retries, or a cleanup of one. -/
+def Reason.byItself : Reason → Bool
+  | .storage f _ => f.byItself
+  | .failed l =>
+      match l with
+      | .database | .diskFull | .diskDenied | .diskOther | .keyCustody | .shutdown | .bug => true
+      | .crypto | .operation => false
+  | .cleanup _ c => c.byItself
+  | _ => false
+
 /-- Why a pass that reached storage, or the attempt to, didn't end synced:
 `PassFailure` and `SyncFailure`. -/
 inductive PassFailure
@@ -216,19 +227,32 @@ inductive PassFailure
   deriving DecidableEq, Repr
 
 /-- The state a failed pass names; none for a wait, such as a provider's
-cooldown or a slot waiting on another device's key. -/
+cooldown or a slot waiting on another device's key, and for a failure that
+clears by itself and names no state of its own, on the pass, on coven's own
+operation or on a slot's application alike (`one_retry`). -/
 def PassFailure.state : PassFailure → Option State
   | .offline => some .offline
   | .storage f =>
       match f.named with
       | some s => some s
-      | none => if f = .rateLimited then none else some .failed
+      | none => if f.byItself then none else some .failed
   | .updateRequired => some .updateNeeded
   | .removed => some .removed
   | .deviceIdInUse => some .needsReset
-  | .operation r => some (r.state.getD .failed)
+  | .operation r =>
+      match r.state with
+      | some s => some s
+      | none => if r.byItself then none else some .failed
   | .blocked r => r.state
   | .other => some .failed
+
+/-- The failures that retry under the sync scope's backoff: those that clear by
+themselves and name no state, whichever way the pass met them. -/
+def PassFailure.retries : PassFailure → Bool
+  | .storage f => f.named.isNone && f.byItself
+  | .operation r => r.state.isNone && r.byItself
+  | .blocked r => r.state.isNone && r.byItself
+  | _ => false
 
 /-- How the last pass that reached storage, or failed trying, ended. -/
 inductive LastPass
@@ -310,6 +334,9 @@ structure Facts where
   metered : Bool
   /-- A self-replacement of this member's keys pauses writes (§12.3). -/
   keysChanging : Bool
+  /-- The sync scope's backoff runs: the last pass failed and retries then
+  (`_coven_retries`, scope `sync`). -/
+  passRetrying : Bool
   /-- The time of the last pass that reached the read end. -/
   lastSynced : Option Nat
   deriving DecidableEq, Repr
@@ -375,10 +402,18 @@ highest-ranked candidate. -/
 def state (f : Facts) : State :=
   if f.storage = .none then .notSynced else top f.loop f.rest
 
-/-- Whether the last pass is blocked at a slot. -/
+/-- Whether the last pass is blocked at a slot that waits for something other
+than a retry: a failure that clears by itself retries instead. -/
 def Facts.blocked (f : Facts) : Bool :=
   match f.last with
-  | .failed (.blocked _) => true
+  | .failed (.blocked r) => !(r.state.isNone && r.byItself)
+  | _ => false
+
+/-- Whether the last pass ended on a failure that retries under the sync
+scope's backoff. -/
+def Facts.lastRetries (f : Facts) : Bool :=
+  match f.last with
+  | .failed p => p.retries
   | _ => false
 
 /-- What holds every transfer, the pass's, each upload's and a queued
@@ -390,10 +425,14 @@ def Facts.heldAll (f : Facts) : Option SyncWait :=
   else if f.blocked then some .blocked
   else none
 
-/-- What the next pass waits for: what holds every transfer, else its turn,
-once a cooldown that held the last one is over. A pass held back by a wait
-waits for it, and so does a queued write, which goes out with that pass. -/
-def Facts.passWait (f : Facts) : SyncWait := f.heldAll.getD .queued
+/-- What the next pass waits for: what holds every transfer, else the backoff
+of a failure that clears by itself, else its turn, once a cooldown that held
+the last one is over. A pass held back by a wait waits for it, and so does a
+queued write, which goes out with that pass. -/
+def Facts.passWait (f : Facts) : SyncWait :=
+  match f.heldAll with
+  | some w => w
+  | none => if f.lastRetries && f.passRetrying then .retrying else .queued
 
 /-- What one queued bound upload waits for: what holds every transfer first,
 then its backoff. -/
@@ -459,13 +498,20 @@ theorem pass_named (p : PassFailure) (s : State) (h : p.state = some s) :
   | offline => simp [PassFailure.state] at h; exact .inr h.symm
   | storage g =>
       left
-      cases g <;> simp [PassFailure.state, Failure.named] at h <;> (subst h; rfl)
+      cases g <;> simp [PassFailure.state, Failure.named, Failure.byItself] at h <;>
+        (subst h; rfl)
   | operation r =>
       left
-      simp only [PassFailure.state, Option.some.injEq] at h
+      simp only [PassFailure.state] at h
       cases hr : r.state with
-      | none => rw [hr] at h; subst h; rfl
-      | some x => rw [hr] at h; subst h; exact reason_named r x hr
+      | none =>
+          rw [hr] at h
+          cases hb : r.byItself <;> simp [hb] at h
+          subst h; rfl
+      | some x =>
+          rw [hr] at h
+          simp only [Option.some.injEq] at h
+          subst h; exact reason_named r x hr
   | blocked r => exact .inl (reason_named r s h)
   | _ => left; simp [PassFailure.state] at h; subst h; rfl
 
@@ -829,6 +875,8 @@ inductive Event
   /-- A self-replacement of this member's keys starts or ends its write
   pause (§12.3). -/
   | keysChanging (changing : Bool)
+  /-- The sync scope's backoff is armed or ends. -/
+  | backoff (retrying : Bool)
   /-- The process ends and the store opens again. -/
   | reopen
   deriving DecidableEq, Repr
@@ -848,6 +896,7 @@ def step (f : Facts) : Event → Option Facts
   | .finish last now =>
       if f.passing then
         some { f with passing := false, moving := false, last,
+                      passRetrying := if last = .synced then false else f.passRetrying,
                       lastSynced := if last = .synced then some (later f.lastSynced now)
                                     else f.lastSynced }
       else none
@@ -863,6 +912,7 @@ def step (f : Facts) : Event → Option Facts
   | .settings r c p m => some { f with running := r, cooling := c, paused := p, unmeteredOnly := m }
   | .network m => some { f with metered := m }
   | .keysChanging c => some { f with keysChanging := c }
+  | .backoff b => some { f with passRetrying := b }
   | .reopen =>
       some { f with passing := false, moving := false,
                     uploads := f.uploads.map Upload.reopened, running := false,
@@ -1048,7 +1098,36 @@ sync: neither is a failure. -/
 theorem waiting_pass_waits (f : Facts) (r : Reason) (wait : r.state = none) :
     ({ f with last := .failed (.blocked r) } : Facts).ended = .waitingToSync ∧
       ({ f with last := .failed (.storage .rateLimited) } : Facts).ended = .waitingToSync := by
-  simp [Facts.ended, PassFailure.state, wait, Failure.named]
+  simp [Facts.ended, PassFailure.state, wait, Failure.named, Failure.byItself]
+
+/-! ## One retry wait -/
+
+/-- **A failure that clears by itself names no state.** A pass ending on a
+provider failure that clears by itself and names no state of its own, a
+cooldown's included, never names failed: it waits to sync. -/
+theorem self_clearing_waits (f : Failure) (clears : f.byItself = true) (unnamed : f.named = none) :
+    (PassFailure.storage f).state = none ∧ (PassFailure.storage f).retries = true := by
+  simp [PassFailure.state, PassFailure.retries, unnamed, clears]
+
+/-- **One retry wait.** The same failure that clears by itself, as the last
+pass's, as the block of a slot's application, or as the failure of coven's own
+operation, names the same candidate on a quiet device with sync running and the
+sync scope's backoff armed: waiting to sync, retrying. -/
+theorem one_retry (f : Facts) (fail : Failure) (answered : Bool)
+    (clears : fail.byItself = true) (unnamed : fail.named = none)
+    (connected : f.storage = .connected) (still : f.moving = false)
+    (idle : f.uploads.filter (·.bound) = []) (noWrites : f.unsent = false)
+    (noRecords : f.records = []) (running : f.running = true) (cooling : f.cooling = false)
+    (backoff : f.passRetrying = true)
+    (last : f.last = .failed (.storage fail) ∨ f.last = .failed (.blocked (.storage fail answered)) ∨
+      f.last = .failed (.operation (.storage fail answered))) :
+    state f = .waitingToSync ∧ f.waits.head? = some .retrying := by
+  rcases last with h | h | h <;>
+    simp [state, connected, top, Facts.rest, Facts.files, Facts.writes, Facts.others, Facts.loop,
+      Facts.ended, Facts.bound, Facts.waits, Facts.passWait, Facts.heldAll,
+      Facts.blocked, Facts.lastRetries, PassFailure.state, PassFailure.retries, Reason.state,
+      Reason.byItself, still, idle, noWrites, noRecords, running, cooling, backoff, h, unnamed,
+      clears]
 
 /-! ## The network -/
 
@@ -1121,7 +1200,7 @@ namespace Examples
 
 def connected : Facts :=
   ⟨.connected, .synced, false, false, [], false, [], true, false, false, false, false, false,
-    some 100⟩
+    false, some 100⟩
 
 /-- A cover a write holds back, which the write waits for. -/
 def cover (progress : Progress) : Upload := ⟨progress, true, false, none⟩
@@ -1185,6 +1264,18 @@ example : (run connected [.settings true true false false, .begin,
     some (.waitingToSync, [.coolingDown]) := by decide
 example : (run connected [.begin, .finish (.failed (.storage .rateLimited)) 150]).map
     (fun f => (state f, f.waits)) = some (.waitingToSync, [.queued]) := by decide
+
+/-- Ben's pass meets a 503 from the provider, as a slot's block, as the pass's
+own failure or as coven's own operation's: waiting to sync, retrying, once the
+sync scope's backoff is armed, and never failed. -/
+example : (run connected [.backoff true, .begin, .finish (.failed (.storage .network)) 150]).map
+    (fun f => (state f, f.waits)) = some (.waitingToSync, [.retrying]) := by decide
+example : (run connected [.backoff true, .begin,
+    .finish (.failed (.blocked (.storage .network true))) 150]).map
+    (fun f => (state f, f.waits)) = some (.waitingToSync, [.retrying]) := by decide
+example : (run connected [.backoff true, .begin,
+    .finish (.failed (.operation (.storage .network true))) 150]).map
+    (fun f => (state f, f.waits)) = some (.waitingToSync, [.retrying]) := by decide
 
 /-- Carol's cover uploads: syncing while it moves, and synced only once it is
 stored. Her track never shows: not moving, queued, paused or failed. -/
