@@ -42,8 +42,13 @@ enum Reason {
     Refused,
     Update(u32),
     WritesRefused,
-    /// A move's original is missing: the record names the move.
-    Original(i64),
+    /// A move's original is missing: the record names the move and the
+    /// original's path, as `PendingReason::Original` serializes it: a JSON
+    /// array of the path's bytes.
+    Original {
+        path: Vec<u8>,
+        of: i64,
+    },
 }
 impl PendingValue for Record {
     fn provider_access(id: OperationId, _account: String, _grant: bool) -> Self {
@@ -83,7 +88,7 @@ impl PendingValue for Record {
     }
     fn move_of(&self) -> Option<crate::MoveId> {
         match self.reason {
-            Reason::Original(of) => Some(crate::MoveId(of)),
+            Reason::Original { of, .. } => Some(crate::MoveId(of)),
             _ => None,
         }
     }
@@ -102,7 +107,7 @@ impl PendingValue for Record {
     const BUILD: u128 = 1;
     fn can_retry(&self, build: u128, schema: u32) -> bool {
         match self.reason {
-            Reason::Missing | Reason::Original(_) => true,
+            Reason::Missing | Reason::Original { .. } => true,
             Reason::WritesRefused => false,
             Reason::Refused => build != Self::BUILD,
             Reason::Update(required) => schema >= required,
@@ -119,9 +124,16 @@ impl PendingValue for Record {
 pub(crate) fn missing(subject: u64) -> Record {
     Record { subject: subject.into(), reason: Reason::Missing, operation: None, cause: None }
 }
+/// The bytes of the path every move record names its original by.
+const ORIGINAL_PATH: &[u8] = b"/music/Caf\xC3\xA9/01 Intro.flac";
 /// A record that a move's original is missing, about a numbered subject.
 pub(crate) fn moving(subject: u64, of: crate::MoveId) -> Record {
-    Record { subject: subject.into(), reason: Reason::Original(of.0), operation: None, cause: None }
+    Record {
+        subject: subject.into(),
+        reason: Reason::Original { path: ORIGINAL_PATH.to_vec(), of: of.0 },
+        operation: None,
+        cause: None,
+    }
 }
 pub(crate) fn operation_record(id: OperationId) -> Record {
     Record {
@@ -544,6 +556,67 @@ async fn coven_pending_lists_records_in_the_order_they_arose() {
     let read: Vec<Subject> =
         db.pending::<Record>().await.unwrap().into_iter().map(|record| record.subject).collect();
     assert_eq!(read, [5.into(), 2.into(), 1.into()]);
+    db.close().await.unwrap();
+}
+
+/// `coven_pending` shows each record's subject and reason as the name of
+/// the variant it holds (`subject_kind`, `reason_kind`), the journal row it
+/// describes (`operation`), and, for a record that a move's original is
+/// missing, the original's path as the bytes `coven_user_files.path` holds
+/// (`original_path`), so an app's SQL selects on them without decoding the
+/// record.
+#[tokio::test]
+async fn coven_pending_shows_the_kinds_the_record_names_and_an_originals_path() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let id = db
+        .start_operation(NewOperation {
+            kind: "fixture".into(),
+            data: vec![0],
+            started_by: "test".into(),
+            pauses_writes: false,
+        })
+        .await
+        .unwrap();
+    db.record_pending(operation_record(id)).await.unwrap();
+    db.inspect_writer(|sql| crate::file_moves::tests::moving(sql, 3));
+    db.record_pending(moving(7, crate::MoveId(3))).await.unwrap();
+    db.record_pending(record(8)).await.unwrap();
+    db.record_pending(Record {
+        subject: Subject::Slot(4),
+        reason: Reason::Update(2),
+        operation: None,
+        cause: None,
+    })
+    .await
+    .unwrap();
+    let rows = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT operation,subject_kind,reason_kind,original_path FROM coven_pending
+                 ORDER BY position",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<i64>>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<Vec<u8>>>(3)?,
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (Some(id.0), "number".to_owned(), "missing".to_owned(), None),
+            (None, "number".to_owned(), "original".to_owned(), Some(ORIGINAL_PATH.to_vec())),
+            (None, "number".to_owned(), "refused".to_owned(), None),
+            (None, "slot".to_owned(), "update".to_owned(), None),
+        ]
+    );
     db.close().await.unwrap();
 }
 

@@ -630,7 +630,12 @@ move from its `move` column, and cancels it with `cancel_move`. Every track
 stays on her laptop only. A bound file's upload shows NULL there, since its
 move can't be cancelled (§17.4). A move's pending record, such as one whose
 original is missing, names the move in `coven_pending.move`, so the app joins
-it to the move's files with `coven_uploads.move`.
+it to the move's files with `coven_uploads.move`, and names the original in
+`coven_pending.original_path`, so the app joins it to the original's row in
+`coven_user_files` without decoding the record. `subject_kind` and `reason_kind`
+give the kind of each record's subject and reason in plain columns, and
+`operation` the operation a record is about, so a query filters and joins on
+what a record is about.
 
 The error behind a pending record is in `coven_pending` too (§19.1). Coven
 writes the error's text into the record's `cause` in the same statement that

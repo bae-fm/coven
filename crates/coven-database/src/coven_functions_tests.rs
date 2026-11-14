@@ -225,6 +225,106 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
     db.close().await.unwrap();
 }
 
+/// `_coven_variant_kind` names the variant of a value serde wrote for an
+/// enum, in snake case: a unit variant is a string, any other is an object
+/// of one key. Any other value is damage.
+#[tokio::test]
+async fn a_variant_kind_is_the_name_serde_wrote_in_snake_case() {
+    let store = TestStore::new();
+    let db = analyzed_keys(&store).await;
+    for (json, kind) in [
+        (r#""Missing""#, "missing"),
+        (r#""NoStorage""#, "no_storage"),
+        (r#"{"Move":{"id":3}}"#, "move"),
+        (r#"{"KeyCopy":{"key":1}}"#, "key_copy"),
+        (r#"{"Waits":"SequenceCatchUp"}"#, "waits"),
+        (r#"{"Original":{"path":[1],"failure":"Missing"}}"#, "original"),
+    ] {
+        let read: String = db
+            .read(move |sql| {
+                Ok::<_, DbError>(
+                    sql.query_row("SELECT _coven_variant_kind(?1)", [json], |r| r.get(0))?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(read, kind, "{json}");
+    }
+    for damaged in ["{}", r#"{"A":1,"B":2}"#, "7", "[1]", "null", "not json"] {
+        let error = db
+            .read(move |sql| {
+                Ok(sql.query_row("SELECT _coven_variant_kind(?1)", [damaged], |r| {
+                    r.get::<_, String>(0)
+                })?)
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..))),
+            "{damaged}: {error:?}"
+        );
+    }
+    let null: Option<String> = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT _coven_variant_kind(NULL)", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(null, None);
+    db.close().await.unwrap();
+}
+
+/// `_coven_json_bytes` turns a JSON array of byte numbers, as a record
+/// writes a path's bytes, into those bytes as a blob; NULL stays NULL, and
+/// anything but an array of 0 to 255 is damage.
+#[tokio::test]
+async fn a_json_array_of_byte_numbers_becomes_a_blob() {
+    let store = TestStore::new();
+    let db = analyzed_keys(&store).await;
+    for (json, bytes) in [
+        ("[]", vec![]),
+        ("[0,255,67]", vec![0, 255, 67]),
+        (" [ 1 , 2 ] ", vec![1, 2]),
+        (
+            &format!("[{}]", (0..=255).map(|b| b.to_string()).collect::<Vec<_>>().join(",")),
+            (0..=255).collect(),
+        ),
+    ] {
+        let json = json.to_owned();
+        let read: Vec<u8> = db
+            .read(move |sql| {
+                Ok::<_, DbError>(
+                    sql.query_row("SELECT _coven_json_bytes(?1)", [json], |r| r.get(0))?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(read, bytes);
+    }
+    let null: Option<Vec<u8>> = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT _coven_json_bytes(NULL)", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(null, None);
+    for damaged in ["[256]", "[-1]", "[1.5]", r#"["a"]"#, "{}", "7", "not json", r#""text""#] {
+        let error = db
+            .read(move |sql| {
+                Ok(sql.query_row("SELECT _coven_json_bytes(?1)", [damaged], |r| {
+                    r.get::<_, Vec<u8>>(0)
+                })?)
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..))),
+            "{damaged}: {error:?}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
 /// One of coven's SQL functions panics. rusqlite would turn the panic into
 /// an error that names no bug, so the function keeps it: the call fails
 /// with `DbError::Bug`, its message kept. A function changes nothing, so the

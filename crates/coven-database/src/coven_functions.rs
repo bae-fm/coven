@@ -139,7 +139,52 @@ pub(crate) fn register(
     add(connection, authorization, "_coven_unix_nanos", 1, PURE, |ctx| {
         Ok(Value::Integer(unix_time(ctx)?.1.into()))
     })?;
+    // What a record's JSON names, for `coven_pending`: the variant of an
+    // enum value and the bytes of a path written as an array of numbers.
+    add(connection, authorization, "_coven_variant_kind", 1, PURE, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Null => Value::Null,
+            ValueRef::Text(text) => Value::Text(variant_kind(text)?),
+            _ => return Err(damaged()),
+        })
+    })?;
+    add(connection, authorization, "_coven_json_bytes", 1, PURE, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Null => Value::Null,
+            ValueRef::Text(text) => Value::Blob(json_bytes(text)?),
+            _ => return Err(damaged()),
+        })
+    })?;
     Ok(())
+}
+
+/// The name of the variant in `json`, which serde wrote for an enum value:
+/// a unit variant as its name, any other as an object whose one key is its
+/// name. The name in snake case: `KeyCopy` is `key_copy`.
+#[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
+fn variant_kind(json: &[u8]) -> rusqlite::Result<String> {
+    let value: serde_json::Value = serde_json::from_slice(json).map_err(|_| damaged())?;
+    let name = match &value {
+        serde_json::Value::String(name) => name,
+        serde_json::Value::Object(fields) if fields.len() == 1 => {
+            fields.keys().next().ok_or_else(damaged)?
+        }
+        _ => return Err(damaged()),
+    };
+    let mut kind = String::with_capacity(name.len() + 2);
+    for (place, letter) in name.chars().enumerate() {
+        if letter.is_uppercase() && place > 0 {
+            kind.push('_');
+        }
+        kind.extend(letter.to_lowercase());
+    }
+    Ok(kind)
+}
+
+/// The bytes `json` lists as an array of numbers from 0 to 255.
+#[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
+fn json_bytes(json: &[u8]) -> rusqlite::Result<Vec<u8>> {
+    serde_json::from_slice(json).map_err(|_| damaged())
 }
 
 /// Register `function` as `name` on `connection`, as `authorization` keeps

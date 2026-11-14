@@ -106,9 +106,18 @@ pub(super) const SCHEMA: &str = concat!(
     // record about a pin coven keeps names its file. Its cause is the text
     // of the error behind it, when this run met that error and no app call
     // received it. A record about a move names it in `move`, the id
-    // `coven_uploads.move` holds.
-    "CREATE VIEW coven_pending(record,file,position,cause,move) AS
-        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause,e.move
+    // `coven_uploads.move` holds. `operation` is the journal row a record
+    // describes. `subject_kind` and `reason_kind` name the variants of the
+    // record's subject and reason in snake case, as `PendingSubject` and
+    // `PendingReason` name them; `original_path` is the path, as the bytes
+    // `coven_user_files.path` holds, of a reason that an original is missing
+    // or changed, and NULL for any other.
+    "CREATE VIEW coven_pending(record,file,position,cause,move,operation,subject_kind,
+            reason_kind,original_path) AS
+        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause,e.move,e.operation,
+            _coven_variant_kind(CAST(e.value AS TEXT)->'$.subject'),
+            _coven_variant_kind(CAST(e.value AS TEXT)->'$.reason'),
+            _coven_json_bytes(CAST(e.value AS TEXT)->'$.reason.Original.path')
         FROM _coven_pending AS e
         LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.object=e.object
         LEFT JOIN _coven_upload_files AS l ON l.upload=u.id
