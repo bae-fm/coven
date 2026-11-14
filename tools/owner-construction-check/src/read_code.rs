@@ -107,6 +107,8 @@ pub(crate) struct ReadCode<'a> {
     /// The calls, by file and place, to a function taking a read type: they
     /// hand over a read value, so they run SQL.
     handoffs: BTreeSet<(String, CallSite)>,
+    /// The workspace functions each call resolves to, by file and place.
+    callees: BTreeMap<(String, CallSite), Vec<usize>>,
 }
 
 impl<'a> ReadCode<'a> {
@@ -140,8 +142,17 @@ impl<'a> ReadCode<'a> {
             .filter(|call| call.targets.iter().any(|target| takes_read.contains(target)))
             .map(|call| (index.callables[call.callable].file.relative_path.clone(), call.site))
             .collect();
+        let callees = walked
+            .calls
+            .iter()
+            .filter(|call| !call.targets.is_empty())
+            .map(|call| {
+                let path = index.callables[call.callable].file.relative_path.clone();
+                ((path, call.site), call.targets.clone())
+            })
+            .collect();
         let (units, closures) = units(&index, &walked, &takes_read);
-        Self { units, closures, index, handoffs }
+        Self { units, closures, index, handoffs, callees }
     }
 
     /// Every closure in read code: a unit, or inside one.
@@ -156,6 +167,12 @@ impl<'a> ReadCode<'a> {
 
     pub(crate) fn units(&self) -> &[Unit<'a>] {
         &self.units
+    }
+
+    /// The functions of the index (`index().callables`, by position) the call
+    /// at `site` in `path` resolves to.
+    pub(crate) fn callees(&self, path: &str, site: CallSite) -> &[usize] {
+        self.callees.get(&(path.to_string(), site)).map_or(&[], Vec::as_slice)
     }
 
     /// Whether the call at `site` in `path` hands a read value to its callee.

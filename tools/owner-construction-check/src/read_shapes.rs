@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::counters::{counters, request_bumps};
 use crate::crate_code::CrateCode;
+use crate::cutoffs::cutoffs;
 use crate::finding::Finding;
 use crate::kept_state::kept_state;
 use crate::policy::{Policy, Shape, FILE_NAME};
@@ -31,7 +32,8 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
         .into_iter()
         .chain(kept_state(&read, &code.expanded, policy, shapes))
         .chain(counters(code))
-        .chain(request_bumps(&read, &code.expanded, shapes));
+        .chain(request_bumps(&read, &code.expanded, shapes))
+        .chain(cutoffs(&read, &code.expanded));
     for hit in hits {
         keyed.entry((hit.path.clone(), hit.item.clone(), hit.shape)).or_default().push(hit);
     }
@@ -91,6 +93,9 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
 fn remedy(rule: &str, shape: Shape) -> String {
     let instead = match shape {
         Shape::QueryPerRow => "join in the statement instead of a query per row.",
+        Shape::Cutoff => {
+            "one query, one path: when the one statement is slow, fix it in SQL (the query, an index, a device-local table its triggers keep) and measure."
+        }
         Shape::Counter | Shape::RequestBump => {
             "a live query reruns because what it read changed: drop the counter and let the query read the rows whose change it follows."
         }

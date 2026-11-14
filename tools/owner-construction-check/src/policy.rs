@@ -231,6 +231,8 @@ pub(crate) enum Shape {
     Counter,
     /// A request's integer field counted up by one, to run a live query again.
     RequestBump,
+    /// A comparison with a fixed limit, which picks one read path over another.
+    Cutoff,
 }
 
 impl Shape {
@@ -246,6 +248,7 @@ impl Shape {
             Shape::KeptState => "kept-state",
             Shape::Counter => "counter",
             Shape::RequestBump => "request-bump",
+            Shape::Cutoff => "cutoff",
         }
     }
 }
