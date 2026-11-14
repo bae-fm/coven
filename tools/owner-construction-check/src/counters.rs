@@ -70,7 +70,7 @@ pub(crate) fn counters(code: &CrateCode) -> Vec<Hit> {
             Some(Hit {
                 path,
                 line,
-                what: format!("counts up `{column}`, which no statement sets to anything else"),
+                what: "is only ever counted up, never set to another value".to_string(),
                 item: column,
                 shape: Shape::Counter,
             })

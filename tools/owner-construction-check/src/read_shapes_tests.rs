@@ -176,3 +176,70 @@ fn kept_state_has_its_own_remedy_and_is_keyed_by_the_type() {
     );
     assert_eq!(lines.len(), 2);
 }
+
+/// One workspace with every shape, both lists and the plumbing: the lines an
+/// agent reads are fixed here, as the report prints them.
+#[test]
+fn a_workspace_with_every_shape_reports_the_exact_lines_and_remedies() {
+    let policy = Policy::fixture(
+        r#"
+        rules = ["read-shapes"]
+        [database]
+        capability = "SQLite"
+        test_support_features = ["test-utils"]
+        [read_shapes]
+        read_types = ["SqlReadContext"]
+        live_query_types = ["LiveQuery"]
+        request_query_types = ["LiveQuery"]
+        kept_state_types = ["Mutex"]
+        plumbing = ["crates/app/src/plumbing.rs"]
+        rule = "projects/rule.md in agent-instructions"
+        frozen = [{ path = "crates/app/src/reads.rs", item = "Holder", shape = "kept-state", count = 1, finding = "keeps a lock beside its query" }]
+        allowed = [{ path = "crates/app/src/reads.rs", item = "read", shape = "query-per-row", count = 1, reason = "one statement for each requested window" }]
+        "#,
+    );
+    let plumbing =
+        "pub struct LiveQuery<Q>(Mutex<Q>);\nfn plumbed(sql: &SqlReadContext<'_>) { rows.sort(); }";
+    let reads = "const LIMIT: usize = 100;
+struct Query { revision: u64 }
+struct Holder { query: LiveQuery<Query>, told: Mutex<u8> }
+fn read(sql: &SqlReadContext<'_>, rows: Vec<u8>, ids: Vec<u8>, q: &mut Query) {
+    rows.sort();
+    rows.retain(|r| r.ok);
+    let by = HashMap::new();
+    let n = rows.iter().count();
+    let p = rows.iter().any(|r| r.ok);
+    for id in ids { sql.query_row(\"SELECT 1\", [], f); }
+    if rows.len() > LIMIT {}
+    q.revision += 1;
+}";
+    let files = [
+        RustFile::fixture("crates/app/src/plumbing.rs", plumbing),
+        RustFile::fixture("crates/app/src/reads.rs", reads),
+    ];
+    let sql = [crate::sources::SqlFile {
+        relative_path: "crates/app/src/schema.sql".to_string(),
+        package_root: "crates/app/".to_string(),
+        package: "app".to_string(),
+        text: "UPDATE v SET version = version + 1;".to_string(),
+    }];
+    let lines = lines(find_read_shape_violations(&CrateCode::of(&files, &sql), &policy));
+    let remedy =
+        |instead: &str| format!("projects/rule.md in agent-instructions: {instead} {ENDING}");
+    assert_eq!(
+        lines,
+        [
+            "crates/app/src/reads.rs:5: read sorts with `sort` (sort)".to_string(),
+            "crates/app/src/reads.rs:6: read filters with `retain` (filter)".to_string(),
+            "crates/app/src/reads.rs:7: read groups with `HashMap::new` (group)".to_string(),
+            "crates/app/src/reads.rs:8: read aggregates with `count` (aggregate)".to_string(),
+            "crates/app/src/reads.rs:9: read picks with `any` (pick)".to_string(),
+            "crates/app/src/reads.rs:12: read adds one to the request's `revision` to run the query again (request-bump)".to_string(),
+            "crates/app/src/reads.rs:11: read compares with `>` against the constant LIMIT (cutoff)".to_string(),
+            "crates/app/src/schema.sql:1: v.version is only ever counted up, never set to another value (counter)".to_string(),
+            remedy("the statement filters, sorts, joins, groups, counts and sums, in the same query or its own live query beside it; a read returns what the screen shows."),
+            remedy("a live query reruns because what it read changed: drop the counter and let the query read the rows whose change it follows."),
+            remedy("one query, one path: when the one statement is slow, fix it in SQL (the query, an index, a device-local table its triggers keep) and measure."),
+        ]
+    );
+}
