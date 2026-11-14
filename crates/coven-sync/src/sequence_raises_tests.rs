@@ -2,7 +2,8 @@
 //! raise.
 
 use crate::sequence_sync::tests::*;
-use coven_database::{Database, DbError};
+use coven_database::{Database, DbError, Replacement};
+use coven_merge::Audience;
 
 async fn deed(
     db: &Database,
@@ -854,4 +855,104 @@ pub(crate) async fn raise_admitted_circle(ben: &Device, version: u32) {
     let audience = coven_merge::Audience::Circle(own);
     ben.sync.raise_schema(audience.clone(), version).await.unwrap();
     ben.sync.snapshot(audience).await.unwrap();
+}
+
+// A part ahead of its audience's version, §18.5: a write a device made on its
+// new app and sent in a capture before its raise.
+
+/// The version the store reached and the device whose raise established it.
+async fn store_raise(device: &Device) -> (u32, coven_foundation::id_source::DeviceId) {
+    let state = device.sync.database.store_state().await.unwrap();
+    let version = state.schema.get(&Audience::Store).expect("the store was raised");
+    (version.number, version.snapshot.device)
+}
+
+/// Faults refusing every store snapshot `device` would create.
+fn refuse_store_snapshots(group: &Group, device: &Device) -> coven_storage::test_utils::Faults {
+    let refused: std::collections::BTreeMap<_, _> = (1..=8)
+        .map(|number| {
+            let path = coven_storage::ObjectPath::snapshot(
+                group.store,
+                Audience::Store,
+                device.sync.device,
+                std::num::NonZeroU64::new(number).unwrap(),
+            );
+            (path, (coven_storage::StorageFailure::Network, 503))
+        })
+        .collect();
+    coven_storage::test_utils::Faults {
+        create_failures: refused,
+        ..coven_storage::test_utils::Faults::none()
+    }
+}
+
+/// Ana writes note `b` at version 2, then both devices reach version 4, where
+/// the migrations to 2 and 4 are breaking with `Drop` and 3 is an addition.
+async fn ana_writes_between_two_breaking_migrations(group: &Group) -> (Device, Device) {
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    insert(&ana.sync.database, "b", "between the migrations").await;
+    group.version.store(4, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let ben = group.reopen(ben).await;
+    (ana, ben)
+}
+
+#[tokio::test]
+async fn a_captured_write_sent_ahead_of_the_raise_is_in_the_writers_raise() {
+    let group = Group::new();
+    let (ana, ben) = ana_writes_between_two_breaking_migrations(&group).await;
+    for _ in 0..4 {
+        ana.sync.pass().await.unwrap();
+        ben.sync.pass().await.unwrap();
+    }
+    for device in [&ana, &ben] {
+        assert_eq!(store_raise(device).await, (4, ana.sync.device));
+        assert_eq!(
+            rows(device.database()).await,
+            vec![("b".to_string(), "between the migrations".to_string())]
+        );
+        assert!(device.database().lost_values().await.unwrap().is_empty());
+    }
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_captured_write_a_racing_raise_covers_is_a_lost_value_everywhere() {
+    let group = Group::new();
+    let (ana, ben) = ana_writes_between_two_breaking_migrations(&group).await;
+    ana.storage.set_faults(refuse_store_snapshots(&group, &ana)).await;
+    ana.sync.pass().await.unwrap();
+    for _ in 0..4 {
+        ben.sync.pass().await.unwrap();
+    }
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    for _ in 0..4 {
+        ana.sync.pass().await.unwrap();
+    }
+    ben.sync.pass().await.unwrap();
+    let mut kept = Vec::new();
+    for device in [&ana, &ben] {
+        assert_eq!(store_raise(device).await, (4, ben.sync.device));
+        assert!(rows(device.database()).await.is_empty());
+        let lost = device.database().lost_values().await.unwrap();
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].table, "notes");
+        assert!(lost[0].frozen);
+        assert_eq!(lost[0].replaced_by, Replacement::SchemaChange { version: 4 });
+        kept.push((lost[0].key.clone(), lost[0].lost.clone()));
+    }
+    assert_eq!(kept[0], kept[1]);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
 }
