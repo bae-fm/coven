@@ -14,9 +14,10 @@ audiences it raises. What Garden's capture holds depends on how Ben came to read
   version 2 and never ran migration 2 on its rows, so the rows he migrates to 3
   aren't Garden's rows migrated to 3 (`second_capture_not_body`), the joiner's
   problem of `joiner_cannot_raise` one version on. **Leaving Garden out**
-  instead sends his held write ahead of Garden's version: every device refuses
-  its part, and the raise a holder later makes covers that slot without it, so
-  the write is gone for good (`skipped_capture_drops_held`).
+  instead sends his held write ahead of Garden's version: the model refuses
+  its part, and the raise a holder later makes covers that slot without it
+  (`skipped_capture_drops_held`). That is the model's outcome; coven's devices
+  judge such a part as a late write (`RaiseBody.ahead_part_differs`).
 - **Rebuilt.** Ben rebuilds Garden at version 1 and runs migration 2 on its
   rows (`rebuilt_body_honest`), as a member who held it would. His second
   migration then runs step 3 on those rows, and what it captures is Garden's
@@ -86,10 +87,11 @@ def heldSent : Nat → Slot sig
   | 3 => .boundary () () (.raise 3) 1 (6 : Nat)
   | _ => .writes () 0 (fun _ => none)
 
-/-- **Counterexample: leaving the joined circle out of the capture loses the
-held write.** Its part, at version 2 in a circle at version 1, is refused; the
-raise to 3 that covers its slot counts, and Garden's rows after it hold the
-migration's marks and not the write. -/
+/-- **Counterexample: in the model, leaving the joined circle out of the capture
+loses the held write.** Its part, at version 2 in a circle at version 1, is
+refused; the raise to 3 that covers its slot counts, and Garden's rows after it
+hold the migration's marks and not the write. Coven's devices judge the part as
+a late write instead (`RaiseBody.ahead_part_differs`). -/
 theorem skipped_capture_drops_held :
     ¬ AppliedTo steps heldSent () 1 ∧ AppliedTo steps heldSent () 3 ∧
     rowsAt steps heldSent () 3 = [1002, 1003] := by

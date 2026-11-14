@@ -29,7 +29,8 @@ raise depends on what it held:
   result the honest body (`rebuilt_body_honest`), and the raise built on it
   counts (`rebuilt_raise_counted`). A migration that read a second circle
   would give the rebuilder another body than a member who held both
-  (`cross_read_rebuild_differs`).
+  (`cross_read_rebuild_differs`). A write above the rebuild's version stays out
+  of its rows, kept as a lost value.
 -/
 
 namespace CovenSequence.CircleRaise

@@ -8,11 +8,14 @@ A part counts only at a version its audience has reached (`audValid`'s
 increase it and nothing else changes it (`version_mono`). So a device that sends
 a part only once the audience has reached the part's version in the prefix it
 has applied sends a part that counts at whatever later slot it lands
-(`waiting_part_counts`). One sent earlier is refused: a device that started
-reading a circle at version 1 after its app reached version 2 writes parts at
-version 2, which the circle refuses until its raise (`ahead_part_refused`). An audience no one may raise, such as a deleted
-circle, keeps its version (`closed_version`), so a part ahead of it never meets
-the rule however long it waits (`closed_part_never_counts`).
+(`waiting_part_counts`). In the model one sent earlier doesn't count at its
+slot: a part at version 2 in a circle at version 1 is refused there, and the
+same part at the circle's version counts (`ahead_part_refused`). Coven's
+devices don't refuse such a part, they judge it as a late write, so their raise
+body can hold what the model's leaves out (`RaiseBody.ahead_part_differs`). An
+audience no one may raise, such as a deleted circle, keeps its version
+(`closed_version`), so a part ahead of it never meets the rule however long it
+waits (`closed_part_never_counts`).
 -/
 
 namespace CovenSequence.WriteVersion
@@ -147,11 +150,10 @@ def atOne : Nat → Slot sig
   | 1 => .writes () 0 (fun _ => some ⟨1, [], 10, 0⟩)
   | _ => .writes () 0 (fun _ => none)
 
-/-- **Counterexample: a part ahead of its audience is refused.** A circle at
-version 1 refuses a part written at version 2 and counts the same part
-written at version 1. A device whose app reached version 2 before it started
-reading the circle writes parts at version 2, so sent before the circle's
-raise they are refused. -/
+/-- **Counterexample: a part ahead of its audience doesn't count at its slot.**
+A circle at version 1 doesn't count a part written at version 2 and counts the
+same part written at version 1. Coven's devices judge such a part as a late
+write instead (`RaiseBody.ahead_part_differs`). -/
 theorem ahead_part_refused :
     ¬ AppliedTo baseOne ahead () 1 ∧ AppliedTo baseOne atOne () 1 := by
   unfold AppliedTo

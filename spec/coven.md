@@ -9569,8 +9569,14 @@ migrations, and installing it makes the circle's capture (§18.4).
    writer stops at the raise, so no circle part after it reads store rows from
    later. A write above the version the rebuild runs at, such as this device's
    own migration marker or another device's captured write, counts there as
-   everywhere: its parts in an audience below that version are refused
-   (§18.5), and the rebuild does not wait for the app to support the version.
+   everywhere, and the rebuild does not wait for the app to support the
+   version. The rebuild can't hold such a write's changes at its version, and
+   its migration write, which read past them, would replace them without a lost
+   value if they were applied after the migration. So it keeps each of the
+   write's changes as a frozen lost value naming the breaking version the write
+   needs (§18.6). Ana's pin in Garden, made at version 2 and sent before her
+   raise, lands before Ben starts reading Garden. His rebuild keeps the pin as
+   a lost value, and if his raise lands first, so does every device.
 3. It runs the breaking migrations over that database, checked as any run is,
    and makes the migration write with the header the device queued for the
    rebuild: its number, its timestamp and the rebuild slot as the slot it read
@@ -9800,10 +9806,23 @@ it are new-version writes and wait behind it.
 - **A pass's writes slot can carry those writes and the marker.** Later ordinary
   writes wait for a raise to their version, this device's or another's, or until
   a later local breaking migration captures them (below).
-- **Every audience a write goes to must have reached its version.** A part
-  counts only at a version its audience has reached, so every device refuses
-  one ahead of it
+- **Every audience a write goes to must have reached its version.** A device
+  sends a write into an audience below the write's version only as one of a
+  capture's writes, which its raise covers. Its other writes wait. Such a part
+  doesn't count at its slot
   ([`ahead_part_refused`](proofs/sequence/CovenSequence/WriteVersion.lean)).
+  Each device that reads it judges it as a late write: the writer counts its
+  own captured write; another device judges it against its own capture, which
+  is at or past the part's version, and converts it, freezes it under `Drop`,
+  or applies it when no breaking step lies between; a device whose app is below
+  the part's version waits (§18.2). The raise that is established decides for
+  everyone: its body carries what its raiser judged, and a part after its
+  coverage is judged against it (§18.6)
+  ([`ahead_part_differs`](proofs/sequence/CovenSequence/RaiseBody.lean)).
+  Ana's second migration captures her note `b`, made at version 2. If her raise
+  of the store to 4 lands first, every device holds `b`. If Ben's lands first
+  and covers it, every device holds `b` as a lost value, since version 4
+  declares `Drop`. A rebuild keeps such a part as a frozen lost value (§18.3).
   A device makes no write into an audience it holds below its own version
   without a capture: it has either held the audience at the old version, so a
   migration captured it, or it reads the audience below its version without
@@ -9877,7 +9896,8 @@ or untried: its device, number, timestamp, `read_through`, schema version,
 disposition and plaintext stay unchanged. A write already tried also keeps its
 format and the keys it was sealed with.
 
-**Judging late writes before the raise.** Until it claims its raise, a migrated
+**Judging late writes before the raise.** A part ahead of its audience is
+judged the same way. Until it claims its raise, a migrated
 device interprets other devices' old-schema changes that its capture doesn't
 cover using its own local capture's conversion, keeping the original records. A
 recapture includes every write already judged. Its raise body then agrees with
@@ -10065,7 +10085,8 @@ Ana's update captures it, and both prepare Garden's raise to version 2.
 Whichever claim lands first is established, and the other device loads it as
 any member does. Their bodies may differ, since each covers what its device
 had applied when it prepared, but each is one a member who held the circle
-makes (§18.3, §18.5), and every device loads the same one.
+makes (§18.3, §18.5), except that a rebuild keeps a part ahead of the circle as
+a lost value where a holder judges it (§18.3), and every device loads the same one.
 
 Writes the losing device made after migrating can be built on its migration
 write. Ana's migration sets every note's title, and before Ben's raise is
@@ -14049,13 +14070,14 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A rebuild from the kept store snapshot and the kept bodies, with a sound circle reader, migrates a view of just the circle's rows and the store's to the circle's raise body | `rebuilt_body_from_kept` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §16.6, §18.3 |
 | *Body.* A raise prepared at the rebuild slot with the rebuilt body, with no other raise, reset or larger announcement of the circle since, applies, and its rows are that body with the later parts converted | `rebuilt_raise_counted` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A migration that reads a second circle gives a member of both circles and a rebuilder of one other bodies at the same coverage, which is why a breaking migration may read only its audience's rows and the store's | `cross_read_rebuild_differs` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.1 |
-| *Body.* A part ahead of its audience's version is refused, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
+| *Body.* In the model, a part ahead of its audience's version doesn't count at its slot, and the same part at the audience's version counts | `ahead_part_refused` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience's version never goes down, so a part sent once its audience reached its version counts on that rule wherever it lands | `step_version`, `version_mono`, `waiting_part_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* An audience no one may raise, such as a deleted circle, keeps its version, so a part ahead of it never meets the version rule wherever it lands | `closed_step_version`, `closed_version`, `closed_part_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §18.5 |
 | *Body.* A raise to a version its audience has reached in the prefix its operation validated against, or of an audience no one may raise from there on, is refused at every later slot, so that operation adopts the state instead of claiming | `satisfied_raise_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §15.9, §18.3, §18.8 |
 | *Body.* A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
-| A device that read a circle converted, after its first breaking migration, and wrote into it can't handle the circle at its second: capturing it publishes a raise body it never held, and leaving it out sends its held write ahead of the circle's version, refused everywhere and covered by the holder's later raise without it | `second_capture_not_body`, `skipped_capture_drops_held` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
+| *Body.* A part ahead of its audience, such as a writer's captured write sent before its raise, is refused by the model and judged as a late write by coven's devices, so coven's body can hold it where the model's leaves it out | `ahead_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
+| A device that read a circle converted, after its first breaking migration, and wrote into it can't handle the circle at its second: capturing it publishes a raise body it never held, and leaving it out sends its held write ahead of the circle's version, which the model refuses and the holder's later raise covers without it (coven's devices judge such a part as a late write) | `second_capture_not_body`, `skipped_capture_drops_held` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
 | *Body.* A device that rebuilt a circle and then runs a second breaking migration captures the circle's rows migrated to the second version: its second migration's step on the rebuilt rows is the honest body | `rebuilt_second_capture_is_body` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3, §18.3 |

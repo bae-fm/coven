@@ -16,6 +16,13 @@ part after migrating (`one_part_agrees`): a converter that is the migration
 applied to one change. They differ when a converter drops the part: a write on
 the old app landing after the raising device migrated, and before its
 coverage, is in the model's body and not in coven's (`late_part_differs`).
+
+A part ahead of its audience, such as a writer's captured write sent before its
+raise, is refused by the model and judged by coven's devices as a late write, so
+coven's body can hold a part the model's leaves out (`ahead_part_differs`). A
+rebuild keeps such a part out of its rows as a frozen lost value, and the
+model's rows leave it out too, so `rebuilt_body_honest` covers a rebuild that
+meets one.
 -/
 
 namespace CovenSequence.RaiseBody
@@ -79,6 +86,37 @@ theorem late_part_differs :
   have view₁ : raiseView dropping lateHistory () 1 = fun _ => [10] := by
     funext B; simp [raiseView, inputSlot, one]
   have view₂ : raiseView dropping lateHistory () 2 = fun _ => [10, 20] := by
+    funext B; simp [raiseView, inputSlot, two]
+  refine ⟨by unfold AppliedTo; decide, ?_, ?_⟩
+  · rw [view₂]; rfl
+  · rw [view₁]; rfl
+
+/-- Slot 1 holds a part at the circle's version 1; slot 2 a part at version 2,
+ahead of the circle, such as a writer's captured write sent before its raise. -/
+def aheadHistory : Nat → Slot sig
+  | 1 => .writes () 0 (fun _ => some ⟨1, [], 10, 0⟩)
+  | 2 => .writes () 0 (fun _ => some ⟨2, [], 30, 0⟩)
+  | _ => .writes () 0 (fun _ => none)
+
+/-- **Counterexample: coven's raise body holds a part the model refuses.** Slot
+2's part is at version 2 in the version-1 circle, so the model refuses it at its
+slot and its body, `[10, 1002]`, leaves it out. Coven's raising device migrates
+slot 1's rows and judges the part after migrating, `convert 2 2`, which keeps
+it: `[10, 1002, 30]`. -/
+theorem ahead_part_differs :
+    ¬ AppliedTo dropping aheadHistory () 2 ∧
+    preparedRows dropping (.raise 2) (6 : Nat) (raiseView dropping aheadHistory () 2) () = [10, 1002] ∧
+    replay dropping () aheadHistory (fun _ => false) 2 0
+      (dropping.migrate 2 (raiseView dropping aheadHistory () 1) ()) 2 1 = [10, 1002, 30] := by
+  have one : rowsAt dropping aheadHistory () 1 = [10] := by
+    rw [rowsAt_other dropping aheadHistory () 0 (by intros; simp [aheadHistory]), rowsAt]
+    decide
+  have two : rowsAt dropping aheadHistory () 2 = [10] := by
+    rw [rowsAt_other dropping aheadHistory () 1 (by intros; simp [aheadHistory]), one]
+    decide
+  have view₁ : raiseView dropping aheadHistory () 1 = fun _ => [10] := by
+    funext B; simp [raiseView, inputSlot, one]
+  have view₂ : raiseView dropping aheadHistory () 2 = fun _ => [10] := by
     funext B; simp [raiseView, inputSlot, two]
   refine ⟨by unfold AppliedTo; decide, ?_, ?_⟩
   · rw [view₂]; rfl

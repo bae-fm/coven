@@ -1013,8 +1013,9 @@ side of the rule that a part counts only at a version its audience has reached.
 - `step_version`, `version_mono`: no slot lowers an audience's version.
 - `waiting_part_counts`: a part sent once the sender's applied prefix shows
   its audience at the part's version meets that rule at any later landing slot.
-- `ahead_part_refused`: a circle at version 1 refuses a part at version 2 and
-  counts the same part at version 1.
+- `ahead_part_refused`: in the model, a circle at version 1 doesn't count a
+  part at version 2 at its slot and counts the same part at version 1. Coven's
+  devices judge such a part as a late write (`ahead_part_differs`).
 - `closed_step_version`, `closed_version`, `closed_part_never_counts`: an
   audience no one may raise from some slot on, such as a deleted circle, keeps
   its version from that slot, so a part ahead of it never meets the version
@@ -1039,6 +1040,12 @@ and moves its coverage forward over them.
   in the model's body and not in coven's. The honest-body premise below is the
   model's body, so the model's theorems don't cover coven's body for such a
   part.
+- `ahead_part_differs`: a part at version 2 in a circle at version 1, such as
+  a writer's captured write sent before its raise, is refused by the model at
+  its slot, so the model's body leaves it out. Coven's raising device judges it
+  after migrating, which keeps it, so coven's body holds it. A rebuild keeps
+  such a part out of its rows as a frozen lost value, and the model's rows
+  leave it out too, so `rebuilt_body_honest` covers a rebuild that meets one.
 
 [`SecondRaise`](sequence/CovenSequence/SecondRaise.lean) takes a device that
 read a circle after its first breaking migration and runs a second one before
@@ -1050,8 +1057,9 @@ marker, the held write into the circle among them, and the audiences it read.
   migration on the circle's rows, so its rows migrated again aren't the
   circle's rows migrated.
 - `skipped_capture_drops_held`: leaving that circle out sends the held write
-  ahead of the circle's version. Its part is refused, and the raise a holder
-  makes later covers its slot without it.
+  ahead of the circle's version. The model refuses its part, and the raise a
+  holder makes later covers its slot without it. That is the model's outcome:
+  coven's devices judge such a part as a late write (`ahead_part_differs`).
 - `rebuilt_second_capture_is_body`: if it rebuilt the circle instead, its rows
   are the circle's rows migrated to the first breaking version, and the second
   migration's step on them gives the circle's rows migrated to the second:
@@ -2473,7 +2481,11 @@ they do not replace the separate byte-format, merge or queue tests.
   to the model's encryption observations.
 - Unique values and owner rows are per audience; uniqueness across audiences is
   not modelled.
-- Ordinary receive parts at a version above their audience's are refused.
+- The model refuses a part at a version above its audience's. Coven's devices
+  judge it against their own capture as a late write, so the model's theorems
+  don't cover a body or a replay that holds one (`ahead_part_differs`). A
+  rebuild keeps one as a frozen lost value, which the model's rows also leave
+  out.
   Captured publication and migration effects are separate in `RaiseQueue`;
   each abstract part contains originals with one authored prefix. Decoding a
   batch with mixed authored prefixes into individual originals is not modelled.
