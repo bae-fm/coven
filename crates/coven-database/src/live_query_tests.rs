@@ -73,7 +73,8 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
     let equal_run = Mutex::new(Some(equal_run));
     let mut query = db.subscribe(move |sql| {
         let values =
-            sql.query("SELECT id FROM notes WHERE title LIKE 'Plan' ORDER BY id", [], |r| {
+            // The subquery keeps the table whole: this test is about columns.
+            sql.query("SELECT id FROM notes WHERE title LIKE 'Plan' OR (SELECT 0) ORDER BY id", [], |r| {
                 r.get::<_, String>(0)
             })?;
         if count.fetch_add(1, Ordering::SeqCst) == 1 {

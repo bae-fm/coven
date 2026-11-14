@@ -12,7 +12,10 @@
 //! (`scope_lookup.rs`). Values pass
 //! into a subquery: whether a subquery finds a row doesn't narrow the core
 //! around it, and only the column a subquery returns as it is does come out
-//! of one, as an equality with a column around it (`scope_subquery.rs`). A subquery in FROM, a CTE and one of the app's
+//! of one, as an equality with a column around it (`scope_subquery.rs`). A
+//! condition on one table's row that none of these reads, a function of a
+//! column or a CASE, narrows that table by asking SQLite about each changed
+//! row (`scope_row.rs`). A subquery in FROM, a CTE and one of the app's
 //! views are read as cores too, and conditions on their rows pass into them
 //! (`derived.rs`).
 
@@ -21,6 +24,7 @@ use std::collections::BTreeSet;
 use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
 use crate::row_scope::Scopes;
+use crate::scope_row::row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
@@ -341,7 +345,7 @@ impl Planner {
         for part in found {
             let name = match part {
                 Part::Name(name) => name,
-                Part::Function(..) => continue,
+                Part::Function(..) | Part::Clock => continue,
                 Part::Select(_) | Part::Table | Part::Collation => return None,
             };
             let (item, _) = self.resolve(core, name)?;
@@ -566,7 +570,7 @@ fn read_nested<'a>(
     let mut read = Vec::new();
     for part in found {
         match part {
-            Part::Name(_) | Part::Collation | Part::Function(..) => {}
+            Part::Name(_) | Part::Collation | Part::Function(..) | Part::Clock => {}
             Part::Select(select) => {
                 let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
                     return Ok(None);
@@ -714,13 +718,13 @@ fn read_condition<'a>(
             return Ok(Narrowing { terms: Vec::new(), edges: vec![edge] });
         }
     }
-    let mut found = Vec::new();
-    parts(condition, &mut found);
+    let mut read = Vec::new();
+    parts(condition, &mut read);
     let mut referenced = Vec::new();
-    for part in found {
+    for part in &read {
         let name = match part {
-            Part::Name(name) => name,
-            Part::Function(..) => continue,
+            Part::Name(name) => *name,
+            Part::Function(..) | Part::Clock => continue,
             // A COLLATE changes only how a comparison compares: `term` and
             // `edge` refuse the comparisons it reaches, and a NULL test
             // looks through it.
@@ -746,7 +750,12 @@ fn read_condition<'a>(
                 (found == item).then(|| planner.items[item].columns.affinity(&column)).flatten()?;
             Some((column, affinity))
         };
-        found.terms.extend(term(connection, &column, condition)?.map(|term| (item, term)));
+        // What `term` can't read, SQLite judges row by row (`scope_row.rs`).
+        let narrowed = match term(connection, &column, condition)? {
+            Some(term) => Some(term),
+            None => row_term(connection, planner, core, item, condition, &read)?,
+        };
+        found.terms.extend(narrowed.map(|term| (item, term)));
     } else if let Expr::Binary(left, Operator::Equals, right) = condition {
         for (member, other, first) in [(left, right, false), (right, left, true)] {
             found.edges.extend(planner.edge(core, member, other, first));

@@ -675,9 +675,37 @@ column whose collation isn't BINARY, or on a generated column, doesn't, and nor
 does one whose value SQLite would convert first, as text compared with an
 INTEGER column: there SQLite's answer and coven's could differ. A NULL test
 looks through a COLLATE on its column, since a collation doesn't change whether
-a value is NULL. Other conditions, such as `<>`, `LIKE`, `IS NOT` a value or a
-function of the column, don't narrow. A statement with no condition that
-narrows depends on every row of each table it read.
+a value is NULL.
+
+Any other condition on one table's row narrows that table too, however it is
+written: a function of a column, a CASE, `LIKE` and `GLOB`, `<>`, `NOT`, `IS
+NOT` a value, a row value, a COLLATE. Coven doesn't compare such a condition
+itself. To judge a write it asks SQLite whether the changed row passes, as it
+was before the write and as it is after, with each value given its column's
+type so the condition compares as it does in the table. Ben's artist picker
+lists the artists his typed text finds first, ordered by `CASE WHEN lower(name)
+= ?1 THEN 0 WHEN lower(name) GLOB ?2 THEN 1 ELSE 2 END`, so a window of it holds
+`CASE ... END = 2` over `artists`. Coven asks SQLite whether an artist written
+while the picker is open lands in that window's rank, so an artist added whose
+name the text doesn't find, and which sorts in another window, doesn't rerun
+it. The question is a SELECT over the changed row's values, with a text kept as
+`CAST(?3 AS TEXT)` in a TEXT column and an integer as `CAST(?3 AS INTEGER)` in
+a numeric one, so `name = 5` is true of the text `'5'` there as it is in the
+table.
+
+A condition is judged this way when it names columns of one table of its own
+SELECT and no other table, each a column coven narrows by (stored, BINARY),
+and holds no subquery, no `rowid`, no clock (`CURRENT_TIME`, `date('now')` and
+the other date and time functions) and no function that isn't deterministic. A
+condition that doesn't qualify, such as `b = (SELECT b FROM u LIMIT 1)`, `c >
+unixepoch('now')` or `t.a + u.a = 3`, narrows nothing, and a statement with no
+condition that narrows depends on every row of each table it read. When coven
+can't tell, it counts the row as a match, so the query runs again: a value
+with no cast that keeps it, such as a blob in a TEXT column, a value the write
+didn't record, an error, and a question that runs past the lookups' step limit
+(below). A condition judged this way is never read from a view's or subquery's
+rows: it narrows the tables the statement reads directly, and the tables
+behind a view keep the conditions they have.
 
 A statement that joins tables narrows each one by the rows the others matched.
 Ben's album page lists its tracks with their credited artists:
@@ -733,18 +761,21 @@ the join. The ON of a LEFT JOIN narrows only its right side: it decides which
 right rows join each left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
 inner join's ON, makes the LEFT JOIN an inner join. Each condition coven narrows
-by is false where its column is NULL, except a NULL test and a truth compared
-with a value, so a left row with NULLs in the right side's place fails it, and
-can't appear whatever the LEFT JOIN's ON matched: only the rows an inner join
-gives are left. So coven narrows such a join as an inner join, by its ON both
-ways. Ben's album page can list only the album's producers, with `JOIN tracks AS
-t ON t.release_id = r.id LEFT JOIN track_artists AS c ON c.track_id = t.id` and
-`WHERE r.album_id = ?1 AND c.role = 'producer'`. That narrows `track_artists` to
-the producer credits on this album's tracks, so crediting a producer on another
-album, or a singer on this one, doesn't rerun the page.
+by is false where its column is NULL, except a NULL test, a truth compared with
+a value and a condition SQLite judges, so a left row with NULLs in the right
+side's place fails it, and can't appear whatever the LEFT JOIN's ON matched:
+only the rows an inner join gives are left. So coven narrows such a join as an
+inner join, by its ON both ways. Ben's album page can list only the album's
+producers, with `JOIN tracks AS t ON t.release_id = r.id LEFT JOIN track_artists
+AS c ON c.track_id = t.id` and `WHERE r.album_id = ?1 AND c.role = 'producer'`.
+That narrows `track_artists` to the producer credits on this album's tracks, so
+crediting a producer on another album, or a singer on this one, doesn't rerun
+the page.
 
-A NULL test or a truth compared with a value on the right side doesn't make the
-join inner, since it can be true of the NULLs a missing right row gives. Ben's
+A NULL test, a truth compared with a value or a condition SQLite judges, such
+as `lower(c.role) = 'x'`, on the right side doesn't make the join inner, since
+it can be true of the NULLs a missing right row gives, and it narrows nothing
+there. Ben's
 album page lists the tracks no artist is credited on with `LEFT JOIN
 track_artists AS c ON c.track_id = t.id WHERE c.track_id IS NULL`. Crediting an
 artist on one of those tracks takes it off the page, so coven reads
@@ -779,6 +810,13 @@ coven's lookups apart ([api.md E4](api.md#e4-reading)). Ben's test runs his
 album page over 10 releases and then over 1,000, and credits an artist on
 another release's track. The page and the write's lookup should run as many
 steps over both, and the test fails if they grow.
+
+A condition SQLite judges costs a write one small SELECT for each row it
+changes and each such condition a live query holds, and rows that agree on the
+columns a condition names share one answer. Ben's import writes 270 rows at a
+time. With four queries open, each holding such a condition on the table it
+writes, the write ran 33 SQLite steps a row and took 4.7 µs a row, against
+1.8 µs with none open, on a busy machine.
 
 A subquery is narrowed the same way, by its own conditions and by the values it
 compares with columns of the query around it. Ben's album page marks the tracks

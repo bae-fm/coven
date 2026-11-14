@@ -144,7 +144,6 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE TABLE numbers(value INTEGER)").await.unwrap();
     for sql in [
-        "SELECT value FROM items WHERE id=abs(1)",
         "SELECT value FROM items WHERE id=1 AND EXISTS(SELECT 1 FROM items)",
         "SELECT value FROM items WHERE id=1 AND value NOT IN numbers",
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT value FROM items, n WHERE id=1",
@@ -154,13 +153,7 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
         "SELECT a.value FROM items a JOIN items b ON a.id<b.id WHERE b.value=90",
         "SELECT a.value FROM items a NATURAL JOIN items b WHERE a.id=1",
         "SELECT a.value FROM items a JOIN items b USING (id) WHERE a.id=1",
-        "SELECT value FROM items WHERE id BETWEEN 1 AND 1",
-        "SELECT value FROM items WHERE id IS NOT 1",
-        "SELECT value FROM items WHERE id!=9",
-        "SELECT value FROM items WHERE id NOT IN (9)",
         "SELECT value FROM items WHERE id=1 OR value>20",
-        "SELECT value FROM items WHERE id COLLATE NOCASE=1",
-        "SELECT value FROM items WHERE id='1'",
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
@@ -840,34 +833,39 @@ CREATE VIEW credited AS SELECT t.id, t.release, c.id AS credit, c.track, c.role,
     db.close().await.unwrap();
 }
 
-/// A comparison under a COLLATE, or against a value under one, keeps the
-/// table whole: coven compares values by BINARY only. So do `IS NOT` a
-/// value, and `IS` under a collation, which compare as `=` does.
+/// A comparison under a COLLATE, or against a value under one, and `IS NOT`
+/// a value, aren't comparisons coven makes: SQLite judges each changed row
+/// (`scope_row.rs`), so a row it fails is spared and one it passes reruns.
 #[tokio::test]
-async fn collated_comparisons_keep_whole_tables() {
+async fn collated_comparisons_narrow_by_sqlites_answer() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, x TEXT, value INTEGER); INSERT INTO items VALUES (1,'a',0),(2,'z',0)").await.unwrap();
-    for sql in [
-        "SELECT value FROM items WHERE x COLLATE NOCASE = 'a'",
-        "SELECT value FROM items WHERE x = 'a' COLLATE NOCASE",
-        "SELECT value FROM items WHERE x COLLATE NOCASE IN ('a')",
-        "SELECT value FROM items WHERE x COLLATE NOCASE IS 'a'",
-        "SELECT value FROM items WHERE x COLLATE NOCASE IS ?1",
-        "SELECT value FROM items WHERE x IS NOT 'z'",
+    let db = store
+        .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, x TEXT, value INTEGER)")
+        .await
+        .unwrap();
+    for (sql, parameters) in [
+        ("SELECT value FROM items WHERE x COLLATE NOCASE = 'a'", vec![]),
+        ("SELECT value FROM items WHERE x = 'a' COLLATE NOCASE", vec![]),
+        ("SELECT value FROM items WHERE x COLLATE NOCASE IN ('a')", vec![]),
+        ("SELECT value FROM items WHERE x COLLATE NOCASE IS 'a'", vec![]),
+        (
+            "SELECT value FROM items WHERE x COLLATE NOCASE IS ?1",
+            vec![crate::sql_value::SqlValue::Text(b"a".to_vec())],
+        ),
+        ("SELECT value FROM items WHERE x IS NOT 'z'", vec![]),
     ] {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let count = calls.clone();
-        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
-            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
-            let parameters: &[&str] = if sql.contains('?') { &["a"] } else { &[] };
-            Ok((
-                run,
-                db.query(sql, rusqlite::params_from_iter(parameters), |r| r.get::<_, i64>(0))?,
-            ))
-        });
-        next(&mut query).await;
-        write(&db, "UPDATE items SET value=value+1 WHERE id=2");
-        assert_eq!(next(&mut query).await.0, 2, "{sql}");
+        write(&db, "DELETE FROM items; INSERT INTO items VALUES (1,'a',0),(2,'z',0)");
+        follows(
+            &db,
+            sql,
+            parameters,
+            &[
+                ("UPDATE items SET value=value+1 WHERE id=2", false),
+                ("UPDATE items SET value=value+1 WHERE id=1", true),
+                ("UPDATE items SET x='A' WHERE id=2", true),
+            ],
+        )
+        .await;
     }
     db.close().await.unwrap();
 }

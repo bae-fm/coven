@@ -93,7 +93,7 @@ fn a_conditions_truth_compared_with_a_value_binds_as_sqlite_compares() {
                     .filter(|(_, (_, stored))| {
                         let image =
                             RowImage::new(Arc::from(["x".to_owned()]), vec![Some(stored.clone())]);
-                        scope.matches(&image, &mut |_, _| Ok(true)).unwrap()
+                        scope.matches(&image, &mut |_| Ok(true)).unwrap()
                     })
                     .map(|(id, _)| id)
                     .collect();

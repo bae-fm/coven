@@ -1,9 +1,13 @@
 //! A statement's conditions on one source's rows, read from its parsed SQL
-//! and bound to each run's values (§4).
+//! and bound to each run's values (§4). A condition it can't read, on one
+//! table's columns, becomes a `Row` term that a write judges by asking SQLite
+//! (`scope_row.rs`).
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use crate::row_scope::{compare, RowScope};
+use crate::scope_row::{RowCondition, RowTerm};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, Literal, Operator, UnaryOperator};
@@ -41,6 +45,9 @@ pub(crate) enum ScopeTerm {
         is: bool,
         operand: Operand,
     },
+    /// A condition on the columns of one row that coven asks SQLite to judge
+    /// (`scope_row.rs`).
+    Row(Arc<RowTerm>),
     /// `column IS ?`: a NULL test when the run's value is NULL, an equality
     /// otherwise.
     Is {
@@ -77,6 +84,10 @@ impl ScopeTerm {
             Self::Null { column, not } => {
                 Some(RowScope::Null { column: column.clone(), not: *not })
             }
+            Self::Row(term) => Some(RowScope::Row(Arc::new(RowCondition {
+                term: Arc::clone(term),
+                parameters: parameters.to_vec(),
+            }))),
             Self::Truth { condition, ordering, inclusive, is, operand } => {
                 let value = operand.value(parameters);
                 let passes = |truth: Option<i64>| match (truth, value) {
@@ -139,7 +150,7 @@ impl ScopeTerm {
         match self {
             Self::Compare { .. } | Self::In { .. } => false,
             Self::Null { not, .. } => !not,
-            Self::Is { .. } | Self::Truth { .. } => true,
+            Self::Is { .. } | Self::Truth { .. } | Self::Row(_) => true,
             Self::And(left, right) => left.may_hold_on_nulls() && right.may_hold_on_nulls(),
             Self::Or(left, right) => left.may_hold_on_nulls() || right.may_hold_on_nulls(),
         }
@@ -164,6 +175,13 @@ impl ScopeTerm {
             Self::Truth { condition, .. } => {
                 if !into.iter().any(|column| column == condition.column()) {
                     into.push(condition.column().to_owned());
+                }
+            }
+            Self::Row(term) => {
+                for (column, _) in &term.columns {
+                    if !into.contains(column) {
+                        into.push(column.clone());
+                    }
                 }
             }
             Self::And(left, right) | Self::Or(left, right) => {
@@ -196,6 +214,9 @@ impl ScopeTerm {
             Self::Null { column: tested, not } => {
                 Some(Self::Null { column: column(tested)?, not: *not })
             }
+            // It stays with the table it was written for: a view's own
+            // tables keep the conditions they have.
+            Self::Row(_) => None,
             Self::Truth { condition, ordering, inclusive, is, operand } => Some(Self::Truth {
                 condition: condition.renamed(column)?,
                 ordering: *ordering,

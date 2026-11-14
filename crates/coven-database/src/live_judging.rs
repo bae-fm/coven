@@ -5,7 +5,7 @@
 
 use super::DatabaseConnection;
 use crate::observation::{CommitObserver, ReadSet};
-use crate::scope_lookup::Lookups;
+use crate::scope_lookup::{Judging, Lookups};
 use crate::{DbError, SqlReadContext};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,8 +29,8 @@ impl DatabaseConnection {
             let result = read(SqlReadContext::new(self));
             let reads = self.authorization.reads();
             finished = true;
-            let judged = judge(reads, &mut |lookup, value| {
-                self.authorization.judged_unrecorded(|| self.lookup(lookup, value))
+            let judged = judge(reads, &mut |judging| {
+                self.authorization.judged_unrecorded(|| self.ask(judging))
             });
             let value = result?;
             judged.map_err(DbError::from)?;
@@ -38,10 +38,8 @@ impl DatabaseConnection {
         });
         // A run that never began read nothing.
         if !finished {
-            judge(ReadSet::new(), &mut |_, _| {
-                unreachable!("a run that read nothing reads no join")
-            })
-            .expect("judging without lookups can't fail");
+            judge(ReadSet::new(), &mut |_| unreachable!("a run that read nothing reads no join"))
+                .expect("judging without lookups can't fail");
         }
         result
     }
@@ -56,22 +54,40 @@ impl DatabaseConnection {
     ) -> Result<crate::observation::Judged, DbError> {
         let _reading = self.authorization.reading();
         handle
-            .judge(changes, crate::commit_scope::committing(), &mut |lookup, value| {
-                self.authorization.judged_unrecorded(|| self.lookup(lookup, value))
+            .judge(changes, crate::commit_scope::committing(), &mut |judging| {
+                self.authorization.judged_unrecorded(|| self.ask(judging))
             })
             .map_err(Into::into)
     }
 
-    /// Whether some partner row in `lookup`'s scope holds `value`, read in
-    /// this connection's transaction: a write's own, or a live query's
-    /// run. A lookup that runs past `LOOKUP_STEPS` stops and counts as a
-    /// match (§4). The caller sets how the authorizer judges it.
-    fn lookup(
+    /// Answer one question about a changed row, read in this connection's
+    /// transaction: a write's own, or a live query's run. The caller sets
+    /// how the authorizer judges it.
+    fn ask(&self, judging: Judging<'_>) -> rusqlite::Result<bool> {
+        match judging {
+            Judging::Partner(lookup, value) => {
+                let (sql, parameters) = lookup.sql(value);
+                self.run_limited(sql, &parameters)
+            }
+            // An error SQLite gives for this question, as for malformed JSON
+            // a condition reads or an overflow, says nothing of whether the
+            // row passes: it counts as a match.
+            Judging::Row(sql, parameters) => match self.run_limited(sql, parameters) {
+                Err(rusqlite::Error::SqliteFailure(..) | rusqlite::Error::SqlInputError { .. }) => {
+                    Ok(true)
+                }
+                found => found,
+            },
+        }
+    }
+
+    /// Whether `sql` finds a row. A question that runs past `LOOKUP_STEPS`
+    /// stops and counts as a match (§4).
+    fn run_limited(
         &self,
-        lookup: &crate::scope_lookup::Lookup,
-        value: &crate::sql_value::SqlValue,
+        sql: &str,
+        parameters: &[crate::sql_value::SqlValue],
     ) -> rusqlite::Result<bool> {
-        let (sql, parameters) = lookup.sql(value);
         let mut statement = self.connection.prepare_cached(sql)?;
         for (index, value) in parameters.iter().enumerate() {
             statement.raw_bind_parameter(index + 1, value)?;

@@ -12,10 +12,18 @@ use crate::scope_plan::{PartnerValue, Sources};
 use crate::scope_term::Affinity;
 use crate::sql_value::SqlValue as Value;
 
-/// Runs a lookup for one value of a changed row: whether some partner row
-/// in its scope holds it. `Ok(true)` also when coven gives up on the
-/// lookup, which then counts as a match.
-pub(crate) type Lookups<'a> = dyn FnMut(&Lookup, &Value) -> rusqlite::Result<bool> + 'a;
+/// What a write asks of SQLite about a changed row.
+#[derive(Clone, Copy)]
+pub(crate) enum Judging<'a> {
+    /// Whether some partner row in the lookup's scope holds the value.
+    Partner(&'a Lookup, &'a Value),
+    /// Whether a row passes a condition: the SQL and its parameters.
+    Row(&'a str, &'a [Value]),
+}
+
+/// Runs one question about a changed row. `Ok(true)` also when coven gives
+/// up on it, which then counts as a match.
+pub(crate) type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
 
 /// The most SQLite steps one lookup runs. A lookup no index serves reads its
 /// partner row by row; past this it stops and counts as a match, so the
@@ -208,6 +216,9 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
             let list: Vec<String> = values.iter().map(|value| parameter(value, bound)).collect();
             format!("{qualifier}.{} IN ({})", crate::sql::identifier(column), list.join(","))
         }
+        // Its parameters are numbered as the statement's, which the lookup
+        // binds first.
+        RowScope::Row(row) => format!("({})", row.term.condition),
         RowScope::Joined { column, lookup } => format!(
             "{qualifier}.{} IN (SELECT {} FROM {} WHERE {})",
             crate::sql::identifier(column),

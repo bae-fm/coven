@@ -170,7 +170,7 @@ pub(crate) fn read_item<'a>(
             for arg in args.iter().flat_map(|args| args.iter()) {
                 parts(arg, &mut found);
             }
-            let alone = found.iter().all(|part| matches!(part, Part::Function(..)));
+            let alone = found.iter().all(|part| matches!(part, Part::Function(..) | Part::Clock));
             let from = alone.then(|| match alias {
                 Some(_) => text(table),
                 None => format!("{} AS {qualifier}", text(table)),

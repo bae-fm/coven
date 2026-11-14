@@ -2,7 +2,7 @@
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
 use crate::row_scope::{RowImage, RowScope};
-use crate::scope_lookup::Lookups;
+use crate::scope_lookup::{Judging, Lookups};
 use crate::sql_value::SqlValue;
 use crate::{CommitScope, DbError};
 use coven_foundation::locks::lock_unpoisoned;
@@ -242,10 +242,8 @@ impl CommitSubscription {
 
     /// Wait on `reads`, which join no table: no commit needs a lookup.
     pub(crate) fn finish(&self, reads: ReadSet) {
-        self.finish_judging(reads, &mut |_, _| {
-            unreachable!("only a live query's run reads a join")
-        })
-        .expect("judging without lookups can't fail");
+        self.finish_judging(reads, &mut |_| unreachable!("only a live query's run reads a join"))
+            .expect("judging without lookups can't fail");
     }
 
     /// Wait on `reads`, a run's. The commits made while it ran are judged
@@ -318,9 +316,9 @@ fn affected(
             .is_some_and(|count| *count > crate::sqlite::ROWS_PER_TABLE);
         for read in reads {
             let found = if bounded {
-                read.affected(change, &mut |_, _| Ok(true))?
+                read.affected(change, &mut |_| Ok(true))?
             } else {
-                read.affected(change, &mut |lookup, value| answers.answer(lookup, value, lookups))?
+                read.affected(change, &mut |judging| answers.answer(judging, lookups))?
             };
             if found {
                 return Ok(true);
@@ -330,25 +328,41 @@ fn affected(
     Ok(false)
 }
 
-/// The lookups one judging ran, by lookup and value, so rows sharing a
-/// value look it up once.
+/// The questions one judging asked, by lookup and value, or by condition
+/// and values, so rows sharing a value, and a row's old and new images that
+/// agree on the columns a condition names, ask once.
 #[derive(Default)]
-struct Answers(HashMap<(usize, ValueKey), bool>);
+struct Answers {
+    partners: HashMap<(usize, ValueKey), bool>,
+    rows: HashMap<(String, Vec<ValueKey>), bool>,
+}
 
 impl Answers {
     fn answer(
         &mut self,
-        lookup: &crate::scope_lookup::Lookup,
-        value: &SqlValue,
+        judging: Judging<'_>,
         lookups: &mut Lookups<'_>,
     ) -> rusqlite::Result<bool> {
-        let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value));
-        if let Some(found) = self.0.get(&key) {
-            return Ok(*found);
+        match judging {
+            Judging::Partner(lookup, value) => {
+                let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value));
+                if let Some(found) = self.partners.get(&key) {
+                    return Ok(*found);
+                }
+                let found = lookups(judging)?;
+                self.partners.insert(key, found);
+                Ok(found)
+            }
+            Judging::Row(sql, parameters) => {
+                let key = (sql.to_owned(), parameters.iter().map(ValueKey::of).collect());
+                if let Some(found) = self.rows.get(&key) {
+                    return Ok(*found);
+                }
+                let found = lookups(judging)?;
+                self.rows.insert(key, found);
+                Ok(found)
+            }
         }
-        let found = lookups(lookup, value)?;
-        self.0.insert(key, found);
-        Ok(found)
     }
 }
 
@@ -614,7 +628,7 @@ impl CommitObserver {
                             .then_some(*found)
                         });
                         let found = verdict.unwrap_or_else(|| {
-                            affected(reads, &changes, &mut Answers::default(), &mut |_, _| Ok(true))
+                            affected(reads, &changes, &mut Answers::default(), &mut |_| Ok(true))
                                 .expect("judging without lookups can't fail")
                         });
                         if found {

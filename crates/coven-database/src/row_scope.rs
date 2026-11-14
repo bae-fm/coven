@@ -1,11 +1,14 @@
 //! Which rows of a table a live query depends on, and the values of a changed
-//! row that decide whether it is one of them (§4).
+//! row that decide whether it is one of them (§4). A join's values come from
+//! a lookup, and a condition on the row's own columns from a question to
+//! SQLite (`scope_lookup.rs`, `scope_row.rs`).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::scope_lookup::{Lookup, Lookups};
+use crate::scope_lookup::{Judging, Lookup, Lookups};
+use crate::scope_row::RowCondition;
 use crate::sql_value::SqlValue as Value;
 
 /// A predicate over a table's rows. A change reruns a query when its row
@@ -33,6 +36,9 @@ pub(crate) enum RowScope {
         column: String,
         values: Vec<Value>,
     },
+    /// Rows a condition on their columns holds for, which a write judges by
+    /// asking SQLite (`scope_row.rs`).
+    Row(Arc<RowCondition>),
     /// Rows whose `column` equals a value some row of another source holds
     /// in its own scope: a join, which a write judges by running `lookup`.
     Joined {
@@ -75,7 +81,13 @@ impl RowScope {
                 None => true,
                 // NULL equals nothing, so no join matches it.
                 Some(Value::Null) => false,
-                Some(value) => lookups(lookup, value)?,
+                Some(value) => lookups(Judging::Partner(lookup, value))?,
+            },
+            // A value the question can't give its column's type, or one the
+            // write didn't record, passes.
+            Self::Row(condition) => match condition.question(row) {
+                None => true,
+                Some((sql, parameters)) => lookups(Judging::Row(&sql, &parameters))?,
             },
             Self::And(left, right) => left.matches(row, lookups)? && right.matches(row, lookups)?,
             Self::Or(left, right) => left.matches(row, lookups)? || right.matches(row, lookups)?,
@@ -123,6 +135,9 @@ impl RowScope {
             | Self::In { column, .. }
             | Self::Joined { column, .. } => {
                 into.insert(column.clone());
+            }
+            Self::Row(condition) => {
+                into.extend(condition.term.columns.iter().map(|(column, _)| column.clone()));
             }
             Self::And(left, right) | Self::Or(left, right) => {
                 left.columns(into);

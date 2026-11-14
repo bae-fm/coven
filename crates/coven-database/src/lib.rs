@@ -73,6 +73,7 @@ mod row_cache;
 mod row_scope;
 mod scope_lookup;
 mod scope_plan;
+mod scope_row;
 mod scope_subquery;
 mod scope_term;
 mod select_syntax;

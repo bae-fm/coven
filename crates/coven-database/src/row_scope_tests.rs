@@ -221,6 +221,18 @@ struct Generated {
     narrows: bool,
 }
 
+/// A bound value of any type, among them ones a column would convert.
+fn any_value(rng: &mut Rng) -> SqlValue {
+    match rng.below(10) {
+        0 => SqlValue::Null,
+        1..=3 => SqlValue::Integer(rng.below(5) as i64),
+        4 => SqlValue::Real(rng.below(5) as f64 + 0.5),
+        5 => SqlValue::Real(rng.below(5) as f64),
+        6..=8 => SqlValue::Text((*rng.pick(&["x", "X", "k*", "*1", "k1", "2", "k?"])).into()),
+        _ => SqlValue::Blob(vec![b'x']),
+    }
+}
+
 /// A condition on one row of `table`, named `name` in the statement, and
 /// whether coven can narrow by it.
 fn condition(
@@ -240,7 +252,7 @@ fn condition(
         };
     }
     let id = rng.below(10);
-    match rng.below(18) {
+    match rng.below(23) {
         0 => (format!("{name}.id = {}", key(table, id)), true),
         1 => (format!("{name}.a = {}", rng.below(5)), true),
         2 => (format!("{name}.b = {}", b_value(rng)), true),
@@ -256,7 +268,7 @@ fn condition(
             let narrows = matches!(parameters.last(), Some(SqlValue::Integer(_)));
             (format!("{name}.a = ?{}", parameters.len()), narrows)
         }
-        6 => (format!("{name}.b <> {}", b_value(rng)), false),
+        6 => (format!("{name}.b <> {}", b_value(rng)), true),
         7 => {
             let column = *rng.pick(&["a", "b", "c"]);
             let spelling = *rng.pick(&["IS NULL", "ISNULL"]);
@@ -298,8 +310,32 @@ fn condition(
             };
             (condition, true)
         }
-        8 => (format!("abs({name}.c) = {}", rng.below(10)), false),
-        9 => (format!("{name}.b LIKE {}", b_value(rng)), false),
+        8 => (format!("abs({name}.c) = {}", rng.below(10)), true),
+        9 => (format!("{name}.b LIKE {}", b_value(rng)), true),
+        18 => {
+            parameters.push(any_value(rng));
+            (format!("lower({name}.b) = ?{}", parameters.len()), true)
+        }
+        19 => {
+            parameters.push(any_value(rng));
+            (format!("{name}.a + 1 > ?{}", parameters.len()), true)
+        }
+        20 => {
+            parameters.push(any_value(rng));
+            parameters.push(any_value(rng));
+            let (first, second) = (parameters.len() - 1, parameters.len());
+            (format!("CASE WHEN {name}.a = ?{first} THEN 0 ELSE 1 END = ?{second}"), true)
+        }
+        21 => {
+            parameters.push(any_value(rng));
+            parameters.push(any_value(rng));
+            let (first, second) = (parameters.len() - 1, parameters.len());
+            (format!("({name}.a, {name}.c) >= (?{first}, ?{second})"), true)
+        }
+        22 => {
+            parameters.push(any_value(rng));
+            (format!("{name}.b GLOB ?{}", parameters.len()), true)
+        }
         _ => (format!("{name}.c < {}", rng.below(10)), true),
     }
 }

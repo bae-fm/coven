@@ -3,7 +3,7 @@
 
 use rusqlite::Statement;
 use sqlite3_parser::ast::{
-    Expr, FrameBound, FunctionCallOrder, FunctionTail, Operator, Over, Select, Window,
+    Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Operator, Over, Select, Window,
 };
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
@@ -73,6 +73,9 @@ pub(crate) enum Part<'a> {
     Collation,
     /// A function called by name, and whether it runs over a window.
     Function(&'a str, bool),
+    /// `CURRENT_DATE`, `CURRENT_TIME` or `CURRENT_TIMESTAMP`, which read
+    /// the clock.
+    Clock,
 }
 
 /// The parts of `expr`, in every operand, argument, filter and window.
@@ -137,6 +140,9 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
         }
         Expr::Parenthesized(exprs) => every(exprs.iter(), into),
         Expr::Raise(_, expr) => every(expr.iter().copied(), into),
+        Expr::Literal(Literal::CurrentDate | Literal::CurrentTime | Literal::CurrentTimestamp) => {
+            into.push(Part::Clock)
+        }
         Expr::Literal(_) | Expr::Variable(_) => {}
     }
 }
