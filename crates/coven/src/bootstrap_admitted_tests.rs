@@ -313,17 +313,18 @@ async fn an_admitted_store_whose_member_is_removed_before_it_loads_stops() {
     owner.close().await;
 }
 
-/// Carol's join publishes Household and deletes its invite code, the only
-/// other place on her phone holding her name, and the store's first load
-/// fails: her storage access is taken away before it streams the floor's
-/// snapshot. Household keeps her name, through closing and opening it again
-/// and through the load that runs once access is back, for the app to record
-/// her profile from (§13.2).
+/// Carol's join publishes Household, and the store's first load fails: her
+/// storage access is taken away before it streams the floor's snapshot. Her
+/// registration hasn't applied, so no member is listed, no profile is written
+/// and her app's joining write hasn't run. The load that runs once access is
+/// back applies her admission, and her profile is written in that
+/// transaction, from the name her request carried, with the circle her
+/// admission made (§13.2).
 #[tokio::test]
-async fn a_joined_store_keeps_its_persons_name_through_a_failed_first_load() {
+async fn a_joined_stores_profile_is_written_as_its_registration_applies() {
     let owner = Owner::new(CloudProvider::S3, true).await;
     let invite = owner.invite().await;
-    let install = Installation::new();
+    let install = Installation::joining();
     let store = owner.directory.id();
     let snapshot = crate::tests::snapshots(&owner.storage, store).await.remove(0).path;
     let (_, cancel) = watch::channel(false);
@@ -335,7 +336,7 @@ async fn a_joined_store_keeps_its_persons_name_through_a_failed_first_load() {
         &cancel,
         |_| {},
     );
-    let (result, _) = owner
+    let (result, member) = owner
         .join_and_approve(joining, &control, |_| async {
             owner
                 .storage
@@ -355,31 +356,58 @@ async fn a_joined_store_keeps_its_persons_name_through_a_failed_first_load() {
         "{source:?}"
     );
     assert!(saved_code(&install, store).is_none());
-    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
-    handle.close().await.unwrap();
+    let registered = |handle: CovenHandle| async move {
+        let members = handle.members().await.unwrap();
+        handle.close().await.unwrap();
+        members.iter().any(|found| found.is_self)
+    };
+    assert!(joining_runs(&handle).await.is_empty());
+    assert!(profiles(&handle).await.is_empty());
+    assert!(!registered(handle).await);
     owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     let handle = install.builder(&owner, owner.recipient()).open(store, |_| {}).await.unwrap();
-    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    assert!(joining_runs(&handle).await.is_empty());
     // The load installs the floor's snapshot and applies the slots after it.
     handle.start_sync().await.unwrap();
     let answer = handle.retry_now().await.unwrap().await;
     assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
-    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    let circle = handle
+        .circles()
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .find(|circle| circle.name == crate::tests::CIRCLE)
+        .expect("the admission made the circle her request named")
+        .id
+        .to_string();
+    let carol = member.to_string();
+    assert_eq!(
+        joining_runs(&handle).await,
+        [(carol.clone(), Some("Carol".to_owned()), circle.clone())]
+    );
+    assert_eq!(profiles(&handle).await, [(carol.clone(), "Carol".to_owned(), circle.clone())]);
+    // The write was made as the registration applied: Ana accepts it, which
+    // she does only for a write whose author's device was registered at the
+    // slot it read through.
+    owner.pass_now().await;
+    handle.retry_now().await.unwrap().await;
+    owner.pass_now().await;
+    assert_eq!(profiles(&owner.handle).await, [(carol, "Carol".to_owned(), circle)]);
     handle.close().await.unwrap();
     owner.close().await;
 }
 
-/// Carol's app records her profile from the name Household keeps and
-/// acknowledges the name in the same write. A write that fails after
-/// acknowledging keeps it, so the profile and the acknowledgement commit
-/// together; once one commits, the store keeps the name no longer, opened
-/// again too. Acknowledging again, as an app that can't tell whether its
-/// write committed does, succeeds and changes nothing (§13.2).
+/// Carol's app's joining write fails, as a bug of the app's would: the load
+/// that applies her admission fails with it, and nothing of the admission
+/// commits, her registration included. Once the app's write works, the next
+/// pass commits the registration and the profile together (§13.2).
 #[tokio::test]
-async fn acknowledging_a_joined_stores_person_ends_the_name_and_may_be_repeated() {
+async fn a_failing_joining_write_stops_the_load_and_the_next_pass_commits_both() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
-    let install = Installation::new();
+    let install = Installation::joining();
+    install.joining_fails.store(true, std::sync::atomic::Ordering::SeqCst);
     let store = owner.directory.id();
     let (_, cancel) = watch::channel(false);
     let control = JoinControl::new();
@@ -391,47 +419,35 @@ async fn acknowledging_a_joined_stores_person_ends_the_name_and_may_be_repeated(
         |_| {},
     );
     let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
-    let handle = result.unwrap().expect("the admitted join publishes its store");
-    let name = handle.joined_invitee().await.unwrap().expect("the store keeps Carol's name");
-    let failed = handle
-        .write(|sql| {
-            sql.acknowledge_joined_invitee()?;
-            sql.execute("INSERT INTO profiles VALUES('Carol')", [])?;
-            Ok::<_, CovenError>(())
-        })
-        .await;
-    assert!(failed.is_err(), "{failed:?}");
-    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
-    handle
-        .write(move |sql| {
-            sql.execute(
-                "INSERT INTO notes VALUES('profile',?1)",
-                coven_database::params![name.into_bytes()],
-            )?;
-            sql.acknowledge_joined_invitee()?;
-            Ok::<_, CovenError>(())
-        })
-        .await
-        .unwrap();
-    assert_eq!(handle.joined_invitee().await.unwrap(), None);
-    handle.write(|sql| Ok::<_, CovenError>(sql.acknowledge_joined_invitee()?)).await.unwrap();
-    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    let Err(BootstrapError::Published { handle, .. }) = result else {
+        panic!("the admitted join is a store whose load failed: {:?}", result.err());
+    };
+    // The slots before the admission applied; the admission and its write did not.
+    assert!(handle.members().await.unwrap().iter().all(|found| !found.is_self));
+    assert!(profiles(&handle).await.is_empty());
+    assert!(joining_runs(&handle).await.is_empty());
     handle.close().await.unwrap();
+    install.joining_fails.store(false, std::sync::atomic::Ordering::SeqCst);
     let handle = install.builder(&owner, owner.recipient()).open(store, |_| {}).await.unwrap();
-    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    handle.start_sync().await.unwrap();
+    let answer = handle.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+    assert!(handle.members().await.unwrap().iter().any(|found| found.is_self));
+    assert_eq!(profiles(&handle).await.len(), 1);
+    assert_eq!(joining_runs(&handle).await.len(), 1);
     handle.close().await.unwrap();
     owner.close().await;
 }
 
-/// Carol discards Household before her app recorded her profile, and joins
-/// it again with a recovery invite, which names no one: the name her first
-/// join kept went with the store she discarded, and the store the recovery
-/// publishes keeps none (§13.2, §13.3).
+/// Carol discards Household and joins it again with a recovery invite, which
+/// names no one: the recovery's admission carries her new circle and no
+/// name, so the joining write runs with the circle and no person (§13.2,
+/// §13.3).
 #[tokio::test]
-async fn discarding_a_joined_store_removes_its_persons_name() {
+async fn a_recovery_runs_the_joining_write_with_its_new_circle_and_no_name() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
-    let install = Installation::new();
+    let install = Installation::joining();
     let store = owner.directory.id();
     let (_, cancel) = watch::channel(false);
     let control = JoinControl::new();
@@ -444,7 +460,7 @@ async fn discarding_a_joined_store_removes_its_persons_name() {
     );
     let (result, carol) = owner.join_and_approve(joining, &control, |_| async {}).await;
     let handle = result.unwrap().expect("the admitted join publishes its store");
-    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    let first_circle = joining_runs(&handle).await.remove(0).2;
     handle.close().await.unwrap();
     install.app.discard_store(&install.app.store_dir(&store)).await.unwrap();
     let recovery = crate::tests::device_invite(
@@ -468,7 +484,11 @@ async fn discarding_a_joined_store_removes_its_persons_name() {
     let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
     assert_eq!(member, carol);
     let handle = result.unwrap().expect("the recovery publishes its store");
-    assert_eq!(handle.joined_invitee().await.unwrap(), None);
+    let runs = joining_runs(&handle).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].0, carol.to_string());
+    assert_eq!(runs[0].1, None);
+    assert_ne!(runs[0].2, first_circle);
     handle.close().await.unwrap();
     owner.close().await;
 }
@@ -500,7 +520,7 @@ async fn a_joined_store_refuses_synced_writes_until_its_registration_has_applied
     // A table of the device's own is written as before.
     let own = handle
         .write(|sql| {
-            sql.acknowledge_joined_invitee()?;
+            sql.execute("INSERT INTO joining_runs VALUES('own',NULL,'none')", [])?;
             Ok::<_, CovenError>(())
         })
         .await;

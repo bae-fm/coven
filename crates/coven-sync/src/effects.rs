@@ -2,8 +2,8 @@
 
 use crate::{circle_effects, EntryTarget, OperationRejection};
 use coven_database::{
-    AdminEffect, Boundary, DeviceState, StoreDevice, StoreIdentity, StoreMember, StoreState,
-    StoreVersion,
+    AdminEffect, Boundary, DeviceState, Joined, StoreDevice, StoreIdentity, StoreMember,
+    StoreState, StoreVersion,
 };
 use coven_format::{
     admin::{MemberRole, StoreChange},
@@ -173,7 +173,13 @@ pub(crate) fn checked_change(
             next.store = Some(StoreIdentity { id: *store, name: name.clone(), named_at: slot });
             next.members.insert(
                 *author,
-                StoreMember { keys: *admin, access: None, role: MemberRole::Admin, removed: false },
+                StoreMember {
+                    keys: *admin,
+                    access: None,
+                    role: MemberRole::Admin,
+                    removed: false,
+                    joined: None,
+                },
             );
             next.bound_keys.insert(*admin);
             next.devices.insert(
@@ -210,7 +216,8 @@ pub(crate) fn checked_change(
             store.name = name.clone();
             store.named_at = slot;
         }
-        AdmitMember { member: id, keys, role, access, device, device_name, circle } => {
+        AdmitMember { member: id, keys, role, access, device, device_name, person, circle } => {
+            let joined = Joined { person: Some(person.clone()), circle: circle.circle };
             if let Some(existing) = state.members.get(id) {
                 // Done already: the member, their device and the circle the
                 // admission made for them are all there (§13.2).
@@ -238,6 +245,7 @@ pub(crate) fn checked_change(
                     access: Some(access.clone()),
                     role: *role,
                     removed: false,
+                    joined: Some(joined),
                 },
             );
             next.bound_keys.insert(*keys);
@@ -275,6 +283,7 @@ pub(crate) fn checked_change(
             }
             let recovered = next.members.get_mut(id).expect("checked target");
             recovered.keys = *keys;
+            recovered.joined = Some(Joined { person: None, circle: circle.circle });
             if let Some(access) = access {
                 recovered.access = Some(access.clone());
             }

@@ -7,6 +7,7 @@ pub(super) fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes", RowIdentity::SharedKey),
         SyncedTable::new("circle_notes", RowIdentity::IndependentUuid).audience_column("audience"),
+        SyncedTable::new("profiles", RowIdentity::SharedKey),
     ]
 }
 
@@ -15,8 +16,31 @@ pub(super) fn migrations() -> Vec<Migration> {
         1,
         "notes",
         "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL, body BLOB NOT NULL); \
-         CREATE TABLE circle_notes(id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL, audience TEXT NOT NULL)",
+         CREATE TABLE circle_notes(id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL, audience TEXT NOT NULL); \
+         CREATE TABLE profiles(id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, circle TEXT NOT NULL); \
+         CREATE TABLE joining_runs(member TEXT NOT NULL, person TEXT, circle TEXT NOT NULL)",
     )]
+}
+
+/// The test app's joining write: it records each run in a table of the
+/// device's own, and writes the person's profile when it has a name and the
+/// member has none, so a second run changes nothing synced.
+pub(super) fn joining_write(
+    sql: &coven_database::JoiningWrite<'_>,
+    joining: &coven_database::Joining,
+) -> Result<(), DbError> {
+    let (member, circle) = (joining.member.to_string(), joining.circle.to_string());
+    sql.execute(
+        "INSERT INTO joining_runs VALUES(?1,?2,?3)",
+        coven_database::params![member, joining.person, circle],
+    )?;
+    if let Some(person) = &joining.person {
+        sql.execute(
+            "INSERT INTO profiles SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM profiles WHERE id=?1)",
+            coven_database::params![member, person, circle],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -245,6 +269,10 @@ pub(super) struct Installation {
     pub(super) root: tempfile::TempDir,
     pub(super) app: Coven,
     pub(super) keychain: Arc<Keychain>,
+    /// Whether this installation's app registers [`joining_write`].
+    joining: bool,
+    /// Set to make that write fail, as an app's bug would.
+    pub(super) joining_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Installation {
@@ -252,18 +280,34 @@ impl Installation {
         let root = tempfile::tempdir().unwrap();
         let keychain = Keychain::in_memory("bootstrap-test").unwrap();
         let app = Coven::with_keychain(root.path().into(), keychain.clone());
-        Self { root, app, keychain }
+        Self { root, app, keychain, joining: false, joining_fails: Default::default() }
+    }
+
+    /// An installation whose app registers [`joining_write`].
+    pub(super) fn joining() -> Self {
+        Self { joining: true, ..Self::new() }
     }
 
     /// A builder on the test's clock itself: its waits end only as the test
     /// moves the clock or asks a join to check, as Ana's do.
     pub(super) fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
-        self.app
+        let builder = self
+            .app
             .builder()
             .synced_tables(tables())
             .migrations(migrations())
             .clock(owner.clock.clone())
-            .storage_connector(storage)
+            .storage_connector(storage);
+        if !self.joining {
+            return builder;
+        }
+        let fails = self.joining_fails.clone();
+        builder.joining_write(move |sql, joining| {
+            if fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(DbError::Invariant { what: "the app's joining write failed" });
+            }
+            joining_write(sql, joining)
+        })
     }
 
     /// A builder signed in as the owner's provider asks, through
@@ -407,6 +451,35 @@ impl Installation {
         handle.unlock_store_key().await.unwrap();
         handle
     }
+}
+
+/// Each run of the test app's joining write on `handle`'s device: the member,
+/// the person (none for a recovery) and the circle it was given.
+pub(super) async fn joining_runs(handle: &CovenHandle) -> Vec<(String, Option<String>, String)> {
+    handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query(
+                "SELECT member,person,circle FROM joining_runs ORDER BY rowid",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// The profiles `handle`'s store shows: id, name and circle.
+pub(super) async fn profiles(handle: &CovenHandle) -> Vec<(String, String, String)> {
+    handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query(
+                "SELECT id,name,circle FROM profiles ORDER BY id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap()
 }
 
 pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {

@@ -145,15 +145,6 @@ impl CovenHandle {
         self.database.subscribe_store_name()
     }
 
-    /// The new person's name the join's request carried, which a store a join
-    /// published keeps on this device until a write acknowledges it
-    /// (`CovenWrite::acknowledge_joined_invitee`). None for a store no join
-    /// published, for a recovery invite's, which carries no name, and once
-    /// acknowledged (§13.2).
-    pub async fn joined_invitee(&self) -> CovenResult<Option<String>> {
-        self.database.joined_invitee().await.map_err(CovenError::from)
-    }
-
     /// Renames the store, in a write of its own (`CovenWrite::rename_store`).
     pub async fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError> {
         let name = name.to_owned();

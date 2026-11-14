@@ -290,12 +290,6 @@ impl<'a> FileWrite<'a> {
     pub(crate) fn new(database: &'a DatabaseConnection, files: &'a WriteFiles<'a>) -> Self {
         Self { database, files }
     }
-    /// End the new person's name the store a join published keeps, in this
-    /// write (§13.2).
-    pub(crate) fn acknowledge_joined_invitee(&self) -> Result<(), DbError> {
-        crate::joined_invitee::acknowledge(self.database)
-    }
-
     /// Dismiss these lost values in this write (§8.4).
     pub(crate) fn dismiss(&self, values: &[crate::LostValue]) {
         self.files.dismissing.borrow_mut().extend_from_slice(values);

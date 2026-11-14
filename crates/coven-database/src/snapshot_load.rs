@@ -31,10 +31,15 @@ pub(crate) fn load<P: crate::PendingValue>(
     files: &crate::file_write::WriteFiles<'_>,
     progress: &mut ProgressReport<LoadStep>,
     store_through: Option<u64>,
+    joining: Option<&crate::joining_write::JoiningHook>,
     now: std::time::SystemTime,
     rebuilt: Option<Rebuilt<'_>>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
-    database.stream_transaction(|database| {
+    // A load that brings the state registering this device runs the app's
+    // joining write in the same transaction (§13.2).
+    let registering =
+        crate::joining_write::owed(database, joining, &reload.state, schema, now, files)?;
+    database.stream_registering(registering, |database| {
         let files = &crate::file_write::FileWrite::new(database, files);
         let crate::SnapshotReload {
             snapshots,
@@ -174,7 +179,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             crate::operation::advance(database, &operation)?;
         }
         crate::operation::end_on_stop(database)?;
-        Ok(loaded)
+        Ok((loaded, true))
     })
 }
 

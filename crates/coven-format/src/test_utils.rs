@@ -638,6 +638,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
             device: DeviceId(2),
             device_name: "D".into(),
+            person: "P".into(),
             circle: admitted_circle(),
         },
         member_removal(),

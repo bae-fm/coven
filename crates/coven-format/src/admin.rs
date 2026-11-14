@@ -126,6 +126,9 @@ pub enum StoreChange {
         device: DeviceId,
         /// The joining installation's name, from its request.
         device_name: String,
+        /// The name the member's request carried: the person's, which every
+        /// device of theirs writes their profile with (§13.2).
+        person: String,
         /// The circle the member's request made, whose only member they are.
         circle: NewCircle,
     },
@@ -300,8 +303,12 @@ impl StoreChange {
                 name(device_name)?;
                 circles.iter().try_for_each(|circle| name(&circle.name))
             }
-            Self::AdmitMember { device_name, circle, .. }
-            | Self::RecoverMember { device_name, circle, .. } => {
+            Self::AdmitMember { device_name, person, circle, .. } => {
+                name(device_name)?;
+                name(person)?;
+                circle.validate()
+            }
+            Self::RecoverMember { device_name, circle, .. } => {
                 name(device_name)?;
                 circle.validate()
             }
@@ -356,7 +363,7 @@ macro_rules! store_changes {
 }
 store_changes!(
     0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash, circles },
-    1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name, circle },
+    1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name, person => crate::wire::get_name, circle },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },
     4 => AddDevice { name => crate::wire::get_name, replaces },

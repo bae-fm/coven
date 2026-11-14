@@ -8,7 +8,7 @@ use coven_format::codes::InviteAdmits;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Joiner {
     /// A new person, with the name they typed: the admin sees it with the
-    /// request, and the app makes their profile with it.
+    /// request, and the admission records it for the app's joining write.
     NewPerson {
         /// The name, which follows the `name` rule (format.md D2).
         name: String,

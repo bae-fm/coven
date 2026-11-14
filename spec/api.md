@@ -2443,6 +2443,25 @@ impl CovenBuilder {
     /// Required.
     pub fn migrations(self, migrations: Vec<Migration>) -> Self;
 
+    /// The app's write for a member's device as its registration applies
+    /// (§13.2). It runs in the transaction that first applies the
+    /// registration of one of the member's devices: a join's admission or the
+    /// snapshot that covers it, a restore's, a pairing's or a reset's add-device
+    /// entry. It is a local write made right after that slot or install,
+    /// reading the store as the transaction leaves it, whose `read_through`
+    /// is the slot the transaction applies through, queued for upload as any
+    /// write is. It runs once on each device of the member, so it is written
+    /// to change nothing a second time: insert the profile only when the
+    /// member has none, and for a recovery (`person: None`) point it at the
+    /// new circle only when it points elsewhere. It never runs for the
+    /// store's creator, whom no admission made. An error fails the
+    /// transaction as a failed migration does (E13): the slot or install
+    /// doesn't commit, the pass reports the error and the next pass tries
+    /// again. Without one, nothing runs.
+    pub fn joining_write<F>(self, write: F) -> Self
+    where
+        F: Fn(&JoiningWrite<'_>, &Joining) -> Result<(), DbError> + Send + Sync + 'static;
+
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
@@ -3412,6 +3431,35 @@ impl CovenWrite<'_> {
 impl BulkSqlContext<'_> {
     /// Ordinary SQL inside the bulk write, on device-local tables; it reads
     /// any table app SQL reads.
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
+    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+}
+
+/// The facts of a member's latest admission, which the app's joining write
+/// reads (§13.2).
+pub struct Joining {
+    /// The member whose device registers.
+    pub member: MemberId,
+    /// The name the member's join request carried; none after a recovery.
+    pub person: Option<String>,
+    /// The circle their latest admission made.
+    pub circle: CircleId,
+}
+
+/// App SQL inside a joining write: the statements of a local write and none
+/// of coven's steps, so it reaches no operation, file or journal. Returning
+/// an error rolls back the write and the registration it runs with.
+pub struct JoiningWrite<'write> { /* private fields */ }
+
+impl JoiningWrite<'_> {
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
     pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
@@ -7724,16 +7772,11 @@ pub enum ProviderSignOut {
   the history it loads refused the admission (§13.2).
   Before then a cancel unmounts the Dropbox folder the join may have mounted,
   then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
-- The store a join publishes keeps the new person's name its request carried,
-  on the device only, never synced, until the app acknowledges it: the app
-  makes the person's profile from it, and nothing else on the device holds
-  it once the saved request is deleted. `CovenHandle::joined_invitee` reads it, from
-  the first open of the store on, whether or not its first load has
-  finished; `CovenWrite::acknowledge_joined_invitee` ends it, in the write
-  that records the profile, or the app's request for one, so the two commit
-  together. Acknowledging again succeeds and changes nothing. Deleting or
-  discarding the store removes it; a recovery's request carries no name, and
-  its store keeps none ([§13.2](coven.md#132-adding-a-person-invites)).
+- The new person's name a join's request carries goes into the admission,
+  and the admission's facts, the name and the circle it made, reach the app's
+  joining write (`CovenBuilder::joining_write`, E1) as each device of the
+  member registers, the joining phone's among them. A recovery's request
+  carries no name ([§13.2](coven.md#132-adding-a-person-invites)).
 - A join sends no first request once the invite's `expires_at` has passed by
   the joining device's clock: it ends as an expired one does. An ended
   invite's marker at the request's path (format.md D8) ends a join that
@@ -8900,22 +8943,6 @@ pub async fn join_with_pairing(
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
-
-impl CovenHandle {
-    /// The new person's name the join's request carried, which a store a join
-    /// published keeps on this device until a write acknowledges it (§13.2).
-    /// None for a store no join published, for a recovery invite's, and once
-    /// acknowledged.
-    pub async fn joined_invitee(&self) -> CovenResult<Option<String>>;
-}
-
-impl CovenWrite<'_> {
-    /// Acknowledges the name `joined_invitee` reads, as a step of this
-    /// write: the store keeps it no longer. The app records the person's
-    /// profile, or its request for one, in the same write. With no name
-    /// kept, it succeeds and changes nothing.
-    pub fn acknowledge_joined_invitee(&self) -> Result<(), DbError>;
-}
 
 impl CovenBuilder {
     /// The joins under way on this device (§13.2), ordered by store id, each

@@ -4554,6 +4554,11 @@ Ana types her restore code on her new laptop and signs in to her Dropbox. Then:
    account as his.
 6. It finishes loading and hands the app the open store.
 
+Applying the new device's registration runs the app's joining write on it,
+when its member's admission recorded facts (§13.2): a laptop restored for Dan
+finds his profile, written by his phone, or writes it. The store's creator was
+made by no admission, so a device of hers runs none.
+
 Restoring always makes a fresh device. It doesn't rescue the old installation's
 unsent writes.
 
@@ -4850,8 +4855,11 @@ the binding's outcome in `coven_operations` beside an approval
 the pair, device and circle it checked: *admit member* for a fresh id, or *recover
 member* for an existing one (`add_device_for`), each registering the device the request names
 and making the circle it carries, with the member as its first and only member
-and the request's base version (format.md [D6](format.md#d6-admin-entries)). A
-request that changes afterwards needs a new approval. The slot's clear prefix
+and the request's base version (format.md [D6](format.md#d6-admin-entries)).
+*Admit member* also records the name the request carried, and the member's
+state keeps the facts of their latest admission: that name, none after a
+recovery, and the circle it made. Dan's devices read them to write his profile
+(below). A request that changes afterwards needs a new approval. The slot's clear prefix
 carries the copies for Dan's exact sealing key: every store key in history, and,
 when recovering an existing member, the keys Ana holds for that member's circles.
 After them it carries Dan's own copy of the circle the entry makes, the copy his
@@ -5032,20 +5040,44 @@ the invite carried, and Dan's saved restore code keeps that name with the
 slot the invite names, the latest Ana's phone had applied, at which the name
 was current (§13.1): a rename after it is newer, and one before it older.
 
-Dan's own name goes with the store too. The app makes his profile from the
-name his request carried (above), and only the saved request holds it on his
-phone: the admission names no person. Publishing deletes the saved request, so
-Household keeps Dan's name, in a table of coven's on his phone, never synced,
-until the app
-acknowledges it. Say Household's first load fails, or Dan closes the app
-before it has recorded his profile: the store still holds the name, and the
-app records the profile when it next opens Household. The app reads the name
-through the handle, and acknowledges it in the write that records the
-profile, or its request for one, so the two commit together. Acknowledging
-again changes nothing. Removing the store removes the name with it. A
-request for a member's new keys carries no name (§13.3), and its store keeps none. Kept
-only in the saved request, the name would go as the join publishes, and Dan
-would have to type it again.
+Dan's profile is written as his registration applies. The app registers a
+*joining write* on the builder (api.md E1). It runs in the transaction that
+first applies a device's registration: for Dan's phone the load that applies
+his admission, or the install of a snapshot that covers it. It reads the store
+as that transaction leaves it, with the facts of its member's latest
+admission, his name and his circle. Say Household's app inserts Dan's row in
+`people`, in his circle, when he has none. The row is an ordinary local write,
+queued for upload like any other, whose past is the slot that transaction
+applies through. So Dan is listed as a member in the same commit as his
+profile, and no state between lists him without one. Until the load applies
+his registration, the store refuses his synced writes (§13.4).
+
+The facts are in history, not on his phone. His request carries the name, the
+admission records it, and every device of Dan's runs the joining write once,
+at its own registration: a second phone restored from his code, a pairing's new
+device and a reset's installation each apply an add-device entry, and the
+member's state holds the facts (§13.1, §19.3). Say Dan's phone is lost before
+his profile reaches Ana's phone. A name kept only on that phone would go with
+it, and his next device would register as a member with no profile, and
+nothing could write it
+([`device_record_lost`](proofs/sequence/CovenSequence/JoiningWrite.lean)). The
+name gains no audience: Ana's phone showed it with his request, every member
+reads the profile row it makes, and history is readable by members only.
+
+The app writes the joining write so that running it again changes nothing: it
+inserts the profile only when Dan has none, so a device whose history already
+holds his row, because the first write landed before this device registered,
+changes nothing and queues no write. A request for a member's new keys carries
+no name (§13.3): the recovery's admission records none, and the write points
+the profile at the new circle when it points elsewhere.
+
+A joining write that fails fails its transaction, as a failed migration does
+(§18.4): the slot or install doesn't commit, the pass reports the error, and
+the next pass tries again. No state holds the registration without the write.
+Written after the load instead, a registered member has no profile until the
+app writes it, and for good if the app quits first
+([`acknowledged_profile_lags`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+With no joining write registered, nothing runs.
 
 From the admission on, Household is a store on Dan's phone like any other.
 Say Dan's Dropbox session is revoked before his phone has downloaded
@@ -5690,7 +5722,8 @@ everything is encrypted.
   device and member as they stood at that slot (§7.1), so each would refuse
   it, and with it the writes slot that carries it. Writes to device-only
   tables are unaffected. The same write is made again once the load has
-  applied the registration.
+  applied the registration. That load's transaction runs the app's joining
+  write (§13.2), before any write the app makes after it.
 - **The commit only goes forward.** It writes the device's custody for the
   store one value at a time: the location, the store keys, the member's keys,
   the device id and the credentials, with the person's restore code. Those go
@@ -10412,6 +10445,10 @@ laptop in place from her current restore code instead (§13.1).
   with, and the device's name. From the record on, ordinary opening refuses
   the store, read-only opening too, and the replacement only goes forward.
   A reader holding the store refuses the record, changing nothing.
+- **The registration's application** runs the app's joining write in the new
+  installation when its member's admission recorded facts (§13.2): the fresh
+  id writes the person's profile, or finds it written, as it registers, and a
+  write it queues stays in the installation that replaces the old one.
 - **The swap.** Once the registration has applied, coven marks the record as
   swapping. It moves the old local state aside whole, including SQLite's
   journals and local file sources, and keeps it for inspection, not as live
@@ -11985,6 +12022,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | Table | Holds |
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before a joined store has loaded, the name its invite carried, as set by the slot the invite names (§13.2) |
+| `_coven_members` | each member of the applied history, removed ones too: their pair, role and storage access, and the facts of their latest admission, the person's name (none after a recovery) and the circle it made, which the joining write reads as a device of theirs registers (§13.2); `coven_members` shows none of those facts |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
 | `_coven_queued_dismissals` | the rows each waiting write's dismissals name, recorded with the write, so a slot finds the rows each waiting write changes without reading its record (§6.2) |
@@ -12017,7 +12055,6 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, or the own write a raise wait holds, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
-| `_coven_joined_invitee` | the new person's name the join request carried, which a store a join published keeps until the app acknowledges it (§13.2) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 
 ### C.2 Storage format versions

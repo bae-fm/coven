@@ -16,7 +16,10 @@ fn access(seed: u8) -> coven_format::MemberAccess {
 }
 
 fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMember) {
-    (member(seed), StoreMember { keys: keys(seed), access: Some(access(seed)), role, removed })
+    (
+        member(seed),
+        StoreMember { keys: keys(seed), access: Some(access(seed)), role, removed, joined: None },
+    )
 }
 
 /// Replay state with this device's member 1, member 2 with an active, a
@@ -456,7 +459,13 @@ async fn a_member_with_no_recorded_access_has_none_and_null_columns() {
     let mut state = db.store_state().await.unwrap();
     state.members = [(
         member(1),
-        StoreMember { keys: keys(1), access: None, role: MemberRole::Admin, removed: false },
+        StoreMember {
+            keys: keys(1),
+            access: None,
+            role: MemberRole::Admin,
+            removed: false,
+            joined: None,
+        },
     )]
     .into();
     state.devices =

@@ -300,9 +300,10 @@ fn every_change_fits_one_request_at_its_field_bounds() {
             StoreChange::SetUpStorage { access } => {
                 *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
             }
-            StoreChange::AdmitMember { access, device_name, circle, .. } => {
+            StoreChange::AdmitMember { access, device_name, person, circle, .. } => {
                 *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
                 *device_name = "d".repeat(1024);
+                *person = "p".repeat(1024);
                 circle.name = "c".repeat(1024);
             }
             StoreChange::SetAccess { access, .. } => {
@@ -370,12 +371,13 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
         access: crate::MemberAccess::ProviderAccount("b".into()),
         device: coven_foundation::id_source::DeviceId(7),
         device_name: "p".into(),
+        person: "q".into(),
         circle: test_utils::admitted_circle(),
     })
     .encode()
     .unwrap();
-    // The circle follows the device name: its id, name, base version, key and
-    // the key's commitment.
+    // The person's name follows the device name, then the circle: its id,
+    // name, base version, key and the key's commitment.
     let circle = test_utils::admitted_circle();
     assert_eq!(
         add[HEADER..],
@@ -386,6 +388,7 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
             vec![1, 0, 0, 0, 0, 1, b'b'],
             7u64.to_be_bytes().to_vec(),
             vec![0, 0, 0, 1, b'p'],
+            vec![0, 0, 0, 1, b'q'],
             circle.circle.0.as_bytes().to_vec(),
             vec![0, 0, 0, 1, b'B'],
             2u32.to_be_bytes().to_vec(),
@@ -476,4 +479,19 @@ fn an_invite_share_names_an_account_within_its_bound() {
     let bytes =
         encode_frame(4, &StoreChange::AddInviteShare { invite, account: String::new() }).unwrap();
     assert!(Object::decode(&bytes).is_err());
+}
+
+#[test]
+fn an_admission_names_its_person() {
+    let mut admission = test_utils::store_changes()
+        .into_iter()
+        .find(|change| matches!(change, StoreChange::AdmitMember { .. }))
+        .unwrap();
+    assert!(Object::Admin(admission.clone()).encode().is_ok());
+    let StoreChange::AdmitMember { person, .. } = &mut admission else { unreachable!() };
+    person.clear();
+    assert!(Object::Admin(admission.clone()).encode().is_err());
+    let StoreChange::AdmitMember { person, .. } = &mut admission else { unreachable!() };
+    *person = "a\0b".into();
+    assert!(Object::Admin(admission).encode().is_err());
 }

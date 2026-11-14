@@ -44,6 +44,7 @@ fn leave_circle(db: &Database) {
                     }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
+                    joined: None,
                 },
             );
             let circle = state.circles.get_mut(&circle()).expect("the circle exists");

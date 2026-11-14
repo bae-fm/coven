@@ -27,14 +27,11 @@ impl Database {
 
     /// Save what the store a join publishes keeps from its invite before it
     /// loads, in one transaction: the store's `name`, set by `named_at`, the
-    /// slot the inviting device had applied, and the new person's name,
-    /// `invitee`, which it keeps until the app acknowledges it. A recovery's
-    /// request carries none (§13.2).
+    /// slot the inviting device had applied (§13.2).
     pub async fn initialize_joined_store(
         &self,
         name: String,
         named_at: coven_merge::Slot,
-        invitee: Option<String>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -45,22 +42,11 @@ impl Database {
                         &name,
                         named_at,
                         true,
-                    )?;
-                    match &invitee {
-                        Some(invitee) => crate::joined_invitee::keep(db, invitee),
-                        None => Ok(()),
-                    }
+                    )
                 })
             })
         })
         .await
-    }
-
-    /// The new person's name the store a join published keeps until the app
-    /// acknowledges it; None for any other store, and once acknowledged
-    /// (§13.2).
-    pub async fn joined_invitee(&self) -> Result<Option<String>, DbError> {
-        self.read(|sql| sql.joined_invitee()).await
     }
 
     /// The same name query, live (E4).

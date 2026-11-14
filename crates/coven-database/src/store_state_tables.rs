@@ -42,9 +42,14 @@ fn member_keys(row: &Row<'_>, signing: usize) -> rusqlite::Result<MemberPublicKe
 }
 
 /// A `_coven_members` row, read as
-/// `SELECT member,signing,sealing,role,removed,access`. A fact that doesn't
+/// `SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person`.
+/// A fact that doesn't
 /// decode is `DamagedDatabase`.
 pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreMember)> {
+    let joined = match stored::<Option<CircleId>>(row, 6, Type::Text)? {
+        Some(circle) => Some(Joined { person: stored(row, 7, Type::Text)?, circle }),
+        None => None,
+    };
     Ok((
         member(row, 0)?,
         StoreMember {
@@ -59,6 +64,7 @@ pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreM
                 .map(|bytes| serde_json::from_slice(&bytes))
                 .transpose()
                 .map_err(|_not_access| damaged(5, Type::Blob))?,
+            joined,
         },
     ))
 }
@@ -166,7 +172,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
         .pop();
     state.members = database
         .query(
-            "SELECT member,signing,sealing,role,removed,access FROM _coven_members",
+            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members",
             [],
             stored_member,
         )?
@@ -231,8 +237,8 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
             MemberRole::Member => "member",
         };
         database.internal_execute(
-            "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
-             VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 id,
                 member.keys.signing.as_bytes().as_slice(),
@@ -242,7 +248,9 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
                 member
                     .access
                     .as_ref()
-                    .map(|access| serde_json::to_vec(access).expect("member access encoding"))
+                    .map(|access| serde_json::to_vec(access).expect("member access encoding")),
+                member.joined.as_ref().map(|joined| joined.circle),
+                member.joined.as_ref().and_then(|joined| joined.person.as_deref())
             ],
         )?;
     }

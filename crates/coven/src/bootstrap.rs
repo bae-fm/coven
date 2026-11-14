@@ -352,7 +352,6 @@ async fn bootstrap_device(
             storage,
             state,
             waits,
-            invitee,
         })) => {
             let requests = storage.requests();
             status(BootstrapStatus::Committing);
@@ -361,9 +360,7 @@ async fn bootstrap_device(
             // with (E5). A join publishes before it loads, with the name its
             // invite carries (§13.2).
             let name = match &request {
-                BootstrapRequest::Join { code, .. } => {
-                    commit::joined_name(&database, code, invitee).await
-                }
+                BootstrapRequest::Join { code, .. } => commit::joined_name(&database, code).await,
                 BootstrapRequest::Restore { .. } => commit::loaded_name(&database).await,
             };
             let name = match name {
@@ -528,7 +525,7 @@ impl Installing<'_> {
 
 enum Admission {
     Restoring,
-    Joining(join::Joining),
+    Joining(join::InviteJoin),
 }
 
 impl Admission {
@@ -595,9 +592,6 @@ struct Loaded {
     /// The sequence state the handle continues, which gates the connection.
     state: Arc<coven_sync::SequenceState>,
     waits: Arc<coven_sync::RetryWaits>,
-    /// The new person's name a join's request carried, for the store it
-    /// publishes to keep; none for a restore and for a recovery.
-    invitee: Option<String>,
 }
 
 /// Load the store into `pending` and register its device. A join loads
@@ -897,10 +891,6 @@ async fn prepare_and_load(
             ring,
         )))
     });
-    let invitee = match &admission {
-        Admission::Joining(joining) => joining.invitee(),
-        Admission::Restoring => None,
-    };
     match result {
         Ok(Some((code, location, credentials, ring))) => Ok(Some(Loaded {
             code,
@@ -913,7 +903,6 @@ async fn prepare_and_load(
             storage,
             state,
             waits,
-            invitee,
         })),
         result => {
             let closed = close_database(&database).await;

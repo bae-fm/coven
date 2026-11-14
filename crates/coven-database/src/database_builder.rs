@@ -24,6 +24,7 @@ pub struct DatabaseBuilder {
     namespaces: Vec<crate::Namespace>,
     migrations: Option<Vec<Migration>>,
     migration_operation: Option<Box<MigrationOperation>>,
+    joining_write: Option<Box<crate::joining_write::JoiningHook>>,
     installation: crate::migration_run::Installation,
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
@@ -45,6 +46,7 @@ impl DatabaseBuilder {
             namespaces: Vec::new(),
             migrations: None,
             migration_operation: None,
+            joining_write: None,
             installation: crate::migration_run::Installation::Own,
             clock: None,
             ids: None,
@@ -122,6 +124,21 @@ impl DatabaseBuilder {
         F: Fn(u32) -> Result<NewOperation, DbError> + Send + Sync + 'static,
     {
         self.migration_operation = Some(Box::new(operation));
+        self
+    }
+
+    /// The app's write for a member's device as its registration applies
+    /// (§13.2): it runs in the transaction that first applies this device's
+    /// registration, as a local write, with the facts of its member's latest
+    /// admission. Without one, nothing runs.
+    pub fn joining_write<F>(mut self, write: F) -> Self
+    where
+        F: Fn(&crate::JoiningWrite<'_>, &crate::Joining) -> Result<(), DbError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.joining_write = Some(Box::new(write));
         self
     }
 
@@ -401,6 +418,7 @@ impl DatabaseBuilder {
                 statistics,
                 migrations: outcomes,
                 raise_operation: self.migration_operation,
+                joining_write: self.joining_write,
                 open_inputs,
                 clock,
                 ids,

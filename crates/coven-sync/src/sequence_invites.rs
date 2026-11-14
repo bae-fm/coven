@@ -208,6 +208,11 @@ impl InviteWork {
                 access: self.access.member_access(),
                 device,
                 device_name,
+                person: request
+                    .joiner
+                    .person()
+                    .ok_or(coven_format::Error::UnknownTag { field: "invite joiner", tag: 0 })?
+                    .to_owned(),
                 circle,
             },
             // A recovery on S3 records the invite's new key as the member's

@@ -163,6 +163,21 @@ pub struct StoreMember {
     pub role: MemberRole,
     /// Whether a kept removal removed this member.
     pub removed: bool,
+    /// The facts of the member's latest admission, which their devices'
+    /// joining write reads as each registers (§13.2). `None` for the store's
+    /// creator, who no admission made.
+    pub joined: Option<Joined>,
+}
+
+/// What a member's latest admission recorded of them (§13.2): the person's
+/// name, which a new person's request carried, and the circle it made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Joined {
+    /// The name the member's request carried; none for a recovery, whose
+    /// member already has a profile.
+    pub person: Option<String>,
+    /// The circle the admission made for the member.
+    pub circle: CircleId,
 }
 
 /// One install, retained after removal or replacement so its older objects

@@ -9,7 +9,7 @@ use coven_foundation::locks::lock_unpoisoned;
 use coven_sync::{ApprovalWaits, HeldIntervals, JoinOutcome, JoinPoll, JoiningIdentity, Parks};
 
 /// A prepared join request with the provider access its invite grants.
-pub(super) struct Joining {
+pub(super) struct InviteJoin {
     identity: JoiningIdentity,
     invitation: coven_storage::StorageInvitation,
     /// The intervals the app asks the join to check at.
@@ -27,7 +27,7 @@ pub(super) async fn prepare_request(
     terms: &RequestTerms,
     held: HeldIntervals,
     parks: Parks,
-) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
+) -> Result<(InviteJoin, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match terms {
         RequestTerms::Given { device_name, name, circle_name } => {
             let device = directory.settings().map_err(CovenError::from)?.device_id;
@@ -81,10 +81,10 @@ pub(super) async fn prepare_request(
     let data = ConnectionCredentials { location: invitation.location().clone(), credentials };
     // Validation refuses a sign-in without the location's access.
     data.validate().map_err(SyncError::from)?;
-    Ok((Joining { identity, invitation, held, parks }, data, custody))
+    Ok((InviteJoin { identity, invitation, held, parks }, data, custody))
 }
 
-impl Joining {
+impl InviteJoin {
     pub(super) fn identity(&self) -> coven_crypto::MemberIdentity {
         self.identity.identity()
     }
@@ -92,15 +92,6 @@ impl Joining {
     /// The name the device gave itself in its request.
     pub(super) fn device_name(&self) -> &str {
         self.identity.device_name()
-    }
-
-    /// The new person's name the request carries, which the store this join
-    /// publishes keeps until the app acknowledges it; none for a recovery.
-    pub(super) fn invitee(&self) -> Option<String> {
-        match self.identity.joiner() {
-            Joiner::NewPerson { name } => Some(name.clone()),
-            Joiner::MemberKeys => None,
-        }
     }
 
     /// Whether the request may have been sent, here or before a restart.

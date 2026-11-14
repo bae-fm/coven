@@ -419,15 +419,6 @@ impl<'write> CovenWrite<'write> {
         self.sql.acknowledge_operation(operation)
     }
 
-    /// Acknowledges the new person's name a store a join published keeps,
-    /// in this write, so the store keeps it no longer: the write records the
-    /// app's profile of that person, or its request for one, and the two
-    /// commit together (§13.2). With no name kept, it succeeds and changes
-    /// nothing.
-    pub fn acknowledge_joined_invitee(&self) -> Result<(), DbError> {
-        self.sql.acknowledge_joined_invitee()
-    }
-
     /// Execute one app statement with parameters.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> SqliteResult<usize> {
         self.sql.execute(sql, params)

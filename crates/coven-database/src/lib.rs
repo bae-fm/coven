@@ -39,7 +39,7 @@ mod from_item;
 mod insert_rows;
 mod internal_schema;
 mod interpretation;
-mod joined_invitee;
+mod joining_write;
 mod judge;
 mod judge_view;
 mod live_query;
@@ -273,10 +273,12 @@ pub use claim::{
     Claim, ClaimAttempt, ClaimBytes, ClaimRead, ClaimSettlement, ClaimUpload, ClaimWork,
 };
 pub use forget_records::Writers;
+pub use joining_write::{Joining, JoiningWrite};
 pub use sequence::WriteCutoff;
 pub use sequence_apply::{AdminEffect, IncomingSlot, SlotContent};
 pub use store_state::{
-    DeviceState, StoreCircle, StoreDevice, StoreIdentity, StoreMember, StoreState, StoreVersion,
+    DeviceState, Joined, StoreCircle, StoreDevice, StoreIdentity, StoreMember, StoreState,
+    StoreVersion,
 };
 
 mod claim_preparation;

@@ -22,7 +22,9 @@ macro_rules! coven_store_state_tables {
                 sealing BLOB NOT NULL CHECK(length(sealing)=32),
                 access BLOB,
                 role TEXT NOT NULL CHECK(role IN ('admin','member')),
-                removed INTEGER NOT NULL CHECK(removed IN (0,1))
+                removed INTEGER NOT NULL CHECK(removed IN (0,1)),
+                joined_circle TEXT,
+                joined_person TEXT CHECK(joined_person IS NULL OR joined_circle IS NOT NULL)
             ) STRICT, WITHOUT ROWID;
         "
         );

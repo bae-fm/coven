@@ -94,6 +94,7 @@ impl TestStore {
                     }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
+                    joined: None,
                 });
                 state.devices.entry(device).or_insert(crate::store_state::StoreDevice {
                     member,
@@ -124,6 +125,7 @@ impl TestStore {
                     }),
                     role: coven_format::admin::MemberRole::Admin,
                     removed: false,
+                    joined: None,
                 });
                 let device =
                     state.devices.entry(device).or_insert(crate::store_state::StoreDevice {

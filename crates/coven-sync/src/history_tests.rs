@@ -82,6 +82,7 @@ fn sequence_key_selection_matches_lean() {
                     access: Some(crate::sequence_sync::tests::access("fixture")),
                     role: MemberRole::Member,
                     removed: id == member(2) && matches!(mode, 1 | 4),
+                    joined: None,
                 },
             );
         }
@@ -268,6 +269,7 @@ impl Household {
                 access: ben_access,
                 device: DeviceId(2),
                 device_name: "Ben's phone".into(),
+                person: "Person".into(),
                 circle: crate::effects::tests::circle(2),
             },
         );
@@ -508,6 +510,7 @@ fn a_member_reaches_the_store_with_the_access_kind_it_was_created_with() {
         access,
         device: DeviceId(4),
         device_name: "Carol's phone".into(),
+        person: "Person".into(),
         circle: crate::effects::tests::circle(3),
     };
     let s3 = crate::sequence_sync::tests::access;
@@ -557,6 +560,7 @@ fn set_access_names_an_active_member_and_only_an_admin_sets_anothers_key() {
             access: key("carol"),
             device: DeviceId(4),
             device_name: "Carol's phone".into(),
+            person: "Person".into(),
             circle: crate::effects::tests::circle(3),
         },
     );
@@ -750,6 +754,7 @@ fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
                 access: Some(crate::sequence_sync::tests::access("fixture")),
                 role: MemberRole::Member,
                 removed,
+                joined: None,
             },
         );
     }

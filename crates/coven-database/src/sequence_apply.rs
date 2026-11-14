@@ -103,10 +103,38 @@ pub(crate) fn apply<P: crate::PendingValue>(
     writers: &crate::Writers,
     files: &crate::file_write::WriteFiles<'_>,
     raises: Option<&crate::migration::MigrationOperation>,
+    joining: Option<&crate::joining_write::JoiningHook>,
     now: std::time::SystemTime,
     authenticate: impl FnOnce() -> Result<(), DbError>,
 ) -> Result<crate::ApplyOutcome, DbError> {
-    crate::download::source_wait(db.stream_transaction(|db| {
+    // The slot that registers this device runs the app's joining write in the
+    // same transaction (§13.2).
+    let registering = match &incoming.content {
+        SlotContent::Admin { effect: Some(effect), .. } => {
+            crate::joining_write::owed(db, joining, &effect.state, schema, now, files)?
+        }
+        _ => None,
+    };
+    crate::download::source_wait(db.stream_registering(registering, |db| {
+        let outcome =
+            apply_in::<P>(db, before, schema, incoming, writers, files, raises, now, authenticate)?;
+        let applied = matches!(outcome, crate::ApplyOutcome::Applied);
+        Ok((outcome, applied))
+    }))
+}
+
+fn apply_in<P: crate::PendingValue>(
+    db: &DatabaseConnection,
+    before: &DatabaseConnection,
+    schema: &WriteSchema,
+    incoming: IncomingSlot<PreparedWrite<'_>>,
+    writers: &crate::Writers,
+    files: &crate::file_write::WriteFiles<'_>,
+    raises: Option<&crate::migration::MigrationOperation>,
+    now: std::time::SystemTime,
+    authenticate: impl FnOnce() -> Result<(), DbError>,
+) -> Result<crate::ApplyOutcome, DbError> {
+    {
         let files = &crate::file_write::FileWrite::new(db, files);
         // Applying a slot runs no migration and no DDL.
         let _constants = db.keep_constants();
@@ -141,11 +169,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
         // kept row is put back and the whole queue folds again. Any other
         // slot puts back only the kept rows its writes reach (§6.2).
         let whole = matches!(&incoming.content, SlotContent::Admin { effect: Some(_), .. });
-        let mut touched = if whole {
-            crate::published::restore(db, schema)?
-        } else {
-            BTreeSet::new()
-        };
+        let mut touched =
+            if whole { crate::published::restore(db, schema)? } else { BTreeSet::new() };
         let mut reach = crate::queued_writes::Reach::new();
         crate::pending::clear_slot(db, incoming.slot)?;
         match incoming.content {
@@ -162,8 +187,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 retain(db, "admin", &original)?;
                 if let Some(effect) = effect {
                     let old = crate::store_state_tables::deleted_circles(db)?;
-                    let created = !crate::store_state_tables::created(db)?
-                        && effect.state.store.is_some();
+                    let created =
+                        !crate::store_state_tables::created(db)? && effect.state.store.is_some();
                     crate::sequence::cutoff(db, incoming.slot, &effect.change)?;
                     crate::store_state_tables::replace(db, &effect.state)?;
                     crate::rebuild_wait::release(db, &effect.state)?;
@@ -174,7 +199,12 @@ pub(crate) fn apply<P: crate::PendingValue>(
                         crate::raise_capture::capture_made(db, *circle, &effect.state, raises)?;
                     }
                     crate::provider_access::adopt::<P>(db, &effect.provider_access)?;
-                    for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
+                    for circle in effect
+                        .state
+                        .circle_deletions
+                        .keys()
+                        .filter(|circle| !old.contains_key(circle))
+                    {
                         touched.extend(db.query(
                             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
                             [coven_merge::Audience::Circle(*circle)],
@@ -213,7 +243,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         files.before_commit()?;
         crate::operation::end_on_stop(db)?;
         Ok(crate::ApplyOutcome::Applied)
-    }))
+    }
 }
 
 /// `announcement` was accepted. An ordinary snapshot's coverage only moves

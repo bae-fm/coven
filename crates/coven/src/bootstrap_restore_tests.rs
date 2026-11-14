@@ -747,3 +747,100 @@ async fn in_memory_key_custody_keeps_opened_keys_only_until_close() {
     reopened.close().await.unwrap();
     owner.close().await;
 }
+
+/// Carol's phone is discarded before her profile reaches Ana, and she
+/// restores Household on another device from her code. Her name and circle
+/// are in history, so the new device's registration runs the joining write
+/// with them and the profile lands (§13.2).
+#[tokio::test]
+async fn a_device_restored_after_the_joining_phone_was_lost_writes_the_profile() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::joining();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, carol) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    let phone = result.unwrap().expect("the admitted join publishes its store");
+    // Her profile is queued on the phone, which never sends it.
+    let written = profiles(&phone).await;
+    assert_eq!(written.len(), 1);
+    assert_eq!(phone.unsent_work().await.unwrap().writes, 1);
+    let code = phone.restore_code().await.unwrap();
+    phone.close().await.unwrap();
+    install.app.discard_store(&install.app.store_dir(&store)).await.unwrap();
+
+    let second = Installation::joining();
+    let tablet = restore_from_code(
+        second.authenticated_builder(&owner, owner.storage.clone()).await,
+        &code,
+        owner.s3_credentials(),
+        "Carol's tablet",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        joining_runs(&tablet).await,
+        [(carol.to_string(), Some("Carol".to_owned()), written[0].2.clone())]
+    );
+    assert_eq!(profiles(&tablet).await, written);
+    tablet.start_sync().await.unwrap();
+    tablet.retry_now().await.unwrap().await;
+    owner.pass_now().await;
+    assert_eq!(profiles(&owner.handle).await, written);
+    tablet.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Carol's phone sent her profile, and she restores Household on a tablet:
+/// the tablet's registration runs the joining write, which finds the profile
+/// and writes nothing, so no write waits to be sent (§13.2).
+#[tokio::test]
+async fn a_device_restored_after_the_profile_landed_runs_the_write_and_changes_nothing() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::joining();
+    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    let phone = result.unwrap().expect("the admitted join publishes its store");
+    phone.start_sync().await.unwrap();
+    phone.retry_now().await.unwrap().await;
+    owner.pass_now().await;
+    let landed = profiles(&owner.handle).await;
+    assert_eq!(landed.len(), 1);
+
+    let second = Installation::joining();
+    let tablet = restore_from_code(
+        second.authenticated_builder(&owner, owner.storage.clone()).await,
+        &phone.restore_code().await.unwrap(),
+        owner.s3_credentials(),
+        "Carol's tablet",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(joining_runs(&tablet).await.len(), 1);
+    assert_eq!(profiles(&tablet).await, landed);
+    assert_eq!(tablet.unsent_work().await.unwrap().writes, 0);
+    tablet.close().await.unwrap();
+    phone.close().await.unwrap();
+    owner.close().await;
+}

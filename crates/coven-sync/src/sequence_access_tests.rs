@@ -129,6 +129,7 @@ fn admit_ben(access: coven_format::MemberAccess) -> StoreChange {
         access,
         device: DeviceId(2),
         device_name: "Ben's phone".into(),
+        person: "Person".into(),
         circle: crate::effects::tests::circle(2),
     }
 }

@@ -628,6 +628,7 @@ pub fn admitting(
             access,
             device,
             device_name: device_name.into(),
+            person: format!("person {member}"),
             circle,
         },
         copy,

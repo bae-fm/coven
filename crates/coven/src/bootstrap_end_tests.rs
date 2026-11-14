@@ -173,7 +173,7 @@ async fn joins_and_is_approved(owner: &Owner, install: &Installation, invite: &I
 async fn a_join_that_stopped_before_its_create_sends_the_request_on_resume() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
-    let install = Installation::new();
+    let install = Installation::joining();
     let store = owner.directory.id();
     waiting_join(&owner, &install, &invite).await;
     // As if the create had never reached storage.
@@ -182,9 +182,12 @@ async fn a_join_that_stopped_before_its_create_sends_the_request_on_resume() {
     let control = JoinControl::new();
     let resumed = install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
     let (result, _) = owner.join_and_approve(resumed, &control, |_| async {}).await;
-    // The resume gave no name: the saved request returns the one Carol typed.
+    // The resume gave no name: the saved request returns the one Carol typed,
+    // which her admission records and her joining write receives.
     let handle = result.unwrap().unwrap();
-    assert_eq!(handle.joined_invitee().await.unwrap().as_deref(), Some("Carol"));
+    let runs = joining_runs(&handle).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].1.as_deref(), Some("Carol"));
     handle.close().await.unwrap();
     owner.close().await;
 }

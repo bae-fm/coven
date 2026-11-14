@@ -485,6 +485,7 @@ async fn the_first_counted_creation_keeps_the_owner() {
                     }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
+                    joined: None,
                 },
             );
             state.devices.insert(

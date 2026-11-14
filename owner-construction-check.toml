@@ -381,7 +381,7 @@ task_types = [
     "KeyScan",
     # One join's bootstrap file, one folder request's sign-in, one S3
     # detection's probes and one connection attempt (§13.2, §20.7).
-    "Joining",
+    "InviteJoin",
     "OAuthFolders",
     "Probes",
     "ConnectionAttempt",
@@ -425,6 +425,10 @@ task_types = [
     "Observing",
     "MigrationContext",
     "SqlContext",
+    # An app's joining write borrows the transaction's writes for that one
+    # transaction, with what the transaction owes it.
+    "JoiningWrite",
+    "Registering",
     # An app's write borrows the store's operation steps and files for that
     # one transaction.
     "CovenWrite",
@@ -478,6 +482,8 @@ external_types = [
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
     "FileWrite",
+    "JoiningWrite",
+    "Registering",
     "SqlReadContext",
     "MigrationContext",
     "SqlContext",
@@ -593,7 +599,6 @@ table_macros = [
     "coven_retries_tables",
     "coven_uploads_tables",
     "coven_device_reset_tables",
-    "coven_joined_invitee_tables",
     "coven_file_columns_tables",
     "coven_pin_requests_tables",
     "coven_file_moves_tables",
@@ -814,17 +819,6 @@ homes = [
 ]
 tables = [
     "_coven_device_reset",
-]
-
-[[database.domains]]
-name = "joined invitee"
-owner = "Database"
-homes = [
-    "crates/coven-database/src/joined_invitee.rs",
-    "crates/coven-database/src/joined_invitee_schema.rs",
-]
-tables = [
-    "_coven_joined_invitee",
 ]
 
 [[database.domains]]
@@ -1637,7 +1631,7 @@ tables = [
 "crates/coven/src/bootstrap_join.rs" = [
     "prepare_request",
     # The wait for approval reads the intervals the app holds for the join.
-    "Joining::admit",
+    "InviteJoin::admit",
 ]
 # Restore connects through the builder's held sign-in.
 "crates/coven/src/restore_credentials.rs" = ["restore_connection"]

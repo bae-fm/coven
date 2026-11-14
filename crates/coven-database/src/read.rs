@@ -144,10 +144,6 @@ impl<'connection> SqlReadContext<'connection> {
         crate::store_state_tables::named(self.database)
     }
 
-    pub(crate) fn joined_invitee(&self) -> Result<Option<String>, DbError> {
-        crate::joined_invitee::read(self.database)
-    }
-
     pub(crate) fn members(
         &self,
         device: coven_foundation::id_source::DeviceId,

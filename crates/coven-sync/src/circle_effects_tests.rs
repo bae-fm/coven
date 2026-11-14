@@ -434,3 +434,33 @@ fn an_admission_repeated_with_its_circle_present_is_already_done() {
         Err(OperationRejection::TargetGone(EntryTarget::Member(_)))
     ));
 }
+
+/// An admission records the person's name and circle in the member's state,
+/// which a device of theirs reads as it registers; a recovery records the
+/// new circle and no name (§13.2).
+#[test]
+fn an_admission_records_its_members_facts_and_a_recovery_replaces_them() {
+    use coven_database::Joined;
+    let admission = admit(4, MemberRole::Member, 4);
+    let state = apply(&household(), 1, admission.clone()).unwrap().unwrap().state;
+    assert_eq!(
+        state.members[&id(4)].joined,
+        Some(Joined { person: Some("Person".into()), circle: admission_circle(4).circle })
+    );
+    // The store's creator was made by no admission.
+    assert_eq!(state.members[&id(1)].joined, None);
+    let recovery = StoreChange::RecoverMember {
+        member: id(4),
+        expected: keys(4),
+        keys: keys(9),
+        access: None,
+        device: DeviceId(9),
+        device_name: "new phone".into(),
+        circle: admission_circle(9),
+    };
+    let recovered = apply(&state, 1, recovery).unwrap().unwrap().state;
+    assert_eq!(
+        recovered.members[&id(4)].joined,
+        Some(Joined { person: None, circle: admission_circle(9).circle })
+    );
+}

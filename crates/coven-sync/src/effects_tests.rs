@@ -88,6 +88,7 @@ pub(crate) fn admit(n: u8, role: MemberRole, device: u64) -> StoreChange {
         access: access(n),
         device: DeviceId(device),
         device_name: format!("device {device}"),
+        person: "Person".into(),
         circle: circle(n),
     }
 }
@@ -118,6 +119,7 @@ fn repeating_an_active_member_requires_the_exact_binding() {
             access,
             device: DeviceId(device),
             device_name: "Ben".into(),
+            person: "Person".into(),
             circle: circle(2),
         };
         assert!(apply(&state, 1, request(keys(2), MemberRole::Admin, recorded.clone(), 2))
@@ -177,6 +179,7 @@ fn an_admin_cannot_remove_the_last_admin_and_a_removed_id_cannot_return() {
                 access: access(3),
                 device: DeviceId(3),
                 device_name: "Ben's new phone".into(),
+                person: "Person".into(),
                 circle: circle(3),
             }
         ),
@@ -447,6 +450,7 @@ mod sequence_differential {
                     access: access(seed),
                     device: DeviceId(*d),
                     device_name: "admitted".into(),
+                    person: "Person".into(),
                     circle: circle(*m as u8),
                 },
                 Self::Remove(m) => StoreChange::RemoveMember { member: id(*m) },

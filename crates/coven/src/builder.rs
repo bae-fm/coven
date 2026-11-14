@@ -17,6 +17,10 @@ use coven_storage::{
 };
 use std::sync::Arc;
 
+#[path = "builder_joining.rs"]
+mod joining;
+use joining::JoiningHook;
+
 /// The choices for creating or opening a store (E1).
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
@@ -39,6 +43,8 @@ pub struct CovenBuilder {
     identity: SessionSource<MemberIdentity>,
     sqlite: SqliteSettings,
     sql_functions: coven_database::SqlFunctions,
+    /// The app's write for a member's device as its registration applies.
+    joining_write: Option<Arc<JoiningHook>>,
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
@@ -114,6 +120,7 @@ impl CovenBuilder {
             identity: SessionSource::Configured(CustodyChoice::Keyring),
             sqlite: SqliteSettings::default(),
             sql_functions: coven_database::SqlFunctions::default(),
+            joining_write: None,
             #[cfg(test)]
             interrupt_after_swap: false,
             #[cfg(test)]
@@ -528,6 +535,13 @@ impl CovenBuilder {
             .id_source(self.ids.clone())
             .sqlite_settings(self.sqlite.clone())
             .sql_functions(self.sql_functions.clone());
+        let database = match &self.joining_write {
+            Some(write) => {
+                let write = Arc::clone(write);
+                database.joining_write(move |sql, joining| write(sql, joining))
+            }
+            None => database,
+        };
         #[cfg(test)]
         let database = if self.refuse_database_close { database.refuse_close() } else { database };
         Ok(database)

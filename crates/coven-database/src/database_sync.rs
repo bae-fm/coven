@@ -141,6 +141,7 @@ impl Database {
                                 &writers,
                                 files,
                                 inner.raise_operation.as_deref(),
+                                inner.joining_write.as_deref(),
                                 inner.clock.now(),
                                 authenticate,
                             )

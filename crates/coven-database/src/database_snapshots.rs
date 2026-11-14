@@ -443,6 +443,7 @@ impl Database {
                                 files,
                                 &mut progress,
                                 store_through,
+                                inner.joining_write.as_deref(),
                                 inner.clock.now(),
                                 rebuilt.map(|(circle, marker)| crate::snapshot_load::Rebuilt {
                                     circle,

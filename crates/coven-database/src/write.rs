@@ -182,13 +182,6 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.journal_step(|journal| journal.acknowledge(operation))
     }
 
-    /// End the new person's name the store a join published keeps, in this
-    /// write, which records the app's profile of that person, or its request
-    /// for one (§13.2). With no name kept, it changes nothing.
-    pub fn acknowledge_joined_invitee(&self) -> Result<(), crate::DbError> {
-        self.files.step(|| self.files.acknowledge_joined_invitee())
-    }
-
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

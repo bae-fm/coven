@@ -171,6 +171,10 @@ pub struct DatabaseInner {
     /// a circle captured after the migration's journal finished opens it
     /// again (§18.3).
     raise_operation: Option<Box<crate::migration::MigrationOperation>>,
+    /// The app's write for a member's device as its registration applies:
+    /// the transaction that first applies this device's registration runs it
+    /// (§13.2).
+    joining_write: Option<Box<crate::joining_write::JoiningHook>>,
     /// What a rebuild opens its database with (§18.3).
     open_inputs: builder::OpenInputs,
     clock: ClockRef,

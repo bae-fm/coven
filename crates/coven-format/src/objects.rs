@@ -68,7 +68,7 @@ impl JoiningCircle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Joiner {
     /// A new person, with the name they typed: the admin sees it with the
-    /// request, and the app makes their profile with it.
+    /// request, and the admission records it for the app's joining write.
     NewPerson {
         /// The name, which follows the `name` rule (D2).
         name: String,
@@ -94,6 +94,14 @@ impl Joiner {
             Self::NewPerson { .. } => Some(InviteAdmits::NewPerson),
             Self::MemberKeys { .. } => Some(InviteAdmits::MemberKeys),
             Self::OwnDevice => None,
+        }
+    }
+    /// The name the request carries, which a new person typed; none for a
+    /// member's keys and for a member's own device.
+    pub fn person(&self) -> Option<&str> {
+        match self {
+            Self::NewPerson { name, .. } => Some(name),
+            Self::MemberKeys { .. } | Self::OwnDevice => None,
         }
     }
     /// The circle the request makes; none for a member's own device.

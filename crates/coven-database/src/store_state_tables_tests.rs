@@ -8,7 +8,7 @@
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1,0);
-         INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
+         INSERT INTO _coven_members(member,signing,sealing,access,role,removed) SELECT member,key,key,x'00','member',i%2 FROM fixture;
          INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
          INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
          INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i,i%3 FROM fixture;
@@ -59,7 +59,7 @@ pub(crate) fn scan_reason(
     relation: &str,
 ) -> Option<&'static str> {
     match (file, template, relation) {
-("store_state_tables.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members", "_coven_members") =>
+("store_state_tables.rs", "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members", "_coven_members") =>
     Some("store_state() returns the complete member map"),
 ("store_state_tables.rs", "SELECT signing,sealing FROM _coven_bound_keys", "_coven_bound_keys") =>
     Some("store_state() returns every registered key pair"),

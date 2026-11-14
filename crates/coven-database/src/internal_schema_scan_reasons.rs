@@ -87,7 +87,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the view lists every circle's members, reached from the memberships or from the members they name"),
 ("database_sync.rs", "SELECT slot,record FROM _coven_slot_records ORDER BY slot", "_coven_slot_records") =>
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
-("members.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
+("members.rs", "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
     Some("the member list returns every current member"),
 ("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
     Some("the file queue reader returns every upload a file waits for"),

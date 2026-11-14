@@ -893,7 +893,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | Tag | Change | Fields |
 | --- | --- | --- |
 | 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes \| circles:[NewCircle]`; only in an admission slot |
-| 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name \| circle:NewCircle`; only in an admission slot |
+| 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name \| person:name \| circle:NewCircle`; only in an admission slot |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
 | 4 | Add device | `name:name \| replaces:Option<DeviceId>`; registers the writing device, which `replaces` must not name |
@@ -956,6 +956,16 @@ its entry admits the request's member with the request's pair, registers the
 request's device and makes the request's circle, and its clear prefix carries
 that member's key copies and their own copy of the circle's key (D9). Both
 changes are an admin's, written by the device that made the invite.
+Admit-member also records `person`, the name the request carried (D8), which
+follows the `name` rule (D2). Recover-member records none, since the member
+already has a profile.
+
+A member's state keeps the facts of their latest admission: `person`, absent
+after a recover-member, and the circle it made. The store's creator, whom no
+admission made, has none. The facts are no new field of a snapshot: it carries
+the original admissions (D7.6), and every device rebuilds the state, the facts
+among it, by applying them. They appear in no column of `coven_members`. The
+app's joining write reads them as each device of the member registers (§13.2).
 
 `NewCircle` is `circle:uuid | name:name | breaking_version:u32 | key:uuid |
 key_hash:32 bytes`, the fields of Create circle, repeated verbatim from the
@@ -981,9 +991,10 @@ request (D8).
 - The slot's own body is sealed with one of the store keys it copies.
 - Applying it binds the pair, records the access, registers the device for the
   member and makes the circle with the member as its first and only member and
-  `breaking_version` as its base, in one transaction. An admission whose member,
-  pair, role, access and device all match the state already, with the circle
-  there holding the member under that name, is satisfied and changes nothing.
+  `breaking_version` as its base, in one transaction, and replaces the
+  member's admission facts with its own. An admission whose member, pair, role,
+  access and device all match the state already, with the circle there
+  holding the member under that name, is satisfied and changes nothing.
 
 **Replacing member keys.**
 
@@ -1648,8 +1659,8 @@ circle and its key id is `key`, or the request is refused.
 - `joiner` says who asks. Tag 0 is a member's new keys: the member already has a
   profile, so the request carries no name, only the circle that replaces the
   private one they can no longer read. Tag 1 is a new person, followed by the
-  name they typed, which the admin sees with the request and the app makes
-  their profile with, and then their circle (§13.2). Tag 2 is the member's own
+  name they typed, which the admin sees with the request and the admission
+  records for the app's joining write, and then their circle (§13.2). Tag 2 is the member's own
   new device, asking to be paired, with no name and no circle. Any other tag is
   refused. The invite's `admits` fixes whether a request may carry tag 0 or tag
   1, and a pairing takes tag 2 alone; the device that made it refuses any other.

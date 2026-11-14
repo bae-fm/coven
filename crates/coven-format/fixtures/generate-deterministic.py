@@ -457,7 +457,7 @@ def changes(sodium):
         b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + text(b"D")
         + bytes([1]) * 16 + initial_hash + collection([]),
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test")
-        + u64(2) + text(b"D") + admitted_circle(),
+        + u64(2) + text(b"D") + text(b"P") + admitted_circle(),
         b"\x02" + BEN,
         b"\x03" + ANA + b"\x00",
         b"\x04" + text(b"D") + b"\x00",
