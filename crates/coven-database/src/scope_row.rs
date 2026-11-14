@@ -21,18 +21,10 @@ use std::sync::Arc;
 use crate::row_scope::RowImage;
 use crate::scope_plan::Planner;
 use crate::scope_term::{Affinity, ScopeTerm};
-use crate::select_syntax::Part;
+use crate::select_syntax::{deterministic, is_clock_function, Part};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
 use sqlite3_parser::ast::Expr;
-
-/// SQLite's date and time functions, which it flags deterministic but which
-/// read the clock for `'now'`.
-const CLOCK_FUNCTIONS: [&str; 7] =
-    ["date", "time", "datetime", "julianday", "unixepoch", "strftime", "timediff"];
-
-/// SQLITE_DETERMINISTIC, as `pragma_function_list` reports it in `flags`.
-const DETERMINISTIC: i64 = 0x800;
 
 /// The condition of one conjunct and what it names, before a run's values.
 #[derive(Debug)]
@@ -82,10 +74,7 @@ pub(crate) fn row_term(
             }
             Part::Function(name, window) => {
                 let name = name.to_ascii_lowercase();
-                if *window
-                    || planner.aggregates.contains(&name)
-                    || CLOCK_FUNCTIONS.contains(&name.as_str())
-                {
+                if *window || planner.aggregates.contains(&name) || is_clock_function(&name) {
                     return Ok(None);
                 }
                 functions.push(name);
@@ -102,25 +91,6 @@ pub(crate) fn row_term(
         qualifier: from.source.qualifier.clone(),
         columns,
     }))))
-}
-
-/// Whether every function of `names` is a scalar function the connection
-/// flags deterministic, at every arity it has.
-fn deterministic(connection: &Connection, names: &[String]) -> rusqlite::Result<bool> {
-    let mut flags = connection.prepare_cached(
-        "SELECT count(*), min(flags & ?2 = ?2 AND type = 's') \
-         FROM pragma_function_list WHERE name = ?1 COLLATE NOCASE",
-    )?;
-    for name in names {
-        let (found, all): (i64, Option<i64>) = flags
-            .query_row(rusqlite::params![name, DETERMINISTIC], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
-        if found == 0 || all != Some(1) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// A run's condition: the term bound to the run's parameters.

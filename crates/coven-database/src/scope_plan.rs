@@ -27,7 +27,7 @@ use crate::row_scope::Scopes;
 use crate::scope_row::row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
-use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
+use crate::select_syntax::{conjuncts, number_parameters, parts, repeatable, window_parts, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use rusqlite::{Connection, Statement};
@@ -319,8 +319,26 @@ impl Planner {
     /// of this core or one it sits in, which coven can read alone; and when
     /// SQLite compares them by BINARY, as coven does: the comparison takes
     /// the collation of a COLLATE in either side, else of the first side
-    /// when that is a column.
+    /// when that is a column. `other` holds no clock and no function the
+    /// connection doesn't flag deterministic: a lookup evaluates it again, and
+    /// would get another answer than the query did.
     fn edge(
+        &self,
+        connection: &Connection,
+        core: usize,
+        member_expr: &Expr<'_>,
+        other: &Expr<'_>,
+        first: bool,
+    ) -> rusqlite::Result<Option<Edge>> {
+        let Some(edge) = self.edge_between(core, member_expr, other, first) else {
+            return Ok(None);
+        };
+        let mut found = Vec::new();
+        parts(other, &mut found);
+        Ok(repeatable(connection, &found)?.then_some(edge))
+    }
+
+    fn edge_between(
         &self,
         core: usize,
         member_expr: &Expr<'_>,
@@ -758,7 +776,7 @@ fn read_condition<'a>(
         found.terms.extend(narrowed.map(|term| (item, term)));
     } else if let Expr::Binary(left, Operator::Equals, right) = condition {
         for (member, other, first) in [(left, right, false), (right, left, true)] {
-            found.edges.extend(planner.edge(core, member, other, first));
+            found.edges.extend(planner.edge(connection, core, member, other, first)?);
         }
     }
     Ok(found)

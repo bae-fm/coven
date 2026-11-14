@@ -757,8 +757,12 @@ about 50 lookups a write, and cost the same 94 µs a row as with none open.
 
 A join narrows a table this way through an equality between one of its
 columns and a column, or an expression over the columns, of one other table in
-the join. The ON of a LEFT JOIN narrows only its right side: it decides which
-right rows join each left row, and a left row none joins still appears, with
+the join. The expression holds no clock (`CURRENT_TIMESTAMP`, `date('now')`) and
+no function SQLite doesn't flag deterministic, as `random()` or an app function
+registered nondeterministic: a write's lookup evaluates it again and could get
+another answer than the query did, so such a join narrows nothing. The ON of a
+LEFT JOIN narrows only its right side: it decides which right rows join each
+left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
 inner join's ON, makes the LEFT JOIN an inner join. Each condition coven narrows
 by is false where its column is NULL, except a NULL test, a truth compared with

@@ -376,6 +376,75 @@ async fn an_app_function_narrows_only_when_deterministic() {
     }
 }
 
+/// A join on an expression holding a clock or a function SQLite can't repeat
+/// is no edge: a lookup would evaluate it again and could get another answer
+/// than the query did, so a write to the joined table reruns the query even
+/// when no value the lookup finds matches.
+#[tokio::test]
+async fn a_join_on_a_clock_or_a_nondeterministic_function_makes_no_edge() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![],
+            "CREATE TABLE a(id INTEGER PRIMARY KEY, x TEXT);
+             CREATE TABLE b(id INTEGER PRIMARY KEY, y TEXT, v INTEGER);
+             INSERT INTO a VALUES (1,'p'),(2,'q');
+             INSERT INTO b VALUES (1,'p',0)",
+        )
+        .await
+        .unwrap();
+    for sql in [
+        "SELECT b.v FROM a JOIN b ON b.y = a.x || random() WHERE a.id = 1",
+        "SELECT b.v FROM a JOIN b ON b.y = a.x || unixepoch('now') WHERE a.id = 1",
+        "SELECT b.v FROM a JOIN b ON b.y = a.x || CURRENT_TIMESTAMP WHERE a.id = 1",
+    ] {
+        follows(&db, sql, vec![], &[("INSERT INTO b VALUES (9,'zzz',0)", true)]).await;
+        write(&db, "DELETE FROM b WHERE id = 9");
+    }
+    db.close().await.unwrap();
+}
+
+/// An app function registered deterministic in a join's expression still
+/// makes an edge: a write to the joined table reruns the query only for a
+/// value the lookup finds. One registered nondeterministic makes none.
+#[tokio::test]
+async fn an_app_function_in_a_join_makes_an_edge_only_when_deterministic() {
+    for (determinism, narrows) in
+        [(Determinism::Deterministic { version: 1 }, true), (Determinism::Nondeterministic, false)]
+    {
+        let store = TestStore::new();
+        let db = store
+            .builder(
+                vec![],
+                vec![Migration::addition(
+                    1,
+                    "schema",
+                    "CREATE TABLE a(id INTEGER PRIMARY KEY, x TEXT);
+                     CREATE TABLE b(id INTEGER PRIMARY KEY, y TEXT, v INTEGER);
+                     INSERT INTO a VALUES (1,'P'),(2,'Q');
+                     INSERT INTO b VALUES (1,'p',0)",
+                )],
+            )
+            .sql_functions(SqlFunctions::default().scalar("fold", 1, determinism, |arguments| {
+                Ok(arguments.get::<String>(0)?.to_lowercase())
+            }))
+            .open()
+            .await
+            .unwrap();
+        follows(
+            &db,
+            "SELECT b.v FROM a JOIN b ON b.y = fold(a.x) WHERE a.id = 1",
+            vec![],
+            &[
+                ("INSERT INTO b VALUES (9,'zzz',0)", !narrows),
+                ("INSERT INTO b VALUES (10,'p',0)", true),
+            ],
+        )
+        .await;
+        db.close().await.unwrap();
+    }
+}
+
 /// The median time and judging steps a row of `writes` writes of `rows`
 /// new tracks each, the first key being `from`.
 async fn spend(

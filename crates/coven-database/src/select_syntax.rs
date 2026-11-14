@@ -1,7 +1,7 @@
 //! The parsed SELECT a scope plan reads: its parameters numbered in source
 //! order, and the expressions inside it (§4).
 
-use rusqlite::Statement;
+use rusqlite::{Connection, Statement};
 use sqlite3_parser::ast::{
     Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Operator, Over, Select, Window,
 };
@@ -186,4 +186,57 @@ pub(crate) fn text(node: &impl sqlite3_parser::ast::fmt::ToTokens) -> String {
         }
     }
     Text(node).to_string()
+}
+
+/// SQLite's date and time functions, which it flags deterministic but which
+/// read the clock for `'now'`.
+const CLOCK_FUNCTIONS: [&str; 7] =
+    ["date", "time", "datetime", "julianday", "unixepoch", "strftime", "timediff"];
+
+/// SQLITE_DETERMINISTIC, as `pragma_function_list` reports it in `flags`.
+const DETERMINISTIC: i64 = 0x800;
+
+/// Whether `name` is one of SQLite's date and time functions, which may read
+/// the clock.
+pub(crate) fn is_clock_function(name: &str) -> bool {
+    CLOCK_FUNCTIONS.contains(&name)
+}
+
+/// Whether every function of `names` is a scalar function the connection
+/// flags deterministic, at every arity it has.
+pub(crate) fn deterministic(connection: &Connection, names: &[String]) -> rusqlite::Result<bool> {
+    let mut flags = connection.prepare_cached(
+        "SELECT count(*), min(flags & ?2 = ?2 AND type = 's') \
+         FROM pragma_function_list WHERE name = ?1 COLLATE NOCASE",
+    )?;
+    for name in names {
+        let (found, all): (i64, Option<i64>) = flags
+            .query_row(rusqlite::params![name, DETERMINISTIC], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        if found == 0 || all != Some(1) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether evaluating the expression `found` holds twice gives the same
+/// answer: it names no clock and every function in it is deterministic.
+pub(crate) fn repeatable(connection: &Connection, found: &[Part<'_>]) -> rusqlite::Result<bool> {
+    let mut functions = Vec::new();
+    for part in found {
+        match part {
+            Part::Clock => return Ok(false),
+            Part::Function(name, _) => {
+                let name = name.to_ascii_lowercase();
+                if is_clock_function(&name) {
+                    return Ok(false);
+                }
+                functions.push(name);
+            }
+            _ => {}
+        }
+    }
+    deterministic(connection, &functions)
 }
