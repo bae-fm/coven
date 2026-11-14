@@ -292,6 +292,59 @@ fn a_helper_is_reached_through_a_typed_let_a_parameter_and_a_resolved_return_typ
 }
 
 #[test]
+fn a_closure_parameter_and_a_pattern_binding_take_the_type_of_what_they_come_from() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        use std::collections::HashMap;
+        struct Card;
+        impl Card {
+            fn mapped(&self) {} fn each(&self) {} fn looped(&self) {} fn destructured(&self) {}
+            fn matched(&self) {} fn iflet(&self) {} fn valued(&self) {} fn folded(&self) {}
+            fn projected(&self) {}
+        }
+        struct Stored { card: Card }
+        fn loaded(sql: &SqlReadContext<'_>) -> Option<Stored> { None }
+        fn read(
+            sql: &SqlReadContext<'_>,
+            cards: &[Card],
+            one: Option<&Card>,
+            by_key: HashMap<String, Card>,
+        ) {
+            cards.iter().map(|card| card.mapped());
+            one.map(|card| card.each());
+            for card in cards { card.looped(); }
+            let Some(card) = one else { return };
+            card.destructured();
+            match one { Some(card) => card.matched(), None => {} }
+            if let Some(card) = one { card.iflet(); }
+            by_key.values().for_each(|card| card.valued());
+            let held = loaded(sql).map(|stored| stored.card).filter(|c| c.ok).ok_or(1)?;
+            held.projected();
+            cards.iter().fold(0, |sum, card| { card.folded(); sum });
+        }
+        "#,
+    )]);
+    let items = found.iter().map(|found| found.1.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        items,
+        [
+            "Card::destructured",
+            "Card::each",
+            "Card::folded",
+            "Card::iflet",
+            "Card::looped",
+            "Card::mapped",
+            "Card::matched",
+            "Card::projected",
+            "Card::valued",
+            "loaded",
+            "read"
+        ]
+    );
+}
+
+#[test]
 fn a_method_on_an_unknown_receiver_is_followed_by_its_name_only_when_one_method_has_it() {
     let found = units(&[(
         "crates/app/src/a.rs",

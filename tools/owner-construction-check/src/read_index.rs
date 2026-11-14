@@ -57,7 +57,9 @@ impl<'ast> Visit<'ast> for Names {
 
 /// The type a type is, by name: references, `Result`, `Option` (their first
 /// type argument), `Box`, `Rc`, `Arc` and the policy's shared pointers
-/// peeled, and `Self` as `owner`.
+/// peeled, and `Self` as `owner`. A collection is the type of what it holds
+/// (a sequence or set its element, a map its values), since what is called on
+/// its items is what the search follows.
 pub(crate) fn peel(
     ty: &syn::Type,
     owner: Option<&str>,
@@ -67,21 +69,38 @@ pub(crate) fn peel(
         syn::Type::Reference(reference) => peel(&reference.elem, owner, pointers),
         syn::Type::Paren(inner) => peel(&inner.elem, owner, pointers),
         syn::Type::Group(inner) => peel(&inner.elem, owner, pointers),
+        syn::Type::Slice(inner) => peel(&inner.elem, owner, pointers),
+        syn::Type::Array(inner) => peel(&inner.elem, owner, pointers),
         syn::Type::Path(path) if path.qself.is_none() => {
             let segment = path.path.segments.last()?;
             let name = segment.ident.to_string();
             if name == "Self" {
                 return owner.map(str::to_string);
             }
-            let wrapper = matches!(name.as_str(), "Result" | "Option" | "Box" | "Rc" | "Arc")
-                || pointers.contains(&name);
+            let wrapper = matches!(
+                name.as_str(),
+                "Result"
+                    | "Option"
+                    | "Box"
+                    | "Rc"
+                    | "Arc"
+                    | "Vec"
+                    | "VecDeque"
+                    | "HashSet"
+                    | "BTreeSet"
+                    | "IndexSet"
+                    | "HashMap"
+                    | "BTreeMap"
+                    | "IndexMap"
+            ) || pointers.contains(&name);
             if wrapper {
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
-                    let inner = arguments.args.iter().find_map(|argument| match argument {
+                    let mut types = arguments.args.iter().filter_map(|argument| match argument {
                         syn::GenericArgument::Type(inner) => Some(inner),
                         _ => None,
-                    })?;
-                    return peel(inner, owner, pointers);
+                    });
+                    let held = if name.ends_with("Map") { types.next_back() } else { types.next() };
+                    return peel(held?, owner, pointers);
                 }
             }
             Some(name)

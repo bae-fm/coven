@@ -131,6 +131,7 @@ impl<'a> ReadCode<'a> {
                     scopes: vec![BTreeMap::new()],
                     open: Vec::new(),
                     marks: BTreeMap::new(),
+                    parameter_types: BTreeMap::new(),
                     out: &mut walked,
                 };
                 walker.run(callable, body);
@@ -416,11 +417,82 @@ struct Walker<'i, 'a> {
     /// The closures, by address, passed to a read place in the call being
     /// visited.
     marks: BTreeMap<usize, Why>,
+    /// The closures, by address, whose first untyped parameter takes the type
+    /// of what the receiver of the call they are passed to holds.
+    parameter_types: BTreeMap<usize, (usize, String)>,
     out: &'i mut Walked,
 }
 
-const TYPE_PRESERVING: [&str; 8] =
-    ["clone", "unwrap", "expect", "as_ref", "as_mut", "as_deref", "to_owned", "cloned"];
+const TYPE_PRESERVING: [&str; 38] = [
+    "clone",
+    "unwrap",
+    "expect",
+    "as_ref",
+    "as_mut",
+    "as_deref",
+    "to_owned",
+    "cloned",
+    "copied",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "values",
+    "values_mut",
+    "rev",
+    "skip",
+    "take",
+    "peekable",
+    "filter",
+    "skip_while",
+    "take_while",
+    "unwrap_or_default",
+    "unwrap_or",
+    "unwrap_or_else",
+    "ok_or",
+    "ok_or_else",
+    "ok",
+    "next",
+    "first",
+    "last",
+    "get",
+    "find",
+    "remove",
+    "pop",
+    "max_by_key",
+    "min_by_key",
+    "max_by",
+    "min_by",
+];
+
+/// Methods of `Option`, `Result` and iterators whose closure takes what the
+/// receiver holds, by the place of that parameter.
+const CLOSURE_OF_ITEM: [(&str, usize); 25] = [
+    ("map", 0),
+    ("map_or", 0),
+    ("map_or_else", 0),
+    ("and_then", 0),
+    ("filter", 0),
+    ("is_some_and", 0),
+    ("is_ok_and", 0),
+    ("inspect", 0),
+    ("filter_map", 0),
+    ("flat_map", 0),
+    ("for_each", 0),
+    ("any", 0),
+    ("all", 0),
+    ("find", 0),
+    ("find_map", 0),
+    ("position", 0),
+    ("take_while", 0),
+    ("skip_while", 0),
+    ("max_by_key", 0),
+    ("min_by_key", 0),
+    ("sort_by_key", 0),
+    ("retain", 0),
+    ("partition", 0),
+    ("try_for_each", 0),
+    ("fold", 1),
+];
 
 impl Walker<'_, '_> {
     fn callable(&self) -> &Callable<'_> {
@@ -448,8 +520,19 @@ impl Walker<'_, '_> {
     fn bind(&mut self, pattern: &syn::Pat, ty: Option<String>) {
         let scope = self.scopes.last_mut().expect("a scope");
         match pattern {
-            syn::Pat::Ident(ident) => {
+            syn::Pat::Ident(ident) if ident.subpat.is_none() => {
                 scope.insert(ident.ident.to_string(), ty);
+            }
+            syn::Pat::Reference(inner) => self.bind(&inner.pat, ty),
+            syn::Pat::Paren(inner) => self.bind(&inner.pat, ty),
+            syn::Pat::TupleStruct(inner)
+                if inner.elems.len() == 1
+                    && inner
+                        .path
+                        .get_ident()
+                        .is_some_and(|name| name == "Some" || name == "Ok") =>
+            {
+                self.bind(&inner.elems[0], ty);
             }
             other => {
                 let mut found = PatternNames(Vec::new());
@@ -489,6 +572,9 @@ impl Walker<'_, '_> {
                 match self.type_of(&call.receiver) {
                     Some(receiver) => match index.methods.get(&(receiver.clone(), name.clone())) {
                         Some(targets) => self.returned(targets),
+                        None if matches!(name.as_str(), "map" | "and_then") => {
+                            self.field_of_closure_argument(&receiver, &call.args)
+                        }
                         None => TYPE_PRESERVING.contains(&name.as_str()).then_some(receiver),
                     },
                     None => self.returned(&self.unique_named(&name, &call.args)),
@@ -517,6 +603,24 @@ impl Walker<'_, '_> {
             }
             _ => None,
         }
+    }
+
+    /// The type of the field a closure argument `|item| item.field` reads
+    /// from the receiver's type, when it is that.
+    fn field_of_closure_argument(
+        &self,
+        receiver: &str,
+        arguments: &Punctuated<syn::Expr, syn::Token![,]>,
+    ) -> Option<String> {
+        let syn::Expr::Closure(closure) = arguments.first()? else { return None };
+        let [syn::Pat::Ident(parameter)] = closure.inputs.iter().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let syn::Expr::Field(field) = closure.body.as_ref() else { return None };
+        let syn::Member::Named(name) = &field.member else { return None };
+        let syn::Expr::Path(base) = field.base.as_ref() else { return None };
+        base.path.is_ident(&parameter.ident).then_some(())?;
+        self.context.index.fields.get(&(receiver.to_string(), name.to_string())).cloned()
     }
 
     /// The type the first of these returns, by name.
@@ -700,23 +804,29 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
         self.bind(pattern, ty);
     }
 
-    fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        self.scopes.push(BTreeMap::new());
-        self.bind(&node.pat, None);
-        self.visit_pat(&node.pat);
-        self.visit_expr(&node.body);
-        self.scopes.pop();
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        self.visit_expr(&node.expr);
+        let scrutinee = self.type_of(&node.expr);
+        for arm in &node.arms {
+            self.scopes.push(BTreeMap::new());
+            self.bind(&arm.pat, scrutinee.clone());
+            self.visit_pat(&arm.pat);
+            self.visit_expr(&arm.body);
+            self.scopes.pop();
+        }
     }
 
     fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
         self.visit_expr(&node.expr);
-        self.bind(&node.pat, None);
+        let ty = self.type_of(&node.expr);
+        self.bind(&node.pat, ty);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         self.visit_expr(&node.expr);
+        let item = self.type_of(&node.expr);
         self.scopes.push(BTreeMap::new());
-        self.bind(&node.pat, None);
+        self.bind(&node.pat, item);
         self.visit_block(&node.body);
         self.scopes.pop();
     }
@@ -741,7 +851,7 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
                 .collect(),
         });
         self.scopes.push(BTreeMap::new());
-        for input in &node.inputs {
+        for (place, input) in node.inputs.iter().enumerate() {
             match input {
                 syn::Pat::Type(typed) => {
                     let ty = peel(
@@ -751,7 +861,13 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
                     );
                     self.bind(&typed.pat, ty);
                 }
-                other => self.bind(other, None),
+                other => {
+                    let ty = match self.parameter_types.get(&address) {
+                        Some((wanted, ty)) if *wanted == place => Some(ty.clone()),
+                        _ => None,
+                    };
+                    self.bind(other, ty);
+                }
             }
         }
         self.open.push(position);
@@ -773,6 +889,16 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let name = node.method.to_string();
         let receiver = self.type_of(&node.receiver);
+        if let (Some(receiver), Some((_, place))) =
+            (&receiver, CLOSURE_OF_ITEM.iter().find(|(method, _)| *method == name))
+        {
+            for argument in &node.args {
+                if let syn::Expr::Closure(closure) = argument {
+                    self.parameter_types
+                        .insert(std::ptr::from_ref(closure) as usize, (*place, receiver.clone()));
+                }
+            }
+        }
         let index = self.context.index;
         let (targets, candidates) = match &receiver {
             Some(receiver) => (
