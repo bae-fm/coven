@@ -239,10 +239,26 @@ impl Planner {
                                 .any(|edge| edge.member == *item && order.contains(&edge.partner))
                         })
                         .or_else(|| {
-                            candidates
-                                .iter()
-                                .copied()
-                                .find(|item| items[*item].source.term.is_some())
+                            // An item that takes values from a FROM item
+                            // nothing narrows, a table function whose
+                            // columns no equality joins to another source,
+                            // goes after it, as the values are all of its
+                            // narrowing.
+                            let takes_unplaced_values = |item: usize| {
+                                self.edges.iter().any(|edge| {
+                                    edge.member == item
+                                        && candidates.contains(&edge.partner)
+                                        && items[edge.partner].source.table.is_none()
+                                        && items[edge.partner].source.term.is_none()
+                                        && !self
+                                            .edges
+                                            .iter()
+                                            .any(|other| other.member == edge.partner)
+                                })
+                            };
+                            candidates.iter().copied().find(|item| {
+                                items[*item].source.term.is_some() && !takes_unplaced_values(*item)
+                            })
                         })
                         .or_else(|| {
                             candidates

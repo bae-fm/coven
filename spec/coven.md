@@ -807,6 +807,12 @@ it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view
 or the function. The view's own tables are read whole. A table function of
 another table's columns, as `json_each(l.items)`, narrows nothing: it lists
 rows only beside that table's rows, so a lookup can't ask it alone.
+A condition on a table's own rows doesn't put it ahead of such a function: a
+list window that reads `json_each(?1) AS w JOIN placement AS p ON p.key =
+unhex(w.value) AND p.item <> 'group'` still narrows `placement` to the keys the
+function lists, so a write to the selection rows of `p.key` that the window
+checks with `EXISTS (SELECT 1 FROM selection AS chosen WHERE chosen.key =
+p.key)` reruns only the window listing that key.
 
 A lookup's cost depends on the app's indexes. One no index serves reads its
 partner row by row, so it could cost a write as much as reading the whole

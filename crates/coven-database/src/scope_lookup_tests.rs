@@ -836,3 +836,48 @@ INSERT INTO credits VALUES (1,1,'Ana'),(2,2,'Ben'),(3,2,'Cy')",
     .await;
     db.close().await.unwrap();
 }
+
+/// A window of a list reads the rows of the keys it was handed as one JSON
+/// parameter, each row's placement beside whether it is selected, through a
+/// correlated subquery on the selection. A condition on the placement that
+/// coven judges by asking SQLite (`<>`) is a condition of the placement's own,
+/// which must not put the placement ahead of the table function that gives
+/// its keys: a selection write reruns the window holding the changed key and
+/// no other.
+#[tokio::test]
+async fn a_condition_on_a_row_keeps_it_after_the_table_function_giving_its_keys() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![],
+            "CREATE TABLE placement(entry INTEGER PRIMARY KEY, key BLOB NOT NULL, item TEXT NOT NULL, name TEXT);
+CREATE TABLE selection(list_id INTEGER NOT NULL, key BLOB NOT NULL, PRIMARY KEY (list_id, key));
+INSERT INTO placement VALUES (1,X'41','candidate','A'),(2,X'42','candidate','B'),(3,X'43','candidate','C'),(4,X'44','candidate','D')",
+        )
+        .await
+        .unwrap();
+    for (sql, keys) in [
+        (
+            "SELECT EXISTS (SELECT 1 FROM selection AS chosen WHERE chosen.list_id = 1 AND chosen.key = p.key) FROM json_each(?1) AS w JOIN placement AS p ON p.key = unhex(w.value ->> 1) AND p.item <> 'group' ORDER BY w.value ->> 0",
+            &br#"[[0,"41"],[1,"42"]]"#[..],
+        ),
+        (
+            "SELECT EXISTS (SELECT 1 FROM selection AS chosen WHERE chosen.list_id = 1 AND chosen.key = p.key) FROM json_each(?1) AS w JOIN placement AS p ON p.key = unhex(w.value) WHERE p.item = 'candidate' ORDER BY w.value",
+            &br#"["41","42"]"#[..],
+        ),
+    ] {
+        follows(
+            &db,
+            sql,
+            vec![crate::sql_value::SqlValue::Text(keys.to_vec())],
+            &[
+                ("INSERT INTO selection VALUES (1, X'43')", false),
+                ("INSERT INTO selection VALUES (1, X'42')", true),
+                ("DELETE FROM selection WHERE key = X'43'", false),
+            ],
+        )
+        .await;
+        write(&db, "DELETE FROM selection");
+    }
+    db.close().await.unwrap();
+}
