@@ -39,20 +39,47 @@ fn lines(findings: Vec<Finding>) -> Vec<String> {
     Report(findings).lines()
 }
 
+/// The lines the report prints: findings sorted, and those that read alike
+/// printed once.
+fn printed(mut findings: Vec<Finding>) -> Vec<String> {
+    findings.sort();
+    findings.dedup();
+    lines(findings)
+}
+
 #[test]
 fn an_unlisted_finding_names_its_line_its_item_and_the_remedy() {
     let found = run(&[(PATH, SOURCE)], "");
-    assert_eq!(found.len(), 2);
+    assert_eq!(found.len(), 3);
     let lines = lines(found);
     assert_eq!(lines[0], "crates/app/src/a.rs:2: read sorts with `sort` (sort)");
     assert_eq!(lines[1], "crates/app/src/a.rs:3: read sorts with `sort` (sort)");
+    assert_eq!(lines[2], "crates/app/src/a.rs:2: read has 2 findings (sort)");
     assert_eq!(
-        lines[2],
+        lines[3],
         format!(
             "projects/rule.md in agent-instructions: the statement filters, sorts, joins, groups, counts and sums, in the same query or its own live query beside it; a read returns what the screen shows. {ENDING}"
         )
     );
+    assert_eq!(lines.len(), 4);
+}
+
+#[test]
+fn each_unlisted_key_prints_how_many_findings_it_has_even_when_they_read_alike() {
+    let source = "fn read(sql: &SqlReadContext<'_>) { a.sort(); b.sort(); c.sort(); }";
+    let lines = printed(run(&[(PATH, source)], ""));
+    assert_eq!(lines[0], "crates/app/src/a.rs:1: read has 3 findings (sort)");
+    assert_eq!(lines[1], "crates/app/src/a.rs:1: read sorts with `sort` (sort)");
     assert_eq!(lines.len(), 3);
+    let single = run(&[(PATH, "fn read(sql: &SqlReadContext<'_>) { a.sort(); }")], "");
+    assert_eq!(single.len(), 1, "a key with one finding needs no count line");
+}
+
+#[test]
+fn a_key_over_its_row_prints_its_count_beside_the_row_s() {
+    let source = "fn read(sql: &SqlReadContext<'_>) { a.sort(); b.sort(); c.sort(); }";
+    let lines = printed(run(&[(PATH, source)], &row("frozen", 2)));
+    assert_eq!(lines[0], "crates/app/src/a.rs:1: read has 3 findings (sort), and its row lists 2");
 }
 
 #[test]
@@ -105,7 +132,7 @@ fn a_frozen_row_over_more_findings_fails_listing_each() {
     let source =
         "fn read(sql: &SqlReadContext<'_>) {\n    a.sort();\n    b.sort();\n    c.sort();\n}";
     let found = run(&[(PATH, source)], &row("frozen", 2));
-    assert_eq!(found.iter().map(|finding| finding.line).collect::<Vec<_>>(), [2, 3, 4]);
+    assert_eq!(found.iter().map(|finding| finding.line).collect::<Vec<_>>(), [2, 3, 4, 2]);
     assert!(found.iter().all(|finding| finding.path == PATH));
 }
 
@@ -117,7 +144,7 @@ fn an_allowed_row_is_exact_as_a_frozen_row_is() {
     assert!(fewer[0].message.contains("read_shapes.allowed"), "{}", fewer[0].message);
     assert!(fewer[0].message.contains("lower the count to 1"), "{}", fewer[0].message);
     let more = run(&[(PATH, SOURCE)], &row("allowed", 1));
-    assert_eq!(more.len(), 2);
+    assert_eq!(more.len(), 3);
 }
 
 #[test]
@@ -129,8 +156,8 @@ fn a_row_covers_only_its_own_path_item_and_shape() {
         ]"#
     );
     let found = run(&[(PATH, SOURCE)], &rows);
-    // Two unlisted sorts, and two rows with no findings left.
-    assert_eq!(found.iter().filter(|finding| finding.path == PATH).count(), 2);
+    // Two unlisted sorts and their count line, and two rows with no findings left.
+    assert_eq!(found.iter().filter(|finding| finding.path == PATH).count(), 3);
     assert_eq!(
         found.iter().filter(|finding| finding.path == "owner-construction-check.toml").count(),
         2

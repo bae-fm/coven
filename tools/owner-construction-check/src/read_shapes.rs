@@ -59,14 +59,29 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
                 remedy(&shapes.rule, key.2),
             )),
             Some(row) if hits.len() == row.count => {}
-            _ => findings.extend(hits.iter().map(|hit| {
-                Finding::new(
-                    &hit.path,
-                    hit.line,
-                    format!("{} {} ({})", hit.item, hit.what, hit.shape.id()),
-                    remedy(&shapes.rule, hit.shape),
-                )
-            })),
+            _ => {
+                findings.extend(hits.iter().map(|hit| {
+                    Finding::new(
+                        &hit.path,
+                        hit.line,
+                        format!("{} {} ({})", hit.item, hit.what, hit.shape.id()),
+                        remedy(&shapes.rule, hit.shape),
+                    )
+                }));
+                // Findings that read alike print once, so the key's count,
+                // which a row must state, is its own line.
+                let listed = row.map_or(String::new(), |row| {
+                    format!(", and its row lists {}", row.count)
+                });
+                if hits.len() > 1 || row.is_some() {
+                    findings.push(Finding::new(
+                        &key.0,
+                        hits[0].line,
+                        format!("{} has {} findings ({}){listed}", key.1, hits.len(), key.2.id()),
+                        remedy(&shapes.rule, key.2),
+                    ));
+                }
+            }
         }
     }
     for row in &rows {
