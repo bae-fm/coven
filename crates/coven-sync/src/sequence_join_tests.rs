@@ -712,10 +712,15 @@ async fn a_store_whose_history_binds_its_pair_nowhere_stops_not_admitted() {
     group.create(&ana).await;
     let carol = group.device(3).await;
     for _ in 0..2 {
-        assert!(matches!(carol.sync.pass().await, Err(crate::SyncError::NotAdmitted)));
+        assert!(matches!(
+            carol.sync.pass().await,
+            Err(crate::SyncError::Removed(coven_database::Removal::NeverAdmitted))
+        ));
         assert!(matches!(
             &*carol.sync.state.subscribe().borrow(),
-            crate::SequenceStatus::Stopped(crate::SyncFailure::NotAdmitted)
+            crate::SequenceStatus::Stopped(crate::SyncFailure::Removed(
+                coven_database::Removal::NeverAdmitted
+            ))
         ));
     }
     for device in [&ana, &carol] {

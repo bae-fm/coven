@@ -358,7 +358,10 @@ async fn a_removed_members_code_fails_at_restore() {
     ana.sync.administer(StoreChange::RenameStore { name: "Family".into() }).await.unwrap();
     let laptop = group.newcomer(ben.identity.clone(), group.storage.for_device()).await;
     let result = laptop.sync.unlock().await;
-    assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
+    assert!(
+        matches!(result, Err(SyncError::Removed(coven_database::Removal::Member))),
+        "{result:?}"
+    );
     for device in [&ana, &ben, &laptop] {
         device.sync.database.close().await.unwrap();
     }

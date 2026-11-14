@@ -74,7 +74,7 @@ pub use codes::{
 };
 pub use coven_database::WriteCutoff;
 pub use coven_database::{
-    DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
+    DeviceStop, EntryTarget, OperationOutcome, OperationRejection, Removal, UndoCause,
 };
 pub use coven_format::codes::InviteAdmits;
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
@@ -106,8 +106,8 @@ pub use sequence_sync::sequence_pairings::{pairing_status, pairings_opened};
 pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
-    record_location, record_opened, sync_status, SyncActivity, SyncCause, SyncState, SyncStatus,
-    SyncWait,
+    record_location, record_opened, sync_status, ResetReason, SyncActivity, SyncCause, SyncState,
+    SyncStatus, SyncWait,
 };
 
 #[cfg(test)]

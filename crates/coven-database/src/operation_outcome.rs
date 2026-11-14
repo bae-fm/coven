@@ -92,14 +92,23 @@ pub enum UndoCause {
     },
 }
 
+/// Why a device is not in the store, and won't be again (§13.2, §14.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Removal {
+    /// An admin removed this device.
+    Device,
+    /// This device's member was removed, or left.
+    Member,
+    /// The admission that published this joined store was refused: its
+    /// device never became a member (§13.2).
+    NeverAdmitted,
+}
+
 /// Why a device stopped for good (§14.1, §19.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceStop {
-    /// The device, or its member, was removed.
-    Removed,
-    /// The admission that published this joined store was refused: its
-    /// device never became a member (§13.2).
-    NotAdmitted,
+    /// The device is not in the store.
+    Removed(Removal),
     /// A reset registered another installation in this device's place.
     Replaced,
     /// History shows another copy of this installation using its device id.

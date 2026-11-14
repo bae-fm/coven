@@ -1,6 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
-use coven_database::DbError;
+use coven_database::{DbError, Removal};
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{IdSource, KeyId};
@@ -403,9 +403,9 @@ async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_sa
     assert_eq!(claim.settlement, coven_database::ClaimSettlement::Unknown);
     let slot = claim.attempts.last().unwrap().slot_number().unwrap();
     ben.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
-    assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed)));
+    assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed(Removal::Device))));
     assert_eq!(outcome(&ben, removal).await, Some(OperationOutcome::Landed(slot)));
-    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed));
+    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed(Removal::Device)));
     assert!(ben.database().operations().await.unwrap().is_empty());
     assert!(ben.database().current_claim().await.unwrap().is_none());
     close(&[&ana, &ben]).await;
@@ -430,8 +430,8 @@ async fn a_removal_loaded_from_the_floor_ends_this_devices_operations() {
     ana.sync.pass().await.unwrap();
     let path = ObjectPath::slot(group.store, removal.try_into().unwrap());
     assert!(group.storage.status(&path).await.unwrap().is_none());
-    assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed)));
-    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed));
+    assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed(Removal::Device))));
+    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed(Removal::Device)));
     assert!(ben.database().operations().await.unwrap().is_empty());
     close(&[&ana, &ben]).await;
 }

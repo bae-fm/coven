@@ -1,4 +1,5 @@
 import CovenIO.SyncReach
+import CovenIO.Standing
 import CovenSequence.Device
 import CovenSequence.Membership
 
@@ -22,9 +23,11 @@ name, and `io_differential_sync_state` checks what each one shows.
   synced from there, however it steps, and shows waiting to sync on the slot, or
   update needed, or failed.
 - `removal_reached`, `replacement_reached`: once a reader has applied the slot,
-  the device shows removed, or needs reset.
+  the device shows removed (the member's removal), or needs reset (the member's
+  keys replaced), and names which.
 - `device_removal_reached`, `device_replacement_reached`: the same for this
-  device's own removal, and for a registration taking its place.
+  device's own removal (removed, the device's), and for a registration taking
+  its place (needs reset, replaced).
 
 `copy_precedes_need_fails` in `CovenSequence.CopyOrderExamples` is a history
 that reaches `key_wait_reached` with every device following the rules.
@@ -64,7 +67,7 @@ inductive PassEnd (seq : Nat → Slot S) (st : Store S) (self : S.Dev) (me : S.M
   /-- A reader has applied the member's removal. -/
   | removed (A : S.Aud) (followed : A ∈ dv.follows)
       (gone : (dv.reader A).ledger.member me = false) :
-      PassEnd seq st self me gen dv (.failed .removed)
+      PassEnd seq st self me gen dv (.failed (.removed .member))
   /-- A reader has applied a replacement of the member's keys. -/
   | replaced (A : S.Aud) (followed : A ∈ dv.follows)
       (newer : gen < (dv.reader A).ledger.keyGen me) :
@@ -72,11 +75,11 @@ inductive PassEnd (seq : Nat → Slot S) (st : Store S) (self : S.Dev) (me : S.M
   /-- A reader has applied this device's removal. -/
   | deviceRemoved (A : S.Aud) (followed : A ∈ dv.follows) (i : Nat) (a : S.Dev)
       (slot : seq i = .admin a (.removeDevice self)) (past : i ≤ (dv.reader A).pos) :
-      PassEnd seq st self me gen dv (.failed .removed)
+      PassEnd seq st self me gen dv (.failed (.removed .device))
   /-- A reader has applied a registration taking this device's place. -/
   | deviceReplaced (A : S.Aud) (followed : A ∈ dv.follows) (i : Nat) (a fresh : S.Dev) (m : S.Mem)
       (slot : seq i = .admin a (.addDevice fresh m (some self))) (past : i ≤ (dv.reader A).pos) :
-      PassEnd seq st self me gen dv (.failed .deviceIdInUse)
+      PassEnd seq st self me gen dv (.failed .replaced)
 
 /-- Nothing but the pass names a state: a connected device, not in a pass, with
 no bound file moving or queued, no write queued and no record. -/
@@ -100,6 +103,35 @@ theorem quiet_shows {f : Facts} (q : Quiet f) (last : LastPass) (now : Nat) :
       CovenIO.SyncState.Facts.bound, CovenIO.SyncState.Facts.passWait,
       CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.slotWait,
       CovenIO.SyncState.Facts.lastRetries, q.noUploads, q.noRecords, q.noWrites]
+
+/-- A pass ending `last` on a quiet device names the removal and the reset reason
+that `last` names, and no other fact names one. -/
+theorem quiet_names {f : Facts} (q : Quiet f) (last : LastPass) (now : Nat) :
+    (run f [.begin, .finish last now]).map (fun x => (x.removal, x.resetReason)) =
+      some (match last with
+        | .synced => (none, none)
+        | .failed p => (p.removal, p.reset)) := by
+  simp only [run, CovenIO.SyncState.step, q.idle, Bool.false_eq_true, ite_false, ite_true,
+    Option.bind_some, Option.map_some, Option.some.injEq]
+  cases last <;>
+    simp [CovenIO.SyncState.Facts.removal, CovenIO.SyncState.Facts.removals,
+      CovenIO.SyncState.Facts.resetReason, CovenIO.SyncState.Facts.resets,
+      CovenIO.SyncState.Facts.bound, q.noUploads, q.noRecords]
+
+/-- A pass ending `last` on a quiet device leaves a device that shows
+`{ f with last }.ended` and names what `last` names, and no other fact names one. -/
+theorem quiet_standing {f : Facts} (q : Quiet f) (last : LastPass) (now : Nat) :
+    ∃ x, run f [.begin, .finish last now] = some x ∧ state x = { f with last }.ended ∧
+      (x.removal, x.resetReason) = (match last with
+        | .synced => (none, none)
+        | .failed p => (p.removal, p.reset)) := by
+  have shown := quiet_shows q last now
+  have named := quiet_names q last now
+  obtain ⟨x, hx⟩ : ∃ x, run f [.begin, .finish last now] = some x := by
+    simp [run, CovenIO.SyncState.step, q.idle]
+  rw [hx] at shown named
+  simp only [Option.map_some, Option.some.injEq] at shown named
+  exact ⟨x, hx, shown, named⟩
 
 variable (R : Rules S)
 
@@ -181,13 +213,16 @@ theorem removal_reached {st : Store S} {seq : Nat → Slot S} {dv : Device S} {A
     (followed : A ∈ dv.follows) (ok : DevOk R st seq dv) {i : Nat} (positive : 1 ≤ i) {a : S.Dev}
     {me : S.Mem} (slot : seq i = .admin a (.removeMember me)) (applied : Applied R seq i)
     (past : i ≤ (dv.reader A).pos) (self : S.Dev) (gen : Nat) {f : Facts} (q : Quiet f) (now : Nat) :
-    PassEnd seq st self me gen dv (.failed .removed) ∧
-      (run f [.begin, .finish (.failed .removed) now]).map state = some .removed := by
+    PassEnd seq st self me gen dv (.failed (.removed .member)) ∧
+      (run f [.begin, .finish (.failed (.removed .member)) now]).map
+        (fun x => (state x, x.removal)) = some (.removed, some .member) := by
   have gone := (CovenSequence.removed_member_never_active R seq i positive a me slot applied _ past).2
   rw [← (ok A followed).ledger] at gone
   refine ⟨.removed A followed gone, ?_⟩
-  rw [quiet_shows q]
-  rfl
+  obtain ⟨x, hx, shown, named⟩ := quiet_standing q (.failed (.removed .member)) now
+  simp only [Prod.mk.injEq] at named
+  simp [hx, shown, named.1]
+  exact ⟨rfl, rfl⟩
 
 /-- **A replacement ends the device's pair.** Once a sound reader has applied a
 replacement of its member's keys, a pass on a device holding the older generation
@@ -198,16 +233,18 @@ theorem replacement_reached {st : Store S} {seq : Nat → Slot S} {dv : Device S
     (past : i ≤ (dv.reader A).pos) (self : S.Dev) {gen : Nat}
     (older : gen ≤ (ledgerAt R seq (i - 1)).keyGen me) {f : Facts} (q : Quiet f) (now : Nat) :
     PassEnd seq st self me gen dv (.failed (.blocked .memberKeysReplaced)) ∧
-      (run f [.begin, .finish (.failed (.blocked .memberKeysReplaced)) now]).map state =
-        some .needsReset := by
+      (run f [.begin, .finish (.failed (.blocked .memberKeysReplaced)) now]).map
+        (fun x => (state x, x.resetReason)) = some (.needsReset, some .memberKeysReplaced) := by
   have bumped : (ledgerAt R seq i).keyGen me = (ledgerAt R seq (i - 1)).keyGen me + 1 := by
     rw [CovenSequence.applied_ledger R seq positive applied, slot]
     simp [CovenSequence.ledgerEffect, CovenSequence.applyEntry]
   have grown := CovenSequence.keyGen_mono R seq me i _ past
   rw [← (ok A followed).ledger] at grown
   refine ⟨.replaced A followed (by omega), ?_⟩
-  rw [quiet_shows q]
-  rfl
+  obtain ⟨x, hx, shown, named⟩ := quiet_standing q (.failed (.blocked .memberKeysReplaced)) now
+  simp only [Prod.mk.injEq] at named
+  simp [hx, shown, named.2]
+  exact ⟨rfl, rfl⟩
 
 /-- **A device's own removal ends it.** Once a sound reader has applied it, the
 reader's ledger counts the device removed, a pass ends removed, and a quiet
@@ -217,16 +254,19 @@ theorem device_removal_reached {st : Store S} {seq : Nat → Slot S} {dv : Devic
     (slot : seq i = .admin a (.removeDevice self)) (applied : Applied R seq i)
     (past : i ≤ (dv.reader A).pos) (me : S.Mem) (gen : Nat) {f : Facts} (q : Quiet f) (now : Nat) :
     (dv.reader A).ledger.removed self = true ∧
-      PassEnd seq st self me gen dv (.failed .removed) ∧
-      (run f [.begin, .finish (.failed .removed) now]).map state = some .removed := by
+      PassEnd seq st self me gen dv (.failed (.removed .device)) ∧
+      (run f [.begin, .finish (.failed (.removed .device)) now]).map
+        (fun x => (state x, x.removal)) = some (.removed, some .device) := by
   have gone : (ledgerAt R seq i).removed self = true := by
     rw [CovenSequence.applied_ledger R seq positive applied, slot]
     simp [CovenSequence.ledgerEffect, CovenSequence.applyEntry]
   have stays := CovenSequence.removed_stays R seq i gone _ past
   rw [← (ok A followed).ledger] at stays
   refine ⟨stays, .deviceRemoved A followed i a slot past, ?_⟩
-  rw [quiet_shows q]
-  rfl
+  obtain ⟨x, hx, shown, named⟩ := quiet_standing q (.failed (.removed .device)) now
+  simp only [Prod.mk.injEq] at named
+  simp [hx, shown, named.1]
+  exact ⟨rfl, rfl⟩
 
 /-- **A registration in a device's place ends it.** Once a sound reader has
 applied a reset's or a restore's registration naming this device, the reader's
@@ -238,15 +278,18 @@ theorem device_replacement_reached {st : Store S} {seq : Nat → Slot S} {dv : D
     (applied : Applied R seq i) (past : i ≤ (dv.reader A).pos) (me : S.Mem) (gen : Nat) {f : Facts}
     (q : Quiet f) (now : Nat) :
     (dv.reader A).ledger.removed self = true ∧
-      PassEnd seq st self me gen dv (.failed .deviceIdInUse) ∧
-      (run f [.begin, .finish (.failed .deviceIdInUse) now]).map state = some .needsReset := by
+      PassEnd seq st self me gen dv (.failed .replaced) ∧
+      (run f [.begin, .finish (.failed .replaced) now]).map
+        (fun x => (state x, x.resetReason)) = some (.needsReset, some .replaced) := by
   have gone : (ledgerAt R seq i).removed self = true := by
     rw [CovenSequence.applied_ledger R seq positive applied, slot]
     simp [CovenSequence.ledgerEffect, CovenSequence.applyEntry]
   have stays := CovenSequence.removed_stays R seq i gone _ past
   rw [← (ok A followed).ledger] at stays
   refine ⟨stays, .deviceReplaced A followed i a fresh m slot past, ?_⟩
-  rw [quiet_shows q]
-  rfl
+  obtain ⟨x, hx, shown, named⟩ := quiet_standing q (.failed .replaced) now
+  simp only [Prod.mk.injEq] at named
+  simp [hx, shown, named.2]
+  exact ⟨rfl, rfl⟩
 
 end CovenIO.StoreReach

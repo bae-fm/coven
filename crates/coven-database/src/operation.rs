@@ -378,7 +378,12 @@ pub(crate) fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceSto
         ("replaced", ..) => Some(crate::DeviceStop::Replaced),
         ("active", false, true) => None,
         ("active", false, false) => Some(crate::DeviceStop::MemberKeysReplaced),
-        _ => Some(crate::DeviceStop::Removed),
+        // Removing a member removes each of its devices, so a removed member
+        // is the stop. A device removed by itself while its member stays is
+        // the device's. A removal that came second finds the operations the
+        // first one ended already.
+        (_, true, _) => Some(crate::DeviceStop::Removed(crate::Removal::Member)),
+        _ => Some(crate::DeviceStop::Removed(crate::Removal::Device)),
     }))
 }
 

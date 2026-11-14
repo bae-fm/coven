@@ -326,7 +326,9 @@ pub(super) async fn ended(
         || matches!(
             error,
             BootstrapError::Sync(
-                SyncError::Removed | SyncError::MemberKeysReplaced { .. } | SyncError::Rejected(_)
+                SyncError::Removed(_)
+                    | SyncError::MemberKeysReplaced { .. }
+                    | SyncError::Rejected(_)
             )
         );
     if !ends {

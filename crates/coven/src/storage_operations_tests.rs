@@ -18,11 +18,20 @@ async fn wait_for(handle: &CovenHandle, reached: impl FnMut(&Option<LastPass>) -
 /// Wait until a pass ends with this device removed, and the state shows it.
 async fn removed(handle: &CovenHandle) {
     wait_for(handle, |last| {
-        matches!(last, Some(LastPass::Failed { failure: StatusFailure::Removed, .. }))
+        matches!(
+            last,
+            Some(LastPass::Failed {
+                failure: StatusFailure::Removed(coven_database::Removal::Member),
+                ..
+            })
+        )
     })
     .await;
     let status = handle.test_sync_status().latest().await;
-    assert!(matches!(status.state, SyncState::Removed(_)), "{status:?}");
+    assert!(
+        matches!(status.state, SyncState::Removed { removal: coven_database::Removal::Member, .. }),
+        "{status:?}"
+    );
 }
 
 /// Ana removes Ben. Ben's phone deletes his restore code and S3 key when it
@@ -128,13 +137,19 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     let key = || ("ben-new".to_owned(), SecretText::new("new secret".into()));
     let (id, secret) = key();
     let replaced = ben.handle.use_access_key(id, secret).await;
-    assert!(matches!(replaced, Err(SyncError::Removed)), "{replaced:?}");
+    assert!(
+        matches!(replaced, Err(SyncError::Removed(coven_database::Removal::Member))),
+        "{replaced:?}"
+    );
     assert_eq!(held(&ben.app), before);
     let laptop = &laptop;
     let refused = |handle: CovenHandle| async move {
         let (id, secret) = key();
         let result = handle.use_access_key(id, secret).await;
-        assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
+        assert!(
+            matches!(result, Err(SyncError::Removed(coven_database::Removal::Member))),
+            "{result:?}"
+        );
         assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
         assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     };

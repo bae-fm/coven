@@ -1,6 +1,6 @@
 use super::*;
 use crate::sync_status::tests::{
-    connected, key_unavailable, offline, record, upload, upload_record, write_key_record,
+    connected, key_unavailable, offline, record, upload, upload_record, write_key_record, writes,
 };
 use crate::{
     FileMissingReason, LocalFailure, PendingReason, Prerequisite, SyncStatus, UploadPhase,
@@ -107,7 +107,8 @@ fn a_waiting_pass_is_never_synced() {
 fn a_queued_write_is_never_synced() {
     let until = UNIX_EPOCH + Duration::from_secs(60);
     for last in [None, Some(LastPass::Synced)] {
-        let shown = |sync| Facts { last: last.clone(), unsent: true, sync, ..connected() }.state();
+        let shown =
+            |sync| Facts { last: last.clone(), unsent: writes(true), sync, ..connected() }.state();
         assert_eq!(
             shown(RetrySync::Started { cooling_until: None }),
             SyncState::Syncing(SyncActivity::Sending)
@@ -122,7 +123,7 @@ fn a_queued_write_is_never_synced() {
         // the upload.
         let paused = Facts {
             last: last.clone(),
-            unsent: true,
+            unsent: writes(true),
             paused: true,
             uploads: vec![upload(Progress::Queued)],
             queued: true,
@@ -131,7 +132,7 @@ fn a_queued_write_is_never_synced() {
         assert_eq!(paused.state(), SyncState::Syncing(SyncActivity::UploadingBoundFile));
         let claimed = Facts {
             last: last.clone(),
-            unsent: true,
+            unsent: writes(true),
             moved: Some(PassMove::Claimed),
             ..connected()
         };
@@ -175,7 +176,7 @@ fn a_closed_store_shows_what_opening_shows() {
             sync: RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(90)) },
             held: false,
         },
-        unsent: true,
+        unsent: writes(true),
         uploads: vec![coven_database::UploadFacts {
             sending: false,
             stored: false,
@@ -245,7 +246,7 @@ fn a_failure_that_clears_by_itself_waits_for_its_backoff() {
         assert_eq!(armed.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }), "{last:?}");
         let turn = Facts { pass_retry: None, ..armed.clone() };
         assert_eq!(turn.state(), SyncState::Syncing(SyncActivity::Receiving), "{last:?}");
-        let written = Facts { unsent: true, ..armed };
+        let written = Facts { unsent: writes(true), ..armed };
         assert_eq!(written.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
     }
     let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
@@ -369,7 +370,7 @@ fn rate_limited() -> Option<LastPass> {
 fn a_write_with_nothing_holding_it_is_sending() {
     let until = UNIX_EPOCH + Duration::from_secs(60);
     for last in [None, Some(LastPass::Synced)] {
-        let write = Facts { last, unsent: true, ..connected() };
+        let write = Facts { last, unsent: writes(true), ..connected() };
         assert_eq!(write.state(), SyncState::Syncing(SyncActivity::Sending));
         let stopped = Facts { sync: RetrySync::Stopped, ..write.clone() };
         assert_eq!(stopped.state(), SyncState::WaitingToSync(SyncWait::NotSyncing));
@@ -430,7 +431,7 @@ fn an_idle_pass_on_a_synced_store_stays_synced() {
 #[test]
 fn activities_show_in_order() {
     let at = |facts: Facts| facts.state();
-    let write = Facts { unsent: true, ..connected() };
+    let write = Facts { unsent: writes(true), ..connected() };
     let covers = Facts { uploads: vec![upload(Progress::Queued)], queued: true, ..write.clone() };
     assert_eq!(at(covers.clone()), SyncState::Syncing(SyncActivity::UploadingBoundFile));
     let read = Facts { moved: Some(PassMove::Read), ..covers.clone() };
@@ -449,7 +450,8 @@ fn a_write_behind_a_waiting_cover_waits_with_it() {
     let at = UNIX_EPOCH + Duration::from_secs(9);
     let mut retrying = upload(Progress::Queued);
     retrying.retry_at = Some(at);
-    let facts = Facts { unsent: true, uploads: vec![retrying], queued: true, ..connected() };
+    let facts =
+        Facts { unsent: writes(true), uploads: vec![retrying], queued: true, ..connected() };
     assert_eq!(facts.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
     let sending = Facts { uploads: vec![upload(Progress::Moving)], ..facts.clone() };
     assert_eq!(sending.state(), SyncState::Syncing(SyncActivity::UploadingBoundFile));
@@ -488,7 +490,7 @@ fn a_blocked_slot_names_its_wait() {
     ));
     // Every transfer waits behind the slot, a bound file too.
     let held = Facts {
-        unsent: true,
+        unsent: writes(true),
         uploads: vec![upload(Progress::Queued)],
         queued: true,
         ..blocked(key_unavailable())
@@ -502,12 +504,72 @@ fn a_blocked_slot_names_its_wait() {
 #[test]
 fn a_queued_write_waits_for_its_key() {
     let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
-    let write = Facts { unsent: true, records: vec![write_key_record()], ..connected() };
+    let write = Facts { unsent: writes(true), records: vec![write_key_record()], ..connected() };
     assert_eq!(write.state(), SyncState::WaitingToSync(key));
     let stopped = Facts { sync: RetrySync::Stopped, ..write.clone() };
     assert_eq!(stopped.state(), SyncState::WaitingToSync(SyncWait::NotSyncing));
-    let sent = Facts { unsent: false, last: Some(LastPass::Synced), ..write.clone() };
+    let sent = Facts { unsent: writes(false), last: Some(LastPass::Synced), ..write.clone() };
     assert_eq!(sent.state(), SyncState::Synced);
     let cleared = Facts { records: Vec::new(), ..write };
     assert_eq!(cleared.state(), SyncState::Syncing(SyncActivity::Sending));
+}
+
+/// Removed and needs reset name which, from the last pass first and then the
+/// first record that names one, and say what was never sent: every write and
+/// file in the queues, whatever else holds them (§19.1).
+#[test]
+fn a_removed_or_replaced_device_names_which_and_what_it_never_sent() {
+    use crate::{DeviceIdEvidence, ResetReason, StatusFailure};
+    use coven_database::{Removal, UnsentWork};
+    let unsent = UnsentWork { writes: 2, files: 1 };
+    let pass = |failure| Some(LastPass::Failed { failure, error: "e".into() });
+    for removal in [Removal::Device, Removal::Member, Removal::NeverAdmitted] {
+        let facts = Facts { last: pass(StatusFailure::Removed(removal)), unsent, ..connected() };
+        assert_eq!(facts.state(), SyncState::Removed { removal, unsent }, "{removal:?}");
+        let recorded =
+            Facts { records: vec![record(PendingReason::Removed(removal))], unsent, ..connected() };
+        assert_eq!(recorded.state(), SyncState::Removed { removal, unsent }, "{removal:?}");
+    }
+    let first = Facts {
+        last: pass(StatusFailure::Removed(Removal::Device)),
+        records: vec![record(PendingReason::Removed(Removal::Member))],
+        unsent,
+        ..connected()
+    };
+    assert_eq!(first.state(), SyncState::Removed { removal: Removal::Device, unsent });
+    let second = Facts {
+        records: vec![
+            record(PendingReason::Removed(Removal::NeverAdmitted)),
+            record(PendingReason::Removed(Removal::Member)),
+        ],
+        ..connected()
+    };
+    assert_eq!(
+        second.state(),
+        SyncState::Removed { removal: Removal::NeverAdmitted, unsent: writes(false) }
+    );
+    let member = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1));
+    let replaced = Facts {
+        last: pass(StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced)),
+        unsent,
+        ..connected()
+    };
+    assert_eq!(replaced.state(), SyncState::NeedsReset { reason: ResetReason::Replaced, unsent });
+    let keys = Facts {
+        records: vec![record(PendingReason::MemberKeysReplaced { member })],
+        unsent,
+        ..connected()
+    };
+    assert_eq!(
+        keys.state(),
+        SyncState::NeedsReset { reason: ResetReason::MemberKeysReplaced { member }, unsent }
+    );
+    // A removal outranks a reset, as it did.
+    let both = Facts {
+        last: pass(StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced)),
+        records: vec![record(PendingReason::Removed(Removal::Member))],
+        unsent,
+        ..connected()
+    };
+    assert_eq!(both.state(), SyncState::Removed { removal: Removal::Member, unsent });
 }

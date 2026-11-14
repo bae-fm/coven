@@ -484,7 +484,7 @@ impl Case {
 /// other failure fails the case.
 fn passed(result: Result<SequenceStatus, SyncError>) {
     match result {
-        Ok(_) | Err(SyncError::Removed) => (),
+        Ok(_) | Err(SyncError::Removed(_)) => (),
         Err(error) => panic!("the pass failed: {error}"),
     }
 }

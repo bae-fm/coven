@@ -334,7 +334,9 @@ async fn ended(
         || matches!(
             error,
             BootstrapError::Sync(
-                SyncError::Removed | SyncError::MemberKeysReplaced { .. } | SyncError::Rejected(_)
+                SyncError::Removed(_)
+                    | SyncError::MemberKeysReplaced { .. }
+                    | SyncError::Rejected(_)
             )
         );
     if !ends || replacement.is_swapped() {
@@ -391,7 +393,7 @@ fn abandons(error: &BootstrapError) -> bool {
         BootstrapError::Cancelled
             | BootstrapError::Sync(
                 SyncError::MemberKeysReplaced { .. }
-                    | SyncError::Removed
+                    | SyncError::Removed(_)
                     | SyncError::Rejected(coven_sync::OperationRejection::TargetGone(
                         coven_sync::EntryTarget::Member(_)
                     ))

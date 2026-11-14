@@ -551,8 +551,8 @@ pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
     )
 }
 
-/// What a closed store's sync state is computed from, and its unsent work,
-/// in one committed snapshot of its database, read through a connection of
+/// What a closed store's sync state is computed from, which counts its unsent
+/// work, in one committed snapshot of its database, read through a connection of
 /// its own while `lock`, the store's writer lock, shows that no handle has it
 /// open (api.md E1, E5). It reads only coven's tables, so the app's
 /// declarations aren't needed; coven's tables must be at this coven's
@@ -563,7 +563,7 @@ pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
 pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
     directory: StoreDir,
     lock: coven_foundation::files::ClosedStoreLock,
-) -> Result<(crate::SyncFacts<P>, crate::UnsentWork), OpenError> {
+) -> Result<crate::SyncFacts<P>, OpenError> {
     let bugs = directory.bugs().clone();
     finish_blocking(
         blocking_completing("read the closed store's sync status", bugs, move || {
@@ -575,7 +575,7 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
             let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
             let network = crate::network_facts::NetworkFacts::new(observer);
             database.serve_views(settings.device_id, &transfers, &network)?;
-            database.read_snapshot(|sql| Ok::<_, OpenError>((sql.sync_facts()?, sql.unsent()?)))
+            database.read_snapshot(|sql| Ok::<_, OpenError>(sql.sync_facts()?))
         })
         .await,
     )

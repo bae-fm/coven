@@ -553,7 +553,10 @@ async fn a_stop_for_good_finishes_the_rows_and_claims_nothing() {
     let (offered, _) = reach(&group, &ana, At::Offered).await;
     let (handed, _) = reach(&group, &ana, At::HandedOver).await;
     assert!(Handover::decode(&group.storage.read(&handed.path).await.unwrap()).is_ok());
-    ana.database().end_for_good(DeviceStop::Removed).await.unwrap();
+    ana.database()
+        .end_for_good(DeviceStop::Removed(coven_database::Removal::Device))
+        .await
+        .unwrap();
     assert!(rows(&ana).await.is_empty());
     assert!(ana.database().current_claim().await.unwrap().is_none());
     // The request and the handover are still at their paths: the gone

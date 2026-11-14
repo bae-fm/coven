@@ -4,7 +4,7 @@ use crate::{
     Refusal, RequiredUpdate,
 };
 use crate::{PendingSubject, UploadPhase, UploadWait};
-use coven_database::{EntryTarget, OperationRejection, PassMove, WriteCutoff};
+use coven_database::{EntryTarget, OperationRejection, PassMove, Removal, UnsentWork, WriteCutoff};
 use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
 use coven_merge::slot;
 use coven_merge::Audience;
@@ -151,9 +151,9 @@ fn reason_json(reason: &PendingReason) -> Value {
             json!({"cleanup": [reason_json(operation), reason_json(cleanup)]})
         }
         PendingReason::Paused => json!("paused"),
-        // A refused admission names the removed state, as a removal does:
-        // the model's fact is the same (§13.2).
-        PendingReason::Removed | PendingReason::NotAdmitted => json!("removed"),
+        PendingReason::Removed(Removal::Device) => json!("removedDevice"),
+        PendingReason::Removed(Removal::Member) => json!("removedMember"),
+        PendingReason::Removed(Removal::NeverAdmitted) => json!("neverAdmitted"),
         PendingReason::MemberKeysReplaced { .. } => json!("memberKeysReplaced"),
     }
 }
@@ -198,8 +198,9 @@ fn reasons() -> Vec<PendingReason> {
         original(FileSourceFailure::Changed),
         PendingReason::Rejected(OperationRejection::TargetGone(EntryTarget::Member(member()))),
         PendingReason::Paused,
-        PendingReason::Removed,
-        PendingReason::NotAdmitted,
+        PendingReason::Removed(Removal::Device),
+        PendingReason::Removed(Removal::Member),
+        PendingReason::Removed(Removal::NeverAdmitted),
         PendingReason::MemberKeysReplaced { member: member() },
     ];
     for answered in [false, true] {
@@ -262,8 +263,9 @@ fn passes() -> Vec<Option<LastPass>> {
         Some(LastPass::Synced),
         Some(LastPass::Offline { failure: StorageFailure::Network, error: "offline".into() }),
         failed(StatusFailure::UpdateRequired(RequiredUpdate::AppSchema { version: 2 })),
-        failed(StatusFailure::Removed),
-        failed(StatusFailure::NotAdmitted),
+        failed(StatusFailure::Removed(Removal::Device)),
+        failed(StatusFailure::Removed(Removal::Member)),
+        failed(StatusFailure::Removed(Removal::NeverAdmitted)),
         failed(StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced)),
         failed(StatusFailure::Other),
     ];
@@ -318,8 +320,10 @@ fn pass_json(last: &Option<LastPass>) -> Value {
         Some(LastPass::Blocked { reason, .. }) => json!({"blocked": reason_json(reason)}),
         Some(LastPass::Failed { failure, .. }) => match failure {
             StatusFailure::UpdateRequired(_) => json!("updateRequired"),
-            StatusFailure::Removed | StatusFailure::NotAdmitted => json!("removed"),
-            StatusFailure::DeviceIdInUse(_) => json!("deviceIdInUse"),
+            StatusFailure::Removed(Removal::Device) => json!("removedDevice"),
+            StatusFailure::Removed(Removal::Member) => json!("removedMember"),
+            StatusFailure::Removed(Removal::NeverAdmitted) => json!("neverAdmitted"),
+            StatusFailure::DeviceIdInUse(_) => json!("replaced"),
             StatusFailure::Storage(failure) => json!({"storage": failure_name(*failure)}),
             StatusFailure::Operation(record) => json!({"operation": reason_json(&record.reason)}),
             StatusFailure::Other => json!("other"),
@@ -343,8 +347,8 @@ fn state_name(state: &SyncState) -> &'static str {
         SyncState::FolderMissing(_) => "folderMissing",
         SyncState::ClockWrong(_) => "clockWrong",
         SyncState::UpdateNeeded(_) => "updateNeeded",
-        SyncState::Removed(_) => "removed",
-        SyncState::NeedsReset(_) => "needsReset",
+        SyncState::Removed { .. } => "removed",
+        SyncState::NeedsReset { .. } => "needsReset",
         SyncState::Failed(_) => "failed",
     }
 }
@@ -394,6 +398,11 @@ fn phase_json(phase: &UploadPhase) -> Value {
     }
 }
 
+/// What the queues hold with a write queued or not, and no file.
+pub(super) fn writes(queued: bool) -> UnsentWork {
+    UnsentWork { writes: u64::from(queued), files: 0 }
+}
+
 pub(super) fn connected() -> Facts {
     Facts {
         location: RecordedLocation::Connected(CloudProvider::S3),
@@ -401,7 +410,7 @@ pub(super) fn connected() -> Facts {
         moved: None,
         uploads: Vec::new(),
         queued: false,
-        unsent: false,
+        unsent: writes(false),
         records: Vec::new(),
         sync: RetrySync::Started { cooling_until: None },
         paused: false,
@@ -462,7 +471,8 @@ fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
             Some(PassMove::Claimed) => json!("claimed"),
         },
         "uploads": uploads,
-        "unsent": facts.unsent,
+        "unsent": facts.unsent.writes > 0,
+        "unsentFiles": facts.unsent.files > 0,
         "running": running,
         "cooling": cooling,
         "paused": facts.paused,
@@ -486,7 +496,34 @@ fn shown(facts: &Facts) -> Value {
         SyncState::Syncing(activity) => json!(activity_name(*activity)),
         _ => Value::Null,
     };
-    json!({"state": state_name(&state), "wait": wait, "activity": activity})
+    let (removal, reset, unsent) = match &state {
+        SyncState::Removed { removal, unsent } => (
+            json!(match removal {
+                Removal::Device => "device",
+                Removal::Member => "member",
+                Removal::NeverAdmitted => "neverAdmitted",
+            }),
+            Value::Null,
+            json!({"writes": unsent.writes > 0, "files": unsent.files > 0}),
+        ),
+        SyncState::NeedsReset { reason, unsent } => (
+            Value::Null,
+            json!(match reason {
+                ResetReason::Replaced => "replaced",
+                ResetReason::MemberKeysReplaced { .. } => "memberKeysReplaced",
+            }),
+            json!({"writes": unsent.writes > 0, "files": unsent.files > 0}),
+        ),
+        _ => (Value::Null, Value::Null, Value::Null),
+    };
+    json!({
+        "state": state_name(&state),
+        "wait": wait,
+        "activity": activity,
+        "removal": removal,
+        "reset": reset,
+        "unsent": unsent,
+    })
 }
 
 /// Every set of facts the differential test compares: each pass of every
@@ -512,7 +549,7 @@ fn cases() -> Vec<Facts> {
             for pass_retry in [None, backoff] {
                 cases.push(Facts {
                     last: last.clone(),
-                    unsent,
+                    unsent: writes(unsent),
                     uploads: vec![upload(Progress::Stored); stored],
                     pass_retry,
                     ..connected()
@@ -563,7 +600,7 @@ fn cases() -> Vec<Facts> {
         for last in [blocked.clone(), limited.clone()] {
             cases.push(Facts { sync, last, ..connected() });
         }
-        cases.push(Facts { sync, unsent: true, ..connected() });
+        cases.push(Facts { sync, unsent: writes(true), ..connected() });
         for (last, unsent) in [None, blocked.clone()]
             .into_iter()
             .flat_map(|last| [(last.clone(), false), (last, true)])
@@ -586,7 +623,7 @@ fn cases() -> Vec<Facts> {
                         cases.push(Facts {
                             sync,
                             last: last.clone(),
-                            unsent,
+                            unsent: writes(unsent),
                             paused,
                             unmetered_only,
                             metered,
@@ -619,7 +656,7 @@ fn cases() -> Vec<Facts> {
                             sync,
                             last: last.clone(),
                             moved,
-                            unsent,
+                            unsent: writes(unsent),
                             uploads,
                             ..connected()
                         });
@@ -638,12 +675,52 @@ fn cases() -> Vec<Facts> {
                     cases.push(Facts {
                         sync,
                         last: last.clone(),
-                        unsent,
+                        unsent: writes(unsent),
                         uploads,
                         records: vec![write_key_record()],
                         ..connected()
                     });
                 }
+            }
+        }
+    }
+    // Two failures that name a standing state, one from the pass and one from a
+    // record or a queued upload's record, in every pairing: the first the
+    // state's candidates list names it, and the pass only while nothing moves.
+    let standing: Vec<(StatusFailure, PendingReason)> = vec![
+        (StatusFailure::Removed(Removal::Device), PendingReason::Removed(Removal::Device)),
+        (StatusFailure::Removed(Removal::Member), PendingReason::Removed(Removal::Member)),
+        (
+            StatusFailure::Removed(Removal::NeverAdmitted),
+            PendingReason::Removed(Removal::NeverAdmitted),
+        ),
+        (
+            StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced),
+            PendingReason::MemberKeysReplaced { member: member() },
+        ),
+    ];
+    for (failure, _) in &standing {
+        for (_, reason) in &standing {
+            for moved in [None, Some(PassMove::Read)] {
+                let last = Some(LastPass::Failed { failure: failure.clone(), error: "e".into() });
+                let mut queued = upload(Progress::Queued);
+                queued.record = Some(upload_record(1, reason.clone()));
+                cases.push(Facts {
+                    last: last.clone(),
+                    moved,
+                    records: vec![record(reason.clone())],
+                    unsent: writes(true),
+                    ..connected()
+                });
+                cases.push(Facts { last, moved, uploads: vec![queued], ..connected() });
+            }
+        }
+        for (_, first) in &standing {
+            for (_, second) in &standing {
+                cases.push(Facts {
+                    records: vec![record(first.clone()), record(second.clone())],
+                    ..connected()
+                });
             }
         }
     }
@@ -663,14 +740,24 @@ fn cases() -> Vec<Facts> {
 #[test]
 #[ignore = "requires COVEN_IO_LEAN"]
 fn io_differential_sync_state() {
-    let cases = cases();
-    let trailing = trailing_uploads();
-    let inputs: Vec<Value> = cases.iter().map(|facts| facts_json(facts, &trailing)).collect();
-    let actual: Vec<Value> = cases.iter().map(shown).collect();
-    let expected = crate::tests::io_runner(&inputs);
-    assert_eq!(actual.len(), expected.len());
-    for ((input, actual), expected) in inputs.iter().zip(&actual).zip(&expected) {
-        assert_eq!(actual, expected, "{input}");
+    // The upload queue holds the bound uploads the facts list and the
+    // trailing ones; its count is what a stopped state says is unsent, so each
+    // run's cases carry it, with and without trailing uploads.
+    for trailing in [trailing_uploads(), Vec::new()] {
+        let cases: Vec<Facts> = cases()
+            .into_iter()
+            .map(|mut facts| {
+                facts.unsent.files = (facts.uploads.len() + trailing.len()) as u64;
+                facts
+            })
+            .collect();
+        let inputs: Vec<Value> = cases.iter().map(|facts| facts_json(facts, &trailing)).collect();
+        let actual: Vec<Value> = cases.iter().map(shown).collect();
+        let expected = crate::tests::io_runner(&inputs);
+        assert_eq!(actual.len(), expected.len());
+        for ((input, actual), expected) in inputs.iter().zip(&actual).zip(&expected) {
+            assert_eq!(actual, expected, "{input}");
+        }
     }
 }
 
@@ -687,7 +774,7 @@ fn the_differential_covers_every_reason() {
         .collect();
     kinds.sort();
     kinds.dedup();
-    assert_eq!(kinds.len(), 23, "{kinds:?}");
+    assert_eq!(kinds.len(), 25, "{kinds:?}");
 }
 
 /// An upload of each kind: bound or trailing, sending, stored or queued, with

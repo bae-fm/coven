@@ -199,7 +199,8 @@ impl Coven {
             })
             .await??
         };
-        let (facts, unsent) = coven_database::closed_sync_facts(store_dir.clone(), lock).await?;
+        let facts = coven_database::closed_sync_facts(store_dir.clone(), lock).await?;
+        let unsent = facts.unsent;
         let sync = coven_sync::SyncStatus::closed(facts, location)?;
         Ok(ClosedSyncStatus { sync, unsent })
     }

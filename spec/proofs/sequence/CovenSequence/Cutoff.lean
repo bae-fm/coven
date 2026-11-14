@@ -140,6 +140,55 @@ def Cut (seq : Nat → Slot S) (j : Nat) (d : S.Dev) (g : Nat) : Prop :=
      (∃ a m e, seq j = .admin a (.recover m e) ∧ (ledgerAt R seq (j - 1)).deviceOf d = some m ∧
         g ≤ (ledgerAt R seq (j - 1)).keyGen m))
 
+/-- **A cut-off device stops counting.** Once slot `j` cuts a device off, the
+ledger before every later slot `k + 1` says its batches don't count. A device
+that applied slot `j` reads this from its own ledger and stops. -/
+theorem cut_counts_false (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g : Nat}
+    (hcut : Cut R seq j d g) : counts (ledgerAt R seq k) d g = false := by
+  obtain ⟨hj1, happ, hcases⟩ := hcut
+  simp only [counts]
+  rcases hcases with ⟨a, hs⟩ | ⟨a, e, m, hs⟩ | ⟨a, m, hs, hdm⟩ | ⟨a, m, hs, hdm, hg⟩ |
+    ⟨a, m, e, hs, hdm, hg⟩
+  · have hrj : (ledgerAt R seq j).removed d = true := by
+      rw [applied_ledger R seq hj1 happ, hs]
+      simp [ledgerEffect, applyEntry]
+    have hr := removed_stays R seq j hrj k hjk
+    cases hdk : (ledgerAt R seq k).deviceOf d with
+    | none => rfl
+    | some m => simp [hr]
+  · have hrj : (ledgerAt R seq j).removed d = true := by
+      rw [applied_ledger R seq hj1 happ, hs]
+      simp [ledgerEffect, applyEntry]
+    have hr := removed_stays R seq j hrj k hjk
+    cases hdk : (ledgerAt R seq k).deviceOf d with
+    | none => rfl
+    | some m => simp [hr]
+  · have hrj : (ledgerAt R seq j).removed d = true := by
+      rw [applied_ledger R seq hj1 happ, hs]
+      simp [ledgerEffect, applyEntry, hdm]
+    have hr := removed_stays R seq j hrj k hjk
+    cases hdk : (ledgerAt R seq k).deviceOf d with
+    | none => rfl
+    | some m => simp [hr]
+  · have hkj : (ledgerAt R seq j).keyGen m = (ledgerAt R seq (j - 1)).keyGen m + 1 := by
+      rw [applied_ledger R seq hj1 happ, hs]
+      simp [ledgerEffect, applyEntry]
+    have hmono := keyGen_mono R seq m j k hjk
+    have hdk := deviceOf_stays R seq (j - 1) hdm k (by omega)
+    rw [hdk]
+    have : ((ledgerAt R seq k).keyGen m == g) = false := by
+      simp only [beq_eq_false_iff_ne]; omega
+    simp [this]
+  · have hkj : (ledgerAt R seq j).keyGen m = (ledgerAt R seq (j - 1)).keyGen m + 1 := by
+      rw [applied_ledger R seq hj1 happ, hs]
+      simp [ledgerEffect, applyEntry]
+    have hmono := keyGen_mono R seq m j k hjk
+    have hdk := deviceOf_stays R seq (j - 1) hdm k (by omega)
+    rw [hdk]
+    have : ((ledgerAt R seq k).keyGen m == g) = false := by
+      simp only [beq_eq_false_iff_ne]; omega
+    simp [this]
+
 /-- **The removal cut-off.** A batch at slot `k+1` by a device cut off at an
 earlier slot `j` is refused in every audience it has a part for: that audience
 only records the refusal, so no unique value or owner row is taken, and its
@@ -151,50 +200,7 @@ theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g
     ledgerAt R seq (k + 1) = noteSlot R (ledgerAt R seq k) (ledgerAt R seq k) (k + 1) (seq (k + 1)) ∧
     audAt R seq A (k + 1) = refuseAud (audAt R seq A k) (k + 1) ∧
     rowsAt R seq A (k + 1) = rowsAt R seq A k := by
-  obtain ⟨hj1, happ, hcases⟩ := hcut
-  have hcount : counts (ledgerAt R seq k) d g = false := by
-    simp only [counts]
-    rcases hcases with ⟨a, hs⟩ | ⟨a, e, m, hs⟩ | ⟨a, m, hs, hdm⟩ | ⟨a, m, hs, hdm, hg⟩ |
-      ⟨a, m, e, hs, hdm, hg⟩
-    · have hrj : (ledgerAt R seq j).removed d = true := by
-        rw [applied_ledger R seq hj1 happ, hs]
-        simp [ledgerEffect, applyEntry]
-      have hr := removed_stays R seq j hrj k hjk
-      cases hdk : (ledgerAt R seq k).deviceOf d with
-      | none => rfl
-      | some m => simp [hr]
-    · have hrj : (ledgerAt R seq j).removed d = true := by
-        rw [applied_ledger R seq hj1 happ, hs]
-        simp [ledgerEffect, applyEntry]
-      have hr := removed_stays R seq j hrj k hjk
-      cases hdk : (ledgerAt R seq k).deviceOf d with
-      | none => rfl
-      | some m => simp [hr]
-    · have hrj : (ledgerAt R seq j).removed d = true := by
-        rw [applied_ledger R seq hj1 happ, hs]
-        simp [ledgerEffect, applyEntry, hdm]
-      have hr := removed_stays R seq j hrj k hjk
-      cases hdk : (ledgerAt R seq k).deviceOf d with
-      | none => rfl
-      | some m => simp [hr]
-    · have hkj : (ledgerAt R seq j).keyGen m = (ledgerAt R seq (j - 1)).keyGen m + 1 := by
-        rw [applied_ledger R seq hj1 happ, hs]
-        simp [ledgerEffect, applyEntry]
-      have hmono := keyGen_mono R seq m j k hjk
-      have hdk := deviceOf_stays R seq (j - 1) hdm k (by omega)
-      rw [hdk]
-      have : ((ledgerAt R seq k).keyGen m == g) = false := by
-        simp only [beq_eq_false_iff_ne]; omega
-      simp [this]
-    · have hkj : (ledgerAt R seq j).keyGen m = (ledgerAt R seq (j - 1)).keyGen m + 1 := by
-        rw [applied_ledger R seq hj1 happ, hs]
-        simp [ledgerEffect, applyEntry]
-      have hmono := keyGen_mono R seq m j k hjk
-      have hdk := deviceOf_stays R seq (j - 1) hdm k (by omega)
-      rw [hdk]
-      have : ((ledgerAt R seq k).keyGen m == g) = false := by
-        simp only [beq_eq_false_iff_ne]; omega
-      simp [this]
+  have hcount := cut_counts_false R seq hjk hcut
   have hinv : audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (seq (k + 1)) = false := by
     rw [hw]; simp [audValid, hA, hcount]
   have htouch : touches A (seq (k + 1)) = true := by rw [hw]; simp [touches, hA]
@@ -204,5 +210,24 @@ theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g
   · have hnr : ∀ d a v c p, seq (k + 1) ≠ .boundary d a v c p := by intro _ _ _ _ _; simp [hw]
     rw [rowsAt_other R seq A k hnr]
     simp [hinv]
+
+/-- **A device's own writes are never refused by its own cut-off.** A device
+claims slot `k + 1` only after applying slots `1` to `k`, so the ledger it
+reads is `ledgerAt R seq k`, and it sends a batch only while that ledger counts
+it (`counts`). Such a batch at slot `k + 1` follows no cut-off of its own: no
+slot `j ≤ k` removed the device, registered another installation in its place,
+removed its member or replaced the member's key it wrote under (`Cut`). The
+device stops on applying any such slot (`cut_counts_false`), so it writes
+nothing after it. What a device's records of refused writes (`WritesRefused`)
+hold is other devices' writes, and what a stopped device loses is its unsent
+queue. -/
+theorem own_writes_never_refused (seq : Nat → Slot S) {k : Nat} {d : S.Dev} {g : Nat}
+    {parts : S.Aud → Option (WPart S)} (_batch : seq (k + 1) = .writes d g parts)
+    (sent : counts (ledgerAt R seq k) d g = true) :
+    ∀ j, j ≤ k → ¬ Cut R seq j d g := by
+  intro j hjk hcut
+  have := cut_counts_false R seq hjk hcut
+  rw [sent] at this
+  cases this
 
 end CovenSequence

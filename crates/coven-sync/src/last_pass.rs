@@ -50,10 +50,8 @@ pub enum LastPass {
 pub enum StatusFailure {
     /// A schema or stored object format is newer than this implementation.
     UpdateRequired(crate::RequiredUpdate),
-    /// This device or its member has been removed.
-    Removed,
-    /// The admission that published this joined store was refused (§13.2).
-    NotAdmitted,
+    /// This device is not in the store (§13.2, §14.1).
+    Removed(coven_database::Removal),
     /// Another copy uses this device's id; this copy sends nothing more (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
     /// The provider refused or failed a request, as its adapter classified it.
@@ -72,8 +70,7 @@ impl LastPass {
         let error = failure.to_string();
         let failure = match failure {
             SyncFailure::UpdateRequired(update) => StatusFailure::UpdateRequired(update),
-            SyncFailure::Removed => StatusFailure::Removed,
-            SyncFailure::NotAdmitted => StatusFailure::NotAdmitted,
+            SyncFailure::Removed(removal) => StatusFailure::Removed(removal),
             SyncFailure::DeviceIdInUse(evidence) => StatusFailure::DeviceIdInUse(evidence),
             SyncFailure::Storage(storage) => StatusFailure::Storage(storage.failure()),
             SyncFailure::Operation(record) => StatusFailure::Operation(*record),

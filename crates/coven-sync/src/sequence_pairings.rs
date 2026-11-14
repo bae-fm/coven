@@ -226,7 +226,10 @@ pub(crate) fn approve_request(
         }
         let stored = stored.clone();
         let applied = journal.store_state()?;
-        let current = applied.active_member(&work.member).ok_or(SyncError::Removed)?.keys;
+        let current = applied
+            .active_member(&work.member)
+            .ok_or(SyncError::Removed(coven_database::Removal::Member))?
+            .keys;
         let selected =
             held.activate(&current).ok_or(SyncError::MemberKeysReplaced { member: work.member })?;
         let sealing = decode_request(&stored)?.keys.sealing;

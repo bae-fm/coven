@@ -550,9 +550,9 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField made ["metadata"] (toJson (9 : Nat))
 
 #eval do
-  check (json% {"kind":"floor","coverage":[10,null]}) Json.null
-  check (json% {"kind":"floor","coverage":[10,8]}) (toJson (9 : Nat))
-  check (json% {"kind":"floor","coverage":[]}) Json.null
+  check (json% {"kind":"floor","audiences":[{"parts":true,"announced":false,"coverage":10},{"parts":true,"announced":false,"coverage":null}]}) Json.null
+  check (json% {"kind":"floor","audiences":[{"parts":true,"announced":false,"coverage":10},{"parts":true,"announced":false,"coverage":8}]}) (toJson (9 : Nat))
+  check (json% {"kind":"floor","audiences":[]}) Json.null
 
 #eval check (json% {"kind":"read","stopped":true,"applied":0,"fetched":[1],"first_kept":10})
   (json% {"reload":false,"apply":[]})

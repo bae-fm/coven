@@ -826,7 +826,8 @@ pub(crate) fn access_change(
     member: MemberId,
     access: coven_format::MemberAccess,
 ) -> Result<Option<coven_format::admin::StoreChange>, SyncError> {
-    let recorded = state.active_member(&member).ok_or(SyncError::Removed)?;
+    let recorded =
+        state.active_member(&member).ok_or(SyncError::Removed(coven_database::Removal::Member))?;
     let current = recorded.access.as_ref().is_some_and(|held| held.same_credential(&access));
     Ok((!current).then_some(coven_format::admin::StoreChange::SetAccess { member, access }))
 }

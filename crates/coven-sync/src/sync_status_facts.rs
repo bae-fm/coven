@@ -6,7 +6,7 @@
 
 use super::{named_provider, Named, SyncActivity, SyncCause, SyncState, SyncWait};
 use crate::{LastPass, PendingReason, PendingRecord, PendingSubject, StatusFailure};
-use coven_database::{DbError, PassMove, RecordedLocation, RetrySync};
+use coven_database::{DbError, PassMove, RecordedLocation, RetrySync, UnsentWork};
 use coven_storage::CloudProvider;
 use std::time::SystemTime;
 
@@ -55,8 +55,9 @@ pub(crate) struct Facts {
     /// The upload queue holds a bound upload with bytes to send, whether
     /// `uploads` lists it or not.
     pub(crate) queued: bool,
-    /// The send queue holds a write.
-    pub(crate) unsent: bool,
+    /// What the send queue and the upload queue hold, which a stopped device
+    /// will never send: a write waits when it counts one.
+    pub(crate) unsent: UnsentWork,
     /// The pending records the state reads, in the order they arose, but
     /// the connection's, which is the last pass's failure kept for its
     /// retry. The database leaves out those about a trailing upload, a
@@ -92,18 +93,25 @@ impl Candidate<'_> {
         }
     }
 
-    fn state(self, provider: CloudProvider) -> SyncState {
+    fn state(self, provider: CloudProvider, unsent: UnsentWork) -> SyncState {
         match self {
             Self::State(state) => state,
-            Self::Named(named, record) => named.state(SyncCause::Pending(record.clone()), provider),
+            Self::Named(named, record) => {
+                named.state(SyncCause::Pending(record.clone()), provider, unsent)
+            }
         }
     }
 }
 
 impl Facts {
+    /// The send queue holds a write.
+    fn writes_queued(&self) -> bool {
+        self.unsent.writes > 0
+    }
+
     /// A write or an upload waits to go out.
     fn unsent_work(&self) -> bool {
-        self.unsent || self.queued
+        self.writes_queued() || self.queued
     }
 
     /// What holds every transfer, the pass's, each upload's and a queued
@@ -210,8 +218,12 @@ impl Facts {
             ),
             (None, None) => (Some(Candidate::State(SyncState::Synced)), None),
             (None, Some(last)) => {
-                let ended =
-                    Candidate::State(last.ended(self.unsent_work(), self.pass_wait(), provider));
+                let ended = Candidate::State(last.ended(
+                    self.unsent_work(),
+                    self.unsent,
+                    self.pass_wait(),
+                    provider,
+                ));
                 if matches!(ended, Candidate::State(SyncState::Syncing(_))) {
                     (None, Some(ended))
                 } else {
@@ -233,7 +245,7 @@ impl Facts {
             Candidate::State(SyncState::WaitingToSync(wait)) => Some(wait.clone()),
             Candidate::State(_) | Candidate::Named(..) => None,
         });
-        let writes = self.unsent.then(|| {
+        let writes = self.writes_queued().then(|| {
             Candidate::State(
                 self.pass_wait()
                     .or(file_wait)
@@ -250,7 +262,7 @@ impl Facts {
             .chain(turn)
             .reduce(|shown, next| if next.rank() > shown.rank() { next } else { shown })
             .expect("the loop's candidate, or its turn, is always one")
-            .state(provider)
+            .state(provider, self.unsent)
     }
 
     /// The facts as the database read them, and when sync last finished.

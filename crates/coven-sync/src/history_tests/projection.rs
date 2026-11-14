@@ -157,7 +157,7 @@ impl Projection {
             .map(|a| {
                 let (selected, sending) = match history.sending_key(ring, writer, a) {
                     Ok(k) => (Some(self.key(a, k)), json!({"key":self.key(a,k)})),
-                    Err(SyncError::Removed) => (None, json!({"error":"removed"})),
+                    Err(SyncError::Removed(_)) => (None, json!({"error":"removed"})),
                     Err(SyncError::KeyUnavailable { key: k, .. }) => {
                         (None, json!({"unavailable":self.key(a,k)}))
                     }

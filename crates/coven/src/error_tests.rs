@@ -132,11 +132,11 @@ fn setup_and_unlock_name_a_removal_and_a_required_update() {
         SyncError::Pending(Box::new(PendingRecord::new(PendingSubject::Slot(slot(4)), reason)))
     };
     let removals: [fn() -> SyncError; 2] = [
-        || SyncError::Removed,
+        || SyncError::Removed(coven_database::Removal::Device),
         || {
             SyncError::Pending(Box::new(PendingRecord::new(
                 PendingSubject::Slot(slot(4)),
-                PendingReason::Removed,
+                PendingReason::Removed(coven_database::Removal::Device),
             )))
         },
     ];

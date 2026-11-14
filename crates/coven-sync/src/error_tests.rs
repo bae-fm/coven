@@ -191,7 +191,10 @@ fn one_failure_shared_by_several_receivers_keeps_one_cause_and_its_category() {
 #[test]
 fn removal_and_required_updates_stop_the_pass_as_themselves() {
     let update = crate::RequiredUpdate::AppSchema { version: 3 };
-    assert!(matches!(SyncFailure::from(SyncError::Removed), SyncFailure::Removed));
+    assert!(matches!(
+        SyncFailure::from(SyncError::Removed(coven_database::Removal::Device)),
+        SyncFailure::Removed(coven_database::Removal::Device)
+    ));
     assert!(matches!(
         SyncFailure::from(SyncError::UpdateRequired(update)),
         SyncFailure::UpdateRequired(found) if found == update
@@ -290,14 +293,15 @@ fn a_repeated_bug_carries_none_to_report() {
 #[test]
 fn a_failed_writes_cleanup_follows_the_steps_own_error() {
     use coven_database::WriteFailure;
-    let rolled = SyncError::Removed.with_rollback(coven_database::SqliteError::InvalidQuery);
+    let rolled = SyncError::Removed(coven_database::Removal::Device)
+        .with_rollback(coven_database::SqliteError::InvalidQuery);
     let SyncError::Cleanup { operation, cleanup } = rolled else {
         panic!("a rollback follows the step's error: {rolled:?}")
     };
-    assert!(matches!(*operation, SyncError::Removed));
+    assert!(matches!(*operation, SyncError::Removed(_)));
     assert!(matches!(*cleanup, SyncError::Database(_)), "{cleanup:?}");
     let cleaned = SyncError::with_cleanup(
-        SyncError::Removed,
+        SyncError::Removed(coven_database::Removal::Device),
         vec![DbError::StoreClosed, DbError::RollbackFailed],
     );
     let SyncError::Cleanup { operation, cleanup } = cleaned else {
@@ -306,7 +310,7 @@ fn a_failed_writes_cleanup_follows_the_steps_own_error() {
     assert!(matches!(*cleanup, SyncError::Database(DbError::RollbackFailed)), "{cleanup:?}");
     assert!(
         matches!(*operation, SyncError::Cleanup { ref operation, ref cleanup }
-            if matches!(**operation, SyncError::Removed)
+            if matches!(**operation, SyncError::Removed(_))
                 && matches!(**cleanup, SyncError::Database(DbError::StoreClosed))),
         "{operation:?}"
     );

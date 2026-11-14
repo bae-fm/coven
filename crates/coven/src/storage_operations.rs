@@ -21,7 +21,7 @@ impl StorageConnections {
         };
         match live.sync.administer(StoreChange::RemoveDevice { device: self.device }).await {
             // A device never admitted has no registration to remove (§13.2).
-            Err(SyncError::Removed | SyncError::NotAdmitted) => Ok(()),
+            Err(SyncError::Removed(_)) => Ok(()),
             result => result,
         }
     }

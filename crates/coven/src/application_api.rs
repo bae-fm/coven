@@ -127,9 +127,9 @@ pub use coven_sync::{
     InviteAccess, InviteLifetime, InviteStage, JoinRequest, LastPass, LocalFailure, MemberInfo,
     OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection, PassFailure,
     PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
-    RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure, SyncActivity,
-    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
-    WriteCutoff,
+    Removal, RequiredUpdate, ResetReason, Retry, RetryAnswer, RetryEffect, RetryOutcome,
+    StatusFailure, SyncActivity, SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState,
+    SyncStatus, SyncWait, UndoCause, WriteCutoff,
 };
 pub use coven_sync::{
     DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,

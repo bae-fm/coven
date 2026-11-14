@@ -508,7 +508,7 @@ pub(crate) fn restorable(
 ) -> Result<(), SyncError> {
     match admission {
         MemberBinding::Bound { .. } => Ok(()),
-        MemberBinding::Removed => Err(SyncError::Removed),
+        MemberBinding::Removed => Err(SyncError::Removed(coven_database::Removal::Member)),
         MemberBinding::Replaced => Err(SyncError::MemberKeysReplaced { member: member.member() }),
         MemberBinding::Absent => Err(SyncError::Rejected(crate::OperationRejection::TargetGone(
             crate::EntryTarget::Member(member.member()),

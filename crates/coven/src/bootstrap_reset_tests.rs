@@ -294,7 +294,12 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
         // how it ended; the effect is written before it.
         handle
             .test_sync_status()
-            .wait_for(|shown| matches!(shown.state, SyncState::NeedsReset(SyncCause::Pass(_))))
+            .wait_for(|shown| {
+                matches!(
+                    shown.state,
+                    SyncState::NeedsReset { reason: crate::ResetReason::Replaced, .. }
+                )
+            })
             .await;
         // Reads and local writes still work; nothing is recorded.
         assert_eq!(notes(&handle).await, ["kept"]);

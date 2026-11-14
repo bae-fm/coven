@@ -843,7 +843,10 @@ async fn a_stop_for_good_ends_this_devices_invites() {
         .administer(coven_format::admin::StoreChange::RemoveDevice { device: ana.sync.device })
         .await
         .unwrap();
-    assert!(matches!(ana.sync.pass().await, Err(SyncError::Removed)));
+    assert!(matches!(
+        ana.sync.pass().await,
+        Err(SyncError::Removed(coven_database::Removal::Device))
+    ));
     assert!(listed(&ana).await.is_empty(), "{:?}", listed(&ana).await);
     let operations = ana.database().operations().await.unwrap();
     assert!(
@@ -862,7 +865,10 @@ async fn a_stop_for_good_ends_this_devices_invites() {
         })
         .await
         .unwrap();
-    assert_eq!(outcome, Some(OperationOutcome::Stopped(DeviceStop::Removed)));
+    assert_eq!(
+        outcome,
+        Some(OperationOutcome::Stopped(DeviceStop::Removed(coven_database::Removal::Device)))
+    );
     for invite in [&approving, &waiting] {
         assert!(ana
             .database()

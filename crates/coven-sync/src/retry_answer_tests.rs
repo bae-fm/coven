@@ -29,13 +29,15 @@ async fn begin(waits: &Arc<RetryWaits>) -> PassRequests {
 }
 
 fn failure() -> PassFailure {
-    PassFailure::Failed { error: crate::SyncFailure::Removed }
+    PassFailure::Failed { error: crate::SyncFailure::Removed(coven_database::Removal::Device) }
 }
 
 fn removed(answer: Option<RetryOutcome>) -> bool {
     matches!(
         answer,
-        Some(RetryOutcome::Failed(PassFailure::Failed { error: crate::SyncFailure::Removed }))
+        Some(RetryOutcome::Failed(PassFailure::Failed {
+            error: crate::SyncFailure::Removed(coven_database::Removal::Device)
+        }))
     )
 }
 

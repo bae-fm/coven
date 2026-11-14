@@ -21,7 +21,7 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
         ),
         (PendingReason::Paused, Retry::AppAction, false, false),
         (PendingReason::UpdateRequired(update), Retry::AfterUpdate, false, true),
-        (PendingReason::Removed, Retry::Never, false, false),
+        (PendingReason::Removed(coven_database::Removal::Device), Retry::Never, false, false),
     ] {
         let error = crate::SyncError::Cleanup {
             operation: Box::new(crate::SyncError::Rejected(crate::OperationRejection::NotAllowed)),
@@ -109,7 +109,14 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
             assert_eq!(record(operation(kind), reason.clone()).retry(), app, "{kind:?} {reason:?}");
         }
     }
-    assert_eq!(record(PendingSubject::Slot(slot(1)), PendingReason::Removed).retry(), Retry::Never);
+    assert_eq!(
+        record(
+            PendingSubject::Slot(slot(1)),
+            PendingReason::Removed(coven_database::Removal::Device)
+        )
+        .retry(),
+        Retry::Never
+    );
 }
 
 /// No app call asks again for a slot or a pass, so a local failure that

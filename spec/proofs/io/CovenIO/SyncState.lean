@@ -152,6 +152,26 @@ inductive Local
   | bug
   deriving DecidableEq, Repr
 
+/-- Why a device isn't in the store (`Removal`, §13.2, §14.1). -/
+inductive Removal
+  /-- An admin removed this device. -/
+  | device
+  /-- This device's member was removed, or left. -/
+  | member
+  /-- A joined store's history refused the admission that published it: this
+  device never became a member. -/
+  | neverAdmitted
+  deriving DecidableEq, Repr
+
+/-- Why this installation can't send under its keys or id (`ResetReason`,
+§19.3, §12.3). -/
+inductive ResetReason
+  /-- A reset or restore registered another installation in this one's place. -/
+  | replaced
+  /-- This member's keys were replaced with a pair this device doesn't hold. -/
+  | memberKeysReplaced
+  deriving DecidableEq, Repr
+
 /-- A pending record's reason, as `PendingReason` names it. -/
 inductive Reason
   | missing
@@ -179,7 +199,7 @@ inductive Reason
   | rejected
   | cleanup (operation cleanup : Reason)
   | paused
-  | removed
+  | removed (removal : Removal)
   | memberKeysReplaced
   deriving DecidableEq, Repr
 
@@ -199,7 +219,7 @@ def Reason.state : Reason → Option State
       | some s => some s
       | none => if f.byItself then none else some .failed
   | .updateRequired => some .updateNeeded
-  | .removed => some .removed
+  | .removed _ => some .removed
   | .memberKeysReplaced => some .needsReset
   | .refused | .fileLost | .fileSource | .originalMissing | .originalChanged => some .failed
   | .failed l => if l = .shutdown then none else some .failed
@@ -238,8 +258,9 @@ inductive PassFailure
   /-- The provider answered with this failure. -/
   | storage (failure : Failure)
   | updateRequired
-  | removed
-  | deviceIdInUse
+  | removed (removal : Removal)
+  /-- Another installation was registered in this one's place. -/
+  | replaced
   /-- The pass finished, but coven's own operation failed with this reason. -/
   | operation (reason : Reason)
   /-- A slot can't apply, for this reason. -/
@@ -258,8 +279,8 @@ def PassFailure.state : PassFailure → Option State
       | some s => some s
       | none => if f.byItself then none else some .failed
   | .updateRequired => some .updateNeeded
-  | .removed => some .removed
-  | .deviceIdInUse => some .needsReset
+  | .removed _ => some .removed
+  | .replaced => some .needsReset
   | .operation r =>
       match r.state with
       | some s => some s
@@ -373,6 +394,9 @@ structure Facts where
   passRetrying : Bool
   /-- The time of the last pass that reached the read end. -/
   lastSynced : Option Nat
+  /-- The upload queue holds a file, bound or trailing, whether `uploads` lists
+  it or not (`UnsentWork.files`). -/
+  unsentFiles : Bool
   deriving DecidableEq, Repr
 
 /-- The uploads the sync state reads: a bound upload holds the writes behind
@@ -1360,7 +1384,7 @@ namespace Examples
 
 def connected : Facts :=
   ⟨.connected, .synced, false, none, [], false, [], true, false, false, false, false, false,
-    false, false, some 100⟩
+    false, false, some 100, false⟩
 
 /-- A cover a write holds back, which the write waits for. -/
 def cover (progress : Progress) : Upload := ⟨progress, true, false, none⟩
@@ -1482,7 +1506,7 @@ example : (run connected [.storage .signedOut none, .reopen]).map (fun f => (sta
     some (.signedOut, some 100) := by decide
 
 /-- Dan's device was removed while it was signed out: removed outranks. -/
-example : (run connected [.storage .signedOut none, .pending [.removed]]).map state =
+example : (run connected [.storage .signedOut none, .pending [.removed .device]]).map state =
     some .removed := by decide
 
 /-- Ben's sync loop panics after reading a slot: failed, never syncing,

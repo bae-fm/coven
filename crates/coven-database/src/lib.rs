@@ -243,7 +243,7 @@ pub use operation::{NewOperation, OperationId, OperationRecord, OperationUpdate}
 pub mod operation_kind;
 mod operation_outcome;
 pub use operation_outcome::{
-    slot_json, DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
+    slot_json, DeviceStop, EntryTarget, OperationOutcome, OperationRejection, Removal, UndoCause,
 };
 
 mod commit_scope;

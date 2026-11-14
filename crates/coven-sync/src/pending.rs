@@ -304,10 +304,8 @@ pub enum PendingReason {
     },
     /// Work awaits the app’s next action, such as approval or resuming a transfer.
     Paused,
-    /// This installation was removed.
-    Removed,
-    /// The admission that published this joined store was refused (§13.2).
-    NotAdmitted,
+    /// This installation is not in the store (§13.2, §14.1).
+    Removed(coven_database::Removal),
     /// Sending needs this stable member's current credentials, which this
     /// installation does not hold (§14.1).
     MemberKeysReplaced {
@@ -492,8 +490,7 @@ impl PendingReason {
             | Self::Rejected(_)
             | Self::Cleanup { .. }
             | Self::Paused
-            | Self::Removed
-            | Self::NotAdmitted
+            | Self::Removed(_)
             | Self::MemberKeysReplaced { .. } => None,
         }
     }
@@ -519,8 +516,7 @@ impl PendingReason {
             | Self::FileUnavailable(_)
             | Self::Failed(_)
             | Self::Rejected(_)
-            | Self::Removed
-            | Self::NotAdmitted
+            | Self::Removed(_)
             | Self::MemberKeysReplaced { .. } => false,
             Self::Cleanup { operation, cleanup } => operation.waits() && cleanup.waits(),
         }
@@ -552,8 +548,7 @@ impl PendingReason {
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
             Self::Rejected(_)
             | Self::WritesRefused { .. }
-            | Self::Removed
-            | Self::NotAdmitted
+            | Self::Removed(_)
             | Self::MemberKeysReplaced { .. } => Retry::Never,
             Self::NoStorage
             | Self::Storage { .. }

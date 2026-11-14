@@ -5410,13 +5410,11 @@ pub enum SyncError {
     SequenceExhausted,
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),
-    /// This device or its member was removed; syncing stops for good (§14.1).
-    Removed,
-    /// A joined store read to the end of the sequence with its pair bound
-    /// nowhere in its history: the admission that published it was refused,
-    /// and its device never became a member. Syncing stops for good (§13.2,
-    /// §14.1).
-    NotAdmitted,
+    /// This device is not in the store, and won't be again: it or its member
+    /// was removed, or a joined store read to the end of the sequence with its
+    /// pair bound nowhere in its history, the admission that published it
+    /// having been refused. Syncing stops for good (§13.2, §14.1).
+    Removed(Removal),
     /// Another copy uses this device's id; this one sends nothing more.
     /// Nothing is recorded; `reset_device` is the app's option (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
@@ -5663,9 +5661,8 @@ pub enum PendingReason {
     /// Both causes stay visible; the cleanup cause determines retry (§11.3).
     Cleanup { operation: Box<PendingReason>, cleanup: Box<PendingReason> },
     Paused,
-    Removed,
-    /// The admission that published this joined store was refused (§13.2).
-    NotAdmitted,
+    /// This installation is not in the store (§13.2, §14.1).
+    Removed(Removal),
     /// Sending needs this stable member's current credentials (§14.1).
     MemberKeysReplaced { member: MemberId },
 }
@@ -5912,10 +5909,8 @@ pub struct DeviceReset {
 pub enum SyncFailure {
     /// A schema or stored object format is newer than this implementation.
     UpdateRequired(RequiredUpdate),
-    /// This device or its member has been removed.
-    Removed,
-    /// The admission that published this joined store was refused (§13.2).
-    NotAdmitted,
+    /// This device is not in the store (§13.2, §14.1).
+    Removed(Removal),
     /// Another copy uses this device's id; this copy sends nothing more (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
     /// The provider refused or failed a request.
@@ -5985,15 +5980,38 @@ pub enum SyncState {
     ClockWrong(SyncCause),
     /// A newer app or coven is needed.
     UpdateNeeded(SyncCause),
-    /// This device or its member was removed, or a joined store's admission
-    /// was refused (`NotAdmitted`, §13.2).
-    Removed(SyncCause),
-    /// Another copy uses this device's id, or its member keys were replaced.
-    NeedsReset(SyncCause),
+    /// This device isn't in the store, and won't be again. What was written
+    /// here and not sent never will be: `unsent` counts the writes in the send
+    /// queue and the files in the upload queue (`UnsentWork`, E1).
+    Removed { removal: Removal, unsent: UnsentWork },
+    /// This installation can't send under its keys or id. What was written
+    /// here and not sent never will be, as `unsent` counts.
+    NeedsReset { reason: ResetReason, unsent: UnsentWork },
     /// A failure only a person clears that has no state of its own, one that
     /// never clears, a bug, or a bound file that can't be uploaded or read,
     /// whose pending record is the cause.
     Failed(SyncCause),
+}
+
+/// Why a device isn't in the store, and won't be again (§13.2, §14.1).
+pub enum Removal {
+    /// An admin removed this device.
+    Device,
+    /// This device's member was removed, or left.
+    Member,
+    /// A joined store's history refused the admission that published it: this
+    /// device never became a member (§13.2).
+    NeverAdmitted,
+}
+
+/// Why this installation can't send under its keys or id (§19.3, §12.3).
+pub enum ResetReason {
+    /// A reset or restore registered another installation in this one's place
+    /// (§19.3).
+    Replaced,
+    /// This member's keys were replaced with a pair this device doesn't hold
+    /// (§12.3).
+    MemberKeysReplaced { member: MemberId },
 }
 
 /// What Syncing is doing, as `Syncing` names it (§19.1): the first of what the
@@ -6083,8 +6101,7 @@ pub enum LastPass {
 /// without its error objects, whose text it holds beside it.
 pub enum StatusFailure {
     UpdateRequired(RequiredUpdate),
-    Removed,
-    NotAdmitted,
+    Removed(Removal),
     DeviceIdInUse(DeviceIdEvidence),
     Storage(StorageFailure),
     Operation(PendingRecord),
@@ -6401,11 +6418,8 @@ pub enum UndoCause {
 
 /// Why a device stopped for good (§14.1, §19.3).
 pub enum DeviceStop {
-    /// The device, or its member, was removed.
-    Removed,
-    /// The admission that published this joined store was refused: its
-    /// device never became a member (§13.2).
-    NotAdmitted,
+    /// The device is not in the store.
+    Removed(Removal),
     /// A reset registered another installation in this device's place.
     Replaced,
     /// History shows another copy of this installation using its device id.
@@ -7802,8 +7816,8 @@ pub enum ProviderSignOut {
   sent, a join can't be cancelled; it ends only by approval, decline or expiry.
   Once it finds its admission, the join publishes the store, deletes its code
   and no longer lists; the store then loads as any store does, and stops as
-  any store does: removed, its member's keys replaced, or `NotAdmitted` when
-  the history it loads refused the admission (§13.2).
+  any store does: removed, its member's keys replaced, or removed as never
+  admitted when the history it loads refused the admission (§13.2).
   Before then a cancel unmounts the Dropbox folder the join may have mounted,
   then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
 - The new person's name a join's request carries goes into the admission,

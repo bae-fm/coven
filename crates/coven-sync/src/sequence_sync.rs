@@ -406,13 +406,14 @@ impl SequenceSync {
         if session.through == 0 || self.pair_bound(session, member) {
             return Ok(());
         }
-        self.state.set(SequenceStatus::Stopped(crate::SyncFailure::NotAdmitted));
+        let removal = coven_database::Removal::NeverAdmitted;
+        self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed(removal)));
         if let Err(error) =
-            self.database.end_for_good(coven_database::DeviceStop::NotAdmitted).await
+            self.database.end_for_good(coven_database::DeviceStop::Removed(removal)).await
         {
             tracing::error!("a store never admitted keeps its operations journaled: {error}");
         }
-        Err(SyncError::NotAdmitted)
+        Err(SyncError::Removed(removal))
     }
 
     pub(crate) async fn check_copy(
@@ -442,8 +443,14 @@ impl SequenceSync {
         if let Some(device) = session.history.state.devices.get(&self.device) {
             match device.state {
                 coven_database::DeviceState::Removed => {
-                    self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
-                    return Err(SyncError::Removed);
+                    let removal = session.history.removal(self.device).ok_or_else(|| {
+                        SyncError::Bug(coven_foundation::task::Bug::new(
+                            "check the device's binding",
+                            "a removed device is removed by a counted entry",
+                        ))
+                    })?;
+                    self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed(removal)));
+                    return Err(SyncError::Removed(removal));
                 }
                 coven_database::DeviceState::Replaced => {
                     return Err(self.state.stop_copy(crate::DeviceIdEvidence::Replaced))
@@ -592,8 +599,8 @@ impl SequenceSync {
         if let SyncError::DeviceIdInUse(evidence) = error {
             return self.stop_copy(evidence).await;
         }
-        if matches!(error, SyncError::Removed) {
-            self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
+        if let SyncError::Removed(removal) = error {
+            self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed(removal)));
             return error;
         }
         let path = self.path(slot);

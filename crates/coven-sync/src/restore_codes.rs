@@ -22,7 +22,10 @@ pub(crate) fn member_code(
     storage: &RestoreStorage,
 ) -> Result<RestoreCode, SyncError> {
     let store = state.store.as_ref().ok_or(SyncError::NoStorage)?;
-    let current = state.active_member(&identity.member()).ok_or(SyncError::Removed)?.keys;
+    let current = state
+        .active_member(&identity.member())
+        .ok_or(SyncError::Removed(coven_database::Removal::Member))?
+        .keys;
     // A kept self-replacement's candidate is current before custody
     // installs it; a retired pair never is.
     let selected = identity
@@ -404,7 +407,7 @@ pub(crate) async fn refuse_after_leaving(
 ) -> Result<(), SyncError> {
     let member = identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?.member();
     if crate::effects::left(&database.store_state().await?, &member) {
-        return Err(SyncError::Removed);
+        return Err(SyncError::Removed(coven_database::Removal::Member));
     }
     Ok(())
 }

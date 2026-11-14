@@ -133,6 +133,9 @@ import CovenIO
 #print axioms CovenIO.SyncState.bound_before_write
 #print axioms CovenIO.SyncState.move_first
 #print axioms CovenIO.SyncState.Reached.every_activity
+#print axioms CovenIO.SyncState.removed_names_which
+#print axioms CovenIO.SyncState.reset_names_why
+#print axioms CovenIO.SyncState.stopped_unsent
 #print axioms CovenIO.SyncState.waiting_not_moving
 #print axioms CovenIO.SyncState.synced_bound_stored
 #print axioms CovenIO.SyncState.trailing_keeps_state

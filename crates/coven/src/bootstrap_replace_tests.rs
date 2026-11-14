@@ -418,7 +418,7 @@ async fn a_restore_in_place_whose_registration_is_refused_leaves_the_old_copy() 
     .await
     .unwrap();
     assert!(
-        matches!(result, Err(BootstrapError::Sync(SyncError::Removed | SyncError::Rejected(_)))),
+        matches!(result, Err(BootstrapError::Sync(SyncError::Removed(_) | SyncError::Rejected(_)))),
         "{result:?}"
     );
     assert_eq!(replaced.carol.app.store_dir(&store).unfinished_replacement().unwrap(), None);

@@ -683,7 +683,7 @@ fn access_and_lasting_local_failures_require_app_action() {
     ] {
         assert_eq!(retry(PendingReason::Failed(failure)), Retry::Automatic);
     }
-    assert_eq!(retry(PendingReason::Removed), Retry::Never);
+    assert_eq!(retry(PendingReason::Removed(coven_database::Removal::Device)), Retry::Never);
     // This installation never sends again with a retired pair; restoring
     // with the current keys is a new installation (§13.1).
     assert_eq!(
@@ -827,7 +827,12 @@ mod mutual_removal {
         network.clock.set(network.clock.now() + std::time::Duration::from_secs(1));
         let _ = ben.handle.retry_now().await.unwrap().await;
         let ended = outcome(&ben.handle, against_ana).await;
-        assert_eq!(ended, OperationOutcome::Stopped(coven_database::DeviceStop::Removed));
+        assert_eq!(
+            ended,
+            OperationOutcome::Stopped(coven_database::DeviceStop::Removed(
+                coven_database::Removal::Member
+            ))
+        );
 
         // Ben's device stopped at the removal; Ana's goes on and no slot of
         // Ben's follows it.

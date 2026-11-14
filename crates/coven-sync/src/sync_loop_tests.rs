@@ -263,7 +263,13 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
         .await
         .unwrap();
     let removed = |last: &Option<LastPass>| {
-        matches!(last, Some(LastPass::Failed { failure: StatusFailure::Removed, .. }))
+        matches!(
+            last,
+            Some(LastPass::Failed {
+                failure: StatusFailure::Removed(coven_database::Removal::Device),
+                ..
+            })
+        )
     };
     let mut last = LastPass::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
@@ -281,7 +287,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     assert!(
         matches!(
             crate::sync_status(&ben.sync.database).await.unwrap().state,
-            SyncState::Removed(SyncCause::Pass(_))
+            SyncState::Removed { removal: coven_database::Removal::Device, .. }
         ),
         "a removed device shows removed"
     );
@@ -295,7 +301,12 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     .await
     .unwrap();
     assert!(
-        matches!(answer, RetryOutcome::Failed(PassFailure::Failed { error: SyncFailure::Removed })),
+        matches!(
+            answer,
+            RetryOutcome::Failed(PassFailure::Failed {
+                error: SyncFailure::Removed(coven_database::Removal::Device)
+            })
+        ),
         "{answer:?}"
     );
     assert_eq!(ben.storage.request_count(), requests);

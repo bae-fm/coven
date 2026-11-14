@@ -146,7 +146,9 @@ async fn a_removed_device_cannot_start_a_pairing() {
     handle.sync_now();
     tokio::time::timeout(
         coven_foundation::clock::HANG_GUARD,
-        handle.test_sync_status().wait_for(|status| matches!(status.state, SyncState::Removed(_))),
+        handle
+            .test_sync_status()
+            .wait_for(|status| matches!(status.state, SyncState::Removed { .. })),
     )
     .await
     .expect("the phone hears of its removal");
@@ -154,7 +156,7 @@ async fn a_removed_device_cannot_start_a_pairing() {
     assert!(
         matches!(
             started,
-            Err(SyncError::Rejected(OperationRejection::NotAllowed)) | Err(SyncError::Removed)
+            Err(SyncError::Rejected(OperationRejection::NotAllowed)) | Err(SyncError::Removed(_))
         ),
         "{started:?}"
     );

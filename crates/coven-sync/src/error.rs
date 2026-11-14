@@ -116,15 +116,12 @@ pub enum SyncError {
     /// A required object failed authentication or parsing.
     #[error(transparent)]
     Damaged(#[from] crate::DamagedObject),
-    /// This device or its member was removed; syncing stops for good (§14.1).
-    #[error("this device or its member was removed")]
-    Removed,
-    /// A joined store read to the end of the sequence with its pair bound
-    /// nowhere in its history: the admission that published it was refused,
-    /// and its device never became a member. Syncing stops for good (§13.2,
-    /// §14.1).
-    #[error("the admission of this device was refused")]
-    NotAdmitted,
+    /// This device is not in the store, and won't be again: it or its member
+    /// was removed, or a joined store read to the end of the sequence with its
+    /// pair bound nowhere in its history, which means the admission that
+    /// published it was refused. Syncing stops for good (§13.2, §14.1).
+    #[error("this device is not in the store: {0:?}")]
+    Removed(coven_database::Removal),
     /// Another copy uses this device's id, as this evidence shows. This copy
     /// sends nothing more; nothing is recorded, and `reset_device` is the
     /// app's option (§19.3).
@@ -265,8 +262,7 @@ impl SyncError {
             },
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
-            SyncError::Removed => PendingReason::Removed,
-            SyncError::NotAdmitted => PendingReason::NotAdmitted,
+            SyncError::Removed(removal) => PendingReason::Removed(*removal),
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }
@@ -330,8 +326,7 @@ impl SyncError {
             | Self::Rejected(_)
             | Self::CutOffRefused(_)
             | Self::Damaged(_)
-            | Self::Removed
-            | Self::NotAdmitted
+            | Self::Removed(_)
             | Self::DeviceIdInUse(_)
             | Self::MemberKeysReplaced { .. }
             | Self::UpdateRequired(_)
@@ -434,12 +429,9 @@ pub enum SyncFailure {
     /// A schema or stored object format is newer than this implementation.
     #[error("an update is required")]
     UpdateRequired(crate::RequiredUpdate),
-    /// This device or its member has been removed.
-    #[error("this device or its member was removed")]
-    Removed,
-    /// The admission that published this joined store was refused (§13.2).
-    #[error("the admission of this device was refused")]
-    NotAdmitted,
+    /// This device is not in the store (§13.2, §14.1).
+    #[error("this device is not in the store: {0:?}")]
+    Removed(coven_database::Removal),
     /// Another copy uses this device's id; this copy sends nothing more (§19.3).
     #[error("another copy uses this device's id: {0:?}")]
     DeviceIdInUse(crate::DeviceIdEvidence),
@@ -474,8 +466,7 @@ impl From<StorageFailure> for SyncError {
 impl From<SyncError> for SyncFailure {
     fn from(error: SyncError) -> Self {
         match error {
-            SyncError::Removed => Self::Removed,
-            SyncError::NotAdmitted => Self::NotAdmitted,
+            SyncError::Removed(removal) => Self::Removed(removal),
             SyncError::DeviceIdInUse(evidence) => Self::DeviceIdInUse(evidence),
             SyncError::UpdateRequired(update) => Self::UpdateRequired(update),
             SyncError::Storage(error) => Self::Storage(Arc::new(error)),

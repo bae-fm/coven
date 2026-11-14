@@ -158,8 +158,9 @@ impl SequenceState {
             SequenceStatus::Stopped(SyncFailure::DeviceIdInUse(evidence)) => {
                 Err(SyncError::DeviceIdInUse(*evidence))
             }
-            SequenceStatus::Stopped(SyncFailure::Removed) => Err(SyncError::Removed),
-            SequenceStatus::Stopped(SyncFailure::NotAdmitted) => Err(SyncError::NotAdmitted),
+            SequenceStatus::Stopped(SyncFailure::Removed(removal)) => {
+                Err(SyncError::Removed(*removal))
+            }
             SequenceStatus::Stopped(failure) => Err(SyncError::Failed {
                 failure: crate::LocalFailure::Operation,
                 source: std::sync::Arc::new(failure.clone()),

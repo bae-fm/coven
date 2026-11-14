@@ -4,7 +4,9 @@ use crate::{
     effects, snapshot_object::RoutedKey, CutOffRefusal, OperationRejection, Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
-use coven_database::{AdminEffect, DeviceStop, StoreCircle, StoreDevice, StoreMember, StoreState};
+use coven_database::{
+    AdminEffect, DeviceStop, Removal, StoreCircle, StoreDevice, StoreMember, StoreState,
+};
 use coven_format::{
     admin::StoreChange,
     sealed_key::{CopyBox, KeyCopyPrefix},
@@ -205,6 +207,15 @@ impl History {
         self.stops(device).next()
     }
 
+    /// How `device` was removed, if a counted entry removed it or its member:
+    /// the first such entry.
+    pub(crate) fn removal(&self, device: DeviceId) -> Option<Removal> {
+        self.stops(device).find_map(|(_, stop)| match stop {
+            DeviceStop::Removed(removal) => Some(removal),
+            DeviceStop::Replaced | DeviceStop::Copied | DeviceStop::MemberKeysReplaced => None,
+        })
+    }
+
     /// Every counted entry that stops `device` for good, oldest first: the
     /// first is where it went (`gone_for_good`), and each later one stops it
     /// again, as its member's removal after its own does.
@@ -218,10 +229,10 @@ impl History {
             let (member, added) = registered?;
             let stop = match &cutoff.change {
                 StoreChange::RemoveDevice { device: removed } if *removed == device => {
-                    DeviceStop::Removed
+                    DeviceStop::Removed(Removal::Device)
                 }
                 StoreChange::RemoveMember { member: removed } if *removed == member => {
-                    DeviceStop::Removed
+                    DeviceStop::Removed(Removal::Member)
                 }
                 StoreChange::AddDevice { replaces: Some(replaced), .. } if *replaced == device => {
                     DeviceStop::Replaced
@@ -611,7 +622,7 @@ impl History {
     ) -> Result<KeyId, SyncError> {
         let belongs = effects::belongs(&self.state, audience, &member);
         if !belongs && *audience == Audience::Store {
-            return Err(SyncError::Removed);
+            return Err(SyncError::Removed(Removal::Member));
         }
         self.introductions
             .iter()

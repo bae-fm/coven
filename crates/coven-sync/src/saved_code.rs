@@ -123,9 +123,9 @@ pub fn replacement_code(
     let storage = RestoreStorage::location_only(location.clone());
     match crate::restore_codes::member_code(state, identity, &storage) {
         Ok(code) => Ok(Some(code)),
-        Err(SyncError::NoStorage | SyncError::Removed | SyncError::MemberKeysReplaced { .. }) => {
-            Ok(None)
-        }
+        Err(
+            SyncError::NoStorage | SyncError::Removed(_) | SyncError::MemberKeysReplaced { .. },
+        ) => Ok(None),
         Err(error) => Err(error),
     }
 }

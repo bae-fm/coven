@@ -13,6 +13,8 @@ import SequenceApply
 #print axioms CovenSequence.valid_prefix
 
 #print axioms CovenSequence.cutoff
+#print axioms CovenSequence.cut_counts_false
+#print axioms CovenSequence.own_writes_never_refused
 
 #print axioms CovenSequence.first_slot_wins
 #print axioms CovenSequence.owner_stays

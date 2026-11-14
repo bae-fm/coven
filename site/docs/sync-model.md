@@ -261,8 +261,8 @@ pub enum SyncState {
     FolderMissing(SyncCause),
     ClockWrong(SyncCause),
     UpdateNeeded(SyncCause),
-    Removed(SyncCause),
-    NeedsReset(SyncCause),
+    Removed { removal: Removal, unsent: UnsentWork },   // not in the store, and which removal
+    NeedsReset { reason: ResetReason, unsent: UnsentWork }, // can't send under its keys or id, and why
     Failed(SyncCause),            // any other failure, or a bound file that can't upload
 }
 ```
@@ -273,7 +273,8 @@ send and upload queues, the network and the pending records. When several
 facts hold, the most urgent shows: the device's own standing first, then
 signing in, then what storage said of the account, then reachability, then
 failures, then activity. The cause is the last pass or the first pending
-record that names the state.
+record that names the state. `Removed` and `NeedsReset` name the removal or the
+reason instead, and count what this device wrote and never sent: it never will.
 
 `Synced` means nothing waits: the last pass reached the end of the sequence and
 every bound file this device uploads is stored. A bound file, one a write

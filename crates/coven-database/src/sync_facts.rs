@@ -32,8 +32,9 @@ pub struct SyncFacts<P> {
     /// What the person's retry would do: whether sync runs, and the
     /// cooldown holding every request.
     pub retry: crate::RetryState,
-    /// Whether the send queue holds a write.
-    pub unsent: bool,
+    /// What the send queue and the upload queue hold (`UnsentWork`): a
+    /// write waits when it counts one.
+    pub unsent: crate::UnsentWork,
     /// The bound uploads the state can show, in queue order: the first one
     /// sending, the first queued one (neither sending nor stored) with no
     /// record and none waiting out a retry, the first with no record that
@@ -190,7 +191,7 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
     Ok(SyncFacts {
         row: crate::internal_schema::sync_status::read(db)?,
         retry: crate::internal_schema::retry_effect::read(db)?,
-        unsent: db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_uploads)", [], |r| r.get(0))?,
+        unsent: crate::file_queue::unsent(db)?,
         uploads,
         queued: db.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads AS u

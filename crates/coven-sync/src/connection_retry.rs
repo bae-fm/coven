@@ -48,8 +48,7 @@ impl ConnectionRetry {
                 crate::PendingReason::Storage { failure, .. } => {
                     SyncFailure::Storage(std::sync::Arc::new(failure.into()))
                 }
-                crate::PendingReason::Removed => SyncFailure::Removed,
-                crate::PendingReason::NotAdmitted => SyncFailure::NotAdmitted,
+                crate::PendingReason::Removed(removal) => SyncFailure::Removed(removal),
                 crate::PendingReason::UpdateRequired(update) => SyncFailure::UpdateRequired(update),
                 _ => SyncError::Pending(Box::new(record)).into(),
             },

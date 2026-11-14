@@ -5,6 +5,7 @@ import CovenIO.Retired
 import CovenIO.WaitingReopen
 import CovenIO.Wakes
 import CovenIO.Activity
+import CovenIO.Standing
 import CovenIO.Transfers
 import CovenIO.RetryAnswer
 import Lean
@@ -376,7 +377,9 @@ private def reasons : List (String × Reason) := [
     ("originalChanged", .originalChanged),
     ("rejected", .rejected),
     ("paused", .paused),
-    ("removed", .removed),
+    ("removedDevice", .removed .device),
+    ("removedMember", .removed .member),
+    ("neverAdmitted", .removed .neverAdmitted),
     ("memberKeysReplaced", .memberKeysReplaced)]
 
 private def locals : List (String × Local) := [
@@ -403,13 +406,14 @@ private partial def reason (j : Json) : Except String Reason := do
     if h : pair.size = 2 then return .cleanup (← reason pair[0]) (← reason pair[1])
   throw s!"unknown reason {j.compress}"
 
-/-- A failed pass: `offline`, `updateRequired`, `removed`, `deviceIdInUse`,
-`other`, or `{"storage": failure}`, `{"operation": reason}`,
+/-- A failed pass: `offline`, `updateRequired`, `removedDevice`, `removedMember`,
+`neverAdmitted`, `replaced`, `other`, or `{"storage": failure}`, `{"operation": reason}`,
 `{"blocked": reason}`. -/
 private def passFailure (j : Json) : Except String PassFailure := do
   if let .ok name := j.getStr? then
-    return ← named [("offline", .offline), ("updateRequired", .updateRequired), ("removed", .removed),
-      ("deviceIdInUse", .deviceIdInUse), ("other", .other)] "pass failure" name
+    return ← named [("offline", .offline), ("updateRequired", .updateRequired), ("removedDevice", .removed .device),
+      ("removedMember", .removed .member), ("neverAdmitted", .removed .neverAdmitted),
+      ("replaced", .replaced), ("other", .other)] "pass failure" name
   if let .ok f := j.getObjVal? "storage" then return .storage (← failure f)
   if let .ok r := j.getObjVal? "operation" then return .operation (← reason r)
   if let .ok r := j.getObjVal? "blocked" then return .blocked (← reason r)
@@ -431,6 +435,15 @@ def stateName : State → String
   | .needsReset => "needsReset"
   | .clockWrong => "clockWrong"
   | .failed => "failed"
+
+def removalName : Removal → String
+  | .device => "device"
+  | .member => "member"
+  | .neverAdmitted => "neverAdmitted"
+
+def resetName : ResetReason → String
+  | .replaced => "replaced"
+  | .memberKeysReplaced => "memberKeysReplaced"
 
 def waitName : SyncWait → String
   | .notSyncing => "notSyncing"
@@ -467,7 +480,7 @@ private def upload (j : Json) : Except String Upload := do
 
 /-- The facts of one case: `storage` (`none`, `signedOut`, `connected`), `last`
 (`synced` or `{"failed": pass failure}`), `moved` (`null`, `"read"` or
-`"claimed"`), `uploads`, `unsent`,
+`"claimed"`), `uploads`, `unsent`, `unsentFiles`,
 `running`, `cooling`, `paused`, `unmeteredOnly`, `metered`, `keysChanging`,
 `writeKey`, `passRetrying` and the pending `records`' reasons. -/
 private def facts (j : Json) : Except String Facts := do
@@ -485,6 +498,7 @@ private def facts (j : Json) : Except String Facts := do
   return {
     storage, last, passing := false, uploads, records, lastSynced := none, moved
     unsent := ← j.getObjValAs? Bool "unsent"
+    unsentFiles := ← j.getObjValAs? Bool "unsentFiles"
     running := ← j.getObjValAs? Bool "running"
     cooling := ← j.getObjValAs? Bool "cooling"
     paused := ← j.getObjValAs? Bool "paused"
@@ -497,7 +511,8 @@ private def facts (j : Json) : Except String Facts := do
 /-- `SyncState.state` of one set of facts. Reports the state's name as
 `state`; for waiting to sync, what it waits for as `wait`: the held-back
 pass's wait, else the first waiting bound upload's; and for syncing, the
-activity it names as `activity`. -/
+activity it names as `activity`; for removed, the removal as `removal`; for
+needs reset, the reason as `reset`; and for both, the unsent work as `unsent`. -/
 def run (j : Json) : Except String Json := do
   let facts ← facts j
   let shown := state facts
@@ -507,7 +522,18 @@ def run (j : Json) : Except String Json := do
   let activity := match shown, facts.activities with
     | .syncing, a :: _ => toJson (activityName a)
     | _, _ => Json.null
-  return Json.mkObj [("state", toJson (stateName shown)), ("wait", wait), ("activity", activity)]
+  let removal := match shown, facts.removal with
+    | .removed, some r => toJson (removalName r)
+    | _, _ => Json.null
+  let reset := match shown, facts.resetReason with
+    | .needsReset, some r => toJson (resetName r)
+    | _, _ => Json.null
+  let unsent := match shown with
+    | .removed | .needsReset => Json.mkObj [("writes", toJson facts.unsentShown.writes),
+        ("files", toJson facts.unsentShown.files)]
+    | _ => Json.null
+  return Json.mkObj [("state", toJson (stateName shown)), ("wait", wait), ("activity", activity),
+    ("removal", removal), ("reset", reset), ("unsent", unsent)]
 
 /-- `Upload.phase` of each upload of one set of facts, in order: `phase`
 (`uploading`, `stored`, `failed`, `waiting`) and, for waiting, what it waits for

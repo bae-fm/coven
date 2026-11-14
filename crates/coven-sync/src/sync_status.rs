@@ -14,8 +14,8 @@
 //! computes it.
 
 use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, Prerequisite, StatusFailure};
-use coven_database::{DbError, RecordedLocation, RetrySync};
-use coven_foundation::id_source::KeyId;
+use coven_database::{DbError, RecordedLocation, Removal, RetrySync, UnsentWork};
+use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{CloudProvider, StorageFailure};
 use std::time::SystemTime;
@@ -78,14 +78,40 @@ pub enum SyncState {
     ClockWrong(SyncCause),
     /// A newer app or coven is needed.
     UpdateNeeded(SyncCause),
-    /// This device or its member was removed, or a joined store's admission
-    /// was refused (`NotAdmitted`, §13.2).
-    Removed(SyncCause),
-    /// Another copy uses this device's id, or its member keys were replaced.
-    NeedsReset(SyncCause),
+    /// This device isn't in the store, and won't be again. What was written
+    /// here and not sent never will be.
+    Removed {
+        /// Why this device isn't in the store.
+        removal: Removal,
+        /// What this device committed and will not send.
+        unsent: UnsentWork,
+    },
+    /// This installation can't send under its keys or id. What was written
+    /// here and not sent never will be.
+    NeedsReset {
+        /// Why it can't send.
+        reason: ResetReason,
+        /// What this device committed and will not send.
+        unsent: UnsentWork,
+    },
     /// Any other failure, or a bound file that can't be uploaded or read,
     /// whose pending record is the cause.
     Failed(SyncCause),
+}
+
+/// Why this installation can't send under its keys or id, as `NeedsReset`
+/// names it (§19.3, §12.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetReason {
+    /// A reset or restore registered another installation in this one's place
+    /// (§19.3).
+    Replaced,
+    /// This member's keys were replaced with a pair this device doesn't hold
+    /// (§12.3).
+    MemberKeysReplaced {
+        /// The member whose held keys were replaced.
+        member: MemberId,
+    },
 }
 
 /// What Syncing is doing, as `Syncing` names it (§19.1): the first of what the
@@ -155,7 +181,8 @@ pub enum SyncCause {
     Pending(PendingRecord),
 }
 
-/// The states that name a cause, as the model's `State.named` lists them.
+/// The states that name a cause, as the model's `State.named` lists them;
+/// removed and needs reset name the removal or reset reason instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Named {
     SignedOut,
@@ -164,8 +191,8 @@ enum Named {
     FolderMissing,
     ClockWrong,
     UpdateNeeded,
-    Removed,
-    NeedsReset,
+    Removed(Removal),
+    NeedsReset(ResetReason),
     Failed,
 }
 
@@ -180,13 +207,14 @@ impl Named {
             Self::NoAccess => 9,
             Self::SignedOut => 10,
             Self::UpdateNeeded => 11,
-            Self::NeedsReset => 12,
-            Self::Removed => 13,
+            Self::NeedsReset(_) => 12,
+            Self::Removed(_) => 13,
         }
     }
 
-    /// The state, named by `cause`, at a location of `provider`.
-    fn state(self, cause: SyncCause, provider: CloudProvider) -> SyncState {
+    /// The state, named by `cause`, at a location of `provider`; the
+    /// standing states say what is unsent instead.
+    fn state(self, cause: SyncCause, provider: CloudProvider, unsent: UnsentWork) -> SyncState {
         match self {
             Self::SignedOut => SyncState::SignedOut { provider, cause: Some(cause) },
             Self::NoAccess => SyncState::NoAccess(cause),
@@ -194,8 +222,8 @@ impl Named {
             Self::FolderMissing => SyncState::FolderMissing(cause),
             Self::ClockWrong => SyncState::ClockWrong(cause),
             Self::UpdateNeeded => SyncState::UpdateNeeded(cause),
-            Self::Removed => SyncState::Removed(cause),
-            Self::NeedsReset => SyncState::NeedsReset(cause),
+            Self::Removed(removal) => SyncState::Removed { removal, unsent },
+            Self::NeedsReset(reason) => SyncState::NeedsReset { reason, unsent },
             Self::Failed => SyncState::Failed(cause),
         }
     }
@@ -220,8 +248,8 @@ impl SyncState {
             Self::NoAccess(_) => Named::NoAccess.rank(),
             Self::SignedOut { .. } => Named::SignedOut.rank(),
             Self::UpdateNeeded(_) => Named::UpdateNeeded.rank(),
-            Self::NeedsReset(_) => Named::NeedsReset.rank(),
-            Self::Removed(_) => Named::Removed.rank(),
+            Self::NeedsReset { reason, .. } => Named::NeedsReset(*reason).rank(),
+            Self::Removed { removal, .. } => Named::Removed(*removal).rank(),
             Self::NotSynced => 14,
         }
     }
@@ -294,8 +322,10 @@ impl PendingReason {
                     .then_some(Named::Failed)
             }),
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
-            Self::Removed | Self::NotAdmitted => Some(Named::Removed),
-            Self::MemberKeysReplaced { .. } => Some(Named::NeedsReset),
+            Self::Removed(removal) => Some(Named::Removed(*removal)),
+            Self::MemberKeysReplaced { member } => {
+                Some(Named::NeedsReset(ResetReason::MemberKeysReplaced { member: *member }))
+            }
             Self::Refused(_) | Self::FileUnavailable(_) | Self::Original { .. } => {
                 Some(Named::Failed)
             }
@@ -352,8 +382,7 @@ impl PendingReason {
             | Self::Rejected(_)
             | Self::Cleanup { .. }
             | Self::Paused
-            | Self::Removed
-            | Self::NotAdmitted
+            | Self::Removed(_)
             | Self::MemberKeysReplaced { .. } => None,
         }
     }
@@ -384,8 +413,7 @@ impl PendingReason {
             | Self::Rejected(_)
             | Self::Cleanup { .. }
             | Self::Paused
-            | Self::Removed
-            | Self::NotAdmitted
+            | Self::Removed(_)
             | Self::MemberKeysReplaced { .. } => {
                 self.names().or_else(|| (!self.clears_by_itself()).then_some(Named::Failed))
             }
@@ -420,8 +448,10 @@ impl StatusFailure {
     fn names(&self) -> Option<Named> {
         match self {
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
-            Self::Removed | Self::NotAdmitted => Some(Named::Removed),
-            Self::DeviceIdInUse(_) => Some(Named::NeedsReset),
+            Self::Removed(removal) => Some(Named::Removed(*removal)),
+            // The evidence of another copy using this id reads as a
+            // replacement.
+            Self::DeviceIdInUse(_) => Some(Named::NeedsReset(ResetReason::Replaced)),
             Self::Storage(failure) => storage_names(*failure).or_else(|| {
                 (crate::pending::storage_clears(*failure) != crate::pending::Clears::ByItself)
                     .then_some(Named::Failed)
@@ -443,11 +473,9 @@ impl StatusFailure {
                     && crate::pending::storage_clears(*failure) == crate::pending::Clears::ByItself
             }
             Self::Operation(record) => record.reason.retries(),
-            Self::UpdateRequired(_)
-            | Self::Removed
-            | Self::NotAdmitted
-            | Self::DeviceIdInUse(_)
-            | Self::Other => false,
+            Self::UpdateRequired(_) | Self::Removed(_) | Self::DeviceIdInUse(_) | Self::Other => {
+                false
+            }
         }
     }
 }
@@ -469,19 +497,25 @@ impl LastPass {
     /// for what `wait` says the next pass waits for; with `wait` none its
     /// turn has come, and that is syncing, receiving; offline is offline with
     /// unsent changes while a write or a file waits to go out.
-    fn ended(&self, unsent: bool, wait: Option<SyncWait>, provider: CloudProvider) -> SyncState {
+    fn ended(
+        &self,
+        unsent_work: bool,
+        unsent: UnsentWork,
+        wait: Option<SyncWait>,
+        provider: CloudProvider,
+    ) -> SyncState {
         let cause = || SyncCause::Pass(self.clone());
         let waiting =
             || wait.map_or(SyncState::Syncing(SyncActivity::Receiving), SyncState::WaitingToSync);
         match self {
             Self::Synced => SyncState::Synced,
-            Self::Offline { .. } if unsent => SyncState::OfflineWithUnsentChanges(cause()),
+            Self::Offline { .. } if unsent_work => SyncState::OfflineWithUnsentChanges(cause()),
             Self::Offline { .. } => SyncState::Offline(cause()),
-            Self::Blocked { reason, .. } => {
-                reason.slot_names().map_or_else(waiting, |named| named.state(cause(), provider))
-            }
+            Self::Blocked { reason, .. } => reason
+                .slot_names()
+                .map_or_else(waiting, |named| named.state(cause(), provider, unsent)),
             Self::Failed { failure, .. } => {
-                failure.names().map_or_else(waiting, |named| named.state(cause(), provider))
+                failure.names().map_or_else(waiting, |named| named.state(cause(), provider, unsent))
             }
         }
     }

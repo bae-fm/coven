@@ -412,3 +412,33 @@ async fn a_write_before_setup_is_sending_until_the_first_pass_sends_it() {
     assert_eq!(dan.unsent_work().await.unwrap().writes, 0);
     dan.close().await.unwrap();
 }
+
+/// Ana removes Ben's device while his phone is stopped, and he keeps writing:
+/// two writes wait in his send queue. His next pass applies the removal, and
+/// his state says an admin removed his device and that two writes were never
+/// sent; the queue still holds them (§14.1, §19.1).
+#[tokio::test]
+async fn a_removed_device_names_its_removal_and_what_it_never_sent() {
+    let network = crate::tests::Network::new(2).await;
+    let (ana, ben) = (&network.devices[0], &network.devices[1]);
+    ben.stop_sync().await;
+    for id in ["a", "b"] {
+        ben.handle
+            .write(move |sql| {
+                sql.execute("INSERT INTO parents(id,label,value) VALUES(?1,?1,1)", [id])?;
+                Ok::<_, CovenError>(())
+            })
+            .await
+            .unwrap();
+    }
+    let (removal, _) = ana.handle.remove_device(ben.handle.device_id()).await.unwrap();
+    crate::tests::landed(&ana.handle, removal).await;
+    ben.handle.start_sync().await.unwrap();
+    let removed = state(ben, |state| matches!(state, SyncState::Removed { .. })).await;
+    assert_eq!(
+        removed.state,
+        SyncState::Removed { removal: Removal::Device, unsent: UnsentWork { writes: 2, files: 0 } }
+    );
+    assert_eq!(ben.handle.unsent_work().await.unwrap().writes, 2);
+    network.close().await;
+}

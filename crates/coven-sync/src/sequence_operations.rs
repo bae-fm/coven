@@ -621,8 +621,9 @@ impl SequenceSync {
                         {
                             match self.read_forward(session, ring, member).await {
                                 Ok(())
-                                | Err(SyncError::Removed | SyncError::MemberKeysReplaced { .. }) => {
-                                }
+                                | Err(
+                                    SyncError::Removed(_) | SyncError::MemberKeysReplaced { .. },
+                                ) => {}
                                 Err(error) => return Err(error),
                             }
                             if matches!(step, OperationStep::Copy(_) | OperationStep::Claiming) {

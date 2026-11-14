@@ -311,6 +311,16 @@ facts, with `pass_wait_holds` for the next pass's wait. `every_state` and
 `every_wait` run the model's events from a synced device to each state and each
 wait, so none of them is dead.
 
+[Standing.lean](io/CovenIO/Standing.lean) says which removal and which reset
+reason removed and device needs reset show. `removed_names_which` proves removed
+shows exactly when a fact names a removal, the last pass, a queued bound
+upload's record or a pending record, and the removal shown is the first named;
+`reset_names_why` proves the same for device needs reset, which a removal
+outranks. `stopped_unsent` proves both states count every write in the send
+queue and every bound file with bytes to send as unsent, whatever else holds
+them. The sequence package's `own_writes_never_refused` says why those are what
+a stopped device loses.
+
 [StoreReach.lean](io/CovenIO/StoreReach.lean) goes from a store history to those
 facts, with the [sequence](sequence.md) package's device reading the history.
 `PassEnd` says how a pass ends from where the device's readers stand; Rust's
@@ -323,7 +333,7 @@ and shows waiting to sync on the slot, or failed, or update needed.
 its member's removal or a replacement of its keys, the device shows removed or
 device needs reset, and `device_removal_reached` and
 `device_replacement_reached` the same for its own removal and a registration in
-its place. The other states come from no store history: they are what a
+its place, each naming which removal or which reason. The other states come from no store history: they are what a
 provider or custody answers, what is recorded, or what is moving, and
 `every_state` reaches them from those facts.
 

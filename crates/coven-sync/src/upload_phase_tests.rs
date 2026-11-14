@@ -17,7 +17,7 @@ fn connected() -> Facts {
         moved: None,
         uploads: Vec::new(),
         queued: false,
-        unsent: false,
+        unsent: coven_database::UnsentWork { writes: 0, files: 0 },
         records: Vec::new(),
         sync: RetrySync::Started { cooling_until: None },
         paused: false,

@@ -213,7 +213,7 @@ async fn a_restore_whose_registration_is_refused_ends_and_removes_its_installati
             .await
             .unwrap();
     assert!(
-        matches!(result, Err(BootstrapError::Sync(SyncError::Removed | SyncError::Rejected(_)))),
+        matches!(result, Err(BootstrapError::Sync(SyncError::Removed(_) | SyncError::Rejected(_)))),
         "{result:?}"
     );
     assert!(listed(&install, &owner).await.is_empty());
@@ -333,7 +333,13 @@ async fn a_restore_whose_device_was_removed_ends_and_removes_its_installation() 
     let (removal, _) = owner.handle.remove_device(device).await.unwrap();
     crate::tests::landed(&owner.handle, removal).await;
     let resumed = resume(&install, &owner).await;
-    assert!(matches!(resumed, Err(BootstrapError::Sync(SyncError::Removed))), "{resumed:?}");
+    assert!(
+        matches!(
+            resumed,
+            Err(BootstrapError::Sync(SyncError::Removed(coven_database::Removal::Device)))
+        ),
+        "{resumed:?}"
+    );
     assert!(listed(&install, &owner).await.is_empty());
     install.absent(owner.directory.id()).await;
     assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
@@ -661,7 +667,13 @@ async fn ending_a_restore_whose_commit_was_cut_deletes_what_it_wrote() {
     let (removal, _) = owner.handle.remove_device(device).await.unwrap();
     crate::tests::landed(&owner.handle, removal).await;
     let resumed = resume(&install, &owner).await;
-    assert!(matches!(resumed, Err(BootstrapError::Sync(SyncError::Removed))), "{resumed:?}");
+    assert!(
+        matches!(
+            resumed,
+            Err(BootstrapError::Sync(SyncError::Removed(coven_database::Removal::Device)))
+        ),
+        "{resumed:?}"
+    );
     assert!(listed(&install, &owner).await.is_empty());
     assert!(install.app.stores().await.unwrap().is_empty());
     no_device_entries(&install, store);

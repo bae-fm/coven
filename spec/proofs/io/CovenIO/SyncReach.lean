@@ -237,7 +237,7 @@ namespace Reached
 /-- A device connected and synced, with sync running. -/
 def start : Facts :=
   ⟨.connected, .synced, false, none, [], false, [], true, false, false, false, false, false,
-    false, false, none⟩
+    false, false, none, false⟩
 
 def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none⟩
 
@@ -254,8 +254,8 @@ def toState : State → List Event
   | .storageFull => [.begin, .finish (.failed (.storage .quotaExceeded)) 1]
   | .folderMissing => [.begin, .finish (.failed (.storage .containerNotFound)) 1]
   | .updateNeeded => [.begin, .finish (.failed .updateRequired) 1]
-  | .removed => [.begin, .finish (.failed .removed) 1]
-  | .needsReset => [.begin, .finish (.failed .deviceIdInUse) 1]
+  | .removed => [.begin, .finish (.failed (.removed .device)) 1]
+  | .needsReset => [.begin, .finish (.failed .replaced) 1]
   | .clockWrong => [.begin, .finish (.failed (.storage .clockSkew)) 1]
   | .failed => [.begin, .finish (.failed .other) 1]
 

@@ -35,7 +35,9 @@ fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), Sync
         None => Err(SyncError::Rejected(OperationRejection::TargetGone(
             crate::EntryTarget::Member(identity.member()),
         ))),
-        Some(current) if current.removed => Err(SyncError::Removed),
+        Some(current) if current.removed => {
+            Err(SyncError::Removed(coven_database::Removal::Member))
+        }
         Some(current)
             if current.keys == identity.keys().public_keys()
                 || identity.candidate().is_some_and(|keys| keys.public_keys() == current.keys) =>

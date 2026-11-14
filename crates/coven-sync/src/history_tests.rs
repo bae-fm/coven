@@ -333,7 +333,10 @@ fn removal_and_replacement_stop_a_device_for_good() {
     let mut removed = Household::new();
     let ben = removed.ben;
     let at = removed.entry(2, ben, StoreChange::RemoveDevice { device: DeviceId(3) });
-    assert_eq!(removed.history.gone_for_good(DeviceId(3)), Some((at, DeviceStop::Removed)));
+    assert_eq!(
+        removed.history.gone_for_good(DeviceId(3)),
+        Some((at, DeviceStop::Removed(coven_database::Removal::Device)))
+    );
     assert_eq!(removed.history.gone_for_good(DeviceId(1)), None);
     assert_eq!(removed.history.gone_for_good(DeviceId(2)), None);
 
@@ -341,7 +344,10 @@ fn removal_and_replacement_stop_a_device_for_good() {
     let (ana, ben) = (left.ana, left.ben);
     let at = left.entry(2, ben, StoreChange::RemoveMember { member: ana });
     for device in [DeviceId(1), DeviceId(3)] {
-        assert_eq!(left.history.gone_for_good(device), Some((at, DeviceStop::Removed)));
+        assert_eq!(
+            left.history.gone_for_good(device),
+            Some((at, DeviceStop::Removed(coven_database::Removal::Member)))
+        );
     }
     assert_eq!(left.history.gone_for_good(DeviceId(2)), None);
 

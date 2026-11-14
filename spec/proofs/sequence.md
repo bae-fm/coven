@@ -218,6 +218,14 @@ old original to `Keys.sendingKey`'s departed-circle choice.
   number, digest and preceding write permission. Every device agrees by
   `prefix_determines_state`.
 
+- `cut_counts_false` and `own_writes_never_refused`: once slot `j` cuts a
+  device off, the ledger before every later slot says its batches don't count,
+  so a device that applied slot `j` stops sending. A device that claims slot
+  `k+1` only after applying `1` to `k` and sends only while its ledger counts it
+  has no cut-off at any slot `j ≤ k`: its own writes are never refused by its
+  own cut-off. A refused write on a device is another device's, and what a
+  removal or a replacement costs the stopped device is its unsent queue.
+
 A batch is cut off when it was "made under a replaced key". A batch that the
 member's other devices make under the new key counts.
 

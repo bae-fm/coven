@@ -305,7 +305,10 @@ async fn an_admitted_store_whose_member_is_removed_before_it_loads_stops() {
     let answer = handle.retry_now().await.unwrap().await;
     assert!(matches!(answer, RetryOutcome::Failed(_)), "{answer:?}");
     let state = handle.sync_status().await.unwrap().state;
-    assert!(matches!(state, SyncState::Removed(_)), "{state:?}");
+    assert!(
+        matches!(state, SyncState::Removed { removal: coven_database::Removal::Member, .. }),
+        "{state:?}"
+    );
     handle.close().await.unwrap();
     install.app.discard_store(&install.app.store_dir(&store)).await.unwrap();
     assert!(saved_code(&install, store).is_none());
