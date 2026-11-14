@@ -829,6 +829,13 @@ impl ProviderOps for MemoryProvider {
     }
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
         self.before_request(MemoryRequest::Other("join")).await?;
+        {
+            let mut state = self.state.lock().await;
+            if state.faults.accept_failures > 0 {
+                state.faults.accept_failures -= 1;
+                return Err(StorageFailure::Network.into());
+            }
+        }
         use crate::invitation::InvitationAcceptance as Acceptance;
         if matches!(invitation.acceptance, Acceptance::Granted) {
             return Ok(());
@@ -856,6 +863,13 @@ impl ProviderOps for MemoryProvider {
     /// Other providers' acceptance stays, as theirs does.
     async fn leave(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
         self.before_request(MemoryRequest::Other("leave")).await?;
+        {
+            let mut state = self.state.lock().await;
+            if state.faults.leave_failures > 0 {
+                state.faults.leave_failures -= 1;
+                return Err(StorageFailure::Network.into());
+            }
+        }
         use crate::invitation::InvitationAcceptance as Acceptance;
         if let (Acceptance::DropboxMount, Account::Recipient(email)) =
             (&invitation.acceptance, &self.account)

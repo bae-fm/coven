@@ -321,3 +321,179 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         owner.close().await;
     }
 }
+
+/// Dan's phone mounts Household in his Dropbox, and Dropbox refuses his
+/// request for a reason that is not lost access, so it was never sent. Cancelled from a later call, before it
+/// sends again, the join unmounts Household before it removes itself: the
+/// cancel knows of the mount only from what the join recorded (§13.2).
+#[tokio::test]
+async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(
+                crate::tests::request_path(&invite),
+                (StorageFailure::Refused, 400),
+            )]
+            .into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let install = Installation::new();
+    let control = JoinControl::new();
+    let (_, running) = watch::channel(false);
+    let refused = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &running,
+            |_| {},
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::Refused),
+        "{:?}",
+        refused.as_ref().err()
+    );
+    assert!(owner.storage.joined("join@example.com").await);
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let (_, cancelled) = watch::channel(true);
+    let result = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancelled,
+            |_| {},
+        )
+        .await;
+    assert!(matches!(result, Err(BootstrapError::Cancelled)), "{result:?}");
+    assert!(!owner.storage.joined("join@example.com").await);
+    install.absent(owner.directory.id()).await;
+    assert!(saved_code(&install, owner.directory.id()).is_none());
+    assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
+    owner.close().await;
+}
+
+/// Dan's phone records that it is accepting Household, and the acceptance
+/// call stops before Dropbox mounts it, as a crash between the record and
+/// the call does. A cancel from a later call unmounts nothing that is
+/// mounted, which counts as done, and removes the join (§13.2).
+#[tokio::test]
+async fn cancelling_after_an_acceptance_that_never_reached_the_provider_succeeds() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let control = JoinControl::new();
+    let (_, running) = watch::channel(false);
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            accept_failures: 1,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        install.run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &running,
+            |_| {},
+        ),
+    )
+    .await
+    .expect("the join waited for approval, so its acceptance did not fail");
+    assert!(matches!(stopped, Err(BootstrapError::Sync(_))), "{:?}", stopped.as_ref().err());
+    assert!(!owner.storage.joined("join@example.com").await);
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let (_, cancelled) = watch::channel(true);
+    let result = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancelled,
+            |_| {},
+        )
+        .await;
+    assert!(matches!(result, Err(BootstrapError::Cancelled)), "{result:?}");
+    assert!(!owner.storage.joined("join@example.com").await);
+    install.absent(owner.directory.id()).await;
+    assert!(saved_code(&install, owner.directory.id()).is_none());
+    owner.close().await;
+}
+
+/// Dan's phone mounted Household and never sent its request. A cancel whose
+/// unmount fails fails loudly and leaves the join listed and mounted; the
+/// cancel Dan tries again unmounts it and removes the join (§13.2).
+#[tokio::test]
+async fn a_cancel_whose_unmount_failed_succeeds_when_retried() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(
+                crate::tests::request_path(&invite),
+                (StorageFailure::Refused, 400),
+            )]
+            .into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let install = Installation::new();
+    let control = JoinControl::new();
+    let (_, running) = watch::channel(false);
+    let refused = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &running,
+            |_| {},
+        )
+        .await;
+    assert!(refused.is_err());
+    assert!(owner.storage.joined("join@example.com").await);
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            leave_failures: 1,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let (_, cancelled) = watch::channel(true);
+    let failed = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancelled,
+            |_| {},
+        )
+        .await;
+    assert!(matches!(failed, Err(BootstrapError::Cleanup { .. })), "{:?}", failed.as_ref().err());
+    assert!(owner.storage.joined("join@example.com").await);
+    assert!(saved_code(&install, owner.directory.id()).is_some());
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let result = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancelled,
+            |_| {},
+        )
+        .await;
+    assert!(matches!(result, Err(BootstrapError::Cancelled)), "{result:?}");
+    assert!(!owner.storage.joined("join@example.com").await);
+    install.absent(owner.directory.id()).await;
+    assert!(saved_code(&install, owner.directory.id()).is_none());
+    owner.close().await;
+}

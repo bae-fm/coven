@@ -87,6 +87,12 @@ pub struct Faults {
     /// Fail every grant of access to an account with this failure, as a
     /// provider refusing to share the store would.
     pub grant_failure: Option<StorageFailure>,
+    /// Fail this many acceptances of a join's invite before they change
+    /// anything, as a provider that cannot be reached would.
+    pub accept_failures: usize,
+    /// Fail this many undos of a join's acceptance before they change
+    /// anything, as a provider that cannot be reached would.
+    pub leave_failures: usize,
 }
 /// Faults on the way to the device that change one byte of a response.
 #[derive(Clone, Copy, Debug)]
@@ -129,6 +135,8 @@ impl Faults {
             refuse_replacements: 0,
             refuse_after_storing: 0,
             grant_failure: None,
+            accept_failures: 0,
+            leave_failures: 0,
             hide_listings: false,
             listing_lag: None,
         }
