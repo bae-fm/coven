@@ -3769,6 +3769,8 @@ let moved = handle
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
 | | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |
+| | `outcome_kind` | NULL while it runs; then the kind of `OperationOutcome` it ended with, in snake case: `landed`, `satisfied`, `rejected`, `stopped`, `cancelled`, `undone` or `sharing_refused` |
+| | `account` | for an invite that ended with a sharing refusal, the address it was to share with; NULL for every other outcome |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member` |
 | | `removed` | 1 for a former member |

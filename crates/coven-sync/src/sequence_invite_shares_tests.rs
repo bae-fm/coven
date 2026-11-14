@@ -555,6 +555,19 @@ async fn a_refusal_only_a_person_can_fix_ends_the_invite_and_keeps_its_reason() 
             )],
             "{refusal:?}"
         );
+        // The outcome's kind and the address it names are columns too.
+        let columns: Vec<(String, Option<String>)> = phone
+            .database()
+            .read(|sql| {
+                Ok::<_, coven_database::DbError>(sql.query(
+                    "SELECT outcome_kind,account FROM coven_operations WHERE outcome IS NOT NULL",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(columns, [("sharing_refused".to_owned(), Some(CAROL.to_owned()))]);
         let left = phone.database().operations().await.unwrap();
         assert!(
             left.is_empty(),

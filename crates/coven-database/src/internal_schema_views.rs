@@ -158,9 +158,14 @@ pub(super) const SCHEMA: &str = concat!(
     // The operations the app's writes journaled, in the order they were
     // journaled, each until the app acknowledges its outcome: `kind` as
     // coven-sync names it, and `outcome` NULL while it runs, then how it
-    // ended as coven-sync encodes it (`OperationOutcome`).
-    "CREATE VIEW coven_operations(operation,kind,outcome) AS
-        SELECT a.operation,a.kind,a.outcome
+    // ended as coven-sync encodes it (`OperationOutcome`). `outcome_kind`
+    // names the outcome's variant in snake case, as `OperationOutcome` names
+    // it, and is NULL while the operation runs; `account` is the address a
+    // sharing refusal names, NULL for every other outcome.
+    "CREATE VIEW coven_operations(operation,kind,outcome,outcome_kind,account) AS
+        SELECT a.operation,a.kind,a.outcome,
+            _coven_variant_kind(CAST(a.outcome AS TEXT)),
+            json_extract(CAST(a.outcome AS TEXT),'$.SharingRefused.account')
         FROM _coven_app_operations AS a;",
     // Every member this device's applied slots name, former ones included,
     // with their public keys and how they reach storage: the account or the

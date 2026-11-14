@@ -5057,7 +5057,9 @@ in the pass that found the refusal, as a failed request check does: its
 marker replaces the request's path, and the access it granted is taken back.
 It leaves `coven_invites`. Its operation's outcome, `SharingRefused`, names
 the address and what went wrong, and stays in `coven_operations` until
-Ana's app acknowledges it (§11.4), a write local to her phone. Her app shows
+Ana's app acknowledges it (§11.4), a write local to her phone. Her app finds
+the refusal by `coven_operations.outcome_kind`, which says `sharing_refused`,
+and reads the address from `account`, with no decoding of the outcome. It shows
 the outcome in the invite's place, with what to fix, such as verifying her
 email, and she invites Dan again once it is fixed. Waiting on a refusal that
 a retry never changes would leave the invite listed without a code, as a

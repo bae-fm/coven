@@ -382,6 +382,19 @@ async fn coven_invites_shows_the_stage_and_the_requests_member_and_joiner() {
         [(operation, "approving".to_owned(), Some(invite.member.to_string()), typed)],
         "binding {binding:?}"
     );
+    // The binding runs, so it has no outcome and no account.
+    let running: Vec<(i64, Option<String>, Option<String>)> = ana
+        .database()
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT operation,outcome_kind,account FROM coven_operations ORDER BY operation",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(running, [(binding.0, None, None)]);
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
