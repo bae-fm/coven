@@ -246,7 +246,8 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
         rows.insert(row(n), (present(1, None), claim("shared", 10)));
     }
     for n in 1..=8_000 {
-        // Two circles share the earliest start. With no store row both stay.
+        // Two circles share the earliest start. With no store row, the lower
+        // circle id wins that tie and the other circle's row is removed.
         let started = if n <= 2 { 0 } else { n };
         rows.insert(circle(0, n), (present(started, None), Constraints::default()));
     }
@@ -286,8 +287,8 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     before.reset_visits();
     let partial = recompute(&before, &after, [row(0)]).unwrap();
     assert_eq!(partial.region.len(), 20_000);
-    assert_eq!(partial.removed.len(), 17_996);
-    for survivor in [row(1), circle(0, 1), circle(0, 2)] {
+    assert_eq!(partial.removed.len(), 17_997);
+    for survivor in [row(1), circle(0, 1)] {
         assert!(!partial.removed.contains_key(&survivor));
     }
     for n in 8_000..10_000 {
@@ -301,7 +302,7 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     for n in 2..8_000 {
         assert_rule(&partial, &row(n), Rule::Unique(["title"].into()));
     }
-    for n in 3..=8_000 {
+    for n in 2..=8_000 {
         assert_rule(&partial, &circle(0, n), Rule::OtherAudience);
     }
     for n in 10_000..11_999 {
