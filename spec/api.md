@@ -2049,7 +2049,9 @@ pub enum StoreLockError {
     /// sync status returns this error immediately. If this process's instance is closing, opening,
     /// bootstrapping or discarding the same store waits until its last
     /// blocking work finishes and its lock handles close, then tries to take
-    /// the lock. Discarding waits so for a closing read-only handle too;
+    /// the lock. Discarding waits so for a closing read-only handle too, and
+    /// for the loading installation of a replacement whose call was dropped,
+    /// which closes its database apart from the store's own locks;
     /// opening and bootstrapping share the store with readers and don't wait
     /// on one. The wait uses release notifications, with
     /// no timeout or polling, keyed by canonical directory and store id.

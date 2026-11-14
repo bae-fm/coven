@@ -684,3 +684,33 @@ async fn a_restore_finished_after_its_swap_keeps_the_rows_its_step_wrote() {
     handle.close().await.unwrap();
     network.close().await;
 }
+
+/// Carol's laptop is dropped mid-restore past its record, as when the app
+/// quits, and she gives up on the laptop's copy. The dropped call leaves the
+/// loading database to close as its last holders end, so a deletion waits
+/// for that close: it begins with no file of the store open, which Windows
+/// needs to move the directory.
+#[tokio::test]
+async fn discarding_a_store_whose_dropped_restore_is_loading_waits_for_its_files_to_close() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let app = &replaced.carol.app;
+    let (registering, release) = hold_registration(&network, &replaced).await;
+    tokio::select! {
+        result = restore(network.reopen(&replaced.carol), store, &replaced.code) => {
+            panic!("the restore finished before it was dropped: {:?}", result.err());
+        }
+        _ = registering => {}
+    }
+    // The registration the dropped call had on its way lands, as it does
+    // when the app quits and the request is already out.
+    release.send(()).unwrap();
+
+    app.store_dir(&store).closed().await.unwrap();
+    crate::assert_no_open_files_under(&store_path(&replaced));
+
+    app.discard_store(&app.store_dir(&store)).await.unwrap();
+    assert!(!store_path(&replaced).exists());
+    network.close().await;
+}

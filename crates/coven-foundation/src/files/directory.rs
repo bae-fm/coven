@@ -424,7 +424,9 @@ pub trait StoreDirAccess: Sized {
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError>;
     /// Wait until no instance of this store in this process is closing, as
     /// `lock_for_open` does, so a deletion that follows is not refused by an
-    /// instance only finishing its close. A live instance is not waited for.
+    /// instance only finishing its close, a replacement's loading
+    /// installation in its hidden directory included. A live instance is not
+    /// waited for.
     fn closed(&self) -> impl std::future::Future<Output = Result<(), FileError>> + Send;
     /// Give a crate the capability for its reserved file, without exposing
     /// the store path or letting it name any other top-level file.
@@ -606,7 +608,13 @@ impl StoreDirAccess for StoreDir {
         locked
     }
     async fn closed(&self) -> Result<(), FileError> {
-        lock::closed(&self.path, self.id).await
+        lock::closed(&self.path, self.id).await?;
+        // A replacement loads in a hidden directory of its own, a lock
+        // instance apart from the store's. Dropping the call that loads it
+        // releases the store's locks at once, but leaves the loading
+        // database to close as its last holders end, its files open until
+        // then.
+        lock::closed(&super::device_reset::loading(&self.path, self.id), self.id).await
     }
     fn owned_file(&self, file: StoreFile) -> AtomicFile {
         AtomicFile::new(self.path.join(file.name()))
