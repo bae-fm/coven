@@ -36,7 +36,7 @@ fn counters_in(sql: &[(&str, &str)], rust: &[(&str, &str)]) -> Vec<String> {
     let mut found = counters(&CrateCode::of(&files, &sql))
         .into_iter()
         .map(|hit| {
-            assert_eq!(hit.shape.id(), "counter");
+            assert!(matches!(hit.shape.id(), "counter" | "reset-counter"));
             format!("{}:{} {}", hit.path, hit.line, hit.item)
         })
         .collect::<Vec<_>>();
@@ -190,6 +190,11 @@ fn a_column_counted_up_and_reset_to_zero_is_a_counter() {
     // queue.rs: `additions = additions + 1`, and `additions = 0` on start.
     let sql = "UPDATE q SET additions = additions + 1; UPDATE q SET additions = 0, added = NULL;";
     assert_eq!(counters_in(&[(SQL, sql)], &[]), ["crates/app/src/schema.sql:1 q.additions"]);
+    let files = [sql_file(SQL, sql)];
+    let hits = counters(&CrateCode::of(&[], &files));
+    assert_eq!(hits[0].shape.id(), "reset-counter");
+    let plain = [sql_file(SQL, "UPDATE q SET additions = additions + 1;")];
+    assert_eq!(counters(&CrateCode::of(&[], &plain))[0].shape.id(), "counter");
     assert_eq!(
         counters_in(
             &[(SQL, "UPDATE q SET additions = additions + 1; UPDATE q SET additions = ?1;")],

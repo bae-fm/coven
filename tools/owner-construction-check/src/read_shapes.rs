@@ -111,7 +111,7 @@ fn remedy(rule: &str, shape: Shape) -> String {
         Shape::Cutoff => {
             "one query, one path: when the one statement is slow, fix it in SQL (the query, an index, a device-local table its triggers keep) and measure."
         }
-        Shape::Counter | Shape::RequestBump => {
+        Shape::Counter | Shape::ResetCounter | Shape::RequestBump => {
             "a live query reruns because what it read changed: drop the counter and let the query read the rows whose change it follows."
         }
         Shape::KeptState => {

@@ -3,8 +3,8 @@
 //!
 //! - `counter`: a column some statement sets to itself plus a positive integer
 //!   (`UPDATE t SET c = c + 1`, an upsert's `DO UPDATE SET c = c + 1`) and
-//!   that no statement anywhere sets to anything else, a reset to zero or
-//!   `NULL` aside. Count tables that
+//!   that no statement anywhere sets to anything else. A column that is also
+//!   reset to zero or `NULL` is a `reset-counter`, the same count with a start. Count tables that
 //!   decrement, upserts that copy `excluded.c` and columns set to bound values
 //!   are none. The SQL read is that of every `.sql` file and every production
 //!   string literal, as the database rule reads it.
@@ -37,6 +37,8 @@ struct ColumnSets {
     first_increment: Option<(String, usize)>,
     /// Whether any statement sets it to anything else.
     set_otherwise: bool,
+    /// Whether any statement resets it to zero or `NULL`.
+    reset: bool,
 }
 
 fn column_sets(code: &CrateCode) -> BTreeMap<String, ColumnSets> {
@@ -52,7 +54,9 @@ fn column_sets(code: &CrateCode) -> BTreeMap<String, ColumnSets> {
                     if sets.first_increment.as_ref().is_none_or(|first| place < *first) {
                         sets.first_increment = Some(place);
                     }
-                } else if !assignment.reset {
+                } else if assignment.reset {
+                    sets.reset = true;
+                } else {
                     sets.set_otherwise = true;
                 }
             }
@@ -71,9 +75,14 @@ pub(crate) fn counters(code: &CrateCode) -> Vec<Hit> {
             Some(Hit {
                 path,
                 line,
-                what: "is only ever counted up, never set to another value".to_string(),
+                what: if sets.reset {
+                    "is only ever counted up, or reset to zero, never set to another value"
+                } else {
+                    "is only ever counted up, never set to another value"
+                }
+                .to_string(),
                 item: column,
-                shape: Shape::Counter,
+                shape: if sets.reset { Shape::ResetCounter } else { Shape::Counter },
             })
         })
         .collect()

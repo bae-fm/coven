@@ -571,7 +571,7 @@ fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) ->
     for row in shapes.listed() {
         let list = row.list.name();
         let (path, item, shape) = (row.path, row.item, row.shape.id());
-        let is_counter = row.shape == Shape::Counter;
+        let is_counter = matches!(row.shape, Shape::Counter | Shape::ResetCounter);
         let rust = files.iter().any(|file| file.relative_path == path);
         if !(rust || (is_counter && sql_paths.contains(path))) {
             stale.push(format!("read_shapes.{list}: {path} holds no source"));
@@ -589,7 +589,7 @@ fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) ->
                 .ok_or("names no function there")
         };
         let found = match row.shape {
-            Shape::Counter => increments
+            Shape::Counter | Shape::ResetCounter => increments
                 .contains(&(path.to_string(), item.to_string()))
                 .then_some(())
                 .ok_or("is no column the SQL there increases"),

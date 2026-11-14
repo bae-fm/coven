@@ -229,6 +229,8 @@ pub(crate) enum Shape {
     KeptState,
     /// A column only ever counted up, to run a live query again.
     Counter,
+    /// A column only ever counted up or reset to zero, to run a live query again.
+    ResetCounter,
     /// A request's integer field counted up by one, to run a live query again.
     RequestBump,
     /// A comparison with a fixed limit, which picks one read path over another.
@@ -254,6 +256,7 @@ impl Shape {
             Shape::QueryPerRow => "query-per-row",
             Shape::KeptState => "kept-state",
             Shape::Counter => "counter",
+            Shape::ResetCounter => "reset-counter",
             Shape::RequestBump => "request-bump",
             Shape::Cutoff => "cutoff",
             Shape::Join => "join",
