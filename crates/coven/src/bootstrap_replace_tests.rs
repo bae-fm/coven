@@ -714,3 +714,60 @@ async fn discarding_a_store_whose_dropped_restore_is_loading_waits_for_its_files
     assert!(!store_path(&replaced).exists());
     network.close().await;
 }
+
+/// A restore that stopped right after its fresh device registered leaves the
+/// store refusing opens. The app tries to open and list it, finds it
+/// unfinished, and discards it. Neither the refused opens nor the listing
+/// leave a file of the store open, which Windows needs to move the directory.
+#[tokio::test]
+async fn discarding_an_unfinished_restore_after_refused_opens_finds_no_file_open() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let app = &replaced.carol.app;
+    let interrupted = restore(
+        network.reopen(&replaced.carol).interrupt_after_registering(),
+        store,
+        &replaced.code,
+    )
+    .await;
+    assert!(matches!(interrupted, Err(BootstrapError::Cancelled)), "{interrupted:?}");
+    refuses_opens(&network, &replaced).await;
+
+    app.store_dir(&store).closed().await.unwrap();
+    crate::assert_no_open_files_under(&store_path(&replaced));
+
+    app.discard_store(&app.store_dir(&store)).await.unwrap();
+    assert!(!store_path(&replaced).exists());
+    network.close().await;
+}
+
+/// The app quits the moment a restore's record exists: the call is dropped
+/// while the replacement is still loading. A removal that follows finds no
+/// file of the store open, which Windows needs to move the directory.
+#[tokio::test]
+async fn discarding_a_store_dropped_at_its_restore_record_finds_no_file_open() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let app = &replaced.carol.app;
+    {
+        let restoring = restore(network.reopen(&replaced.carol), store, &replaced.code);
+        tokio::pin!(restoring);
+        loop {
+            tokio::select! {
+                result = &mut restoring => panic!("the restore finished: {:?}", result.err()),
+                () = tokio::task::yield_now() => {
+                    if replaced.carol.app.readable_stores().await[0].unfinished.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    app.store_dir(&store).closed().await.unwrap();
+    crate::assert_no_open_files_under(&store_path(&replaced));
+    app.discard_store(&app.store_dir(&store)).await.unwrap();
+    assert!(!store_path(&replaced).exists());
+    network.close().await;
+}
