@@ -22,7 +22,7 @@ INSERT INTO tracks VALUES (1,'r1',1,'one'),(2,'r1',2,'two'),(3,'r2',1,'three'),(
 
 /// Run `sql` live, then each write: `false` must leave it unmarked, `true`
 /// must rerun it, and the rerun must read what a one-shot read does.
-async fn follows(
+pub(crate) async fn follows(
     db: &Database,
     sql: &'static str,
     parameters: Vec<crate::sql_value::SqlValue>,
@@ -796,4 +796,40 @@ async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
     for db in [ana, ben] {
         db.close().await.unwrap();
     }
+}
+
+/// A partner narrowed by a NULL test is looked up with the test in its
+/// condition, for the row's old and new values: credits on a deleted
+/// track wake nothing, and a credit moving onto a live track or off it
+/// does.
+#[tokio::test]
+async fn a_lookup_holds_a_partners_null_test() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![],
+            "CREATE TABLE tracks(id INTEGER PRIMARY KEY, deleted TEXT);
+CREATE TABLE credits(id INTEGER PRIMARY KEY, track INTEGER, name TEXT);
+INSERT INTO tracks VALUES (1,NULL),(2,'x');
+INSERT INTO credits VALUES (1,1,'Ana'),(2,2,'Ben'),(3,2,'Cy')",
+        )
+        .await
+        .unwrap();
+    follows(
+        &db,
+        "SELECT c.name FROM credits c JOIN tracks t ON c.track = t.id WHERE t.deleted IS NULL ORDER BY c.id",
+        vec![],
+        &[
+            ("UPDATE credits SET name = 'Bea' WHERE id = 2", false),
+            ("UPDATE credits SET name = 'Anne' WHERE id = 1", true),
+            ("UPDATE credits SET track = 1 WHERE id = 2", true),
+            ("UPDATE credits SET track = 2 WHERE id = 2", true),
+            ("UPDATE credits SET name = 'Cyd' WHERE id = 3", false),
+            ("UPDATE tracks SET deleted = NULL WHERE id = 2", true),
+            ("UPDATE tracks SET deleted = 'y' WHERE id = 2", true),
+            ("UPDATE credits SET name = 'Cyn' WHERE id = 3", false),
+        ],
+    )
+    .await;
+    db.close().await.unwrap();
 }

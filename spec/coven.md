@@ -656,13 +656,21 @@ aggregates, grouping, ordering and limits work only on the rows the WHERE
 allows, so `SELECT count(*) FROM tracks WHERE release_id = ?1` narrows the same
 way.
 
+`IS` with a value, `IS NULL` and `IS NOT NULL` narrow too, and so do their
+spellings `ISNULL`, `NOTNULL` and `NOT NULL`. `x IS 5` is `x = 5`, and `x IS ?1`
+narrows by whichever the run's value is: the rows where `x` is NULL, or those
+where it equals the value. Ben's album grid sorted by artist lists the albums
+with no credits first, so its first window holds `credit_sort_key IS NULL`. An
+album added further down the list, with a credit, doesn't rerun that window.
+
 A condition narrows only where coven compares values as SQLite does. One on a
 column whose collation isn't BINARY, or on a generated column, doesn't, and nor
 does one whose value SQLite would convert first, as text compared with an
-INTEGER column: there SQLite's answer and coven's could differ. Other
-conditions, such as `<>`, `LIKE`, `IS NULL` or a function of the column, don't
-narrow either. A statement with no condition that narrows depends on every row
-of each table it read.
+INTEGER column: there SQLite's answer and coven's could differ. A NULL test
+looks through a COLLATE on its column, since a collation doesn't change whether
+a value is NULL. Other conditions, such as `<>`, `LIKE`, `IS NOT` a value or a
+function of the column, don't narrow. A statement with no condition that
+narrows depends on every row of each table it read.
 
 A statement that joins tables narrows each one by the rows the others matched.
 Ben's album page lists its tracks with their credited artists:
@@ -718,15 +726,26 @@ the join. The ON of a LEFT JOIN narrows only its right side: it decides which
 right rows join each left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
 inner join's ON, makes the LEFT JOIN an inner join. Each condition coven narrows
-by is false where its column is NULL, so a left row with NULLs in the right
-side's place fails it, and can't appear whatever the LEFT JOIN's ON matched:
-only the rows an inner join gives are left. So coven narrows such a join as an
-inner join, by its ON both ways. Ben's album page can list only the album's
-producers, with `JOIN tracks AS t ON t.release_id = r.id LEFT JOIN
-track_artists AS c ON c.track_id = t.id` and `WHERE r.album_id = ?1 AND c.role
-= 'producer'`. That narrows `track_artists` to the producer credits on this
+by is false where its column is NULL, except a NULL test, so a left row with
+NULLs in the right side's place fails it, and can't appear whatever the LEFT
+JOIN's ON matched: only the rows an inner join gives are left. So coven narrows
+such a join as an inner join, by its ON both ways. Ben's album page can list
+only the album's producers, with `JOIN tracks AS t ON t.release_id = r.id LEFT
+JOIN track_artists AS c ON c.track_id = t.id` and `WHERE r.album_id = ?1 AND
+c.role = 'producer'`. That narrows `track_artists` to the producer credits on this
 album's tracks, so crediting a producer on another album, or a singer on this
 one, doesn't rerun the page.
+
+A NULL test on the right side doesn't make the join inner, since it is true of
+the NULLs a missing right row gives. Ben's album page lists the tracks no
+artist is credited on with `LEFT JOIN track_artists AS c ON c.track_id = t.id
+WHERE c.track_id IS NULL`. Crediting an artist on one of those tracks takes it
+off the page, so coven reads `track_artists` whole for this page: narrowing it
+to the rows with a NULL `track_id` would miss that credit. Another condition
+that makes the join inner, such as `AND c.role = 'producer'`, lets the NULL
+test narrow `track_artists` too. In the LEFT JOIN's own ON, as `ON c.track_id =
+t.id AND c.role IS NULL`, a NULL test narrows the right side as any condition
+there does.
 
 A lookup compares as the statement does. A join on an expression, which has no
 affinity, gives the looked-up value the joined column's, so a text `'5'` the

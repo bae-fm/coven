@@ -375,8 +375,15 @@ impl Planner {
     /// Narrow the sources by `found`, which conditions on the joined rows
     /// give. A LEFT JOIN's right side it narrows is an inner join's then: a
     /// left row with NULLs in its place fails the condition, so no row the
-    /// LEFT JOIN alone adds reaches the result.
-    pub(crate) fn narrow(&mut self, found: Narrowing) {
+    /// LEFT JOIN alone adds reaches the result. A term a row of NULLs can
+    /// pass, as a NULL test, narrows nothing on a right side that is still a
+    /// LEFT JOIN's and doesn't make it inner: the NULLs of a left row no
+    /// right row joins pass it, and a right row added for that left row takes
+    /// it out.
+    pub(crate) fn narrow(&mut self, mut found: Narrowing) {
+        found.terms.retain(|(item, term)| {
+            !(term.may_hold_on_nulls() && self.items[*item].left_on.is_some())
+        });
         for item in self.add(found) {
             self.join_inner(item);
         }
@@ -590,8 +597,19 @@ fn read_core<'a>(
     for definition in window_clause.iter().flat_map(|windows| windows.iter()) {
         window_parts(&definition.window, &mut found);
     }
+    let mut read = Vec::new();
     for (condition, place) in conditions {
-        read_condition(connection, planner, core, condition, place)?;
+        read.push((read_condition(connection, planner, core, condition)?, place));
+    }
+    // The conditions a row of NULLs fails come first, as they make LEFT JOINs
+    // inner, which the others see.
+    let (others, rejecting): (Vec<_>, Vec<_>) =
+        read.into_iter().partition(|(found, _)| found.may_hold_on_nulls());
+    for (found, place) in rejecting.into_iter().chain(others) {
+        match place {
+            Place::Inner => planner.narrow(found),
+            Place::LeftOn(item) => planner.narrow_on(item, found),
+        }
     }
     // What its conditions say of a subquery's, CTE's or view's rows alone
     // narrows that one's own cores. Its equalities with other sources do
@@ -611,8 +629,7 @@ fn read_condition(
     planner: &mut Planner,
     core: usize,
     condition: &Expr<'_>,
-    place: Place,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Narrowing> {
     let mut found = Vec::new();
     parts(condition, &mut found);
     let mut referenced = Vec::new();
@@ -620,11 +637,15 @@ fn read_condition(
         let name = match part {
             Part::Name(name) => name,
             Part::Function(..) => continue,
-            Part::Select(_) | Part::Table | Part::Collation => return Ok(()),
+            // A COLLATE changes only how a comparison compares: `term` and
+            // `edge` refuse the comparisons it reaches, and a NULL test
+            // looks through it.
+            Part::Collation => continue,
+            Part::Select(_) | Part::Table => return Ok(Narrowing::default()),
         };
         let Some((item, _)) = planner.resolve(core, name) else {
             // A name coven can't place keeps the condition from narrowing.
-            return Ok(());
+            return Ok(Narrowing::default());
         };
         if !referenced.contains(&item) {
             referenced.push(item);
@@ -633,7 +654,7 @@ fn read_condition(
     let mut found = Narrowing::default();
     if let [item] = referenced[..] {
         if planner.items[item].core != core {
-            return Ok(());
+            return Ok(Narrowing::default());
         }
         let column = |expr: &Expr<'_>| {
             let (found, column) = planner.resolve(core, expr)?;
@@ -647,16 +668,13 @@ fn read_condition(
             found.edges.extend(planner.edge(core, member, other, first));
         }
     }
-    match place {
-        Place::Inner => planner.narrow(found),
-        Place::LeftOn(item) => planner.narrow_on(item, found),
-    }
-    Ok(())
+    Ok(found)
 }
 
 /// What conditions narrow: terms on one source's rows each, and edges.
 /// Each is false where the column it tests is NULL, so it rejects a row
-/// with NULLs in its source's place.
+/// with NULLs in its source's place, except a term a NULL test can make
+/// true (`ScopeTerm::may_hold_on_nulls`).
 #[derive(Default)]
 pub(crate) struct Narrowing {
     terms: Vec<(usize, ScopeTerm)>,
@@ -664,6 +682,11 @@ pub(crate) struct Narrowing {
 }
 
 impl Narrowing {
+    /// Whether a term of it can pass a row of NULLs.
+    fn may_hold_on_nulls(&self) -> bool {
+        self.terms.iter().any(|(_, term)| term.may_hold_on_nulls())
+    }
+
     /// What of this narrows `item`, and the rest.
     fn split(self, item: usize) -> (Self, Self) {
         let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);

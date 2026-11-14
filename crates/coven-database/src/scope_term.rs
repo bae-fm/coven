@@ -24,6 +24,18 @@ pub(crate) enum ScopeTerm {
         affinity: Affinity,
         operands: Vec<Operand>,
     },
+    /// `column IS NULL`, or `IS NOT NULL` when `not`.
+    Null {
+        column: String,
+        not: bool,
+    },
+    /// `column IS ?`: a NULL test when the run's value is NULL, an equality
+    /// otherwise.
+    Is {
+        column: String,
+        affinity: Affinity,
+        operand: Operand,
+    },
     And(Box<Self>, Box<Self>),
     Or(Box<Self>, Box<Self>),
 }
@@ -50,11 +62,41 @@ impl ScopeTerm {
                     .all(|value| affinity.compares(value))
                     .then(|| RowScope::equal(column.clone(), values))
             }
+            Self::Null { column, not } => {
+                Some(RowScope::Null { column: column.clone(), not: *not })
+            }
+            Self::Is { column, affinity, operand } => {
+                let value = operand.value(parameters);
+                if matches!(value, Value::Null) {
+                    Some(RowScope::Null { column: column.clone(), not: false })
+                } else {
+                    affinity.compares(value).then(|| RowScope::Compare {
+                        column: column.clone(),
+                        value: value.clone(),
+                        ordering: Ordering::Equal,
+                        inclusive: false,
+                    })
+                }
+            }
             Self::And(left, right) => match (left.bind(parameters), right.bind(parameters)) {
                 (Some(left), Some(right)) => Some(left.and(right)),
                 (scope, None) | (None, scope) => scope,
             },
             Self::Or(left, right) => Some(left.bind(parameters)?.or(right.bind(parameters)?)),
+        }
+    }
+
+    /// Whether a row whose columns are all NULL can pass it: a NULL test
+    /// does, as does `IS` a parameter, whose value isn't known until a run.
+    /// Every other term is false where its column is NULL. An AND passes
+    /// only where both parts do, an OR where either does.
+    pub(crate) fn may_hold_on_nulls(&self) -> bool {
+        match self {
+            Self::Compare { .. } | Self::In { .. } => false,
+            Self::Null { not, .. } => !not,
+            Self::Is { .. } => true,
+            Self::And(left, right) => left.may_hold_on_nulls() && right.may_hold_on_nulls(),
+            Self::Or(left, right) => left.may_hold_on_nulls() || right.may_hold_on_nulls(),
         }
     }
 
@@ -66,7 +108,10 @@ impl ScopeTerm {
     /// The columns it tests.
     pub(crate) fn columns(&self, into: &mut Vec<String>) {
         match self {
-            Self::Compare { column, .. } | Self::In { column, .. } => {
+            Self::Compare { column, .. }
+            | Self::In { column, .. }
+            | Self::Null { column, .. }
+            | Self::Is { column, .. } => {
                 if !into.contains(column) {
                     into.push(column.clone());
                 }
@@ -97,6 +142,14 @@ impl ScopeTerm {
                 column: column(tested)?,
                 affinity: *affinity,
                 operands: operands.clone(),
+            }),
+            Self::Null { column: tested, not } => {
+                Some(Self::Null { column: column(tested)?, not: *not })
+            }
+            Self::Is { column: tested, affinity, operand } => Some(Self::Is {
+                column: column(tested)?,
+                affinity: *affinity,
+                operand: operand.clone(),
             }),
             Self::And(left, right) => match (left.renamed(column), right.renamed(column)) {
                 (Some(left), Some(right)) => Some(left.and(right)),
@@ -178,6 +231,12 @@ pub(crate) fn term(
     expr: &Expr<'_>,
 ) -> rusqlite::Result<Option<ScopeTerm>> {
     let expr = crate::sql::unparenthesized(expr);
+    if let Some((tested, not)) = null_test(expr) {
+        let Some((named, _)) = column(through_collation(tested)) else {
+            return Ok(None);
+        };
+        return Ok(Some(ScopeTerm::Null { column: named, not }));
+    }
     let result = match expr {
         Expr::Binary(left, op @ (Operator::And | Operator::Or), right) => {
             match (term(connection, column, left)?, term(connection, column, right)?) {
@@ -199,7 +258,7 @@ pub(crate) fn term(
                 return Ok(None);
             };
             let (mut ordering, inclusive) = match op {
-                Operator::Equals => (Ordering::Equal, false),
+                Operator::Equals | Operator::Is => (Ordering::Equal, false),
                 Operator::Less => (Ordering::Less, false),
                 Operator::LessEquals => (Ordering::Less, true),
                 Operator::Greater => (Ordering::Greater, false),
@@ -210,12 +269,14 @@ pub(crate) fn term(
                 ordering = ordering.reverse();
             }
             let (named, affinity) = named;
-            operand(connection, operand_expr, affinity)?.map(|operand| ScopeTerm::Compare {
-                column: named,
-                affinity,
-                operand,
-                ordering,
-                inclusive,
+            operand(connection, operand_expr, affinity)?.map(|operand| {
+                // `IS` a constant is an equality; `IS` a parameter is one or
+                // a NULL test, by the run's value.
+                if *op == Operator::Is && matches!(operand, Operand::Parameter(_)) {
+                    ScopeTerm::Is { column: named, affinity, operand }
+                } else {
+                    ScopeTerm::Compare { column: named, affinity, operand, ordering, inclusive }
+                }
             })
         }
         Expr::InList { lhs, not: false, rhs } => {
@@ -234,6 +295,38 @@ pub(crate) fn term(
         _ => None,
     };
     Ok(result)
+}
+
+/// The expression `expr` tests for NULL, and whether the test is `IS NOT
+/// NULL`: `x IS NULL`, `x ISNULL`, `x IS NOT NULL`, `x NOTNULL` or `x NOT
+/// NULL`.
+fn null_test<'a>(expr: &'a Expr<'a>) -> Option<(&'a Expr<'a>, bool)> {
+    let is_null =
+        |expr: &Expr<'_>| matches!(crate::sql::unparenthesized(expr), Expr::Literal(Literal::Null));
+    match expr {
+        Expr::IsNull(tested) => Some((tested, false)),
+        Expr::NotNull(tested) => Some((tested, true)),
+        Expr::Binary(left, op @ (Operator::Is | Operator::IsNot), right) => {
+            let not = *op == Operator::IsNot;
+            if is_null(right) {
+                Some((left, not))
+            } else if is_null(left) {
+                Some((right, not))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `expr` without the COLLATEs on it: a collation doesn't change whether a
+/// value is NULL.
+fn through_collation<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
+    match crate::sql::unparenthesized(expr) {
+        Expr::Collate(inner, _) => through_collation(inner),
+        expr => expr,
+    }
 }
 
 /// The value `expr` stands for: a parameter, or a constant spelled in the

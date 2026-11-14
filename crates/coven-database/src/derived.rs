@@ -317,7 +317,8 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
 /// source an output column passes on takes them as its own. A LEFT JOIN's
 /// right side in the arm does too, and is an inner join's then: a row with
 /// NULLs in its place fails each of them, as a WHERE condition in the arm
-/// would.
+/// would. A term a row of NULLs can pass, as a NULL test, is the exception:
+/// it narrows nothing there and leaves the join a LEFT JOIN.
 pub(crate) fn push_down(
     planner: &mut Planner,
     item: usize,
@@ -358,13 +359,19 @@ pub(crate) fn push_down(
             if found.source.table.is_none() && found.derived.is_none() {
                 continue;
             }
-            let renamed = term.as_ref().and_then(|term| {
-                term.renamed(&|column| {
-                    through(column)
-                        .filter(|(passed, _)| *passed == target)
-                        .map(|(_, column)| column)
+            // A term a row of NULLs can pass narrows nothing on a LEFT JOIN's
+            // right side that stays one, and doesn't make it inner.
+            let left = planner.items[target].left_on.is_some();
+            let renamed = term
+                .as_ref()
+                .and_then(|term| {
+                    term.renamed(&|column| {
+                        through(column)
+                            .filter(|(passed, _)| *passed == target)
+                            .map(|(_, column)| column)
+                    })
                 })
-            });
+                .filter(|renamed| !(left && renamed.may_hold_on_nulls()));
             let passed: Vec<Edge> = edges
                 .iter()
                 .filter_map(|edge| {

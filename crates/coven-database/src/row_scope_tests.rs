@@ -240,7 +240,7 @@ fn condition(
         };
     }
     let id = rng.below(10);
-    match rng.below(11) {
+    match rng.below(15) {
         0 => (format!("{name}.id = {}", key(table, id)), true),
         1 => (format!("{name}.a = {}", rng.below(5)), true),
         2 => (format!("{name}.b = {}", b_value(rng)), true),
@@ -257,7 +257,32 @@ fn condition(
             (format!("{name}.a = ?{}", parameters.len()), narrows)
         }
         6 => (format!("{name}.b <> {}", b_value(rng)), false),
-        7 => (format!("{name}.a IS NULL"), false),
+        7 => {
+            let column = *rng.pick(&["a", "b", "c"]);
+            let spelling = *rng.pick(&["IS NULL", "ISNULL"]);
+            (format!("{name}.{column} {spelling}"), true)
+        }
+        11 => {
+            let column = *rng.pick(&["a", "b", "c"]);
+            let spelling = *rng.pick(&["IS NOT NULL", "NOTNULL", "NOT NULL"]);
+            (format!("{name}.{column} {spelling}"), true)
+        }
+        12 => {
+            // A parameter that is NULL, or a value the column may convert.
+            parameters.push(match rng.below(10) {
+                0..=3 => SqlValue::Null,
+                4..=8 => SqlValue::Integer(rng.below(5) as i64),
+                _ => SqlValue::Text(rng.below(5).to_string().into_bytes()),
+            });
+            let narrows = !matches!(parameters.last(), Some(SqlValue::Text(_)));
+            (format!("{name}.a IS ?{}", parameters.len()), narrows)
+        }
+        13 => (format!("{name}.a IS {}", rng.below(5)), true),
+        14 => {
+            let value = b_value(rng);
+            let narrows = value == "NULL";
+            (format!("{name}.b IS NOT {value}"), narrows)
+        }
         8 => (format!("abs({name}.c) = {}", rng.below(10)), false),
         9 => (format!("{name}.b LIKE {}", b_value(rng)), false),
         _ => (format!("{name}.c < {}", rng.below(10)), true),
@@ -270,7 +295,10 @@ fn joins(
     rng: &mut Rng,
     parameters: &mut Vec<SqlValue>,
 ) -> (String, Vec<(&'static str, &'static str)>) {
-    match rng.below(20) {
+    match rng.below(22) {
+        20 | 21 => {
+            ("u LEFT JOIN t ON t.id = u.c WHERE t.a IS NULL".into(), vec![("u", "u"), ("t", "t")])
+        }
         14..=16 => (
             "t JOIN u ON u.a = t.id JOIN s ON s.id = u.b".into(),
             vec![("t", "t"), ("u", "u"), ("s", "s")],
@@ -670,6 +698,7 @@ async fn live_queries_rerun_whenever_their_results_change() {
     for seed in 0..seeds {
         spared += run_seed(seed).await;
     }
+    eprintln!("{seeds} seeds, {spared} reruns spared");
     // The test would pass with every table whole; narrowing must also spare
     // the queries it can.
     assert!(spared > 0, "no narrowing query was spared a rerun");

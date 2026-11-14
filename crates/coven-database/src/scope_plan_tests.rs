@@ -1,3 +1,4 @@
+use crate::scope_lookup::tests::follows;
 use crate::tests::next;
 use crate::{tests::TestStore, Database, DbError};
 use coven_foundation::clock::HANG_GUARD;
@@ -155,7 +156,7 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
         "SELECT a.value FROM items a NATURAL JOIN items b WHERE a.id=1",
         "SELECT a.value FROM items a JOIN items b USING (id) WHERE a.id=1",
         "SELECT value FROM items WHERE id BETWEEN 1 AND 1",
-        "SELECT value FROM items WHERE id IS 1",
+        "SELECT value FROM items WHERE id IS NOT 1",
         "SELECT value FROM items WHERE id!=9",
         "SELECT value FROM items WHERE id NOT IN (9)",
         "SELECT value FROM items WHERE id=1 OR value>20",
@@ -715,6 +716,158 @@ async fn conversions_collations_and_generated_columns_keep_whole_tables() {
         });
         next(&mut query).await;
         write(&db, "UPDATE items SET label=label||'.' WHERE id=9");
+        assert_eq!(next(&mut query).await.0, 2, "{sql}");
+    }
+    db.close().await.unwrap();
+}
+
+/// A NULL test narrows as a comparison does: a write to a row outside it
+/// wakes nothing, one inside it does, and so does a row moving in or out
+/// by changing the tested column between NULL and a value.
+#[tokio::test]
+async fn null_tests_and_is_narrow() {
+    use crate::sql_value::SqlValue;
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![],
+            "CREATE TABLE items(id INTEGER PRIMARY KEY, x INTEGER, value INTEGER, extra TEXT)",
+        )
+        .await
+        .unwrap();
+    // The predicate, its parameters, the ids it keeps, an id outside it and
+    // one inside, and the values of `x` that move a row in and out.
+    type Case = (&'static str, Vec<SqlValue>, Vec<i64>, i64, i64, &'static str, &'static str);
+    let cases: Vec<Case> = vec![
+        ("x IS NULL", vec![], vec![1, 2], 3, 1, "NULL", "7"),
+        ("x ISNULL", vec![], vec![1, 2], 3, 1, "NULL", "7"),
+        ("x COLLATE NOCASE IS NULL", vec![], vec![1, 2], 3, 1, "NULL", "7"),
+        ("(x COLLATE NOCASE) ISNULL", vec![], vec![1, 2], 3, 1, "NULL", "7"),
+        ("x IS NOT NULL", vec![], vec![3, 4, 5], 1, 3, "1", "NULL"),
+        ("x NOTNULL", vec![], vec![3, 4, 5], 1, 3, "1", "NULL"),
+        ("x NOT NULL", vec![], vec![3, 4, 5], 1, 3, "1", "NULL"),
+        ("x COLLATE NOCASE IS NOT NULL", vec![], vec![3, 4, 5], 1, 3, "1", "NULL"),
+        ("x IS ?1", vec![SqlValue::Null], vec![1, 2], 3, 1, "NULL", "7"),
+        ("x IS ?1", vec![SqlValue::Integer(3)], vec![3, 4], 5, 3, "3", "9"),
+        ("x IS 3", vec![], vec![3, 4], 5, 3, "3", "9"),
+        ("x IS 3", vec![], vec![3, 4], 1, 3, "3", "NULL"),
+        ("3 IS x", vec![], vec![3, 4], 5, 3, "3", "9"),
+        ("NULL IS x", vec![], vec![1, 2], 3, 1, "NULL", "7"),
+    ];
+    for (predicate, parameters, expected, outside, inside, moves_in, moves_out) in cases {
+        write(&db, "DELETE FROM items; INSERT INTO items VALUES (1,NULL,0,''),(2,NULL,0,''),(3,3,0,''),(4,3,0,''),(5,9,0,'')");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let sql = format!("SELECT id, value FROM items WHERE {predicate} ORDER BY id");
+        let bound = parameters.clone();
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(db.query(&sql, rusqlite::params_from_iter(&bound), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?)
+        });
+        assert_eq!(
+            next(&mut query).await.iter().map(|row| row.0).collect::<Vec<_>>(),
+            expected,
+            "{predicate}"
+        );
+        write(&db, &format!("UPDATE items SET value=value+1 WHERE id={outside}"));
+        assert!(!query.is_marked_for_rerun(), "outside: {predicate} {parameters:?}");
+        write(&db, &format!("UPDATE items SET extra='ignored' WHERE id={inside}"));
+        assert!(!query.is_marked_for_rerun(), "column: {predicate} {parameters:?}");
+        write(&db, &format!("UPDATE items SET value=value+1 WHERE id={inside}"));
+        next(&mut query).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "inside: {predicate} {parameters:?}");
+        write(&db, &format!("UPDATE items SET x={moves_in} WHERE id={outside}"));
+        next(&mut query).await;
+        write(&db, &format!("UPDATE items SET x={moves_out} WHERE id={inside}"));
+        next(&mut query).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "moving: {predicate} {parameters:?}");
+    }
+    db.close().await.unwrap();
+}
+
+/// A NULL test on a LEFT JOIN's right side is true of the NULLs a missing
+/// right row gives, so it doesn't make the join an inner join and doesn't
+/// narrow the right side: a credit that joins a track takes it out of an
+/// anti-join's result. Through a view, the same. Another condition that
+/// makes the join inner lets the NULL test narrow too, in either order, and
+/// in the join's own ON it narrows the right side.
+#[tokio::test]
+async fn a_null_test_on_a_left_joins_right_side_keeps_it_whole() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT);
+CREATE TABLE credits(id INTEGER PRIMARY KEY, track INTEGER, role TEXT, name TEXT);
+CREATE VIEW credited AS SELECT t.id, t.release, c.id AS credit, c.track, c.role, c.name FROM tracks t LEFT JOIN credits c ON c.track = t.id;").await.unwrap();
+    let reset = "DELETE FROM tracks; DELETE FROM credits; INSERT INTO tracks VALUES (1,'r1'),(2,'r1'),(3,'r2'); INSERT INTO credits VALUES (1,2,'x','Ana'),(2,3,'x','Ben')";
+    for sql in [
+        "SELECT t.id FROM tracks t LEFT JOIN credits c ON c.track = t.id WHERE t.release = 'r1' AND c.track IS NULL ORDER BY t.id",
+        "SELECT id FROM credited WHERE release = 'r1' AND track IS NULL ORDER BY id",
+    ] {
+        write(&db, reset);
+        follows(&db, sql, vec![], &[
+            ("INSERT INTO credits VALUES (3,1,'x','Cy')", true),
+            ("DELETE FROM credits WHERE id = 3", true),
+            ("INSERT INTO credits VALUES (4,3,'x','Dee')", false),
+            ("UPDATE credits SET name = 'Benn' WHERE id = 2", false),
+            ("UPDATE credits SET track = 1 WHERE id = 1", true),
+        ]).await;
+    }
+    for sql in [
+        "SELECT t.id FROM tracks t LEFT JOIN credits c ON c.track = t.id WHERE t.release = 'r1' AND c.name IS NULL AND c.role = 'x' ORDER BY t.id",
+        "SELECT t.id FROM tracks t LEFT JOIN credits c ON c.track = t.id WHERE t.release = 'r1' AND c.role = 'x' AND c.name IS NULL ORDER BY t.id",
+    ] {
+        write(&db, reset);
+        write(&db, "UPDATE credits SET name = NULL WHERE id = 1");
+        follows(&db, sql, vec![], &[
+            ("UPDATE credits SET role = 'x' WHERE id = 2", false),
+            ("UPDATE credits SET name = 'Anna' WHERE id = 1", true),
+            ("UPDATE credits SET name = NULL WHERE id = 1", true),
+            ("INSERT INTO credits VALUES (3,1,'y',NULL)", false),
+            ("INSERT INTO credits VALUES (4,1,'x','Cy')", false),
+            ("INSERT INTO credits VALUES (5,3,'x',NULL)", false),
+            ("INSERT INTO credits VALUES (6,1,'x',NULL)", true),
+        ]).await;
+    }
+    write(&db, reset);
+    write(&db, "UPDATE credits SET name = NULL WHERE id = 1");
+    follows(&db, "SELECT c.role FROM tracks t LEFT JOIN credits c ON c.track = t.id AND c.name IS NULL WHERE t.release = 'r1' ORDER BY t.id", vec![], &[
+        ("INSERT INTO credits VALUES (3,1,'y','Cy')", false),
+        ("UPDATE credits SET role = 'z' WHERE id = 3", false),
+        ("INSERT INTO credits VALUES (4,3,'x',NULL)", false),
+        ("UPDATE credits SET role = 'w' WHERE id = 1", true),
+        ("UPDATE credits SET name = 'Anna' WHERE id = 1", true),
+    ]).await;
+    db.close().await.unwrap();
+}
+
+/// A comparison under a COLLATE, or against a value under one, keeps the
+/// table whole: coven compares values by BINARY only. So do `IS NOT` a
+/// value, and `IS` under a collation, which compare as `=` does.
+#[tokio::test]
+async fn collated_comparisons_keep_whole_tables() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, x TEXT, value INTEGER); INSERT INTO items VALUES (1,'a',0),(2,'z',0)").await.unwrap();
+    for sql in [
+        "SELECT value FROM items WHERE x COLLATE NOCASE = 'a'",
+        "SELECT value FROM items WHERE x = 'a' COLLATE NOCASE",
+        "SELECT value FROM items WHERE x COLLATE NOCASE IN ('a')",
+        "SELECT value FROM items WHERE x COLLATE NOCASE IS 'a'",
+        "SELECT value FROM items WHERE x COLLATE NOCASE IS ?1",
+        "SELECT value FROM items WHERE x IS NOT 'z'",
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
+            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
+            let parameters: &[&str] = if sql.contains('?') { &["a"] } else { &[] };
+            Ok((
+                run,
+                db.query(sql, rusqlite::params_from_iter(parameters), |r| r.get::<_, i64>(0))?,
+            ))
+        });
+        next(&mut query).await;
+        write(&db, "UPDATE items SET value=value+1 WHERE id=2");
         assert_eq!(next(&mut query).await.0, 2, "{sql}");
     }
     db.close().await.unwrap();

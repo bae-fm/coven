@@ -198,6 +198,11 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
                 parameter(value, bound)
             )
         }
+        RowScope::Null { column, not } => format!(
+            "{qualifier}.{} IS {}NULL",
+            crate::sql::identifier(column),
+            if *not { "NOT " } else { "" }
+        ),
         RowScope::In { values, .. } if values.is_empty() => "0".into(),
         RowScope::In { column, values } => {
             let list: Vec<String> = values.iter().map(|value| parameter(value, bound)).collect();
@@ -225,4 +230,4 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
 
 #[cfg(test)]
 #[path = "scope_lookup_tests.rs"]
-mod tests;
+pub(crate) mod tests;

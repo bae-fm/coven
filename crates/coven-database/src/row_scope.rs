@@ -22,6 +22,11 @@ pub(crate) enum RowScope {
         ordering: Ordering,
         inclusive: bool,
     },
+    /// Rows whose `column` is NULL, or is not NULL when `not`.
+    Null {
+        column: String,
+        not: bool,
+    },
     /// Rows whose `column` equals one of `values`, sorted in SQLite's order
     /// with NULLs and repeats left out: made by [`RowScope::equal`].
     In {
@@ -54,6 +59,9 @@ impl RowScope {
                     compare(actual, value)
                         .is_some_and(|found| found == *ordering || (*inclusive && found.is_eq()))
                 })
+            }
+            Self::Null { column, not } => {
+                row.get(column).is_none_or(|actual| matches!(actual, Value::Null) != *not)
             }
             Self::In { column, values } => row.get(column).is_none_or(|actual| {
                 !matches!(actual, Value::Null)
@@ -111,6 +119,7 @@ impl RowScope {
         match self {
             Self::All => {}
             Self::Compare { column, .. }
+            | Self::Null { column, .. }
             | Self::In { column, .. }
             | Self::Joined { column, .. } => {
                 into.insert(column.clone());
