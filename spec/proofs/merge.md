@@ -1317,3 +1317,24 @@ install must show what its author shows, and running the rules over every row
 must change nothing it left. Without the reference, CHECK or unique seeds it
 fails. The copy of the merge records and the snapshot's soundness are as in
 B11.
+
+### B21 A write that takes a fresh device id
+
+[`Rekey`](merge/CovenMerge/Rekey.lean). A copy that finds another copy using its
+device id takes a fresh id and re-keys its queued writes: each keeps its time and
+counter and carries the fresh device (§19.3). A stamp compares time and counter,
+then device (§7.2).
+
+**Order is kept.** `rekey_keeps_order`: a re-keyed write `q`, which carried `O`,
+compares with every other stamp `u` as before when the fresh id is not `u`'s
+device and, where `u` ties `q` on time and counter, lies on the same side of
+`u`'s device as `O`. `rekey_pair`: two re-keyed writes compare as before.
+`same_order_same_result`: a merged state is the result for a set of writes under
+either of two timestamp assignments that order the writes alike, so every
+generation, cell winner and lost value stays.
+
+**A write landing twice is not harmless.** `twice_landing_records_lost_value`: the
+same insert landing under two write ids, neither having read the other, records
+the first landing's value as lost, replaced by the second's equal value; one
+landing records none. §8.2 as written counts the second landing as a write that
+didn't read the first.

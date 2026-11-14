@@ -47,3 +47,4 @@ import CovenMerge.ReferenceSetters
 import CovenMerge.ForgetEdits
 import CovenMerge.ForgetEntries
 import CovenMerge.Sources
+import CovenMerge.Rekey

@@ -55,6 +55,16 @@ import SequenceApply
 #print axioms CovenSequence.CopyOrder.owed_complete
 #print axioms CovenSequence.ObjectNumbers.burned_number_safe
 #print axioms CovenSequence.ObjectNumbers.keeper_skips_the_restored_copys_body
+#print axioms CovenSequence.Rejoin.reached_keeps_inv
+#print axioms CovenSequence.Rejoin.one_keeper
+#print axioms CovenSequence.Rejoin.foreign_slot_never_applied
+#print axioms CovenSequence.Rejoin.detector_landed_nothing
+#print axioms CovenSequence.Rejoin.detector_queue_unapplied
+#print axioms CovenSequence.Rejoin.detector_sent_all_occupied
+#print axioms CovenSequence.Rejoin.keeper_never_detects
+#print axioms CovenSequence.Rejoin.rejoin_registers
+#print axioms CovenSequence.Rejoin.rejoin_refused_for_removed_member
+#print axioms CovenSequence.Rejoin.restored_copy_finds_keeper
 #print axioms CovenSequence.CopyOrder.reader_holder_sends
 #print axioms CovenSequence.CopyOrder.holders_from_holders
 #print axioms CovenSequence.CopyOrder.no_holder_never_clears

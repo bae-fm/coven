@@ -1769,6 +1769,52 @@ snapshot 5 over Ana's restored phone's body and landing at 6, or at 7 when 6 is
 taken too. The model has no runner: no code computes the numbers beyond a
 counter.
 
+## Two copies of one device id
+
+[`Rejoin`](sequence/CovenSequence/Rejoin.lean). A restored backup and the
+installation it came from sign slots with one device id. The model holds the
+slots signed with the id (slots of other devices are read and applied with no
+effect on any of this) and, for each copy, the slots it applied, its journal of
+attempts (slot, sealed bytes, carried writes), its one open claim, the creates it
+sent, its queue of unsent writes and whether it stopped. A copy follows
+`ClaimJournal`'s rules: it records an attempt before sending it, claims slot
+`applied + 1` with no other claim open, and reads a slot only with no claim open.
+Detection is §5.3's: reading a slot signed with its id whose attempt its journal
+never recorded, or settling a claim and finding other bytes at its slot, stops
+the copy. A stopped copy begins, sends and reads nothing; creates it already sent
+can still land, and the app's new writes still queue. Every attempt's bytes are
+new: no journal holds them when the attempt is recorded.
+
+The copies part at a state where every copy is settled: no claim open, every
+create sent aimed at a taken slot, every attempt landed and applied, every
+carried write out of the queue (`Parted`). A backup taken with a claim open is
+not in this model. `reached_keeps_inv` proves the invariant every reachable state
+keeps; each theorem below reads from it.
+
+- `one_keeper`: of the slots created after the parting, one copy created every
+  one. `foreign_slot_never_applied`: a copy never applies a slot another copy
+  created after the parting, since applying needs the attempt in its own journal
+  and a new attempt is in one journal; so every other copy finds the first such
+  slot before it can land one.
+- `detector_landed_nothing`: a stopped copy created no slot after the parting,
+  and no attempt it recorded since is in any slot, so every write it numbered
+  since is still in its queue.
+- `detector_queue_unapplied`: no queued write of any copy is in the writes of
+  the slots it applied: a write leaves the queue with a claim that landed and was
+  applied, and an applied slot is one of the copy's own attempts, whose writes
+  already left.
+- `detector_sent_all_occupied`: every create a stopped copy sent aims at a slot
+  at or below the head, which is taken, so none can land.
+- `keeper_never_detects`: a copy whose journal holds every slot from before the
+  parting is never stopped once every other copy is.
+- `rejoin_registers`: the fresh id's registration (`addDevice fresh me none`) is
+  valid and binds the id to the member when no applied history names the id and the
+  member's current keys authorize it (`Registration.self_registration_valid`);
+  `rejoin_refused_for_removed_member`: a member no longer in the store is refused,
+  and the copy then reads Removed as today.
+- `restored_copy_finds_keeper`: a restored copy reading slot 1, which the keeper
+  recorded and the restored copy never did, stops with nothing queued lost.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot

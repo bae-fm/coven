@@ -370,3 +370,7 @@ open CovenMerge
 #print axioms CovenMerge.ForgetEntries.land_retains
 #print axioms CovenMerge.Sources.current_run
 #print axioms CovenMerge.Sources.sources_present
+#print axioms CovenMerge.rekey_keeps_order
+#print axioms CovenMerge.rekey_pair
+#print axioms CovenMerge.same_order_same_result
+#print axioms CovenMerge.twice_landing_records_lost_value

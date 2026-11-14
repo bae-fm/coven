@@ -35,6 +35,7 @@ import CovenSequence.KeysExamples
 import CovenSequence.CopyOrder
 import CovenSequence.CopyOrderExamples
 import CovenSequence.ObjectNumbers
+import CovenSequence.Rejoin
 import CovenSequence.KeyCustody
 import CovenSequence.MemberKeyReplacement
 import CovenSequence.Authorship
