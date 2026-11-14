@@ -227,7 +227,18 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     device.handle.test_retry_effect().wait_for(|effect| *effect == RetryEffect::NotSyncing).await;
     // Stopping has not cut the upload in flight: it is still being sent,
     // and stopping waits for it.
-    assert_eq!(device.handle.sync_status().await.unwrap().state, SyncState::Syncing);
+    assert_eq!(
+        device
+            .handle
+            .uploads()
+            .await
+            .unwrap()
+            .files
+            .iter()
+            .map(|file| file.phase.clone())
+            .collect::<Vec<_>>(),
+        [UploadPhase::Uploading]
+    );
     assert!(!stopping.is_finished());
     resume.send(()).unwrap();
     // The release waits for the upload, then drops the provider's client.
@@ -287,9 +298,10 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     network.close().await;
 }
 
-/// One bad photo while the rest syncs leaves the last pass `Synced`, and
-/// its upload's pending record names the state (E5): a provider's refusal
-/// of one subject does not fail the pass.
+/// One bad photo while the rest syncs leaves the last pass `Synced`, and the
+/// state: a photo is a trailing file, so its upload's pending record, which
+/// names storage full, fails the photo's phase and no state (E5, §19.1). A
+/// provider's refusal of one subject does not fail the pass.
 #[tokio::test]
 async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() {
     let network = file_network().await;
@@ -323,9 +335,12 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     insert(&device.handle, "the rest").await;
     let settled = status.wait_for(|s| s.last_synced >= Some(after)).await;
     assert_eq!(device.handle.test_last_pass().latest().await, Some(LastPass::Synced));
+    assert_eq!(settled.state, SyncState::Synced);
+    let phases: Vec<_> =
+        device.handle.uploads().await.unwrap().files.into_iter().map(|file| file.phase).collect();
     assert!(
-        matches!(&settled.state, SyncState::StorageFull(SyncCause::Pending(record)) if refused(std::slice::from_ref(record))),
-        "{settled:?}"
+        matches!(phases.as_slice(), [UploadPhase::Failed(record)] if refused(std::slice::from_ref(record))),
+        "{phases:?}"
     );
     wait_for_sent(&device.handle).await;
     assert!(refused(&device.handle.pending().await.unwrap()));

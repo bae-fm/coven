@@ -327,6 +327,22 @@ impl Database {
         self.subscribe(move |sql| compute(sql.sync_facts()?))
     }
 
+    /// The upload queue with what its uploads' phases are computed from
+    /// (§17.9): the facts the sync state reads, every queued file with its
+    /// recorded provider session, and what is recorded about each upload,
+    /// in one committed snapshot, available while disconnected (E7).
+    pub async fn upload_queue_facts<P, T, E>(
+        &self,
+        compute: impl FnOnce(crate::QueueFacts<P>) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        P: crate::PendingValue + Clone,
+        T: Send + 'static,
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        self.read(move |sql| compute(sql.queue_facts()?)).await
+    }
+
     /// The upload queue, its pause setting and each file's recorded provider
     /// session in one committed snapshot, available while disconnected (E7).
     pub async fn upload_queue(&self) -> Result<crate::UploadQueueState, DbError> {

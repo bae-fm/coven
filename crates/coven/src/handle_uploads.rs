@@ -7,7 +7,7 @@ impl CovenHandle {
     /// committed database snapshot, available while disconnected, with the
     /// files this device is sending now (E7).
     pub async fn uploads(&self) -> CovenResult<UploadQueue> {
-        Ok(self.database.upload_queue().await?.into())
+        Ok(self.database.upload_queue_facts(UploadQueue::from_facts).await?)
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.9). While

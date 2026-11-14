@@ -1,6 +1,6 @@
 /-! The sync state a status screen shows (§19.1, api.md E5 `SyncStatus`), as
 `sync_status()` computes it from `coven_sync_status`'s row, the send queue,
-the upload queue, the transfers in flight and the pending records.
+the upload queue and the pending records.
 
 The state is one flat list, in the order a host lists them: not synced,
 syncing, waiting to sync, synced, offline, offline with unsent changes,
@@ -8,35 +8,32 @@ signed out, no access to storage, storage full, storage folder missing,
 update needed, removed from the store, device needs reset, clock wrong, and
 failed with no named cause. Coven names no words; the host picks them.
 
-Synced means nothing waits: the last pass reached the end of the sequence,
-no write waits in the send queue, and no file of this device's waits to
-upload. A write queued with nothing moving shows waiting to sync, for the
-next pass, which shows syncing as it claims the write's slot. A file
-uploading shows syncing; one queued with nothing moving shows waiting to
-sync, with what it waits for (`SyncWait`); one whose source failed shows
-failed, naming the file.
-
-Coven watches the device's network. With the setting to transfer only on
-unmetered networks on, a metered network holds the uploads the setting holds
-(`Upload.heldOnMetered`): they wait, named `metered`, until the network is
-unmetered or the setting goes off. Which network the device is on changes
-what an upload waits for, never which state shows (`network_keeps_state`).
+Sync is the sequence and the bound files: writes in and out, and the files a
+write waits for (§17.4). Synced means nothing of that waits: the last pass
+reached the end of the sequence, no write waits in the send queue, and no
+bound file of this device's waits to upload. A write queued with nothing
+moving shows waiting to sync, for the next pass, which shows syncing as it
+claims the write's slot. A bound file uploading shows syncing; one queued with
+nothing moving shows waiting to sync, with what it waits for (`SyncWait`); one
+whose source failed shows failed, naming the file. A trailing file, whose
+write goes out first and whose bytes follow, and a download, never reach the
+state: what a trailing file waits for is its own phase (`Transfers`).
 
 The state is computed, never stored, from facts that are each true on their
 own: whether a location is recorded and this device holds credentials for it
 (`Storage`), how the last pass that reached storage ended (`LastPass`),
-whether a running pass has moved a slot (`moving`), whether a file is being
-downloaded (`downloading`), each upload in the queue (`uploads`), whether the
-send queue holds a write (`unsent`), and the pending records. Each fact is a
+whether a running pass has moved a slot (`moving`), each upload in the queue
+(`uploads`, of which the bound ones count), whether the send queue holds a
+write (`unsent`), and the pending records the state reads. Each fact is a
 candidate state or none; when several hold, the state is the one of highest
 rank (`State.rank`). So a write that commits while offline turns Offline into
 Offline with unsent changes in the same transaction, with no step of the
 loop's.
 
 Syncing shows only while something moves: a pass that has read or claimed a
-slot, or a file in flight. A pass that finds nothing writes nothing the state
-reads, so the state doesn't change while it runs, and ends as it was when it
-ends as the last one did (`quiet_pass_keeps`).
+slot, or a bound file in flight. A pass that finds nothing writes nothing the
+state reads, so the state doesn't change while it runs, and ends as it was
+when it ends as the last one did (`quiet_pass_keeps`).
 
 A wait names no failure: a pass held on a key, a snapshot or another
 device's object, a provider's cooldown, a pending invite. Such a pass didn't
@@ -45,26 +42,26 @@ get everything in or out, so it shows waiting to sync, naming what holds it
 (`failed_pass_not_synced`). Nor does it move the time of the last finished
 sync, which only a pass reaching the read end sets. That time is kept across
 every state and every reopen, and never goes backward, even when the clock
-does (`last_synced_never_back`). A wait for an upload names waiting to sync:
-the file is not in storage yet.
+does (`last_synced_never_back`). A wait for a bound upload names waiting to
+sync: the file is not in storage yet.
 
 Proved here: the state is the one candidate no other outranks (`one_state`);
 no storage recorded is not synced, and only that (`not_synced_iff`), while a
 recorded location without credentials is signed out unless the device's own
-standing outranks it (`signed_out_without_credentials`); offline with unsent
-changes holds exactly when the state is offline and a write or an upload is
-queued (`offline_unsent_iff`, `offline_iff`); syncing only while a slot or a
+standing outranks it (`signed_out_without_credentials`); replacing the
+trailing uploads with any others never changes the state
+(`trailing_keeps_state`); offline with unsent changes holds exactly when the
+state is offline and a write or a bound upload is queued
+(`offline_unsent_iff`, `offline_iff`); syncing only while a slot or a bound
 file moves (`syncing_only_moving`); waiting to sync only while nothing moves,
-with a wait to name (`waiting_not_moving`); synced only with every file of
-this device's in storage (`synced_files_stored`) and no write queued
+with a wait to name (`waiting_not_moving`); synced only with every bound file
+of this device's in storage (`synced_bound_stored`) and no write queued
 (`synced_writes_sent`); a file whose source failed shows failed or what
 outranks it (`bad_file_fails`); a quiet pass keeps the state
 (`quiet_pass_keeps`); the time of the last finished sync never goes
 backward and only a pass reaching the read end changes it
 (`last_synced_never_back`, `last_synced_kept`); a pass held back by a wait
-never shows synced (`failed_pass_not_synced`); a metered network with the
-setting on names `metered` for every upload it holds unless something before
-it does, and only then (`metered_holds`, `metered_only_held`). Each pending reason maps to
+never shows synced (`failed_pass_not_synced`). Each pending reason maps to
 one state or none by `Reason.state`, a function; waits map to none
 (`waits_name_no_state`), and a file that can't be uploaded maps to failed
 (`file_failures_name_failed`). -/
@@ -268,7 +265,8 @@ structure Upload where
   deriving DecidableEq, Repr
 
 /-- What waiting to sync waits for: what holds every transfer, the pass's,
-each upload's and a queued write's alike, then what holds one upload. -/
+each bound upload's and a queued write's alike, then what holds one bound
+upload. -/
 inductive SyncWait
   /-- Sync isn't running here. -/
   | notSyncing
@@ -277,11 +275,6 @@ inductive SyncWait
   /-- A slot can't apply yet: nothing goes out or comes in until it does
   (§5.4). -/
   | blocked
-  /-- The app paused uploads, and this one trails. -/
-  | paused
-  /-- The device's network is metered, the setting to transfer only on
-  unmetered networks is on, and the setting holds this upload. -/
-  | metered
   /-- Its last attempt failed; it retries after its backoff. -/
   | retrying
   /-- Its turn hasn't come: an upload's, a write's, or the next pass's once a
@@ -290,16 +283,17 @@ inductive SyncWait
   deriving DecidableEq, Repr
 
 /-- What the state is computed from. `last`, `lastSynced`, `records`, the
-queues and the settings survive reopening; `passing`, `moving`,
-`downloading` and an upload's moving are this process's, and so is
-`metered`, which the process reads from the platform as the store opens and
-whenever the network changes. -/
+queues and the settings survive reopening; `passing`, `moving` and an
+upload's moving are this process's, and so is `metered`, which the process
+reads from the platform as the store opens and whenever the network changes.
+The state reads the bound uploads and not the pause, the network or the
+self-replacement pause, which only a trailing upload waits for (`Transfers`). -/
 structure Facts where
   storage : Storage
   last : LastPass
   passing : Bool
   moving : Bool
-  downloading : Bool
+  /-- This device's uploads, bound and trailing. -/
   uploads : List Upload
   unsent : Bool
   records : List Reason
@@ -307,19 +301,26 @@ structure Facts where
   running : Bool
   /-- A provider cooldown holds every request. -/
   cooling : Bool
-  /-- The app paused uploads. -/
+  /-- The app paused trailing uploads. -/
   paused : Bool
   /-- The setting to transfer only on unmetered networks is on. -/
   unmeteredOnly : Bool
   /-- The platform says the device's network is metered, or failed to
   answer after the store opened, so it may be. -/
   metered : Bool
+  /-- A self-replacement of this member's keys pauses writes (§12.3). -/
+  keysChanging : Bool
   /-- The time of the last pass that reached the read end. -/
   lastSynced : Option Nat
   deriving DecidableEq, Repr
 
-/-- A write or an upload waits to go out. -/
-def Facts.unsentWork (f : Facts) : Bool := f.unsent || !f.uploads.isEmpty
+/-- The uploads the sync state reads: a bound upload holds the writes behind
+it, so sync waits for it (§17.4). -/
+def Facts.bound (f : Facts) : List Upload := f.uploads.filter (·.bound)
+
+/-- A write or a bound upload with bytes to send waits to go out. -/
+def Facts.unsentWork (f : Facts) : Bool :=
+  f.unsent || f.bound.any (fun u => u.progress != .stored)
 
 /-- What the last pass says, with no slot moving: a pass held back by a wait
 waits to sync, since it didn't get everything in or out. -/
@@ -345,9 +346,8 @@ def Upload.candidate (u : Upload) : Option State :=
   | .stored => none
   | .queued => some ((u.record.bind Reason.state).getD .waitingToSync)
 
-/-- The files' candidates: syncing while a download moves, and each upload's. -/
-def Facts.files (f : Facts) : List State :=
-  (if f.downloading then [.syncing] else []) ++ f.uploads.filterMap Upload.candidate
+/-- The files' candidates: each bound upload's. -/
+def Facts.files (f : Facts) : List State := f.bound.filterMap Upload.candidate
 
 /-- The send queue's candidate: a write in it waits to sync. It goes out with
 the next pass, which shows syncing once it claims the write's slot. -/
@@ -381,16 +381,6 @@ def Facts.blocked (f : Facts) : Bool :=
   | .failed (.blocked _) => true
   | _ => false
 
-/-- The uploads the setting to transfer only on unmetered networks holds
-while the network is metered: the trailing ones, as the pause holds them.
-Whether it holds bound ones too is a choice of this one definition. -/
-def Upload.heldOnMetered (u : Upload) : Bool := !u.bound
-
-/-- The setting holds this upload now: it is on, the network is metered,
-and the upload is one it holds. -/
-def Facts.meteredHolds (f : Facts) (u : Upload) : Bool :=
-  f.unmeteredOnly && f.metered && u.heldOnMetered
-
 /-- What holds every transfer, the pass's, each upload's and a queued
 write's alike: sync stopped, a provider's cooldown, or a slot that can't
 apply yet. -/
@@ -405,39 +395,36 @@ once a cooldown that held the last one is over. A pass held back by a wait
 waits for it, and so does a queued write, which goes out with that pass. -/
 def Facts.passWait (f : Facts) : SyncWait := f.heldAll.getD .queued
 
-/-- What one queued upload waits for: what holds every transfer first, then
-what holds this one. The pause comes before the network, which doesn't
-matter while it holds; the network before the backoff, since an upload
-whose backoff ends still can't go out on it. -/
+/-- What one queued bound upload waits for: what holds every transfer first,
+then its backoff. -/
 def Facts.uploadWait (f : Facts) (u : Upload) : SyncWait :=
   match f.heldAll with
   | some w => w
-  | none =>
-      if f.paused && !u.bound then .paused
-      else if f.meteredHolds u then .metered
-      else if u.retrying then .retrying
-      else .queued
+  | none => if u.retrying then .retrying else .queued
 
-/-- What waits to sync, in order: the held-back pass, then each upload
+/-- What waits to sync, in order: the held-back pass, then each bound upload
 waiting to sync, in queue order, then a queued write; waiting to sync names
 the first. -/
 def Facts.waits (f : Facts) : List SyncWait :=
   (if f.loop = .waitingToSync then [f.passWait] else []) ++
-    f.uploads.filterMap (fun u =>
+    f.bound.filterMap (fun u =>
       if u.candidate = some .waitingToSync then some (f.uploadWait u) else none) ++
     (if f.unsent then [f.passWait] else [])
 
-/-- What the state reads; `passing`, the settings, the network and
-`lastSynced` it doesn't. -/
+/-- What the state reads; `passing`, the trailing uploads, the settings, the
+network and `lastSynced` it doesn't. -/
 def Facts.view (f : Facts) :=
-  (f.storage, f.last, f.moving, f.downloading, f.uploads, f.unsent, f.records)
+  (f.storage, f.last, f.moving, f.bound, f.unsent, f.records)
 
 theorem state_view {f g : Facts} (h : f.view = g.view) : state f = state g := by
-  cases f; cases g
   simp only [Facts.view, Prod.mk.injEq] at h
-  obtain ⟨h1, h2, h3, h4, h5, h6, h7⟩ := h
-  subst h1 h2 h3 h4 h5 h6 h7
-  rfl
+  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
+  have hu : f.unsentWork = g.unsentWork := by simp [Facts.unsentWork, h4, h5]
+  have he : f.ended = g.ended := by simp [Facts.ended, hu, h2]
+  have hl : f.loop = g.loop := by simp [Facts.loop, he, h3]
+  have hr : f.rest = g.rest := by
+    simp [Facts.rest, Facts.files, Facts.writes, Facts.others, h1, h4, h5, h6]
+  simp [state, hl, hr, h1]
 
 /-! ## What each source can name -/
 
@@ -537,10 +524,7 @@ theorem rest_kind (f : Facts) (s : State) (h : s ∈ f.rest) :
     s = .syncing ∨ s = .waitingToSync ∨ s.named = true := by
   simp only [Facts.rest, Facts.files, Facts.writes, Facts.others, List.mem_append,
     List.mem_filterMap] at h
-  rcases h with ((down | ⟨u, _, hu⟩) | write) | (signed | ⟨r, _, named⟩)
-  · split at down
-    · simp at down; exact .inl down
-    · simp at down
+  rcases h with (⟨u, _, hu⟩ | write) | (signed | ⟨r, _, named⟩)
   · exact candidate_kind u s hu
   · split at write
     · simp at write; exact .inr (.inl write)
@@ -694,7 +678,7 @@ theorem offline_iff (f : Facts) (recorded : f.storage ≠ .none)
 /-! ## Syncing, waiting and synced -/
 
 theorem syncing_only_moving (f : Facts) (h : state f = .syncing) :
-    f.moving = true ∨ f.downloading = true ∨ ∃ u ∈ f.uploads, u.progress = .moving := by
+    f.moving = true ∨ ∃ u ∈ f.bound, u.progress = .moving := by
   have recorded := recorded_of f _ h (by simp)
   have ⟨mem, _, _⟩ := one_state f recorded
   rw [h] at mem
@@ -706,11 +690,8 @@ theorem syncing_only_moving (f : Facts) (h : state f = .syncing) :
     · rw [← e] at l; rcases ended_kind f with k | k | k | k | k <;> rw [← l] at k <;> cases k
   · simp only [Facts.rest, Facts.files, Facts.writes, Facts.others, List.mem_append,
       List.mem_filterMap] at m
-    rcases m with ((down | ⟨u, mu, hu⟩) | write) | (signed | ⟨r, _, named⟩)
-    · split at down
-      · rename_i d; exact .inr (.inl d)
-      · simp at down
-    · refine .inr (.inr ⟨u, mu, ?_⟩)
+    rcases m with (⟨u, mu, hu⟩ | write) | (signed | ⟨r, _, named⟩)
+    · refine .inr ⟨u, mu, ?_⟩
       unfold Upload.candidate at hu
       split at hu
       · rename_i p; exact p
@@ -731,19 +712,17 @@ theorem syncing_only_moving (f : Facts) (h : state f = .syncing) :
 a wait: the held-back pass's, else the first waiting upload's, else a queued
 write's. -/
 theorem waiting_not_moving (f : Facts) (h : state f = .waitingToSync) :
-    f.waits ≠ [] ∧ f.moving = false ∧ f.downloading = false ∧
-      ∀ u ∈ f.uploads, u.progress ≠ .moving := by
+    f.waits ≠ [] ∧ f.moving = false ∧ ∀ u ∈ f.bound, u.progress ≠ .moving := by
   have recorded := recorded_of f _ h (by simp)
   have ⟨mem, highest, _⟩ := one_state f recorded
   rw [h] at mem highest
-  refine ⟨?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_⟩
   · rcases List.mem_cons.mp mem with e | m
     · intro empty
       simp [Facts.waits, ← e] at empty
     · simp only [Facts.rest, Facts.files, Facts.writes, Facts.others, List.mem_append,
         List.mem_filterMap] at m
-      rcases m with ((down | ⟨u, mu, hu⟩) | write) | (signed | ⟨r, _, named⟩)
-      · split at down <;> simp at down
+      rcases m with (⟨u, mu, hu⟩ | write) | (signed | ⟨r, _, named⟩)
       · intro empty
         have : f.uploadWait u ∈ f.waits := by
           simp only [Facts.waits, List.mem_append, List.mem_filterMap]
@@ -758,20 +737,16 @@ theorem waiting_not_moving (f : Facts) (h : state f = .waitingToSync) :
     · rfl
     · have := highest f.loop (List.mem_cons_self ..)
       simp [Facts.loop, mv, State.rank] at this
-  · cases d : f.downloading
-    · rfl
-    · have := highest .syncing (List.mem_cons_of_mem _ (by simp [Facts.rest, Facts.files, d]))
-      simp [State.rank] at this
   · intro u mu mv
     have := highest .syncing (List.mem_cons_of_mem _ (by
       simp only [Facts.rest, Facts.files, List.mem_append, List.mem_filterMap]
-      exact .inl (.inl (.inr ⟨u, mu, by simp [Upload.candidate, mv]⟩))))
+      exact .inl (.inl ⟨u, mu, by simp [Upload.candidate, mv]⟩)))
     simp [State.rank] at this
 
-/-- Synced shows only when every upload of this device's has its bytes in
-storage: none is moving, queued or failed. -/
-theorem synced_files_stored (f : Facts) (h : state f = .synced) :
-    ∀ u ∈ f.uploads, u.progress = .stored := by
+/-- Synced shows only when every bound upload of this device's has its bytes
+in storage: none is moving, queued or failed. -/
+theorem synced_bound_stored (f : Facts) (h : state f = .synced) :
+    ∀ u ∈ f.bound, u.progress = .stored := by
   have recorded := recorded_of f _ h (by simp)
   have ⟨_, highest, _⟩ := one_state f recorded
   rw [h] at highest
@@ -781,7 +756,7 @@ theorem synced_files_stored (f : Facts) (h : state f = .synced) :
   | moving =>
       have := highest .syncing (List.mem_cons_of_mem _ (by
         simp only [Facts.rest, Facts.files, List.mem_append, List.mem_filterMap]
-        exact .inl (.inl (.inr ⟨u, mu, by simp [Upload.candidate, p]⟩))))
+        exact .inl (.inl ⟨u, mu, by simp [Upload.candidate, p]⟩)))
       simp [State.rank] at this
   | queued =>
       cases hc : u.candidate with
@@ -789,7 +764,7 @@ theorem synced_files_stored (f : Facts) (h : state f = .synced) :
       | some s =>
           have := highest s (List.mem_cons_of_mem _ (by
             simp only [Facts.rest, Facts.files, List.mem_append, List.mem_filterMap]
-            exact .inl (.inl (.inr ⟨u, mu, hc⟩))))
+            exact .inl (.inl ⟨u, mu, hc⟩)))
           rcases candidate_kind u s hc with e | e | n
           · subst e; simp [State.rank] at this
           · subst e; simp [State.rank] at this
@@ -828,8 +803,6 @@ inductive Event
   | move
   /-- The running pass ends, at the store clock's `now`. -/
   | finish (last : LastPass) (now : Nat)
-  /-- A download starts or stops moving. -/
-  | download (moving : Bool)
   /-- The upload queue changes: a file queued, an attempt starting or ending,
   a file stored or retired. -/
   | uploads (us : List Upload)
@@ -853,6 +826,9 @@ inductive Event
   /-- The platform says the device's network is now metered, or not, or
   fails to answer, which counts as metered. -/
   | network (metered : Bool)
+  /-- A self-replacement of this member's keys starts or ends its write
+  pause (§12.3). -/
+  | keysChanging (changing : Bool)
   /-- The process ends and the store opens again. -/
   | reopen
   deriving DecidableEq, Repr
@@ -875,7 +851,6 @@ def step (f : Facts) : Event → Option Facts
                       lastSynced := if last = .synced then some (later f.lastSynced now)
                                     else f.lastSynced }
       else none
-  | .download m => some { f with downloading := m }
   | .uploads us => some { f with uploads := us }
   | .queue u => some { f with unsent := u }
   | .pending rs => some { f with records := rs }
@@ -887,8 +862,9 @@ def step (f : Facts) : Event → Option Facts
   | .halt p => some { f with passing := false, moving := false, last := .failed p, running := false }
   | .settings r c p m => some { f with running := r, cooling := c, paused := p, unmeteredOnly := m }
   | .network m => some { f with metered := m }
+  | .keysChanging c => some { f with keysChanging := c }
   | .reopen =>
-      some { f with passing := false, moving := false, downloading := false,
+      some { f with passing := false, moving := false,
                     uploads := f.uploads.map Upload.reopened, running := false,
                     cooling := false }
 
@@ -904,10 +880,10 @@ theorem quiet_pass_keeps (f : Facts) (idle : f.passing = false) (still : f.movin
       (run f [.begin, .finish f.last now]).map state = some (state f) := by
   constructor
   · simp only [step, idle, Bool.false_eq_true, ite_false, Option.map_some, Option.some.injEq]
-    exact state_view (by simp [Facts.view, still])
+    exact state_view (by simp [Facts.view, Facts.bound, still])
   · simp only [run, step, idle, Bool.false_eq_true, ite_false, ite_true, Option.bind_some,
       Option.map_some, Option.some.injEq]
-    exact state_view (by simp [Facts.view, still])
+    exact state_view (by simp [Facts.view, Facts.bound, still])
 
 /-- The time of the last finished sync never goes backward, whatever the
 clock says. -/
@@ -1074,39 +1050,14 @@ theorem waiting_pass_waits (f : Facts) (r : Reason) (wait : r.state = none) :
       ({ f with last := .failed (.storage .rateLimited) } : Facts).ended = .waitingToSync := by
   simp [Facts.ended, PassFailure.state, wait, Failure.named]
 
-/-! ## Waiting for an unmetered network -/
-
-/-- With the setting on and the network metered, an upload the setting holds
-waits for what holds every upload, for the pause, or for the network: never
-for its backoff or its turn. -/
-theorem metered_holds (f : Facts) (u : Upload) (on : f.unmeteredOnly = true)
-    (metered : f.metered = true) (held : u.heldOnMetered = true) :
-    f.uploadWait u ≠ .retrying ∧ f.uploadWait u ≠ .queued := by
-  have hm : f.meteredHolds u = true := by simp [Facts.meteredHolds, on, metered, held]
-  unfold Facts.uploadWait Facts.heldAll
-  by_cases r : f.running = true <;> by_cases c : f.cooling = true <;>
-    by_cases b : f.blocked = true <;> by_cases p : (f.paused && !u.bound) = true <;>
-    simp [r, c, b, p, hm]
-
-/-- An upload waits for the network only while the setting is on, the
-network is metered and the setting holds it. -/
-theorem metered_only_held (f : Facts) (u : Upload) (h : f.uploadWait u = .metered) :
-    f.unmeteredOnly = true ∧ f.metered = true ∧ u.heldOnMetered = true := by
-  have hm : f.meteredHolds u = true := by
-    apply Classical.byContradiction
-    intro hm
-    unfold Facts.uploadWait Facts.heldAll at h
-    by_cases r : f.running = true <;> by_cases c : f.cooling = true <;>
-      by_cases b : f.blocked = true <;> by_cases p : (f.paused && !u.bound) = true <;>
-      by_cases t : u.retrying = true <;> simp [r, c, b, p, hm, t] at h
-  simpa [Facts.meteredHolds, Bool.and_eq_true, and_assoc] using hm
+/-! ## The network -/
 
 /-- A change of network never changes which state shows, only what a
-waiting upload waits for: the state doesn't read it. -/
+waiting trailing upload waits for: the state doesn't read it. -/
 theorem network_keeps_state (f : Facts) (m : Bool) :
     (step f (.network m)).map state = some (state f) := by
   simp only [step, Option.map_some, Option.some.injEq]
-  exact state_view (by simp [Facts.view])
+  exact state_view (by simp [Facts.view, Facts.bound])
 
 /-! ## Workers ending, and storage set up -/
 
@@ -1169,10 +1120,14 @@ theorem failed_worker_shows (f g : Facts) (p : PassFailure) (s : State)
 namespace Examples
 
 def connected : Facts :=
-  ⟨.connected, .synced, false, false, false, [], false, [], true, false, false, false, false,
+  ⟨.connected, .synced, false, false, [], false, [], true, false, false, false, false, false,
     some 100⟩
 
-def photo (progress : Progress) : Upload := ⟨progress, false, false, none⟩
+/-- A cover a write holds back, which the write waits for. -/
+def cover (progress : Progress) : Upload := ⟨progress, true, false, none⟩
+
+/-- A track whose write went out first, which its bytes follow. -/
+def track (progress : Progress) : Upload := ⟨progress, false, false, none⟩
 
 /-- Ana's laptop is synced; a pass at 130 finds nothing: synced all along,
 last synced at 130. -/
@@ -1206,15 +1161,18 @@ example : (run { connected with storage := .none, lastSynced := none }
     [.queue true, .storage .connected (some 120)]).map (fun f => (state f, f.waits)) =
     some (.waitingToSync, [.queued]) := by decide
 
-/-- Carol's note waits beside her photo with uploads paused: the photo's wait
-shows. -/
-example : (run connected [.settings true false true false, .uploads [photo .queued],
+/-- Carol's note waits beside her track with uploads paused: the pause never
+reaches the state, so the note's own wait shows. -/
+example : (run connected [.settings true false true false, .uploads [track .queued],
     .queue true]).map (fun f => (state f, f.waits)) =
-    some (.waitingToSync, [.paused, .queued]) := by decide
+    some (.waitingToSync, [.queued]) := by decide
 
-/-- Ben takes a photo while offline: its queued upload is unsent too. -/
-example : (run connected [.begin, .finish (.failed .offline) 140, .uploads [photo .queued]]).map
+/-- Ben takes a photo while offline: its queued upload is unsent too, if a
+write waits for it. A track queued after its write went out is not. -/
+example : (run connected [.begin, .finish (.failed .offline) 140, .uploads [cover .queued]]).map
     state = some .offlineUnsent := by decide
+example : (run connected [.begin, .finish (.failed .offline) 140, .uploads [track .queued]]).map
+    state = some .offline := by decide
 
 /-- Ana's phone reads a slot sealed with a key her laptop hasn't delivered
 yet: with nothing of hers queued, she waits to sync, on the slot, not
@@ -1228,35 +1186,26 @@ example : (run connected [.settings true true false false, .begin,
 example : (run connected [.begin, .finish (.failed (.storage .rateLimited)) 150]).map
     (fun f => (state f, f.waits)) = some (.waitingToSync, [.queued]) := by decide
 
-/-- Carol's photo uploads: syncing while it moves, waiting to sync once she
-pauses uploads with it queued, and synced only once it is stored. -/
-example : (run connected [.uploads [photo .moving]]).map state = some .syncing := by decide
-example : (run connected [.settings true false true false, .uploads [photo .queued]]).map
-    (fun f => (state f, f.waits)) = some (.waitingToSync, [.paused]) := by decide
-example : (run connected [.uploads [photo .stored]]).map state = some .synced := by decide
+/-- Carol's cover uploads: syncing while it moves, and synced only once it is
+stored. Her track never shows: not moving, queued, paused or failed. -/
+example : (run connected [.uploads [cover .moving]]).map state = some .syncing := by decide
+example : (run connected [.uploads [cover .stored]]).map state = some .synced := by decide
+example : (run connected [.uploads [track .moving]]).map state = some .synced := by decide
+example : (run connected [.settings true false true false, .uploads [track .queued]]).map
+    state = some .synced := by decide
 
-/-- Ben's phone transfers only on unmetered networks. On cellular his photo
-waits for Wi-Fi, even once a failed attempt's backoff ends; on Wi-Fi it waits
-only its turn. A bound upload, the setting doesn't hold. -/
-example : (run connected [.settings true false false true, .network true,
-    .uploads [⟨.queued, false, true, none⟩]]).map (fun f => (state f, f.waits)) =
-    some (.waitingToSync, [.metered]) := by decide
-example : (run connected [.settings true false false true, .network true, .network false,
-    .uploads [photo .queued]]).map (fun f => (state f, f.waits)) =
-    some (.waitingToSync, [.queued]) := by decide
-example : (run connected [.settings true false false true, .network true,
-    .uploads [⟨.queued, true, false, none⟩]]).map (fun f => f.waits) =
-    some [.queued] := by decide
-
-/-- Ben's photo upload got a server error and waits out its backoff: waiting
+/-- Ben's cover upload got a server error and waits out its backoff: waiting
 to sync, retrying; the server error itself names nothing. -/
-example : (run connected [.uploads [⟨.queued, false, true, some (.storage .network true)⟩]]).map
+example : (run connected [.uploads [⟨.queued, true, true, some (.storage .network true)⟩]]).map
     (fun f => (state f, f.waits)) = some (.waitingToSync, [.retrying]) := by decide
 
-/-- Dan unplugs the drive holding a track his move uploads: failed, naming
-the file, until the drive is back and the track uploads. -/
-example : (run connected [.uploads [⟨.queued, false, true, none⟩], .pending [.originalMissing]]).map
+/-- Dan unplugs the drive holding a track his move uploads: the state stays
+synced, and the track's phase says failed (`Transfers`). A cover whose original
+is missing holds its write, so the state shows failed. -/
+example : (run connected [.uploads [⟨.queued, true, true, none⟩], .pending [.originalMissing]]).map
     state = some .failed := by decide
+example : (run connected [.uploads [⟨.queued, false, true, some .originalMissing⟩]]).map
+    state = some .synced := by decide
 
 /-- Carol's upload meets a full Dropbox while the pass syncs: storage full. -/
 example : (run connected [.pending [.storage .quotaExceeded true]]).map state =
@@ -1275,10 +1224,10 @@ and sync stops. -/
 example : (run connected [.begin, .move, .halt .other]).map (fun f => (state f, f.running)) =
     some (.failed, false) := by decide
 
-/-- Carol's upload worker panics while her photo uploads: failed, and the
-photo waits with sync not running. -/
-example : (run connected [.uploads [photo .moving], .halt .other, .uploads [photo .queued]]).map
-    (fun f => (state f, f.uploads.map f.uploadWait)) = some (.failed, [.notSyncing]) := by decide
+/-- Carol's upload worker panics while her cover uploads: failed, and the
+cover waits with sync not running. -/
+example : (run connected [.uploads [cover .moving], .halt .other, .uploads [cover .queued]]).map
+    (fun f => (state f, f.bound.map f.uploadWait)) = some (.failed, [.notSyncing]) := by decide
 
 /-- Ana's pending invite waits for Dan's request: no state of its own. -/
 example : (run connected [.pending [.missing, .paused]]).map state = some .synced := by decide

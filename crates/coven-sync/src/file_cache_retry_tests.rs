@@ -126,3 +126,33 @@ async fn io_differential_read_settles() {
     }
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
+
+/// A pin's failed download belongs to the file's transfers, not to sync: a
+/// download's record that names a state of its own, as a full disk does,
+/// leaves the sync state as it was (§19.1).
+#[tokio::test]
+async fn a_pins_failed_download_names_no_sync_state() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("pinned", vec![23; CHUNK]).await;
+    f.files.stop_background_for_counts().await;
+    let location = f.location(&file).await;
+    f.files
+        .inner
+        .database
+        .fail_download(crate::PendingRecord::new(
+            crate::PendingSubject::Download {
+                device: location.uploader(),
+                object: location.object(),
+            },
+            crate::PendingReason::Failed(crate::LocalFailure::DiskFull),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(file_pending(&f).await.len(), 1);
+    let status = crate::sync_status(&f.database).await.unwrap();
+    assert!(
+        !matches!(status.state, crate::SyncState::Failed(_)),
+        "a download's record names a state of sync: {status:?}"
+    );
+    f.close().await;
+}

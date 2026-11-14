@@ -3,6 +3,7 @@ use crate::{
     DeviceIdEvidence, FileMissingReason, FileSourceFailure, Prerequisite, ProviderAccessAction,
     Refusal, RequiredUpdate,
 };
+use crate::{PendingSubject, UploadPhase, UploadWait};
 use coven_database::{EntryTarget, OperationRejection, WriteCutoff};
 use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
 use coven_merge::slot;
@@ -262,6 +263,40 @@ fn passes() -> Vec<Option<LastPass>> {
     passes
 }
 
+/// Trailing uploads of every progress, with and without a backoff, and with
+/// no record, one that names a state and one that names none.
+fn trailing_uploads() -> Vec<Upload> {
+    let missing = upload_record(
+        90,
+        PendingReason::Original {
+            path: "/Volumes/Drive/track.flac".into(),
+            failure: FileSourceFailure::Missing,
+        },
+    );
+    let network = upload_record(
+        91,
+        PendingReason::Storage {
+            provider: CloudProvider::S3,
+            failure: StorageFailure::Network,
+            answered: true,
+        },
+    );
+    let mut uploads = Vec::new();
+    for progress in [Progress::Moving, Progress::Stored, Progress::Queued] {
+        for retrying in [false, true] {
+            for record in [None, Some(missing.clone()), Some(network.clone())] {
+                uploads.push(Upload {
+                    progress,
+                    bound: false,
+                    retry_at: retrying.then_some(UNIX_EPOCH + Duration::from_secs(9)),
+                    record,
+                });
+            }
+        }
+    }
+    uploads
+}
+
 /// The model's encoding of how the last pass ended; none counts as synced.
 #[deny(clippy::wildcard_enum_match_arm)]
 fn pass_json(last: &Option<LastPass>) -> Value {
@@ -308,10 +343,33 @@ fn wait_name(wait: SyncWait) -> &'static str {
         SyncWait::NotSyncing => "notSyncing",
         SyncWait::CoolingDown { .. } => "coolingDown",
         SyncWait::Blocked => "blocked",
-        SyncWait::Paused => "paused",
-        SyncWait::Metered => "metered",
         SyncWait::Retrying { .. } => "retrying",
         SyncWait::Queued => "queued",
+    }
+}
+
+#[deny(clippy::wildcard_enum_match_arm)]
+fn upload_wait_name(wait: UploadWait) -> &'static str {
+    match wait {
+        UploadWait::NotSyncing => "notSyncing",
+        UploadWait::CoolingDown { .. } => "coolingDown",
+        UploadWait::Sync => "sync",
+        UploadWait::Paused => "paused",
+        UploadWait::Metered => "metered",
+        UploadWait::KeysChanging => "keysChanging",
+        UploadWait::Retrying { .. } => "retrying",
+        UploadWait::Queued => "queued",
+    }
+}
+
+/// The model's encoding of an upload's phase.
+#[deny(clippy::wildcard_enum_match_arm)]
+fn phase_json(phase: &UploadPhase) -> Value {
+    match phase {
+        UploadPhase::Uploading => json!({"phase": "uploading", "wait": null}),
+        UploadPhase::Stored => json!({"phase": "stored", "wait": null}),
+        UploadPhase::Failed(_) => json!({"phase": "failed", "wait": null}),
+        UploadPhase::Waiting(wait) => json!({"phase": "waiting", "wait": upload_wait_name(*wait)}),
     }
 }
 
@@ -320,7 +378,6 @@ fn connected() -> Facts {
         location: RecordedLocation::Connected(CloudProvider::S3),
         last: None,
         moving: false,
-        downloading: false,
         uploads: Vec::new(),
         queued: false,
         unsent: false,
@@ -329,19 +386,38 @@ fn connected() -> Facts {
         paused: false,
         unmetered_only: false,
         metered: false,
+        keys_changing: false,
     }
 }
 
+/// A bound upload: the state reads these.
 fn upload(progress: Progress) -> Upload {
-    Upload { progress, bound: false, retry_at: None, record: None }
+    Upload { progress, bound: true, retry_at: None, record: None }
 }
 
 fn offline() -> Option<LastPass> {
     Some(LastPass::Offline { failure: StorageFailure::Network, error: "offline".into() })
 }
 
-/// The model's encoding of `facts`.
-fn facts_json(facts: &Facts) -> Value {
+fn upload_json(upload: &Upload) -> Value {
+    let progress = match upload.progress {
+        Progress::Moving => "moving",
+        Progress::Stored => "stored",
+        Progress::Queued => "queued",
+    };
+    let record = upload.record.as_ref().map_or(Value::Null, |record| reason_json(&record.reason));
+    json!({
+        "progress": progress,
+        "bound": upload.bound,
+        "retrying": upload.retry_at.is_some(),
+        "record": record,
+    })
+}
+
+/// The model's encoding of `facts`, with `trailing` uploads beside the bound
+/// ones the facts hold: the database reads none for the state, and the model
+/// says they change nothing it shows (`trailing_keeps_state`).
+fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
     let storage = match facts.location {
         RecordedLocation::None => "none",
         RecordedLocation::SignedOut(_) => "signedOut",
@@ -351,25 +427,7 @@ fn facts_json(facts: &Facts) -> Value {
         RetrySync::Stopped => (false, false),
         RetrySync::Started { cooling_until } => (true, cooling_until.is_some()),
     };
-    let uploads: Vec<Value> = facts
-        .uploads
-        .iter()
-        .map(|upload| {
-            let progress = match upload.progress {
-                Progress::Moving => "moving",
-                Progress::Stored => "stored",
-                Progress::Queued => "queued",
-            };
-            let record =
-                upload.record.as_ref().map_or(Value::Null, |record| reason_json(&record.reason));
-            json!({
-                "progress": progress,
-                "bound": upload.bound,
-                "retrying": upload.retry_at.is_some(),
-                "record": record,
-            })
-        })
-        .collect();
+    let uploads: Vec<Value> = trailing.iter().chain(&facts.uploads).map(upload_json).collect();
     let records: Vec<Value> =
         facts.records.iter().map(|record| reason_json(&record.reason)).collect();
     json!({
@@ -377,7 +435,6 @@ fn facts_json(facts: &Facts) -> Value {
         "storage": storage,
         "last": pass_json(&facts.last),
         "moving": facts.moving,
-        "downloading": facts.downloading,
         "uploads": uploads,
         "unsent": facts.unsent,
         "running": running,
@@ -385,6 +442,7 @@ fn facts_json(facts: &Facts) -> Value {
         "paused": facts.paused,
         "unmeteredOnly": facts.unmetered_only,
         "metered": facts.metered,
+        "keysChanging": facts.keys_changing,
         "records": records,
     })
 }
@@ -402,13 +460,13 @@ fn shown(facts: &Facts) -> Value {
 /// Every set of facts the differential test compares: each pass of every
 /// kind with a write queued, a stored file, both or neither; each reason as
 /// a record, as a queued upload's record with and without the record in the
-/// list, and beside a location with no credentials; every location, moving,
-/// download and upload progress combination, offline; and queued uploads
-/// under every wait, one alone or two after a stored one, so the first
-/// waiting one names the wait, with the setting to move files only on
-/// unmetered networks on or off and the network metered or not, with a write
-/// queued beside them or not; and a pass held at a slot or by a cooldown,
-/// with nothing queued, and a write queued alone, under each way sync can be
+/// list, and beside a location with no credentials; every location, moving
+/// and upload progress combination, offline; and queued bound uploads under
+/// every wait, one alone or two after a stored one, so the first waiting one
+/// names the wait, with the pause, the setting to move files only on
+/// unmetered networks and the network set any way, with a write queued
+/// beside them or not; and a pass held at a slot or by a cooldown, with
+/// nothing queued, and a write queued alone, under each way sync can be
 /// held.
 fn cases() -> Vec<Facts> {
     let mut cases = Vec::new();
@@ -442,19 +500,16 @@ fn cases() -> Vec<Facts> {
         RecordedLocation::Connected(CloudProvider::CloudKit),
     ] {
         for moving in [false, true] {
-            for downloading in [false, true] {
-                for progress in
-                    [None, Some(Progress::Moving), Some(Progress::Stored), Some(Progress::Queued)]
-                {
-                    cases.push(Facts {
-                        location,
-                        moving,
-                        downloading,
-                        uploads: progress.map(upload).into_iter().collect(),
-                        last: offline(),
-                        ..connected()
-                    });
-                }
+            for progress in
+                [None, Some(Progress::Moving), Some(Progress::Stored), Some(Progress::Queued)]
+            {
+                cases.push(Facts {
+                    location,
+                    moving,
+                    uploads: progress.map(upload).into_iter().collect(),
+                    last: offline(),
+                    ..connected()
+                });
             }
         }
     }
@@ -481,34 +536,30 @@ fn cases() -> Vec<Facts> {
                 (false, true, true),
                 (true, true, true),
             ] {
-                for bound in [false, true] {
-                    for retrying in [false, true] {
-                        let mut first = upload(Progress::Queued);
-                        first.bound = bound;
-                        first.retry_at = retrying.then_some(UNIX_EPOCH + Duration::from_secs(9));
-                        let mut second = upload(Progress::Queued);
-                        second.bound = true;
-                        for uploads in
-                            [vec![first.clone()], vec![upload(Progress::Stored), first, second]]
-                        {
-                            cases.push(Facts {
-                                sync,
-                                last: last.clone(),
-                                unsent,
-                                paused,
-                                unmetered_only,
-                                metered,
-                                uploads,
-                                ..connected()
-                            });
-                        }
+                for retrying in [false, true] {
+                    let mut first = upload(Progress::Queued);
+                    first.retry_at = retrying.then_some(UNIX_EPOCH + Duration::from_secs(9));
+                    let second = upload(Progress::Queued);
+                    for uploads in
+                        [vec![first.clone()], vec![upload(Progress::Stored), first, second]]
+                    {
+                        cases.push(Facts {
+                            sync,
+                            last: last.clone(),
+                            unsent,
+                            paused,
+                            unmetered_only,
+                            metered,
+                            uploads,
+                            ..connected()
+                        });
                     }
                 }
             }
         }
     }
     for case in &mut cases {
-        case.queued = !case.uploads.is_empty();
+        case.queued = case.uploads.iter().any(|upload| upload.progress != Progress::Stored);
     }
     cases
 }
@@ -516,12 +567,16 @@ fn cases() -> Vec<Facts> {
 /// The computed state agrees with the Lean model's `state`, and waiting to
 /// sync names the wait its `waits` lists first, for every pending reason,
 /// every provider failure, every way a pass ends, and upload and wait
-/// combinations (§19.1, proofs/io.md).
+/// combinations (§19.1, proofs/io.md). The model is also given trailing
+/// uploads of every progress, retry and record beside each case's bound
+/// ones, which coven never reads for the state: they change nothing it
+/// shows (`trailing_keeps_state`).
 #[test]
 #[ignore = "requires COVEN_IO_LEAN"]
 fn io_differential_sync_state() {
     let cases = cases();
-    let inputs: Vec<Value> = cases.iter().map(facts_json).collect();
+    let trailing = trailing_uploads();
+    let inputs: Vec<Value> = cases.iter().map(|facts| facts_json(facts, &trailing)).collect();
     let actual: Vec<Value> = cases.iter().map(shown).collect();
     let expected = crate::tests::io_runner(&inputs);
     assert_eq!(actual.len(), expected.len());
@@ -592,8 +647,8 @@ fn the_cause_is_the_pass_then_the_first_record() {
     );
 }
 
-/// Waiting to sync names what holds the first waiting upload with its time:
-/// a cooldown's end, or the upload's own retry (§19.1).
+/// Waiting to sync names what holds the first waiting bound upload with its
+/// time: a cooldown's end, or the upload's own retry (§19.1).
 #[test]
 fn a_wait_carries_its_time() {
     let until = UNIX_EPOCH + Duration::from_secs(60);
@@ -635,7 +690,7 @@ fn a_waiting_pass_is_never_synced() {
 /// Synced means nothing waits, writes included. A write in the send queue,
 /// with nothing moving and the last pass synced or none ended here yet,
 /// waits to sync: for what holds every transfer, else its turn. A queued
-/// upload's wait comes before the write's (§19.1).
+/// bound upload's wait comes before the write's (§19.1).
 #[test]
 fn a_queued_write_is_never_synced() {
     let until = UNIX_EPOCH + Duration::from_secs(60);
@@ -650,6 +705,8 @@ fn a_queued_write_is_never_synced() {
             shown(RetrySync::Started { cooling_until: Some(until) }),
             SyncState::WaitingToSync(SyncWait::CoolingDown { until })
         );
+        // The pause holds trailing uploads only, which the state never
+        // reads: a write beside a paused bound upload waits for its turn.
         let paused = Facts {
             last: last.clone(),
             unsent: true,
@@ -658,7 +715,7 @@ fn a_queued_write_is_never_synced() {
             queued: true,
             ..connected()
         };
-        assert_eq!(paused.state(), SyncState::WaitingToSync(SyncWait::Paused));
+        assert_eq!(paused.state(), SyncState::WaitingToSync(SyncWait::Queued));
         let moving = Facts { last: last.clone(), unsent: true, moving: true, ..connected() };
         assert_eq!(moving.state(), SyncState::Syncing);
     }
@@ -700,9 +757,9 @@ fn reduced(queue: &[Upload]) -> Vec<Upload> {
 }
 
 /// The state from the reduced uploads equals the state from the whole queue,
-/// for every queue of up to three uploads over every progress, bound, retry
+/// for every queue of up to three bound uploads over every progress, retry
 /// and record (none, one that names a state, one that names none), under
-/// each pause, metered and download setting and each way the last pass ended.
+/// each way the last pass ended.
 #[test]
 fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
     let at = |n: u64| UNIX_EPOCH + Duration::from_secs(n);
@@ -718,11 +775,9 @@ fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
     ];
     let mut alphabet = Vec::new();
     for progress in [Progress::Moving, Progress::Stored, Progress::Queued] {
-        for bound in [false, true] {
-            for retrying in [false, true] {
-                for record in [None, Some(0), Some(1), Some(2)] {
-                    alphabet.push((progress, bound, retrying, record));
-                }
+        for retrying in [false, true] {
+            for record in [None, Some(0), Some(1), Some(2)] {
+                alphabet.push((progress, retrying, record));
             }
         }
     }
@@ -730,10 +785,10 @@ fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
         (0_u64..)
             .zip(picks)
             .map(|(n, pick)| {
-                let (progress, bound, retrying, record) = alphabet[*pick];
+                let (progress, retrying, record) = alphabet[*pick];
                 Upload {
                     progress,
-                    bound,
+                    bound: true,
                     retry_at: retrying.then(|| at(10 + n)),
                     record: record.map(|kind| upload_record(n.into(), kinds[kind].clone())),
                 }
@@ -750,35 +805,25 @@ fn the_reduced_uploads_show_the_state_of_the_whole_queue() {
             }
         }
     }
-    let settings =
-        [(false, false, false), (true, false, false), (false, true, true), (true, true, true)];
     let lasts = [None, offline()];
     for picks in &queues {
         let queue = build(picks);
-        for (paused, unmetered_only, metered) in settings {
-            for last in &lasts {
-                for downloading in [false, true] {
-                    let whole = Facts {
-                        last: last.clone(),
-                        downloading,
-                        paused,
-                        unmetered_only,
-                        metered,
-                        uploads: queue.clone(),
-                        queued: !queue.is_empty(),
-                        ..connected()
-                    };
-                    let kept = Facts { uploads: reduced(&queue), ..whole.clone() };
-                    assert_eq!(kept.state(), whole.state(), "{queue:?} {paused} {metered}");
-                }
-            }
+        for last in &lasts {
+            let whole = Facts {
+                last: last.clone(),
+                uploads: queue.clone(),
+                queued: queue.iter().any(|upload| upload.progress != Progress::Stored),
+                ..connected()
+            };
+            let kept = Facts { uploads: reduced(&queue), ..whole.clone() };
+            assert_eq!(kept.state(), whole.state(), "{queue:?}");
         }
     }
 }
 
 /// A closed store's state is the one opening shows before sync starts: the
 /// move and the cooldown a process that ended mid-pass left in its rows
-/// show nothing, so its queued photo waits with sync not running, as a
+/// show nothing, so its queued cover waits with sync not running, as a
 /// queued write alone does, and the credentials the keychain holds now
 /// decide signed out (api.md E1, E5).
 #[test]
@@ -798,16 +843,15 @@ fn a_closed_store_shows_what_opening_shows() {
         uploads: vec![coven_database::UploadFacts {
             sending: false,
             stored: false,
-            bound: false,
             retry_at: None,
             record: None,
         }],
         queued: true,
-        downloading: false,
         records: Vec::new(),
         paused: false,
         unmetered_only: false,
         metered: false,
+        keys_changing: false,
     };
     assert_eq!(SyncStatus::computed(facts.clone()).unwrap().state, SyncState::Syncing);
     let closed = |location| SyncStatus::closed(facts.clone(), location).unwrap();
@@ -829,4 +873,66 @@ fn a_closed_store_shows_what_opening_shows() {
             .state,
         SyncState::WaitingToSync(SyncWait::NotSyncing)
     );
+}
+
+/// An upload of each kind: bound or trailing, sending, stored or queued, with
+/// a backoff or not, and a record naming a state, one naming none or none.
+fn phase_uploads() -> Vec<Upload> {
+    let mut uploads = trailing_uploads();
+    let bound: Vec<Upload> =
+        uploads.iter().map(|upload| Upload { bound: true, ..upload.clone() }).collect();
+    uploads.extend(bound);
+    uploads
+}
+
+/// Every set of facts the phase differential compares: sync stopped, running
+/// and cooling; the last pass none, blocked at a slot or offline; and the
+/// pause, the setting to move files only on unmetered networks, the network
+/// and a self-replacement's write pause each on or off, over every upload of
+/// `phase_uploads`.
+fn phase_cases() -> Vec<Facts> {
+    let cooling = RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(60)) };
+    let blocked = Some(LastPass::Blocked { slot: slot(7), reason: key_unavailable(), error: None });
+    let mut cases = Vec::new();
+    for sync in [RetrySync::Stopped, RetrySync::Started { cooling_until: None }, cooling] {
+        for last in [None, blocked.clone(), offline()] {
+            for bits in 0..16_u8 {
+                cases.push(Facts {
+                    sync,
+                    last: last.clone(),
+                    paused: bits & 1 != 0,
+                    unmetered_only: bits & 2 != 0,
+                    metered: bits & 4 != 0,
+                    keys_changing: bits & 8 != 0,
+                    uploads: phase_uploads(),
+                    queued: true,
+                    ..connected()
+                });
+            }
+        }
+    }
+    cases
+}
+
+/// Each upload's phase agrees with the Lean model's `Upload.phase`, bound and
+/// trailing, under every wait, setting and network (§17.9, proofs/io.md).
+#[test]
+#[ignore = "requires COVEN_IO_LEAN"]
+fn io_differential_upload_phase() {
+    let cases = phase_cases();
+    let inputs: Vec<Value> = cases
+        .iter()
+        .map(|facts| {
+            let mut input = facts_json(facts, &[]);
+            input["check"] = json!("upload_phase");
+            input
+        })
+        .collect();
+    let expected = crate::tests::io_runner(&inputs);
+    assert_eq!(cases.len(), expected.len());
+    for ((facts, input), expected) in cases.iter().zip(&inputs).zip(&expected) {
+        let actual: Vec<Value> =
+            facts.uploads.iter().map(|upload| phase_json(&facts.upload_phase(upload))).collect();
+        assert_eq!(&Value::Array(actual), expected, "{input}");
+    }
 }

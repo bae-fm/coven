@@ -224,9 +224,9 @@ storage folder missing, update needed, removed from the store, device needs
 reset, clock wrong, or failed with no named cause. It is computed from
 facts, never stored: whether a location is recorded and this device holds
 its credentials, how the last pass that reached storage ended, whether the
-running pass has read or claimed a slot, whether a download is moving, each
-upload in this device's queue, whether the send queue holds a write, and the
-pending records. Each fact names a candidate state or none, and the state is
+running pass has read or claimed a slot, each upload in this device's queue,
+of which the bound ones, whose write waits for them, count, whether the send
+queue holds a write, and the pending records the state reads. Each fact names a candidate state or none, and the state is
 the candidate of highest rank: the device's own standing first (removed,
 needs reset, update needed), then signing in, then what storage said of the
 account or location, then reachability, then the catch-all failure, then
@@ -238,11 +238,13 @@ means no location is recorded, and `signed_out_without_credentials` that a
 recorded location without credentials is signed out unless the device's own
 standing outranks it, so the two are never confused.
 `offline_unsent_iff` and `offline_iff` prove that between offline and
-offline with unsent changes, whether a write or an upload is queued
+offline with unsent changes, whether a write or a bound upload is queued
 decides, and `write_while_offline` that a write committed while offline
 changes one into the other in its own step, with no pass.
-`syncing_only_moving` proves syncing shows only while a slot or a file
-moves; `quiet_pass_keeps` that a pass moving nothing leaves the state as it
+`trailing_keeps_state` proves replacing the trailing uploads with any others
+never changes the state, `synced_bound_stored` that synced shows only with every
+bound upload stored, and `syncing_only_moving` that syncing shows only while a
+slot or a bound file moves; `quiet_pass_keeps` that a pass moving nothing leaves the state as it
 was while it runs, and after it when it ends as the last pass did.
 `last_synced_never_back` proves the time of the last finished sync never
 goes backward, even when the clock does, and `last_synced_kept` that only a
@@ -337,19 +339,35 @@ on a wait, such as a slot waiting on another device's key or a provider's
 cooldown, is no failure either: it waits to sync (`waiting_pass_waits`),
 without moving the time of the last finished sync.
 
+[Transfers.lean](io/CovenIO/Transfers.lean) models what the sync state leaves
+out: the phase of each upload in the queue, the one a host shows where files
+are. `phase_failed_iff` and `phase_retrying_iff` say when a file shows failed
+and when it shows its backoff; `paused_only_trailing` that a bound upload is
+never held by the pause, the metered network or a self-replacement's write
+pause, which hold trailing uploads only; `metered_holds` and
+`metered_only_held` what a metered network holds and what it doesn't; and
+`every_phase` that each phase and each wait is reached by a run of the
+model's events.
+
 The model takes the facts as given: that the loop records how each pass
 ended and whether it moved a slot, that a loop or attempt ending outside a
 pass's end records its failure and that nothing moves, that opening records whether storage is
 set up, and that the live query reads them together in one transaction.
 The `sync_state` case of `ioRunner` takes a set of facts as JSON and
-answers the state's name and, for waiting to sync, its wait.
+answers the state's name and, for waiting to sync, its wait; the
+`upload_phase` case answers each upload's phase.
 `sync_status::tests::io_differential_sync_state` compares the state coven
 computes with the runner's for each pending reason, each provider failure
 answered or not, each local failure, each way a pass ends, blocked on or
-failed with each reason, each with a write queued or not, and queued
-uploads under each wait, alone and behind a stored one, with the setting to
-transfer only on unmetered networks on or off, the network metered or not,
-and a write queued beside them or not.
+failed with each reason, each with a write queued or not, and bound
+uploads under each wait, alone and behind a stored one, with a write queued
+beside them or not; the runner is also given trailing uploads of every
+progress and record that coven never sees, so the comparison checks
+`trailing_keeps_state` against the Rust. `sync_status::tests::io_differential_upload_phase`
+compares each upload's phase with the runner's, bound and trailing, under
+each wait, with the setting to transfer only on unmetered networks on or
+off, the network metered or not, the pause and a self-replacement's write
+pause on or off, and a record of each kind.
 
 ## Work notifications
 

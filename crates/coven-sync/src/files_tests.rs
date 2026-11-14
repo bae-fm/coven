@@ -312,7 +312,7 @@ impl Fixture {
     }
     /// The queue as the app reads it (E7).
     async fn queue(&self) -> UploadQueue {
-        self.database.upload_queue().await.unwrap().into()
+        self.database.upload_queue_facts(UploadQueue::from_facts).await.unwrap()
     }
     /// The queue as the app's SQL reads it from coven's views (E4), as a
     /// live query.
@@ -400,7 +400,8 @@ struct ViewedQueue {
 #[derive(Clone, Debug, PartialEq)]
 struct ViewedUpload {
     file: coven_foundation::id_source::FileId,
-    phase: UploadPhase,
+    /// `coven_uploads.sending`: this process sends it now.
+    sending: bool,
     progress: Option<UploadProgress>,
     retry_at: Option<i64>,
     pending: bool,
@@ -423,7 +424,7 @@ fn viewed_queue(
             };
             Ok(ViewedUpload {
                 file: r.get(0)?,
-                phase: if r.get(1)? { UploadPhase::Uploading } else { UploadPhase::Waiting },
+                sending: r.get(1)?,
                 progress,
                 retry_at: r.get(4)?,
                 pending: r.get(5)?,

@@ -63,9 +63,11 @@ macro_rules! coven_file_uploads_tables {
             CREATE INDEX _coven_file_uploads_copy ON _coven_file_uploads(copy) WHERE copy IS NOT NULL;
             CREATE INDEX _coven_file_uploads_move ON _coven_file_uploads(move);
             CREATE INDEX _coven_file_uploads_holds ON _coven_file_uploads(holds) WHERE holds IS NOT NULL;
-            -- The sync state's walk to the first queued upload passes the
-            -- stored ones, which wait here for the rest of their move.
-            CREATE INDEX _coven_file_uploads_unstored ON _coven_file_uploads(id) WHERE NOT stored;
+            -- The sync state's walk to the first queued bound upload passes
+            -- the stored ones, which wait here for the rest of their move,
+            -- and no trailing one.
+            CREATE INDEX _coven_file_uploads_bound_unstored ON _coven_file_uploads(id)
+                WHERE holds IS NOT NULL AND NOT stored;
             CREATE TRIGGER _coven_upload_copy_unremoved BEFORE INSERT ON _coven_file_uploads
             WHEN NEW.copy IS NOT NULL BEGIN
                 SELECT RAISE(ABORT,'a file recorded for removal is named by a row')

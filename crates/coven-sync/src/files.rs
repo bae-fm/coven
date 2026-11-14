@@ -48,7 +48,7 @@ pub use file_storage::ConnectionComing;
 pub(crate) use file_storage::StorageState;
 pub(crate) use file_upload_connections::SpareConnection;
 pub use file_upload_pool::DrainOutcome;
-pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};
+pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue, UploadWait};
 pub use file_upload_settings::UploadSettings;
 use std::{
     collections::BTreeMap,

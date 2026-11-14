@@ -5,6 +5,7 @@ import CovenIO.Retired
 import CovenIO.WaitingReopen
 import CovenIO.Wakes
 import CovenIO.SyncState
+import CovenIO.Transfers
 import CovenIO.RetryAnswer
 import Lean
 
@@ -433,8 +434,16 @@ def waitName : SyncWait → String
   | .notSyncing => "notSyncing"
   | .coolingDown => "coolingDown"
   | .blocked => "blocked"
+  | .retrying => "retrying"
+  | .queued => "queued"
+
+def uploadWaitName : UploadWait → String
+  | .notSyncing => "notSyncing"
+  | .coolingDown => "coolingDown"
+  | .sync => "sync"
   | .paused => "paused"
   | .metered => "metered"
+  | .keysChanging => "keysChanging"
   | .retrying => "retrying"
   | .queued => "queued"
 
@@ -449,13 +458,11 @@ private def upload (j : Json) : Except String Upload := do
            bound := ← j.getObjValAs? Bool "bound"
            retrying := ← j.getObjValAs? Bool "retrying" }
 
-/-- `SyncState.state` of one set of facts: `storage` (`none`, `signedOut`,
-`connected`), `last` (`synced` or `{"failed": pass failure}`), `moving`,
-`downloading`, `uploads`, `unsent`, `running`, `cooling`, `paused`,
-`unmeteredOnly`, `metered` and the pending `records`' reasons. Reports the state's name as `state`, and, for
-waiting to sync, what it waits for as `wait`: the held-back pass's wait, else
-the first waiting upload's. -/
-def run (j : Json) : Except String Json := do
+/-- The facts of one case: `storage` (`none`, `signedOut`, `connected`), `last`
+(`synced` or `{"failed": pass failure}`), `moving`, `uploads`, `unsent`,
+`running`, `cooling`, `paused`, `unmeteredOnly`, `metered`, `keysChanging` and
+the pending `records`' reasons. -/
+private def facts (j : Json) : Except String Facts := do
   let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
     "storage" (← j.getObjValAs? String "storage")
   let lastJson ← j.getObjVal? "last"
@@ -464,21 +471,39 @@ def run (j : Json) : Except String Json := do
     | _ => pure (LastPass.failed (← passFailure (← lastJson.getObjVal? "failed")))
   let records ← (← j.getObjValAs? (Array Json) "records").toList.mapM reason
   let uploads ← (← j.getObjValAs? (Array Json) "uploads").toList.mapM upload
-  let facts : Facts := {
+  return {
     storage, last, passing := false, uploads, records, lastSynced := none
     moving := ← j.getObjValAs? Bool "moving"
-    downloading := ← j.getObjValAs? Bool "downloading"
     unsent := ← j.getObjValAs? Bool "unsent"
     running := ← j.getObjValAs? Bool "running"
     cooling := ← j.getObjValAs? Bool "cooling"
     paused := ← j.getObjValAs? Bool "paused"
     unmeteredOnly := ← j.getObjValAs? Bool "unmeteredOnly"
-    metered := ← j.getObjValAs? Bool "metered" }
+    metered := ← j.getObjValAs? Bool "metered"
+    keysChanging := ← j.getObjValAs? Bool "keysChanging" }
+
+/-- `SyncState.state` of one set of facts. Reports the state's name as
+`state`, and, for waiting to sync, what it waits for as `wait`: the held-back
+pass's wait, else the first waiting bound upload's. -/
+def run (j : Json) : Except String Json := do
+  let facts ← facts j
   let shown := state facts
   let wait := match shown, facts.waits with
     | .waitingToSync, w :: _ => toJson (waitName w)
     | _, _ => Json.null
   return Json.mkObj [("state", toJson (stateName shown)), ("wait", wait)]
+
+/-- `Upload.phase` of each upload of one set of facts, in order: `phase`
+(`uploading`, `stored`, `failed`, `waiting`) and, for waiting, what it waits for
+as `wait`. -/
+def phases (j : Json) : Except String Json := do
+  let facts ← facts j
+  return toJson (facts.uploads.map fun u =>
+    match u.phase facts with
+    | .uploading => Json.mkObj [("phase", "uploading"), ("wait", Json.null)]
+    | .stored => Json.mkObj [("phase", "stored"), ("wait", Json.null)]
+    | .failed => Json.mkObj [("phase", "failed"), ("wait", Json.null)]
+    | .waiting w => Json.mkObj [("phase", "waiting"), ("wait", toJson (uploadWaitName w))])
 
 end SyncStateCase
 
@@ -493,6 +518,7 @@ private def run (j : Json) : Except String Json := do
   | "wakes" => wakes j
   | "file_scan" => fileScan j
   | "sync_state" => SyncStateCase.run j
+  | "upload_phase" => SyncStateCase.phases j
   | "retry_answer" => RetryAnswerCase.run j
   | check => throw s!"unknown IO check {check}"
 

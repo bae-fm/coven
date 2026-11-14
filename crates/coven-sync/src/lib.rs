@@ -56,10 +56,12 @@ mod retry_waits;
 mod sequence_state;
 mod sync_often;
 mod sync_status;
+mod upload_phase;
 pub use files::{
     ConnectionComing, DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream,
     FileReadError, FileStatus, FileStream, Files, FilesMode, PinProgress, QueuedUpload,
     ReadProgress, TransferLimits, UploadPhase, UploadProgress, UploadQueue, UploadSettings,
+    UploadWait,
 };
 pub use retry_waits::{
     NetworkOwner, PassRequests, RetryAnswer, RetryEffect, RetryOutcome, RetryWaits,

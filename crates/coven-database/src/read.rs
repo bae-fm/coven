@@ -114,6 +114,12 @@ impl<'connection> SqlReadContext<'connection> {
         crate::sync_facts::read(self.database)
     }
 
+    pub(crate) fn queue_facts<P: crate::PendingValue + Clone>(
+        &self,
+    ) -> Result<crate::QueueFacts<P>, DbError> {
+        crate::sync_facts::read_queue(self.database)
+    }
+
     /// `coven_sync_status`'s row, as coven reads it.
     #[cfg(test)]
     pub(crate) fn sync_status_row(&self) -> Result<crate::SyncStatusRow, DbError> {

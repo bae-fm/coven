@@ -87,13 +87,17 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     // The queue shows the three being sent, with no progress until stored.
     let queue = f.queue().await;
     assert_eq!(
-        queue.files.iter().map(|upload| (upload.phase, upload.progress)).collect::<Vec<_>>(),
+        queue
+            .files
+            .iter()
+            .map(|upload| (upload.phase.clone(), upload.progress))
+            .collect::<Vec<_>>(),
         [
             (UploadPhase::Uploading, None),
             (UploadPhase::Uploading, None),
             (UploadPhase::Uploading, None),
-            (UploadPhase::Waiting, None),
-            (UploadPhase::Waiting, None),
+            (UploadPhase::Waiting(UploadWait::Queued), None),
+            (UploadPhase::Waiting(UploadWait::Queued), None),
         ]
     );
     // The first finishes; the oldest file queued meanwhile starts at once.
@@ -159,7 +163,7 @@ async fn pausing_a_cooldown_and_a_metered_network_start_no_new_upload() {
         f.files.uploads_parked_from_now().await;
         assert_eq!(creates(&f).len(), 2, "{stop:?}");
         let queue = f.queue().await;
-        assert!(queue.files.iter().all(|upload| upload.phase == UploadPhase::Waiting));
+        assert!(queue.files.iter().all(|upload| matches!(upload.phase, UploadPhase::Waiting(_))));
         f.close().await;
     }
 }
@@ -626,7 +630,7 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     // none until storage confirms and completion retires it.
     let mut uploads = f.subscribe_queue();
     let queued = uploads.next().await.expect("the live query answers").unwrap().files.remove(0);
-    assert_eq!((queued.phase, queued.progress), (UploadPhase::Uploading, None));
+    assert_eq!((queued.sending, queued.progress), (true, None));
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
     assert!(uploads.next().await.expect("the live query answers").unwrap().files.is_empty());
@@ -741,23 +745,30 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
     }
 }
 
-/// Three queued photos with no record read as the first one in the facts,
-/// and the queue still counts as holding a file: the state shows the first
-/// waiting upload and no later one (§19.1).
+/// Three queued covers, bound, with no record read as the first one in the
+/// facts, and the queue still counts as holding a bound file: the state shows
+/// the first waiting upload and no later one (§19.1). Three photos, trailing,
+/// read as none, and the queue holds no file the state waits for.
 #[tokio::test]
 async fn the_sync_facts_list_the_first_waiting_upload_only() {
     let f = Fixture::new(Provenance::AppProvided).await;
-    f.attach("files", "a", photo(1)).await;
-    f.attach("files", "b", photo(2)).await;
-    f.attach("files", "c", photo(3)).await;
-    let queue = f.files.inner.database.uploads().await.unwrap();
-    assert_eq!(queue.len(), 3);
-    let facts = f
-        .database
-        .sync_facts::<crate::PendingRecord, _, coven_database::DbError>(Ok)
-        .await
-        .unwrap();
-    assert!(facts.queued);
-    assert_eq!(facts.uploads.len(), 1);
+    f.files.stop_background_for_counts().await;
+    let facts = || async {
+        f.database.sync_facts::<crate::PendingRecord, _, coven_database::DbError>(Ok).await.unwrap()
+    };
+    for (id, bytes) in [("a", 1), ("b", 2), ("c", 3)] {
+        f.attach("files", id, photo(bytes)).await;
+    }
+    assert_eq!(f.files.inner.database.uploads().await.unwrap().len(), 3);
+    let trailing = facts().await;
+    assert!(!trailing.queued);
+    assert!(trailing.uploads.is_empty());
+    for (id, bytes) in [("x", 4), ("y", 5), ("z", 6)] {
+        f.attach("covers", id, photo(bytes)).await;
+    }
+    assert_eq!(f.files.inner.database.uploads().await.unwrap().len(), 6);
+    let bound = facts().await;
+    assert!(bound.queued);
+    assert_eq!(bound.uploads.len(), 1);
     f.close().await;
 }

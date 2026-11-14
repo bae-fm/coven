@@ -503,9 +503,9 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     assert_eq!(confirmed(&f).await, CHUNK as u64);
     let paused = &f.queue().await.files[0];
     assert_eq!(
-        (paused.phase, paused.progress),
+        (paused.phase.clone(), paused.progress),
         (
-            UploadPhase::Waiting,
+            UploadPhase::Waiting(UploadWait::Paused),
             Some(UploadProgress {
                 bytes_confirmed: CHUNK as u64,
                 bytes_total: three_parts_total(),
@@ -580,12 +580,14 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
     f.storage.set_faults(Faults { lose_part_reply: true, ..Faults::none() }).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let waiting = &f.queue().await.files[0];
+    assert!(
+        matches!(waiting.phase, UploadPhase::Waiting(UploadWait::Retrying { .. })),
+        "{:?}",
+        waiting.phase
+    );
     assert_eq!(
-        (waiting.phase, waiting.progress),
-        (
-            UploadPhase::Waiting,
-            Some(UploadProgress { bytes_confirmed: 0, bytes_total: three_parts_total() })
-        )
+        waiting.progress,
+        Some(UploadProgress { bytes_confirmed: 0, bytes_total: three_parts_total() })
     );
     assert_eq!(f.upload_reason(&file).await, Some(network()));
     advance(&clock, 1);

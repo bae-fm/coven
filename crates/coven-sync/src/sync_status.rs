@@ -1,14 +1,19 @@
 //! The sync state a status screen shows (§19.1, api.md E5), computed in one
 //! read from what coven knows and never stored: whether a location is
 //! recorded and its credentials held, how the last pass ended, whether the
-//! running pass moved a slot, the files moving, each upload in the queue,
-//! whether the send queue holds a write, and the pending records. Each fact
-//! names one candidate state or none, and when several hold the one of
+//! running pass moved a slot, each bound upload in the queue, whether the
+//! send queue holds a write, and the pending records the state reads. Each
+//! fact names one candidate state or none, and when several hold the one of
 //! highest rank shows, as `state` of the Lean model in
 //! `spec/proofs/io/CovenIO/SyncState.lean` computes it; the differential
 //! test checks this against that model's runner.
+//!
+//! A trailing upload never reaches the state. What it is doing is its
+//! phase in the upload queue, computed from the same facts by
+//! `Facts::upload_phase` as the model's `Upload.phase` in `Transfers.lean`
+//! computes it.
 
-use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, PendingSubject, StatusFailure};
+use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, StatusFailure};
 use coven_database::{DbError, RecordedLocation, RetrySync};
 use coven_storage::{CloudProvider, StorageFailure};
 use std::time::SystemTime;
@@ -34,21 +39,23 @@ pub struct SyncStatus {
 pub enum SyncState {
     /// No storage location is recorded on this device.
     NotSynced,
-    /// A running pass has read or claimed a slot, or a file is being sent
-    /// or downloaded.
+    /// A running pass has read or claimed a slot, or a bound file is being
+    /// sent.
     Syncing,
     /// Nothing moves, and the last pass was held back, at a slot that can't
-    /// apply yet or by a provider's cooldown, or a file waits in the upload
-    /// queue, or a write in the send queue: what the pass waits for, else
-    /// what the first such file waits for, else what the write waits for.
+    /// apply yet or by a provider's cooldown, or a bound file waits in the
+    /// upload queue, or a write in the send queue: what the pass waits for,
+    /// else what the first such file waits for, else what the write waits
+    /// for.
     WaitingToSync(SyncWait),
-    /// The last pass reached the end of the sequence, every file this device
-    /// uploads is stored, the send queue is empty, and nothing below holds:
-    /// nothing waits.
+    /// The last pass reached the end of the sequence, every bound file this
+    /// device uploads is stored, the send queue is empty, and nothing below
+    /// holds: nothing waits. A trailing file never holds it.
     Synced,
     /// The last pass got no provider response.
     Offline(SyncCause),
-    /// Offline, and the send queue holds a write or the upload queue a file.
+    /// Offline, and the send queue holds a write or the upload queue a bound
+    /// file with bytes to send.
     OfflineWithUnsentChanges(SyncCause),
     /// A location is recorded, but this device holds no credentials for it
     /// (no cause), or storage refused them.
@@ -73,14 +80,14 @@ pub enum SyncState {
     Removed(SyncCause),
     /// Another copy uses this device's id, or its member keys were replaced.
     NeedsReset(SyncCause),
-    /// Any other failure, or a file that can't be uploaded or read, whose
-    /// pending record is the cause.
+    /// Any other failure, or a bound file that can't be uploaded or read,
+    /// whose pending record is the cause.
     Failed(SyncCause),
 }
 
 /// What waiting to sync waits for, as `WaitingToSync` names it: what holds
 /// every transfer, the pass's and each file's alike, first; then, for a
-/// file waiting in the upload queue, what holds that file (§19.1).
+/// bound file waiting in the upload queue, what holds that file (§19.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncWait {
     /// Sync isn't running (`start_sync`, `stop_sync`).
@@ -93,22 +100,14 @@ pub enum SyncWait {
     /// A slot can't apply yet; nothing goes out or comes in until it does
     /// (§5.4).
     Blocked,
-    /// The app paused uploads, and the file's reference trails
-    /// (`set_uploads_paused`, §17.4).
-    Paused,
-    /// The network is metered, or may be, since the platform stopped
-    /// answering after opening (E5); the app moves files only on unmetered
-    /// networks (`set_unmetered_only`, §17.9), and the file's reference
-    /// trails.
-    Metered,
-    /// Its last attempt failed, and it retries then, or at the person's
-    /// retry (§6.7); `coven_uploads.pending` says why.
+    /// A bound file's last attempt failed, and it retries then, or at the
+    /// person's retry (§6.7); `coven_uploads.pending` says why.
     Retrying {
         /// When its backoff ends, by the store's clock.
         at: SystemTime,
     },
-    /// Its turn hasn't come: a file's, a write's, or the next pass's once a
-    /// cooldown that held the last one is over.
+    /// Its turn hasn't come: a bound file's, a write's, or the next pass's
+    /// once a cooldown that held the last one is over.
     Queued,
 }
 
@@ -290,6 +289,12 @@ impl PendingReason {
             | Self::Paused => None,
         }
     }
+
+    /// Whether the record names a state of its own, which fails the
+    /// upload it is about (the model's `Reason.state` is some).
+    pub(crate) fn names_a_state(&self) -> bool {
+        self.names().is_some()
+    }
 }
 
 impl StatusFailure {
@@ -347,7 +352,8 @@ pub(crate) enum Progress {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Upload {
     pub(crate) progress: Progress,
-    /// A bound reference's, which the pause doesn't hold (§17.4).
+    /// A bound reference's, which holds the writes behind it and which the
+    /// pause doesn't hold (§17.4). The state reads bound uploads only.
     pub(crate) bound: bool,
     /// Its last attempt failed, and it retries then (§6.7).
     pub(crate) retry_at: Option<SystemTime>,
@@ -366,20 +372,21 @@ pub(crate) struct Facts {
     pub(crate) last: Option<LastPass>,
     /// The running pass has read a slot it hadn't, or claimed one.
     pub(crate) moving: bool,
-    /// A file is being downloaded.
-    pub(crate) downloading: bool,
-    /// The uploads a file waits for that the state can show, in queue
-    /// order: the first one sending, the first queued one with no record,
-    /// and every one with a record. The rest change no candidate: a later
-    /// one of a rank never shows over the first, and a stored one names
-    /// none.
+    /// The bound uploads that the state can show, in queue order: the first
+    /// one sending, the first queued one with no record, and every one with
+    /// a record. The rest change no candidate: a later one of a rank never
+    /// shows over the first, and a stored one names none. The database
+    /// reads no trailing upload for the state (`trailing_keeps_state`).
     pub(crate) uploads: Vec<Upload>,
-    /// The upload queue holds a file, whether `uploads` lists it or not.
+    /// The upload queue holds a bound upload with bytes to send, whether
+    /// `uploads` lists it or not.
     pub(crate) queued: bool,
     /// The send queue holds a write.
     pub(crate) unsent: bool,
-    /// The pending records, in the order they arose, but the connection's,
-    /// which is the last pass's failure kept for its retry.
+    /// The pending records the state reads, in the order they arose, but
+    /// the connection's, which is the last pass's failure kept for its
+    /// retry. The database leaves out those about a trailing upload, a
+    /// download or a pin coven keeps.
     pub(crate) records: Vec<PendingRecord>,
     /// Whether a started connection will plan, and the cooldown holding
     /// every request.
@@ -390,6 +397,8 @@ pub(crate) struct Facts {
     pub(crate) unmetered_only: bool,
     /// The store's watch says the device's network is metered.
     pub(crate) metered: bool,
+    /// A self-replacement of this member's keys pauses writes (§12.3).
+    pub(crate) keys_changing: bool,
 }
 
 /// A state that may show, its cause made only for the one that does.
@@ -423,7 +432,7 @@ impl Facts {
     /// What holds every transfer, the pass's, each upload's and a queued
     /// write's alike: sync stopped, a provider's cooldown, or a slot that
     /// can't apply yet (the model's `Facts.heldAll`).
-    fn held_all(&self) -> Option<SyncWait> {
+    pub(crate) fn held_all(&self) -> Option<SyncWait> {
         match self.sync {
             RetrySync::Stopped => Some(SyncWait::NotSyncing),
             RetrySync::Started { cooling_until: Some(until) } => {
@@ -435,16 +444,11 @@ impl Facts {
         }
     }
 
-    /// What one queued upload waits for: what holds every transfer first,
-    /// then what holds this one (the model's `Facts.uploadWait`).
+    /// What one queued bound upload waits for: what holds every transfer
+    /// first, then its backoff (the model's `Facts.uploadWait`).
     fn upload_wait(&self, upload: &Upload) -> SyncWait {
         if let Some(held) = self.held_all() {
             held
-        } else if self.paused && !upload.bound {
-            SyncWait::Paused
-        } else if self.unmetered_only && self.metered && crate::files::held_on_metered(upload.bound)
-        {
-            SyncWait::Metered
         } else if let Some(at) = upload.retry_at {
             SyncWait::Retrying { at }
         } else {
@@ -452,8 +456,8 @@ impl Facts {
         }
     }
 
-    /// What an upload names: syncing while it moves; once queued, what its
-    /// record names, else waiting to sync; nothing once stored.
+    /// What a bound upload names: syncing while it moves; once queued, what
+    /// its record names, else waiting to sync; nothing once stored.
     fn upload<'a>(&self, upload: &'a Upload) -> Option<Candidate<'a>> {
         match upload.progress {
             Progress::Moving => Some(Candidate::State(SyncState::Syncing)),
@@ -498,7 +502,6 @@ impl Facts {
             .records
             .iter()
             .filter_map(|record| Some(Candidate::Named(record.reason.names()?, record)));
-        let downloading = self.downloading.then_some(Candidate::State(SyncState::Syncing));
         let uploads = self.uploads.iter().filter_map(|upload| self.upload(upload));
         // A write goes out with the next pass, so it waits for what holds
         // every pass, else its turn (the model's `Facts.writes`).
@@ -509,7 +512,6 @@ impl Facts {
             .into_iter()
             .chain([looping])
             .chain(records)
-            .chain(downloading)
             .chain(uploads)
             .chain(writes)
             .reduce(|shown, next| if next.rank() > shown.rank() { next } else { shown })
@@ -518,7 +520,7 @@ impl Facts {
     }
 
     /// The facts as the database read them, and when sync last finished.
-    fn read(
+    pub(crate) fn read(
         facts: coven_database::SyncFacts<PendingRecord>,
     ) -> Result<(Self, Option<SystemTime>), DbError> {
         let row = facts.row;
@@ -546,7 +548,7 @@ impl Facts {
                 } else {
                     Progress::Queued
                 },
-                bound: upload.bound,
+                bound: true,
                 retry_at: upload.retry_at,
                 record: upload.record,
             })
@@ -555,19 +557,19 @@ impl Facts {
             location,
             last,
             moving: row.moving,
-            downloading: facts.downloading,
             uploads,
             queued: facts.queued,
             unsent: facts.unsent,
             records: facts
                 .records
                 .into_iter()
-                .filter(|record| record.subject != PendingSubject::Connection)
+                .filter(|record| record.subject != crate::PendingSubject::Connection)
                 .collect(),
             sync: facts.retry.sync,
             paused: facts.paused,
             unmetered_only: facts.unmetered_only,
             metered: facts.metered,
+            keys_changing: facts.keys_changing,
         };
         Ok((facts, row.last_synced))
     }
@@ -586,8 +588,8 @@ impl SyncStatus {
     /// before sync starts, from the facts its database holds, with what
     /// opening writes over them: `location`, read from the keychain as
     /// opening reads it; no pass moving, whatever a process that ended
-    /// mid-pass left; and sync not running. The facts read with nothing sent
-    /// or downloaded, as nothing moves while the store is closed.
+    /// mid-pass left; and sync not running. The facts read with nothing sent,
+    /// as nothing moves while the store is closed.
     pub fn closed(
         facts: coven_database::SyncFacts<PendingRecord>,
         location: RecordedLocation<CloudProvider>,

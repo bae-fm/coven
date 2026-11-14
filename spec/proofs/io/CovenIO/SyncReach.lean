@@ -26,42 +26,39 @@ theorem state_iff (f : Facts) (recorded : f.storage ≠ .none) (s : State) :
   · intro e; subst e; exact ⟨mem, highest⟩
   · intro h; exact (only s h.1 h.2).symm
 
-/-- **Which fact names a state.** The loop, a download, an upload, a queued
-write, the missing credentials or a pending record. -/
+/-- **Which fact names a state.** The loop, a bound upload, a queued write,
+the missing credentials or a pending record. -/
 theorem candidate_iff (f : Facts) (s : State) :
-    s ∈ f.candidates ↔ f.loop = s ∨ (s = .syncing ∧ f.downloading = true) ∨
-      (∃ u ∈ f.uploads, u.candidate = some s) ∨ (s = .waitingToSync ∧ f.unsent = true) ∨
+    s ∈ f.candidates ↔ f.loop = s ∨
+      (∃ u ∈ f.bound, u.candidate = some s) ∨ (s = .waitingToSync ∧ f.unsent = true) ∨
       (s = .signedOut ∧ f.storage = .signedOut) ∨ ∃ r ∈ f.records, r.state = some s := by
   simp only [Facts.candidates, Facts.rest, Facts.files, Facts.writes, Facts.others,
     List.mem_cons, List.mem_append, List.mem_filterMap]
   constructor
-  · rintro (e | ((down | up) | write) | (signed | named))
+  · rintro (e | (up | write) | (signed | named))
     · exact .inl e.symm
-    · split at down
-      · rename_i d; simp at down; exact .inr (.inl ⟨down, d⟩)
-      · simp at down
-    · exact .inr (.inr (.inl up))
+    · exact .inr (.inl up)
     · split at write
-      · rename_i w; simp at write; exact .inr (.inr (.inr (.inl ⟨write, w⟩)))
+      · rename_i w; simp at write; exact .inr (.inr (.inl ⟨write, w⟩))
       · simp at write
     · split at signed
-      · rename_i h; simp at signed; exact .inr (.inr (.inr (.inr (.inl ⟨signed, h⟩))))
+      · rename_i h; simp at signed; exact .inr (.inr (.inr (.inl ⟨signed, h⟩)))
       · simp at signed
-    · exact .inr (.inr (.inr (.inr (.inr named))))
-  · rintro (e | ⟨e, d⟩ | up | ⟨e, w⟩ | ⟨e, h⟩ | named)
+    · exact .inr (.inr (.inr (.inr named)))
+  · rintro (e | up | ⟨e, w⟩ | ⟨e, h⟩ | named)
     · exact .inl e.symm
-    · exact .inr (.inl (.inl (.inl (by simp [d, e]))))
-    · exact .inr (.inl (.inl (.inr up)))
+    · exact .inr (.inl (.inl up))
     · exact .inr (.inl (.inr (by simp [w, e])))
     · exact .inr (.inr (.inl (by simp [h, e])))
     · exact .inr (.inr (.inr named))
 
 /-- **Synced, exactly.** Synced has the lowest rank, so it shows only when it is
 every candidate: a connected device whose last pass ended synced, with nothing
-moving, every upload stored, no write queued and no record naming a state. -/
+moving, every bound upload stored, no write queued and no record naming a
+state. -/
 theorem synced_iff (f : Facts) :
     state f = .synced ↔ f.storage = .connected ∧ f.last = .synced ∧ f.moving = false ∧
-      f.downloading = false ∧ (∀ u ∈ f.uploads, u.progress = .stored) ∧ f.unsent = false ∧
+      (∀ u ∈ f.bound, u.progress = .stored) ∧ f.unsent = false ∧
       ∀ r ∈ f.records, r.state = none := by
   constructor
   · intro h
@@ -76,13 +73,13 @@ theorem synced_iff (f : Facts) :
       cases mv : f.moving
       · rfl
       · simp [Facts.loop, mv] at loop
-    refine ⟨?_, ?_, still, ?_, synced_files_stored f h, synced_writes_sent f h, ?_⟩
+    refine ⟨?_, ?_, still, synced_bound_stored f h, synced_writes_sent f h, ?_⟩
     · cases hs : f.storage with
       | none => exact absurd hs recorded
       | connected => rfl
       | signedOut =>
           have := only .signedOut
-            ((candidate_iff f _).mpr (.inr (.inr (.inr (.inr (.inl ⟨rfl, hs⟩))))))
+            ((candidate_iff f _).mpr (.inr (.inr (.inr (.inl ⟨rfl, hs⟩)))))
           cases this
     · cases hl : f.last with
       | synced => rfl
@@ -90,26 +87,21 @@ theorem synced_iff (f : Facts) :
           have := failed_ended f p hl
           simp [Facts.loop, still] at loop
           exact absurd loop this
-    · cases d : f.downloading
-      · rfl
-      · have := only .syncing ((candidate_iff f _).mpr (.inr (.inl ⟨rfl, d⟩)))
-        cases this
     · intro r hr
       cases hs : r.state with
       | none => rfl
       | some s =>
-          have := only s ((candidate_iff f _).mpr (.inr (.inr (.inr (.inr (.inr ⟨r, hr, hs⟩))))))
+          have := only s ((candidate_iff f _).mpr (.inr (.inr (.inr (.inr ⟨r, hr, hs⟩)))))
           subst this
           have := reason_named r _ hs
           simp [State.named] at this
-  · rintro ⟨connected, last, still, down, stored, sent, records⟩
+  · rintro ⟨connected, last, still, stored, sent, records⟩
     have recorded : f.storage ≠ .none := by rw [connected]; simp
     apply (state_iff f recorded .synced).mpr
     have loop : f.loop = .synced := by simp [Facts.loop, still, Facts.ended, last]
     refine ⟨(candidate_iff f _).mpr (.inl loop), fun c hc => ?_⟩
-    rcases (candidate_iff f c).mp hc with e | ⟨_, d⟩ | ⟨u, mu, hu⟩ | ⟨_, w⟩ | ⟨_, s⟩ | ⟨r, hr, hs⟩
+    rcases (candidate_iff f c).mp hc with e | ⟨u, mu, hu⟩ | ⟨_, w⟩ | ⟨_, s⟩ | ⟨r, hr, hs⟩
     · rw [← e, loop]; exact Nat.le_refl _
-    · rw [down] at d; cases d
     · simp [Upload.candidate, stored u mu] at hu
     · rw [sent] at w; cases w
     · rw [connected] at s; cases s
@@ -120,9 +112,7 @@ def Facts.waitHolds (f : Facts) : SyncWait → Prop
   | .notSyncing => f.running = false
   | .coolingDown => f.running = true ∧ f.cooling = true
   | .blocked => f.running = true ∧ f.cooling = false ∧ ∃ r, f.last = .failed (.blocked r)
-  | .paused => f.heldAll = none ∧ f.paused = true ∧ ∃ u ∈ f.uploads, u.bound = false
-  | .metered => f.heldAll = none ∧ ∃ u ∈ f.uploads, f.meteredHolds u = true
-  | .retrying => f.heldAll = none ∧ ∃ u ∈ f.uploads, u.retrying = true
+  | .retrying => f.heldAll = none ∧ ∃ u ∈ f.bound, u.retrying = true
   | .queued => f.heldAll = none
 
 theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitHolds w := by
@@ -167,20 +157,11 @@ theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds 
           rw [hh] at hu
           simp only at hu
           split at hu
-          · rename_i p
+          · rename_i r
             subst hu
-            simp only [Bool.and_eq_true, Bool.not_eq_true'] at p
-            exact ⟨hh, p.1, u, mu, p.2⟩
-          · split at hu
-            · rename_i m
-              subst hu
-              exact ⟨hh, u, mu, m⟩
-            · split at hu
-              · rename_i r
-                subst hu
-                exact ⟨hh, u, mu, r⟩
-              · subst hu
-                exact hh
+            exact ⟨hh, u, mu, r⟩
+          · subst hu
+            exact hh
     · simp at hu
   · split at write
     · simp only [List.mem_singleton] at write
@@ -192,7 +173,7 @@ namespace Reached
 
 /-- A device connected and synced, with sync running. -/
 def start : Facts :=
-  ⟨.connected, .synced, false, false, false, [], false, [], true, false, false, false, false, none⟩
+  ⟨.connected, .synced, false, false, [], false, [], true, false, false, false, false, false, none⟩
 
 def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none⟩
 
@@ -214,15 +195,13 @@ def toState : State → List Event
   | .clockWrong => [.begin, .finish (.failed (.storage .clockSkew)) 1]
   | .failed => [.begin, .finish (.failed .other) 1]
 
-/-- The run that reaches each wait. -/
+/-- The run that reaches each wait, with a bound upload. -/
 def toWait : SyncWait → List Event
-  | .notSyncing => [.settings false false false false, .uploads [upload false false]]
-  | .coolingDown => [.settings true true false false, .uploads [upload false false]]
+  | .notSyncing => [.settings false false false false, .uploads [upload false true]]
+  | .coolingDown => [.settings true true false false, .uploads [upload false true]]
   | .blocked => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
-  | .paused => [.settings true false true false, .uploads [upload false false]]
-  | .metered => [.settings true false false true, .network true, .uploads [upload false false]]
-  | .retrying => [.uploads [upload true false]]
-  | .queued => [.uploads [upload false false]]
+  | .retrying => [.uploads [upload true true]]
+  | .queued => [.uploads [upload false true]]
 
 /-- **No state is dead.** Every state shows after some run of the model's
 events from a synced device. -/

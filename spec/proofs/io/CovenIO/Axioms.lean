@@ -129,7 +129,8 @@ import CovenIO
 #print axioms CovenIO.SyncState.offline_iff
 #print axioms CovenIO.SyncState.syncing_only_moving
 #print axioms CovenIO.SyncState.waiting_not_moving
-#print axioms CovenIO.SyncState.synced_files_stored
+#print axioms CovenIO.SyncState.synced_bound_stored
+#print axioms CovenIO.SyncState.trailing_keeps_state
 #print axioms CovenIO.SyncState.synced_writes_sent
 #print axioms CovenIO.SyncState.bad_file_fails
 #print axioms CovenIO.SyncState.quiet_pass_keeps
@@ -140,8 +141,12 @@ import CovenIO
 #print axioms CovenIO.SyncState.file_failures_name_failed
 #print axioms CovenIO.SyncState.failed_pass_not_synced
 #print axioms CovenIO.SyncState.waiting_pass_waits
+#print axioms CovenIO.SyncState.phase_failed_iff
+#print axioms CovenIO.SyncState.phase_retrying_iff
+#print axioms CovenIO.SyncState.paused_only_trailing
 #print axioms CovenIO.SyncState.metered_holds
 #print axioms CovenIO.SyncState.metered_only_held
+#print axioms CovenIO.SyncState.Reached.every_phase
 #print axioms CovenIO.SyncState.network_keeps_state
 #print axioms CovenIO.SyncState.only_setup_changes_storage
 #print axioms CovenIO.SyncState.loop_le_state

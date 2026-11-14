@@ -1,10 +1,11 @@
 //! The sync state an app shows (§19.1, E5), as `subscribe_sync_status`
-//! follows it: synced means data and files are in storage, a queued file
-//! names what it waits for, a queued write waits for the next pass, a file
-//! whose original is missing names failed, offline with a file or a write
-//! queued is offline with unsent changes, a location without credentials is
-//! signed out, and the last synced time survives every state and every
-//! reopen without going backward.
+//! follows it: synced means data and bound files are in storage, a queued
+//! bound file names what it waits for, a queued write waits for the next
+//! pass, a trailing file never reaches the state and shows what it waits for
+//! or its failure as its phase in the upload queue, offline with a bound
+//! file or a write queued is offline with unsent changes, a location
+//! without credentials is signed out, and the last synced time survives
+//! every state and every reopen without going backward.
 use crate::tests::{file_stored, stage, upload_path, wait_for_sent, Device, Network};
 use crate::*;
 use coven_storage::test_utils::{Faults, MemoryRequest, MemoryStorage};
@@ -39,28 +40,45 @@ async fn state(device: &Device, expected: impl Fn(&SyncState) -> bool) -> SyncSt
     device.handle.test_sync_status().wait_for(|status| expected(&status.state)).await
 }
 
+/// What each file in the upload queue is doing, oldest first.
+async fn phases(device: &Device) -> Vec<UploadPhase> {
+    device.handle.uploads().await.unwrap().files.into_iter().map(|file| file.phase).collect()
+}
+
+/// Wait until the upload queue is empty: every upload stored its file.
+async fn wait_for_uploads(device: &Device) {
+    let mut unsent =
+        coven_database::test_utils::Followed::new(device.handle.subscribe_unsent_work());
+    unsent.wait_for(|work| work.files == 0).await;
+}
+
 /// Ana pauses uploads and takes a photo: its row goes out with the photo on
-/// her phone only, so she waits to sync, on the pause. Once she resumes,
-/// the photo uploads and she is synced (§17.4).
+/// her phone only, and she is synced, since a photo is a trailing file that
+/// no state names. Her upload queue says why the photo waits. Once she
+/// resumes, the photo uploads, and she stays synced (§17.4, §17.9, §19.1).
 #[tokio::test]
-async fn a_paused_photo_waits_to_sync_until_it_uploads() {
+async fn a_paused_photo_never_holds_the_state_and_waits_in_its_phase() {
     let network = household().await;
     let ana = &network.devices[0];
     ana.handle.set_uploads_paused(true).await.unwrap();
-    stage(ana, "photos", "beach", vec![7; 4096]).await;
+    let photo = stage(ana, "photos", "beach", vec![7; 4096]).await;
     wait_for_sent(&ana.handle).await;
-    state(ana, |state| *state == SyncState::WaitingToSync(SyncWait::Paused)).await;
-    ana.handle.set_uploads_paused(false).await.unwrap();
     state(ana, |state| *state == SyncState::Synced).await;
-    assert!(ana.handle.uploads().await.unwrap().files.is_empty());
+    assert_eq!(phases(ana).await, [UploadPhase::Waiting(UploadWait::Paused)]);
+    assert!(!file_stored(ana, photo).await);
+    ana.handle.set_uploads_paused(false).await.unwrap();
+    wait_for_uploads(ana).await;
+    assert!(file_stored(ana, photo).await);
+    // The completion is a write, which the next pass sends.
+    state(ana, |state| *state == SyncState::Synced).await;
     network.close().await;
 }
 
 /// Ben moves files only on unmetered networks. On cellular his photo waits
-/// to sync, for the metered network, while his cover, bound, uploads; the
-/// app reads the same from `coven_network` and `coven_uploads`. Once his
-/// phone joins Wi-Fi the photo uploads with no call of his app's, and he is
-/// synced (§17.9, §19.1).
+/// for the metered network, in its phase, while his cover, bound, uploads,
+/// and his state is synced once it has; the app reads the same from
+/// `coven_network` and `coven_uploads`. Once his phone joins Wi-Fi the photo
+/// uploads with no call of his app's (§17.9, §19.1).
 #[tokio::test]
 async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
     let network = household().await;
@@ -70,8 +88,12 @@ async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
     let photo = stage(ben, "photos", "beach", vec![7; 4096]).await;
     let cover = stage(ben, "covers", "album", vec![8; 4096]).await;
     wait_for_sent(&ben.handle).await;
-    state(ben, |state| *state == SyncState::WaitingToSync(SyncWait::Metered)).await;
+    // The cover is stored; the photo alone waits in the queue.
+    let mut unsent = coven_database::test_utils::Followed::new(ben.handle.subscribe_unsent_work());
+    unsent.wait_for(|work| work.files == 1).await;
     assert!(file_stored(ben, cover).await);
+    state(ben, |state| *state == SyncState::Synced).await;
+    assert_eq!(phases(ben).await, [UploadPhase::Waiting(UploadWait::Metered)]);
     let shown: (bool, bool, bool, bool) = ben
         .handle
         .read(move |sql| {
@@ -87,15 +109,17 @@ async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
     assert_eq!(shown, (true, true, true, true));
     assert_eq!(ben.handle.retry_uploads_now().await.unwrap(), DrainOutcome::Metered);
     ben.app.join_network(false);
-    state(ben, |state| *state == SyncState::Synced).await;
+    wait_for_uploads(ben).await;
     assert!(file_stored(ben, photo).await);
+    // The completion is a write, which the next pass sends.
+    state(ben, |state| *state == SyncState::Synced).await;
     network.close().await;
 }
 
 /// Ben's phone stops answering what its network is after his store opened:
 /// it may be cellular, so his photo waits as it would on a metered network,
-/// and `coven_network` says it can't tell. Once the phone answers again,
-/// unmetered, the photo uploads (§6.7, §17.9).
+/// in its phase, and `coven_network` says it can't tell. Once the phone
+/// answers again, unmetered, the photo uploads (§6.7, §17.9).
 #[tokio::test]
 async fn a_photo_waits_while_coven_cannot_tell_the_network() {
     let network = household().await;
@@ -104,7 +128,8 @@ async fn a_photo_waits_while_coven_cannot_tell_the_network() {
     ben.app.network_cannot_tell();
     let photo = stage(ben, "photos", "beach", vec![7; 4096]).await;
     wait_for_sent(&ben.handle).await;
-    state(ben, |state| *state == SyncState::WaitingToSync(SyncWait::Metered)).await;
+    state(ben, |state| *state == SyncState::Synced).await;
+    assert_eq!(phases(ben).await, [UploadPhase::Waiting(UploadWait::Metered)]);
     let shown: (Option<bool>, bool) = ben
         .handle
         .read(|sql| {
@@ -118,7 +143,7 @@ async fn a_photo_waits_while_coven_cannot_tell_the_network() {
         .unwrap();
     assert_eq!(shown, (None, true));
     ben.app.set_network_metered(false);
-    state(ben, |state| *state == SyncState::Synced).await;
+    wait_for_uploads(ben).await;
     assert!(file_stored(ben, photo).await);
     network.close().await;
 }
@@ -193,11 +218,12 @@ async fn one_refused_file_upload_leaves_the_passes_alone() {
     network.close().await;
 }
 
-/// Dan's track sits on a drive he unplugs before it uploads: his state is
-/// failed, naming the track's move, and stays so while the track is gone.
-/// Once the drive is back and the track uploads, he is synced (§17.3).
+/// Dan's track sits on a drive he unplugs before it uploads: his state stays
+/// synced, since a track is a trailing file, and the track's phase is failed,
+/// naming its move's record, while the track is gone. Once the drive is back
+/// and the track uploads, his queue is empty (§17.3, §17.9, §19.1).
 #[tokio::test]
-async fn a_missing_original_fails_naming_its_move_until_it_uploads() {
+async fn a_missing_original_fails_its_phase_not_the_state_until_it_uploads() {
     let network = household().await;
     let dan = &network.devices[0];
     let drive = tempfile::tempdir().unwrap();
@@ -205,20 +231,23 @@ async fn a_missing_original_fails_naming_its_move_until_it_uploads() {
     std::fs::write(&path, vec![9; 4096]).unwrap();
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     dan.handle.set_uploads_paused(true).await.unwrap();
-    dan.handle
+    let track = dan
+        .handle
         .write(move |sql| {
             let track = sql.put_user_file("tracks", prepared, Place::Cloud)?;
             sql.execute("INSERT INTO photos(id,file) VALUES('track',?1)", [track])?;
-            Ok::<_, CovenError>(())
+            Ok::<_, CovenError>(track)
         })
         .await
         .unwrap();
     let aside = drive.path().join("unplugged");
     std::fs::rename(&path, &aside).unwrap();
     dan.handle.set_uploads_paused(false).await.unwrap();
-    let failed = state(dan, |state| matches!(state, SyncState::Failed(_))).await;
-    let SyncState::Failed(SyncCause::Pending(record)) = failed.state else {
-        panic!("the move's record names failed: {failed:?}");
+    crate::tests::upload_wait(&dan.handle, track, |_| true).await;
+    state(dan, |state| *state == SyncState::Synced).await;
+    let shown = phases(dan).await;
+    let [UploadPhase::Failed(record)] = shown.as_slice() else {
+        panic!("the move's record fails the track's phase: {shown:?}");
     };
     assert!(matches!(record.subject, PendingSubject::Move { .. }), "{record:?}");
     assert_eq!(
@@ -227,6 +256,8 @@ async fn a_missing_original_fails_naming_its_move_until_it_uploads() {
     );
     std::fs::rename(&aside, &path).unwrap();
     dan.handle.retry_uploads_now().await.unwrap();
+    wait_for_uploads(dan).await;
+    // The completion is a write, which the next pass sends.
     state(dan, |state| *state == SyncState::Synced).await;
     network.close().await;
 }

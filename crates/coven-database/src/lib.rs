@@ -130,7 +130,7 @@ pub use sqlite_settings::{
     WalAutocheckpoint, WalCheckpoint,
 };
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
-pub use sync_facts::{SyncFacts, UploadFacts};
+pub use sync_facts::{QueueFacts, SyncFacts, UploadFacts, UploadRecords};
 mod written_values;
 pub use file_hashes::{FileHasher, FileHashes};
 pub use file_moves::MoveId;

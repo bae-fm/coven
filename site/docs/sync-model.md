@@ -250,11 +250,11 @@ pub struct SyncStatus {
 
 pub enum SyncState {
     NotSynced,                    // no storage location recorded here
-    Syncing,                      // a slot or a file is moving
+    Syncing,                      // a slot or a bound file is moving
     WaitingToSync(SyncWait),      // held back, and what holds it
     Synced,                       // nothing waits
     Offline(SyncCause),           // the last pass got no answer from storage
-    OfflineWithUnsentChanges(SyncCause), // ... and a write or a file is queued
+    OfflineWithUnsentChanges(SyncCause), // ... and a write or a bound file is queued
     SignedOut { provider: CloudProvider, cause: Option<SyncCause> },
     NoAccess(SyncCause),
     StorageFull(SyncCause),
@@ -263,7 +263,7 @@ pub enum SyncState {
     UpdateNeeded(SyncCause),
     Removed(SyncCause),
     NeedsReset(SyncCause),
-    Failed(SyncCause),            // any other failure, or a file that can't upload
+    Failed(SyncCause),            // any other failure, or a bound file that can't upload
 }
 ```
 
@@ -276,16 +276,19 @@ failures, then activity. The cause is the last pass or the first pending
 record that names the state.
 
 `Synced` means nothing waits: the last pass reached the end of the sequence and
-every file this device uploads is stored. A file queued with nothing moving
-waits to sync, and the state names why: sync stopped, a provider's cooldown, a
-slot that can't apply yet, the app's pause, a metered network while the app
-moves files only on unmetered ones, the file's own retry, or its turn. A pass
-held at a slot waiting for a key, or cut short by a cooldown, waits to sync
-too, though nothing is queued. `Offline` describes the last attempt, not the
-connection's history: Ana syncs, then loses Wi-Fi, and her next attempt is
-offline. A provider error that denies a required read shows no access to
-storage. One photo whose original went missing while the rest syncs shows
-failed, naming the photo, until it uploads.
+every bound file this device uploads is stored. A bound file, one a write
+waits for, queued with nothing moving waits to sync, and the state names why:
+sync stopped, a provider's cooldown, a slot that can't apply yet, the file's
+own retry, or its turn. A trailing file, such as a track whose write went out
+first, never reaches the state: each queued file has its own phase in
+`handle.uploads()`, which names the pause, a metered network, a failure or its
+turn. A pass held at a slot waiting for a key, or cut short by a cooldown,
+waits to sync too, though nothing is queued. `Offline` describes the last
+attempt, not the connection's history: Ana syncs, then loses Wi-Fi, and her
+next attempt is offline. A provider error that denies a required read shows no
+access to storage. A cover whose original went missing while the rest syncs
+shows failed, naming the cover, until it uploads; a missing track shows failed
+in its own phase and leaves the state alone.
 
 Only the handle that runs sync has the state: a widget's read-only handle can't
 tell whether the app that runs sync is still running, so it has no

@@ -18,7 +18,7 @@ use coven::{
     Audience, Coven, DropboxAccess, DropboxLocation, FileColumn, InviteAccess,
     InviteLifetime, MemberRole, Migration, Namespace, OAuthAccess,
     Provenance, RowIdentity, StorageConfig, StoreLayout, SyncState, SyncStatus,
-    SyncWait, SyncedTable, UuidText,
+    SyncedTable, UuidText,
 };
 use uuid::Uuid;
 
@@ -166,7 +166,6 @@ while let Some(result) = status.next().await {
     match state {
         SyncState::Synced => show_line("Synced"),
         SyncState::Syncing => show_line("Syncing…"),
-        SyncState::WaitingToSync(SyncWait::Metered) => show_line("Waiting for Wi-Fi"),
         SyncState::WaitingToSync(_) => show_line("Waiting to sync"),
         SyncState::Offline(_) | SyncState::OfflineWithUnsentChanges(_) => show_line("Offline"),
         SyncState::SignedOut { .. } => offer_sign_in(),

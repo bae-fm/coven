@@ -25,9 +25,22 @@ namespace CovenIO.FileReach
 open CovenIO.SyncState
 open CovenStorage (Files.State Files.Step Files.complete Files.change Files.drop)
 
-/-- The upload queue as the sync state reads it, with no attempt running. -/
+/-- The upload queue as the sync state reads it, with no attempt running:
+each staged file's upload holds the write that staged it, so it is bound. -/
 def queued (s : Files.State) : List Upload :=
-  s.queue.map fun _ => ⟨.queued, false, false, none⟩
+  s.queue.map fun _ => ⟨.queued, true, false, none⟩
+
+theorem bound_queued (s : Files.State) : (queued s).filter (·.bound) = queued s := by
+  unfold queued
+  apply List.filter_eq_self.mpr
+  intro a ha
+  simp only [List.mem_map] at ha
+  obtain ⟨_, _, rfl⟩ := ha
+  rfl
+
+theorem bound_eq (f : Facts) (s : Files.State) (uploads : f.uploads = queued s) :
+    f.bound = queued s := by
+  simp [Facts.bound, uploads, bound_queued]
 
 theorem change_queue (s : Files.State) (row : Nat) (file : Option Nat) :
     (Files.change s row file).queue.length = s.queue.length := by
@@ -57,8 +70,8 @@ theorem queue_holds_synced (f : Facts) (s : Files.State) (uploads : f.uploads = 
     (held : s.queue ≠ []) : state f ≠ .synced := by
   intro shown
   obtain ⟨u, rest, eq⟩ := List.exists_cons_of_ne_nil held
-  have := synced_files_stored f shown ⟨.queued, false, false, none⟩
-    (by simp [uploads, queued, eq])
+  have := synced_bound_stored f shown ⟨.queued, true, false, none⟩
+    (by simp [bound_eq f s uploads, queued, eq])
   cases this
 
 /-- A device with nothing but its uploads to name a state: connected, its last
@@ -68,13 +81,10 @@ structure Settled (f : Facts) : Prop where
   connected : f.storage = .connected
   last : f.last = .synced
   still : f.moving = false
-  noDownload : f.downloading = false
   noWrites : f.unsent = false
   noRecords : f.records = []
   running : f.running = true
   cooling : f.cooling = false
-  unpaused : f.paused = false
-  anyNetwork : f.unmeteredOnly = false
 
 /-- **A queued upload waits its turn.** On a settled device it shows waiting to
 sync, and that is what it waits for. -/
@@ -86,14 +96,13 @@ theorem queued_waits (f : Facts) (s : Files.State) (settled : Settled f)
   have loop : f.loop = .synced := by
     simp [Facts.loop, settled.still, Facts.ended, settled.last]
   constructor
-  · refine (state_iff f recorded _).mpr ⟨(candidate_iff f _).mpr (.inr (.inr (.inl ?_))), ?_⟩
-    · exact ⟨⟨.queued, false, false, none⟩, by simp [uploads, queued, eq], by
+  · refine (state_iff f recorded _).mpr ⟨(candidate_iff f _).mpr (.inr (.inl ?_)), ?_⟩
+    · exact ⟨⟨.queued, true, false, none⟩, by simp [bound_eq f s uploads, queued, eq], by
         simp [Upload.candidate]⟩
     · intro c hc
-      rcases (candidate_iff f c).mp hc with e | ⟨_, d⟩ | ⟨x, mx, hx⟩ | ⟨_, w⟩ | ⟨_, h⟩ | ⟨r, hr, _⟩
+      rcases (candidate_iff f c).mp hc with e | ⟨x, mx, hx⟩ | ⟨_, w⟩ | ⟨_, h⟩ | ⟨r, hr, _⟩
       · rw [← e, loop]; simp [State.rank]
-      · rw [settled.noDownload] at d; cases d
-      · simp only [uploads, queued, List.mem_map] at mx
+      · simp only [bound_eq f s uploads, queued, List.mem_map] at mx
         obtain ⟨_, _, rfl⟩ := mx
         simp [Upload.candidate] at hx
         subst hx
@@ -104,9 +113,8 @@ theorem queued_waits (f : Facts) (s : Files.State) (settled : Settled f)
   · have blocked : f.blocked = false := by simp [Facts.blocked, settled.last]
     have free : f.heldAll = none := by
       simp [Facts.heldAll, settled.running, settled.cooling, blocked]
-    simp [Facts.waits, loop, uploads, queued, eq, Facts.uploadWait, free, settled.unpaused,
-      settled.noWrites,
-      Facts.meteredHolds, settled.anyNetwork, Upload.candidate]
+    simp [Facts.waits, loop, bound_eq f s uploads, queued, eq, Facts.uploadWait, free,
+      settled.noWrites, Upload.candidate]
 
 theorem complete_queue (s : Files.State) (r : CovenStorage.Files.Reference)
     (u : CovenStorage.Files.Upload) (h : u ∈ (Files.complete s r).queue) : u ∈ s.queue := by
@@ -129,9 +137,8 @@ theorem completed_synced (f : Facts) (s : Files.State) (r : CovenStorage.Files.R
   have empty : f.uploads = [] := by
     rw [uploads, queued, completed_empties s r only]; rfl
   apply (synced_iff f).mpr
-  refine ⟨settled.connected, settled.last, settled.still, settled.noDownload, ?_,
-    settled.noWrites, ?_⟩
-  · intro u hu; rw [empty] at hu; cases hu
+  refine ⟨settled.connected, settled.last, settled.still, ?_, settled.noWrites, ?_⟩
+  · intro u hu; simp [Facts.bound, empty] at hu
   · intro x hx; rw [settled.noRecords] at hx; cases hx
 
 /-- **A file storage lost keeps the device failed.** Storage confirming nothing
