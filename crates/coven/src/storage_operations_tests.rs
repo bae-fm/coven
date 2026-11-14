@@ -15,21 +15,22 @@ async fn wait_for(handle: &CovenHandle, reached: impl FnMut(&Option<LastPass>) -
     handle.test_last_pass().wait_for(reached).await;
 }
 
-/// Wait until a pass ends with this device removed, and the state shows it.
-async fn removed(handle: &CovenHandle) {
+/// Wait until a pass ends with this device removed the way `removal` says, and
+/// the state shows it.
+async fn removed(handle: &CovenHandle, removal: coven_database::Removal) {
     wait_for(handle, |last| {
         matches!(
             last,
             Some(LastPass::Failed {
-                failure: StatusFailure::Removed(coven_database::Removal::Member),
+                failure: StatusFailure::Removed(stop),
                 ..
-            })
+            }) if *stop == removal
         )
     })
     .await;
     let status = handle.test_sync_status().latest().await;
     assert!(
-        matches!(status.state, SyncState::Removed { removal: coven_database::Removal::Member, .. }),
+        matches!(status.state, SyncState::Removed { removal: stop, .. } if stop == removal),
         "{status:?}"
     );
 }
@@ -64,7 +65,7 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     // passes as the test moves the clock to its end.
     ben.app.refuse_person_entry_operations(false);
     network.end_wait(crate::tests::connection_wait(&ben.handle, |_| true).await);
-    removed(&ben.handle).await;
+    removed(&ben.handle, coven_database::Removal::Member).await;
     assert!(ben.handle.applied_slot().await > applied);
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
@@ -125,7 +126,7 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     let removal = ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
     crate::tests::landed(&ana.handle, removal).await;
     ben.handle.sync_now();
-    removed(&ben.handle).await;
+    removed(&ben.handle, coven_database::Removal::Member).await;
     let held = |app: &Coven| {
         app.store_keychain(ben.store)
             .storage_credentials()
@@ -203,7 +204,7 @@ async fn leave(refused: bool) {
     crate::tests::landed(&ben.handle, removal).await;
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
-    removed(&ben.handle).await;
+    removed(&ben.handle, coven_database::Removal::Member).await;
     assert_eq!(crate::tests::readable(ana.app.saved_restore_codes().await.unwrap()).len(), 1);
     network.close().await;
 }
@@ -240,7 +241,7 @@ async fn removing_one_device_keeps_the_person_entries() {
     assert_eq!(sign_out, None);
     crate::tests::landed(&restored, removal).await;
     phone.handle.sync_now();
-    removed(&phone.handle).await;
+    removed(&phone.handle, coven_database::Removal::Device).await;
     assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), saved);
     assert_eq!(crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()), saved);
     restored.close().await.unwrap();
