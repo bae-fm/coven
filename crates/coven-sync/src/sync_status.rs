@@ -14,7 +14,8 @@
 //! computes it.
 
 use crate::{
-    KeyHolder, LastPass, LocalFailure, PendingReason, PendingRecord, Prerequisite, StatusFailure,
+    DeviceIdEvidence, KeyHolder, LastPass, LocalFailure, PendingReason, PendingRecord,
+    Prerequisite, StatusFailure,
 };
 use coven_database::{DbError, RecordedLocation, Removal, RetrySync, UnsentWork};
 use coven_foundation::id_source::{KeyId, MemberId};
@@ -108,6 +109,10 @@ pub enum ResetReason {
     /// A reset or restore registered another installation in this one's place
     /// (§19.3).
     Replaced,
+    /// Another installation uses this device's id: this copy is the one
+    /// behind, which the app resets without asking, and the reset registers a
+    /// new device (§19.3).
+    DeviceIdInUse,
     /// This member's keys were replaced with a pair this device doesn't hold
     /// (§12.3).
     MemberKeysReplaced {
@@ -464,9 +469,12 @@ impl StatusFailure {
         match self {
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
             Self::Removed(removal) => Some(Named::Removed(*removal)),
-            // The evidence of another copy using this id reads as a
-            // replacement.
-            Self::DeviceIdInUse(_) => Some(Named::NeedsReset(ResetReason::Replaced)),
+            Self::DeviceIdInUse(DeviceIdEvidence::Replaced) => {
+                Some(Named::NeedsReset(ResetReason::Replaced))
+            }
+            Self::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { .. }) => {
+                Some(Named::NeedsReset(ResetReason::DeviceIdInUse))
+            }
             Self::Storage(failure) => storage_names(*failure).or_else(|| {
                 (crate::pending::storage_clears(*failure) != crate::pending::Clears::ByItself)
                     .then_some(Named::Failed)

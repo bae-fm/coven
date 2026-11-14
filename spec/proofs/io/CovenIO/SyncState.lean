@@ -168,6 +168,9 @@ inductive Removal
 inductive ResetReason
   /-- A reset or restore registered another installation in this one's place. -/
   | replaced
+  /-- History shows another installation using this device's id: this copy is
+  the one behind, and its reset registers a new device. -/
+  | deviceIdInUse
   /-- This member's keys were replaced with a pair this device doesn't hold. -/
   | memberKeysReplaced
   deriving DecidableEq, Repr
@@ -266,6 +269,9 @@ inductive PassFailure
   | removed (removal : Removal)
   /-- Another installation was registered in this one's place. -/
   | replaced
+  /-- A slot signed with this device's id is one this copy never attempted, or
+  its claim's slot holds other bytes signed with its id. -/
+  | deviceIdInUse
   /-- The pass finished, but coven's own operation failed with this reason. -/
   | operation (reason : Reason)
   /-- A slot can't apply, for this reason. -/
@@ -286,6 +292,7 @@ def PassFailure.state : PassFailure → Option State
   | .updateRequired => some .updateNeeded
   | .removed _ => some .removed
   | .replaced => some .needsReset
+  | .deviceIdInUse => some .needsReset
   | .operation r =>
       match r.state with
       | some s => some s

@@ -408,13 +408,14 @@ private partial def reason (j : Json) : Except String Reason := do
   throw s!"unknown reason {j.compress}"
 
 /-- A failed pass: `offline`, `updateRequired`, `removedDevice`, `removedMember`,
-`neverAdmitted`, `replaced`, `other`, or `{"storage": failure}`, `{"operation": reason}`,
+`neverAdmitted`, `replaced`, `deviceIdInUse`, `other`, or `{"storage": failure}`, `{"operation": reason}`,
 `{"blocked": reason}`. -/
 private def passFailure (j : Json) : Except String PassFailure := do
   if let .ok name := j.getStr? then
     return ← named [("offline", .offline), ("updateRequired", .updateRequired), ("removedDevice", .removed .device),
       ("removedMember", .removed .member), ("neverAdmitted", .removed .neverAdmitted),
-      ("replaced", .replaced), ("other", .other)] "pass failure" name
+      ("replaced", .replaced), ("deviceIdInUse", .deviceIdInUse), ("other", .other)]
+      "pass failure" name
   if let .ok f := j.getObjVal? "storage" then return .storage (← failure f)
   if let .ok r := j.getObjVal? "operation" then return .operation (← reason r)
   if let .ok r := j.getObjVal? "blocked" then return .blocked (← reason r)
@@ -444,6 +445,7 @@ def removalName : Removal → String
 
 def resetName : ResetReason → String
   | .replaced => "replaced"
+  | .deviceIdInUse => "deviceIdInUse"
   | .memberKeysReplaced => "memberKeysReplaced"
 
 def waitName : SyncWait → String

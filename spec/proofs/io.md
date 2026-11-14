@@ -333,7 +333,10 @@ and shows waiting to sync on the slot, or failed, or update needed.
 its member's removal or a replacement of its keys, the device shows removed or
 device needs reset, and `device_removal_reached` and
 `device_replacement_reached` the same for its own removal and a registration in
-its place, each naming which removal or which reason. The other states come from no store history: they are what a
+its place, each naming which removal or which reason. `copy_stop_standing`
+proves a pass that finds another installation using the device's id shows
+device needs reset naming `deviceIdInUse`, which no store history reaches: the
+evidence is in the device's own journal (the sequence package's `Rejoin`). The other states come from no store history: they are what a
 provider or custody answers, what is recorded, or what is moving, and
 `every_state` reaches them from those facts.
 

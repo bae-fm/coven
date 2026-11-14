@@ -29,6 +29,10 @@ name, and `io_differential_sync_state` checks what each one shows.
   device's own removal (removed, the device's), and for a registration taking
   its place (needs reset, replaced).
 
+`copy_stop_standing`: a pass that finds another installation using this
+device's id shows needs reset, naming that reason (`deviceIdInUse`), which no
+store history reaches.
+
 `copy_precedes_need_fails` in `CovenSequence.CopyOrderExamples` is a history
 that reaches `key_wait_reached` with every device following the rules.
 
@@ -288,6 +292,20 @@ theorem device_replacement_reached {st : Store S} {seq : Nat → Slot S} {dv : D
   rw [← (ok A followed).ledger] at stays
   refine ⟨stays, .deviceReplaced A followed i a fresh m slot past, ?_⟩
   obtain ⟨x, hx, shown, named⟩ := quiet_standing q (.failed .replaced) now
+  simp only [Prod.mk.injEq] at named
+  simp [hx, shown, named.2]
+  exact ⟨rfl, rfl⟩
+
+/-- **A copy that finds its id in use needs reset, naming that.** No store
+history ends a pass this way: the evidence is a slot signed with the device's
+own id that its journal never attempted, which `CovenSequence.Rejoin` models.
+A quiet device whose pass ends on it shows needs reset with the reason
+`deviceIdInUse`, not `replaced`: the app resets the copy without asking, and
+the reset registers a new device. -/
+theorem copy_stop_standing {f : Facts} (q : Quiet f) (now : Nat) :
+    (run f [.begin, .finish (.failed .deviceIdInUse) now]).map
+      (fun x => (state x, x.resetReason)) = some (.needsReset, some .deviceIdInUse) := by
+  obtain ⟨x, hx, shown, named⟩ := quiet_standing q (.failed .deviceIdInUse) now
   simp only [Prod.mk.injEq] at named
   simp [hx, shown, named.2]
   exact ⟨rfl, rfl⟩

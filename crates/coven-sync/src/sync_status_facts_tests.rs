@@ -630,6 +630,17 @@ fn a_removed_or_replaced_device_names_which_and_what_it_never_sent() {
         ..connected()
     };
     assert_eq!(replaced.state(), SyncState::NeedsReset { reason: ResetReason::Replaced, unsent });
+    let copied = Facts {
+        last: pass(StatusFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot {
+            slot: coven_merge::Slot::FIRST,
+        })),
+        unsent,
+        ..connected()
+    };
+    assert_eq!(
+        copied.state(),
+        SyncState::NeedsReset { reason: ResetReason::DeviceIdInUse, unsent }
+    );
     let keys = Facts {
         records: vec![record(PendingReason::MemberKeysReplaced { member })],
         unsent,

@@ -297,7 +297,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
             .wait_for(|shown| {
                 matches!(
                     shown.state,
-                    SyncState::NeedsReset { reason: crate::ResetReason::Replaced, .. }
+                    SyncState::NeedsReset { reason: crate::ResetReason::DeviceIdInUse, .. }
                 )
             })
             .await;

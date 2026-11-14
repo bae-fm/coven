@@ -10338,9 +10338,11 @@ The state is one of, in the order an app lists them:
   so what a removal costs it is its unsent queue, not refused writes.
 - **Device needs reset:** this installation can't send under its keys or id,
   and says why: a reset or restore registered another installation in its
-  place (§19.3), or its member's keys were replaced elsewhere. A removal
-  outranks it, and the first fact that names a reason is the one shown
-  ([`reset_names_why`](proofs/io/CovenIO/Standing.lean)). It says what is
+  place (`Replaced`), another installation uses this device's id
+  (`DeviceIdInUse`, §19.3), or its member's keys were replaced elsewhere. The
+  app resets a copy that reads `DeviceIdInUse` without asking the person, and
+  asks for the others. A removal outranks it, and the first fact that names a
+  reason is the one shown ([`reset_names_why`](proofs/io/CovenIO/Standing.lean)). It says what is
   unsent as removed does.
 - **Failed:** a failure only a person clears that has no state of its own, one
   that never clears, a bug, or a bound file that can't be uploaded or read,
@@ -10636,8 +10638,9 @@ them. None of them would ever run on the copy, and its app would follow them
 forever. Restoring never rescues the old installation's queue (§13.1).
 
 A copy stopped on this evidence is the one behind: another installation holds
-the id and keeps sending under it. The app resets the copy with `reset_device`
-without asking the person, since no choice is left to make. The reset registers
+the id and keeps sending under it. The copy reads device needs reset, naming
+`DeviceIdInUse`, and the app resets it with `reset_device` without asking the
+person, since no choice is left to make. The reset registers
 the copy's fresh id as a new device of the same member and replaces nothing, so
 the installation that kept the id carries on (below).
 
@@ -14349,7 +14352,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Syncing shows exactly when an activity is named and no candidate outranks it; waiting to sync shows only while something holds the work or a retry is armed, never for a turn; what the pass moved comes first and a bound file before the writes it holds; a write committed with nothing holding it shows syncing, sending, in that step; each activity is reached | `syncing_iff`, `waiting_holds`, `move_first`, `bound_before_write`, `next_write_sends`, `every_activity` | `proofs/io/CovenIO/Activity.lean` | §19.1 |
 | *Body.* A trailing file never changes the sync state; a file's phase in the upload queue is failed exactly when its record names a state, and its backoff exactly when its record names none and nothing before the backoff holds it; a bound upload is never held by the pause, a metered network or a self-replacement's write pause, and a trailing one waits for the network only while the setting is on, the network metered and nothing but the pause before it; every phase and every wait a file can have is reached by some run of the facts' events | `trailing_keeps_state`, `phase_failed_iff`, `phase_retrying_iff`, `paused_only_trailing`, `metered_holds`, `metered_only_held`, `every_phase` | `proofs/io/CovenIO/Transfers.lean` | §17.4, §17.9 |
 | A state shows exactly when a fact names it and none names one above it; synced shows exactly on a connected device whose last pass ended synced, with nothing moving, every bound upload stored, no write queued and no record naming a state; each wait holds for the fact that names it; every state and every wait is reached by some run of the facts' events | `state_iff`, `candidate_iff`, `synced_iff`, `pass_wait_holds`, `wait_facts`, `every_state`, `every_wait` | `proofs/io/CovenIO/SyncReach.lean` | §19.1 |
-| From a store history: a device with its keys that can open every slot can read to the head and show synced; one without an audience's key at that audience's slot never ends synced from there and shows waiting to sync on the slot; one at a kept slot it can't open shows failed or update needed; one whose reader applied its member's removal or its own shows removed, naming which, and a replacement of its member's keys, or a registration in its place, device needs reset, naming which | `synced_reached`, `key_wait_reached`, `unopened_reached`, `removal_reached`, `replacement_reached`, `device_removal_reached`, `device_replacement_reached` | `proofs/io/CovenIO/StoreReach.lean` | §5.4, §14.1, §19.1 |
+| From a store history: a device with its keys that can open every slot can read to the head and show synced; one without an audience's key at that audience's slot never ends synced from there and shows waiting to sync on the slot; one at a kept slot it can't open shows failed or update needed; one whose reader applied its member's removal or its own shows removed, naming which, and a replacement of its member's keys, or a registration in its place, device needs reset, naming which; a pass that finds another installation using its id shows device needs reset naming that | `synced_reached`, `key_wait_reached`, `unopened_reached`, `removal_reached`, `replacement_reached`, `device_removal_reached`, `device_replacement_reached`, `copy_stop_standing` | `proofs/io/CovenIO/StoreReach.lean` | §5.4, §14.1, §19.1 |
 | From a file history: staging a file queues its upload, and a queued bound upload holds synced off; on an otherwise settled device it shows syncing, uploading a bound file, for its turn; once storage confirmed the last queued upload the queue is empty and the device shows synced; a confirmed absence at a record's path is a lost file, whose record keeps the state at failed or what outranks it | `staged_queued`, `queue_holds_synced`, `queued_syncs`, `completed_empties`, `completed_synced`, `lost_file_fails` | `proofs/io/CovenIO/FileReach.lean` | §17.9, §19.1 |
 | A pending record changes only when an attempt records another condition: time passing changes none, an attempt that meets the same condition again changes none, opening keeps every condition and drops only the cause, and a record is gone only when its work settles or the progress it names (a slot, a snapshot's coverage, a move's cancellation, an operation advancing, a raise's capture) or a reset ends it | `time_keeps`, `repeat_keeps`, `reopen_keeps_condition`, `ended_only_by_its_end`, `condition_changes_only_by_save` | `proofs/io/CovenIO/PendingRecords.lean` | §19.1 |
 | *Body.* A refusal judges the stored bytes when it stands only on two reads that agree, so an object whose stored bytes pass is never refused, and a kept copy that is the stored bytes applies; refusing on one read, one fault on the way refuses an honest object for good, while with the second read the next pass applies it | `refusal_judges_stored`, `honest_never_refused`, `stored_copy_applies`, `one_read_refuses_honest`, `fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
@@ -14483,7 +14486,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `UpdateRequired` | a slot needs a newer schema or format | §5.4, §18.3, C.2 |
 | `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
-| `SyncError::DeviceIdInUse` | another installation uses this device's id (the copy records the stop), or a reset registered another installation in its place | §5.1, §5.3, §14.1, §19.3 |
+| `SyncError::DeviceIdInUse` | another installation uses this device's id (the copy records the stop and reads `ResetReason::DeviceIdInUse`), or a reset registered another installation in its place (`ResetReason::Replaced`) | §5.1, §5.3, §14.1, §19.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code, or a pairing's handover holding a replaced pair, is used | §12.3, §13.1, §13.2, §14.1 |
 | `SyncError::Removed(Removal)` | this device or its member was removed, or a joined store read to the end of the sequence with its pair bound nowhere in its history (`NeverAdmitted`: the admission that published it was refused); the store stops for good | §13.2, §14.1, §19.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
@@ -14550,7 +14553,9 @@ recorded, comes before them all.
 | ... with any other `StorageFailure`: one only a person clears with no state of its own, or one that never clears | failed |
 | the last pass `UpdateRequired`; a record's `UpdateRequired` | update needed |
 | the last pass `Removed(removal)`; a record's `Removed(removal)` | removed, naming the removal |
-| the last pass `DeviceIdInUse`; a record's `MemberKeysReplaced` | device needs reset, naming `Replaced` or `MemberKeysReplaced` |
+| the last pass `DeviceIdInUse(Replaced)` | device needs reset, naming `Replaced` |
+| the last pass `DeviceIdInUse(UnattemptedSlot)` | device needs reset, naming `DeviceIdInUse` |
+| a record's `MemberKeysReplaced` | device needs reset, naming `MemberKeysReplaced` |
 | the last pass blocked at a slot whose reason names a state | what the slot's reason names |
 | the last pass failed on coven's own operation | what its record's reason names, else none when the reason clears by itself, else failed |
 | any other failed pass | failed |

@@ -185,6 +185,7 @@ import CovenIO
 #print axioms CovenIO.StoreReach.replacement_reached
 #print axioms CovenIO.StoreReach.device_removal_reached
 #print axioms CovenIO.StoreReach.device_replacement_reached
+#print axioms CovenIO.StoreReach.copy_stop_standing
 #print axioms CovenIO.FileReach.staged_queued
 #print axioms CovenIO.FileReach.queue_holds_synced
 #print axioms CovenIO.FileReach.queued_syncs

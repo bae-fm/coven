@@ -5,8 +5,9 @@ import CovenIO.SyncReach
 
 Removed and device needs reset each say which: an admin removed this device, its
 member was removed or left, or the admission that published a joined store was
-refused (`Removal`); another installation took this one's place, or the member's
-keys were replaced with a pair this device lacks (`ResetReason`). The facts that
+refused (`Removal`); another installation took this one's place, another
+installation uses this device's id, or the member's keys were replaced with a
+pair this device lacks (`ResetReason`). The facts that
 name the state each carry one, and the first, in the order candidates are
 taken, is the one shown.
 
@@ -47,6 +48,7 @@ def PassFailure.removal : PassFailure → Option Removal
 /-- The reset reason a failed pass names. -/
 def PassFailure.reset : PassFailure → Option ResetReason
   | .replaced => some .replaced
+  | .deviceIdInUse => some .deviceIdInUse
   | .operation r => r.reset
   | .blocked r => r.reset
   | _ => none

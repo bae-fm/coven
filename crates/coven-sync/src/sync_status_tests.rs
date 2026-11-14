@@ -290,6 +290,7 @@ fn passes() -> Vec<Option<LastPass>> {
         failed(StatusFailure::Removed(Removal::Member)),
         failed(StatusFailure::Removed(Removal::NeverAdmitted)),
         failed(StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced)),
+        failed(StatusFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { slot: slot(4) })),
         failed(StatusFailure::Other),
     ];
     passes.extend(failures().into_iter().map(|failure| failed(StatusFailure::Storage(failure))));
@@ -346,7 +347,10 @@ fn pass_json(last: &Option<LastPass>) -> Value {
             StatusFailure::Removed(Removal::Device) => json!("removedDevice"),
             StatusFailure::Removed(Removal::Member) => json!("removedMember"),
             StatusFailure::Removed(Removal::NeverAdmitted) => json!("neverAdmitted"),
-            StatusFailure::DeviceIdInUse(_) => json!("replaced"),
+            StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced) => json!("replaced"),
+            StatusFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { .. }) => {
+                json!("deviceIdInUse")
+            }
             StatusFailure::Storage(failure) => json!({"storage": failure_name(*failure)}),
             StatusFailure::Operation(record) => json!({"operation": reason_json(&record.reason)}),
             StatusFailure::Other => json!("other"),
@@ -533,6 +537,7 @@ fn shown(facts: &Facts) -> Value {
             Value::Null,
             json!(match reason {
                 ResetReason::Replaced => "replaced",
+                ResetReason::DeviceIdInUse => "deviceIdInUse",
                 ResetReason::MemberKeysReplaced { .. } => "memberKeysReplaced",
             }),
             json!({"writes": unsent.writes > 0, "files": unsent.files > 0}),

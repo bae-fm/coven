@@ -6192,6 +6192,10 @@ pub enum ResetReason {
     /// A reset or restore registered another installation in this one's place
     /// (§19.3).
     Replaced,
+    /// Another installation uses this device's id: this copy is the one
+    /// behind. The app resets it without asking, and the reset registers a new
+    /// device (§19.3).
+    DeviceIdInUse,
     /// This member's keys were replaced with a pair this device doesn't hold
     /// (§12.3).
     MemberKeysReplaced { member: MemberId },
