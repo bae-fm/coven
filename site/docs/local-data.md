@@ -454,6 +454,12 @@ let count = handle.subscribe(|sql| {
 A write that adds a row reruns `count`, and only the window whose rows it
 changed.
 
+A window reads by cursor, `WHERE title > ?1 ... LIMIT 100`, not by `OFFSET`:
+a live query reruns when any row it read changes, and a cursor window reads
+only its own rows, while `LIMIT 100 OFFSET 200` steps over the 200 rows before
+it, so any insert above reruns it. A jump to a far position, such as a
+scrollbar drag, reads by offset once and pages by cursor from there.
+
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
 `subscribe_pin_progress` and others. They all work offline. The upload queue
