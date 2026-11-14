@@ -24,6 +24,43 @@ async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
     ben.sync.database.close().await.unwrap();
 }
 
+/// §19.3: a copy of Ana's id restored from a backup left a snapshot body at the
+/// path Ana numbers next. Ana finds other bytes there, burns that number and
+/// announces her snapshot under the next one; the other copy's body stays
+/// where it is, and no slot names it.
+#[tokio::test]
+async fn a_snapshot_whose_path_holds_another_copys_body_takes_the_next_number() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "a", "recorded").await;
+    ana.sync.pass().await.unwrap();
+    let burned = ana.sync.database.reserve_snapshot_number().await.unwrap().get() + 1;
+    let taken = ObjectPath::snapshot(
+        group.store,
+        coven_merge::Audience::Store,
+        ana.sync.device,
+        burned.try_into().unwrap(),
+    );
+    let other = b"another copy's body, never announced".to_vec();
+    group.storage.plant(&taken, &other).await.unwrap();
+
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let session = ana.sync.session.lock().await;
+    let named = &session.history.announcements[&announced].snapshot;
+    assert_eq!(named.number, burned + 1);
+    let path = crate::snapshot_object::path(group.store, named).unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    assert_eq!(
+        crate::identity::stored_digest(&group.storage, &taken).await.unwrap(),
+        crate::identity::digest(&other),
+        "the burned path keeps the other copy's bytes"
+    );
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    drop(session);
+    ana.sync.database.close().await.unwrap();
+}
+
 /// Ana's insert lands in a writes slot that Ben applies. Once he applies
 /// her ordinary store snapshot covering it, that slot counts nothing toward
 /// the store's next snapshot, from any coverage: he keeps no size for it.

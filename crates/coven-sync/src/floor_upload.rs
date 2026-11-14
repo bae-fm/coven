@@ -29,6 +29,16 @@ impl UploadSource for FloorUploadSource<'_> {
         true
     }
 }
+/// How a floor body's upload ended.
+pub(super) enum FloorUpload {
+    /// The body is stored and the pointer names it.
+    Published,
+    /// Other bytes occupy the body's path, left by another copy of this
+    /// device's id. The body is sealed for that path, so the number is burned
+    /// and the floor is captured again under the next one (§19.3).
+    Burned,
+}
+
 impl SequenceSync {
     /// Upload the body at the device's own numbered name, then replace the
     /// pointer once, conditional on the pointer observed (§16.6). A body that
@@ -38,7 +48,7 @@ impl SequenceSync {
         &self,
         record: &mut OperationRecord,
         artifact: &mut FloorArtifact,
-    ) -> Result<(), SyncError> {
+    ) -> Result<FloorUpload, SyncError> {
         let body = artifact.capture.body_path(self.store(), self.device);
         let lock = self.directory.lock_read_only()?;
         let reader = self.artifact_file(&artifact.capture.name)?.open_reader()?;
@@ -50,13 +60,12 @@ impl SequenceSync {
         {
             Uploaded::Stored(_) => (),
             Uploaded::Paused => unreachable!("retention owns its active request"),
-            Uploaded::Occupied(_) => {
-                // Only this device writes this name, and never twice, so what
-                // is there is this write's body, stored before a reply was
-                // lost. A reader checks its digest against the pointer's.
-                let stored = self.storage.status(&body).await?;
-                if stored.is_none_or(|stored| stored.size != total) {
-                    return Err(crate::write_object::wrong_identity(&body));
+            Uploaded::Occupied(expected) => {
+                // This device's own earlier attempt stored this body before a
+                // reply was lost; a reader checks its digest against the
+                // pointer's. Different bytes are another copy's.
+                if !crate::identity::occupant_is(self.storage.as_ref(), &body, expected).await? {
+                    return Ok(FloorUpload::Burned);
                 }
             }
         }
@@ -67,7 +76,7 @@ impl SequenceSync {
                 self.storage.create(&ObjectPath::floor(self.store()), pointer).await?;
             }
         }
-        Ok(())
+        Ok(FloorUpload::Published)
     }
 
     /// Drop this write's local bytes and its upload session, and delete its

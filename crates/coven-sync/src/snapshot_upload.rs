@@ -6,7 +6,7 @@ use crate::{
     sequence_sync::sequence_operations::{
         OperationProgress, OperationStep, Request, SequenceOperation,
     },
-    sequence_sync::snapshot_capture::SnapshotArtifact,
+    sequence_sync::snapshot_capture::{Capture, SnapshotArtifact},
     sequence_sync::SequenceSync,
     SyncError,
 };
@@ -68,7 +68,9 @@ impl SequenceSync {
         {
             Uploaded::Stored(object) => object,
             Uploaded::Occupied(expected) => {
-                crate::identity::settle_occupied(self.storage.as_ref(), &path, expected).await?;
+                if !crate::identity::occupant_is(self.storage.as_ref(), &path, expected).await? {
+                    return self.recapture_under_next_number(source).await;
+                }
                 None
             }
             Uploaded::Paused => unreachable!("an operation owns its active request"),
@@ -87,6 +89,36 @@ impl SequenceSync {
                     )),
                 }
                 .update(&source.record)?,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Another copy of this device's id left different bytes at the path of
+    /// this snapshot. The body is sealed for its path, so the number is
+    /// burned: the capture is journaled again under the next number, and the
+    /// other copy's bytes stay where they are (§19.3).
+    async fn recapture_under_next_number(
+        &self,
+        source: SnapshotUploadSource<'_>,
+    ) -> Result<(), SyncError> {
+        let SnapshotUploadSource { record, request, artifact, reader, _lock, .. } = source;
+        drop(reader);
+        drop(_lock);
+        self.artifact_file(&artifact.capture.name)?.remove()?;
+        let number = self.database.reserve_snapshot_number().await?.get();
+        let capture = Capture {
+            id: coven_format::admin::SnapshotId { number, ..artifact.capture.id },
+            name: format!("snapshot-{number}.sealed"),
+            ..artifact.capture
+        };
+        self.database
+            .advance_operation(
+                SequenceOperation {
+                    request,
+                    progress: OperationProgress::Running(OperationStep::Capturing(capture)),
+                }
+                .update(&record)?,
             )
             .await?;
         Ok(())

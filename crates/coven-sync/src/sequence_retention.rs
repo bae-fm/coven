@@ -582,7 +582,24 @@ impl SequenceSync {
                 record.last_step = next;
                 let result = self.upload_floor(&mut record, artifact).await;
                 match result {
-                    Ok(()) => {
+                    Ok(floor_upload::FloorUpload::Burned) => {
+                        // The next pass captures the floor under the next
+                        // number and uploads it.
+                        if let Some(session) = &artifact.session {
+                            self.storage.abort_upload(session).await?;
+                        }
+                        self.artifact_file(&artifact.capture.name)?.remove()?;
+                        let number = Slot::from(self.database.reserve_snapshot_number().await?);
+                        let capture = FloorCapture {
+                            number,
+                            name: format!("floor-{}.sealed", self.ids.new_id()),
+                            ..artifact.capture.clone()
+                        };
+                        let update = Retention::Capture(capture).update(&record)?;
+                        self.database.advance_operation(update).await?;
+                        return Ok(());
+                    }
+                    Ok(floor_upload::FloorUpload::Published) => {
                         confirmed = Some(first);
                         // The rest of the pass deletes by the floor storage
                         // now holds: the bodies it names stay, and the slots

@@ -51,6 +51,15 @@ pub(crate) async fn stored_digest(
     Ok((length, hasher.finish()))
 }
 
+/// Whether the bytes stored at `path` are the ones with this length and digest.
+pub(crate) async fn occupant_is(
+    storage: &dyn Storage,
+    path: &ObjectPath,
+    expected: (u64, ObjectDigest),
+) -> Result<bool, SyncError> {
+    Ok(stored_digest(storage, path).await? == expected)
+}
+
 /// A non-slot immutable artifact with other bytes fails its own attempt. Only
 /// authenticated sequence claims prove another installation uses this device id.
 pub(crate) async fn settle_occupied(
@@ -58,7 +67,7 @@ pub(crate) async fn settle_occupied(
     path: &ObjectPath,
     expected: (u64, ObjectDigest),
 ) -> Result<(), SyncError> {
-    if stored_digest(storage, path).await? == expected {
+    if occupant_is(storage, path, expected).await? {
         return Ok(());
     }
     Err(crate::write_object::wrong_identity(path))

@@ -1753,6 +1753,22 @@ Each rule is needed:
 
 The new device's installation is `FirstInstallation`'s (above).
 
+## Numbered objects outside the sequence
+
+[`ObjectNumbers`](sequence/CovenSequence/ObjectNumbers.lean). A snapshot's or a
+floor body's path holds the device's id and a number of its own, so copies of
+one id can number the same path with different bytes. The model holds the
+objects at the paths of one id, by a token of their bytes. `place` takes a
+copy's next number, past each path holding other bytes (burned) and stopping at
+one that is empty or holds the copy's own bytes, as after a lost reply.
+`burned_number_safe`: the copy lands at a path that was empty or its own, holding
+exactly its own bytes; every burned path keeps what it held and is not the path
+its slot names. A body is sealed for its path, so the copy captures again for the
+new number. `keeper_skips_the_restored_copys_body` is Ben's phone numbering a
+snapshot 5 over Ana's restored phone's body and landing at 6, or at 7 when 6 is
+taken too. The model has no runner: no code computes the numbers beyond a
+counter.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot

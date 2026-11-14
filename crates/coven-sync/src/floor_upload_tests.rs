@@ -68,6 +68,61 @@ async fn floors_above_the_request_limit_create_and_replace_atomically() {
     ana.database().close().await.unwrap();
 }
 
+/// §19.3: another copy of Ana's id left bytes at the path her next floor body
+/// takes. Her body is sealed for its path, so she burns that number, captures
+/// the body again under the next one, and the floor names it; the other copy's
+/// bytes stay where they are.
+#[tokio::test]
+async fn a_floor_body_whose_path_holds_another_copys_bytes_takes_the_next_number() {
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    // The pass that plans the next floor loses its first part, and its journal
+    // names the number its body takes.
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.storage.set_faults(Faults { drop_part: true, ..Faults::none() }).await;
+    ana.sync.pass().await.unwrap();
+    let planned = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|record| match serde_json::from_slice::<super::Retention>(&record.data) {
+            Ok(super::Retention::Floor(artifact)) => Some(artifact.capture.number.get()),
+            _ => None,
+        })
+        .expect("the floor write is journaled");
+    ana.storage.set_faults(Faults::none()).await;
+    let taken = ObjectPath::floor_body(group.store, ana.sync.device, planned.try_into().unwrap());
+    let other = b"another copy's floor body".to_vec();
+    group.storage.plant(&taken, &other).await.unwrap();
+    group.clock.set(std::time::UNIX_EPOCH + super::GRACE * 3);
+
+    // A pass burns the number and journals the body again; later ones upload it.
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ana).await;
+    assert!(
+        floor.body().1.get() > planned,
+        "the floor names a later number than the burned {planned}"
+    );
+    assert_eq!(
+        crate::identity::stored_digest(&group.storage, &taken).await.unwrap(),
+        crate::identity::digest(&other),
+        "the burned path keeps the other copy's bytes"
+    );
+    ana.database().close().await.unwrap();
+}
+
 /// A floor write that moves only the names keeps `first`, so an unchanged
 /// floor with that same `first` does not show the write landed: the retry
 /// publishes it.

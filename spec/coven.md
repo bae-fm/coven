@@ -8844,9 +8844,9 @@ depends on it.
 through the provider's resumable or multipart upload. Providers require this
 above a size: Dropbox, for example, above 150 MiB per request. Any object past
 that size goes up this way (§20.6), a large writes slot, snapshot or floor
-included. A floor body goes up like any immutable object, at a name only its
-writer uses; the floor pointer, which a retry must not let overwrite a
-competing floor, is never uploaded in parts.
+included. A floor body goes up like any immutable object, at a path made of
+its writer's device id and a number it reserved; the floor pointer, which a
+retry must not let overwrite a competing floor, is never uploaded in parts.
 
 - The upload session records each part the provider confirms, and its byte count,
   before reporting progress. Resuming, the app's `uploads()`, and
@@ -10441,10 +10441,18 @@ its id:
   same number with a different hash (§5.3).
 
 Outside the sequence, an occupied path that never changes (a file, a snapshot, a
-key delivery) counts as this device's only if its complete bytes equal the
-recorded attempt. A mismatch at a path of its own stops that attempt. A failed
-read for the comparison stays pending, and metadata alone never proves the bytes
-equal.
+floor body, a key delivery) counts as this device's only if its complete bytes
+equal the recorded attempt. A failed read for the comparison stays pending, and
+metadata alone never proves the bytes equal. A file's path holds a random id, so
+no other copy can have written it, and a mismatch there stops the attempt. A
+snapshot's and a floor body's path holds the device's id and a number of its own,
+so a copy that parted from this one can have written the same path: Ana's
+restored phone numbered a snapshot 5 and uploaded its body, and Ben's phone, the
+keeper, numbers its next snapshot 5 too. The keeper finds other bytes at 5, takes
+the next number and captures the snapshot again under it, since a body is sealed
+for its path. Its slot names 6, never the other copy's body at 5, and the burned
+number stays burned
+([`burned_number_safe`](proofs/sequence/CovenSequence/ObjectNumbers.lean)).
 
 A backup may keep going with intact custody unless history shows another copy, a
 removal or a replacement. Coven detects only that evidence, not every clone. Even
@@ -14140,6 +14148,7 @@ Write-ups explain each model and state its assumptions:
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
 | Settling a claim at a kept slot that holds other bytes signed by this device's id answers another copy, whatever the claim number those bytes carry | `kept_same_id_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3, §19.3 |
+| *Body.* A copy whose next snapshot or floor-body path holds other bytes takes the next number: the slot names the path it landed at, never a burned path, which keeps what it held, and the path it lands at was empty or already held its own bytes | `burned_number_safe`, `keeper_skips_the_restored_copys_body` | `proofs/sequence/CovenSequence/ObjectNumbers.lean` | §16.6, §19.3 |
 | *Body.* A settlement that takes only a claim number at or above its own as another copy misses a copy that reused an earlier number | `earlier_claim_counterexample` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
 
 ### G.8 Storage (§20, Appendix E)

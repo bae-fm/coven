@@ -53,6 +53,8 @@ import SequenceApply
 #print axioms CovenSequence.CopyOrder.need_introduced
 #print axioms CovenSequence.CopyOrder.stuck_scan_finds_copy
 #print axioms CovenSequence.CopyOrder.owed_complete
+#print axioms CovenSequence.ObjectNumbers.burned_number_safe
+#print axioms CovenSequence.ObjectNumbers.keeper_skips_the_restored_copys_body
 #print axioms CovenSequence.CopyOrder.reader_holder_sends
 #print axioms CovenSequence.CopyOrder.holders_from_holders
 #print axioms CovenSequence.CopyOrder.no_holder_never_clears
