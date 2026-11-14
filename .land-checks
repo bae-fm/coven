@@ -1,4 +1,0 @@
-# Whole-tree checks that land.sh runs on a cherry-picked result before pushing it.
-# Static checks only. The compile check of the result is .land-compile; tests stay with the coordinator.
-python3 scripts/check-spec.py
-scripts/cargo.sh run --quiet -p owner-construction-check -- .

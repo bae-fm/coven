@@ -1,6 +1,6 @@
 #!/bin/bash
 # Compile check that land.sh runs on a cherry-picked result before pushing it
-# (see .land-checks for the static ones). Builds what the pre-commit hook's
+# (the `whole` lines of .checks are the static ones). Builds what the pre-commit hook's
 # `.checks` lines build, over the whole workspace: clippy with every target and
 # feature, warnings denied, then each crate with no features. The hook builds
 # only the crates holding a staged file, so a commit's dependents are first
