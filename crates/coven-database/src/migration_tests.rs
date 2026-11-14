@@ -548,27 +548,33 @@ pub(crate) mod declarations {
         Committed { version, schema, tables }
     }
 
+    /// Statements a migration runs, each with whether SQLite makes it
+    /// breaking; the test declares each as the other kind.
+    const STATEMENTS: [(&str, bool); 9] = [
+        ("ALTER TABLE notes RENAME COLUMN title TO name", true),
+        ("UPDATE notes SET title='candidate'", true),
+        ("DELETE FROM notes", true),
+        ("INSERT INTO notes VALUES('new','candidate','body')", true),
+        ("ALTER TABLE notes ADD COLUMN color TEXT", false),
+        ("CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('candidate')", false),
+        (
+            "CREATE TABLE cache(value TEXT); ALTER TABLE cache ADD COLUMN color TEXT CHECK(color <> '')",
+            false,
+        ),
+        ("CREATE TABLE cache(value TEXT); CREATE INDEX cache_values ON cache(value)", false),
+        ("SELECT 1", false),
+    ];
+
     pub(crate) async fn compare(runner: Option<&std::ffi::OsStr>) {
-        for (statement, actual_breaking) in [
-            ("ALTER TABLE notes RENAME COLUMN title TO name", true),
-            ("UPDATE notes SET title='candidate'", true),
-            ("DELETE FROM notes", true),
-            ("INSERT INTO notes VALUES('new','candidate','body')", true),
-            ("ALTER TABLE notes ADD COLUMN color TEXT", false),
-            (
-                "CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('candidate')",
-                false,
-            ),
-            (
-                "CREATE TABLE cache(value TEXT); ALTER TABLE cache ADD COLUMN color TEXT CHECK(color <> '')",
-                false,
-            ),
-            (
-                "CREATE TABLE cache(value TEXT); CREATE INDEX cache_values ON cache(value)",
-                false,
-            ),
-            ("SELECT 1", false),
-        ] {
+        for statement in 0..STATEMENTS.len() {
+            compare_statement(runner, statement).await;
+        }
+    }
+
+    /// `STATEMENTS[statement]` in every populated, code and convert variant.
+    async fn compare_statement(runner: Option<&std::ffi::OsStr>, statement: usize) {
+        let (statement, actual_breaking) = STATEMENTS[statement];
+        {
             for populated in [false, true] {
                 for code in [false, true] {
                     for convert in [false, true] {
@@ -621,7 +627,7 @@ pub(crate) mod declarations {
                                         "backfill",
                                         "UPDATE notes SET body='candidate'",
                                         OldWrites::Drop,
-notes(),
+                                        notes(),
                                     ),
                                     migration,
                                     Migration::addition(
@@ -640,10 +646,7 @@ notes(),
                         else {
                             panic!("expected the typed migration-kind error")
                         };
-                        assert_eq!(
-                            version, 3,
-                            "{statement}, code {code}, populated {populated}"
-                        );
+                        assert_eq!(version, 3, "{statement}, code {code}, populated {populated}");
                         let after = committed(&store);
                         assert_eq!(
                             after, before,
@@ -672,22 +675,36 @@ notes(),
                                 json!({"mismatch": version, "version": after.version})
                             );
                         }
-                        store
-                            .schema(notes(), NOTES)
-                            .await
-                            .unwrap()
-                            .close()
-                            .await
-                            .unwrap();
+                        store.schema(notes(), NOTES).await.unwrap().close().await.unwrap();
                     }
                 }
             }
         }
     }
 
-    #[tokio::test]
-    async fn migration_kind_mismatches_roll_back_every_pending_step() {
-        compare(None).await;
+    /// One test for each statement, so a slow platform runs nine short tests
+    /// side by side, not one long one.
+    macro_rules! mismatch_tests {
+        ($($name:ident = $statement:expr),* $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $name() {
+                    compare_statement(None, $statement).await;
+                }
+            )*
+        };
+    }
+
+    mismatch_tests! {
+        a_renamed_column_declared_as_an_addition_rolls_back_every_pending_step = 0,
+        an_update_declared_as_an_addition_rolls_back_every_pending_step = 1,
+        a_delete_declared_as_an_addition_rolls_back_every_pending_step = 2,
+        an_insert_declared_as_an_addition_rolls_back_every_pending_step = 3,
+        an_added_column_declared_as_breaking_rolls_back_every_pending_step = 4,
+        a_new_table_with_a_row_declared_as_breaking_rolls_back_every_pending_step = 5,
+        a_new_table_with_a_checked_column_declared_as_breaking_rolls_back_every_pending_step = 6,
+        a_new_table_with_an_index_declared_as_breaking_rolls_back_every_pending_step = 7,
+        a_select_declared_as_breaking_rolls_back_every_pending_step = 8,
     }
 
     #[tokio::test]
