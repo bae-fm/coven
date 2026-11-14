@@ -420,6 +420,7 @@ async fn a_join_refuses_a_recorded_restores_installation() {
         install.authenticated_builder(&owner, owner.recipient()).await,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "Carol's phone",
         |_| {},
         &control,

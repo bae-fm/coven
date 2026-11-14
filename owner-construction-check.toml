@@ -149,6 +149,9 @@ non_owner_types = [
     "CustodyChoice",
     "Command",
     "Request",
+    # An approved join request's admission as its operation journals it: the
+    # entry and the joiner's own copy, kept as written.
+    "ApprovedAdmission",
     # What stops a connection's lookups that run too long, shared with
     # that connection's progress handler; it lives with the connection.
     "LookupLimit",
@@ -1400,6 +1403,8 @@ tables = [
 "crates/coven-database/src/file_removals.rs" = ["remove_bytes"]
 # The folder the person picked, which the app's call hands in (§17.3).
 "crates/coven-sync/src/file_device_only.rs" = ["Files::prepare_device_only"]
+# A test's join with a circle named "Circle", whose ids are random ones.
+"crates/coven-sync/src/joining_identity.rs" = ["JoiningIdentity::prepare_for_test"]
 # A device-only call's step that makes a name in the person's folder runs
 # to its end with its record as its own task, though the call is dropped
 # (§17.3).

@@ -223,7 +223,7 @@ fn rotation_rejects_unknown_audiences_and_member_ids_need_no_key_validation() {
 #[test]
 fn creation_carries_its_circles_in_order() {
     let circles: Vec<_> = (1..=2)
-        .map(|n| crate::admin::CreationCircle {
+        .map(|n| crate::admin::NewCircle {
             circle: circle(n),
             name: format!("Circle {n}"),
             breaking_version: n as u32,
@@ -300,14 +300,18 @@ fn every_change_fits_one_request_at_its_field_bounds() {
             StoreChange::SetUpStorage { access } => {
                 *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
             }
-            StoreChange::AdmitMember { access, device_name, .. } => {
+            StoreChange::AdmitMember { access, device_name, circle, .. } => {
                 *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
                 *device_name = "d".repeat(1024);
+                circle.name = "c".repeat(1024);
             }
             StoreChange::SetAccess { access, .. } => {
                 *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
             }
-            StoreChange::RecoverMember { device_name, .. } => *device_name = "d".repeat(1024),
+            StoreChange::RecoverMember { device_name, circle, .. } => {
+                *device_name = "d".repeat(1024);
+                circle.name = "c".repeat(1024);
+            }
             StoreChange::AddInviteShare { account, .. } => *account = "a".repeat(1024),
             StoreChange::RenameStore { name }
             | StoreChange::AddDevice { name, .. }
@@ -366,9 +370,13 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
         access: crate::MemberAccess::ProviderAccount("b".into()),
         device: coven_foundation::id_source::DeviceId(7),
         device_name: "p".into(),
+        circle: test_utils::admitted_circle(),
     })
     .encode()
     .unwrap();
+    // The circle follows the device name: its id, name, base version, key and
+    // the key's commitment.
+    let circle = test_utils::admitted_circle();
     assert_eq!(
         add[HEADER..],
         [
@@ -378,6 +386,11 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
             vec![1, 0, 0, 0, 0, 1, b'b'],
             7u64.to_be_bytes().to_vec(),
             vec![0, 0, 0, 1, b'p'],
+            circle.circle.0.as_bytes().to_vec(),
+            vec![0, 0, 0, 1, b'B'],
+            2u32.to_be_bytes().to_vec(),
+            circle.key.0.as_bytes().to_vec(),
+            circle.key_hash.to_vec(),
         ]
         .concat()
     );

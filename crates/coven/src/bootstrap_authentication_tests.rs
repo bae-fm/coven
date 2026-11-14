@@ -91,7 +91,7 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
     let control = JoinControl::new();
     let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
     assert!(matches!(
-        join_with_invite(builder, invite.shown_code(), carol_joins(invite.shown_code()), "New phone", |_| {}, &control).await,
+        join_with_invite(builder, invite.shown_code(), carol_joins(invite.shown_code()), crate::tests::CIRCLE, "New phone", |_| {}, &control).await,
         Err(BootstrapError::Sync(SyncError::Storage(error)))
             if error.failure() == StorageFailure::AccessNotGranted { required }
     ));
@@ -117,6 +117,7 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "New phone",
         |_| {},
         &control,
@@ -274,6 +275,7 @@ async fn a_join_records_the_folder_label_once_it_accepted_the_share() {
             builder,
             invite.shown_code(),
             carol_joins(invite.shown_code()),
+            crate::tests::CIRCLE,
             "New phone",
             |_| {},
             &control,
@@ -318,6 +320,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "Carol's phone",
         |status| {
             if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {

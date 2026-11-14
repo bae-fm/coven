@@ -170,9 +170,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                     if created {
                         crate::raise_capture::capture_created(db, schema)?;
                     }
-                    if let coven_format::admin::StoreChange::CreateCircle { circle, .. } =
-                        &effect.change
-                    {
+                    if let Some(circle) = effect.change.made_circle() {
                         crate::raise_capture::capture_made(db, *circle, &effect.state, raises)?;
                     }
                     crate::provider_access::adopt::<P>(db, &effect.provider_access)?;

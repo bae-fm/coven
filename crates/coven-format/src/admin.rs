@@ -44,22 +44,31 @@ pub struct SnapshotId {
 }
 wire_struct!(SnapshotId, audience, device, number);
 
-/// A circle store creation makes, with its first key (§10.3, D6).
+/// A circle that creating a store or admitting a member makes, with the
+/// commitment to the circle key it introduces (§10.3, §13.2, D6). A creation's
+/// circles are the creator's; an admission's is the admitted person's, its
+/// first and only member, and its key's one copy is the admission's own copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CreationCircle {
-    /// The circle's id.
+pub struct NewCircle {
+    /// The new circle's id: no circle, live or deleted, has it.
     pub circle: CircleId,
     /// The circle's name.
     pub name: String,
-    /// The newest breaking migration the creator's app had run, zero if
-    /// none, as `CreateCircle` records it.
+    /// The newest breaking migration its maker's app had run, zero if none:
+    /// the circle's schema version until a raise of its own goes past it
+    /// (§15.5, §16.3).
     pub breaking_version: u32,
-    /// The circle's first key, introduced by the creation.
+    /// The first circle key, introduced by the creation or admission.
     pub key: KeyId,
     /// SHA-256 of the exact 32 circle-key bytes.
     pub key_hash: [u8; 32],
 }
-wire_struct!(CreationCircle, circle, name => crate::wire::get_name, breaking_version, key, key_hash);
+wire_struct!(NewCircle, circle, name => crate::wire::get_name, breaking_version, key, key_hash);
+impl NewCircle {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        name(&self.name)
+    }
+}
 
 /// Every admin operation listed in §10, including store creation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +92,7 @@ pub enum StoreChange {
         device_name: String,
         /// The circles the creator's first write asks for, each with the
         /// creator as its first member, in the order they were asked for.
-        circles: Vec<CreationCircle>,
+        circles: Vec<NewCircle>,
     },
     /// Record how the store's first admin reaches storage, which fixes the
     /// kind of access every member has and, for a provider account, the
@@ -117,6 +126,8 @@ pub enum StoreChange {
         device: DeviceId,
         /// The joining installation's name, from its request.
         device_name: String,
+        /// The circle the member's request made, whose only member they are.
+        circle: NewCircle,
     },
     /// Recover an active member on a new device: rebind their pair, as
     /// replace-member-keys does, set their access when the invite carried a
@@ -137,6 +148,9 @@ pub enum StoreChange {
         device: DeviceId,
         /// The new installation's name, from its request.
         device_name: String,
+        /// The new circle the member's request made, whose only member they
+        /// are: their old private circle has no reader left.
+        circle: NewCircle,
     },
     /// Record a member's current storage access, used by a later removal (§10):
     /// the author's own, or an admin's replacement S3 key for another member.
@@ -267,6 +281,18 @@ pub enum StoreChange {
 }
 
 impl StoreChange {
+    /// The circle this change makes: a circle's creation, or an admission
+    /// making its member's.
+    pub fn made_circle(&self) -> Option<&CircleId> {
+        match self {
+            Self::CreateCircle { circle, .. } => Some(circle),
+            Self::AdmitMember { circle, .. } | Self::RecoverMember { circle, .. } => {
+                Some(&circle.circle)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
             Self::CreateStore { name: n, device_name, circles, .. } => {
@@ -274,9 +300,12 @@ impl StoreChange {
                 name(device_name)?;
                 circles.iter().try_for_each(|circle| name(&circle.name))
             }
+            Self::AdmitMember { device_name, circle, .. }
+            | Self::RecoverMember { device_name, circle, .. } => {
+                name(device_name)?;
+                circle.validate()
+            }
             Self::RenameStore { name: n }
-            | Self::AdmitMember { device_name: n, .. }
-            | Self::RecoverMember { device_name: n, .. }
             | Self::AddDevice { name: n, .. }
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
@@ -327,7 +356,7 @@ macro_rules! store_changes {
 }
 store_changes!(
     0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash, circles },
-    1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name },
+    1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name, circle },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },
     4 => AddDevice { name => crate::wire::get_name, replaces },
@@ -345,7 +374,7 @@ store_changes!(
     17 => RenameStore { name => crate::wire::get_name },
     18 => AddInviteShare { invite, account => get_account },
     19 => EndInviteShare { invite },
-    20 => RecoverMember { member, expected, keys, access, device, device_name => crate::wire::get_name },
+    20 => RecoverMember { member, expected, keys, access, device, device_name => crate::wire::get_name, circle },
     21 => SetUpStorage { access },
 );
 

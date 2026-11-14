@@ -64,6 +64,14 @@ impl SequenceSync {
             let previous = session.history.announcements.iter().rev().find(|(_, snapshot)| {
                 snapshot.snapshot.audience == audience && session.history.usable(snapshot)
             });
+            // A circle with no part and no snapshot has an empty body and
+            // needs none: no floor names it (§16.4).
+            if previous.is_none()
+                && audience != coven_merge::Audience::Store
+                && !self.database.audience_holds_parts(audience.clone()).await?
+            {
+                continue;
+            }
             // After the first, a snapshot follows k times as many bytes of
             // slots as the last one holds, at any size.
             let (covers, threshold) = match previous {

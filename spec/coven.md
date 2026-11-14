@@ -3996,22 +3996,23 @@ the audience, the key's id, the recipient member and the exact sealing key it is
 sealed to. That is how Dan finds his copy before he holds any key.
 
 A new audience key is *introduced* by an admin entry naming the key's random id
-and a SHA-256 hash of its exact 32 bytes. Store creation, circle creation,
-rotations and a circle member's removal introduce keys; every other removal
-carries none. The introduction's fields are encrypted like the rest of the
-entry.
+and a SHA-256 hash of its exact 32 bytes. Store creation, circle creation, an
+admission (for the circle it makes), rotations and a circle member's removal
+introduce keys; every other removal carries none. The introduction's fields are
+encrypted like the rest of the entry.
 
 **Copies come first, then the introduction.** An operation claims every copy the
 key needs before it claims the introduction, so by the time a key is in use,
 everyone who should have it has a copy. Admitting a member is the same rule
-held in one slot: the admission's prefix carries the new member's copies, and
-its entry admits them, so the copies never stand in history without the
-admission, nor the admission without them (§13.2). Each copy's sealed box sits in the
-clear part of its slot, sealed to its recipient alone; no second layer of
-encryption wraps it. The rest of the copy's slot, only an acknowledgement, is
-encrypted with a store key already accepted. The new key may encrypt its own
-introduction. Store creation holds the rule in one slot too: slot 1's prefix
-carries the creator's copies of every key it introduces (§10.3).
+held in one slot: the admission's prefix carries the new member's copies and
+their own copy of the circle's key it introduces, and its entry admits them, so
+the copies never stand in history without the admission, nor the admission
+without them (§13.2). Each copy's sealed box sits in the clear part of its slot,
+sealed to its recipient alone; no second layer of encryption wraps it. The rest
+of the copy's slot, only an acknowledgement, is encrypted with a store key
+already accepted. The new key may encrypt its own introduction. Store creation
+holds the rule in one slot too: slot 1's prefix carries the creator's copies of
+every key it introduces (§10.3).
 
 Opening a copy:
 
@@ -4671,17 +4672,19 @@ Ana adds Dan to Household on Dropbox, with Dan beside her:
    the store's location, a member id chosen for Dan, and a one-time *invite
    secret*.
 2. Dan's phone scans it, Dan types his name, and his phone signs in to his own
-   Dropbox, mounts the shared folder, makes Dan's member keys, and writes a
-   *join request* to storage, carrying his name, encrypted with a key derived
-   from the invite secret and signed with Dan's new key. It shows a six-digit
+   Dropbox, mounts the shared folder, makes Dan's member keys and the circle
+   that will hold his own data, and writes a *join request* to storage,
+   carrying his name and that circle, encrypted with a key derived from the
+   invite secret and signed with Dan's new key. It shows a six-digit
    *confirmation number*.
 3. Ana's phone, the only device holding the secret, reads the request, checks it
    and shows it to Ana with Dan's name and the same number. The numbers on the
    two screens match, and Ana approves.
-4. Ana's phone claims one slot, the *admission*: an entry adding Dan and
-   registering his phone, whose clear prefix carries copies of every store
-   key, sealed to Dan's new sealing key. Every key, not just the newest, so
-   Dan can read a late write made under an older one.
+4. Ana's phone claims one slot, the *admission*: an entry adding Dan,
+   registering his phone and making his circle, whose clear prefix carries
+   copies of every store key, sealed to Dan's new sealing key, and his own
+   copy of his circle's key. Every store key, not just the newest, so Dan can
+   read a late write made under an older one.
 5. Dan's phone finds the admission and opens its keys. From then on
    Household is a store on his phone like any other, which loads, and Dan
    writes down his own restore code.
@@ -4768,13 +4771,22 @@ under the id of the device that made the invite, which the code carries. It
 holds the invite id, the chosen member id, both of Dan's new public keys, and
 his phone's device id and name, and who is asking: a new person, with the name
 they typed, or a member's new keys, which carries none because the member's
-profile already has one. The device id is the joining installation's own, fixed when
-the join begins. The provider sees only an encrypted object under the
+profile already has one. Either also carries a circle for the admission to
+make: its id, name and base version (§15.5), the id and hash of its key, and the
+key's only copy, which Dan's phone sealed to his own new sealing key. His phone
+makes that key with the request and keeps it nowhere else: the saved request
+holds the copy, which Dan's member keys open, and a join that resumes sends the
+same circle. A new person's circle is their private one. A recovered member's
+old private circle has them as its only member, under a sealing key they lost,
+so no device can read or write it again (§13.3); the recovery gives them a new
+one. The device id is the joining installation's own, fixed when the join
+begins. The provider sees only an encrypted object under the
 inviting device's id and the invite's id. Dan's phone reads from the code
 whether the invite admits a new person or a member's new keys, and refuses to
 begin with the other person's request, before it changes anything. The join
 call gives the name the person typed, or none, and the code says which it
-must be.
+must be, and names the circle; a saved request with another circle name is a
+changed join, as it is with another name.
 
 **Approving.** Ana's phone opens the request and checks it:
 
@@ -4784,7 +4796,12 @@ must be.
   invite carries a name, and one for a member's new keys carries none;
 - both keys are fresh: no entry in the history her phone has caught up with
   bound either one to a member, current or past (§12.3);
-- the device id is fresh: that history registers no device with it.
+- the device id is fresh: that history registers no device with it;
+- the circle's id is unused: no circle in that history has it, live or deleted;
+- the circle's copy is routed to the request's member id and sealing key, for
+  that circle and key.
+
+Ana's phone sees the circle's id and name, never its key.
 
 A request that fails a check is neither offered nor approved. A request
 carrying Ben's keys, which history bound when he joined, fails, though his
@@ -4830,13 +4847,24 @@ the binding's outcome in `coven_operations` beside an approval
 `coven_invites` still listed as under way.
 
 **The admission.** Approval claims exactly one slot. Its entry records exactly
-the pair and device it checked: *admit member* for a fresh id, or *recover
+the pair, device and circle it checked: *admit member* for a fresh id, or *recover
 member* for an existing one (`add_device_for`), each registering the device the request names
-(format.md [D6](format.md#d6-admin-entries)). A request that changes
-afterwards needs a new approval. The slot's clear prefix carries the copies
-for Dan's exact sealing key: every store key in history, and, when recovering
-an existing member, the keys Ana holds for that member's circles. Every device
-checks that the copies name every store key introduced before the slot. If
+and making the circle it carries, with the member as its first and only member
+and the request's base version (format.md [D6](format.md#d6-admin-entries)). A
+request that changes afterwards needs a new approval. The slot's clear prefix
+carries the copies for Dan's exact sealing key: every store key in history, and,
+when recovering an existing member, the keys Ana holds for that member's circles.
+After them it carries Dan's own copy of the circle the entry makes, the copy his
+request carried, byte for byte: the approval journals it with the change, so
+the one claim, and any retry of it, sends those bytes. Ana's phone never opens
+it and holds no key of that circle. Dan's phone sealed it before any slot
+was known, so its seal binds the store and the box's routing, not the slot's
+path (format.md [D11](format.md#d11-keys-and-contexts)), and it can't stand in for a slot's
+box or a handover. Every device counts it as one more copy of the circle's key,
+which the entry introduces. Every device
+checks that the copies name every store key introduced before the slot, and that
+the own copy is routed to the entry's member and new sealing key, for the entry's
+circle and key. If
 Ana's phone lacks a store key it must send, approval waits until it has it,
 claiming nothing: a late write sealed with that key could otherwise land
 after the admission, below any copy of it to Dan. The keys of a circle Ana is
@@ -4846,13 +4874,23 @@ the admission doesn't wait for them.
 So the copies and the entry stand in history together or not at all. Each
 claim is checked against exactly the slots before the one it lands in
 (§11.1), so an admission that lands always counts: Dan never holds a key
-without being a member, and is never a member without a registered device.
+without being a member, and is never a member without a registered device, or
+without a circle that holds his copy of its key.
+Applying the entry makes the circle and introduces its key in the slot's one
+transaction. The circle has no earlier part, so applying it starts no reload
+(§15.7). The entry again, once its member, device and circle are all there,
+changes nothing; a member there without the circle isn't the entry done, and
+the entry is refused as naming a member that is already there.
 Before the admission, claiming the copies in slots of their own left both
 open. Ana's phone could stop between the copies and the entry, and Dan's
 phone would hold every store key and wait, its store loaded, for an entry
 that might never come. Meanwhile every device counted the newest store key
 exposed, its copy naming someone who wasn't a member, and replaced it
 ([`split_approval_exposes`](proofs/sequence/CovenSequence/Admission.lean)).
+The circle is no entry of Dan's own after the admission, either: it might be
+refused, or a removal might come between, and he would be a member with no
+circle for good
+([`split_circle_leaves_member_without`](proofs/sequence/CovenSequence/Admission.lean)).
 
 The admission records how a new member reaches storage: their provider
 account, or the id of the S3 key made for them and who holds it. Any admin can
@@ -4976,7 +5014,8 @@ he must apply (§6.1). A restoring device scans for its member's copies the
 same way (§13.1, §13.4).
 
 Once his copies arrive, in the admission or in the floor, Dan's phone opens
-them, and the join is done. If history he had scanned has since been
+them, the circle's key from the admission's own box among them, and the join is
+done. If history he had scanned has since been
 deleted, the copies the floor carries supply his keys (§16.4). The admission
 registered his phone, so nothing is left for the phone to claim. His phone
 records in its saved request (below) that it found its admission, then
@@ -5555,6 +5594,9 @@ admission, which replaces his keys and registers his new device:
 
 - his role, circles and existing device ids stay attached to his id; those
   devices are gone for good;
+- the admission also makes him a new circle, with him alone in it (§13.2): his
+  old private circle is under a sealing key he lost, and no device can read or
+  write it again;
 - his old keys count as exposed (§12.2);
 - writes signed with his old keys that land after the replacement are refused
   (§14.1).
@@ -6156,6 +6198,11 @@ Renames take effect in slot order, and the latest valid rename supplies the name
 A rename after the circle's deletion fails its check, because the target is
 deleted.
 
+An admission makes a circle too: the person's own, with them alone in it, at the
+base version the request named, in the slot that admits them (§13.2). Its key is
+introduced by that entry, and its one copy is the person's own copy in the slot's
+prefix.
+
 Each circle has its own key, introduced and copied like the store key (§12.1).
 Each copy is sealed to a member's current sealing key, never a retired one, and
 authenticates both the member id and that sealing key. Copies are slots whose
@@ -6408,6 +6455,10 @@ the audience's parts, and a slot's size once no audience counts it. A raise's
 or reset's snapshot waits for its entry to land before a new device starts
 from it, so its announcement forgets nothing; the next ordinary one does.
 
+A circle that holds no part and has no snapshot asks for none, however old
+its slots: its body is empty, and no floor names it (§16.4). It asks for its
+first once a write carries a part for it.
+
 **Why the gap grows with the snapshot.** Each snapshot is uploaded whole, and a
 restore loads one and replays the slots after it. With a gap of k × S, snapshot
 uploads cost about 1/k of the bytes written, however large the library grows,
@@ -6647,7 +6698,8 @@ moves `first` to 161 and slots 1 to 160 are deleted (§16.6).
 - **Snapshots may cover different slots.** The store's might cover 560 and
   Gifts' 520, with `first` at 501.
 - **It carries the original key-copy boxes** needed to open the store key,
-  with the key-copy slots and admissions that hold them. Their
+  with the key-copy slots and admissions that hold them, an admission's own
+  circle box among its boxes. Their
   routing and `first` are visible, as in the sequence (§12.1, §20.4); the snapshot
   references are encrypted ([format.md D8](format.md#d8-small-frames),
   [D9](format.md#d9-sealed-objects)). A new device can find its copy or the kept
@@ -6710,9 +6762,9 @@ Reading every kept slot instead would give the same state, but costs a request
 per slot; a returning device, which already holds its slots, reloads only when
 `first` has passed its next slot (§6.1).
 
-A circle it belongs to that the floor doesn't name starts empty at `first - 1`:
-the floor's writer had no part of it in any slot it applied, so none below
-`first` exists, and the kept slots after it supply the rest. The same goes for a
+A circle it belongs to that the floor doesn't name starts empty as of the
+floor's `at`: the floor's writer had no part of it in any slot it applied, so
+none through `at` exists, and the kept slots after `at` supply the rest. The same goes for a
 circle a later slot makes readable to a device that holds the floor.
 
 Its circle keys come from copies in the store snapshot's history and in the
@@ -9360,7 +9412,10 @@ migrations, and installing it makes the circle's capture (§18.4).
    there the tables that breaking migration starts from (above).
 2. It loads the circle's newest usable snapshot and the store's newest
    ordinary snapshot at or below the circle's version, or starts either empty
-   where history holds none (§16.5). The body of a store reset or raise at or
+   where history holds none (§16.5). A circle with no snapshot starts empty as of
+   the slot before the floor's first kept slot when the floor doesn't name it,
+   since an unnamed circle holds no part below it (§16.4), so the rebuild reads
+   no slot the floor deleted. The body of a store reset or raise at or
    below the circle's version, if newer, is the store's start instead, as
    replaying it over the ordinary snapshot would give. It applies the slots after them up to the
    *rebuild slot*: the slot the device had applied when it started reading the

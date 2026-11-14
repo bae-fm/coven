@@ -160,6 +160,17 @@ impl Migration {
     }
 }
 
+/// The version of the newest breaking migration in `migrations`, zero if none:
+/// the breaking version an installation that runs them all reaches (§16.3).
+pub fn newest_breaking_version(migrations: &[Migration]) -> u32 {
+    migrations
+        .iter()
+        .filter(|m| matches!(m.kind, MigrationKind::Breaking(_)))
+        .map(|m| m.version)
+        .max()
+        .unwrap_or(0)
+}
+
 pub(crate) fn validate_versions(migrations: &[Migration]) -> Result<u32, MigrationError> {
     let mut supported = 0u32;
     for (position, migration) in migrations.iter().enumerate() {

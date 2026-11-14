@@ -1,16 +1,18 @@
-//! `checked_change`, whose circle entries and member removals these effects
-//! carry out, against the sequence model's circle lifecycle
+//! `checked_change`, whose circle entries, admissions and member removals
+//! these effects carry out, against the sequence model's circle lifecycle
 //! (`CircleLifecycle.effect`): the same circle histories, slot by slot, give
 //! the same verdicts, names, members, deletion slots and member standing
-//! (§15.5, §15.8, §15.9).
+//! (§13.2, §15.5, §15.8, §15.9).
 use crate::effects::checked_change;
 use crate::effects::tests::{
-    apply, create_circle, gifts, header, household, id, remove_circle_member, with_a_plain_member,
+    admit, apply, circle as admission_circle, create_circle, gifts, header, household, id, keys,
+    remove_circle_member, with_a_plain_member,
 };
 use crate::{EntryTarget, OperationRejection};
 use coven_database::{AdminEffect, StoreState};
-use coven_format::admin::StoreChange;
+use coven_format::admin::{MemberRole, NewCircle, StoreChange};
 use coven_foundation::id_source::CircleId;
+use coven_foundation::id_source::DeviceId;
 use coven_merge::slot;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -25,12 +27,45 @@ const BEFORE: u64 = 5;
 
 #[derive(Clone, Copy, Debug)]
 enum Entry {
-    Create { author: u128, circle: u128, name: usize },
-    Rename { author: u128, circle: u128, name: usize },
-    Delete { author: u128, circle: u128 },
-    Add { author: u128, circle: u128, member: u128 },
-    Remove { author: u128, circle: u128, member: u128 },
+    Create {
+        author: u128,
+        circle: u128,
+        name: usize,
+    },
+    Rename {
+        author: u128,
+        circle: u128,
+        name: usize,
+    },
+    Delete {
+        author: u128,
+        circle: u128,
+    },
+    Add {
+        author: u128,
+        circle: u128,
+        member: u128,
+    },
+    Remove {
+        author: u128,
+        circle: u128,
+        member: u128,
+    },
     RemoveMember(u128),
+    /// An admin admits `member` with `circle`, named `name`.
+    Admit {
+        author: u128,
+        member: u128,
+        circle: u128,
+        name: usize,
+    },
+    /// An admin recovers `member` with a new `circle`, named `name`.
+    Recover {
+        author: u128,
+        member: u128,
+        circle: u128,
+        name: usize,
+    },
 }
 
 fn circle(n: u128) -> CircleId {
@@ -56,6 +91,12 @@ impl Entry {
             Self::RemoveMember(member) => {
                 return json!({"kind": "removeMember", "member": member as u64});
             }
+            Self::Admit { author, member, circle, name }
+            | Self::Recover { author, member, circle, name } => {
+                let kind = if matches!(self, Self::Admit { .. }) { "admit" } else { "recover" };
+                return json!({"kind": kind, "author": author as u64, "member": member as u64,
+                    "circle": circle as u64, "name": NAMES[name]});
+            }
         };
         let mut entry = json!({"kind": kind, "author": author as u64, "circle": circle as u64});
         if let Some((key, value)) = field {
@@ -70,12 +111,72 @@ impl Entry {
             | Self::Rename { author, .. }
             | Self::Delete { author, .. }
             | Self::Add { author, .. }
-            | Self::Remove { author, .. } => author,
+            | Self::Remove { author, .. }
+            | Self::Admit { author, .. }
+            | Self::Recover { author, .. } => author,
             Self::RemoveMember(_) => 1,
         }
     }
 
-    fn change(self) -> StoreChange {
+    /// The change this entry makes in `state`, at slot `at`. An admission or
+    /// a recovery of a member whose circle is already made for them repeats
+    /// the request the first was: the member's own keys and registered
+    /// device, which "already done" compares. Any other recovery is a new
+    /// request, with keys and a device nothing used before.
+    fn change(self, state: &StoreState, at: u64) -> StoreChange {
+        match self {
+            Self::Admit { member, circle: c, name, .. } => {
+                let role = if member <= 2 { MemberRole::Admin } else { MemberRole::Member };
+                let mut change = admit(member as u8, role, member as u64);
+                let StoreChange::AdmitMember { circle, keys, role, access, device, .. } =
+                    &mut change
+                else {
+                    unreachable!()
+                };
+                *circle = new_circle(c, name);
+                // A member whose circle is already made for them is admitted
+                // again with the request the first was: the keys, role,
+                // access and device they hold, which "already done" compares.
+                let held = state.members.get(&id(member));
+                let registered = state.devices.iter().find(|(_, held)| held.member == id(member));
+                if let (Some(held), Some((registered, _))) = (held, registered) {
+                    if crate::circle_effects::made_for(
+                        state,
+                        circle.circle,
+                        &id(member),
+                        NAMES[name],
+                    ) {
+                        *keys = held.keys;
+                        *role = held.role;
+                        *access = held.access.clone().expect("a member admitted with access");
+                        *device = *registered;
+                    }
+                }
+                change
+            }
+            Self::Recover { member, circle: c, name, .. } => {
+                let current = state.members.get(&id(member)).map(|held| held.keys);
+                let repeats =
+                    crate::circle_effects::made_for(state, circle(c), &id(member), NAMES[name]);
+                let (keys, device) = match current {
+                    Some(held) if repeats => (held, member as u64),
+                    _ => (keys((100 + at) as u8), 100 + at),
+                };
+                StoreChange::RecoverMember {
+                    member: id(member),
+                    expected: current.unwrap_or(keys),
+                    keys,
+                    access: None,
+                    device: DeviceId(device),
+                    device_name: "recovered".into(),
+                    circle: new_circle(c, name),
+                }
+            }
+            other => other.plain(),
+        }
+    }
+
+    fn plain(self) -> StoreChange {
         match self {
             Self::Create { circle: c, name, .. } => create_circle(circle(c), NAMES[name]),
             Self::Rename { circle: c, name, .. } => {
@@ -87,8 +188,14 @@ impl Entry {
             }
             Self::Remove { circle: c, member, .. } => remove_circle_member(circle(c), id(member)),
             Self::RemoveMember(member) => StoreChange::RemoveMember { member: id(member) },
+            Self::Admit { .. } | Self::Recover { .. } => unreachable!("admissions need a state"),
         }
     }
+}
+
+/// The circle an admission makes: id `c` of this test's circles, named `name`.
+fn new_circle(c: u128, name: usize) -> NewCircle {
+    NewCircle { circle: circle(c), name: NAMES[name].into(), ..admission_circle(0) }
 }
 
 /// Every entry over the people and circles above, with removals of the
@@ -105,6 +212,17 @@ fn alphabet() -> Vec<Entry> {
             for member in PEOPLE {
                 entries.push(Entry::Add { author, circle, member });
                 entries.push(Entry::Remove { author, circle, member });
+            }
+        }
+    }
+    // Only an admin admits or recovers (`Authority` decides that).
+    for author in [1, 2] {
+        for member in PEOPLE {
+            for circle in CIRCLES {
+                for name in 0..NAMES.len() {
+                    entries.push(Entry::Admit { author, member, circle, name });
+                    entries.push(Entry::Recover { author, member, circle, name });
+                }
             }
         }
     }
@@ -201,7 +319,7 @@ fn circle_lifecycle_matches_lean() {
                 &state,
                 &header(author as u64, author, slot.get() - 1),
                 slot,
-                &entry.change(),
+                &entry.change(&state, slot.get()),
                 &BTreeMap::new(),
                 &[],
             );
@@ -241,4 +359,78 @@ fn removing_a_circles_last_member_deletes_it_at_that_slot() {
     assert!(removed.circles[&gifts()].members.is_empty());
     assert_eq!(removed.circle_deletions.get(&shared), None);
     assert_eq!(removed.circles[&shared].members, [id(1)].into());
+}
+
+/// An admission applies the member, their device and their circle together:
+/// the member is the circle's first and only member, at the base the entry
+/// names, and the effect says which circle it made (§13.2).
+#[test]
+fn an_admission_makes_the_member_their_device_and_circle_in_one_effect() {
+    let before = household();
+    let admission = admit(4, MemberRole::Member, 4);
+    let effect = apply(&before, 1, admission.clone()).unwrap().unwrap();
+    let made = admission_circle(4);
+    assert_eq!(effect.change.made_circle(), Some(&made.circle));
+    assert!(effect.state.members.contains_key(&id(4)));
+    assert!(effect.state.devices.contains_key(&DeviceId(4)));
+    let record = &effect.state.circles[&made.circle];
+    assert_eq!(record.members, [id(4)].into());
+    assert_eq!((record.name.as_str(), record.base), (made.name.as_str(), made.breaking_version));
+    assert!(!before.circles.contains_key(&made.circle));
+    // Neither another admission's circle nor the person's earlier circle
+    // changes.
+    assert_eq!(effect.state.circles.len(), before.circles.len() + 1);
+}
+
+/// A circle id the history already uses, live or deleted, refuses the
+/// admission and changes nothing: a request naming it is never offered, and
+/// a forged entry that does is refused (§13.2).
+#[test]
+fn an_admission_naming_a_used_circle_is_refused_and_changes_nothing() {
+    let mut state = with_a_plain_member(&household());
+    let admission = admit(4, MemberRole::Member, 4);
+    let used = admission_circle(4).circle;
+    state = apply(&state, 3, create_circle(used, "Gifts")).unwrap().unwrap().state;
+    for deleted in [false, true] {
+        if deleted {
+            state = apply(&state, 3, StoreChange::DeleteCircle { circle: used })
+                .unwrap()
+                .unwrap()
+                .state;
+        }
+        let refused = apply(&state, 1, admission.clone());
+        assert!(
+            matches!(&refused, Err(OperationRejection::TargetGone(EntryTarget::Circle(c))) if *c == used),
+            "deleted: {deleted}"
+        );
+        assert!(!state.members.contains_key(&id(4)));
+    }
+}
+
+/// The same admission again, once its circle holds the member under its
+/// name, changes nothing; the circle missing or another name is a different
+/// request (§13.2).
+#[test]
+fn an_admission_repeated_with_its_circle_present_is_already_done() {
+    let admission = admit(4, MemberRole::Member, 4);
+    let state = apply(&household(), 1, admission.clone()).unwrap().unwrap().state;
+    assert!(apply(&state, 1, admission.clone()).unwrap().is_none());
+    let StoreChange::AdmitMember { circle, .. } = &admission else { unreachable!() };
+    let mut renamed = circle.clone();
+    renamed.name = "another".into();
+    let mut other = admission.clone();
+    let StoreChange::AdmitMember { circle, .. } = &mut other else { unreachable!() };
+    *circle = renamed;
+    assert!(matches!(
+        apply(&state, 1, other),
+        Err(OperationRejection::TargetGone(EntryTarget::Member(_)))
+    ));
+    // The member there without their circle is not the admission done: the
+    // member exists, so the entry has nothing to admit.
+    let mut without = state.clone();
+    without.circles.remove(&admission_circle(4).circle);
+    assert!(matches!(
+        apply(&without, 1, admission),
+        Err(OperationRejection::TargetGone(EntryTarget::Member(_)))
+    ));
 }

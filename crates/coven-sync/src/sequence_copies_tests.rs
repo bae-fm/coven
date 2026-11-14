@@ -466,9 +466,67 @@ fn an_admission_over_a_slots_size_is_refused_with_its_own_rejection() {
     }
     let path =
         coven_storage::ObjectPath::slot(StoreId(uuid::Uuid::from_u128(7)), 5.try_into().unwrap());
-    let refused = super::admission_prefix(&ring, &path, id(1), copies.clone(), 200).unwrap();
+    let admission = {
+        let (change, own) = crate::admitting(
+            StoreId(uuid::Uuid::from_u128(7)),
+            joiner,
+            coven_format::test_utils::keys_from_seed(3).public_keys(),
+            coven_format::admin::MemberRole::Member,
+            coven_format::MemberAccess::ProviderAccount("carol@example.org".into()),
+            coven_foundation::id_source::DeviceId(9),
+            "Carol's phone",
+            &coven_foundation::id_source::UuidIds,
+        )
+        .unwrap();
+        super::ApprovedAdmission::new(change, own)
+    };
+    let refused =
+        super::admission_prefix(&ring, &path, id(1), copies.clone(), Some(&admission), 200)
+            .unwrap();
     assert!(matches!(refused, Err(crate::OperationRejection::AdmissionTooLarge)));
     copies.truncate(100);
-    let prefix = super::admission_prefix(&ring, &path, id(1), copies, 200).unwrap().unwrap();
-    assert_eq!(prefix.kind.boxes().count(), 100);
+    let prefix = super::admission_prefix(&ring, &path, id(1), copies, Some(&admission), 200)
+        .unwrap()
+        .unwrap();
+    // The hundred copies and the member's own circle box.
+    assert_eq!(prefix.kind.boxes().count(), 101);
+}
+
+/// A member who replaces their own keys sends the new sealing key a copy of
+/// every key they hold, the circle their admission made for them included: the
+/// own copy was sealed to the pair being replaced, so no other box carries the
+/// key to the new one (§10.4, §12.1, §13.2).
+#[tokio::test]
+async fn a_member_replacing_their_keys_copies_their_admitted_circles_key_to_the_new_pair() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let member = ben.identity.member();
+    let state = ben.sync.database.store_state().await.unwrap();
+    let (circle, _) =
+        state.circles.iter().find(|(_, held)| held.members == [member].into()).unwrap();
+    let fresh = coven_format::test_utils::keys_from_seed(12).public_keys();
+    let change = StoreChange::ReplaceMemberKeys {
+        member,
+        expected: ben.identity.keys().public_keys(),
+        keys: fresh,
+    };
+    let ring = ben.sync.keys.read().unwrap().unwrap();
+    let session = ben.sync.session.lock().await;
+    let routes = super::required_copies(&session.history, &ring, &change, member);
+    assert!(
+        routes
+            .iter()
+            .any(|route| route.audience == Audience::Circle(*circle)
+                && route.sealing == fresh.sealing),
+        "{routes:?}"
+    );
+    assert!(routes.iter().any(|route| route.audience == Audience::Store));
+    assert!(routes.iter().all(|route| route.member == member && route.sealing == fresh.sealing));
+    drop(session);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
 }

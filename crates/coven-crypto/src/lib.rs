@@ -35,8 +35,9 @@ pub use hashing::{
 };
 pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};
 pub use member::{
-    seal_circle_key, seal_handover, seal_store_key, MemberIdentity, MemberKeys, MemberPublicKeys,
-    SealingKey, Signature, SigningKey, KEY_BOX_HEAD_LEN, KEY_BOX_TAG_LEN, SIGNATURE_LEN,
+    seal_circle_key, seal_handover, seal_own_circle_key, seal_store_key, MemberIdentity,
+    MemberKeys, MemberPublicKeys, SealingKey, Signature, SigningKey, KEY_BOX_HEAD_LEN,
+    KEY_BOX_TAG_LEN, SIGNATURE_LEN,
 };
 pub use object_digest::{ObjectDigest, ObjectHasher};
 pub use s3_signing::{aws_request_signature, gcs_request_signature, s3_request_hash};

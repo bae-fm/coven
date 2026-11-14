@@ -36,7 +36,7 @@ async fn a_request_naming_another_member_than_its_invite_is_refused() {
         keys: keys.public_keys(),
         device: coven_foundation::id_source::DeviceId(70),
         device_name: "Carol's phone".into(),
-        joiner: carol_asks(&code),
+        joiner: carol_asks(&code, &keys.public_keys().sealing),
     };
     let sealed = |request: &coven_format::objects::JoinRequest| {
         sealed_join_request(&code.secret, &code.request_path(), request, &keys).unwrap()
@@ -76,7 +76,7 @@ async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
         keys: named.public_keys(),
         device: coven_foundation::id_source::DeviceId(70),
         device_name: "forged".into(),
-        joiner: carol_asks(&code),
+        joiner: carol_asks(&code, &named.public_keys().sealing),
     };
     let bytes = sealed_join_request(&code.secret, &code.request_path(), &forged, &signer).unwrap();
     let record = ana
@@ -132,7 +132,17 @@ async fn a_request_of_the_other_kind_than_its_invite_is_refused() {
         };
         sealed_join_request(&code.secret, &code.request_path(), &request, &keys).unwrap()
     };
-    let person = || Joiner::NewPerson { name: "Carol".into() }.into();
+    let circle = || {
+        crate::test_joining_circle(
+            code.store,
+            code.member,
+            &keys.public_keys().sealing,
+            &coven_foundation::id_source::UuidIds,
+        )
+        .unwrap()
+    };
+    let person = || Joiner::NewPerson { name: "Carol".into() }.requesting(circle());
+    let recovery = || Joiner::MemberKeys.requesting(circle());
     let refused = |opened: Opened| {
         matches!(
             opened,
@@ -140,10 +150,8 @@ async fn a_request_of_the_other_kind_than_its_invite_is_refused() {
                 if matches!(damaged.failure, Refusal::WrongIdentity { .. })
         )
     };
-    let recovery_for_person = ana
-        .sync
-        .open_request(&new_person_invite, &state, &sealed(Joiner::MemberKeys.into()))
-        .unwrap();
+    let recovery_for_person =
+        ana.sync.open_request(&new_person_invite, &state, &sealed(recovery())).unwrap();
     assert!(refused(recovery_for_person), "a recovery's request for a new person's invite");
     // A pairing's request, for the member's own device, is no invite's kind.
     for invite in [&new_person_invite, &recovery_invite] {
@@ -158,10 +166,7 @@ async fn a_request_of_the_other_kind_than_its_invite_is_refused() {
     assert!(refused(person_for_recovery), "a new person's request for a recovery's invite");
     let matching = ana.sync.open_request(&new_person_invite, &state, &sealed(person())).unwrap();
     assert!(matches!(matching, Opened::Checked(_)));
-    let matching = ana
-        .sync
-        .open_request(&recovery_invite, &state, &sealed(Joiner::MemberKeys.into()))
-        .unwrap();
+    let matching = ana.sync.open_request(&recovery_invite, &state, &sealed(recovery())).unwrap();
     assert!(matches!(matching, Opened::Checked(_)));
     ana.sync.database.close().await.unwrap();
 }
@@ -178,7 +183,7 @@ async fn a_new_persons_request_carries_the_name_they_typed_to_the_approval() {
     assert_eq!(invite.admits, InviteAdmits::NewPerson);
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(
+    let request = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,
@@ -210,7 +215,7 @@ async fn a_join_of_another_person_than_its_invite_admits_fails_before_it_begins(
     let invite = invite(&ana).await;
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (_temp, directory) = group.directory();
-    let result = JoiningIdentity::prepare(
+    let result = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,

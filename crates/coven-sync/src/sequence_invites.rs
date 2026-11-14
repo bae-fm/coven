@@ -1,6 +1,7 @@
 //! The inviting device's one-time invitation, its join request and the
 //! approval that binds the request's exact pair (§13.2, §13.3).
 
+use super::sequence_copies::ApprovedAdmission;
 use super::{SequenceSync, Session};
 use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::sequence_sync::OperationState;
@@ -187,12 +188,19 @@ impl InviteWork {
     }
 
     /// The admission approving `request` claims: admitting the invite's
-    /// member with the request's pair, or recovering the member with it, and
-    /// registering the device the request names (§13.2).
-    fn binding_change(&self, request: &[u8]) -> Result<StoreChange, SyncError> {
+    /// member with the request's pair, or recovering the member with it,
+    /// registering the device the request names and making the circle it
+    /// carries, with the request's copy of that circle's key (§13.2).
+    fn binding_admission(&self, request: &[u8]) -> Result<ApprovedAdmission, SyncError> {
         let request = decode_request(request)?;
         let (keys, device, device_name) = (request.keys, request.device, request.device_name);
-        Ok(match self.binding {
+        let joining = request
+            .joiner
+            .circle()
+            .cloned()
+            .ok_or(coven_format::Error::UnknownTag { field: "invite joiner", tag: 2 })?;
+        let circle = joining.circle;
+        let change = match self.binding {
             InviteBinding::Add { role } => StoreChange::AdmitMember {
                 member: self.member,
                 keys,
@@ -200,6 +208,7 @@ impl InviteWork {
                 access: self.access.member_access(),
                 device,
                 device_name,
+                circle,
             },
             // A recovery on S3 records the invite's new key as the member's
             // access in the same entry; on another provider the member keeps
@@ -214,8 +223,10 @@ impl InviteWork {
                 },
                 device,
                 device_name,
+                circle,
             },
-        })
+        };
+        Ok(ApprovedAdmission::new(change, joining.copy))
     }
 
     /// The invite as the app sees it, at `stage`, with the operation that

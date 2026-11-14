@@ -201,14 +201,19 @@ async fn later_resets_and_raises_apply_in_slot_order_and_keep_the_earlier_entry(
     }
     for device in [&ana, &ben] {
         let history = device.sync.session.lock().await.history.clone();
-        let kinds: Vec<_> = history
+        // The circle Ben's admission made is raised too, which is no part of
+        // the store's order.
+        let store: Vec<_> = history
             .boundaries
+            .iter()
+            .filter(|coverage| coverage.boundary.snapshot().audience == Audience::Store)
+            .collect();
+        let kinds: Vec<_> = store
             .iter()
             .map(|coverage| matches!(coverage.boundary, coven_database::Boundary::Reset { .. }))
             .collect();
         assert_eq!(kinds, [true, false, true], "reset, raise, reset in slot order");
-        let entries: Vec<_> =
-            history.boundaries.iter().map(|coverage| coverage.boundary.entry()).collect();
+        let entries: Vec<_> = store.iter().map(|coverage| coverage.boundary.entry()).collect();
         assert!(entries.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             rows(&device.sync.database).await,
@@ -350,6 +355,12 @@ async fn activation_whose_suffix_is_below_the_floor(raise: bool) {
     ana.sync.retry_pending_operation(operation).await.unwrap();
     let activated = ana.sync.database.applied_slot().await.unwrap();
     assert_eq!(activated, before + 1);
+    if raise {
+        ben.sync.pass().await.unwrap();
+        crate::sequence_sync::sequence_raises::tests::raise_admitted_circle(&ben, 2).await;
+        ana.sync.pass().await.unwrap();
+    }
+    let activated = ana.sync.database.applied_slot().await.unwrap();
     ana.sync.snapshot(Audience::Store).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH

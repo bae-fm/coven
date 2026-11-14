@@ -13,13 +13,13 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     code.store = StoreId(UuidIds.new_id());
     let device = directory.settings().unwrap().device_id;
     assert!(matches!(
-        JoiningIdentity::prepare(&directory, &code, device, "New phone", carol_joins(invite.shown_code())),
+        JoiningIdentity::prepare_for_test(&directory, &code, device, "New phone", carol_joins(invite.shown_code())),
         Err(SyncError::Code(CodeError::WrongStore { expected, actual }))
             if expected == directory.id() && actual == code.store
     ));
     assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
     // Through bootstrap, it is refused as the join's code, as a restore's is.
-    let refused = JoiningIdentity::prepare(
+    let refused = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         device,
@@ -42,7 +42,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
-    let mut identity = JoiningIdentity::prepare(
+    let mut identity = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,
@@ -74,6 +74,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
             install.builder(&owner, owner.recipient()),
             &changed.to_text().unwrap(),
             carol_joins(invite.shown_code()),
+            crate::tests::CIRCLE,
             "New phone",
             |_| {},
             &control,
@@ -89,7 +90,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let pending =
         install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
-    let resumed = JoiningIdentity::prepare(
+    let resumed = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,
@@ -103,7 +104,8 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     assert_eq!(resumed.joiner(), &Joiner::NewPerson { name: "Carol".into() });
     for other in [Some("Caroline".to_owned()), None] {
         let device = directory.settings().unwrap().device_id;
-        let changed = JoiningIdentity::prepare(&directory, &code, device, "New phone", other);
+        let changed =
+            JoiningIdentity::prepare_for_test(&directory, &code, device, "New phone", other);
         assert!(matches!(
             changed,
             Err(SyncError::InvitationChanged | SyncError::Code(CodeError::WrongJoiner { .. }))
@@ -312,6 +314,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
         joined.builder(&owner, owner.recipient()),
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "Guest phone",
         |_| {},
         &control,
@@ -376,6 +379,7 @@ async fn a_held_check_finds_an_approval_before_the_joins_wait_ends() {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "New phone",
         |status| {
             if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
@@ -878,6 +882,7 @@ async fn a_join_signed_in_as_another_account_is_refused_and_keeps_nothing() {
             install.authenticated_builder(&owner, other_account(&owner)).await,
             invite.shown_code(),
             crate::tests::carol_joins(invite.shown_code()),
+            crate::tests::CIRCLE,
             "Carol's phone",
             |_| {},
             &JoinControl::new(),
@@ -924,6 +929,7 @@ async fn resuming_with_the_invited_account_joins_after_a_wrong_one() {
         install.authenticated_builder(&owner, other_account(&owner)).await,
         invite.shown_code(),
         crate::tests::carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "Carol's phone",
         |_| {},
         &control,
@@ -976,6 +982,7 @@ async fn the_invited_accounts_refused_mount_ends_the_join_with_nothing_left() {
             install.authenticated_builder(&owner, owner.recipient()).await,
             invite.shown_code(),
             crate::tests::carol_joins(invite.shown_code()),
+            crate::tests::CIRCLE,
             "Carol's phone",
             |_| {},
             &JoinControl::new(),

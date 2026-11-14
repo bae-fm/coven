@@ -240,8 +240,10 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<StoreKey, CryptoError> {
-        let plaintext =
-            self.open_box::<{ StoreKey::ENCODED_LEN }>(b"store", path, prefix, sealed)?;
+        let plaintext = self.open_box::<{ StoreKey::ENCODED_LEN }>(
+            |sender, recipient| box_context(b"store", path, prefix, sender, recipient),
+            sealed,
+        )?;
         Ok(StoreKey::from_encoded(&plaintext))
     }
 
@@ -255,8 +257,26 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<CircleKey, CryptoError> {
-        let plaintext =
-            self.open_box::<{ CircleKey::ENCODED_LEN }>(b"circle", path, prefix, sealed)?;
+        let plaintext = self.open_box::<{ CircleKey::ENCODED_LEN }>(
+            |sender, recipient| box_context(b"circle", path, prefix, sender, recipient),
+            sealed,
+        )?;
+        Ok(CircleKey::from_encoded(&plaintext))
+    }
+
+    /// Open the copy of a circle key a joining request carries for its own
+    /// member, sealed by `seal_own_circle_key` with the same `binding` (D11).
+    /// It binds no slot path, so it opens wherever its bytes are found, and
+    /// only for the sealing key it was sealed to.
+    pub fn open_own_circle_key(
+        &self,
+        binding: &[u8],
+        sealed: &[u8],
+    ) -> Result<CircleKey, CryptoError> {
+        let plaintext = self.open_box::<{ CircleKey::ENCODED_LEN }>(
+            |sender, recipient| own_copy_context(binding, sender, recipient),
+            sealed,
+        )?;
         Ok(CircleKey::from_encoded(&plaintext))
     }
 
@@ -289,9 +309,7 @@ impl MemberKeys {
     /// malformed.
     fn open_box<const N: usize>(
         &self,
-        kind: &[u8],
-        path: &str,
-        prefix: &[u8],
+        context: impl FnOnce(&[u8; 32], &[u8; 32]) -> Vec<u8>,
         sealed: &[u8],
     ) -> Result<Zeroizing<[u8; N]>, CryptoError> {
         let (sender, rest) = sealed.split_first_chunk::<32>().ok_or(CryptoError::Malformed)?;
@@ -308,7 +326,7 @@ impl MemberKeys {
         if !shared.was_contributory() {
             return Err(CryptoError::WeakSealingKey);
         }
-        let context = box_context(kind, path, prefix, sender, recipient.as_bytes());
+        let context = context(sender, recipient.as_bytes());
         let key = derivation::derive(shared.as_bytes(), &context);
         cipher::open_exact(&key, nonce, &context, ciphertext, tag)
     }
@@ -533,6 +551,21 @@ pub fn seal_circle_key(
     seal_box(b"circle", recipient, path, prefix, &bytes)
 }
 
+/// Seal a circle key to the sealing key of the joining member who made it,
+/// for the copy their join request carries (D11). Unlike a slot's box it binds
+/// no path: the joining phone doesn't know the slot its copy will land in, so
+/// `binding` is what the request can fix, the store and the box's routing.
+/// Returns the ephemeral key, nonce, ciphertext and tag.
+pub fn seal_own_circle_key(
+    key: &CircleKey,
+    recipient: &SealingKey,
+    binding: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(CircleKey::ENCODED_LEN));
+    key.encode_into(&mut bytes);
+    seal_with(recipient, &bytes, |sender| own_copy_context(binding, sender, &recipient.0))
+}
+
 /// Seal a pairing's handover anonymously to the sealing key of the request it
 /// answers, authenticating its path and clear prefix (D11). Returns the
 /// ephemeral key, nonce, ciphertext and tag; format supplies the prefix.
@@ -599,12 +632,26 @@ fn box_context(
     ])
 }
 
+fn own_copy_context(binding: &[u8], sender: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8> {
+    cipher::context(&[derivation::OWN_COPY, b"circle", binding, sender, recipient])
+}
+
 fn seal_box(
     kind: &[u8],
     recipient: &SealingKey,
     path: &str,
     prefix: &[u8],
     plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    seal_with(recipient, plaintext, |sender| box_context(kind, path, prefix, sender, &recipient.0))
+}
+
+/// Seal `plaintext` to `recipient` under an ephemeral key, with the context
+/// `context` makes from that key's public half.
+fn seal_with(
+    recipient: &SealingKey,
+    plaintext: &[u8],
+    context: impl FnOnce(&[u8; 32]) -> Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
     let seed = randomness::secret_bytes()?;
     let ephemeral = StaticSecret::from(*seed);
@@ -613,7 +660,7 @@ fn seal_box(
     if !shared.was_contributory() {
         return Err(CryptoError::WeakSealingKey);
     }
-    let context = box_context(kind, path, prefix, &sender, &recipient.0);
+    let context = context(&sender);
     let key = derivation::derive(shared.as_bytes(), &context);
     let body = cipher::seal_random(&key, &context, plaintext)?;
     let mut bytes = Vec::with_capacity(32 + body.len());

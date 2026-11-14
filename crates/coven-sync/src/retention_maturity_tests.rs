@@ -130,22 +130,26 @@ async fn a_circle_below_the_store_keeps_the_stores_snapshot_at_its_version() {
         }
     };
     assert!(first(&ana).await <= covers + 1, "first keeps the snapshot Garden rebuilds from");
-    // Garden raised: nothing rebuilds from the old snapshot.
+    // Every circle raised: nothing rebuilds from the old snapshot.
     {
         let mut session = ana.sync.session.lock().await;
         let announced = session.history.announcements.values().last().unwrap().snapshot.clone();
         let entry = coven_merge::slot(session.through);
-        session.history.state.schema.insert(
-            Audience::Circle(garden),
-            StoreVersion {
-                number: 2,
-                snapshot: coven_format::admin::SnapshotId {
-                    audience: Audience::Circle(garden),
-                    ..announced
+        // Every circle is raised: Garden, and the circle Ben's admission made.
+        let circles: Vec<_> = session.history.state.circles.keys().copied().collect();
+        for circle in circles {
+            session.history.state.schema.insert(
+                Audience::Circle(circle),
+                StoreVersion {
+                    number: 2,
+                    snapshot: coven_format::admin::SnapshotId {
+                        audience: Audience::Circle(circle),
+                        ..announced.clone()
+                    },
+                    entry,
                 },
-                entry,
-            },
-        );
+            );
+        }
     }
     assert!(first(&ana).await > covers + 1, "first moves on once Garden is raised");
     for device in [&ana, &ben] {
@@ -205,7 +209,12 @@ async fn the_bodies_a_rebuild_reads_survive_the_deletion_walk() {
     let (old_body, reset_body) = {
         let session = ana.sync.session.lock().await;
         let reads = session.history.rebuild_reads();
-        assert_eq!(reads.len(), 1, "Garden is below the store");
+        // Garden and the circle each admitted member's admission made are
+        // below the store, and rebuild from the same store history.
+        assert_eq!(reads.len(), 3, "Garden and Ben's and Cy's circles are below the store");
+        assert!(reads
+            .iter()
+            .all(|read| read.snapshot == reads[0].snapshot && read.replay == reads[0].replay));
         let (slot, _) = reads[0].snapshot.expect("the old store snapshot is the start");
         assert_eq!(slot, old);
         assert_eq!(reads[0].replay.len(), 1, "the reset is replayed over it");

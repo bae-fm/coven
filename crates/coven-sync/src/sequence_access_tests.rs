@@ -20,7 +20,7 @@ async fn only_the_owners_device_records_the_work_a_removal_needs() {
     group.create(&ana).await;
     for (device, account) in [(&ben, "ben@example.org"), (&dan, "dan@example.org")] {
         ana.sync
-            .administer(admission(
+            .administer_admission(admission(
                 device,
                 MemberRole::Admin,
                 MemberAccess::ProviderAccount(account.into()),
@@ -60,7 +60,7 @@ async fn retained_grants_stay_one_record_per_account_whoever_removed_the_member(
         (&dan, MemberRole::Member, "dan@example.org"),
     ] {
         ana.sync
-            .administer(admission(
+            .administer_admission(admission(
                 device,
                 role,
                 MemberAccess::ProviderAccount(account.into()),
@@ -129,6 +129,7 @@ fn admit_ben(access: coven_format::MemberAccess) -> StoreChange {
         access,
         device: DeviceId(2),
         device_name: "Ben's phone".into(),
+        circle: crate::effects::tests::circle(2),
     }
 }
 

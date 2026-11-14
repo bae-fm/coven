@@ -27,11 +27,15 @@ impl Joiner {
     }
 }
 
-impl From<Joiner> for coven_format::objects::Joiner {
-    fn from(joiner: Joiner) -> Self {
-        match joiner {
-            Joiner::NewPerson { name } => Self::NewPerson { name },
-            Joiner::MemberKeys => Self::MemberKeys,
+impl Joiner {
+    /// The format's joiner of a request that makes `circle`.
+    pub fn requesting(
+        self,
+        circle: coven_format::objects::JoiningCircle,
+    ) -> coven_format::objects::Joiner {
+        match self {
+            Self::NewPerson { name } => coven_format::objects::Joiner::NewPerson { name, circle },
+            Self::MemberKeys => coven_format::objects::Joiner::MemberKeys { circle },
         }
     }
 }
@@ -43,8 +47,8 @@ impl TryFrom<coven_format::objects::Joiner> for Joiner {
 
     fn try_from(joiner: coven_format::objects::Joiner) -> Result<Self, Self::Error> {
         match joiner {
-            coven_format::objects::Joiner::NewPerson { name } => Ok(Self::NewPerson { name }),
-            coven_format::objects::Joiner::MemberKeys => Ok(Self::MemberKeys),
+            coven_format::objects::Joiner::NewPerson { name, .. } => Ok(Self::NewPerson { name }),
+            coven_format::objects::Joiner::MemberKeys { .. } => Ok(Self::MemberKeys),
             coven_format::objects::Joiner::OwnDevice => {
                 Err(coven_format::Error::UnknownTag { field: "invite joiner", tag: 2 }.into())
             }

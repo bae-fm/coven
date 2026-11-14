@@ -446,7 +446,7 @@ async fn a_member_lacking_an_older_key_gets_a_copy_once() {
     let phone = group.newcomer(carol.clone(), group.storage.for_device()).await;
     let admission =
         admission(&phone, coven_format::admin::MemberRole::Member, group.access("carol"), "Carol");
-    assert!(ana.sync.administer(admission).await.is_err());
+    assert!(ana.sync.administer_admission(admission).await.is_err());
     ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
     ana.sync.pass().await.unwrap();
@@ -458,7 +458,9 @@ async fn a_member_lacking_an_older_key_gets_a_copy_once() {
             .history
             .copies
             .iter()
-            .filter(|copy| copy.route().member == carol.member())
+            .filter(|copy| {
+                copy.route().member == carol.member() && copy.route().audience == Audience::Store
+            })
             .map(|copy| copy.route().key)
             .collect();
         sent.sort();

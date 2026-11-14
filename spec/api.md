@@ -8769,14 +8769,16 @@ pub async fn restore_from_saved_code(
 /// Dropbox or OneDrive sign-in, kept on the device beside the code until the
 /// join ends.
 ///
-/// On the new person's device: makes their member keys, keeps the code in
-/// this device's keychain, writes a join request to storage, and waits for
-/// approval. The request carries `name`: the name the person typed, when the
-/// invite admits a new person, or none when it admits a member's new keys, as
-/// the code's `InviteInfo::admits` says. A `name` of the other sort fails the
-/// call with `CodeError::WrongJoiner` before anything changes, and one that
-/// differs from the unfinished join's saved request, or a device name that
-/// does, with `SyncError::InvitationChanged`. Once it finds its admission, it commits the store's custody and
+/// On the new person's device: makes their member keys and the circle the
+/// admission will make for them, keeps the code in this device's keychain,
+/// writes a join request to storage, and waits for approval. The request
+/// carries `name`: the name the person typed, when the invite admits a new
+/// person, or none when it admits a member's new keys, as the code's
+/// `InviteInfo::admits` says, and the circle, named `circle_name`, with its
+/// key's only copy sealed to the person's new keys. A `name` of the other sort
+/// fails the call with `CodeError::WrongJoiner` before anything changes, and
+/// one that differs from the unfinished join's saved request, or a device name
+/// or circle name that does, with `SyncError::InvitationChanged`. Once it finds its admission, it commits the store's custody and
 /// publishes the store, which no longer lists as a join, then loads it,
 /// reporting `Loading`, and returns the open store. A failure while the
 /// published store loads, its storage access lost among them, returns
@@ -8807,6 +8809,7 @@ pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     name: Option<String>,
+    circle_name: &str,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
@@ -9230,6 +9233,8 @@ match join_with_invite(
     &scanned,
     // The name Carol typed on the screen after she scanned the code.
     Some("Carol".into()),
+    // The circle her admission makes for her, which her profile will name.
+    "Carol's circle",
     "Carol's phone",
     |step| show_step(step),
     &control,

@@ -520,7 +520,15 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
             keys: keys.public_keys(),
             device: coven_foundation::id_source::DeviceId(70),
             device_name: "Departing member".into(),
-            joiner: Joiner::NewPerson { name: "Departing".into() }.into(),
+            joiner: Joiner::NewPerson { name: "Departing".into() }.requesting(
+                coven_sync::test_joining_circle(
+                    code.store,
+                    code.member,
+                    &keys.public_keys().sealing,
+                    &UuidIds,
+                )
+                .unwrap(),
+            ),
         },
         keys,
     )

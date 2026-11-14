@@ -259,6 +259,7 @@ impl Network {
                 .migrations(self.schema.1.clone()),
             invite.shown_code(),
             carol_joins(invite.shown_code()),
+            crate::tests::CIRCLE,
             &name,
             |status| {
                 if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {

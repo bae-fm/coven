@@ -56,7 +56,7 @@ impl Case {
         let ben = group.device(2).await;
         group.create(&ana).await;
         ana.sync
-            .administer(admission(
+            .administer_admission(admission(
                 &ben,
                 MemberRole::Admin,
                 MemberAccess::ProviderAccount("ben@example.org".into()),
@@ -345,7 +345,10 @@ impl Case {
             keys: self.ben.identity.keys().public_keys(),
             device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol's phone".into(),
-            joiner: crate::sequence_sync::sequence_invites::tests::carol_asks(&code),
+            joiner: crate::sequence_sync::sequence_invites::tests::carol_asks(
+                &code,
+                &self.ben.identity.keys().public_keys().sealing,
+            ),
         };
         let path = code.request_path();
         let bytes =

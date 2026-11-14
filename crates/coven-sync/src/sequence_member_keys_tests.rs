@@ -676,7 +676,10 @@ async fn a_newcomer_verifies_slots_signed_with_a_replaced_pair() {
 
     let ben = group.newcomer(newcomer, group.storage.for_device()).await;
     let role = coven_format::admin::MemberRole::Member;
-    ana.sync.administer(admission(&ben, role, group.access("newcomer"), "Newcomer")).await.unwrap();
+    ana.sync
+        .administer_admission(admission(&ben, role, group.access("newcomer"), "Newcomer"))
+        .await
+        .unwrap();
     ben.sync.pass().await.unwrap();
 
     assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);

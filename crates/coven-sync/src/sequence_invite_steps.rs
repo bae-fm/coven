@@ -232,8 +232,9 @@ pub(crate) fn approve_request(
         if work.present_request(&stored)? != *request {
             return Err(SyncError::InvitationChanged);
         }
-        let change = work.binding_change(&stored)?;
-        let binding = SequenceOperation::change(change).start(journal, operation_kind::INVITE)?;
+        let admission = work.binding_admission(&stored)?;
+        let binding =
+            SequenceOperation::admission(admission).start(journal, operation_kind::INVITE)?;
         work.state = InviteState::Approving { code, request: stored, binding };
         journal.advance_operation(&work.update(&record)?)?;
         Ok((record.id, binding))

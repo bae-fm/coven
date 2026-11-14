@@ -268,6 +268,7 @@ impl Household {
                 access: ben_access,
                 device: DeviceId(2),
                 device_name: "Ben's phone".into(),
+                circle: crate::effects::tests::circle(2),
             },
         );
         household.entry(
@@ -397,6 +398,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
         access: Some(new_key.clone()),
         device: DeviceId(6),
         device_name: "Ben's new phone".into(),
+        circle: crate::effects::tests::circle(6),
     };
     // Access of the other kind than creation's is refused, as set-access's is.
     let mut by_account = recovery.clone();
@@ -428,6 +430,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
                     access: None,
                     device: DeviceId(7),
                     device_name: "Ben's other phone".into(),
+                    circle: crate::effects::tests::circle(7),
                 },
             )
             .err(),
@@ -445,6 +448,7 @@ fn a_recovery_stops_the_members_earlier_devices_but_not_the_one_it_registers() {
                     access: None,
                     device: DeviceId(3),
                     device_name: "Ana's laptop".into(),
+                    circle: crate::effects::tests::circle(7),
                 },
             )
             .err(),
@@ -504,6 +508,7 @@ fn a_member_reaches_the_store_with_the_access_kind_it_was_created_with() {
         access,
         device: DeviceId(4),
         device_name: "Carol's phone".into(),
+        circle: crate::effects::tests::circle(3),
     };
     let s3 = crate::sequence_sync::tests::access;
     let shared = Household::shared();
@@ -552,6 +557,7 @@ fn set_access_names_an_active_member_and_only_an_admin_sets_anothers_key() {
             access: key("carol"),
             device: DeviceId(4),
             device_name: "Carol's phone".into(),
+            circle: crate::effects::tests::circle(3),
         },
     );
     let set = |member, name: &str| StoreChange::SetAccess { member, access: key(name) };

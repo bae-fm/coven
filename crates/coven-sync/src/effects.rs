@@ -210,13 +210,16 @@ pub(crate) fn checked_change(
             store.name = name.clone();
             store.named_at = slot;
         }
-        AdmitMember { member: id, keys, role, access, device, device_name } => {
+        AdmitMember { member: id, keys, role, access, device, device_name, circle } => {
             if let Some(existing) = state.members.get(id) {
+                // Done already: the member, their device and the circle the
+                // admission made for them are all there (§13.2).
                 if !existing.removed
                     && existing.keys == *keys
                     && existing.role == *role
                     && existing.access.as_ref() == Some(access)
                     && registered_for(state, device, id)
+                    && circle_effects::made_for(state, circle.circle, id, &circle.name)
                 {
                     return Ok(None);
                 }
@@ -242,11 +245,19 @@ pub(crate) fn checked_change(
                 *device,
                 StoreDevice { member: *id, name: device_name.clone(), state: DeviceState::Active },
             );
+            circle_effects::create(
+                &mut next,
+                circle.circle,
+                &circle.name,
+                *id,
+                circle.breaking_version,
+            )?;
         }
-        RecoverMember { member: id, expected, keys, access, device, device_name } => {
+        RecoverMember { member: id, expected, keys, access, device, device_name, circle } => {
             let target = state.active_member(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
             if target.keys == *keys
                 && registered_for(state, device, id)
+                && circle_effects::made_for(state, circle.circle, id, &circle.name)
                 && access.as_ref().is_none_or(|access| {
                     target.access.as_ref().is_some_and(|held| held.same_credential(access))
                 })
@@ -272,6 +283,13 @@ pub(crate) fn checked_change(
                 *device,
                 StoreDevice { member: *id, name: device_name.clone(), state: DeviceState::Active },
             );
+            circle_effects::create(
+                &mut next,
+                circle.circle,
+                &circle.name,
+                *id,
+                circle.breaking_version,
+            )?;
         }
         RemoveMember { member: id } => {
             let target = next.members.get_mut(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;

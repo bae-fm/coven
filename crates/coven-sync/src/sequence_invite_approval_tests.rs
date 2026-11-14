@@ -73,6 +73,57 @@ async fn an_approved_request_admits_its_pair_and_registers_its_device() {
     }
 }
 
+/// The admission makes the circle the request carries, with Carol its only
+/// member, and its prefix carries the request's copy of the circle's key byte
+/// for byte. Ana's device never holds that key; Carol's opens it from the
+/// admission and holds it once her admission applies (§13.2).
+#[tokio::test]
+async fn the_admission_makes_the_requests_circle_and_carries_its_copy() {
+    use coven_format::sealed_slot::{BoundedSlot, SlotKind};
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = invite(&ana).await;
+    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let checked = requests(&ana).await;
+    ana.sync.approve_join_request(&checked[0]).await.unwrap();
+    let asked = carol.request.circle().clone();
+    assert_eq!(asked.circle.name, "Circle");
+    // Exactly one slot is an admission, and its own box is the request's.
+    let mut own = Vec::new();
+    for number in 1..=ana.sync.database.applied_slot().await.unwrap() {
+        let path = ObjectPath::slot(group.store, number.try_into().unwrap());
+        let bytes = group.storage.read(&path).await.unwrap();
+        if let SlotKind::Admission { own: Some(found), .. } =
+            BoundedSlot::decode(&bytes).unwrap().prefix.kind
+        {
+            own.push(found);
+        }
+    }
+    assert_eq!(own, std::slice::from_ref(&asked.copy));
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Admitted
+    );
+    carol.device.sync.pass().await.unwrap();
+    for device in [&ana.sync, &carol.device.sync] {
+        let state = device.database.store_state().await.unwrap();
+        let circle = &state.circles[&asked.circle.circle];
+        assert_eq!(circle.members, [invite.member].into());
+        assert_eq!((circle.name.as_str(), circle.base), ("Circle", 0));
+    }
+    // The key is Carol's alone: opened from the admission's own box.
+    let held = |device: &Device| {
+        device.sync.keys.read().unwrap().unwrap().circle_key_ids(asked.circle.circle).count()
+    };
+    assert_eq!(held(&ana), 0);
+    assert_eq!(held(&carol.device), 1);
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Once Ana's approval has begun, its admission may already be on its way:
 /// approving, declining and cancelling all fail with `InvitationChanged`,
 /// and the approval finishes on retry (§13.2).
@@ -325,14 +376,19 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
         group.admit(&ana, &ben).await;
         let target = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91));
         ana.sync
-            .administer(coven_format::admin::StoreChange::AdmitMember {
-                member: target,
-                keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
-                role: MemberRole::Member,
-                access: MemberAccess::ProviderAccount("carol@example.org".into()),
-                device: coven_foundation::id_source::DeviceId(81),
-                device_name: "Carol's old phone".into(),
-            })
+            .administer_admission(
+                crate::admitting(
+                    group.store,
+                    target,
+                    coven_format::test_utils::keys_from_seed(3).public_keys(),
+                    MemberRole::Member,
+                    MemberAccess::ProviderAccount("carol@example.org".into()),
+                    coven_foundation::id_source::DeviceId(81),
+                    "Carol's old phone",
+                    &coven_foundation::id_source::UuidIds,
+                )
+                .unwrap(),
+            )
             .await
             .unwrap();
         let invite = key_replacement_invite(&ana, target).await;
@@ -451,14 +507,19 @@ async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
         coven_format::test_utils::keys_from_seed(3),
     );
     ana.sync
-        .administer(coven_format::admin::StoreChange::AdmitMember {
-            member: carol.member(),
-            keys: carol.keys().public_keys(),
-            role: MemberRole::Member,
-            access: access("carol-old"),
-            device: coven_foundation::id_source::DeviceId(81),
-            device_name: "Carol's old phone".into(),
-        })
+        .administer_admission(
+            crate::admitting(
+                group.store,
+                carol.member(),
+                carol.keys().public_keys(),
+                MemberRole::Member,
+                access("carol-old"),
+                coven_foundation::id_source::DeviceId(81),
+                "Carol's old phone",
+                &coven_foundation::id_source::UuidIds,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     let invite = ana
@@ -476,9 +537,14 @@ async fn a_recovery_on_s3_records_the_invites_key_in_its_admission() {
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
     let device = directory.settings().unwrap().device_id;
-    let mut request =
-        JoiningIdentity::prepare(&directory, &code, device, "Carol's phone", carol_for(&code))
-            .unwrap();
+    let mut request = JoiningIdentity::prepare_for_test(
+        &directory,
+        &code,
+        device,
+        "Carol's phone",
+        carol_for(&code),
+    )
+    .unwrap();
     let phone = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
     assert!(phone.sync.submit_join(&request).await.unwrap());
     ana.sync.pass().await.unwrap();
@@ -587,7 +653,8 @@ async fn publish_request(
 }
 
 /// A request that fails one of Ana's checks, among them one naming a device
-/// id history registered, published at her invite's one path, ends the
+/// id history registered, a circle id history uses or a copy routed to
+/// another member, published at her invite's one path, ends the
 /// invite in the pass that reads it, as a decline does: no
 /// attempt could pass it, and no other request can reach that path. The
 /// invite leaves her list with no pending record and no binding journaled,
@@ -595,12 +662,15 @@ async fn publish_request(
 /// Carol's account (§13.2).
 #[tokio::test]
 async fn a_request_failing_a_check_ends_its_invite() {
-    for check in ["signature", "member", "keys", "device"] {
+    for check in ["signature", "member", "keys", "device", "circle", "copy"] {
         let group = Group::shared();
         let ana = group.device(1).await;
         let ben = group.device(2).await;
         group.create(&ana).await;
         group.admit(&ana, &ben).await;
+        // A circle some entry of the history already made, before the invite
+        // looks for its request.
+        let used = ana.sync.create_circle("Used".into()).await.unwrap();
         let (code, member) = carol_request_slot(&group, &ana).await;
         let operation = listed(&ana).await[0].operation;
         let carol = coven_crypto::MemberKeys::generate().unwrap();
@@ -622,14 +692,27 @@ async fn a_request_failing_a_check_ends_its_invite() {
             "device" => ben.sync.device,
             _ => coven_foundation::id_source::DeviceId(70),
         };
-        let request = coven_format::objects::JoinRequest {
+        let mut request = coven_format::objects::JoinRequest {
             invite: code.invite,
             member,
             keys,
             device,
             device_name: "Carol's phone".into(),
-            joiner: carol_asks(&code),
+            joiner: carol_asks(&code, &keys.sealing),
         };
+        let (coven_format::objects::Joiner::NewPerson { circle, .. }
+        | coven_format::objects::Joiner::MemberKeys { circle }) = &mut request.joiner
+        else {
+            unreachable!("an invite's request names a circle")
+        };
+        match check {
+            "circle" => {
+                circle.circle.circle = used;
+                circle.copy.routing.audience = coven_merge::Audience::Circle(used);
+            }
+            "copy" => circle.copy.routing.member = ben.identity.member(),
+            _ => (),
+        }
         publish_request(&group, &code, &request, signer).await;
         let pass = ana.sync.pass().await;
         assert!(pass.is_ok(), "{check}: {:?}", pass.err());

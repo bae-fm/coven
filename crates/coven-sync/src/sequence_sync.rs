@@ -705,9 +705,13 @@ impl History {
                 // An admission's copies stand in history whether or not its
                 // entry counts: a refused one still disclosed them (§12.2).
                 let validated = match &received.prefix.kind {
-                    SlotKind::Admission(copies) => {
-                        self.validate_admission(&received.header, slot, &change, copies)
-                    }
+                    SlotKind::Admission { copies, own } => self.validate_admission(
+                        &received.header,
+                        slot,
+                        &change,
+                        copies,
+                        own.as_ref(),
+                    ),
                     _ => self.validate(&received.header, slot, &change),
                 };
                 self.copies.extend(KeyCopy::all(&received.path, &received.prefix));

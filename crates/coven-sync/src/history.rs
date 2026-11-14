@@ -387,24 +387,41 @@ impl History {
         Ok(effect)
     }
 
-    /// Validate an admission: its entry, as `validate` does, and the copies
-    /// its clear prefix carries. They all go to the entry's member and new
-    /// sealing key, name each store key introduced before the slot, and
-    /// otherwise only keys introduced for circles the member reads before it
-    /// (§13.2, format.md D6). The format keeps each key to one copy.
+    /// Validate an admission: its entry, as `validate` does, and the boxes
+    /// its clear prefix carries. The copies all go to the entry's member and
+    /// new sealing key, name each store key introduced before the slot, and
+    /// otherwise only keys introduced for circles the member reads before it;
+    /// the own box goes to the same member and sealing key, for the circle and
+    /// key the entry itself introduces (§13.2, format.md D6). The format keeps
+    /// each key to one copy.
     pub(crate) fn validate_admission(
         &self,
         header: &SlotHeader,
         slot: Slot,
         change: &StoreChange,
         copies: &[CopyBox],
+        own: Option<&CopyBox>,
     ) -> Result<Option<AdminEffect>, OperationRejection> {
         let effect = self.validate(header, slot, change)?;
-        let (StoreChange::AdmitMember { member, keys, .. }
-        | StoreChange::RecoverMember { member, keys, .. }) = change
+        let (StoreChange::AdmitMember { member, keys, circle, .. }
+        | StoreChange::RecoverMember { member, keys, circle, .. }) = change
         else {
+            // A creation's circles are the creator's, with their copies among
+            // `copies`, so its slot carries no own box.
+            if own.is_some() {
+                return Err(OperationRejection::NotAllowed);
+            }
             return self.validate_creation(header, change, copies, effect);
         };
+        let owned = own.is_some_and(|own| {
+            own.routing.member == *member
+                && own.routing.sealing == keys.sealing
+                && own.routing.audience == Audience::Circle(circle.circle)
+                && own.routing.key == circle.key
+        });
+        if !owned {
+            return Err(OperationRejection::NotAllowed);
+        }
         let introduced: BTreeSet<KeyId> = self
             .introductions
             .iter()
@@ -772,6 +789,9 @@ impl History {
 /// key and each circle's first key.
 pub(crate) fn introductions(change: &StoreChange) -> Vec<(Audience, KeyId, [u8; 32])> {
     match change {
+        StoreChange::AdmitMember { circle, .. } | StoreChange::RecoverMember { circle, .. } => {
+            vec![(Audience::Circle(circle.circle), circle.key, circle.key_hash)]
+        }
         StoreChange::CreateStore { key, key_hash, circles, .. } => {
             let mut keys = vec![(Audience::Store, *key, *key_hash)];
             keys.extend(circles.iter().map(|c| (Audience::Circle(c.circle), c.key, c.key_hash)));

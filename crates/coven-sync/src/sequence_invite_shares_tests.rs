@@ -18,7 +18,7 @@ pub(crate) async fn household(group: &Group) -> (Device, Device, Device) {
     group.create(&phone).await;
     phone
         .sync
-        .administer(admission(
+        .administer_admission(admission(
             &ben,
             MemberRole::Admin,
             MemberAccess::ProviderAccount("ben@example.org".into()),
@@ -378,14 +378,19 @@ async fn a_share_applied_after_its_account_was_taken_back_grants_it_again() {
     );
     phone
         .sync
-        .administer(StoreChange::AdmitMember {
-            member: carol,
-            keys: coven_format::test_utils::keys_from_seed(4).public_keys(),
-            role: MemberRole::Member,
-            access: MemberAccess::ProviderAccount(CAROL.into()),
-            device: coven_foundation::id_source::DeviceId(40),
-            device_name: "Carol's phone".into(),
-        })
+        .administer_admission(
+            crate::admitting(
+                group.store,
+                carol,
+                coven_format::test_utils::keys_from_seed(4).public_keys(),
+                MemberRole::Member,
+                MemberAccess::ProviderAccount(CAROL.into()),
+                coven_foundation::id_source::DeviceId(40),
+                "Carol's phone",
+                &coven_foundation::id_source::UuidIds,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     laptop.sync.pass().await.unwrap();

@@ -100,7 +100,9 @@ async fn approved_with_retention(
         .history
         .copies
         .iter()
-        .filter(|copy| copy.route().held_by(&carol.device.identity))
+        .filter(|copy| {
+            copy.route().audience == Audience::Store && copy.route().held_by(&carol.device.identity)
+        })
         .map(|copy| copy.path.slot_number().unwrap().get())
         .collect();
     assert!(!copies.is_empty());

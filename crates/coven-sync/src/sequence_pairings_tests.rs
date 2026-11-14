@@ -64,6 +64,18 @@ async fn started(ana: &Device) -> Shown {
     Shown { id: code.pairing, code, path }
 }
 
+/// The circle an invite's request of `pairing`'s member with `keys` makes: no
+/// pairing takes one, so the pairing refuses a request that carries it.
+fn circle(pairing: &Shown, keys: &MemberKeys) -> coven_format::objects::JoiningCircle {
+    crate::test_joining_circle(
+        pairing.code.store,
+        pairing.code.member,
+        &keys.public_keys().sealing,
+        &coven_foundation::id_source::UuidIds,
+    )
+    .unwrap()
+}
+
 /// The new device's request, answering `pairing` with fresh `keys` as `device`.
 fn request(pairing: &Shown, keys: &MemberKeys, device: DeviceId, joiner: Tag) -> JoinRequest {
     JoinRequest {
@@ -203,14 +215,19 @@ async fn a_request_that_fails_a_check_ends_the_pairing_with_the_marker_placed() 
             "a new person",
             Box::new(move |p| {
                 let keys = fresh();
-                (request(p, &keys, DeviceId(70), Tag::NewPerson { name: "Eve".into() }), keys)
+                let circle = circle(p, &keys);
+                (
+                    request(p, &keys, DeviceId(70), Tag::NewPerson { name: "Eve".into(), circle }),
+                    keys,
+                )
             }),
         ),
         (
             "a recovery",
             Box::new(move |p| {
                 let keys = fresh();
-                (request(p, &keys, DeviceId(70), Tag::MemberKeys), keys)
+                let circle = circle(p, &keys);
+                (request(p, &keys, DeviceId(70), Tag::MemberKeys { circle }), keys)
             }),
         ),
         (
@@ -506,7 +523,9 @@ async fn opening_the_store_forgets_every_pairing_and_still_places_the_marker() {
         // A pairing that ended already: its request failed a check.
         let ended = started(&ana).await;
         let keys = MemberKeys::generate().unwrap();
-        send(&group, &ended, &request(&ended, &keys, DeviceId(73), Tag::MemberKeys), &keys).await;
+        let asking =
+            request(&ended, &keys, DeviceId(73), Tag::MemberKeys { circle: circle(&ended, &keys) });
+        send(&group, &ended, &asking, &keys).await;
         ana.sync.pass().await.unwrap();
         assert!(matches!(state_of(&ana, &ended).await, Some(PairingState::Ended { .. })));
         pairings_opened(ana.database()).await.unwrap();

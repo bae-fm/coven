@@ -205,7 +205,10 @@ pub use lost::{
     ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,
 };
 pub use members::{Circle, CircleMemberInfo, DeviceInfo, MemberInfo};
-pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome, OldWrites};
+pub use migration::{
+    newest_breaking_version, Migration, MigrationChange, MigrationContext, MigrationOutcome,
+    OldWrites,
+};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;

@@ -469,13 +469,17 @@ async fn a_floor_whose_signer_or_copies_fail_verification_commits_no_reload() {
         .into_iter()
         .map(|original| original.slot.get())
         .collect();
-    // Ana's copy is a key-copy slot, Carol's her admission (§13.2).
+    // Ana's copy is a key-copy slot, Carol's her admission, whose boxes are the
+    // store key's copy and her own circle's (§13.2): every box of a slot goes to
+    // one member.
     let routes = |copy: &coven_format::floor::OriginalSlot| {
         let object = coven_format::sealed_slot::BoundedSlot::decode(&copy.object).unwrap();
-        let [(_, copy)] = object.prefix.kind.boxes().collect::<Vec<_>>()[..] else {
-            panic!("one box");
+        let members: std::collections::BTreeSet<_> =
+            object.prefix.kind.boxes().map(|(_, copy)| copy.routing.member).collect();
+        let [member] = members.into_iter().collect::<Vec<_>>()[..] else {
+            panic!("one member");
         };
-        copy.routing.member
+        member
     };
     let members: Vec<_> = floor.copies.iter().map(routes).collect();
     assert_eq!(members, [ana.identity.member(), carol.identity.member()]);

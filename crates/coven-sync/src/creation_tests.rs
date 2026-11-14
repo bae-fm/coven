@@ -104,7 +104,9 @@ async fn a_creation_slot_carries_only_its_creators_copy_of_the_first_key() {
     insert(ana.database(), "a", "kept").await;
     let kept = kept_attempt(&ana).await;
     let received = coven_format::sealed_slot::BoundedSlot::decode(&kept).unwrap();
-    let coven_format::sealed_slot::SlotKind::Admission(copies) = &received.prefix.kind else {
+    let coven_format::sealed_slot::SlotKind::Admission { copies, own: None } =
+        &received.prefix.kind
+    else {
         panic!("slot 1 is an admission");
     };
     assert_eq!(copies.len(), 1);
@@ -133,9 +135,11 @@ async fn a_creation_slot_carries_only_its_creators_copy_of_the_first_key() {
     let mut wrong = copies.clone();
     wrong[0].routing.member = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(77));
     assert!(history
-        .validate_admission(&header, coven_merge::Slot::FIRST, &change, &wrong)
+        .validate_admission(&header, coven_merge::Slot::FIRST, &change, &wrong, None)
         .is_err());
-    assert!(history.validate_admission(&header, coven_merge::Slot::FIRST, &change, copies).is_ok());
+    assert!(history
+        .validate_admission(&header, coven_merge::Slot::FIRST, &change, copies, None)
+        .is_ok());
     ana.database().close().await.unwrap();
 }
 
@@ -171,7 +175,9 @@ async fn a_creation_slot_makes_its_circles_and_carries_a_copy_of_each_key() {
 
     let kept = kept_attempt(&ana).await;
     let received = coven_format::sealed_slot::BoundedSlot::decode(&kept).unwrap();
-    let coven_format::sealed_slot::SlotKind::Admission(copies) = &received.prefix.kind else {
+    let coven_format::sealed_slot::SlotKind::Admission { copies, own: None } =
+        &received.prefix.kind
+    else {
         panic!("slot 1 is an admission");
     };
     let mut expected =
@@ -209,7 +215,9 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
         .unwrap();
     let kept = kept_attempt(&ana).await;
     let received = coven_format::sealed_slot::BoundedSlot::decode(&kept).unwrap();
-    let coven_format::sealed_slot::SlotKind::Admission(copies) = &received.prefix.kind else {
+    let coven_format::sealed_slot::SlotKind::Admission { copies, own: None } =
+        &received.prefix.kind
+    else {
         panic!("slot 1 is an admission");
     };
     let store_key = group.ring.store_key_ids().next().unwrap();
@@ -220,7 +228,7 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
         key: store_key,
         key_hash: group.ring.store_key(store_key).unwrap().hash(),
         device_name: "d".into(),
-        circles: vec![coven_format::admin::CreationCircle {
+        circles: vec![coven_format::admin::NewCircle {
             circle,
             name: "Private".into(),
             breaking_version: 0,
@@ -236,7 +244,7 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
     };
     let history = crate::history::History::default();
     let validate = |copies: &[coven_format::sealed_key::CopyBox]| {
-        history.validate_admission(&header, coven_merge::Slot::FIRST, &change, copies)
+        history.validate_admission(&header, coven_merge::Slot::FIRST, &change, copies, None)
     };
     assert!(validate(copies).is_ok());
     for kept in [&copies[..1], &copies[1..]] {
@@ -250,7 +258,7 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
 /// id the state holds (§10.3).
 #[test]
 fn creation_makes_its_circles_and_refuses_a_repeated_one() {
-    let circle = |n: u128| coven_format::admin::CreationCircle {
+    let circle = |n: u128| coven_format::admin::NewCircle {
         circle: coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(n)),
         name: format!("Circle {n}"),
         breaking_version: 3,

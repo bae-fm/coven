@@ -29,9 +29,27 @@ pub(super) async fn prepare_request(
     parks: Parks,
 ) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match terms {
-        RequestTerms::Given { device_name, name } => {
+        RequestTerms::Given { device_name, name, circle_name } => {
             let device = directory.settings().map_err(CovenError::from)?.device_id;
-            JoiningIdentity::prepare(directory, code, device, device_name, name.clone())?
+            // The circle starts at the version this app's newest breaking
+            // migration reaches, as a store's first run of them would (§15.5).
+            let migrations = builder
+                .migrations
+                .as_deref()
+                .ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
+            let circle = coven_sync::CircleTerms {
+                name: circle_name.clone(),
+                breaking_version: coven_database::newest_breaking_version(migrations),
+            };
+            JoiningIdentity::prepare(
+                directory,
+                code,
+                device,
+                device_name,
+                name.clone(),
+                &circle,
+                builder.ids.as_ref(),
+            )?
         }
         RequestTerms::Saved => JoiningIdentity::resume(directory, code)?,
     };

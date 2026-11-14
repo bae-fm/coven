@@ -245,6 +245,10 @@ async fn a_member_removed_from_a_circle_no_longer_snapshots_it() {
             .await
             .unwrap();
     }
+    // A circle holding no part asks for no snapshot, so each holds one.
+    pin(ana.database(), "00000000-0000-4000-8000-0000000000c1", gifts, "gift").await;
+    pin(ana.database(), "00000000-0000-4000-8000-0000000000c2", garden, "plant").await;
+    ana.sync.pass().await.unwrap();
     ana.sync.remove_circle_member(gifts, ben.identity.member()).await.unwrap();
     ben.sync.pass().await.unwrap();
     group.clock.set(

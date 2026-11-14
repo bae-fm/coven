@@ -11,7 +11,7 @@ use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 async fn s3_joiner(group: &Group, invite: &Invite, name: &str) -> JoiningDevice {
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(
+    let request = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,
@@ -149,7 +149,7 @@ async fn only_an_admins_device_that_applied_the_stop_ends_the_requests() {
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ana.sync
-        .administer(admission(
+        .administer_admission(admission(
             &dan,
             coven_format::admin::MemberRole::Member,
             access("dan"),

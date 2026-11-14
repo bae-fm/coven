@@ -79,7 +79,11 @@ pub use credential_custody::{commit_credentials, CredentialKeychains, Credential
 pub use error::{CutOffRefusal, DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
 pub use joiner::Joiner;
-pub use joining_identity::{ended_for, record_ending, sealed_join_request, JoiningIdentity};
+#[cfg(any(test, feature = "test-utils"))]
+pub use joining_identity::{admitting, test_joining_circle};
+pub use joining_identity::{
+    ended_for, record_ending, sealed_join_request, CircleTerms, JoiningIdentity,
+};
 pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
 pub use pairing_types::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};

@@ -67,6 +67,22 @@ impl RequestChecks<'_> {
         {
             return Ok(Opened::Refused(crate::write_object::wrong_identity(self.path)));
         }
+        // The circle the request makes is new to the history, and its copy
+        // goes to the request's own member and pair: an admission whose own
+        // box went elsewhere would be refused, so no invite offers one
+        // (§13.2).
+        if let Some(joining) = request.joiner.circle() {
+            let circle = joining.circle.circle;
+            if state.circles.contains_key(&circle) {
+                return Ok(Opened::Refused(SyncError::Rejected(OperationRejection::TargetGone(
+                    crate::EntryTarget::Circle(circle),
+                ))));
+            }
+            let routing = &joining.copy.routing;
+            if routing.member != request.member || routing.sealing != request.keys.sealing {
+                return Ok(Opened::Refused(crate::write_object::wrong_identity(self.path)));
+            }
+        }
         if !crate::effects::fresh(state, &request.keys) {
             return Ok(Opened::Refused(SyncError::Rejected(OperationRejection::KeysAlreadyUsed)));
         }

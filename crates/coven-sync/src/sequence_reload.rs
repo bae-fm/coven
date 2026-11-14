@@ -46,9 +46,8 @@ enum ReloadStart {
     /// A selected announced snapshot.
     Stored(SelectedSnapshot),
     /// Nothing of the audience exists up to the slot given: slot zero when no
-    /// slot is deleted and no snapshot is announced, or the slot before the
-    /// floor's first kept slot for a circle the floor leaves unnamed because
-    /// it holds no part (§16.4).
+    /// slot is deleted and no snapshot is announced, or the floor's `at` for a
+    /// circle the floor leaves unnamed because it holds no part (§16.4).
     Empty(Audience, u64),
     /// This device's committed prefix, applied to `Session::through`.
     Current(Audience),
@@ -314,7 +313,7 @@ impl SequenceSync {
                     if !starts.iter().any(|start| *start.audience() == audience)
                         && !rebuilds.contains(&audience)
                     {
-                        starts.push(ReloadStart::Empty(audience, floor.header.first.get() - 1));
+                        starts.push(ReloadStart::Empty(audience, floor.header.at));
                     }
                 }
                 Ok(())
@@ -455,7 +454,7 @@ impl SequenceSync {
                             // a snapshot, so an unnamed circle holds nothing below
                             // its first kept slot (§16.4).
                             (_, None) if !boundary => {
-                                ReloadStart::Empty(audience.clone(), floor.header.first.get() - 1)
+                                ReloadStart::Empty(audience.clone(), floor.header.at)
                             }
                             (_, None) => {
                                 return Err(SyncError::Pending(Box::new(PendingRecord::new(

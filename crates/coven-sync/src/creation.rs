@@ -11,7 +11,7 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{ClaimAttempt, ClaimWork, Database};
 use coven_format::{
-    admin::{CreationCircle, StoreChange},
+    admin::StoreChange,
     path::ObjectPath,
     sequence::{SlotFrame, SlotHeader},
 };
@@ -63,7 +63,7 @@ pub async fn decide_creation(database: &Database, creation: Creation<'_>) -> Res
     let circles = circles
         .into_iter()
         .map(|new| {
-            Ok(CreationCircle {
+            Ok(coven_format::admin::NewCircle {
                 key_hash: ring.circle_key(new.circle, new.key)?.hash(),
                 circle: new.circle,
                 name: new.name,
@@ -99,7 +99,7 @@ pub async fn decide_creation(database: &Database, creation: Creation<'_>) -> Res
         .begin_claim(ClaimWork::Operation(id), move |claim| {
             let header = SlotHeader { device, claim, author: author.member(), after: 0 };
             let plaintext = frame.encode(&header, &claimed)?.len();
-            let prefix = admission_prefix(&held, &claimed, key, copies, plaintext)??;
+            let prefix = admission_prefix(&held, &claimed, key, copies, None, plaintext)??;
             let bytes =
                 slot_object::seal_bounded(&claimed, &header, &frame, prefix, &held, &author)?;
             *kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes.clone());

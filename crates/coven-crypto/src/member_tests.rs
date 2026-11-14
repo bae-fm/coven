@@ -549,6 +549,38 @@ fn member_private_keys_erase_when_dropped() {
 }
 
 #[test]
+fn an_own_circle_copy_opens_only_for_its_binding_and_recipient() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
+    let member = MemberKeys::generate().unwrap();
+    let foreign = MemberKeys::generate().unwrap();
+    let circle =
+        CircleKey::generate(CircleId(Uuid::from_u128(11)), KeyId(key_ids.new_id())).unwrap();
+    let sealed =
+        seal_own_circle_key(&circle, &member.public_keys().sealing, b"store routing").unwrap();
+    assert_eq!(sealed.len(), KEY_BOX_HEAD_LEN + CircleKey::ENCODED_LEN + KEY_BOX_TAG_LEN);
+    let opened = member.open_own_circle_key(b"store routing", &sealed).unwrap();
+    assert_eq!((opened.circle(), opened.id()), (circle.circle(), circle.id()));
+    assert!(matches!(
+        member.open_own_circle_key(b"other routing", &sealed),
+        Err(CryptoError::Authentication)
+    ));
+    assert!(matches!(
+        foreign.open_own_circle_key(b"store routing", &sealed),
+        Err(CryptoError::Authentication)
+    ));
+    for index in 0..sealed.len() {
+        let mut changed = sealed.clone();
+        changed[index] ^= 1;
+        assert!(member.open_own_circle_key(b"store routing", &changed).is_err());
+    }
+    // A slot's circle box and an own copy are not interchangeable.
+    let slot =
+        seal_circle_key(&circle, &member.public_keys().sealing, "p", b"store routing").unwrap();
+    assert!(member.open_own_circle_key(b"store routing", &slot).is_err());
+    assert!(member.open_circle_key("p", b"store routing", &sealed).is_err());
+}
+
+#[test]
 fn a_handover_opens_only_at_its_path_for_its_key() {
     let asking = MemberKeys::generate().unwrap();
     let other = MemberKeys::generate().unwrap();

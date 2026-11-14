@@ -235,8 +235,8 @@ fn admission_fixture_is_a_signed_slot_whose_box_opens_at_its_index() {
     let ben = MemberIdentity::new(f::other_member_id(), f::keys_from_seed(0x35));
     let check = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
         let envelope = BoundedSlot::decode(bytes)?;
-        let SlotKind::Admission(copies) = &envelope.prefix.kind else {
-            return Err("expected an admission".into());
+        let SlotKind::Admission { copies, own: Some(own) } = &envelope.prefix.kind else {
+            return Err("expected an admission with an own copy".into());
         };
         let [copy] = copies.as_slice() else {
             return Err("expected one copy".into());
@@ -255,6 +255,29 @@ fn admission_fixture_is_a_signed_slot_whose_box_opens_at_its_index() {
         for place in [BoxPlace::Admission(1), BoxPlace::KeyCopy] {
             assert!(copy.open_store_key(&ben, path.as_str(), &context(place)?).is_err());
         }
+        // Ben's own circle box, sealed before the slot was known, binds the
+        // store and its routing: it opens for that store and no other.
+        let circle = own.open_own_circle_key(&ben, f::STORE_ID)?;
+        assert_eq!(circle.circle(), f::admitted_circle().circle);
+        assert_eq!(circle.id(), f::admitted_circle().key);
+        assert_eq!(circle.hash(), f::admitted_circle().key_hash);
+        let other_store = coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x11; 16]));
+        assert!(own.open_own_circle_key(&ben, other_store).is_err());
+        // It is no slot box: no slot path and place opens it as one.
+        let own_slot = |place| {
+            SlotObjectPrefix::copy_context(
+                envelope.prefix.format,
+                envelope.prefix.key,
+                place,
+                &own.routing,
+            )
+        };
+        assert!(own_slot(BoxPlace::Own).is_err());
+        assert!(own
+            .open_circle_key(&ben, path.as_str(), &own_slot(BoxPlace::Admission(1))?)
+            .is_err());
+        let carol = MemberIdentity::new(f::member_id(), f::keys_from_seed(0x35));
+        assert!(own.open_own_circle_key(&carol, f::STORE_ID).is_err());
         let mut hash = coven_crypto::ObjectHasher::new();
         hash.update(&bytes[..bytes.len() - 64]);
         f::member().signing.verify_object(path.as_str(), &hash.finish(), &envelope.signature)?;
@@ -288,7 +311,7 @@ fn creation_fixture_is_an_admission_slot_whose_box_opens_for_its_creator() {
     let path = f::slot_path(1);
     let check = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
         let envelope = BoundedSlot::decode(bytes)?;
-        let SlotKind::Admission(copies) = &envelope.prefix.kind else {
+        let SlotKind::Admission { copies, own: None } = &envelope.prefix.kind else {
             return Err("expected an admission".into());
         };
         let [copy] = copies.as_slice() else {

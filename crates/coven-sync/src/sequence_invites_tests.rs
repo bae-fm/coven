@@ -26,11 +26,22 @@ pub(crate) fn carol_for(code: &coven_format::codes::InviteCode) -> Option<String
     }
 }
 
-/// The person the request of the join `carol_for` names carries.
-pub(crate) fn carol_asks(code: &coven_format::codes::InviteCode) -> coven_format::objects::Joiner {
+/// The person the request of the join `carol_for` names carries, with the
+/// circle it makes for the member holding `sealing`.
+pub(crate) fn carol_asks(
+    code: &coven_format::codes::InviteCode,
+    sealing: &coven_crypto::SealingKey,
+) -> coven_format::objects::Joiner {
+    let circle = crate::test_joining_circle(
+        code.store,
+        code.member,
+        sealing,
+        &coven_foundation::id_source::UuidIds,
+    )
+    .unwrap();
     match carol_for(code) {
-        Some(name) => coven_format::objects::Joiner::NewPerson { name },
-        None => coven_format::objects::Joiner::MemberKeys,
+        Some(name) => coven_format::objects::Joiner::NewPerson { name, circle },
+        None => coven_format::objects::Joiner::MemberKeys { circle },
     }
 }
 
@@ -52,7 +63,7 @@ pub(crate) async fn joiner(group: &Group, code: &str, name: &str) -> JoiningDevi
     let code = read_invite_code(code).unwrap();
     let invitation = accepted_invitation(&code);
     let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(
+    let request = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,
@@ -327,14 +338,19 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
         coven_format::test_utils::keys_from_seed(3),
     );
     ana.sync
-        .administer(coven_format::admin::StoreChange::AdmitMember {
-            member: carol_id.member(),
-            keys: carol_id.keys().public_keys(),
-            role: MemberRole::Member,
-            access: MemberAccess::ProviderAccount("carol@example.org".into()),
-            device: coven_foundation::id_source::DeviceId(81),
-            device_name: "Carol's old phone".into(),
-        })
+        .administer_admission(
+            crate::admitting(
+                group.store,
+                carol_id.member(),
+                carol_id.keys().public_keys(),
+                MemberRole::Member,
+                MemberAccess::ProviderAccount("carol@example.org".into()),
+                coven_foundation::id_source::DeviceId(81),
+                "Carol's old phone",
+                &coven_foundation::id_source::UuidIds,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     let invite = key_replacement_invite(&ana, carol_id.member()).await;
@@ -355,6 +371,9 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
     carol.device.sync.pass().await.unwrap();
     let state = carol.device.sync.database.store_state().await.unwrap();
     assert_eq!(state.devices[&carol.device.sync.device].member, carol_id.member());
+    // The recovery made her a new circle, with her alone in it.
+    let circle = carol.request.circle().circle.circle;
+    assert_eq!(state.circles[&circle].members, [carol_id.member()].into());
     assert!(
         ana.sync
             .database
@@ -700,7 +719,7 @@ async fn an_invite_may_carry_a_key_another_member_uses() {
     assert_eq!(invite.access, access("ana"));
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let mut request = JoiningIdentity::prepare(
+    let mut request = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,
@@ -870,7 +889,7 @@ async fn a_request_sent_after_the_invite_ended_finds_its_marker() {
     let invite = s3_invite(&ana, "Carol").await;
     let code = read_invite_code(invite.shown_code()).unwrap();
     let (temp, directory) = group.directory();
-    let mut request = JoiningIdentity::prepare(
+    let mut request = JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         directory.settings().unwrap().device_id,

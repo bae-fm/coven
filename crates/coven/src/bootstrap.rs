@@ -80,9 +80,11 @@ use status::{loading, open_installation};
 /// `name` is the name the new person typed when the invite admits a new
 /// person, and `None` when it admits a member's new keys, as the invite's
 /// `InviteInfo::admits` says; the other fails with `CodeError::WrongJoiner`
-/// before anything changes. Dropping the future before the join finds its
+/// before anything changes. `circle_name` names the circle the request makes
+/// for the person, which the admission creates with them as its only member
+/// (§13.2). Dropping the future before the join finds its
 /// admission preserves the unfinished join for a subsequent call with the
-/// same invite, device name and name, or `resume_join`. On Dropbox and
+/// same invite, device name, name and circle name, or `resume_join`. On Dropbox and
 /// OneDrive the builder's sign-in is kept on the device beside the saved code
 /// until the join ends, and a later call without one uses it (§13.2).
 /// `control` cancels the join or asks for a check for approval at once.
@@ -98,6 +100,7 @@ pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     name: Option<String>,
+    circle_name: &str,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
@@ -109,7 +112,11 @@ pub async fn join_with_invite(
         builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
-            terms: RequestTerms::Given { device_name: device_name.into(), name },
+            terms: RequestTerms::Given {
+                device_name: device_name.into(),
+                name,
+                circle_name: circle_name.into(),
+            },
             held: control.often.subscribe(),
             parks: control.parks.clone(),
         },
@@ -250,10 +257,11 @@ enum BootstrapRequest {
     },
 }
 
-/// The device name and the new person's name a join's request carries.
+/// The device name, the new person's name and the circle's name a join's
+/// request carries.
 enum RequestTerms {
     /// What the app passed, which a saved request must repeat.
-    Given { device_name: String, name: Option<String> },
+    Given { device_name: String, name: Option<String>, circle_name: String },
     /// What the saved request carries: the join resumes from it.
     Saved,
 }

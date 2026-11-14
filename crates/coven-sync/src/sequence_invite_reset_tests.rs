@@ -93,14 +93,19 @@ async fn reset_preserves_an_active_members_account() {
     group.create(&ana).await;
     let target = MemberId(group.ids.new_id());
     ana.sync
-        .administer(StoreChange::AdmitMember {
-            member: target,
-            keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
-            role: MemberRole::Member,
-            access: MemberAccess::ProviderAccount("carol@example.org".into()),
-            device: coven_foundation::id_source::DeviceId(60),
-            device_name: "Carol's old phone".into(),
-        })
+        .administer_admission(
+            crate::admitting(
+                group.store,
+                target,
+                coven_format::test_utils::keys_from_seed(3).public_keys(),
+                MemberRole::Member,
+                MemberAccess::ProviderAccount("carol@example.org".into()),
+                coven_foundation::id_source::DeviceId(60),
+                "Carol's old phone",
+                &coven_foundation::id_source::UuidIds,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     key_replacement_invite(&ana, target).await;
@@ -163,7 +168,15 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
             keys,
             device: coven_foundation::id_source::DeviceId(70),
             device_name: "Carol".into(),
-            joiner: crate::Joiner::NewPerson { name: "Carol".into() }.into(),
+            joiner: crate::Joiner::NewPerson { name: "Carol".into() }.requesting(
+                crate::test_joining_circle(
+                    group.store,
+                    invite.member,
+                    &keys.sealing,
+                    &coven_foundation::id_source::UuidIds,
+                )
+                .unwrap(),
+            ),
         })
         .encode()
         .unwrap(),
@@ -174,14 +187,19 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
     // The binding has applied, but the parent invite still records Approving,
     // as after interruption before its next local commit.
     ana.sync
-        .administer(StoreChange::AdmitMember {
-            member: invite.member,
-            keys,
-            role: MemberRole::Member,
-            access: work.access.member_access(),
-            device: coven_foundation::id_source::DeviceId(70),
-            device_name: "Carol".into(),
-        })
+        .administer_admission(
+            crate::admitting(
+                group.store,
+                invite.member,
+                keys,
+                MemberRole::Member,
+                work.access.member_access(),
+                coven_foundation::id_source::DeviceId(70),
+                "Carol",
+                &coven_foundation::id_source::UuidIds,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     let new = replacement(&group, &ana).await;

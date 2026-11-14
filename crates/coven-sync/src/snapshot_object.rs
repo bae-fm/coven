@@ -10,7 +10,10 @@ use crate::{
 use coven_crypto::{MemberIdentity, Signature, StoreKeyring, SIGNATURE_LEN};
 use coven_database::Database;
 use coven_format::{
-    admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_slot::SlotObjectPrefix,
+    admin::SnapshotId,
+    floor::OriginalSlot,
+    path::ObjectPath,
+    sealed_slot::{BoxPlace, SlotObjectPrefix},
     sealed_snapshot::SnapshotObjectPrefix,
 };
 use coven_storage::{ByteRange, Storage};
@@ -240,17 +243,27 @@ impl RoutedKey {
     /// that slot's damage, not a local failure.
     pub(crate) fn open(saved: &KeyCopy, member: &MemberIdentity) -> Result<Self, SyncError> {
         let (copy, path) = (&saved.copy, &saved.path);
-        let context =
-            SlotObjectPrefix::copy_context(saved.format, saved.key, saved.place, &copy.routing)?;
-        match copy.routing.audience {
-            coven_merge::Audience::Store => {
-                copy.open_store_key(member, path.as_str(), &context).map(Self::Store)
+        let opened = if saved.place == BoxPlace::Own {
+            // The member's own circle box binds the store and its routing,
+            // not the slot (D11).
+            copy.open_own_circle_key(member, path.store()).map(Self::Circle)
+        } else {
+            let context = SlotObjectPrefix::copy_context(
+                saved.format,
+                saved.key,
+                saved.place,
+                &copy.routing,
+            )?;
+            match copy.routing.audience {
+                coven_merge::Audience::Store => {
+                    copy.open_store_key(member, path.as_str(), &context).map(Self::Store)
+                }
+                coven_merge::Audience::Circle(_) => {
+                    copy.open_circle_key(member, path.as_str(), &context).map(Self::Circle)
+                }
             }
-            coven_merge::Audience::Circle(_) => {
-                copy.open_circle_key(member, path.as_str(), &context).map(Self::Circle)
-            }
-        }
-        .map_err(|error| damaged(path, Refusal::Decryption { cause: Some(Arc::new(error)) }))
+        };
+        opened.map_err(|error| damaged(path, Refusal::Decryption { cause: Some(Arc::new(error)) }))
     }
 
     /// Check the key against the hash its introduction committed to.

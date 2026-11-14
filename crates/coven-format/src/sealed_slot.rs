@@ -20,6 +20,10 @@ pub enum BoxPlace {
     KeyCopy,
     /// The box at this index of an admission's copies.
     Admission(u32),
+    /// An admission's own copy: the joining member's circle key, sealed by
+    /// the joining phone before any slot was known, so its context binds the
+    /// store and routing rather than the slot (D11).
+    Own,
 }
 
 /// Slot kind and the routing which exists only for key-copy slots and
@@ -38,7 +42,13 @@ pub enum SlotKind {
     /// creating the store and its first admin, with that member's boxes, all
     /// to one recipient and sealing key, in increasing `(audience, key)`
     /// order (§10.3, §13.2).
-    Admission(Vec<CopyBox>),
+    Admission {
+        /// The member's copies of the keys introduced before the slot.
+        copies: Vec<CopyBox>,
+        /// An admitted member's copy of their new circle's key, as the
+        /// request carried it, after the others; a creation has none.
+        own: Option<CopyBox>,
+    },
 }
 impl SlotKind {
     /// The D9 kind byte.
@@ -48,19 +58,29 @@ impl SlotKind {
             Self::Writes => 1,
             Self::KeyCopy(_) => 2,
             Self::Announcement => 3,
-            Self::Admission(_) => 4,
+            Self::Admission { .. } => 4,
         }
     }
     /// The key boxes the clear prefix carries, each with its place.
     pub fn boxes(&self) -> impl Iterator<Item = (BoxPlace, &CopyBox)> {
         let (single, many) = match self {
             Self::KeyCopy(copy) => (Some(copy), &[][..]),
-            Self::Admission(copies) => (None, &copies[..]),
+            Self::Admission { copies, .. } => (None, &copies[..]),
             Self::Admin | Self::Writes | Self::Announcement => (None, &[][..]),
         };
-        single.map(|copy| (BoxPlace::KeyCopy, copy)).into_iter().chain(
-            many.iter().enumerate().map(|(index, copy)| (BoxPlace::Admission(index as u32), copy)),
-        )
+        let own = match self {
+            Self::Admission { own: Some(own), .. } => Some((BoxPlace::Own, own)),
+            _ => None,
+        };
+        single
+            .map(|copy| (BoxPlace::KeyCopy, copy))
+            .into_iter()
+            .chain(
+                many.iter()
+                    .enumerate()
+                    .map(|(index, copy)| (BoxPlace::Admission(index as u32), copy)),
+            )
+            .chain(own)
     }
     /// Check the opened second frame against the clear kind. Only an
     /// admission holds an admit-member, recover-member or create-store
@@ -77,7 +97,7 @@ impl SlotKind {
         require(
             match (self, frame) {
                 (Self::Admin, SlotFrame::Admin(_)) => !admits,
-                (Self::Admission(_), SlotFrame::Admin(_)) => admits,
+                (Self::Admission { .. }, SlotFrame::Admin(_)) => admits,
                 (Self::KeyCopy(_), SlotFrame::KeyCopy)
                 | (Self::Announcement, SlotFrame::Announcement(_)) => true,
                 _ => false,
@@ -88,18 +108,24 @@ impl SlotKind {
     }
 }
 
-/// An admission's boxes: at least one, all to one recipient and sealing key,
-/// in strictly increasing `(audience, key)` order (D9).
-fn check_copies(copies: &[CopyBox]) -> Result<(), Error> {
+/// An admission's boxes: at least one copy and the member's own circle box,
+/// all to one recipient and sealing key, the copies in strictly increasing
+/// `(audience, key)` order, and the own box for a circle (D9).
+fn check_copies(copies: &[CopyBox], own: Option<&CopyBox>) -> Result<(), Error> {
     require(!copies.is_empty(), "admission copies", Rule::Required)?;
     let first = &copies[0];
     require(
-        copies.iter().all(|copy| {
+        copies.iter().chain(own).all(|copy| {
             copy.routing.member == first.routing.member
                 && copy.routing.sealing == first.routing.sealing
         }),
         "admission copy recipient",
         Rule::Recipient,
+    )?;
+    require(
+        own.is_none_or(|own| matches!(own.routing.audience, coven_merge::Audience::Circle(_))),
+        "admission own copy",
+        Rule::Audience,
     )?;
     require(
         copies.windows(2).all(|pair| {
@@ -140,9 +166,10 @@ impl SlotObjectPrefix {
                 1u8.put(&mut out)?;
                 copy.put(&mut out)?;
             }
-            SlotKind::Admission(copies) => {
-                check_copies(copies)?;
+            SlotKind::Admission { copies, own } => {
+                check_copies(copies, own.as_ref())?;
                 copies.put(&mut out)?;
+                own.put(&mut out)?;
             }
             SlotKind::Admin | SlotKind::Writes | SlotKind::Announcement => 0u8.put(&mut out)?,
         }
@@ -177,7 +204,21 @@ impl SlotObjectPrefix {
                 key.put(&mut out)?;
                 index.put(&mut out)?;
             }
+            // The own copy's context binds no slot: `own_binding` is its.
+            BoxPlace::Own => return Err(Error::Invalid { field: "box place", rule: Rule::Kind }),
         }
+        routing.put(&mut out)?;
+        Ok(out.bytes)
+    }
+    /// What an admission's own copy is sealed and opened with: the store and
+    /// the box's routing. The joining phone knows both when it makes its
+    /// request, and neither the slot nor its path (D11).
+    pub fn own_binding(
+        store: coven_foundation::id_source::StoreId,
+        routing: &KeyCopyPrefix,
+    ) -> Result<Vec<u8>, Error> {
+        let mut out = Encoder::new();
+        store.put(&mut out)?;
         routing.put(&mut out)?;
         Ok(out.bytes)
     }
@@ -203,7 +244,12 @@ impl SlotObjectPrefix {
             for _ in 0..count {
                 end = box_end(bytes, end)?;
             }
-            return Ok(end);
+            // The member's own circle box, if any, follows the copies.
+            return match *bytes.get(end).ok_or(Error::Truncated)? {
+                0 => Ok(end + 1),
+                1 => box_end(bytes, end + 1),
+                tag => Err(Error::UnknownTag { field: "own copy", tag }),
+            };
         }
         let copy = *bytes.get(Self::FIXED_LEN - 1).ok_or(Error::Truncated)?;
         require(copy == u8::from(kind == 2), "slot copy routing", Rule::Kind)?;
@@ -220,8 +266,9 @@ impl SlotObjectPrefix {
         let kind = match bytes[3] {
             4 => {
                 let copies = Vec::<CopyBox>::get(&mut input)?;
-                check_copies(&copies)?;
-                SlotKind::Admission(copies)
+                let own = Option::<CopyBox>::get(&mut input)?;
+                check_copies(&copies, own.as_ref())?;
+                SlotKind::Admission { copies, own }
             }
             tag => {
                 let copy = Option::<CopyBox>::get(&mut input)?;

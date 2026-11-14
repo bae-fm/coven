@@ -24,6 +24,21 @@ pub(crate) fn create(
     Ok(())
 }
 
+/// Whether live `circle` is the one an earlier application of the same
+/// admission made for `member`: it holds the member, under that name.
+pub(crate) fn made_for(
+    state: &StoreState,
+    circle: CircleId,
+    member: &MemberId,
+    name: &str,
+) -> bool {
+    !state.circle_deletions.contains_key(&circle)
+        && state
+            .circles
+            .get(&circle)
+            .is_some_and(|record| record.members.contains(member) && record.name == name)
+}
+
 /// Rename live `circle`; false when it already has that name.
 pub(crate) fn rename(next: &mut StoreState, circle: CircleId, name: &str) -> bool {
     let record = next.circles.get_mut(&circle).expect("a live circle");

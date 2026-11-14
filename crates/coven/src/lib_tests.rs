@@ -120,6 +120,9 @@ pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>)
     }
 }
 
+/// The circle name joins in the tests give.
+pub(crate) const CIRCLE: &str = "Circle";
+
 /// The name joining with `code` gives: Carol's, typed, when it admits a new
 /// person; none when it admits a member's new keys.
 pub(crate) fn carol_joins(code: &str) -> Option<String> {

@@ -3,18 +3,22 @@
 use crate::request_at::{Placed, RequestAt};
 use crate::{Joiner, SyncError};
 use coven_crypto::{
-    ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys, ObjectHasher,
+    CircleKey, ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys,
+    ObjectHasher,
 };
 use coven_format::invite_end::InviteEnd;
 use coven_format::{
+    admin::NewCircle,
     codes::InviteCode,
-    objects::JoinRequest,
+    objects::{JoinRequest, JoiningCircle},
+    sealed_key::{CopyBox, KeyCopyPrefix},
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
+    sealed_slot::SlotObjectPrefix,
     Object,
 };
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{CircleId, DeviceId, IdSource, KeyId};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use zeroize::Zeroizing;
 
@@ -71,6 +75,17 @@ pub(crate) fn opened_join_request(
     Ok(Some((request, plain)))
 }
 
+/// What the app says of the circle its joining person's request makes: the
+/// admission will make it, with the person as its only member (§13.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CircleTerms {
+    /// The circle's name, which the person's profile will find it by.
+    pub name: String,
+    /// The version of the app's newest breaking migration, zero if none:
+    /// the circle's base (§15.5).
+    pub breaking_version: u32,
+}
+
 /// An unpublished member identity and its immutable request. The member id
 /// is the one the invite fixes; the keys are this device's fresh pair. The
 /// only durable local copy is encrypted with the invite secret, bound to the
@@ -91,6 +106,8 @@ pub struct JoiningIdentity {
     device_name: String,
     /// Who the request is for, and the new person's name it carries.
     joiner: Joiner,
+    /// The circle the request makes, whose key's only copy is its own box.
+    circle: JoiningCircle,
     inviting_writer: DeviceId,
     read_through: u64,
     /// When the invite ends, in seconds since the Unix epoch: no first
@@ -165,9 +182,10 @@ impl Sealing {
 impl JoiningIdentity {
     /// Restore a fixed request or prepare it before any provider mutation.
     /// A new request names `device`, the joining installation's id, for the
-    /// approval to register, and `name`, the new person's name: given when
+    /// approval to register, `name`, the new person's name: given when
     /// the invite admits a new person, absent when it admits a member's new
-    /// keys, as the code says. A changed invite, device name or name cannot
+    /// keys, as the code says, and the circle `circle` describes, with ids
+    /// from `ids`. A changed invite, device name, name or circle name cannot
     /// silently reuse another request.
     pub fn prepare(
         directory: &StoreDir,
@@ -175,6 +193,8 @@ impl JoiningIdentity {
         device: DeviceId,
         device_name: &str,
         name: Option<String>,
+        circle: &CircleTerms,
+        ids: &dyn IdSource,
     ) -> Result<Self, SyncError> {
         let joiner = match name {
             Some(name) => Joiner::NewPerson { name },
@@ -188,12 +208,38 @@ impl JoiningIdentity {
             .into());
         }
         match Self::saved(directory, code)? {
-            Some(saved) if saved.device_name != device_name || saved.joiner != joiner => {
+            Some(saved)
+                if saved.device_name != device_name
+                    || saved.joiner != joiner
+                    || saved.circle.circle.name != circle.name =>
+            {
                 Err(SyncError::InvitationChanged)
             }
             Some(saved) => Ok(saved),
-            None => Self::create(directory, code, device, device_name, joiner),
+            None => Self::create(directory, code, device, device_name, joiner, circle, ids),
         }
+    }
+
+    /// `prepare` with a circle named "Circle" at base zero and random ids, for
+    /// a test whose join doesn't care about its circle.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn prepare_for_test(
+        directory: &StoreDir,
+        code: &InviteCode,
+        device: DeviceId,
+        device_name: &str,
+        name: Option<String>,
+    ) -> Result<Self, SyncError> {
+        let circle = CircleTerms { name: "Circle".into(), breaking_version: 0 };
+        Self::prepare(
+            directory,
+            code,
+            device,
+            device_name,
+            name,
+            &circle,
+            &coven_foundation::id_source::UuidIds,
+        )
     }
 
     /// Continue a join from its saved request, with the device name and
@@ -245,6 +291,9 @@ impl JoiningIdentity {
         if opened.invite != code.invite || opened.member != code.member || opened.keys != keys {
             return Err(SyncError::InvitationChanged);
         }
+        // A request for the member's own device is no invite's, so the
+        // invitation changed; an invite's always names its circle.
+        let circle = opened.joiner.circle().cloned().ok_or(SyncError::InvitationChanged)?;
         Ok(Some(Self {
             file,
             confirmation: ConfirmationNumber::of(code.invite, &keys),
@@ -255,6 +304,7 @@ impl JoiningIdentity {
             sealing,
             device_name: opened.device_name,
             joiner: opened.joiner.try_into().map_err(|_| SyncError::InvitationChanged)?,
+            circle,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
             expires_at: code.expires_at,
@@ -267,11 +317,20 @@ impl JoiningIdentity {
         device: DeviceId,
         device_name: &str,
         joiner: Joiner,
+        terms: &CircleTerms,
+        ids: &dyn IdSource,
     ) -> Result<Self, SyncError> {
         let path = code.request_path();
         // The request repeats the id the invite fixed and names this
         // device's fresh pair, which signs it, and this installation (D8).
         let identity = MemberIdentity::generate(code.member)?;
+        let circle = joining_circle(
+            code.store,
+            code.member,
+            &identity.keys().public_keys().sealing,
+            terms,
+            ids,
+        )?;
         let request = sealed_join_request(
             &code.secret,
             &path,
@@ -281,7 +340,7 @@ impl JoiningIdentity {
                 keys: identity.keys().public_keys(),
                 device,
                 device_name: device_name.into(),
-                joiner: joiner.clone().into(),
+                joiner: joiner.clone().requesting(circle.clone()),
             },
             identity.keys(),
         )?;
@@ -295,6 +354,7 @@ impl JoiningIdentity {
             sealing: Sealing::new(code)?,
             device_name: device_name.into(),
             joiner,
+            circle,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
             expires_at: code.expires_at,
@@ -324,6 +384,17 @@ impl JoiningIdentity {
     /// registers it with.
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// The name of the circle the request makes.
+    pub fn circle_name(&self) -> &str {
+        &self.circle.circle.name
+    }
+
+    /// The circle the request makes, with the key's copy it carries.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn circle(&self) -> &JoiningCircle {
+        &self.circle
     }
 
     /// Who the request is for. A new person's name is kept here until the
@@ -477,6 +548,90 @@ impl JoiningIdentity {
         now.duration_since(std::time::UNIX_EPOCH)
             .map_or(true, |since| since.as_secs() < self.expires_at)
     }
+}
+
+/// The circle `member`'s join request makes in `store`: its id, key and the
+/// key's only copy, sealed to the member's own new `sealing` key before the
+/// key is dropped (§13.2, D11). The saved request holds the box and nothing
+/// else holds the key.
+pub(crate) fn joining_circle(
+    store: coven_foundation::id_source::StoreId,
+    member: coven_foundation::id_source::MemberId,
+    sealing: &coven_crypto::SealingKey,
+    terms: &CircleTerms,
+    ids: &dyn IdSource,
+) -> Result<JoiningCircle, SyncError> {
+    let circle = CircleId(ids.new_id());
+    let key_id = KeyId(ids.new_id());
+    let key = CircleKey::generate(circle, key_id)?;
+    let routing = KeyCopyPrefix {
+        audience: coven_merge::Audience::Circle(circle),
+        key: key_id,
+        member,
+        sealing: *sealing,
+    };
+    let binding = SlotObjectPrefix::own_binding(store, &routing)?;
+    let sealed = coven_crypto::seal_own_circle_key(&key, &routing.sealing, &binding)?;
+    Ok(JoiningCircle {
+        circle: NewCircle {
+            circle,
+            name: terms.name.clone(),
+            breaking_version: terms.breaking_version,
+            key: key_id,
+            key_hash: key.hash(),
+        },
+        copy: CopyBox { routing, sealed },
+    })
+}
+
+/// The circle a join request of `member` with the sealing key `sealing` would
+/// make in `store`, named "Circle" at base zero, for a test that seals a
+/// request itself.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_joining_circle(
+    store: coven_foundation::id_source::StoreId,
+    member: coven_foundation::id_source::MemberId,
+    sealing: &coven_crypto::SealingKey,
+    ids: &dyn IdSource,
+) -> Result<JoiningCircle, SyncError> {
+    joining_circle(
+        store,
+        member,
+        sealing,
+        &CircleTerms { name: "Circle".into(), breaking_version: 0 },
+        ids,
+    )
+}
+
+/// The admission of `member` with `keys` that a join request would make, for
+/// a test that admits a member without a join: the circle it makes, named
+/// `name`, and the member's own copy of its key.
+#[cfg(any(test, feature = "test-utils"))]
+#[expect(clippy::too_many_arguments, reason = "an admission's every field")]
+pub fn admitting(
+    store: coven_foundation::id_source::StoreId,
+    member: coven_foundation::id_source::MemberId,
+    keys: coven_crypto::MemberPublicKeys,
+    role: coven_format::admin::MemberRole,
+    access: coven_format::MemberAccess,
+    device: DeviceId,
+    device_name: &str,
+    ids: &dyn IdSource,
+) -> Result<(coven_format::admin::StoreChange, CopyBox), SyncError> {
+    let terms = CircleTerms { name: format!("circle of {member}"), breaking_version: 0 };
+    let JoiningCircle { circle, copy } = joining_circle(store, member, &keys.sealing, &terms, ids)?;
+    Ok((
+        coven_format::admin::StoreChange::AdmitMember {
+            member,
+            keys,
+            role,
+            access,
+            device,
+            device_name: device_name.into(),
+            circle,
+        },
+        copy,
+    ))
 }
 
 /// Record that the join with `code` ends without a store, before anything it

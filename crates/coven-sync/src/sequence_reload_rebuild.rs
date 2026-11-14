@@ -14,13 +14,41 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{RebuildDatabase, SnapshotReload, SnapshotSource};
-use coven_format::{sequence::SnapshotAnnouncement, write::WriteHeader};
+use coven_format::write::WriteHeader;
 use coven_merge::{Audience, SlotRange};
 use std::sync::Arc;
 
 type RebuildSlot = coven_database::IncomingSlot<
     coven_database::DownloadedWriteStream<crate::chunk_reader::PartPlaintext>,
 >;
+
+/// The slot a circle's rebuild starts reading after: its start's coverage,
+/// or, with no start, the slot before the floor's first kept slot when the
+/// floor leaves the circle unnamed, since a circle the floor doesn't name
+/// holds no part below it (§16.4); otherwise slot zero.
+fn circle_covers(
+    session: &Session,
+    audience: &Audience,
+    starts: &crate::history_rebuild::RebuildStarts,
+) -> u64 {
+    if let Some(start) = &starts.circle {
+        return start.covers;
+    }
+    let Some(floor) = session.floor.as_ref().filter(|floor| session.through >= floor.header.at)
+    else {
+        return 0;
+    };
+    let named = floor
+        .announcements
+        .iter()
+        .filter_map(|original| session.history.announcements.get(&original.slot))
+        .any(|announcement| announcement.snapshot.audience == *audience);
+    if named {
+        0
+    } else {
+        floor.header.first.get() - 1
+    }
+}
 
 /// A rebuild's failure, kept with its cause as a database failure.
 fn failed(error: coven_database::RebuildError) -> SyncError {
@@ -61,11 +89,10 @@ impl SequenceSync {
         // marker was in flight: a new marker reads through the slot applied
         // now, and the next pass rebuilds from it.
         // The store's own rebuild reads only the store's start.
-        let own = (audience != Audience::Store).then_some(&starts.circle);
+        let own = (audience != Audience::Store).then(|| circle_covers(session, &audience, &starts));
         let needed = own
             .into_iter()
-            .chain([&starts.store])
-            .map(|start| start.as_ref().map_or(0, |announcement| announcement.covers))
+            .chain([starts.store.as_ref().map_or(0, |announcement| announcement.covers)])
             .min()
             .unwrap_or(0)
             + 1;
@@ -252,10 +279,9 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let mut snapshots = vec![SnapshotSource::Current(Audience::Store)];
         let mut stored = Vec::new();
-        let mut covers = 0;
+        let covers = circle_covers(session, audience, starts);
         match &starts.circle {
             Some(announcement) => {
-                covers = announcement.covers;
                 let snapshot =
                     self.select_into(announcement.clone(), ring, None, Some(rebuild)).await?;
                 let author = match snapshot.authenticate(&session.history) {
@@ -267,7 +293,7 @@ impl SequenceSync {
                 stored.push((snapshot.announcement().clone(), snapshot.path().clone()));
                 snapshots.push(snapshot.into_source(author));
             }
-            None => snapshots.push(SnapshotSource::Empty(audience.clone())),
+            None => snapshots.push(SnapshotSource::Empty(audience.clone(), covers)),
         }
         let mut slots = Vec::new();
         let mut at = at.clone();
@@ -348,7 +374,7 @@ impl SequenceSync {
         let circle_covers = if *audience == Audience::Store {
             store_covers
         } else {
-            starts.circle.as_ref().map_or(0, |a: &SnapshotAnnouncement| a.covers)
+            circle_covers(session, audience, starts)
         };
         let mut slots = Vec::new();
         self.read_rebuild_slots(
@@ -376,7 +402,7 @@ impl SequenceSync {
             snapshots.push(SnapshotSource::Empty(Audience::Store, 0));
         }
         if starts.circle.is_none() && *audience != Audience::Store {
-            snapshots.push(SnapshotSource::Empty(audience.clone(), 0));
+            snapshots.push(SnapshotSource::Empty(audience.clone(), circle_covers));
         }
         for (start, author) in std::mem::take(selected).into_iter().zip(authors) {
             match (start, author) {

@@ -107,4 +107,4 @@ impl SequenceSync {
 
 #[cfg(test)]
 #[path = "sequence_raises_tests.rs"]
-mod tests;
+pub(crate) mod tests;

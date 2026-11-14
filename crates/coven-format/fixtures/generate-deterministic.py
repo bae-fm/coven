@@ -144,12 +144,35 @@ def pair(sodium, seed):
 
 
 def anonymous_box(sodium, kind, path, prefix, plaintext, seed, ephemeral_seed, nonce):
+    return box_with(
+        sodium,
+        lambda sender, recipient: context(
+            b"coven/sealed-box/v1", kind, path, prefix, sender, recipient),
+        plaintext, seed, ephemeral_seed, nonce)
+
+
+def own_copy(sodium, circle, key_id, key_bytes, member, seed, ephemeral_seed, nonce):
+    """D9/D11 own copy: a circle key sealed to its member by the joining phone,
+    bound to the store and the box's routing, not to any slot. Returns the box
+    as the wire carries it: routing, ephemeral key and nonce, the ciphertext's
+    length, the ciphertext and tag."""
+    routing = b"\x01" + circle + key_id + member + sealing_public(sodium, seed)
+    plaintext = circle + key_id + key_bytes
+    sealed = box_with(
+        sodium,
+        lambda sender, recipient: context(
+            b"coven/own-copy/v1", b"circle", STORE + routing, sender, recipient),
+        plaintext, seed, ephemeral_seed, nonce)
+    return routing + sealed[:56] + u32(len(plaintext)) + sealed[56:]
+
+
+def box_with(sodium, box_context_of, plaintext, seed, ephemeral_seed, nonce):
     recipient = sealing_public(sodium, seed)
     ephemeral = bytes([ephemeral_seed]) * 32
     sender = sealing_public(sodium, ephemeral_seed)
     shared = c.create_string_buffer(32)
     checked(sodium.crypto_scalarmult(shared, ephemeral, recipient))
-    box_context = context(b"coven/sealed-box/v1", kind, path, prefix, sender, recipient)
+    box_context = box_context_of(sender, recipient)
     extracted = hmac.digest(bytes(32), shared.raw, "sha256")
     key = hmac.digest(extracted, box_context + b"\x01", "sha256")
     nonce = bytes([nonce]) * 24
@@ -404,6 +427,28 @@ def seal_writes_slot(sodium, slot, claim, writes):
     return signed(sodium, path, body)
 
 
+def new_circle(circle, key, key_bytes, name):
+    """D6 `NewCircle`: the circle an admission makes and its key's commitment."""
+    return (bytes([circle]) * 16 + text(name) + u32(2) + bytes([key]) * 16
+            + hashlib.sha256(bytes([key_bytes]) * 32).digest())
+
+
+def admitted_circle():
+    """The circle Ben's admission makes; its key's bytes are 19 repeated."""
+    return new_circle(6, 7, 19, b"B")
+
+
+def recovered_circle():
+    """The circle Ana's recovery makes; its key's bytes are 20 repeated."""
+    return new_circle(8, 9, 20, b"R")
+
+
+def recovered_circle_copy(sodium):
+    """Ana's own copy of her recovery circle's key, sealed to her replacement pair."""
+    return own_copy(sodium, bytes([8]) * 16, bytes([9]) * 16, bytes([20]) * 32,
+                    ANA, 0x34, 0x59, 0x48)
+
+
 def changes(sodium):
     """`test_utils::store_changes`, in canonical tag order."""
     initial_hash = hashlib.sha256(bytes([17]) * 32).digest()
@@ -412,7 +457,7 @@ def changes(sodium):
         b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + text(b"D")
         + bytes([1]) * 16 + initial_hash + collection([]),
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test")
-        + u64(2) + text(b"D"),
+        + u64(2) + text(b"D") + admitted_circle(),
         b"\x02" + BEN,
         b"\x03" + ANA + b"\x00",
         b"\x04" + text(b"D") + b"\x00",
@@ -432,15 +477,16 @@ def changes(sodium):
         b"\x12" + bytes([0x55]) * 16 + text(b"dan@example.org"),
         b"\x13" + bytes([0x55]) * 16,
         b"\x14" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34) + b"\x01" + b"\x01"
-        + text(b"recovered-key") + u64(3) + text(b"D"),
+        + text(b"recovered-key") + u64(3) + text(b"D") + recovered_circle(),
         b"\x15" + s3_key,
     ]
 
 
 def join_request(sodium):
     """Ana's request answering the re-binding invite with her replacement pair."""
-    # The joiner is a member's new keys: tag 0, and no name.
-    return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + u64(3) + text(b"D") + b"\x00")
+    # The joiner is a member's new keys: tag 0 and the circle the recovery makes.
+    return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + u64(3) + text(b"D") + b"\x00"
+                 + recovered_circle() + recovered_circle_copy(sodium))
 
 
 def pairing_request(sodium):
@@ -623,14 +669,17 @@ def load_sodium():
 
 def admission(sodium):
     """Ana's device admitting Ben at slot 4 and registering his device 2, its
-    prefix carrying his copy of the store key at index 0 (D6, D9, D11)."""
+    prefix carrying his copy of the store key at index 0, then his own copy of
+    the circle key the admission introduces, flagged present (D6, D9, D11)."""
     path = STORE_TEXT + b"seq/4"
     key_id = bytes([1]) * 16
     routing = b"\x00" + key_id + BEN + sealing_public(sodium, 0x35)
     fixed = bytes([33, 0, 1, 4]) + key_id
     sealed = anonymous_box(sodium, b"store", path, fixed + u32(0) + routing,
                            key_id + bytes([17]) * 32, 0x35, 0x57, 0x46)
-    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:]
+    own = own_copy(sodium, bytes([6]) * 16, bytes([7]) * 16, bytes([19]) * 32,
+                   BEN, 0x35, 0x58, 0x47)
+    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:] + b"\x01" + own
     plaintext = slot_header(4, 4) + frame(4, changes(sodium)[1])
     body = chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext)
     return signed(sodium, path, prefix + body)
@@ -646,7 +695,7 @@ def creation(sodium):
     fixed = bytes([33, 0, 1, 4]) + key_id
     sealed = anonymous_box(sodium, b"store", path, fixed + u32(0) + routing,
                            key_id + bytes([17]) * 32, 0x33, 0x55, 0x44)
-    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:]
+    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:] + b"\x00"
     plaintext = slot_header(1, 1) + frame(4, changes(sodium)[0])
     body = chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext)
     return signed(sodium, path, prefix + body)
@@ -806,6 +855,7 @@ def main():
         ("sealed-store-key.hex", store_key),
         ("sealed-circle-key.hex", circle_key),
         ("sealed-admission.hex", admission(sodium)),
+        ("own-copy.hex", recovered_circle_copy(sodium)),
         ("restore-code.hex", restore_code()),
         ("invite-code.hex", invite_code()),
         ("sealed-pairing-request.hex", pairing_object),

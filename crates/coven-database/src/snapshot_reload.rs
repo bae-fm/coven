@@ -16,9 +16,8 @@ pub enum SnapshotSource<R> {
         /// Member whose key signed the body.
         author: MemberId,
     },
-    /// History starts empty after the slot given: slot zero, or the slot
-    /// before a floor's first kept slot for a circle the floor leaves
-    /// unnamed because it holds no part (§16.4).
+    /// History starts empty after the slot given: slot zero, or a floor's `at`
+    /// for a circle the floor leaves unnamed because it holds no part (§16.4).
     Empty(Audience, u64),
     /// Preserve this audience's committed prefix and apply only subsequent slots.
     Current(Audience),

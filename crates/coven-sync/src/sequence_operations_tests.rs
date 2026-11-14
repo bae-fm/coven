@@ -14,7 +14,7 @@ async fn the_provider_owner_cannot_be_removed_or_claim_a_removal() {
     let ben = group.device(2).await;
     group.create(&ana).await;
     let access = coven_format::MemberAccess::ProviderAccount("ben@example.org".into());
-    ana.sync.administer(admission(&ben, MemberRole::Admin, access, "Ben")).await.unwrap();
+    ana.sync.administer_admission(admission(&ben, MemberRole::Admin, access, "Ben")).await.unwrap();
     ben.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
     let before = ana.sync.database.applied_slot().await.unwrap();
@@ -165,7 +165,7 @@ async fn provider_access_stays_until_the_last_member_using_the_account_is_remove
     group.storage.grant_access("shared@example.org").await.unwrap();
     for member in [&ben, &carol] {
         ana.sync
-            .administer(admission(
+            .administer_admission(admission(
                 member,
                 MemberRole::Member,
                 coven_format::MemberAccess::ProviderAccount("shared@example.org".into()),

@@ -5,10 +5,10 @@ use {coven_database::StoreCircle, coven_merge::slot};
 pub(crate) fn id(n: u128) -> MemberId {
     MemberId(uuid::Uuid::from_u128(n))
 }
-fn keys(n: u8) -> coven_crypto::MemberPublicKeys {
+pub(crate) fn keys(n: u8) -> coven_crypto::MemberPublicKeys {
     coven_format::test_utils::keys_from_seed(n).public_keys()
 }
-fn access(n: u8) -> coven_format::MemberAccess {
+pub(crate) fn access(n: u8) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey { access_key_id: n.to_string() }
 }
 /// The entry removing `member` from `circle`, with the key it introduces.
@@ -67,9 +67,20 @@ pub(crate) fn household() -> StoreState {
     .unwrap()
     .state
 }
+/// The circle admitting member `n` makes: a fixed id, name and commitment,
+/// with no key material at this level.
+pub(crate) fn circle(n: u8) -> coven_format::admin::NewCircle {
+    coven_format::admin::NewCircle {
+        circle: CircleId(uuid::Uuid::from_u128(500 + u128::from(n))),
+        name: format!("circle {n}"),
+        breaking_version: 0,
+        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(600 + u128::from(n))),
+        key_hash: [n; 32],
+    }
+}
 /// Admit member `n` with seed `n`'s keys and access and `role`, registering
-/// device `device` for them (§13.2).
-fn admit(n: u8, role: MemberRole, device: u64) -> StoreChange {
+/// device `device` for them and making their circle (§13.2).
+pub(crate) fn admit(n: u8, role: MemberRole, device: u64) -> StoreChange {
     StoreChange::AdmitMember {
         member: id(n.into()),
         keys: keys(n),
@@ -77,6 +88,7 @@ fn admit(n: u8, role: MemberRole, device: u64) -> StoreChange {
         access: access(n),
         device: DeviceId(device),
         device_name: format!("device {device}"),
+        circle: circle(n),
     }
 }
 pub(crate) fn apply(
@@ -106,6 +118,7 @@ fn repeating_an_active_member_requires_the_exact_binding() {
             access,
             device: DeviceId(device),
             device_name: "Ben".into(),
+            circle: circle(2),
         };
         assert!(apply(&state, 1, request(keys(2), MemberRole::Admin, recorded.clone(), 2))
             .unwrap()
@@ -164,6 +177,7 @@ fn an_admin_cannot_remove_the_last_admin_and_a_removed_id_cannot_return() {
                 access: access(3),
                 device: DeviceId(3),
                 device_name: "Ben's new phone".into(),
+                circle: circle(3),
             }
         ),
         Err(OperationRejection::TargetGone(EntryTarget::Member(_)))
@@ -433,6 +447,7 @@ mod sequence_differential {
                     access: access(seed),
                     device: DeviceId(*d),
                     device_name: "admitted".into(),
+                    circle: circle(*m as u8),
                 },
                 Self::Remove(m) => StoreChange::RemoveMember { member: id(*m) },
                 Self::Role(m, r) => StoreChange::ChangeRole { member: id(*m), role: *r },

@@ -92,6 +92,10 @@ fn admission_box(
     crate::sealed_key::CopyBox { routing, sealed: vec![7; length] }
 }
 
+fn own_circle() -> coven_merge::Audience {
+    coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(6)))
+}
+
 /// An admission's prefix carries its boxes in place of the copy flag, and
 /// its length follows from them; it holds at least one, all to one recipient
 /// and sealing key, in increasing `(audience, key)` order (D9).
@@ -102,7 +106,7 @@ fn admission_prefix_holds_ordered_boxes_to_one_recipient() {
     let prefix = |copies| SlotObjectPrefix {
         format: crate::FormatVersion::CURRENT,
         key: f::store_key().id(),
-        kind: SlotKind::Admission(copies),
+        kind: SlotKind::Admission { copies, own: Some(admission_box(own_circle(), 3, 9)) },
     };
     let good = prefix(vec![
         admission_box(Audience::Store, 1, 9),
@@ -113,7 +117,9 @@ fn admission_prefix_holds_ordered_boxes_to_one_recipient() {
     assert!(SlotObjectPrefix::admission(&bytes).unwrap());
     assert_eq!(SlotObjectPrefix::length(&bytes).unwrap(), bytes.len());
     assert_eq!(SlotObjectPrefix::decode(&bytes).unwrap(), good);
-    assert_eq!(good.kind.boxes().count(), 3);
+    // The member's own circle box follows the copies, with a place of its own.
+    assert_eq!(good.kind.boxes().count(), 4);
+    assert_eq!(good.kind.boxes().last().map(|(place, _)| place), Some(BoxPlace::Own));
     for bad in [
         vec![],
         vec![admission_box(Audience::Store, 2, 9), admission_box(Audience::Store, 1, 9)],
@@ -124,15 +130,22 @@ fn admission_prefix_holds_ordered_boxes_to_one_recipient() {
         let bad = prefix(bad);
         assert!(bad.encode().is_err());
         let mut encoded = good.start().unwrap();
-        crate::wire::Wire::put(
-            &match bad.kind {
-                SlotKind::Admission(copies) => copies,
-                _ => unreachable!(),
-            },
-            &mut encoded,
-        )
-        .unwrap();
+        let SlotKind::Admission { copies, own } = bad.kind else { unreachable!() };
+        crate::wire::Wire::put(&copies, &mut encoded).unwrap();
+        crate::wire::Wire::put(&own, &mut encoded).unwrap();
         assert!(SlotObjectPrefix::decode(&encoded.bytes).is_err());
+    }
+    // The own box goes to the copies' recipient and sealing key, and holds a
+    // circle's key, never a store key's.
+    for own in [admission_box(own_circle(), 3, 8), admission_box(Audience::Store, 3, 9)] {
+        let bad = SlotObjectPrefix {
+            kind: SlotKind::Admission {
+                copies: vec![admission_box(Audience::Store, 1, 9)],
+                own: Some(own),
+            },
+            ..good.clone()
+        };
+        assert!(bad.encode().is_err());
     }
     // A prefix cut inside its last box is truncated, not shorter.
     assert!(SlotObjectPrefix::decode(&bytes[..bytes.len() - 1]).is_err());
@@ -142,7 +155,10 @@ fn admission_prefix_holds_ordered_boxes_to_one_recipient() {
 /// change, and it holds nothing else (D6, D9).
 #[test]
 fn admit_and_recover_changes_belong_to_admissions_only() {
-    let admission = SlotKind::Admission(vec![admission_box(coven_merge::Audience::Store, 1, 9)]);
+    let admission = SlotKind::Admission {
+        copies: vec![admission_box(coven_merge::Audience::Store, 1, 9)],
+        own: Some(admission_box(own_circle(), 3, 9)),
+    };
     for change in f::store_changes() {
         let admits = matches!(
             change,
@@ -169,11 +185,14 @@ fn an_admission_fits_about_twenty_two_thousand_store_keys() {
     let admission = |count: u128| SlotObjectPrefix {
         format: crate::FormatVersion::CURRENT,
         key: f::store_key().id(),
-        kind: SlotKind::Admission(
-            (0..count).map(|key| admission_box(coven_merge::Audience::Store, key, 9)).collect(),
-        ),
+        kind: SlotKind::Admission {
+            copies: (0..count)
+                .map(|key| admission_box(coven_merge::Audience::Store, key, 9))
+                .collect(),
+            own: Some(admission_box(own_circle(), 3, 9)),
+        },
     };
-    assert_eq!(admission(1).encode().unwrap().len(), 20 + 4 + 189);
+    assert_eq!(admission(1).encode().unwrap().len(), 20 + 4 + 189 + 1 + 221);
     assert!(admission(22_000).fits(frame).unwrap());
     assert!(!admission(22_200).fits(frame).unwrap());
 }

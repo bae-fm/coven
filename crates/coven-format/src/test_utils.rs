@@ -638,6 +638,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
             device: DeviceId(2),
             device_name: "D".into(),
+            circle: admitted_circle(),
         },
         member_removal(),
         StoreChange::ChangeRole { member: m, role: MemberRole::Admin },
@@ -691,11 +692,43 @@ pub fn store_changes() -> Vec<StoreChange> {
             }),
             device: DeviceId(3),
             device_name: "D".into(),
+            circle: recovered_circle(),
         },
         StoreChange::SetUpStorage {
             access: crate::MemberAccess::S3AccessKey { access_key_id: "fixture-access-key".into() },
         },
     ]
+}
+/// The circle Ben's admission makes: its key's bytes are 19 repeated, and its
+/// copy is Ben's own copy in the admission fixture.
+pub fn admitted_circle() -> NewCircle {
+    new_circle(6, 7, 19, "B")
+}
+/// The circle Ana's recovery makes: its key's bytes are 20 repeated, and its
+/// copy is the one her request carries.
+pub fn recovered_circle() -> NewCircle {
+    new_circle(8, 9, 20, "R")
+}
+fn new_circle(circle: u8, key: u8, bytes: u8, name: &str) -> NewCircle {
+    let circle = CircleId(Uuid::from_bytes([circle; 16]));
+    let key = KeyId(Uuid::from_bytes([key; 16]));
+    NewCircle {
+        circle,
+        name: name.into(),
+        breaking_version: 2,
+        key,
+        key_hash: coven_crypto::CircleKey::from_bytes(circle, key, [bytes; 32]).hash(),
+    }
+}
+/// Ana's own copy of her recovery circle's key, sealed to her replacement
+/// pair for her request, as the independent generator wrote it.
+pub fn recovered_circle_copy() -> crate::sealed_key::CopyBox {
+    let bytes = fixture_bytes(include_str!("../fixtures/own-copy.hex"));
+    let mut input = crate::wire::Decoder::new(&bytes).expect("pinned own copy");
+    let copy = <crate::sealed_key::CopyBox as crate::wire::Wire>::get(&mut input)
+        .expect("pinned own copy");
+    input.finish().expect("pinned own copy");
+    copy
 }
 /// Every independently decoded ordinary object kind.
 pub fn objects() -> Vec<Object> {
@@ -714,7 +747,9 @@ pub fn join_request() -> JoinRequest {
         keys: replacement(),
         device: DeviceId(3),
         device_name: "D".into(),
-        joiner: Joiner::MemberKeys,
+        joiner: Joiner::MemberKeys {
+            circle: JoiningCircle { circle: recovered_circle(), copy: recovered_circle_copy() },
+        },
     }
 }
 /// A two-audience write with a row frame spanning three chunks.

@@ -137,7 +137,7 @@ async fn an_unsent_join_left_without_its_code_does_not_fail_the_next_invite() {
     let code = coven_sync::read_invite_code(first.shown_code()).unwrap();
     let directory = pending.directory();
     let device = directory.settings().unwrap().device_id;
-    coven_sync::JoiningIdentity::prepare(
+    coven_sync::JoiningIdentity::prepare_for_test(
         &directory,
         &code,
         device,
@@ -157,6 +157,7 @@ async fn joins_and_is_approved(owner: &Owner, install: &Installation, invite: &I
         install.builder(owner, owner.recipient()),
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "Carol's phone",
         |_| {},
         &control,

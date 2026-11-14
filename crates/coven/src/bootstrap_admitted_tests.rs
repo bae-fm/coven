@@ -768,3 +768,135 @@ async fn ana_approving_a_request_whose_join_ended_admits_a_device_she_can_remove
     crate::tests::landed(&owner.handle, removal).await;
     owner.close().await;
 }
+
+/// Carol joins and the admission makes her circle: Ana's device lists it
+/// with Carol alone in it. Her device writes a row into it, and a second
+/// device of hers, restored from her code, opens the circle's key from the
+/// admission's own box and reads the row (§13.2, §15.5).
+#[tokio::test]
+async fn a_joined_member_writes_into_the_circle_her_admission_made_and_a_restored_device_reads_it()
+{
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let control = JoinControl::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite, &control),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (carol, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
+    let carol = carol.unwrap().expect("Carol's join found its admission");
+    let circles = carol.circles().list().await.unwrap();
+    let circle = circles
+        .iter()
+        .find(|circle| circle.name == crate::tests::CIRCLE)
+        .expect("the admission made the circle her request named")
+        .id;
+    let alone = |members: Vec<coven_database::CircleMemberInfo>| {
+        members.into_iter().map(|info| info.member).collect::<Vec<_>>()
+    };
+    assert_eq!(alone(carol.circles().members(circle).await.unwrap()), [member]);
+    owner.pass_now().await;
+    assert_eq!(alone(owner.handle.circles().members(circle).await.unwrap()), [member]);
+
+    let audience = circle.to_string();
+    carol
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO circle_notes VALUES('00000000-0000-4000-8000-000000000001',x'07',?1)",
+                [audience],
+            )?;
+            Ok::<_, CovenError>(())
+        })
+        .await
+        .unwrap();
+    carol.start_sync().await.unwrap();
+    let answer = carol.retry_now().await.unwrap().await;
+    assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
+
+    let second = Installation::new();
+    let tablet = restore_from_code(
+        second.authenticated_builder(&owner, owner.storage.clone()).await,
+        &carol.restore_code().await.unwrap(),
+        owner.s3_credentials(),
+        "Carol's tablet",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let read = |handle: &CovenHandle| {
+        let handle = handle.clone();
+        async move {
+            handle
+                .read(|sql| {
+                    Ok::<_, CovenError>(sql.query("SELECT id,body FROM circle_notes", [], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })?)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let note = ("00000000-0000-4000-8000-000000000001".to_owned(), vec![7_u8]);
+    assert_eq!(read(&tablet).await, std::slice::from_ref(&note));
+    // The circle is Carol's alone: Ana's device reads no row of it.
+    owner.pass_now().await;
+    assert!(read(&owner.handle).await.is_empty());
+    tablet.close().await.unwrap();
+    carol.close().await.unwrap();
+    owner.close().await;
+}
+
+/// A join that stops after its request is made resumes with the same
+/// request: its circle's id and copy are the saved request's, and a call
+/// that names another circle is a changed join (§13.2).
+#[tokio::test]
+async fn a_resumed_join_keeps_its_circle_and_another_circle_name_is_a_changed_join() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
+    let pending =
+        install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
+    let directory = pending.directory();
+    let device = directory.settings().unwrap().device_id;
+    let first = coven_sync::JoiningIdentity::prepare_for_test(
+        &directory,
+        &code,
+        device,
+        "New phone",
+        carol_joins(invite.shown_code()),
+    )
+    .unwrap();
+    let again = coven_sync::JoiningIdentity::prepare_for_test(
+        &directory,
+        &code,
+        device,
+        "New phone",
+        carol_joins(invite.shown_code()),
+    )
+    .unwrap();
+    // Resumed, it is the request it was: the same circle id, key and copy.
+    assert_eq!(again.circle(), first.circle());
+    assert_eq!(first.circle_name(), crate::tests::CIRCLE);
+    // The saved request holds the circle: another name for it is another join.
+    let terms = coven_sync::CircleTerms { name: "Another".into(), breaking_version: 0 };
+    let changed = coven_sync::JoiningIdentity::prepare(
+        &directory,
+        &code,
+        device,
+        "New phone",
+        carol_joins(invite.shown_code()),
+        &terms,
+        &UuidIds,
+    );
+    assert!(matches!(changed, Err(SyncError::InvitationChanged)));
+    drop(directory);
+    pending.cancel().unwrap();
+    owner.close().await;
+}

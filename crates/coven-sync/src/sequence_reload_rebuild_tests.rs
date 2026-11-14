@@ -188,7 +188,10 @@ async fn a_floor_reload_leaves_a_circle_below_the_version_gated_for_its_rebuild(
     for _ in 0..6 {
         cy.sync.pass().await.unwrap();
     }
-    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    {
+        let w = cy.database().rebuilds_waiting().await.unwrap();
+        assert!(w.is_empty(), "{w:?}");
+    }
     assert_eq!(pins(cy.database()).await, [(EARLY.to_string(), "early".to_string())]);
     for device in [&ana, &ben, &cy] {
         device.sync.database.close().await.unwrap();
@@ -255,7 +258,10 @@ async fn a_rebuild_starts_the_store_from_a_raise_body() {
     for _ in 0..8 {
         cy.sync.pass().await.unwrap();
     }
-    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    {
+        let w = cy.database().rebuilds_waiting().await.unwrap();
+        assert!(w.is_empty(), "{w:?}");
+    }
     assert_eq!(pins(cy.database()).await, [(EARLY.to_string(), "early".to_string())]);
     for device in [&ana, &ben, &cy] {
         device.sync.database.close().await.unwrap();
@@ -292,7 +298,10 @@ async fn a_device_ahead_of_the_stores_raise_rebuilds_and_raises_the_store() {
     for _ in 0..6 {
         cy.sync.pass().await.unwrap();
     }
-    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    {
+        let w = cy.database().rebuilds_waiting().await.unwrap();
+        assert!(w.is_empty(), "{w:?}");
+    }
     let state = cy.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&Audience::Store), 4);
     assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
@@ -351,7 +360,10 @@ async fn a_floor_whose_store_snapshot_is_below_the_version_is_rebuilt() {
     for _ in 0..6 {
         cy.sync.pass().await.unwrap();
     }
-    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    {
+        let w = cy.database().rebuilds_waiting().await.unwrap();
+        assert!(w.is_empty(), "{w:?}");
+    }
     let state = cy.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&Audience::Store), 2);
     assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
@@ -398,7 +410,10 @@ async fn a_fresh_install_loading_a_floor_below_the_version_rebuilds_and_raises_t
     for _ in 0..6 {
         cy.sync.pass().await.unwrap();
     }
-    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    {
+        let w = cy.database().rebuilds_waiting().await.unwrap();
+        assert!(w.is_empty(), "{w:?}");
+    }
     let state = cy.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&Audience::Store), 2);
     assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);
@@ -429,7 +444,10 @@ async fn a_store_reset_below_the_version_is_rebuilt() {
     for _ in 0..6 {
         cy.sync.pass().await.unwrap();
     }
-    assert!(cy.database().rebuilds_waiting().await.unwrap().is_empty());
+    {
+        let w = cy.database().rebuilds_waiting().await.unwrap();
+        assert!(w.is_empty(), "{w:?}");
+    }
     let state = cy.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&Audience::Store), 2);
     assert_eq!(state.schema[&Audience::Store].snapshot.device, cy.sync.device);

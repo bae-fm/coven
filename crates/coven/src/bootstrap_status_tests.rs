@@ -154,6 +154,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "New phone",
         |status| {
             if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
@@ -214,6 +215,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "New phone",
         |status| {
             if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
@@ -280,6 +282,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "New phone",
         |status| {
             let mut reported = reported.lock().unwrap();
@@ -366,6 +369,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "New phone",
         |status| {
             let mut reported = reported.lock().unwrap();

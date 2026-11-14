@@ -359,6 +359,7 @@ impl Installation {
             terms: RequestTerms::Given {
                 device_name: "New phone".into(),
                 name: crate::tests::carol_joins(invite.shown_code()),
+                circle_name: crate::tests::CIRCLE.into(),
             },
             held: control.often.subscribe(),
             parks: control.parks.clone(),
@@ -560,6 +561,7 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
         builder,
         invite.shown_code(),
         carol_joins(invite.shown_code()),
+        crate::tests::CIRCLE,
         "Carol's phone",
         |status| {
             if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {

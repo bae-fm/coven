@@ -16,6 +16,31 @@ use coven_format::{
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 
+/// An approved join request's admission, as its operation journals it: the
+/// entry, and the member's own copy of the circle key it introduces, exactly
+/// as the request carried it, so the one claim, and every retry of it, sends
+/// the bytes the request held (§13.2). The approving device never holds that
+/// key.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ApprovedAdmission {
+    #[serde(with = "change")]
+    pub(crate) change: StoreChange,
+    #[serde(with = "route")]
+    own_routing: KeyCopyPrefix,
+    own_sealed: Vec<u8>,
+}
+
+impl ApprovedAdmission {
+    pub(crate) fn new(change: StoreChange, own: CopyBox) -> Self {
+        Self { change, own_routing: own.routing, own_sealed: own.sealed }
+    }
+
+    /// The member's own circle box.
+    fn own(&self) -> CopyBox {
+        CopyBox { routing: self.own_routing.clone(), sealed: self.own_sealed.clone() }
+    }
+}
+
 /// The copies `change` sends before its entry, when `author`'s device
 /// holding `ring` makes it. An admission carries its own in its slot, each
 /// key once, in `(audience, key)` order (format.md D9).
@@ -93,20 +118,11 @@ pub(crate) fn required_copies(
     }
 }
 
-/// Whether `change` is an admission's or a creation's entry, whose slot
-/// carries its copies.
-pub(super) fn admits(change: &StoreChange) -> bool {
-    matches!(
-        change,
-        StoreChange::AdmitMember { .. }
-            | StoreChange::RecoverMember { .. }
-            | StoreChange::CreateStore { .. }
-    )
-}
-
 /// An admission's clear prefix: each of `copies`, in order, sealed for its
-/// box at its index in the slot at `path` whose body `store_key` seals. A
-/// claim that loses its slot seals them again (D11). A store key `ring` lacks
+/// box at its index in the slot at `path` whose body `store_key` seals, then
+/// an admitted member's own box as the request carried it (a creation has
+/// none). A claim that loses its slot
+/// seals the copies again (D11). A store key `ring` lacks
 /// fails here, before anything is claimed: the approval waits for it (§13.2).
 /// An admission whose slot, with `plaintext` bytes of body, would exceed a
 /// slot's size is refused with `AdmissionTooLarge`, also before anything is
@@ -116,6 +132,7 @@ pub(crate) fn admission_prefix(
     path: &coven_storage::ObjectPath,
     store_key: coven_foundation::id_source::KeyId,
     copies: Vec<KeyCopyPrefix>,
+    admission: Option<&ApprovedAdmission>,
     plaintext: usize,
 ) -> Result<Result<SlotObjectPrefix, OperationRejection>, SyncError> {
     let boxes = copies
@@ -128,7 +145,7 @@ pub(crate) fn admission_prefix(
     let prefix = SlotObjectPrefix {
         format: coven_format::FormatVersion::CURRENT,
         key: store_key,
-        kind: SlotKind::Admission(boxes),
+        kind: SlotKind::Admission { copies: boxes, own: admission.map(ApprovedAdmission::own) },
     };
     Ok(if prefix.fits(plaintext)? {
         Ok(prefix)
@@ -169,6 +186,21 @@ pub(super) fn seal_copy(
     Ok(CopyBox { routing: route, sealed })
 }
 
+pub(super) mod change {
+    use super::*;
+    pub(crate) fn serialize<S: serde::Serializer>(
+        value: &StoreChange,
+        output: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.encode().map_err(serde::ser::Error::custom)?.serialize(output)
+    }
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        input: D,
+    ) -> Result<StoreChange, D::Error> {
+        StoreChange::decode(&Vec::<u8>::deserialize(input)?).map_err(serde::de::Error::custom)
+    }
+}
+
 pub(super) mod route {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(
@@ -194,6 +226,21 @@ pub(super) mod route {
 }
 
 impl SequenceSync {
+    /// Admit a member as an approved join request does, with the member's
+    /// own copy of the circle key the entry introduces, for a test that
+    /// admits without a join: the pair `admitting` returns.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn administer_admission(
+        self: &std::sync::Arc<Self>,
+        (change, own): (StoreChange, CopyBox),
+    ) -> Result<(), SyncError> {
+        self.submit(crate::sequence_sync::sequence_operations::Request::Admission(
+            ApprovedAdmission::new(change, own),
+        ))
+        .await
+        .map(drop)
+    }
+
     /// Send the older keys this device's member holds to the current members
     /// of those keys' audiences whose current sealing key has no copy of
     /// them, each as an operation of its own (§12.1). Another member's device

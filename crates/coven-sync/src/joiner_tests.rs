@@ -4,7 +4,12 @@ use coven_format::objects::Joiner as Wire;
 #[test]
 fn the_apps_two_joiners_round_trip_through_the_formats() {
     for joiner in [Joiner::NewPerson { name: "Carol".into() }, Joiner::MemberKeys] {
-        let wire: Wire = joiner.clone().into();
+        let circle = coven_format::objects::JoiningCircle {
+            circle: coven_format::test_utils::recovered_circle(),
+            copy: coven_format::test_utils::recovered_circle_copy(),
+        };
+        let wire: Wire = joiner.clone().requesting(circle.clone());
+        assert_eq!(wire.circle(), Some(&circle));
         assert_eq!(wire.admits(), Some(joiner.admits()));
         assert_eq!(Joiner::try_from(wire).unwrap(), joiner);
     }

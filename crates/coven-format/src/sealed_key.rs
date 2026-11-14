@@ -110,6 +110,28 @@ impl CopyBox {
         }
         Ok(key)
     }
+    /// Open the member's own circle box of a join request and its admission,
+    /// sealed with the store and this box's routing as its context (D11).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a binding that cannot be framed is a malformed box; the framing error adds nothing"
+    )]
+    pub fn open_own_circle_key(
+        &self,
+        member: &MemberIdentity,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<CircleKey, CryptoError> {
+        let Audience::Circle(circle) = self.routing.audience else {
+            return Err(CryptoError::KeyIdentity);
+        };
+        let binding = crate::sealed_slot::SlotObjectPrefix::own_binding(store, &self.routing)
+            .map_err(|_| CryptoError::Malformed)?;
+        let key = self.credential(member)?.open_own_circle_key(&binding, &self.sealed)?;
+        if key.circle() != circle || key.id() != self.routing.key {
+            return Err(CryptoError::KeyIdentity);
+        }
+        Ok(key)
+    }
     fn credential<'m>(&self, member: &'m MemberIdentity) -> Result<&'m MemberKeys, CryptoError> {
         if self.routing.member != member.member() {
             return Err(CryptoError::Authentication);

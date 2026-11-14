@@ -232,7 +232,7 @@ fn bootstrap_and_operation_futures_stay_small() {
                     &'static str,
                     Status,
                     &'static JoinControl,
-                )| crate::join_with_invite(b, c, j, d, o, x),
+                )| crate::join_with_invite(b, c, j, crate::tests::CIRCLE, d, o, x),
             ),
         ),
         (

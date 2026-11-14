@@ -90,7 +90,7 @@ spaces only separate fields for reading. Example times are UTC.
 | · admin entry slot | | one membership or settings change | D6, D9 |
 | · writes slot | | one device's queued writes, each an inner write | D5, D9 |
 | · key copy slot | | one audience key sealed to one member | D9, D11 |
-| · admission slot | | an admin entry admitting a member and registering their first device, or creating the store, with that member's key copies | D6, D9, D11 |
+| · admission slot | | an admin entry admitting a member, registering their first device and making their circle, with that member's key copies and their own circle's copy, or creating the store, with that member's key copies | D6, D9, D11 |
 | · snapshot announcement slot | | a snapshot's id, coverage, breaking version, purpose and hash | D9 |
 | Inner write | inside a writes slot | one write: a header, then one part per audience | D5, D9 |
 | Floor pointer | `<store>/floor` | the first kept slot, and the newest floor body's writer, number and digest | D8, D9 |
@@ -892,8 +892,8 @@ An admin frame (kind 4) is `change:u8 | fields`.
 
 | Tag | Change | Fields |
 | --- | --- | --- |
-| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes \| circles:[circle:uuid \| name:name \| breaking_version:u32 \| key:uuid \| key_hash:32 bytes]`; only in an admission slot |
-| 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name`; only in an admission slot |
+| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes \| circles:[NewCircle]`; only in an admission slot |
+| 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name \| circle:NewCircle`; only in an admission slot |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
 | 4 | Add device | `name:name \| replaces:Option<DeviceId>`; registers the writing device, which `replaces` must not name |
@@ -911,7 +911,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 17 | Rename store | `name:name` |
 | 18 | Add invite share | `invite:uuid \| account:text` |
 | 19 | End invite share | `invite:uuid` |
-| 20 | Recover member | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys \| access:Option<MemberAccess> \| device:DeviceId \| device_name:name`; only in an admission slot |
+| 20 | Recover member | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys \| access:Option<MemberAccess> \| device:DeviceId \| device_name:name \| circle:NewCircle`; only in an admission slot |
 | 21 | Set up storage | `access:MemberAccess` |
 
 - Tag 12 is unused.
@@ -952,10 +952,14 @@ recover-member register the device they name, which is never the writing
 device: the first device of the member they admit (below).
 
 **Admissions.** An approved join request becomes one admission slot (§13.2):
-its entry admits the request's member with the request's pair and registers
-the request's device, and its clear prefix carries that member's key copies
-(D9). Both changes are an admin's, written by the device that made the
-invite.
+its entry admits the request's member with the request's pair, registers the
+request's device and makes the request's circle, and its clear prefix carries
+that member's key copies and their own copy of the circle's key (D9). Both
+changes are an admin's, written by the device that made the invite.
+
+`NewCircle` is `circle:uuid | name:name | breaking_version:u32 | key:uuid |
+key_hash:32 bytes`, the fields of Create circle, repeated verbatim from the
+request (D8).
 
 - Admit-member: the member id has never been bound, and both keys have never
   been used. Recover-member: the member is active, its current binding equals
@@ -966,14 +970,20 @@ invite.
   (§14.1).
 - `device` has never been registered. `access` is of the kind Set up storage's
   `access` has, so an admission needs Set up storage to have applied.
+- The circle's id has never been used: no circle, live or deleted, has it. The
+  circle's key is introduced by the entry, with `key_hash` as its commitment,
+  as Create circle introduces one.
 - The prefix's copies are all routed to the entry's `member` and
   `keys.sealing`, and name every store key introduced before the slot, each
   once. A circle key copy may follow, for a circle the member belongs to.
+- The prefix's own copy is routed to the entry's `member` and `keys.sealing`,
+  for the entry's circle and key.
 - The slot's own body is sealed with one of the store keys it copies.
-- Applying it binds the pair, records the access and registers the device
-  for the member, in one transaction. An admission whose member, pair, role,
-  access and device all match the state already is satisfied and changes
-  nothing.
+- Applying it binds the pair, records the access, registers the device for the
+  member and makes the circle with the member as its first and only member and
+  `breaking_version` as its base, in one transaction. An admission whose member,
+  pair, role, access and device all match the state already, with the circle
+  there holding the member under that name, is satisfied and changes nothing.
 
 **Replacing member keys.**
 
@@ -1612,8 +1622,17 @@ member       MemberId
 keys         MemberKeys
 device       DeviceId
 device_name  name
-joiner       u8, then a name for a new person
+joiner       u8, then a name for a new person, then the circle for either
+             kind of invite
 ```
+
+`JoiningCircle` is `circle:uuid | name:name | breaking_version:u32 | key:uuid |
+key_hash:32 bytes | copy:CopyBox`: the circle an admission makes for the person
+(D6), with the circle key's one copy. The joining phone makes the circle and
+its key with the request, with `breaking_version` the version of its app's
+newest breaking migration, and seals the key to its own new sealing key as an
+own copy (D9, D11); the key is kept nowhere else. The copy's audience is the
+circle and its key id is `key`, or the request is refused.
 
 - `invite` is the invite's or the pairing's id, which names the request's
   path (D10).
@@ -1627,12 +1646,13 @@ joiner       u8, then a name for a new person
   An invite's approval registers it (D6); a paired device registers it itself,
   with its own add-device entry.
 - `joiner` says who asks. Tag 0 is a member's new keys: the member already has a
-  profile, so the request carries no name. Tag 1 is a new person, followed by
-  the name they typed, which the admin sees with the request and the app makes
-  their profile with (§13.2). Tag 2 is the member's own new device, asking to
-  be paired, with no name. Any other tag is refused. The invite's `admits` fixes
-  whether a request may carry tag 0 or tag 1, and a pairing takes tag 2 alone;
-  the device that made it refuses any other.
+  profile, so the request carries no name, only the circle that replaces the
+  private one they can no longer read. Tag 1 is a new person, followed by the
+  name they typed, which the admin sees with the request and the app makes
+  their profile with, and then their circle (§13.2). Tag 2 is the member's own
+  new device, asking to be paired, with no name and no circle. Any other tag is
+  refused. The invite's `admits` fixes whether a request may carry tag 0 or tag
+  1, and a pairing takes tag 2 alone; the device that made it refuses any other.
 
 ### A pairing's handover (kind 41)
 
@@ -1731,7 +1751,7 @@ objects.
 | Kind | Object | Prefix |
 | --- | --- | --- |
 | 32 | Inner write | `header_key:uuid \| part_keys:[uuid]` |
-| 33 | Sequence slot | `slot_kind:u8 \| key:uuid \| copy:Option<CopyBox>`, or for an admission `slot_kind:u8 \| key:uuid \| copies:[CopyBox]` |
+| 33 | Sequence slot | `slot_kind:u8 \| key:uuid \| copy:Option<CopyBox>`, or for an admission `slot_kind:u8 \| key:uuid \| copies:[CopyBox] \| own:Option<CopyBox>` |
 | 34 | Snapshot | `audience:Audience \| key:uuid \| covers:u64 \| purpose:Purpose` |
 | 36 | Join request | empty |
 | 39 | Floor | `key:uuid \| first:Slot \| copies:[slot:Slot \| object:bytes]` |
@@ -1859,7 +1879,10 @@ A key copy seals an audience key to one member (§12.1). Its routing must be
 readable before the recipient holds any key, so Dan can find his copy. So the
 box sits in the slot's clear prefix: a key-copy slot's one box, whose body is
 only an acknowledgement, or each of an admission's boxes, beside the entry
-that admits their recipient.
+that admits their recipient. An admission's last box, `own`, is the recipient's
+copy of the circle the entry makes: the copy the join request carried, verbatim.
+The prefix holds a flag byte, 1 with `own` after it, 0 for a creation, whose
+circles' copies are among its other boxes.
 
 `CopyBox` is:
 
@@ -1893,7 +1916,10 @@ ephemeral:32 bytes | nonce:24 bytes | ciphertext:bytes | tag:16 bytes
   admission, the prefix in that context is the slot's kind, version,
   `slot_kind`, `key`, the box's index in `copies` as a `u32`, and its routing.
 - An admission's boxes are in increasing order of `(audience, key)`, with no
-  duplicates.
+  duplicates. An admitted member's `own` follows them, goes to the same member
+  and sealing key, and holds a circle's key; its context is the own copy's
+  (D11), not a slot's, so it is no box of an index. The slot that creates the
+  store has no `own`.
 - The slot that creates the store is an admission by this layout. Its boxes
   are the creator's, routed to the author and the entry's `admin` sealing key,
   and name exactly the keys the entry introduces, each once.
@@ -1948,7 +1974,7 @@ needs before it holds any key (§16.4).
 - Require the announcements to name the store first, then audiences in order,
   once each, each introduced by `at`, and every audience with an announcement
   at or before `at`. An introduced audience left out has none: it holds no part,
-  and a loader starts it empty at `first - 1` (§16.4).
+  and a loader starts it empty as of `at` (§16.4).
 - Verify the floor and the snapshots' historical evidence before committing a
   reload.
 
@@ -2204,6 +2230,7 @@ the string's length, 8, then the number.
 | `coven/confirmation-number/v1` | a join request's confirmation number | below |
 | `coven/sealed-box/v1` | a sealed key's box | below |
 | `coven/handover/v1` | a pairing's handover's box | below |
+| `coven/own-copy/v1` | a join request's own copy of its circle's key | below |
 | `coven/file-chunk/v1` | a file chunk's associated data | D12 |
 | `coven/kept-value/v1` | a kept record's digest of a value | D7.3 |
 
@@ -2352,6 +2379,20 @@ A sealed audience key in a sequence slot has D9's clear routing prefix and box.
   routing, so no box can be moved to another index or slot.
 - **The plaintext** is `key:uuid | key bytes:32` for a store key, and
   `circle:uuid | key:uuid | key bytes:32` for a circle key.
+
+**Own copies.** The copy of its circle's key that a join request carries (D8) is
+sealed by the joining phone before any slot or path is known, so it can't use
+a slot's context. It has its own label: its box key is HKDF-SHA256 of the shared
+secret, with no salt and a 32-byte output, and its info is the context of
+`coven/own-copy/v1`; `circle`; the store id's 16 bytes and the box's D9 routing
+(`audience | key | member | sealing`); the ephemeral key; and the member's
+sealing key, in that order. That context is also the associated data, and the
+plaintext is a circle key's. Everything it binds is readable from the box and
+its store, so it opens like any box, before or without the entry. Moved
+elsewhere in the same store it gives the same key to the same recipient; the
+separate label keeps it from standing in for a slot's box or a handover. The
+approval puts it in the admission's prefix as `own` (D9), and opening checks
+the key against the introduction as for any box.
 
 **Opening.**
 
@@ -2550,8 +2591,9 @@ storage          bytes
 - A joiner checks the routing of subsequent slots for its copy, or follows the
   floor when that prefix is gone (§13.2).
 - Routing scans establish no applied progress or authority.
-- Approval publishes the request's exact pair and device in one admission,
-  whose prefix carries the joiner's copies (D6, D9).
+- Approval publishes the request's exact pair, device and circle in one
+  admission, whose prefix carries the joiner's copies and the request's own
+  copy of the circle's key (D6, D9).
 - Bootstrap requires a claimed admission from the approving writer named in
   the invite, binding the request's id and pair and registering its device.
   Never merely an active id, another writer's equal pair, or an available key
@@ -2718,13 +2760,15 @@ kind, sealed object, file and code. Format 1 includes:
 - every admin tag and first-slot creation, stable member ids, expected and
   replacement member keys, access key ids and key introductions;
 - key copies for old and current credentials, with signed clear routing, and
-  an admission whose box opens only at its own index;
+  an admission whose box opens only at its own index and whose own circle box
+  opens for its store and routing alone;
 - snapshot announcements, and snapshots with every evidence section,
   active and frozen lost values, first-slot creations and per-device last-claim
   numbers;
 - a floor with original boxes, announcements and the first kept slot;
 - restore and invite codes with S3 storage parts, which `coven-storage`'s
-  tests decode and reproduce, a saved restore code and signed join requests;
+  tests decode and reproduce, a saved restore code and signed join requests,
+  each with its circle and the copy of its key;
 - pairing codes with and without an S3 key, a pairing's request, and a
   handover sealed to that request's key, which opens only at its own path.
 

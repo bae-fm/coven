@@ -4,28 +4,28 @@ use crate::sequence_sync::OperationState;
 use crate::{
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
     sequence_sync::{next_slot, SequenceSync, Session},
-    slot_object, OperationOutcome, OperationRejection, SyncError,
+    OperationOutcome, OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
 use coven_database::{
-    ClaimAttempt, ClaimSettlement, ClaimWork, Journal, NewOperation, OperationId, OperationRecord,
+    ClaimSettlement, ClaimWork, Journal, NewOperation, OperationId, OperationRecord,
 };
 use coven_format::{
     admin::StoreChange,
     sealed_key::KeyCopyPrefix,
-    sealed_slot::{BoxPlace, SlotKind, SlotObjectPrefix},
-    sequence::{Purpose, SlotFrame, SlotHeader},
+    sequence::{Purpose, SlotHeader},
 };
 use coven_merge::{Audience, Slot};
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
 
-use super::sequence_copies::{admission_prefix, admits, required_copies, route, seal_copy};
+use super::sequence_copies::{change, required_copies, route, ApprovedAdmission};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Request {
     Change(#[serde(with = "change")] StoreChange),
+    /// An approved join request's admission, with the member's own copy.
+    Admission(ApprovedAdmission),
     Snapshot(SnapshotRequest),
     Key(super::sequence_keys::KeyPreparation),
     /// One key copy this device's member owes a current member (§12.1).
@@ -114,11 +114,20 @@ impl SequenceOperation {
         }
     }
 
+    /// An admission, before its first step.
+    pub(crate) fn admission(admission: ApprovedAdmission) -> Self {
+        Self {
+            request: Request::Admission(admission),
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        }
+    }
+
     pub(crate) fn kind(&self) -> crate::OperationKind {
         match &self.request {
             Request::Key(target) => target.kind(),
             Request::Copy(_) => crate::OperationKind::SendKeyCopy,
             Request::Change(change) => crate::OperationKind::of(change),
+            Request::Admission(admission) => crate::OperationKind::of(&admission.change),
             Request::Snapshot(request) => match request.purpose {
                 Purpose::Ordinary => crate::OperationKind::WriteSnapshot,
                 Purpose::Raise(_) => crate::OperationKind::SchemaChange,
@@ -144,6 +153,11 @@ impl SequenceSync {
         self: &std::sync::Arc<Self>,
         change: StoreChange,
     ) -> Result<Option<Slot>, SyncError> {
+        // An admission carries its member's own copy, which only an approved
+        // join request holds (§13.2).
+        if matches!(change, StoreChange::AdmitMember { .. } | StoreChange::RecoverMember { .. }) {
+            return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+        }
         self.submit(Request::Change(change)).await
     }
 
@@ -249,7 +263,7 @@ impl SequenceSync {
         .map(drop)
     }
 
-    async fn submit(
+    pub(super) async fn submit(
         self: &std::sync::Arc<Self>,
         request: Request,
     ) -> Result<Option<Slot>, SyncError> {
@@ -357,6 +371,14 @@ impl SequenceSync {
                     &self.operation_header(session, member, 1),
                     next_slot(session.through)?,
                     change,
+                )
+                .map(|effect| effect.is_some()),
+            Request::Admission(admission) => session
+                .history
+                .validate(
+                    &self.operation_header(session, member, 1),
+                    next_slot(session.through)?,
+                    &admission.change,
                 )
                 .map(|effect| effect.is_some()),
             Request::Copy(route) => Ok(session.history.copy_wanted(route, member.member())),
@@ -664,7 +686,7 @@ impl SequenceSync {
                     Request::Key(_) => unreachable!("key preparation has advanced"),
                     Request::Copy(route) => OperationStep::Copy(route.clone()),
                     // An admission carries its copies in its own slot.
-                    Request::Change(change) if admits(change) => OperationStep::Claiming,
+                    Request::Admission(_) => OperationStep::Claiming,
                     Request::Change(change) => {
                         match required_copies(&session.history, ring, change, member.member())
                             .into_iter()
@@ -763,164 +785,6 @@ impl SequenceSync {
         }
         Ok(outcome)
     }
-
-    /// The settlement of the open `claim`: an attempt not yet read is read,
-    /// and one whose slot is still empty is sent again with its exact bytes.
-    pub(crate) async fn settle_claim(
-        &self,
-        session: &mut Session,
-        ring: &mut StoreKeyring,
-        member: &MemberIdentity,
-        claim: &coven_database::Claim,
-    ) -> Result<ClaimSettlement, SyncError> {
-        let settlement = match claim.settlement {
-            ClaimSettlement::Unknown => {
-                self.settle_open(session, ring, member).await?.expect("open claim")
-            }
-            value => value,
-        };
-        if settlement == ClaimSettlement::Retry {
-            return self.publish_current(session, ring, member).await;
-        }
-        Ok(settlement)
-    }
-
-    async fn claim_step(
-        &self,
-        session: &mut Session,
-        ring: &mut StoreKeyring,
-        member: &MemberIdentity,
-        record: &OperationRecord,
-        request: &Request,
-        step: &OperationStep,
-    ) -> Result<(), SyncError> {
-        // The store's creation is sealed once, when the store is created
-        // (`creation`); an operation of it with no attempt to send has lost
-        // its slot.
-        if matches!(request, Request::Change(StoreChange::CreateStore { .. })) {
-            return Err(coven_database::DbError::Invariant {
-                what: "a store's creation journals the attempt at its slot 1",
-            }
-            .into());
-        }
-        let path = self.path(next_slot(session.through)?);
-        let store_key = session.history.metadata_key(ring)?;
-        let (frame, kind) = match step {
-            OperationStep::Copy(route) => {
-                let route = route.clone();
-                let copy = seal_copy(ring, &path, store_key, BoxPlace::KeyCopy, route)?;
-                (SlotFrame::KeyCopy, SlotKind::KeyCopy(copy))
-            }
-            OperationStep::Claiming => {
-                let Request::Change(change) = request else { unreachable!("plain admin claim") };
-                if !admits(change) {
-                    (SlotFrame::Admin(change.clone()), SlotKind::Admin)
-                } else {
-                    let copies = required_copies(&session.history, ring, change, member.member());
-                    let frame = SlotFrame::Admin(change.clone());
-                    let header = self.operation_header(session, member, 1);
-                    let plaintext = frame.encode(&header, &path)?.len();
-                    match admission_prefix(ring, &path, store_key, copies, plaintext)? {
-                        Ok(prefix) => (frame, prefix.kind),
-                        Err(reason) => {
-                            self.database
-                                .advance_operation(
-                                    SequenceOperation {
-                                        request: request.clone(),
-                                        progress: OperationProgress::Undo {
-                                            step: OperationStep::Claiming,
-                                            reason,
-                                        },
-                                    }
-                                    .update(record)?,
-                                )
-                                .await?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            OperationStep::Announcing(artifact) => {
-                (SlotFrame::Announcement(artifact.announcement()), SlotKind::Announcement)
-            }
-            OperationStep::Activating { artifact, announcement } => {
-                let change = match artifact.capture.purpose {
-                    Purpose::Raise(version) => {
-                        StoreChange::RaiseSchema { version, announcement: *announcement }
-                    }
-                    Purpose::Reset => StoreChange::Reset { announcement: *announcement },
-                    Purpose::Ordinary => unreachable!("ordinary snapshots need no activation"),
-                };
-                session.history.validate(
-                    &self.operation_header(session, member, 1),
-                    next_slot(session.through)?,
-                    &change,
-                )?;
-                (SlotFrame::Admin(change), SlotKind::Admin)
-            }
-            _ => unreachable!("a publication step"),
-        };
-        let held = ring.clone();
-        let author = member.clone();
-        let device = self.device;
-        let after = session.through;
-        let seal = move |claim| {
-            let bytes = slot_object::seal_bounded(
-                &path,
-                &SlotHeader { device, claim, author: author.member(), after },
-                &frame,
-                SlotObjectPrefix {
-                    format: coven_format::FormatVersion::CURRENT,
-                    key: store_key,
-                    kind,
-                },
-                &held,
-                &author,
-            )?;
-            Ok::<_, SyncError>(ClaimAttempt { path, bytes: Cursor::new(bytes) })
-        };
-        if let Some(claim) = self.database.current_claim().await? {
-            self.database.retry_claim(seal(claim.number)?).await?;
-        } else {
-            self.database.begin_claim(ClaimWork::Operation(record.id), seal).await?;
-        }
-        self.publish_current(session, ring, member).await?;
-        Ok(())
-    }
-
-    async fn undo_step(&self, step: &OperationStep) -> Result<(), SyncError> {
-        let artifact = match step {
-            OperationStep::Capturing(capture) => {
-                self.artifact_file(&capture.name)?.remove()?;
-                return Ok(());
-            }
-            OperationStep::Uploading(artifact)
-            | OperationStep::Announcing(artifact)
-            | OperationStep::Activating { artifact, .. } => artifact,
-            _ => return Ok(()),
-        };
-        if let Some(session) = &artifact.session {
-            self.storage.abort_upload(session).await?;
-        }
-        let path = crate::snapshot_object::path(self.store(), &artifact.capture.id)?;
-        self.storage.delete(&path).await?;
-        if self.storage.status(&path).await?.is_some() {
-            return Err(coven_storage::StorageFailure::Protocol
-                .with_source("snapshot remains after deletion")
-                .into());
-        }
-        self.artifact_file(&artifact.capture.name)?.remove()?;
-        Ok(())
-    }
-
-    async fn abandon_settled_claim(&self, id: OperationId) -> Result<(), SyncError> {
-        if let Some(claim) = self.database.current_claim().await? {
-            if claim.work == ClaimWork::Operation(id) {
-                self.database.finish_claim(None).await?;
-            }
-        }
-        Ok(())
-    }
 }
 #[cfg(test)]
 impl SequenceSync {
@@ -972,23 +836,12 @@ impl SequenceSync {
     }
 }
 
-mod change {
-    use super::*;
-    pub(super) fn serialize<S: serde::Serializer>(
-        value: &StoreChange,
-        output: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.encode().map_err(serde::ser::Error::custom)?.serialize(output)
-    }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        input: D,
-    ) -> Result<StoreChange, D::Error> {
-        StoreChange::decode(&Vec::<u8>::deserialize(input)?).map_err(serde::de::Error::custom)
-    }
-}
 fn parent_owned(record: &OperationRecord) -> bool {
     record.started_by == operation_kind::INVITE
 }
+
+#[path = "sequence_operations_claim.rs"]
+mod claim;
 
 #[cfg(test)]
 #[path = "sequence_operations_tests.rs"]

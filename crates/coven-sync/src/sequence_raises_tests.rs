@@ -774,7 +774,8 @@ async fn a_second_breaking_migration_points_a_waiting_rebuild_at_its_marker() {
 
 /// Ben waits for Garden's rebuild when his app runs a second breaking
 /// migration. Garden is not a circle he ever held at any version, so the
-/// migration captures the store alone; the rebuild, which now reaches the
+/// migration captures the store and the circle his admission made, not
+/// Garden; the rebuild, which now reaches the
 /// second migration's version, installs the capture of Garden itself and Ben
 /// raises it at that version (§18.3).
 #[tokio::test]
@@ -815,7 +816,12 @@ async fn a_second_breaking_migration_does_not_capture_a_circle_awaiting_its_rebu
         .into_iter()
         .map(|capture| capture.audience)
         .collect();
-    assert_eq!(captured, [Audience::Store]);
+    // The circle Ben's admission made for him is one he holds at every
+    // version, so it is captured with the store; Garden, which he never held
+    // at any version, is not.
+    assert!(captured.contains(&Audience::Store), "{captured:?}");
+    assert!(!captured.contains(&Audience::Circle(garden)), "{captured:?}");
+    assert_eq!(captured.len(), 2, "{captured:?}");
 
     for _ in 0..8 {
         ben.sync.pass().await.unwrap();
@@ -828,4 +834,24 @@ async fn a_second_breaking_migration_does_not_capture_a_circle_awaiting_its_rebu
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }
+}
+
+/// Raise and snapshot, at `version`, the circle `ben`'s admission made, the one
+/// circle of his below the store's version: retention keeps what a rebuild of
+/// a circle below the store would read until he does (§16.6).
+pub(crate) async fn raise_admitted_circle(ben: &Device, version: u32) {
+    let own = {
+        let session = ben.sync.session.lock().await;
+        let state = &session.history.state;
+        let store = state.reached(&coven_merge::Audience::Store);
+        state
+            .circles
+            .keys()
+            .copied()
+            .find(|circle| state.reached(&coven_merge::Audience::Circle(*circle)) < store)
+            .expect("the circle Ben's admission made")
+    };
+    let audience = coven_merge::Audience::Circle(own);
+    ben.sync.raise_schema(audience.clone(), version).await.unwrap();
+    ben.sync.snapshot(audience).await.unwrap();
 }

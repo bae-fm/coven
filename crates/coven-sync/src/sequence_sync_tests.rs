@@ -13,7 +13,7 @@ use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{StoreDirectories, StoreFile},
-    id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},
+    id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId, UuidIds},
 };
 use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
 use std::sync::Arc;
@@ -416,7 +416,7 @@ impl Group {
             _ => ben.identity.member().to_string(),
         };
         let admission = admission(ben, MemberRole::Admin, self.access(&name), "Ben");
-        ana.sync.administer(admission).await.unwrap();
+        ana.sync.administer_admission(admission).await.unwrap();
         ben.sync.pass().await.unwrap();
         ana.sync.pass().await.unwrap();
     }
@@ -449,22 +449,25 @@ pub(crate) fn codes(
     )
 }
 
-/// The admission admitting `device`'s member with `role` and `access`, and
-/// registering the device as `name` (§13.2).
+/// The admission of `device`'s member with `role` and `access`, registering the
+/// device as `name`, and the member's own circle key copy (§13.2).
 pub(crate) fn admission(
     device: &Device,
     role: MemberRole,
     access: coven_format::MemberAccess,
     name: &str,
-) -> StoreChange {
-    StoreChange::AdmitMember {
-        member: device.identity.member(),
-        keys: device.identity.keys().public_keys(),
+) -> (StoreChange, coven_format::sealed_key::CopyBox) {
+    crate::admitting(
+        device.sync.store(),
+        device.identity.member(),
+        device.identity.keys().public_keys(),
         role,
         access,
-        device: device.sync.device,
-        device_name: name.into(),
-    }
+        device.sync.device,
+        name,
+        &UuidIds,
+    )
+    .unwrap()
 }
 
 pub(crate) fn access(name: &str) -> coven_format::MemberAccess {
