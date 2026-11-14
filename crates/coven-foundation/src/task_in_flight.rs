@@ -10,6 +10,7 @@
 //! running means the test waits on an event in its own async code.
 
 use crate::locks::lock_unpoisoned;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, Once};
 
@@ -28,9 +29,26 @@ pub(crate) enum State {
 
 struct Flights {
     next: u64,
-    running: BTreeMap<u64, (&'static str, State)>,
+    /// Each running operation's name, state and the step it last named.
+    running: BTreeMap<u64, (&'static str, State, Option<&'static str>)>,
     /// The latest finished operations, oldest first, by their number.
     recent: Vec<(u64, &'static str)>,
+}
+
+thread_local! {
+    /// The operation whose closure this pool thread is running.
+    static RUNNING_HERE: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Name the step the blocking operation running on this thread has reached,
+/// so a hang report says where inside it the operation waits.
+pub(crate) fn step(name: &'static str) {
+    let Some(id) = RUNNING_HERE.with(Cell::get) else { return };
+    with_flights(|flights| {
+        if let Some(entry) = flights.running.get_mut(&id) {
+            entry.2 = Some(name);
+        }
+    });
 }
 
 static FLIGHTS: Mutex<Option<Flights>> = Mutex::new(None);
@@ -65,7 +83,7 @@ impl Flight {
         with_flights(|flights| {
             flights.next += 1;
             let id = flights.next;
-            flights.running.insert(id, (operation, state));
+            flights.running.insert(id, (operation, state, None));
             Self(id)
         })
     }
@@ -77,13 +95,19 @@ impl Flight {
                 entry.1 = State::Running;
             }
         });
+        RUNNING_HERE.with(|here| here.set(Some(self.0)));
     }
 }
 
 impl Drop for Flight {
     fn drop(&mut self) {
+        RUNNING_HERE.with(|here| {
+            if here.get() == Some(self.0) {
+                here.set(None);
+            }
+        });
         with_flights(|flights| {
-            if let Some((operation, _)) = flights.running.remove(&self.0) {
+            if let Some((operation, _, _)) = flights.running.remove(&self.0) {
                 flights.recent.push((self.0, operation));
                 if flights.recent.len() > RECENT {
                     flights.recent.remove(0);
@@ -102,13 +126,16 @@ pub(crate) fn report() -> String {
             flights.next,
             flights.running.len()
         );
-        for (number, (operation, state)) in &flights.running {
+        for (number, (operation, state, step)) in &flights.running {
             let state = match state {
                 State::Queued => "queued on the blocking pool, never started",
                 State::Running => "running on the blocking pool",
                 State::Task => "a task on the runtime",
             };
             text.push_str(&format!("\n  #{number} {operation}: {state}"));
+            if let Some(step) = step {
+                text.push_str(&format!(", at: {step}"));
+            }
         }
         text.push_str("\nthe latest to finish:");
         for (number, operation) in &flights.recent {

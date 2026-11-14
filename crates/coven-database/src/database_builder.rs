@@ -208,6 +208,7 @@ impl DatabaseBuilder {
             self.tables.ok_or(OpenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations =
             self.migrations.ok_or(OpenError::MissingConfiguration { field: "migrations" })?;
+        coven_foundation::task::operation_step("checking the store's lock");
         // Refuse a directory that is not a store before creating its database.
         coven_foundation::files::verify_lock(&self.directory, &lock)?;
         let settings = lock.settings()?;
@@ -235,6 +236,7 @@ impl DatabaseBuilder {
         observer.refuse_upkeep_thread_after(self.upkeep_threads);
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
+        coven_foundation::task::operation_step("opening the writer's connection");
         let mut writer = DatabaseConnection::open(
             &path,
             false,
@@ -246,9 +248,13 @@ impl DatabaseBuilder {
         writer.serve_views(settings.device_id, &transfers, &network)?;
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
             writer.with_profile(|writer| -> Result<_, OpenError> {
+                coven_foundation::task::operation_step("switching the store's database to WAL");
                 writer.enable_wal()?;
                 let mut progress = ProgressReport::of(&self.progress, clock.clone());
                 let migrating = clock.elapsed();
+                coven_foundation::task::operation_step(
+                    "preparing the schema and running migrations",
+                );
                 let outcomes = writer.prepare_schema(
                     &tables,
                     &migrations,
@@ -272,6 +278,7 @@ impl DatabaseBuilder {
                     }),
                     &mut progress,
                 )?;
+                coven_foundation::task::operation_step("reading the store's state after migrating");
                 crate::database::file_database::declare_budgets(writer, &self.namespaces)?;
                 crate::file_removals::finish_at_open(writer, &self.directory)?;
                 crate::pending::forget_causes(writer)?;
@@ -286,6 +293,9 @@ impl DatabaseBuilder {
                 write_schema.namespaces = self.namespaces;
                 crate::write_schema::prepare_evaluators(writer, &write_schema)?;
                 let migrated = clock.elapsed();
+                coven_foundation::task::operation_step(
+                    "gathering statistics on a connection of its own",
+                );
                 // After migrating, and before the writer captures commits, on a
                 // connection of its own: one that analyzes a small table loads its
                 // count, and forgetting the statistics afterwards doesn't unload it.
@@ -303,6 +313,7 @@ impl DatabaseBuilder {
                 let optimized = clock.elapsed();
                 // The input database holds only coven's tables, which no app setting
                 // or function reaches.
+                coven_foundation::task::operation_step("opening the input database");
                 let input_path = self.directory.input_database_path();
                 let mut input_writer = coven_only(&input_path, false)?;
                 input_writer.enable_wal()?;
@@ -332,6 +343,9 @@ impl DatabaseBuilder {
                 let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
                 Ok((outcomes, write_schema, inputs, checkpoints, migrating, migrated, optimized))
             })?;
+        coven_foundation::task::operation_step(
+            "starting the writer's commit capture and upkeep threads",
+        );
         writer.observe_commits(observer.clone(), settings.device_id, &tables);
         #[cfg(any(test, feature = "test-utils"))]
         if self.refuse_close {

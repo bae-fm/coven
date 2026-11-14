@@ -23,6 +23,17 @@ mod in_flight;
 
 pub use location::{catching_operation, SourceLocation};
 
+/// Name the step the blocking operation running on this thread has reached.
+/// A test's hang report prints the latest step of each operation still
+/// running, so a wait inside a long operation shows where. Nothing outside
+/// tests.
+pub fn operation_step(name: &'static str) {
+    #[cfg(any(test, feature = "test-utils"))]
+    in_flight::step(name);
+    #[cfg(not(any(test, feature = "test-utils")))]
+    let _ = name;
+}
+
 /// Why work apart from its caller gave no result.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TaskFailed {

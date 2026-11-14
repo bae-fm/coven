@@ -525,6 +525,7 @@ async fn the_hang_report_names_running_operations_and_the_latest_to_finish() {
     let (started, running) = tokio::sync::oneshot::channel();
     let bugs: BugSinkRef = std::sync::Arc::new(LoggedBugs);
     let work = blocking_completing("hold the report test's thread", bugs.clone(), move || {
+        operation_step("waiting for the test's release");
         started.send(()).unwrap();
         held.recv().unwrap();
         Ok::<_, Bug>(())
@@ -532,7 +533,9 @@ async fn the_hang_report_names_running_operations_and_the_latest_to_finish() {
     running.await.unwrap();
     let during = in_flight::report();
     assert!(
-        during.contains("hold the report test's thread: running on the blocking pool"),
+        during.contains(
+            "hold the report test's thread: running on the blocking pool, at: waiting for the test's release"
+        ),
         "{during}"
     );
     release.send(()).unwrap();
