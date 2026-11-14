@@ -1,11 +1,10 @@
 # Build output paths and the size each may reach before the `builds` tool
 # deletes it whole for the next build to refill (cargo mostly from sccache).
-# scripts/build-layout.sh, run by the post-checkout hook and scripts/check.sh, links
-# each path to /Volumes/Builds/coven/<checkout>/<path>, deletes the build
-# copies in it that no build has used for three days (the tool's default), and
-# then applies the caps. The scripts run cargo through
-# scripts/cargo.sh, which records each build copy cargo uses, rebuilt or up to
-# date.
+# `builds new` and `builds setup` link each path to
+# /Volumes/Builds/coven/<checkout>/<path>, delete the build copies in it that
+# no build has used for three days (the tool's default), and then apply the
+# caps. The scripts run cargo through scripts/cargo.sh, which records each
+# build copy cargo uses, rebuilt or up to date.
 #
 # Caps are about twice a fresh build of each; target's is set by the
 # `--all-features` test runs of the six crates, which reached 30-34G in one
