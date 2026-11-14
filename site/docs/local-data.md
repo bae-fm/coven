@@ -435,30 +435,32 @@ window it holds, on every write. Subscribe each window the screen shows as its
 own live query, with that window as its request, and the count as another:
 
 ```rust
-// A window: up to 100 notes after the title the screen sends (None: the top).
-let window = |after: &Option<String>, sql: SqlReadContext<'_>| {
+// A window: the notes from one title up to the next window's first title.
+let window = |(from, until): &(String, String), sql: SqlReadContext<'_>| {
     Ok(sql.query(
-        "SELECT id, title FROM notes WHERE ?1 IS NULL OR title > ?1 ORDER BY title LIMIT 100",
-        [after],
+        "SELECT id, title FROM notes WHERE title >= ?1 AND title < ?2 ORDER BY title",
+        [from, until],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )?)
 };
-let top = handle.subscribe_reconfigurable(None, window);
-let next = handle.subscribe_reconfigurable(Some(last_title_on_screen), window);
+let top = handle.subscribe_reconfigurable((String::new(), second_window_first), window);
+let next = handle.subscribe_reconfigurable((second_window_first, third_window_first), window);
 // The count, read by itself.
 let count = handle.subscribe(|sql| {
     Ok(sql.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0))?)
 });
 ```
 
-A write that adds a row reruns `count`, and only the window whose rows it
-changed.
+A write that adds a row reruns `count`, and only the window whose range holds
+it.
 
-A window reads by cursor, `WHERE title > ?1 ... LIMIT 100`, not by `OFFSET`:
-a live query reruns when any row it read changes, and a cursor window reads
-only its own rows, while `LIMIT 100 OFFSET 200` steps over the 200 rows before
-it, so any insert above reruns it. A jump to a far position, such as a
-scrollbar drag, reads by offset once and pages by cursor from there.
+A live query reruns for a write that changes a row its WHERE comparisons take
+in; its `LIMIT` and `OFFSET` narrow nothing. So bound each window by a key at
+both ends. `WHERE title > ?1 ... LIMIT 100` reruns for any change after `?1`,
+and `LIMIT 100 OFFSET 200` for any change at all. The screen holds its windows
+as a chain whose ranges meet, so each row is in exactly one; a jump to a far
+position, such as a scrollbar drag, reads the key at that position once and
+starts a chain there.
 
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
