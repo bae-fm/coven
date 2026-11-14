@@ -951,13 +951,19 @@ fn combine<T>(
 }
 
 /// Every entry under `path` with its contents, sorted, so a test can show
-/// that a refused replacement changed nothing.
+/// that a refused replacement changed nothing. A SQLite `-shm` file is left
+/// out: it holds only the write-ahead log's index of page positions, never a
+/// row or a key, and Windows byte-range locks it while any connection to its
+/// database is open, so reading it fails with a lock violation.
 #[cfg(test)]
 fn files_under(path: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(path).unwrap_or_else(|error| panic!("list {path:?}: {error}")) {
         let entry = entry.unwrap();
         let relative = std::path::PathBuf::from(entry.file_name());
+        if entry.file_name().to_string_lossy().ends_with("-shm") {
+            continue;
+        }
         if entry.file_type().unwrap().is_dir() {
             found.extend(
                 files_under(&entry.path())
