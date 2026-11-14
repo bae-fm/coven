@@ -227,6 +227,10 @@ pub(crate) enum Shape {
     QueryPerRow,
     /// Memory kept between reads.
     KeptState,
+    /// A column only ever counted up, to run a live query again.
+    Counter,
+    /// A request's integer field counted up by one, to run a live query again.
+    RequestBump,
 }
 
 impl Shape {
@@ -240,6 +244,8 @@ impl Shape {
             Shape::Pick => "pick",
             Shape::QueryPerRow => "query-per-row",
             Shape::KeptState => "kept-state",
+            Shape::Counter => "counter",
+            Shape::RequestBump => "request-bump",
         }
     }
 }
@@ -263,6 +269,11 @@ pub(crate) struct ReadShapes {
     /// hold: the values that change many times a second travel on them.
     #[serde(default)]
     pub(crate) value_stream_types: BTreeSet<String>,
+    /// The live queries that take a request as their first type argument: the
+    /// request is the type of what the query is asked, and its integer fields
+    /// are not counted up to run the query again.
+    #[serde(default)]
+    pub(crate) request_query_types: BTreeSet<String>,
     /// The types that keep memory between reads: locks, cells and atomics.
     #[serde(default)]
     pub(crate) kept_state_types: BTreeSet<String>,
@@ -605,6 +616,7 @@ impl Policy {
             let lists = [
                 ("read_shapes.read_types", &read.read_types),
                 ("read_shapes.live_query_types", &read.live_query_types),
+                ("read_shapes.request_query_types", &read.request_query_types),
                 ("read_shapes.value_stream_types", &read.value_stream_types),
                 ("read_shapes.kept_state_types", &read.kept_state_types),
             ];

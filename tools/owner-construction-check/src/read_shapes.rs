@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::counters::{counters, request_bumps};
 use crate::crate_code::CrateCode;
 use crate::finding::Finding;
 use crate::kept_state::kept_state;
@@ -26,7 +27,11 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
     };
     let read = ReadCode::collect(&code.expanded, policy, shapes);
     let mut keyed: BTreeMap<(String, String, Shape), Vec<Hit>> = BTreeMap::new();
-    let hits = row_work(&read).into_iter().chain(kept_state(&read, &code.expanded, policy, shapes));
+    let hits = row_work(&read)
+        .into_iter()
+        .chain(kept_state(&read, &code.expanded, policy, shapes))
+        .chain(counters(code))
+        .chain(request_bumps(&read, &code.expanded, shapes));
     for hit in hits {
         keyed.entry((hit.path.clone(), hit.item.clone(), hit.shape)).or_default().push(hit);
     }
@@ -86,6 +91,9 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
 fn remedy(rule: &str, shape: Shape) -> String {
     let instead = match shape {
         Shape::QueryPerRow => "join in the statement instead of a query per row.",
+        Shape::Counter | Shape::RequestBump => {
+            "a live query reruns because what it read changed: drop the counter and let the query read the rows whose change it follows."
+        }
         Shape::KeptState => {
             "a read starts from the database every time: drop the state and read it in SQL; a value no table holds that changes many times a second travels on a keyed stream."
         }

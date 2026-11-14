@@ -188,3 +188,56 @@ fn each_statement_names_the_tables_it_reads() {
         assert_eq!(reads(sql), tables, "{sql}");
     }
 }
+
+/// Each assignment of `sql` as `table.column`, with `+1` for an increment.
+fn assigned(sql: &str) -> Vec<String> {
+    statements(sql)
+        .into_iter()
+        .flat_map(|statement| statement.assignments)
+        .map(|set| format!("{}.{}{}", set.table, set.column, if set.increment { " +" } else { "" }))
+        .collect()
+}
+
+#[test]
+fn an_update_names_each_column_it_sets_and_the_increments() {
+    assert_eq!(assigned("UPDATE v SET version = version + 1"), ["v.version +"]);
+    assert_eq!(
+        assigned("UPDATE OR IGNORE main.V SET a = 1, b = b + 2, c = ?1, d = d - 1 WHERE id = 3"),
+        ["v.a", "v.b +", "v.c", "v.d"]
+    );
+    assert_eq!(
+        assigned("UPDATE v SET t.n = t.n + 1, m = max(m, 3), k = k + 0, j = j + 1 + x"),
+        ["v.n +", "v.m", "v.k", "v.j"]
+    );
+    assert_eq!(assigned("UPDATE v SET x = ?"), ["v.x"]);
+}
+
+#[test]
+fn an_upserts_do_update_sets_columns_of_the_insert_target() {
+    assert_eq!(
+        assigned("INSERT INTO c (id, count) VALUES (?1, 1) ON CONFLICT (id) DO UPDATE SET count = count + 1"),
+        ["c.count +"]
+    );
+    assert_eq!(
+        assigned(
+            "INSERT OR REPLACE INTO c VALUES (1) ON CONFLICT DO UPDATE SET count = excluded.count"
+        ),
+        ["c.count"]
+    );
+}
+
+#[test]
+fn a_triggers_body_assigns_what_its_updates_set() {
+    let sql = "CREATE TRIGGER t AFTER INSERT ON notes BEGIN
+        UPDATE counts SET total = total + 1 WHERE id = new.id;
+        UPDATE listing SET shown = CASE WHEN new.body IS NULL THEN 0 ELSE 1 END;
+    END";
+    assert_eq!(assigned(sql), ["counts.total +", "listing.shown"]);
+}
+
+#[test]
+fn reads_and_inserts_assign_nothing() {
+    for sql in ["SELECT 1", "INSERT INTO v (a) VALUES (1)", "DELETE FROM v WHERE a = 1"] {
+        assert_eq!(assigned(sql), Vec::<String>::new(), "{sql}");
+    }
+}

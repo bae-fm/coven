@@ -679,3 +679,32 @@ fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_e
         ]
     );
 }
+
+#[test]
+fn a_kept_state_row_names_a_type_or_a_function_and_a_counter_row_a_sql_column() {
+    let rows = read_shapes_rows(
+        r#"frozen = [
+            { path = "crates/app/src/reads.rs", item = "Screen", shape = "kept-state", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", item = "Screen::read", shape = "kept-state", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", item = "Gone", shape = "kept-state", count = 1, finding = "x" },
+            { path = "crates/app/src/schema.sql", item = "v.version", shape = "counter", count = 1, finding = "x" },
+            { path = "crates/app/src/schema.sql", item = "v.gone", shape = "counter", count = 1, finding = "x" },
+        ]"#,
+    );
+    let members = [("crates/app-foundation", "app-foundation"), ("crates/app", "app")];
+    let mut workspace = workspace(read_shape_files(), &members);
+    workspace.sql_files = vec![SqlFile {
+        relative_path: "crates/app/src/schema.sql".to_string(),
+        package_root: "crates/app/".to_string(),
+        package: "app".to_string(),
+        text: "UPDATE v SET version = version + 1;".to_string(),
+    }];
+    let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
+    assert_eq!(
+        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        [
+            "read_shapes.frozen: crates/app/src/reads.rs: Gone names no type or function there",
+            "read_shapes.frozen: crates/app/src/schema.sql: v.gone is no column the SQL there increases",
+        ]
+    );
+}

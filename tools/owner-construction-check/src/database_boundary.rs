@@ -160,15 +160,52 @@ fn confined_remedy(confined_to: &str) -> String {
     )
 }
 
-/// The views the crates' production SQL creates: in its `.sql` files and in
-/// its string literals, as the domains read them.
-pub(crate) fn schema_views(code: &CrateCode) -> SchemaViews {
-    let mut texts = code.sql.iter().map(|file| file.text.clone()).collect::<Vec<_>>();
-    for file in &code.written {
-        SqlLiterals::new(|literal: &syn::LitStr, _: &[Scope]| texts.push(literal.value()))
-            .visit_file(&file.syntax);
+/// A piece of the crates' production SQL: a `.sql` file or a string literal.
+pub(crate) struct SqlText {
+    /// The file the text is in.
+    pub(crate) path: String,
+    pub(crate) text: String,
+    /// The line of a literal; none for a `.sql` file, whose lines are counted
+    /// in its text.
+    line: Option<usize>,
+}
+
+impl SqlText {
+    /// The line of byte offset `at` in the text.
+    pub(crate) fn line_at(&self, at: usize) -> usize {
+        self.line.unwrap_or_else(|| line_of(&self.text, at))
     }
-    SchemaViews::collect(texts.iter().map(String::as_str))
+}
+
+/// The crates' production SQL: in its `.sql` files and in its string literals,
+/// as the domains read them.
+pub(crate) fn production_sql(code: &CrateCode) -> Vec<SqlText> {
+    let mut texts = code
+        .sql
+        .iter()
+        .map(|file| SqlText {
+            path: file.relative_path.clone(),
+            text: file.text.clone(),
+            line: None,
+        })
+        .collect::<Vec<_>>();
+    for file in &code.written {
+        SqlLiterals::new(|literal: &syn::LitStr, _: &[Scope]| {
+            texts.push(SqlText {
+                path: file.relative_path.clone(),
+                text: literal.value(),
+                line: Some(literal.span().start().line),
+            });
+        })
+        .visit_file(&file.syntax);
+    }
+    texts
+}
+
+/// The views the crates' production SQL creates.
+pub(crate) fn schema_views(code: &CrateCode) -> SchemaViews {
+    let texts = production_sql(code);
+    SchemaViews::collect(texts.iter().map(|text| text.text.as_str()))
 }
 
 /// The policy's domains, by table and by view.

@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
 use crate::capability_construction::construction_only_types;
+use crate::counters::increment_sites;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::{is_identifier, split_callable, Database, ListKind, Policy};
+use crate::policy::{is_identifier, split_callable, Database, ListKind, Policy, Shape};
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
@@ -546,8 +547,10 @@ fn invalid_domains(code: &CrateCode, database: &Database, policy: &Policy) -> Ve
 }
 
 /// The read rule's rows: its plumbing holds a source, and each list row names
-/// a file and a function or method there, with a count of at least one and
-/// what it found or why it is allowed. A key is in one list, once.
+/// a file and what it found there (a function or method, a type for the
+/// memory a type keeps, `table.column` for a counter), with a count of at
+/// least one and what it found or why it is allowed. A key is in one list,
+/// once.
 fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) -> Vec<String> {
     let Some(shapes) = &policy.read_shapes else {
         return Vec::new();
@@ -559,26 +562,51 @@ fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) ->
         }
     }
     let methods = declared_methods(files);
+    let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
+    let types = collect_declared_types(files, &policy.shared_pointer_types, &identity);
+    let increments = increment_sites(code);
+    let sql_paths =
+        code.sql.iter().map(|file| file.relative_path.as_str()).collect::<BTreeSet<_>>();
     let mut seen = BTreeMap::new();
     for row in shapes.listed() {
         let list = row.list.name();
         let (path, item, shape) = (row.path, row.item, row.shape.id());
-        if !files.iter().any(|file| file.relative_path == path) {
+        let is_counter = row.shape == Shape::Counter;
+        let rust = files.iter().any(|file| file.relative_path == path);
+        if !(rust || (is_counter && sql_paths.contains(path))) {
             stale.push(format!("read_shapes.{list}: {path} holds no source"));
             continue;
         }
-        let (owner, method) = match split_callable(item) {
-            Some((owner, method)) => (owner, method),
-            None if is_identifier(item) => ("<free>", item),
-            None => {
-                stale.push(format!(
-                    "read_shapes.{list}: {path}: {item} is neither `Type::method` nor a function name"
-                ));
-                continue;
-            }
+        let function = || {
+            let (owner, method) = match split_callable(item) {
+                Some(parts) => parts,
+                None if is_identifier(item) => ("<free>", item),
+                None => return Err("is neither `Type::method` nor a function name"),
+            };
+            methods
+                .contains_key(&(path.to_string(), owner.to_string(), method.to_string()))
+                .then_some(())
+                .ok_or("names no function there")
         };
-        if !methods.contains_key(&(path.to_string(), owner.to_string(), method.to_string())) {
-            stale.push(format!("read_shapes.{list}: {path}: {item} names no function there"));
+        let found = match row.shape {
+            Shape::Counter => increments
+                .contains(&(path.to_string(), item.to_string()))
+                .then_some(())
+                .ok_or("is no column the SQL there increases"),
+            Shape::KeptState => {
+                let type_there = types
+                    .get(item)
+                    .is_some_and(|info| info.declarations.iter().any(|(file, _)| file == path));
+                if type_there {
+                    Ok(())
+                } else {
+                    function().or(Err("names no type or function there"))
+                }
+            }
+            _ => function(),
+        };
+        if let Err(reason) = found {
+            stale.push(format!("read_shapes.{list}: {path}: {item} {reason}"));
         }
         if row.count == 0 {
             stale.push(format!(

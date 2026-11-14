@@ -45,6 +45,21 @@ pub(crate) struct Statement {
     /// The tables the statement reads, after `FROM` or `JOIN`, each once, in
     /// the order they appear.
     pub(crate) reads: Vec<Read>,
+    /// The columns the statement sets with `UPDATE … SET` or an upsert's
+    /// `DO UPDATE SET`, in the order they appear.
+    pub(crate) assignments: Vec<Assignment>,
+}
+
+/// A column an `UPDATE` or an upsert sets, and whether it sets it to itself
+/// plus a positive integer literal.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Assignment {
+    /// The table the statement writes, lowercase.
+    pub(crate) table: String,
+    pub(crate) column: String,
+    pub(crate) increment: bool,
+    /// The byte offset of the column's name in the text.
+    pub(crate) at: usize,
 }
 
 /// A table a statement reads, lowercase, and the byte offset of its name in
@@ -129,6 +144,7 @@ fn statement(words: &[Located], end: usize) -> Option<Statement> {
         creation: creation(words),
         writes: writes(words),
         reads: reads(words),
+        assignments: assignments(words),
     })
 }
 
@@ -231,6 +247,99 @@ fn writes(words: &[Located]) -> Vec<Write> {
         }
     }
     writes
+}
+
+/// The words that end an `UPDATE`'s `SET` list.
+const SET_END_WORDS: &[&str] = &["where", "from", "returning", "end", "order", "limit"];
+
+/// Each column set by `UPDATE t SET …` or by an upsert's `DO UPDATE SET …`,
+/// wherever it stands in the statement, a trigger's body included. An
+/// upsert writes the table of the nearest `INSERT INTO` before it.
+fn assignments(words: &[Located]) -> Vec<Assignment> {
+    let mut found = Vec::new();
+    for index in 0..words.len() {
+        if name_at(words, index) != Some("update") {
+            continue;
+        }
+        let (table, set) = if index > 0 && name_at(words, index - 1) == Some("do") {
+            let Some(table) = upsert_table(words, index) else { continue };
+            (table, index + 1)
+        } else {
+            let first = if name_at(words, index + 1) == Some("or") { index + 3 } else { index + 1 };
+            let Some((table, _, after)) = object_at(words, first) else { continue };
+            (table, after)
+        };
+        if name_at(words, set) != Some("set") {
+            continue;
+        }
+        set_list(words, set + 1, &table, &mut found);
+    }
+    found
+}
+
+/// The table of the `INSERT INTO` or `REPLACE INTO` nearest before `index`.
+fn upsert_table(words: &[Located], index: usize) -> Option<String> {
+    let into = (0..index).rev().find(|&at| {
+        name_at(words, at) == Some("into")
+            && matches!(
+                name_at(words, at.wrapping_sub(1)),
+                Some("insert" | "replace" | "rollback" | "abort" | "fail" | "ignore")
+            )
+    })?;
+    object_at(words, into + 1).map(|(table, _, _)| table)
+}
+
+/// The assignments of the `SET` list starting at `start`.
+fn set_list(words: &[Located], start: usize, table: &str, found: &mut Vec<Assignment>) {
+    let mut index = start;
+    loop {
+        let Some((column, _, after)) = object_at(words, index) else { return };
+        if !matches!(words.get(after).map(|located| &located.word), Some(Word::Symbol('='))) {
+            return;
+        }
+        let value = after + 1;
+        let mut depth = 0usize;
+        let mut end = value;
+        while let Some(located) = words.get(end) {
+            match &located.word {
+                Word::Symbol('(') => depth += 1,
+                Word::Symbol(')') => match depth.checked_sub(1) {
+                    Some(outer) => depth = outer,
+                    None => break,
+                },
+                Word::Symbol(',' | ';') if depth == 0 => break,
+                Word::Name(name) if depth == 0 && SET_END_WORDS.contains(&name.as_str()) => break,
+                _ => {}
+            }
+            end += 1;
+        }
+        found.push(Assignment {
+            table: table.to_string(),
+            increment: is_increment(&words[value..end], &column),
+            column,
+            at: words[index].at,
+        });
+        match words.get(end).map(|located| &located.word) {
+            Some(Word::Symbol(',')) => index = end + 1,
+            _ => return,
+        }
+    }
+}
+
+/// Whether a value is the column plus a positive integer literal.
+fn is_increment(value: &[Located], column: &str) -> bool {
+    let Some((name, _, after)) = object_at(value, 0) else { return false };
+    let number = |index: usize| match value.get(index).map(|located| &located.word) {
+        Some(Word::Name(digits)) => {
+            digits.chars().all(|digit| digit.is_ascii_digit())
+                && digits.chars().any(|digit| digit != '0')
+        }
+        _ => false,
+    };
+    name == column
+        && matches!(value.get(after).map(|located| &located.word), Some(Word::Symbol('+')))
+        && number(after + 1)
+        && value.len() == after + 2
 }
 
 /// The tables after `FROM` and `JOIN`, a `DELETE FROM`'s target aside, and

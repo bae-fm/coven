@@ -14,6 +14,7 @@ mod capability_boundaries;
 mod capability_construction;
 mod component_bundles;
 mod conventions;
+mod counters;
 mod crate_code;
 mod crate_dependencies;
 mod database_boundary;
