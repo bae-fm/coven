@@ -98,7 +98,7 @@ async fn a_statement_cached_in_a_write_is_still_refused_in_a_read() {
         writer
             .transaction(|writer| {
                 let _reading = writer.authorization.reading();
-                Ok(writer.app_query(INSERT, ["2"], |_| Ok(())))
+                Ok(writer.app_query(crate::sqlite::Recorded::No, INSERT, ["2"], |_| Ok(())))
             })
             .unwrap()
     });

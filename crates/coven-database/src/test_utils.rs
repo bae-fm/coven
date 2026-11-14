@@ -19,6 +19,10 @@ pub fn path_text_sql(
 mod work_counts;
 pub use work_counts::{WorkCounter, WorkCounts};
 
+#[path = "statement_log.rs"]
+mod statement_log;
+pub use statement_log::StatementLog;
+
 /// One measured number, as a line `scripts/perf.sh` reads:
 /// `COST metric=<name> value=<n> unit=<ms|ratio|count>`. Lower is better in
 /// every unit. A character in `metric` outside letters, digits and `_./-`

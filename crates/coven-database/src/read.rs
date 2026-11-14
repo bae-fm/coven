@@ -27,7 +27,7 @@ impl<'connection> SqlReadContext<'connection> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.database.app_query_row(sql, params, map)
+        self.database.app_query_row(crate::sqlite::Recorded::Yes, sql, params, map)
     }
 
     /// Map all result rows of an ordinary SQL read.
@@ -36,7 +36,7 @@ impl<'connection> SqlReadContext<'connection> {
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.database.app_query(sql, params, map)
+        self.database.app_query(crate::sqlite::Recorded::Yes, sql, params, map)
     }
 
     /// The journal's rows of `kind`, oldest first, as this read sees them:

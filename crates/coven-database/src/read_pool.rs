@@ -20,6 +20,13 @@ impl ReadPool {
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn test_record_statements(&self, log: &crate::test_utils::StatementLog) {
+        for reader in &self.readers {
+            lock_unpoisoned(reader).test_record_statements(log.clone());
+        }
+    }
+
     pub(super) fn new(readers: Vec<Mutex<DatabaseConnection>>) -> Self {
         Self {
             idle_readers: Mutex::new((0..readers.len()).collect()),

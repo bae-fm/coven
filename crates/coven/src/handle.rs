@@ -721,6 +721,15 @@ impl CovenHandle {
         self.database.test_track_work(counter).await
     }
 
+    /// Record the statements the store's reads run from here on into `log`,
+    /// in application tests and measurements: each `query` and `query_row`
+    /// of a read or a live query's run, as SQLite's text with the bound
+    /// values written in, in order. Writes are not recorded.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_record_statements(&self, log: crate::StatementLog) -> Result<(), DbError> {
+        self.database.record_statements(log).await
+    }
+
     /// The plaintext bytes each section of a store snapshot would hold now,
     /// for a test measuring what a snapshot keeps (D7). Every section's place
     /// is in `coven_format::snapshot::section`.

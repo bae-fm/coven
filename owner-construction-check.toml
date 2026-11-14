@@ -1341,6 +1341,8 @@ tables = [
 
 # The work a test counts on a database, shared by its writer and readers.
 "crates/coven-database/src/work_counts.rs" = ["WorkCounter::new"]
+# The statements a test records a database's reads running.
+"crates/coven-database/src/statement_log.rs" = ["StatementLog::new"]
 # The next commit scope's number, unique across the process.
 "crates/coven-database/src/commit_scope.rs" = ["NEXT"]
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that

@@ -250,7 +250,7 @@ impl<'connection> BulkSqlContext<'connection> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.database.app_query_row(sql, params, map)
+        self.database.app_query_row(crate::sqlite::Recorded::No, sql, params, map)
     }
 
     /// Map all app rows produced by a query within this write.
@@ -259,7 +259,7 @@ impl<'connection> BulkSqlContext<'connection> {
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.database.app_query(sql, params, map)
+        self.database.app_query(crate::sqlite::Recorded::No, sql, params, map)
     }
 }
 

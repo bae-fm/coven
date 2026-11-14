@@ -354,3 +354,31 @@ async fn a_read_fails_with_its_closures_own_error() {
     let closed = db.read(|_| Ok::<_, AppError>(())).await;
     assert!(matches!(closed, Err(AppError::Database(DbError::StoreClosed))), "{closed:?}");
 }
+
+#[tokio::test]
+async fn statement_log_records_a_reads_statements_in_order_with_their_values() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.commit_writer(|sql| {
+        sql.batch("INSERT INTO notes VALUES ('a','Plan','body')").unwrap();
+    });
+    let log = crate::test_utils::StatementLog::new();
+    db.record_statements(log.clone()).await.unwrap();
+    db.read(|sql| {
+        sql.query_row("SELECT title FROM notes WHERE id=?1", ["a"], |r| r.get::<_, String>(0))?;
+        sql.query("SELECT body FROM notes WHERE title=?1", ["Plan"], |r| r.get::<_, String>(0))?;
+        Ok::<_, DbError>(())
+    })
+    .await
+    .unwrap();
+    // A write's statements are not recorded.
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Two','')").unwrap());
+    assert_eq!(
+        log.statements(),
+        vec![
+            "SELECT title FROM notes WHERE id='a'".to_string(),
+            "SELECT body FROM notes WHERE title='Plan'".to_string(),
+        ]
+    );
+    db.close().await.unwrap();
+}

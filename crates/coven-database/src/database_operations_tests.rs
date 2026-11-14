@@ -1,9 +1,25 @@
 //! Test transport support using the actual local-write queue.
 
 use super::Database;
-use crate::DbError;
+use crate::{test_utils::StatementLog, DbError};
 
 impl Database {
+    /// Record the statements every read context of this database runs into
+    /// `log` (`query` and `query_row`, in reads and live queries' runs), as
+    /// SQLite reads them with their bound values written in. Writes and
+    /// migrations are not recorded. Install while the database is quiescent.
+    pub async fn record_statements(&self, log: StatementLog) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.test_record_statements(log.clone());
+                Ok::<_, DbError>(())
+            })?;
+            inner.access.readers.test_record_statements(&log);
+            Ok::<_, DbError>(())
+        })
+        .await
+    }
+
     /// Count executed work on every connection without including counter reads.
     /// Install while the database is quiescent, before starting the measured pass.
     pub async fn test_track_work(

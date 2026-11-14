@@ -64,9 +64,20 @@ use crate::{
 /// would evict before reuse, beside the app's.
 const STATEMENT_CACHE: usize = 512;
 
+/// Whether a statement run through `app_query` belongs to a read, whose
+/// statements a test can record, rather than a write or a migration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recorded {
+    Yes,
+    No,
+}
+
 pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
     work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
+    /// Where this connection's reads push the statements they run.
+    #[cfg(any(test, feature = "test-utils"))]
+    statement_log: std::cell::RefCell<Option<crate::test_utils::StatementLog>>,
     connection: Connection,
     authorization: SqlAuthorization,
     /// Stops a lookup that runs too long (`live_judging.rs`).
@@ -137,6 +148,11 @@ impl DatabaseConnection {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn test_record_statements(&self, log: crate::test_utils::StatementLog) {
+        *self.statement_log.borrow_mut() = Some(log);
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn record_work(&self, update: impl FnOnce(&mut crate::test_utils::WorkCounts)) {
         if let Some(counter) = self.work.borrow().as_ref() {
             counter.record(update);
@@ -181,6 +197,8 @@ impl DatabaseConnection {
         let db = Self {
             #[cfg(any(test, feature = "test-utils"))]
             work: std::cell::RefCell::new(None),
+            #[cfg(any(test, feature = "test-utils"))]
+            statement_log: std::cell::RefCell::new(None),
             connection,
             authorization,
             lookups,
@@ -678,13 +696,14 @@ impl DatabaseConnection {
 
     pub(crate) fn app_query_row<T, P: Params>(
         &self,
+        recorded: Recorded,
         sql: &str,
         params: P,
         map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
         let mut map = Some(map);
         let mut value = None;
-        self.app_rows(sql, params, |row| {
+        self.app_rows(recorded, sql, params, |row| {
             let map = map.take().expect("the first row ends the read");
             value = Some(map(row)?);
             Ok(false)
@@ -694,12 +713,13 @@ impl DatabaseConnection {
 
     pub(crate) fn app_query<T, P: Params>(
         &self,
+        recorded: Recorded,
         sql: &str,
         params: P,
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
         let mut values = Vec::new();
-        self.app_rows(sql, params, |row| {
+        self.app_rows(recorded, sql, params, |row| {
             values.push(map(row)?);
             Ok(true)
         })?;
@@ -711,6 +731,7 @@ impl DatabaseConnection {
     /// answers false.
     fn app_rows<P: Params>(
         &self,
+        recorded: Recorded,
         sql: &str,
         params: P,
         mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
@@ -736,6 +757,14 @@ impl DatabaseConnection {
                 }
             });
             self.record_app_statement(plan.as_deref(), &parameters);
+            #[cfg(any(test, feature = "test-utils"))]
+            if recorded == Recorded::Yes {
+                if let Some(log) = self.statement_log.borrow().as_ref() {
+                    log.push(statement.expanded_sql().expect("prepared SQL"));
+                }
+            }
+            #[cfg(not(any(test, feature = "test-utils")))]
+            let _ = recorded;
             result
         })();
         self.authorization.app_result(result)

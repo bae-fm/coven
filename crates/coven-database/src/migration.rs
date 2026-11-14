@@ -267,7 +267,9 @@ impl<'connection> MigrationContext<'connection> {
         P: Params,
         F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.statement(sql, || self.database.app_query_row(sql, params, map))
+        self.statement(sql, || {
+            self.database.app_query_row(crate::sqlite::Recorded::No, sql, params, map)
+        })
     }
 
     /// Map every result of an app query.
@@ -276,7 +278,9 @@ impl<'connection> MigrationContext<'connection> {
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
     {
-        self.statement(sql, || self.database.app_query(sql, params, map))
+        self.statement(sql, || {
+            self.database.app_query(crate::sqlite::Recorded::No, sql, params, map)
+        })
     }
 }
 

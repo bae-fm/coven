@@ -367,7 +367,9 @@ impl<'a> FileWrite<'a> {
         params: P,
         map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        self.statement(|| self.database.app_query_row(sql, params, map))
+        self.statement(|| {
+            self.database.app_query_row(crate::sqlite::Recorded::No, sql, params, map)
+        })
     }
 
     pub(crate) fn query<T, P: rusqlite::Params>(
@@ -376,7 +378,7 @@ impl<'a> FileWrite<'a> {
         params: P,
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
-        self.statement(|| self.database.app_query(sql, params, map))
+        self.statement(|| self.database.app_query(crate::sqlite::Recorded::No, sql, params, map))
     }
 
     /// The new files the write's moves made for rows removal rules took out,
