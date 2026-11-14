@@ -9462,7 +9462,10 @@ the version her app runs. Ben's phone on an app before version 2 then stops with
 version 2 snapshot it can't read.
 
 **Who raises a circle.** A device raises the audiences it read when its app
-migrated: their raise bodies are the rows it held then, migrated. A circle its
+migrated: their raise bodies are the rows it held then, migrated. A circle it held
+is raised like the store: its writes aren't gated and nothing is rebuilt, and a
+write that lands between the device's migration and its raise is late, judged
+by the converters as any late write is (§18.6). A circle its
 member makes later starts at the base its creation recorded (§15.5). When the
 entry was prepared before the update and applies after it, that base is below
 the device's newest breaking version, and the device raises the circle as the
@@ -13992,9 +13995,6 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A raise to a version its audience has reached in the prefix its operation validated against, or of an audience no one may raise from there on, is refused at every later slot, so that operation adopts the state instead of claiming | `satisfied_raise_never_counts` | `proofs/sequence/CovenSequence/WriteVersion.lean` | §15.9, §18.3, §18.8 |
 | *Body.* A raise body of rows migrated before a part and one with the part converted after agree when the converter does what the migration does to it | `one_part_agrees` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
 | *Body.* A part on the old app landing after the raising device migrated, before its coverage, is in the model's raise body and, under `Drop`, not in coven's | `late_part_differs` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.5 |
-| *Body.* A holder that queues a fresh marker and rebuilds a circle from storage at the marker's read slot raises the model's body at that slot, the rebuilder's | `holder_body_is_rebuilt` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.3, §18.4 |
-| *Body.* A write that landed after the holder's first migration and before its fresh marker's read slot is in the raise body, even under `Drop` | `write_before_fresh_marker_kept` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.4 |
-| *Body.* A part after the fresh marker's read slot is a late write, which `Drop` leaves out | `write_after_fresh_marker_late` | `proofs/sequence/CovenSequence/RaiseBody.lean` | §18.4, §18.6 |
 | A device that read a circle converted, after its first breaking migration, and wrote into it can't handle the circle at its second: capturing it publishes a raise body it never held, and leaving it out sends its held write ahead of the circle's version, refused everywhere and covered by the holder's later raise without it | `second_capture_not_body`, `skipped_capture_drops_held` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
 | *Body.* A device that rebuilt a circle and then runs a second breaking migration captures the circle's rows migrated to the second version: its second migration's step on the rebuilt rows is the honest body | `rebuilt_second_capture_is_body` | `proofs/sequence/CovenSequence/SecondRaise.lean` | §18.3, §18.5 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
