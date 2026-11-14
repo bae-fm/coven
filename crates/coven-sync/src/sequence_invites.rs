@@ -263,35 +263,35 @@ impl InviteWork {
     }
 }
 
-/// The invite a `coven_invites` row lists: its journal entry, and the
-/// operation that names it.
-fn listed(data: &[u8], operation: OperationId) -> Result<Invite, SyncError> {
-    let work: InviteWork = serde_json::from_slice(data)?;
-    let shown = |code: &SecretText| code.as_str().to_owned();
-    let stage = match &work.state {
-        InviteState::Requested | InviteState::Sharing { .. } | InviteState::Grant => {
-            crate::InviteStage::Granting
-        }
-        InviteState::Waiting { code, request } => crate::InviteStage::Waiting {
-            code: shown(code),
-            request: request.as_deref().map(|bytes| work.present_request(bytes)).transpose()?,
-        },
-        InviteState::Approving { code, request, binding } => crate::InviteStage::Approving {
-            code: shown(code),
-            request: work.present_request(request)?,
-            binding: *binding,
-        },
-        InviteState::Settled { .. } => {
-            return Err(coven_database::DbError::Invariant {
-                what: "coven_invites lists invites that haven't ended",
-            }
-            .into())
-        }
-    };
-    Ok(work.shown(operation, stage))
-}
-
 impl Invite {
+    /// Decode one invite from the `invite` and `operation` columns of a
+    /// `coven_invites` row. `Invite::list` decodes its rows with this.
+    pub fn from_columns(invite: &[u8], operation: OperationId) -> Result<Self, SyncError> {
+        let work: InviteWork = serde_json::from_slice(invite)?;
+        let shown = |code: &SecretText| code.as_str().to_owned();
+        let stage = match &work.state {
+            InviteState::Requested | InviteState::Sharing { .. } | InviteState::Grant => {
+                crate::InviteStage::Granting
+            }
+            InviteState::Waiting { code, request } => crate::InviteStage::Waiting {
+                code: shown(code),
+                request: request.as_deref().map(|bytes| work.present_request(bytes)).transpose()?,
+            },
+            InviteState::Approving { code, request, binding } => crate::InviteStage::Approving {
+                code: shown(code),
+                request: work.present_request(request)?,
+                binding: *binding,
+            },
+            InviteState::Settled { .. } => {
+                return Err(coven_database::DbError::Invariant {
+                    what: "coven_invites lists invites that haven't ended",
+                }
+                .into())
+            }
+        };
+        Ok(work.shown(operation, stage))
+    }
+
     /// Read `coven_invites`, as an app's live query does:
     /// `handle.subscribe(Invite::list)`. This device's invites that haven't
     /// ended, in the order they were made (§13.2).
@@ -301,7 +301,7 @@ impl Invite {
             [],
             |row| {
                 let data: Vec<u8> = row.get(0)?;
-                listed(&data, OperationId(row.get(1)?)).map_err(|error| {
+                Self::from_columns(&data, OperationId(row.get(1)?)).map_err(|error| {
                     coven_database::SqliteError::FromSqlConversionFailure(
                         0,
                         coven_database::types::Type::Blob,

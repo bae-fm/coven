@@ -6,6 +6,7 @@
 //! the app's steps a write accepts.
 
 use crate::sequence_sync::sequence_invites::expiry;
+use crate::sequence_sync::sequence_invites::tests::{carol_invite, invite};
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_database::DbError;
@@ -575,4 +576,38 @@ async fn invite_lifecycle_matches_lean() {
         assert_eq!(Value::Array(actual), expected, "{events:?}");
         case.close().await;
     }
+}
+
+/// A statement that selects `coven_invites`' columns in its own order decodes,
+/// through `Invite::from_columns`, the invites `Invite::list` returns.
+#[tokio::test]
+async fn a_statement_over_coven_invites_decodes_the_invites_list_returns() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    invite(&ana).await;
+    carol_invite(&ana, InviteLifetime::SevenDays).await;
+
+    let decoded = ana
+        .sync
+        .database
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT operation, invite FROM coven_invites ORDER BY operation",
+                [],
+                |row| {
+                    let data: Vec<u8> = row.get(1)?;
+                    Ok(Invite::from_columns(&data, coven_database::OperationId(row.get(0)?)))
+                },
+            )?)
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let listed = ana.sync.database.read(Invite::list).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(decoded, listed);
 }

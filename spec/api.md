@@ -3808,7 +3808,7 @@ let moved = handle
 | | `subject_kind` | the kind of `PendingSubject` the record is about, in snake case: `write`, `slot`, `key_copy`, `snapshot`, `upload`, `download`, `keep`, `move`, `operation`, `retention`, `audience` or `connection` |
 | | `reason_kind` | the kind of `PendingReason` the record gives, in snake case: `missing`, `waits`, `key_unavailable`, `original`, `paused`, `failed` and so on, one for each variant |
 | | `original_path` | for a record whose reason is `original`, the original's path as the operating system's bytes, the form `coven_user_files.path` holds, so a join on it finds the original's row; NULL otherwise |
-| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
+| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, decoded with `operation` by `Invite::from_columns`, which `Invite::list` uses |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
 | | `stage` | `granting` until the invite's code is shown, `waiting` while it waits for its request or the admin's decision, `approving` once the admin approved the request; as `InviteStage` names them |
 | | `request_member` | the member the invite's request names, as canonical UUID text and read as `MemberId`, once a request has arrived; NULL before |
@@ -8768,6 +8768,11 @@ impl Invite {
     /// Reads `coven_invites`, in the order the invites were made, for a
     /// read or a live query: `handle.subscribe(Invite::list)`.
     pub fn list(sql: SqlReadContext<'_>) -> Result<Vec<Invite>, DbError>;
+
+    /// Decodes one invite from the `invite` and `operation` columns of a
+    /// `coven_invites` row, for a statement that selects them beside other
+    /// columns. `list` decodes each row this way.
+    pub fn from_columns(invite: &[u8], operation: OperationId) -> Result<Invite, SyncError>;
 }
 
 pub struct JoinRequest {
