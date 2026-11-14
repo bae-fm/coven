@@ -13908,7 +13908,7 @@ the same on any platform.
     proof write-up cites has its own `#print axioms` line in its package's
     `Axioms.lean`, so check 9 audits it by name. spec/WRITING.md is the standard
     they help keep. It includes the tests of the check scripts themselves
-    (`scripts/check_spec_tests.py`, `scripts/check_fast_tests.py`).
+    (`scripts/check_spec_tests.py`, `scripts/perf_tests.py`).
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.
@@ -13917,9 +13917,11 @@ Tests control clocks, transfer limits and request completion. Upload boundary
 tests use byte-sized payloads; races wait for observed events; interrupted
 operations are reopened until they report completion.
 
-The pre-commit hook runs the fast checks: formatting, clippy, the rules of F.1 to
-F.5, every crate built without test code (check 7), and the spec's own checks;
-and, when a commit changes one of the check scripts, that script's tests.
+The pre-commit hook is `builds checks run`, which runs the lines of `.checks`
+that the staged files match: formatting, the rules of F.1 to F.5, the licenses
+and bans of `deny.toml`, clippy and a build without test code (check 7) over the
+crates holding a staged file, and the spec's own checks. It runs no tests; the
+tests of the check scripts are `test` lines of `.checks`, which CI runs.
 
 ---
 

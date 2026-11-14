@@ -1,0 +1,26 @@
+# The checks `builds checks run` runs on a commit's staged files (the
+# pre-commit hook, written by `builds install-hook`), and the tests of the
+# checkers `builds checks tests` runs.
+#
+#   <kind> <name> <paths> <program> [args...]
+#
+# kind: `check` (static check), `fix` (formatter; builds re-stages what it
+# changed) or `test` (a checker's own test: never run by the hook). paths: the
+# files the line reads, as comma-separated globs. `{files}` is the staged files
+# that match; `{crates}` is `-p <crate>` for each workspace crate holding one.
+# A line with neither runs once, on everything it reads. Formatting and static
+# analysis only; the tests are the `test` lines.
+
+# Rust
+fix rustfmt *.rs rustfmt {files}
+check ownership *.rs,*.sql,Cargo.toml,Cargo.lock,owner-construction-check.toml scripts/cargo.sh run --quiet -p owner-construction-check -- .
+check deny Cargo.toml,Cargo.lock,deny.toml cargo deny check advisories bans licenses
+check clippy *.rs,Cargo.toml,Cargo.lock,clippy.toml,rust-toolchain.toml,.cargo/** scripts/cargo.sh clippy {crates} --all-targets --all-features -- -D warnings
+check build-without-test-code *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.cargo/** scripts/cargo.sh check {crates}
+
+# Spec
+check spec-readability spec/*.md,scripts/check-spec.py python3 scripts/check-spec.py
+
+# Checker tests, run in CI when a push touches a checker or its test
+test check-spec-test scripts/check-spec.py,scripts/check_spec_tests.py python3 scripts/check_spec_tests.py
+test perf-test scripts/perf.py,scripts/perf.sh,scripts/perf_tests.py python3 scripts/perf_tests.py

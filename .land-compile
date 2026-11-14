@@ -1,10 +1,10 @@
 #!/bin/bash
 # Compile check that land.sh runs on a cherry-picked result before pushing it
 # (see .land-checks for the static ones). Builds what the pre-commit hook's
-# scripts/check-fast.sh builds, so the landing worktree reuses the hook's warm
-# build: clippy over the workspace with every target and feature, warnings
-# denied, then each crate with no features. The hook has no dependency-aware
-# selection, so this builds the whole workspace. Two commits that each pass the
+# `.checks` lines build, over the whole workspace: clippy with every target and
+# feature, warnings denied, then each crate with no features. The hook builds
+# only the crates holding a staged file, so a commit's dependents are first
+# checked here. Two commits that each pass the
 # hook can break each other's tests; this is where that shows.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"

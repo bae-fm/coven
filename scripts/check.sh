@@ -139,8 +139,6 @@ code_checks() {
 
     step "the check scripts' own tests"
     "$(command -v python3 || command -v python)" scripts/check_spec_tests.py
-    "$(command -v python3 || command -v python)" scripts/check_fast_tests.py
-    "$(command -v python3 || command -v python)" scripts/hook_restage_tests.py
     "$(command -v python3 || command -v python)" scripts/perf_tests.py
 
     # Build the structural checker before the crates whose graph it validates (Appendix F.6).
