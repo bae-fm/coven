@@ -131,10 +131,16 @@ pub enum PendingSubject {
 /// A fact required before processing can continue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prerequisite {
-    /// A completed read and apply through the current sequence end.
+    /// A completed read and apply through the current sequence end, which a
+    /// file read or a member-key replacement waits for. A slot never blocks
+    /// on it.
     SequenceCatchUp,
-    /// This audience must reload.
+    /// This audience must reload: a slot holds a raise or reset of it, and no
+    /// snapshot announced after it is named yet.
     Reload(#[serde(with = "crate::pending_encoding::audience")] Audience),
+    /// A slot's reload met a newer floor, which retention moved past the slots
+    /// it needed; the next pass retries it from the new floor.
+    Floor,
 }
 
 /// A local invariant or resource failure; immediate calls retain the native cause.

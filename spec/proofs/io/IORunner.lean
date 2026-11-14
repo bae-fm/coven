@@ -360,6 +360,8 @@ private def failures : List (String × CovenIO.SyncState.Failure) := [
 private def reasons : List (String × Reason) := [
     ("missing", .missing),
     ("waits", .waits),
+    ("waitsReload", .waitsReload),
+    ("waitsFloor", .waitsFloor),
     ("keyUnavailable", .keyUnavailable),
     ("updateRequired", .updateRequired),
     ("noStorage", .noStorage),
@@ -433,7 +435,8 @@ def stateName : State → String
 def waitName : SyncWait → String
   | .notSyncing => "notSyncing"
   | .coolingDown => "coolingDown"
-  | .blocked => "blocked"
+  | .keyCopy => "keyCopy"
+  | .snapshot => "snapshot"
   | .retrying => "retrying"
 
 def activityName : Activity → String
@@ -466,7 +469,7 @@ private def upload (j : Json) : Except String Upload := do
 (`synced` or `{"failed": pass failure}`), `moved` (`null`, `"read"` or
 `"claimed"`), `uploads`, `unsent`,
 `running`, `cooling`, `paused`, `unmeteredOnly`, `metered`, `keysChanging`,
-`passRetrying` and the pending `records`' reasons. -/
+`writeKey`, `passRetrying` and the pending `records`' reasons. -/
 private def facts (j : Json) : Except String Facts := do
   let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
     "storage" (← j.getObjValAs? String "storage")
@@ -488,6 +491,7 @@ private def facts (j : Json) : Except String Facts := do
     unmeteredOnly := ← j.getObjValAs? Bool "unmeteredOnly"
     metered := ← j.getObjValAs? Bool "metered"
     keysChanging := ← j.getObjValAs? Bool "keysChanging"
+    writeKey := ← j.getObjValAs? Bool "writeKey"
     passRetrying := ← j.getObjValAs? Bool "passRetrying" }
 
 /-- `SyncState.state` of one set of facts. Reports the state's name as

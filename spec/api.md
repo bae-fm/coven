@@ -1835,7 +1835,10 @@ pub struct StagedDigest(/* private */);
 
 /// What a downloaded write waits for before it can apply (§5.4, §19.1).
 pub enum WriteWait {
-    /// These original row changes are unavailable even if their slots were consumed.
+    /// These original row changes are unavailable even if their slots were
+    /// consumed. A slot read in order never meets it from a genuine write,
+    /// whose sources landed before it (§9.5): sync refuses such a slot as
+    /// damaged.
     Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
@@ -4613,8 +4616,8 @@ while let Some(Ok(values)) = lost.next().await {
     §19.1's order shows; Appendix H.3 of coven.md lists which state each
     fact names.
   - Synced means nothing waits, data or files: a pass held back at a slot
-    that can't apply yet or by a provider's cooldown waits to sync, with what
-    holds it (`SyncWait`); while a file waits in the upload queue the state
+    for a key or a snapshot or by a provider's cooldown waits to sync, with
+    what holds it (`SyncWait`); while a file waits in the upload queue the state
     is syncing, uploading a bound file, as it moves or waits its turn,
     waiting to sync while something holds every transfer or the file waits
     out a retry, with what holds it, or failed when its source failed, naming
@@ -5562,10 +5565,16 @@ pub enum PendingSubject {
 
 /// A condition coven has not yet observed (§19.1).
 pub enum Prerequisite {
-    /// A completed read and apply through the current sequence end (§11.1).
+    /// A completed read and apply through the current sequence end (§11.1),
+    /// which a file read or a member-key replacement waits for. A slot never
+    /// blocks on it.
     SequenceCatchUp,
-    /// This audience must reload.
+    /// This audience must reload: a slot holds a raise or reset of it, and no
+    /// snapshot announced after it is named yet (§16.5).
     Reload(Audience),
+    /// A slot's reload met a newer floor, which retention moved past the
+    /// slots it needed; the next pass retries it from the new floor (§16.2).
+    Floor,
 }
 
 /// One vocabulary for failed object checks in calls and pending records.
@@ -5952,7 +5961,7 @@ pub enum SyncState {
     /// a write, else the next pass.
     Syncing(SyncActivity),
     /// Nothing moves, and something holds the work for a while: the last pass
-    /// was held back, at a slot that can't apply yet or by a provider's
+    /// was held back, at a slot for a key or a snapshot or by a provider's
     /// cooldown, or it, a bound file or a write waits out a retry, or sync
     /// isn't running: what the pass waits for, else what the first such file
     /// waits for, else what the write waits for.
@@ -6011,9 +6020,15 @@ pub enum SyncWait {
     NotSyncing,
     /// The provider asked every request to wait until then (§6.7).
     CoolingDown { until: SystemTime },
-    /// A slot can't apply yet; nothing goes out or comes in until it does
-    /// (§5.4).
-    Blocked,
+    /// A slot, or the first write in the send queue, needs a key this device
+    /// holds no copy of; another device of a member holding it sends one
+    /// (§12.1). A slot waiting on it holds everything: nothing goes out or
+    /// comes in until the key arrives (§5.4).
+    KeyCopy { audience: Audience, key: KeyId },
+    /// A slot holds a raise or reset of `audience`, and no snapshot announced
+    /// after it is named yet; another device takes one (§16.5). Nothing goes
+    /// out or comes in until then.
+    Snapshot { audience: Audience },
     /// A failure that clears by itself and names no state of its own, on the
     /// pass, a slot's application, coven's own operation or a bound file's
     /// attempt, has failed, and the next try is then, or at the person's
@@ -6652,7 +6667,8 @@ pub enum UploadWait {
     NotSyncing,
     /// The provider asked every request to wait until then (§6.7).
     CoolingDown { until: SystemTime },
-    /// A slot can't apply yet, so no transfer goes out until it does (§5.4).
+    /// A slot waits for a key or a snapshot, so no transfer goes out until it
+    /// comes (§5.4).
     Sync,
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).

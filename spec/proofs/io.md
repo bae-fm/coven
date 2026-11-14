@@ -346,9 +346,18 @@ reachability. A file that can't be uploaded or read names failed
 (`file_failures_name_failed`): an original missing or changed, coven's copy
 failing its check, stored bytes lost or refused. `bad_file_fails` proves
 such a record keeps the state at failed or what outranks it. A pass held
-on a wait, such as a slot waiting on another device's key or a provider's
-cooldown, is no failure either: it waits to sync (`waiting_pass_waits`),
-without moving the time of the last finished sync. A failure that clears by
+on a wait, such as a slot waiting on another device's key or a snapshot, or a
+provider's cooldown, is no failure either: it waits to sync
+(`waiting_pass_waits`), without moving the time of the last finished sync.
+The wait a slot names is `Reason.slotWait`, the key (`keyCopy`) or the
+snapshot (`snapshot`): `blocked_names_its_wait` proves the pass, every bound
+upload and every write behind it wait for it, and `slot_wait_names_no_state`
+that it names no state. A slot whose reload met a newer floor (`waitsFloor`)
+names no wait: `floor_is_a_turn` proves the next pass's turn is syncing. A
+slot blocks with no other reason that names no state and doesn't clear by
+itself, so one that did names failed (`Reason.slotState`). A write recorded as
+waiting for a key it can't seal under waits for that key (`Facts.writeKey`),
+after what holds the pass and a bound file. A failure that clears by
 itself and names no state of its own is one wait: `self_clearing_waits` proves
 a pass ending on it never names failed, and `one_retry` that the same failure
 as the pass's, as a slot's block or as coven's own operation's names the same

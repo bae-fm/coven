@@ -3213,9 +3213,15 @@ as written, and a later replacement of the cell doesn't clear it.
   which slots were consumed; it can't turn a dropped source into data that
   counts. The original cause survives later schema raises.
 - **Checking sources.** Sources are checked against the original authored
-  history. Missing evidence waits; invalid evidence is refused. None of these
-  establishes a source: a read position, an old value that happens to be equal,
-  or the write that currently holds the generation.
+  history. Invalid evidence is refused, and so is a source whose write hasn't
+  landed when the write naming it is judged: a genuine write names only
+  changes of writes that landed before it, the slots it read and its device's
+  own earlier writes
+  ([`sources_present`](proofs/merge/CovenMerge/Sources.lean)), so a write
+  naming one is not genuine, no later slot supplies it, and its slot is
+  damaged (§19.1). None of these establishes a source: a read position, an
+  old value that happens to be equal, or the write that currently holds the
+  generation.
 - **Sources no genuine write names.** A device forgets a change's record once
   no write still to be judged can genuinely name it (§16.7), and devices
   forget at different slots. A forged write can still name the change. Two
@@ -3230,11 +3236,11 @@ as written, and a later replacement of the cell doesn't clear it.
     hold.** A device's writes land in number order, so the source's write
     landed before the write being judged when another write of its device
     numbered at or above it has landed. Such a source never waits and is
-    never invalid. One whose write hasn't landed, which only a device's own
-    predecessor of the judged write can be, waits for it. A migration write whose raise lost to
-    another device's is one case: no history holds its changes (§18.8). A
-    device that loaded a snapshot covering that write knows it only as a
-    covered write, with no part and no header, and treats it the same.
+    never invalid. One whose write hasn't landed is refused (above). A
+    migration write whose raise lost to another device's is one case: no
+    history holds its changes (§18.8). A device that loaded a snapshot
+    covering that write knows it only as a covered write, with no part and no
+    header, and treats it the same.
 
   Neither rule reads the source's record further: not its role, timestamp or
   values. A device that forgot the record couldn't, so one that holds it
@@ -10115,8 +10121,11 @@ The state is one of, in the order an app lists them:
   yet (§5.4) or by a provider's cooldown (§6.7), or it, a bound file or a
   write waits out a retry, or sync isn't running. It names what the pass
   waits for, else what the first bound file waits for, else what the write
-  waits for: sync isn't running, a provider's cooldown, a slot that can't
-  apply yet, or the time of the next try after a failed attempt. A turn that
+  waits for: sync isn't running, a provider's cooldown, the key a slot or a
+  write needs that this device holds no copy of (the *key copy* wait, which
+  names the key and its audience), the snapshot a raise or reset waits for
+  (the *snapshot* wait, which names the audience), or the time of the next
+  try after a failed attempt. A turn that
   hasn't come is never a wait ([`waiting_holds`](proofs/io/CovenIO/Activity.lean)).
 - **Synced:** nothing waits. The last pass reached the end of the sequence,
   every bound file this device uploads is stored, the send queue is empty, and
@@ -10161,11 +10170,16 @@ which state each fact names, and
 [`syncing_iff`](proofs/io/CovenIO/Activity.lean) says when syncing shows.
 
 - **A wait names no failure.** A slot waiting on another device's key, a
-  provider's cooldown, a pending invite, a snapshot not yet taken: none is a
-  failure, and none needs the person. A pass held back by one didn't get
-  everything in or out, so it waits to sync, naming what holds it: sync
-  stopped, the cooldown, or the slot. Once a cooldown is over the pass's turn
-  has come, which is syncing, receiving, not a wait. It doesn't move the last
+  provider's cooldown, a snapshot not yet taken: none is a failure, and none
+  needs the person. A pass held back by one didn't get everything in or out,
+  so it waits to sync, naming what holds it: sync stopped, the cooldown, the
+  key the slot needs, or the snapshot not yet taken
+  ([`blocked_names_its_wait`](proofs/io/CovenIO/SyncState.lean)). A slot whose
+  reload met a newer floor holds nothing: the next pass retries it, and its
+  turn is syncing, receiving
+  ([`floor_is_a_turn`](proofs/io/CovenIO/SyncState.lean)), as it is once a
+  cooldown is over. A pending invite waits on an operation, never holds a
+  pass, and is no wait of the state's. A pass held back doesn't move the last
   synced time. Ana's phone reads a
   slot sealed with a key her laptop hasn't delivered yet: she waits to sync
   until the key comes, though nothing of hers is queued.
@@ -13796,6 +13810,7 @@ Write-ups explain each model and state its assumptions:
 | A queued write's claim ranks after every published one, in write-number order: the order the device's claims will have once its queued writes land, so the row it selects for a value is the one selected after they land | `landing_agrees`, `queued_loss_stands`, `published_before_queued` | `proofs/sequence/CovenSequence/LiveClaims.lean` | §9.2 |
 | Within its row, a change is kept exactly when its write makes it, it passes its own checks, and the writes that supplied its generation and set the cells it replaced are all kept; a change whose foreign-key cause in the same write was dropped has no effect | `retained_iff`, `dropped_cause_no_effect` | `proofs/merge/CovenMerge/DataDependency.lean`; `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.5 |
 | *Body.* A genuine write, authored over the slots it read and its own queued writes, never names a change that stopped being current within those slots; so counting such a source as dropped gives every genuine write the verdict it had before, given stop slots kept faithfully | `genuine_names_no_stopped`, `stopped_rule_spares_genuine` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §9.5, §16.7 |
+| *Body.* A genuine write, authored over the slots it read and its own queued writes, names only changes of writes that landed before it, so a source that has not landed when its write is judged was named by a write that is not genuine | `current_run`, `sources_present` | `proofs/merge/CovenMerge/Sources.lean` | §9.5 |
 | *Body.* With the two source rules, a write that lands after its device passed each forgotten change's stop slot, or that read past it itself, gets the same decision with the forgotten records removed as with them kept. The decision is modelled in the shape of `retained_iff`, as admission and every source counting, not wired into `DataDependency.retained` | `forget_preserves_judgement` | `proofs/merge/CovenMerge/ForgetEdits.lean` | §9.5, §16.7 |
 | The data rule and value accounting: receive order, progress, and dropping by data | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | §9.5 |
 | The owner is the creation with the lowest slot, then the lower write number | `selected_creation`, `lower_write_number_wins` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
@@ -14060,6 +14075,7 @@ Write-ups explain each model and state its assumptions:
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a bound file is queued decides, and a write committed while offline changes one into the other with no pass; waiting to sync only while nothing moves, naming the wait of a held-back pass, a queued bound file or a queued write, and synced only once every bound file this device uploads is stored and the send queue is empty, and only after a pass that ended synced; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end, or setup, joining or restoring finishing, changes it; only opening, setup or forgetting changes whether storage is set up, and a pass, the sync loop or the attempt to connect ending on a failure that names a state, or the upload worker's panic, shows that state or one that outranks it, never synced, with every queued upload then waiting for sync to run; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `waiting_not_moving`, `synced_bound_stored`, `synced_writes_sent`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `network_keeps_state`, `only_setup_changes_storage`, `failed_worker_shows`, `halted_uploads_wait` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* A pass ending on a failure that clears by itself and names no state of its own never names failed, and the same failure as the pass's, as a slot's block or as coven's own operation's names the same candidate on a quiet device: waiting to sync, retrying | `self_clearing_waits`, `one_retry` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| *Body.* A pass blocked at a slot for a key or a snapshot waits for it, and so does every bound upload and write behind it; such a wait names no state; a slot whose reload met a newer floor holds nothing and its turn is syncing | `blocked_names_its_wait`, `slot_wait_names_no_state`, `floor_is_a_turn` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* Syncing shows exactly when an activity is named and no candidate outranks it; waiting to sync shows only while something holds the work or a retry is armed, never for a turn; what the pass moved comes first and a bound file before the writes it holds; a write committed with nothing holding it shows syncing, sending, in that step; each activity is reached | `syncing_iff`, `waiting_holds`, `move_first`, `bound_before_write`, `next_write_sends`, `every_activity` | `proofs/io/CovenIO/Activity.lean` | §19.1 |
 | *Body.* A trailing file never changes the sync state; a file's phase in the upload queue is failed exactly when its record names a state, and its backoff exactly when its record names none and nothing before the backoff holds it; a bound upload is never held by the pause, a metered network or a self-replacement's write pause, and a trailing one waits for the network only while the setting is on, the network metered and nothing but the pause before it; every phase and every wait a file can have is reached by some run of the facts' events | `trailing_keeps_state`, `phase_failed_iff`, `phase_retrying_iff`, `paused_only_trailing`, `metered_holds`, `metered_only_held`, `every_phase` | `proofs/io/CovenIO/Transfers.lean` | §17.4, §17.9 |
 | A state shows exactly when a fact names it and none names one above it; synced shows exactly on a connected device whose last pass ended synced, with nothing moving, every bound upload stored, no write queued and no record naming a state; each wait holds for the fact that names it; every state and every wait is reached by some run of the facts' events | `state_iff`, `candidate_iff`, `synced_iff`, `pass_wait_holds`, `wait_facts`, `every_state`, `every_wait` | `proofs/io/CovenIO/SyncReach.lean` | §19.1 |
@@ -14242,7 +14258,12 @@ recorded, comes before them all.
 | a write in the send queue | syncing, sending, while nothing holds the pass or a bound file; waiting to sync while something does |
 | the next pass's turn, once nothing holds it: a cooldown that held the last pass is over, or a failure that clears by itself has no backoff armed | syncing, receiving |
 | the last pass synced | synced |
-| the last pass held back by a wait: blocked at a slot whose reason names nothing, or failed with `RateLimited` while the cooldown holds | waiting to sync |
+| the last pass blocked at a slot for a key this device holds no copy of (`KeyUnavailable`) | waiting to sync, key copy: the key and its audience |
+| the last pass blocked at a slot holding a raise or reset whose snapshot isn't named yet (`Waits(Reload)`) | waiting to sync, snapshot: the audience |
+| the last pass blocked at a slot whose reload met a newer floor (`Waits(Floor)`) | none: the next pass's turn, syncing, receiving |
+| the last pass failed with `RateLimited` while the cooldown holds | waiting to sync, cooling down |
+| the first write in the send queue recorded as waiting for a key (`KeyUnavailable` about a write), with nothing holding the pass or a bound file | waiting to sync, key copy |
+| the last pass blocked at a slot with any other reason that names no state and doesn't clear by itself, such as `Waits(SequenceCatchUp)`: a slot blocks with none of them | failed |
 | the last pass got no provider response | offline; offline with unsent changes while the send queue holds a write or the upload queue a bound file with bytes to send |
 | the last pass, or a record, failed with `Authentication` | signed out |
 | ... with `PermissionDenied` or `AccessNotGranted` | no access to storage |
@@ -14266,7 +14287,10 @@ What waiting to sync names (`SyncWait`), for a held-back pass, else for the
 first waiting bound file in the queue, else for a write in the send queue,
 the first that holds: sync isn't running (`NotSyncing`); a provider's
 cooldown holds every request (`CoolingDown`); the last pass is blocked at a
-slot (`Blocked`); the last pass, a slot's application, coven's own operation
+slot for a key (`KeyCopy`, which names the key and its audience) or for a
+snapshot (`Snapshot`, which names the audience); the first write in the send
+queue is recorded as waiting for a key (`KeyCopy`); the last pass, a slot's
+application, coven's own operation
 or, for a bound file, its own attempt failed with a failure that clears by
 itself, and it waits out its backoff (`Retrying`). With none of these the
 work's turn has come, and the state is syncing.

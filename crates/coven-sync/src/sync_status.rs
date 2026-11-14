@@ -13,8 +13,10 @@
 //! `Facts::upload_phase` as the model's `Upload.phase` in `Transfers.lean`
 //! computes it.
 
-use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, StatusFailure};
+use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, Prerequisite, StatusFailure};
 use coven_database::{DbError, RecordedLocation, RetrySync};
+use coven_foundation::id_source::KeyId;
+use coven_merge::Audience;
 use coven_storage::{CloudProvider, StorageFailure};
 use std::time::SystemTime;
 
@@ -105,8 +107,9 @@ pub enum SyncActivity {
 
 /// What waiting to sync waits for, as `WaitingToSync` names it: what holds
 /// every transfer, the pass's and each file's alike, first; then, for a
-/// bound file waiting in the upload queue, what holds that file (§19.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// bound file waiting in the upload queue, what holds that file, then a
+/// write's own key (§19.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncWait {
     /// Sync isn't running (`start_sync`, `stop_sync`).
     NotSyncing,
@@ -115,9 +118,23 @@ pub enum SyncWait {
         /// When the cooldown ends, by the store's clock.
         until: SystemTime,
     },
-    /// A slot can't apply yet; nothing goes out or comes in until it does
-    /// (§5.4).
-    Blocked,
+    /// A slot, or the first write in the send queue, needs a key this device
+    /// holds no copy of; another device of a member holding it sends one
+    /// (§12.1). A slot waiting on it holds everything: nothing goes out or
+    /// comes in until the key arrives (§5.4).
+    KeyCopy {
+        /// The key's audience.
+        audience: Audience,
+        /// The key.
+        key: KeyId,
+    },
+    /// A slot holds a raise or reset of `audience`, and no snapshot announced
+    /// after it is named yet; another device takes one (§16.5). Nothing goes
+    /// out or comes in until then.
+    Snapshot {
+        /// The audience whose snapshot is awaited.
+        audience: Audience,
+    },
     /// A failure that clears by itself and names no state of its own, on the
     /// pass, a slot's application, coven's own operation or a bound file's
     /// attempt, has failed, and the next try is then, or at the person's
@@ -307,6 +324,74 @@ impl PendingReason {
         }
     }
 
+    /// The wait a slot blocked with this reason names (the model's
+    /// `Reason.slotWait`): the key it needs, or the snapshot it waits for. A
+    /// newer floor names none: the next pass retries it.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    pub(super) fn slot_wait(&self) -> Option<SyncWait> {
+        match self {
+            Self::KeyUnavailable { audience, key } => {
+                Some(SyncWait::KeyCopy { audience: audience.clone(), key: *key })
+            }
+            Self::Waits(Prerequisite::Reload(audience)) => {
+                Some(SyncWait::Snapshot { audience: audience.clone() })
+            }
+            Self::Waits(Prerequisite::Floor | Prerequisite::SequenceCatchUp)
+            | Self::Missing { .. }
+            | Self::UpdateRequired(_)
+            | Self::NoStorage
+            | Self::Storage { .. }
+            | Self::Refused(_)
+            | Self::WritesRefused { .. }
+            | Self::ProviderPending { .. }
+            | Self::AccountInUse { .. }
+            | Self::AccessRemains { .. }
+            | Self::FileUnavailable(_)
+            | Self::Original { .. }
+            | Self::Failed(_)
+            | Self::Rejected(_)
+            | Self::Cleanup { .. }
+            | Self::Paused
+            | Self::Removed
+            | Self::NotAdmitted
+            | Self::MemberKeysReplaced { .. } => None,
+        }
+    }
+
+    /// What a slot blocked with this reason names (the model's
+    /// `Reason.slotState`). The reasons that wait (`slot_wait`, a newer
+    /// floor), the failures that clear by themselves and those that name a
+    /// state keep what `names` says. A slot blocks with no other reason, so
+    /// one that did would be coven's own bug: it names failed.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn slot_names(&self) -> Option<Named> {
+        match self {
+            Self::KeyUnavailable { .. }
+            | Self::Waits(Prerequisite::Reload(_) | Prerequisite::Floor) => None,
+            Self::Waits(Prerequisite::SequenceCatchUp)
+            | Self::Missing { .. }
+            | Self::UpdateRequired(_)
+            | Self::NoStorage
+            | Self::Storage { .. }
+            | Self::Refused(_)
+            | Self::WritesRefused { .. }
+            | Self::ProviderPending { .. }
+            | Self::AccountInUse { .. }
+            | Self::AccessRemains { .. }
+            | Self::FileUnavailable(_)
+            | Self::Original { .. }
+            | Self::Failed(_)
+            | Self::Rejected(_)
+            | Self::Cleanup { .. }
+            | Self::Paused
+            | Self::Removed
+            | Self::NotAdmitted
+            | Self::MemberKeysReplaced { .. } => {
+                self.names().or_else(|| (!self.clears_by_itself()).then_some(Named::Failed))
+            }
+        }
+    }
+
     /// Whether the record names a state of its own, which fails the
     /// upload it is about (the model's `Reason.state` is some).
     pub(crate) fn names_a_state(&self) -> bool {
@@ -393,7 +478,7 @@ impl LastPass {
             Self::Offline { .. } if unsent => SyncState::OfflineWithUnsentChanges(cause()),
             Self::Offline { .. } => SyncState::Offline(cause()),
             Self::Blocked { reason, .. } => {
-                reason.names().map_or_else(waiting, |named| named.state(cause(), provider))
+                reason.slot_names().map_or_else(waiting, |named| named.state(cause(), provider))
             }
             Self::Failed { failure, .. } => {
                 failure.names().map_or_else(waiting, |named| named.state(cause(), provider))

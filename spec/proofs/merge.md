@@ -705,6 +705,17 @@ checked landing order, a write whose device passed each forgotten record's
 stop slot before it, or which read past that slot itself, gets the same
 decision with the forgotten records removed (`forget`) as with them kept.
 
+`Sources.lean` proves that a genuine write's sources have all landed before it
+(coven.md §9.5). `current_run` proves a change current after writes applied
+to a state came from that state or from one of the writes. `sources_present`
+proves that a write authored over the canonical state through a
+`read_through` no later than its own position, with queued writes that its
+device numbered below it and so lands before it, names only changes of writes
+before its position. A device judging the write has landed every write before
+it, since it applies slots in order, so the verdict that waits for a source
+whose write hasn't landed is never given to a genuine write: a write with
+such a source is not genuine, and no later slot supplies it.
+
 `ForgetEntries.lean` proves that a device can forget applied-write entries no
 check reads (coven.md §16.7). An `Entry` holds a write's device, number,
 slot, timestamp and `read_through`. `Retains log T kept` says the kept

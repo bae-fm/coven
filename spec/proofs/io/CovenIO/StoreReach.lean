@@ -98,7 +98,7 @@ theorem quiet_shows {f : Facts} (q : Quiet f) (last : LastPass) (now : Nat) :
       CovenIO.SyncState.Facts.others, CovenIO.SyncState.Facts.loop,
       CovenIO.SyncState.Facts.ended, CovenIO.SyncState.Facts.unsentWork,
       CovenIO.SyncState.Facts.bound, CovenIO.SyncState.Facts.passWait,
-      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked,
+      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.slotWait,
       CovenIO.SyncState.Facts.lastRetries, q.noUploads, q.noRecords, q.noWrites]
 
 variable (R : Rules S)
@@ -131,7 +131,7 @@ theorem key_wait_reached {st : Store S} {seq : Nat → Slot S} (g : Good R st se
       ¬ PassEnd seq st self me gen dv' .synced ∧
       PassEnd seq st self me gen dv' (.failed (.blocked .keyUnavailable)) ∧
       (run f [.begin, .finish (.failed (.blocked .keyUnavailable)) now]).map
-        (fun x => (state x, x.waits)) = some (.waitingToSync, [.blocked]) := by
+        (fun x => (state x, x.waits)) = some (.waitingToSync, [.keyCopy]) := by
   intro dv' steps
   have stays := (CovenSequence.device_stops R g followed missing ok touch dv' steps).1
   obtain ⟨sameFollows, sameKeys, _⟩ := CovenSequence.devs_frame R steps
@@ -144,9 +144,10 @@ theorem key_wait_reached {st : Store S} {seq : Nat → Slot S} (g : Good R st se
       CovenIO.SyncState.Facts.writes, CovenIO.SyncState.Facts.others,
       CovenIO.SyncState.Facts.loop, CovenIO.SyncState.Facts.ended,
       CovenIO.SyncState.PassFailure.state, CovenIO.SyncState.Reason.state,
+      CovenIO.SyncState.Reason.slotState, CovenIO.SyncState.Reason.slotWait,
       CovenIO.SyncState.Facts.waits, CovenIO.SyncState.Facts.passWait,
-      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.blocked, CovenIO.SyncState.Facts.bound,
-      CovenIO.SyncState.Facts.lastRetries, CovenIO.SyncState.Reason.byItself,
+      CovenIO.SyncState.Facts.heldAll, CovenIO.SyncState.Facts.slotWait, CovenIO.SyncState.Facts.bound,
+      CovenIO.SyncState.Facts.lastRetries,
       CovenIO.SyncState.State.work, q.noUploads,
       q.noWrites, q.noRecords, running, cooling]
 

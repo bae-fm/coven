@@ -97,7 +97,7 @@ something holds the work: sync stopped, a cooldown, a slot that can't apply, or
 a retry, the pass's or a bound upload's. -/
 theorem waiting_holds (f : Facts) (h : state f = .waitingToSync) :
     f.heldAll ≠ none ∨ (f.lastRetries = true ∧ f.passRetrying = true) ∨
-      ∃ u ∈ f.bound, u.retrying = true := by
+      (∃ u ∈ f.bound, u.retrying = true) ∨ f.writeKey = true := by
   obtain ⟨nonempty, _, _⟩ := waiting_not_moving f h
   obtain ⟨w, hw⟩ := List.exists_mem_of_ne_nil _ nonempty
   have := wait_facts f w hw
@@ -105,11 +105,16 @@ theorem waiting_holds (f : Facts) (h : state f = .waitingToSync) :
   cases w with
   | notSyncing => left; simp [Facts.heldAll, this]
   | coolingDown => left; simp [Facts.heldAll, this.1, this.2]
-  | blocked =>
+  | keyCopy =>
+      rcases this with ⟨r1, r2, r, e, h⟩ | ⟨_, key, _⟩
+      · left
+        simp [Facts.heldAll, Facts.slotWait, r1, r2, e, h]
+      · exact .inr (.inr (.inr key))
+  | snapshot =>
       left
-      obtain ⟨r1, r2, r3, _⟩ := this
-      simp [Facts.heldAll, r1, r2, r3]
-  | retrying => exact this.2.elim (fun u => .inr (.inr u)) (fun l => .inr (.inl l))
+      obtain ⟨r1, r2, r, e, h⟩ := this
+      simp [Facts.heldAll, Facts.slotWait, r1, r2, e, h]
+  | retrying => exact this.2.elim (fun u => .inr (.inr (.inl u))) (fun l => .inr (.inl l))
 
 /-- The pass's move comes first. -/
 theorem move_first (f : Facts) (m : Moved) (h : f.moved = some m) :
@@ -142,6 +147,7 @@ of a device that is synced, with nothing moving, nothing queued, sync running
 and no cooldown or retry, shows syncing, sending, in that step. -/
 theorem next_write_sends (f : Facts) (connected : f.storage = .connected) (last : f.last = .synced)
     (still : f.moved = none) (noUploads : f.bound = []) (noRecords : f.records = [])
+    (noKey : f.writeKey = false)
     (running : f.running = true) (cooling : f.cooling = false) :
     (step f (.queue true)).map (fun g => (state g, g.activities)) =
       some (.syncing, [.sending]) := by
@@ -155,11 +161,12 @@ theorem next_write_sends (f : Facts) (connected : f.storage = .connected) (last 
   have grun : g.running = true := by rw [← hg]; exact running
   have gc : g.cooling = false := by rw [← hg]; exact cooling
   have gu : g.unsent = true := by rw [← hg]
+  have gk : g.writeKey = false := by rw [← hg]; exact noKey
   have gf : g.fileWait = none := by simp [Facts.fileWait, gb]
   simp [state, gs, top, Facts.rest, Facts.files, Facts.writes, Facts.others, Facts.loop,
-    Facts.ended, gb, gf, Facts.writeWait, Facts.passWait, Facts.heldAll, Facts.blocked,
-    Facts.lastRetries, Facts.activities, Facts.held, State.work, pick, State.rank, gl, gm, grun,
-    gc, gr, gu]
+    Facts.ended, gb, gf, Facts.writeWait, Facts.passWait, Facts.heldAll,
+    Facts.lastRetries, Facts.slotWait, Facts.activities, Facts.held, State.work, pick,
+    State.rank, gl, gm, grun, gc, gr, gu, gk]
 
 
 namespace Reached
@@ -209,7 +216,7 @@ example : (run connected [.begin, .finish .synced 130]).map (fun f => (state f, 
 cover's own wait shows, and no activity is named. -/
 example : (run connected [.uploads [⟨.queued, true, true, none⟩], .queue true]).map
     (fun f => (state f, f.activities, f.waits)) =
-    some (.waitingToSync, [], [.retrying]) := by decide
+    some (.waitingToSync, [], [.retrying, .retrying]) := by decide
 
 /-- A write behind a cooldown waits, and goes out when it ends. -/
 example : (run connected [.settings true true false false, .queue true]).map

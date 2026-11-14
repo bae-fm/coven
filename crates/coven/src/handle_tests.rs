@@ -546,7 +546,9 @@ fn retry(reason: PendingReason) -> Retry {
 #[test]
 fn missing_prerequisites_retry_automatically() {
     let path = ObjectPath::floor(coven_storage::test_utils::STORE_ID);
-    for prerequisite in [Prerequisite::SequenceCatchUp, Prerequisite::Reload(Audience::Store)] {
+    for prerequisite in
+        [Prerequisite::SequenceCatchUp, Prerequisite::Reload(Audience::Store), Prerequisite::Floor]
+    {
         assert_eq!(retry(PendingReason::Waits(prerequisite)), Retry::Automatic);
     }
     for reason in [

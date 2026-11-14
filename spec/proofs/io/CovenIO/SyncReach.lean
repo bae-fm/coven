@@ -112,8 +112,13 @@ theorem synced_iff (f : Facts) :
 def Facts.waitHolds (f : Facts) : SyncWait → Prop
   | .notSyncing => f.running = false
   | .coolingDown => f.running = true ∧ f.cooling = true
-  | .blocked =>
-      f.running = true ∧ f.cooling = false ∧ f.blocked = true ∧ ∃ r, f.last = .failed (.blocked r)
+  | .keyCopy =>
+      (f.running = true ∧ f.cooling = false ∧
+        ∃ r, f.last = .failed (.blocked r) ∧ r.slotWait = some .keyCopy) ∨
+      (f.unsent = true ∧ f.writeKey = true ∧ f.passWait = none ∧ f.fileWait = none)
+  | .snapshot =>
+      f.running = true ∧ f.cooling = false ∧
+        ∃ r, f.last = .failed (.blocked r) ∧ r.slotWait = some .snapshot
   | .retrying =>
       f.heldAll = none ∧
         ((∃ u ∈ f.bound, u.retrying = true) ∨ (f.lastRetries = true ∧ f.passRetrying = true))
@@ -123,16 +128,17 @@ theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitH
   cases hr : f.running
   · simp [hr] at h; subst h; exact hr
   · cases hc : f.cooling
-    · cases hb : f.blocked
-      · simp [hr, hc, hb] at h
-      · simp [hr, hc, hb] at h
-        subst h
-        have hb' := hb
-        simp only [Facts.blocked] at hb'
-        split at hb'
-        · rename_i r e; exact ⟨hr, hc, hb, r, e⟩
-        · cases hb'
-
+    · simp only [hr, hc] at h
+      simp only [Bool.not_true, Bool.false_eq_true, ite_false] at h
+      simp only [Facts.slotWait] at h
+      split at h
+      · rename_i r e
+        have kind : w = .keyCopy ∨ w = .snapshot := by
+          cases r <;> simp [Reason.slotWait] at h <;> simp [← h]
+        rcases kind with rfl | rfl
+        · exact .inl ⟨hr, hc, r, e, h⟩
+        · exact ⟨hr, hc, r, e, h⟩
+      · simp at h
     · simp [hr, hc] at h; subst h; exact ⟨hr, hc⟩
 
 /-- What the next pass waits for, the held-back pass's and a queued write's
@@ -154,9 +160,64 @@ theorem pass_wait_holds (f : Facts) (w : SyncWait) (h : f.passWait = some w) :
       subst h
       exact held_holds f x hh
 
+/-- A bound upload's wait holds for what the upload waits for. -/
+theorem upload_wait_holds (f : Facts) (u : Upload) (mu : u ∈ f.bound) (w : SyncWait)
+    (h : f.uploadWait u = some w) : f.waitHolds w := by
+  simp only [Facts.uploadWait] at h
+  cases hh : f.heldAll with
+  | some x =>
+      rw [hh] at h
+      simp only [Option.some.injEq] at h
+      subst h
+      exact held_holds f _ hh
+  | none =>
+      rw [hh] at h
+      simp only at h
+      split at h
+      · rename_i r
+        simp only [Option.some.injEq] at h
+        subst h
+        exact ⟨hh, .inl ⟨u, mu, r⟩⟩
+      · cases h
+
+/-- What the first waiting bound upload waits for holds. -/
+theorem file_wait_holds (f : Facts) (w : SyncWait) (h : f.fileWait = some w) : f.waitHolds w := by
+  have mem := List.mem_of_mem_head? h
+  rw [List.mem_filterMap] at mem
+  obtain ⟨u, mu, hu⟩ := mem
+  split at hu
+  · exact upload_wait_holds f u mu w hu
+  · cases hu
+
+/-- What a queued write waits for holds: the pass's wait, a bound upload's, or
+the key the write is recorded as waiting for. -/
+theorem write_wait_holds (f : Facts) (unsent : f.unsent = true) (w : SyncWait)
+    (h : f.writeWait = some w) : f.waitHolds w := by
+  simp only [Facts.writeWait] at h
+  cases hp : f.passWait with
+  | some x =>
+      rw [hp] at h
+      simp only [Option.orElse_some, Option.some.injEq] at h
+      subst h
+      exact pass_wait_holds f x hp
+  | none =>
+      cases hf : f.fileWait with
+      | some x =>
+          rw [hp, hf] at h
+          simp only [Option.orElse_none, Option.orElse_some, Option.some.injEq] at h
+          subst h
+          exact file_wait_holds f x hf
+      | none =>
+          rw [hp, hf] at h
+          cases hk : f.writeKey
+          · simp [hk] at h
+          · simp [hk] at h
+            subst h
+            exact .inr ⟨unsent, hk, hp, hf⟩
+
 /-- **Why waiting to sync waits.** Each wait named holds for the fact that
-names it: sync stopped, a cooldown, a slot that can't apply, a retry, or, for a
-queued upload, what holds that upload. -/
+names it: sync stopped, a cooldown, a key or a snapshot a slot waits for, a
+retry, or, for a queued upload or write, what holds it. -/
 theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds w := by
   simp only [Facts.waits, List.mem_append, List.mem_filterMap] at h
   rcases h with (pass | ⟨u, mu, hu⟩) | write
@@ -164,21 +225,11 @@ theorem wait_facts (f : Facts) (w : SyncWait) (h : w ∈ f.waits) : f.waitHolds 
     · exact pass_wait_holds f w (Option.mem_toList.mp pass)
     · simp at pass
   · split at hu
-    · simp only [Facts.uploadWait] at hu
-      cases hh : f.heldAll with
-      | some x => rw [hh] at hu; simp only [Option.some.injEq] at hu; subst hu; exact held_holds f _ hh
-      | none =>
-          rw [hh] at hu
-          simp only at hu
-          split at hu
-          · rename_i r
-            simp only [Option.some.injEq] at hu
-            subst hu
-            exact ⟨hh, .inl ⟨u, mu, r⟩⟩
-          · cases hu
+    · exact upload_wait_holds f u mu w hu
     · simp at hu
   · split at write
-    · exact pass_wait_holds f w (Option.mem_toList.mp write)
+    · rename_i unsent
+      exact write_wait_holds f unsent w (Option.mem_toList.mp write)
     · simp at write
 
 namespace Reached
@@ -186,7 +237,7 @@ namespace Reached
 /-- A device connected and synced, with sync running. -/
 def start : Facts :=
   ⟨.connected, .synced, false, none, [], false, [], true, false, false, false, false, false,
-    false, none⟩
+    false, false, none⟩
 
 def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none⟩
 
@@ -212,7 +263,8 @@ def toState : State → List Event
 def toWait : SyncWait → List Event
   | .notSyncing => [.settings false false false false, .uploads [upload false true]]
   | .coolingDown => [.settings true true false false, .uploads [upload false true]]
-  | .blocked => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
+  | .keyCopy => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
+  | .snapshot => [.begin, .finish (.failed (.blocked .waitsReload)) 1]
   | .retrying => [.uploads [upload true true]]
 
 /-- **No state is dead.** Every state shows after some run of the model's

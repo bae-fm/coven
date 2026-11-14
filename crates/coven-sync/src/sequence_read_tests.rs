@@ -911,3 +911,38 @@ async fn a_stuck_slot_has_one_record_and_nothing_gets_past_it() {
         device.database().close().await.unwrap();
     }
 }
+
+/// A write that names a source which hasn't landed when it is judged was not
+/// authored by a genuine device, whose sources all landed before it, and no
+/// later slot supplies the source: its slot is damaged, never a wait. The
+/// database's other waits stay waits (§9.5, §19.1).
+#[tokio::test]
+async fn a_write_naming_a_source_that_has_not_landed_damages_its_slot() {
+    use coven_database::WriteWait;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let at = coven_merge::slot(5);
+    let error = ana.sync.waiting_slot(at, WriteWait::Sources(Vec::new()));
+    assert!(
+        matches!(&error, SyncError::Damaged(object)
+            if object.path == ana.sync.path(at).as_str()
+                && matches!(object.failure, crate::Refusal::Parse { .. })),
+        "{error:?}"
+    );
+    let reload = ana.sync.waiting_slot(at, WriteWait::Reload(coven_merge::Audience::Store));
+    assert!(
+        matches!(&reload, SyncError::Pending(record)
+            if record.subject == PendingSubject::Slot(at)
+                && record.reason == PendingReason::Waits(crate::Prerequisite::Reload(
+                    coven_merge::Audience::Store))),
+        "{reload:?}"
+    );
+    let schema = ana.sync.waiting_slot(at, WriteWait::SchemaVersion(3));
+    assert!(
+        matches!(&schema, SyncError::Pending(record)
+            if record.reason == PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 3 })),
+        "{schema:?}"
+    );
+    ana.database().close().await.unwrap();
+}

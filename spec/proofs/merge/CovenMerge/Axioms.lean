@@ -368,3 +368,5 @@ open CovenMerge
 #print axioms CovenMerge.ForgetEntries.pass_retains
 #print axioms CovenMerge.ForgetEntries.retains_later
 #print axioms CovenMerge.ForgetEntries.land_retains
+#print axioms CovenMerge.Sources.current_run
+#print axioms CovenMerge.Sources.sources_present

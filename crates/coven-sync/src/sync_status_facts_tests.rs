@@ -1,9 +1,13 @@
 use super::*;
 use crate::sync_status::tests::{
-    connected, key_unavailable, offline, record, upload, upload_record,
+    connected, key_unavailable, offline, record, upload, upload_record, write_key_record,
 };
-use crate::{FileMissingReason, LocalFailure, PendingReason, Prerequisite, SyncStatus};
-use coven_merge::slot;
+use crate::{
+    FileMissingReason, LocalFailure, PendingReason, Prerequisite, SyncStatus, UploadPhase,
+    UploadWait,
+};
+use coven_foundation::id_source::KeyId;
+use coven_merge::{slot, Audience};
 use coven_storage::StorageFailure;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -85,7 +89,8 @@ fn a_waiting_pass_is_never_synced() {
     };
     let shown =
         |last: &LastPass, sync| Facts { last: Some(last.clone()), sync, ..connected() }.state();
-    assert_eq!(shown(&blocked, started), SyncState::WaitingToSync(SyncWait::Blocked));
+    let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
+    assert_eq!(shown(&blocked, started), SyncState::WaitingToSync(key.clone()));
     assert_eq!(shown(&blocked, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
     assert_eq!(shown(&blocked, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
     assert_eq!(shown(&limited, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
@@ -243,9 +248,10 @@ fn a_failure_that_clears_by_itself_waits_for_its_backoff() {
         let written = Facts { unsent: true, ..armed };
         assert_eq!(written.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
     }
+    let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
     let blocked_on_a_key =
         Facts { last: Some(blocked(key_unavailable())), pass_retry: Some(at), ..connected() };
-    assert_eq!(blocked_on_a_key.state(), SyncState::WaitingToSync(SyncWait::Blocked));
+    assert_eq!(blocked_on_a_key.state(), SyncState::WaitingToSync(key));
     let no_answer = Facts { last: offline(), pass_retry: Some(at), ..connected() };
     assert!(matches!(no_answer.state(), SyncState::Offline(_)), "{:?}", no_answer.state());
     let refused = failed(StatusFailure::Storage(StorageFailure::Refused));
@@ -449,4 +455,59 @@ fn a_write_behind_a_waiting_cover_waits_with_it() {
     assert_eq!(sending.state(), SyncState::Syncing(SyncActivity::UploadingBoundFile));
     let stored = Facts { uploads: vec![upload(Progress::Stored)], queued: false, ..facts };
     assert_eq!(stored.state(), SyncState::Syncing(SyncActivity::Sending));
+}
+
+/// A slot waiting on a Gifts key reads as the key copy wait with the audience
+/// and the key; a slot holding a raise whose snapshot isn't named yet reads as
+/// the snapshot wait; a slot whose reload met a newer floor holds nothing, and
+/// the next pass's turn is syncing, receiving; a slot blocked with a reason it
+/// never blocks with is failed (§19.1).
+#[test]
+fn a_blocked_slot_names_its_wait() {
+    let gifts = Audience::Circle(coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(5)));
+    let key = KeyId(uuid::Uuid::from_u128(6));
+    let blocked = |reason| Facts {
+        last: Some(LastPass::Blocked { slot: slot(7), reason, error: None }),
+        ..connected()
+    };
+    assert_eq!(
+        blocked(PendingReason::KeyUnavailable { audience: gifts.clone(), key }).state(),
+        SyncState::WaitingToSync(SyncWait::KeyCopy { audience: gifts.clone(), key })
+    );
+    assert_eq!(
+        blocked(PendingReason::Waits(Prerequisite::Reload(gifts.clone()))).state(),
+        SyncState::WaitingToSync(SyncWait::Snapshot { audience: gifts })
+    );
+    assert_eq!(
+        blocked(PendingReason::Waits(Prerequisite::Floor)).state(),
+        SyncState::Syncing(SyncActivity::Receiving)
+    );
+    assert!(matches!(
+        blocked(PendingReason::Waits(Prerequisite::SequenceCatchUp)).state(),
+        SyncState::Failed(_)
+    ));
+    // Every transfer waits behind the slot, a bound file too.
+    let held = Facts {
+        unsent: true,
+        uploads: vec![upload(Progress::Queued)],
+        queued: true,
+        ..blocked(key_unavailable())
+    };
+    assert_eq!(held.upload_phase(&held.uploads[0]), UploadPhase::Waiting(UploadWait::Sync));
+}
+
+/// A queued write whose circle key isn't held waits for that key, behind what
+/// holds the pass and a bound file; once the record is gone it is next in
+/// line (§12.1, §19.1).
+#[test]
+fn a_queued_write_waits_for_its_key() {
+    let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
+    let write = Facts { unsent: true, records: vec![write_key_record()], ..connected() };
+    assert_eq!(write.state(), SyncState::WaitingToSync(key));
+    let stopped = Facts { sync: RetrySync::Stopped, ..write.clone() };
+    assert_eq!(stopped.state(), SyncState::WaitingToSync(SyncWait::NotSyncing));
+    let sent = Facts { unsent: false, last: Some(LastPass::Synced), ..write.clone() };
+    assert_eq!(sent.state(), SyncState::Synced);
+    let cleared = Facts { records: Vec::new(), ..write };
+    assert_eq!(cleared.state(), SyncState::Syncing(SyncActivity::Sending));
 }

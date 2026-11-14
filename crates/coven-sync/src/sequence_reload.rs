@@ -520,7 +520,7 @@ impl SequenceSync {
             session.floor = Some(newer);
             return Err(SyncError::Pending(Box::new(crate::PendingRecord::new(
                 crate::PendingSubject::Slot(slot),
-                crate::PendingReason::Waits(crate::Prerequisite::SequenceCatchUp),
+                crate::PendingReason::Waits(crate::Prerequisite::Floor),
             ))));
         }
         Ok(())

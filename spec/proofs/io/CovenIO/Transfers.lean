@@ -119,11 +119,11 @@ theorem phase_retrying_iff (f : Facts) (u : Upload) :
       u.progress = .queued ∧ u.record.bind Reason.state = none ∧ u.retrying = true ∧
         f.heldAll = none ∧ (f.paused && !u.bound) = false ∧ f.meteredHolds u = false ∧
         (f.keysChanging && !u.bound) = false := by
-  unfold Upload.phase Facts.transferWait Facts.heldAll
+  unfold Upload.phase Facts.transferWait Facts.heldAll Facts.blocked
   cases p : u.progress <;> simp
   cases h : u.record.bind Reason.state
   · simp
-    cases f.running <;> cases f.cooling <;> cases f.blocked <;> cases f.paused <;>
+    cases f.running <;> cases f.cooling <;> cases f.slotWait <;> cases f.paused <;>
       cases u.bound <;> cases f.keysChanging <;> cases u.retrying <;> cases f.meteredHolds u <;>
       simp_all
   · simp

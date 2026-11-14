@@ -146,6 +146,9 @@ import CovenIO
 #print axioms CovenIO.SyncState.file_failures_name_failed
 #print axioms CovenIO.SyncState.failed_pass_not_synced
 #print axioms CovenIO.SyncState.waiting_pass_waits
+#print axioms CovenIO.SyncState.blocked_names_its_wait
+#print axioms CovenIO.SyncState.slot_wait_names_no_state
+#print axioms CovenIO.SyncState.floor_is_a_turn
 #print axioms CovenIO.SyncState.self_clearing_waits
 #print axioms CovenIO.SyncState.one_retry
 #print axioms CovenIO.SyncState.phase_failed_iff
@@ -165,6 +168,9 @@ import CovenIO
 #print axioms CovenIO.SyncState.synced_iff
 #print axioms CovenIO.SyncState.pass_wait_holds
 #print axioms CovenIO.SyncState.wait_facts
+#print axioms CovenIO.SyncState.upload_wait_holds
+#print axioms CovenIO.SyncState.file_wait_holds
+#print axioms CovenIO.SyncState.write_wait_holds
 #print axioms CovenIO.SyncState.Reached.every_state
 #print axioms CovenIO.SyncState.Reached.every_wait
 #print axioms CovenIO.StoreReach.quiet_shows

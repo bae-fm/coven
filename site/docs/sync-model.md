@@ -279,7 +279,8 @@ record that names the state.
 every bound file this device uploads is stored. A bound file, one a write
 waits for, queued with nothing holding it is syncing, uploading a bound file;
 while something holds it, the state waits to sync and names why: sync stopped,
-a provider's cooldown, a slot that can't apply yet, or the file's own retry.
+a provider's cooldown, a slot waiting for a key or a snapshot, or the file's own
+retry.
 A write in the send queue is syncing, sending, in the same way. A trailing file, such as a track whose write went out
 first, never reaches the state: each queued file has its own phase in
 `handle.uploads()`, which names the pause, a metered network, a failure or its

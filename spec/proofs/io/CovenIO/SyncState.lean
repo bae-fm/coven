@@ -38,11 +38,12 @@ over. A pass that finds nothing writes nothing the state reads, so the state
 doesn't change while it runs, and ends as it was when it ends as the last one
 did (`quiet_pass_keeps`).
 
-A wait names no failure: a pass held on a key, a snapshot or another
-device's object, a provider's cooldown, a pending invite. Such a pass didn't
-get everything in or out, so it shows waiting to sync, naming what holds it
-(`Facts.passWait`), and only a pass that ended synced can show synced
-(`failed_pass_not_synced`). Nor does it move the time of the last finished
+A wait names no failure: a pass held on a key, a snapshot or a provider's
+cooldown. Such a pass didn't get everything in or out, so it shows waiting to
+sync, naming what holds it (`Facts.passWait`, `blocked_names_its_wait`), and
+only a pass that ended synced can show synced (`failed_pass_not_synced`). A
+slot whose reload met a newer floor holds nothing: the next pass retries it,
+and its turn is syncing (`floor_is_a_turn`). Nor does it move the time of the last finished
 sync, which only a pass reaching the read end sets. That time is kept across
 every state and every reopen, and never goes backward, even when the clock
 does (`last_synced_never_back`). A wait for a bound upload names waiting to
@@ -154,7 +155,13 @@ inductive Local
 /-- A pending record's reason, as `PendingReason` names it. -/
 inductive Reason
   | missing
+  /-- Waits for a read and apply through the sequence end: a file read, a
+  member-key replacement draining the queue. Never a slot's. -/
   | waits
+  /-- A slot holds a raise or reset whose snapshot isn't named yet. -/
+  | waitsReload
+  /-- A slot's reload met a newer floor, and the next pass retries it. -/
+  | waitsFloor
   | keyUnavailable
   | updateRequired
   | noStorage
@@ -197,8 +204,8 @@ def Reason.state : Reason → Option State
   | .refused | .fileLost | .fileSource | .originalMissing | .originalChanged => some .failed
   | .failed l => if l = .shutdown then none else some .failed
   | .cleanup _ c => c.state
-  | .missing | .waits | .keyUnavailable | .noStorage | .writesRefused | .providerPending
-  | .accountInUse | .accessRemains | .rejected | .paused => none
+  | .missing | .waits | .waitsReload | .waitsFloor | .keyUnavailable | .noStorage
+  | .writesRefused | .providerPending | .accountInUse | .accessRemains | .rejected | .paused => none
 
 /-- The reasons that clear by themselves (`PendingReason::clears`): a provider
 failure of that class, a local failure that retries, or a cleanup of one. -/
@@ -210,6 +217,18 @@ def Reason.byItself : Reason → Bool
       | .crypto | .operation => false
   | .cleanup _ c => c.byItself
   | _ => false
+
+/-- What a slot blocked with this reason names. The reasons that wait
+(`slotWait`, a newer floor), the failures that clear by themselves and those
+that name a state keep what `Reason.state` says. A slot blocks with no other
+reason, so one that did would be coven's own bug: it names failed. -/
+def Reason.slotState (r : Reason) : Option State :=
+  match r.state with
+  | some s => some s
+  | none =>
+      match r with
+      | .keyUnavailable | .waitsReload | .waitsFloor => none
+      | _ => if r.byItself then none else some .failed
 
 /-- Why a pass that reached storage, or the attempt to, didn't end synced:
 `PassFailure` and `SyncFailure`. -/
@@ -245,7 +264,7 @@ def PassFailure.state : PassFailure → Option State
       match r.state with
       | some s => some s
       | none => if r.byItself then none else some .failed
-  | .blocked r => r.state
+  | .blocked r => r.slotState
   | .other => some .failed
 
 /-- The failures that retry under the sync scope's backoff: those that clear by
@@ -298,9 +317,14 @@ inductive SyncWait
   | notSyncing
   /-- The provider asked every request to wait (§6.7). -/
   | coolingDown
-  /-- A slot can't apply yet: nothing goes out or comes in until it does
-  (§5.4). -/
-  | blocked
+  /-- A slot needs a key this device holds no copy of; another device of a
+  member holding it sends one (§12.1). Nothing goes out or comes in until it
+  arrives (§5.4). -/
+  | keyCopy
+  /-- A slot holds a raise or reset of an audience and no snapshot announced
+  after it is named yet; another device takes one (§16.5). Nothing goes out or
+  comes in until then. -/
+  | snapshot
   /-- Its last attempt failed; it retries after its backoff. -/
   | retrying
   deriving DecidableEq, Repr
@@ -341,6 +365,9 @@ structure Facts where
   metered : Bool
   /-- A self-replacement of this member's keys pauses writes (§12.3). -/
   keysChanging : Bool
+  /-- The first write in the send queue is recorded as waiting for a key this
+  device holds no copy of (`PendingReason::KeyUnavailable` about a write). -/
+  writeKey : Bool
   /-- The sync scope's backoff runs: the last pass failed and retries then
   (`_coven_retries`, scope `sync`). -/
   passRetrying : Bool
@@ -356,12 +383,21 @@ def Facts.bound (f : Facts) : List Upload := f.uploads.filter (·.bound)
 def Facts.unsentWork (f : Facts) : Bool :=
   f.unsent || f.bound.any (fun u => u.progress != .stored)
 
-/-- Whether the last pass is blocked at a slot that waits for something other
-than a retry: a failure that clears by itself retries instead. -/
-def Facts.blocked (f : Facts) : Bool :=
+/-- The wait a slot blocked with this reason names: a key no device has sent a
+copy of, or a snapshot not named yet. A newer floor names none: the next pass
+retries it, so its turn is syncing. -/
+def Reason.slotWait : Reason → Option SyncWait
+  | .keyUnavailable => some .keyCopy
+  | .waitsReload => some .snapshot
+  | _ => none
+
+/-- What the last pass is blocked on at a slot, if it waits for something that
+can last: a key or a snapshot. A failure that clears by itself retries
+instead, and a newer floor is the next pass's turn. -/
+def Facts.slotWait (f : Facts) : Option SyncWait :=
   match f.last with
-  | .failed (.blocked r) => !(r.state.isNone && r.byItself)
-  | _ => false
+  | .failed (.blocked r) => r.slotWait
+  | _ => none
 
 /-- Whether the last pass ended on a failure that retries under the sync
 scope's backoff. -/
@@ -370,14 +406,17 @@ def Facts.lastRetries (f : Facts) : Bool :=
   | .failed p => p.retries
   | _ => false
 
+/-- Whether the last pass is blocked at a slot that waits for a key or a
+snapshot, which holds every transfer. -/
+def Facts.blocked (f : Facts) : Bool := f.slotWait.isSome
+
 /-- What holds every transfer, the pass's, each upload's and a queued
 write's alike: sync stopped, a provider's cooldown, or a slot that can't
 apply yet. -/
 def Facts.heldAll (f : Facts) : Option SyncWait :=
   if !f.running then some .notSyncing
   else if f.cooling then some .coolingDown
-  else if f.blocked then some .blocked
-  else none
+  else f.slotWait
 
 /-- What the next pass waits for: what holds every transfer, else the backoff
 of a failure that clears by itself. With neither it waits for nothing: its turn
@@ -445,8 +484,9 @@ def Facts.fileWait (f : Facts) : Option SyncWait :=
 
 /-- What a write in the send queue waits for: what holds the next pass, else
 what holds a bound file, since the writes behind a file go out once it is
-stored. With neither, it is next in line. -/
-def Facts.writeWait (f : Facts) : Option SyncWait := f.passWait.orElse fun _ => f.fileWait
+stored, else the key it can't seal under. With none, it is next in line. -/
+def Facts.writeWait (f : Facts) : Option SyncWait :=
+  (f.passWait.orElse fun _ => f.fileWait).orElse fun _ => if f.writeKey then some .keyCopy else none
 
 /-- The send queue's candidate: a write in it waits to sync while something
 holds it, and shows syncing, sending, once nothing does. It goes out with the
@@ -483,25 +523,25 @@ def Facts.waits (f : Facts) : List SyncWait :=
   (if f.loop = .waitingToSync then f.passWait.toList else []) ++
     f.bound.filterMap (fun u =>
       if u.candidate f.held = some .waitingToSync then f.uploadWait u else none) ++
-    (if f.unsent then f.passWait.toList else [])
+    (if f.unsent then f.writeWait.toList else [])
 
 /-- What the state reads; `passing`, the trailing uploads, the pause, the
 network and `lastSynced` it doesn't. -/
 def Facts.view (f : Facts) :=
   (f.storage, f.last, f.moved, f.bound, f.unsent, f.records, f.running, f.cooling,
-    f.lastRetries && f.passRetrying)
+    f.lastRetries && f.passRetrying, f.writeKey)
 
 theorem state_view {f g : Facts} (h : f.view = g.view) : state f = state g := by
   simp only [Facts.view, Prod.mk.injEq] at h
-  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9⟩ := h
+  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10⟩ := h
   have hu : f.unsentWork = g.unsentWork := by simp [Facts.unsentWork, h4, h5]
-  have hb : f.blocked = g.blocked := by simp [Facts.blocked, h2]
+  have hb : f.slotWait = g.slotWait := by simp [Facts.slotWait, h2]
   have hh : f.heldAll = g.heldAll := by simp [Facts.heldAll, hb, h7, h8]
   have hp : f.passWait = g.passWait := by simp [Facts.passWait, hh, h9]
   have hheld : f.held = g.held := by simp [Facts.held, hh]
   have huw : ∀ u, f.uploadWait u = g.uploadWait u := by intro u; simp [Facts.uploadWait, hh]
   have hfw : f.fileWait = g.fileWait := by simp [Facts.fileWait, h4, hheld, huw]
-  have hw : f.writeWait = g.writeWait := by simp [Facts.writeWait, hp, hfw]
+  have hw : f.writeWait = g.writeWait := by simp [Facts.writeWait, hp, hfw, h10]
   have he : f.ended = g.ended := by simp [Facts.ended, hu, h2, hp]
   have hl : f.loop = g.loop := by simp [Facts.loop, he, h3]
   have hr : f.rest = g.rest := by
@@ -535,6 +575,18 @@ theorem reason_named (r : Reason) : ∀ s, r.state = some s → s.named = true :
       intro s h
       simp [Reason.state] at h <;> (subst h; rfl)
 
+theorem slot_named (r : Reason) (s : State) (h : r.slotState = some s) : s.named = true := by
+  unfold Reason.slotState at h
+  cases hs : r.state with
+  | some x =>
+      rw [hs] at h
+      simp only [Option.some.injEq] at h
+      subst h
+      exact reason_named r x hs
+  | none =>
+      rw [hs] at h
+      cases r <;> simp at h <;> (obtain ⟨_, rfl⟩ := h; rfl)
+
 theorem pass_named (p : PassFailure) (s : State) (h : p.state = some s) :
     s.named = true ∨ s = .offline := by
   cases p with
@@ -555,7 +607,7 @@ theorem pass_named (p : PassFailure) (s : State) (h : p.state = some s) :
           rw [hr] at h
           simp only [Option.some.injEq] at h
           subst h; exact reason_named r x hr
-  | blocked r => exact .inl (reason_named r s h)
+  | blocked r => exact .inl (slot_named r s h)
   | _ => left; simp [PassFailure.state] at h; subst h; rfl
 
 theorem ended_kind (f : Facts) :
@@ -844,17 +896,8 @@ theorem waiting_not_moving (f : Facts) (h : state f = .waitingToSync) :
             cases hp : f.writeWait.isSome
             · simp [State.work, hp] at write
             · rfl
-          cases hq : f.passWait with
-          | some w => simp [Facts.waits, queued, hq] at empty
-          | none =>
-              have hfw : f.fileWait.isSome = true := by simpa [Facts.writeWait, hq] using pw
-              obtain ⟨w, hw⟩ := Option.isSome_iff_exists.mp hfw
-              have mem := List.mem_of_mem_head? hw
-              have : w ∈ f.waits := by
-                simp only [Facts.waits, List.mem_append]
-                exact .inl (.inr mem)
-              rw [empty] at this
-              simp at this
+          obtain ⟨w, hw⟩ := Option.isSome_iff_exists.mp pw
+          simp [Facts.waits, queued, hw] at empty
         · simp at write
       · split at signed <;> simp at signed
       · have := reason_named r _ named; simp [State.named] at this
@@ -1142,6 +1185,7 @@ on catching up, on a schema raise, a reload or a snapshot, on the provider,
 on another member, on the app or the person. -/
 theorem waits_name_no_state :
     Reason.missing.state = none ∧ Reason.waits.state = none ∧
+      Reason.waitsReload.state = none ∧ Reason.waitsFloor.state = none ∧
       Reason.keyUnavailable.state = none ∧ Reason.noStorage.state = none ∧
       Reason.providerPending.state = none ∧ Reason.accountInUse.state = none ∧
       Reason.paused.state = none := by
@@ -1173,19 +1217,47 @@ theorem failed_pass_not_synced (f : Facts) (p : PassFailure) (h : f.last = .fail
   · rw [s] at l0; cases l0
   · rw [e] at l0; exact failed_ended f p h l0
 
-/-- A pass held at a slot for a wait that doesn't clear by itself, or by a
-provider's cooldown, waits to sync: neither is a failure. -/
-theorem waiting_pass_waits (f : Facts) (r : Reason) (wait : r.state = none)
-    (stays : r.byItself = false) :
-    ({ f with last := .failed (.blocked r) } : Facts).ended = .waitingToSync ∧
+/-- A pass held at a slot for a key or a snapshot, or by a provider's cooldown,
+waits to sync: neither is a failure. -/
+theorem waiting_pass_waits (f : Facts) :
+    ({ f with last := .failed (.blocked .keyUnavailable) } : Facts).ended = .waitingToSync ∧
+      ({ f with last := .failed (.blocked .waitsReload) } : Facts).ended = .waitingToSync ∧
       ({ f with last := .failed (.storage .rateLimited), running := true, cooling := true } :
         Facts).ended = .waitingToSync := by
-  constructor
-  · cases hr : f.running <;> cases hc : f.cooling <;>
-      simp [Facts.ended, PassFailure.state, wait, Facts.passWait, Facts.heldAll, Facts.blocked,
-        State.work, stays]
+  refine ⟨?_, ?_, ?_⟩
+  · cases f.running <;> cases f.cooling <;>
+      simp [Facts.ended, PassFailure.state, Reason.slotState, Reason.state, Facts.passWait,
+        Facts.heldAll, Facts.slotWait, Reason.slotWait, State.work]
+  · cases f.running <;> cases f.cooling <;>
+      simp [Facts.ended, PassFailure.state, Reason.slotState, Reason.state, Facts.passWait,
+        Facts.heldAll, Facts.slotWait, Reason.slotWait, State.work]
   · simp [Facts.ended, PassFailure.state, Failure.named, Failure.byItself, Facts.passWait,
       Facts.heldAll, State.work]
+
+/-- **A blocked slot names its wait.** A pass blocked with a reason that names no
+state but a wait, a key or a snapshot, waits for that wait, and so does every
+bound upload and write behind it: nothing goes out or comes in until it ends
+(§5.4). -/
+theorem blocked_names_its_wait (f : Facts) (r : Reason) (w : SyncWait)
+    (last : f.last = .failed (.blocked r)) (wait : r.slotWait = some w)
+    (running : f.running = true) (cooling : f.cooling = false) :
+    f.passWait = some w ∧ (∀ u, f.uploadWait u = some w) ∧ f.writeWait = some w := by
+  simp [Facts.passWait, Facts.heldAll, Facts.slotWait, Facts.uploadWait, Facts.writeWait, last,
+    wait, running, cooling]
+
+/-- A slot's wait names no state: the pass waits to sync on it, never failed. -/
+theorem slot_wait_names_no_state (r : Reason) (w : SyncWait) (wait : r.slotWait = some w) :
+    r.slotState = none := by
+  cases r <;> simp_all [Reason.slotWait, Reason.slotState, Reason.state]
+
+/-- **A newer floor is the next pass's turn.** A slot whose reload met a newer
+floor names no wait and no state: with sync running and no cooldown, the pass
+retries at once, which is syncing. -/
+theorem floor_is_a_turn (f : Facts) (running : f.running = true) (cooling : f.cooling = false) :
+    ({ f with last := .failed (.blocked .waitsFloor) } : Facts).ended = .syncing := by
+  simp [Facts.ended, PassFailure.state, Reason.slotState, Reason.state, Facts.passWait,
+    Facts.heldAll, Facts.slotWait, Reason.slotWait, Facts.lastRetries, PassFailure.retries,
+    Reason.byItself, running, cooling, State.work]
 
 /-! ## One retry wait -/
 
@@ -1212,7 +1284,8 @@ theorem one_retry (f : Facts) (fail : Failure) (answered : Bool)
   rcases last with h | h | h <;>
     simp [state, connected, top, Facts.rest, Facts.files, Facts.writes, Facts.others, Facts.loop,
       Facts.ended, Facts.bound, Facts.waits, Facts.passWait, Facts.heldAll,
-      Facts.blocked, Facts.lastRetries, PassFailure.state, PassFailure.retries, Reason.state,
+      Facts.slotWait, Facts.lastRetries, PassFailure.state, PassFailure.retries, Reason.state,
+      Reason.slotState, Reason.slotWait,
       Reason.byItself, State.work, still, idle, noWrites, noRecords, running, cooling, backoff, h,
       unnamed, clears]
 
@@ -1287,7 +1360,7 @@ namespace Examples
 
 def connected : Facts :=
   ⟨.connected, .synced, false, none, [], false, [], true, false, false, false, false, false,
-    false, some 100⟩
+    false, false, some 100⟩
 
 /-- A cover a write holds back, which the write waits for. -/
 def cover (progress : Progress) : Upload := ⟨progress, true, false, none⟩
@@ -1345,12 +1418,27 @@ yet: with nothing of hers queued, she waits to sync, on the slot, not
 synced. A provider's cooldown that cuts a pass short waits on the cooldown,
 then, once it is over, the next pass's turn has come and she is syncing. -/
 example : (run connected [.begin, .finish (.failed (.blocked .keyUnavailable)) 150]).map
-    (fun f => (state f, f.waits)) = some (.waitingToSync, [.blocked]) := by decide
+    (fun f => (state f, f.waits)) = some (.waitingToSync, [.keyCopy]) := by decide
 example : (run connected [.settings true true false false, .begin,
     .finish (.failed (.storage .rateLimited)) 150]).map (fun f => (state f, f.waits)) =
     some (.waitingToSync, [.coolingDown]) := by decide
 example : (run connected [.begin, .finish (.failed (.storage .rateLimited)) 150]).map
     (fun f => (state f, f.waits)) = some (.syncing, []) := by decide
+
+/-- A slot holding a raise whose snapshot isn't named yet waits for the
+snapshot. A slot whose reload met a newer floor is the next pass's turn, so
+syncing. A write recorded as waiting for a key it can't seal under waits for
+that key. -/
+example : (run connected [.begin, .finish (.failed (.blocked .waitsReload)) 150]).map
+    (fun f => (state f, f.waits)) = some (.waitingToSync, [.snapshot]) := by decide
+example : (run connected [.begin, .finish (.failed (.blocked .waitsFloor)) 150]).map
+    (fun f => (state f, f.waits)) = some (.syncing, []) := by decide
+example : (run { connected with writeKey := true } [.queue true]).map
+    (fun f => (state f, f.waits)) = some (.waitingToSync, [.keyCopy]) := by decide
+
+/-- Any other reason a slot blocks with names failed: a slot blocks with none. -/
+example : (run connected [.begin, .finish (.failed (.blocked .waits)) 150]).map state =
+    some .failed := by decide
 
 /-- Ben's pass meets a 503 from the provider, as a slot's block, as the pass's
 own failure or as coven's own operation's: waiting to sync, retrying, once the

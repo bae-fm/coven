@@ -558,24 +558,30 @@ impl SequenceSync {
                 coven_database::ApplyOutcome::Waiting(coven_database::WriteWait::Reload(_)),
                 false,
             ) => self.reload_activation(session, at, &reloads, history, ring, member).await,
-            (coven_database::ApplyOutcome::Waiting(wait), _) => {
-                Err(SyncError::Pending(Box::new(PendingRecord::new(
+            (coven_database::ApplyOutcome::Waiting(wait), _) => Err(self.waiting_slot(at, wait)),
+        }
+    }
+
+    /// Why the slot at `at` didn't apply: the database's wait, as the slot's
+    /// error. A genuine write names only sources that landed before it, so a
+    /// source that hasn't is named by a write that isn't genuine and no later
+    /// slot supplies it: the slot is damaged (§9.5).
+    pub(crate) fn waiting_slot(&self, at: Slot, wait: coven_database::WriteWait) -> SyncError {
+        match wait {
+            coven_database::WriteWait::Sources(_) => {
+                crate::write_object::damaged(&self.path(at), crate::Refusal::Parse { cause: None })
+            }
+            coven_database::WriteWait::Reload(audience) => {
+                SyncError::Pending(Box::new(PendingRecord::new(
                     PendingSubject::Slot(at),
-                    match wait {
-                        coven_database::WriteWait::Reload(audience) => {
-                            PendingReason::Waits(Prerequisite::Reload(audience))
-                        }
-                        coven_database::WriteWait::SchemaVersion(version) => {
-                            PendingReason::UpdateRequired(crate::RequiredUpdate::AppSchema {
-                                version,
-                            })
-                        }
-                        // Missing sources arrive with a later slot's write.
-                        coven_database::WriteWait::Sources(_) => {
-                            PendingReason::Waits(Prerequisite::SequenceCatchUp)
-                        }
-                    },
-                ))))
+                    PendingReason::Waits(Prerequisite::Reload(audience)),
+                )))
+            }
+            coven_database::WriteWait::SchemaVersion(version) => {
+                SyncError::Pending(Box::new(PendingRecord::new(
+                    PendingSubject::Slot(at),
+                    PendingReason::UpdateRequired(crate::RequiredUpdate::AppSchema { version }),
+                )))
             }
         }
     }

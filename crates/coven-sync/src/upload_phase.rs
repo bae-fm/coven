@@ -16,7 +16,7 @@ impl SyncWait {
         match self {
             Self::NotSyncing => Some(UploadWait::NotSyncing),
             Self::CoolingDown { until } => Some(UploadWait::CoolingDown { until }),
-            Self::Blocked => Some(UploadWait::Sync),
+            Self::KeyCopy { .. } | Self::Snapshot { .. } => Some(UploadWait::Sync),
             Self::Retrying { .. } => None,
         }
     }

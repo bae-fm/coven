@@ -151,6 +151,7 @@ fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
         (storage(StorageFailure::Protocol), Retry::Never, Retry::Never),
         (PendingReason::Failed(LocalFailure::DiskOther), Retry::Automatic, Retry::AppAction),
         (PendingReason::Waits(Prerequisite::SequenceCatchUp), Retry::Automatic, Retry::AppAction),
+        (PendingReason::Waits(Prerequisite::Floor), Retry::Automatic, Retry::AppAction),
         (PendingReason::NoStorage, Retry::AppAction, Retry::AppAction),
         (
             PendingReason::FileUnavailable(FileMissingReason::Lost),

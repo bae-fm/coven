@@ -5,7 +5,7 @@
 //! and pending reason names.
 
 use super::{named_provider, Named, SyncActivity, SyncCause, SyncState, SyncWait};
-use crate::{LastPass, PendingRecord, StatusFailure};
+use crate::{LastPass, PendingReason, PendingRecord, PendingSubject, StatusFailure};
 use coven_database::{DbError, PassMove, RecordedLocation, RetrySync};
 use coven_storage::CloudProvider;
 use std::time::SystemTime;
@@ -116,13 +116,23 @@ impl Facts {
                 Some(SyncWait::CoolingDown { until })
             }
             RetrySync::Started { cooling_until: None } => match &self.last {
-                // A slot's failure that clears by itself retries instead.
-                Some(LastPass::Blocked { reason, .. }) if !reason.retries() => {
-                    Some(SyncWait::Blocked)
-                }
+                // A slot's failure that clears by itself retries instead, and a
+                // newer floor is the next pass's turn: neither is a wait.
+                Some(LastPass::Blocked { reason, .. }) => reason.slot_wait(),
                 _ => None,
             },
         }
+    }
+
+    /// The key the first write in the send queue is recorded as waiting for,
+    /// when it can't seal it (the model's `Facts.writeKey`).
+    pub(super) fn write_key(&self) -> Option<SyncWait> {
+        self.records.iter().find_map(|record| match (&record.subject, &record.reason) {
+            (PendingSubject::Write(_), PendingReason::KeyUnavailable { audience, key }) => {
+                Some(SyncWait::KeyCopy { audience: audience.clone(), key: *key })
+            }
+            _ => None,
+        })
     }
 
     /// What the next pass waits for: what holds every transfer, else the
@@ -220,13 +230,14 @@ impl Facts {
         // holds the first waiting bound file, else it is next in line (the
         // model's `Facts.writes`).
         let file_wait = uploads.iter().find_map(|upload| match upload {
-            Candidate::State(SyncState::WaitingToSync(wait)) => Some(*wait),
+            Candidate::State(SyncState::WaitingToSync(wait)) => Some(wait.clone()),
             Candidate::State(_) | Candidate::Named(..) => None,
         });
         let writes = self.unsent.then(|| {
             Candidate::State(
                 self.pass_wait()
                     .or(file_wait)
+                    .or_else(|| self.write_key())
                     .map_or(SyncState::Syncing(SyncActivity::Sending), SyncState::WaitingToSync),
             )
         });

@@ -776,3 +776,67 @@ async fn a_write_while_offline_shows_unsent_changes_with_no_pass() {
     ana_loop.close().await.unwrap();
     ana.database().close().await.unwrap();
 }
+
+/// §5.4, §12.1, §19.1: Ben's new phone opens before Carol's Gifts copy lands
+/// and stops at Carol's Gifts write, whose key it has no copy of. Its state is
+/// waiting to sync on that key, naming the Gifts audience and the key the
+/// slot's record names.
+#[tokio::test]
+async fn a_slot_waiting_on_a_circle_key_reads_as_a_key_wait() {
+    use coven_format::admin::StoreChange;
+    use coven_merge::Audience;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
+    let gifts = carol.sync.create_circle("Gifts".into()).await.unwrap();
+    carol
+        .sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(carol.database(), "00000000-0000-4000-8000-000000000001", gifts, "scarf").await;
+    carol.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let replacement = coven_crypto::MemberIdentity::new(
+        ben.identity.member(),
+        coven_format::test_utils::keys_from_seed(12),
+    );
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), replacement.keys().public_keys())
+        .await
+        .unwrap();
+    let phone = group.newcomer(replacement, group.storage.for_device()).await;
+    let mut status = follow(&phone);
+    let (phone_codes, _) = codes(&phone, Keychain::in_memory("key-wait-phone").unwrap());
+    let phone_loop = SyncLoop::new(phone.sync.clone(), phone_codes);
+    phone_loop.start().await.unwrap();
+    let waiting = status
+        .wait_for(|status| {
+            matches!(&status.state, SyncState::WaitingToSync(SyncWait::KeyCopy { .. }))
+        })
+        .await;
+    let SyncState::WaitingToSync(SyncWait::KeyCopy { audience, key }) = waiting.state else {
+        unreachable!("waited for a key wait")
+    };
+    assert_eq!(audience, Audience::Circle(gifts));
+    let named = phone
+        .database()
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|record| match record.reason {
+            PendingReason::KeyUnavailable { key, .. } => Some(key),
+            _ => None,
+        })
+        .expect("the stuck slot's record names the key");
+    assert_eq!(key, named);
+    phone_loop.close().await.unwrap();
+    for device in [&ana, &ben, &carol, &phone] {
+        device.database().close().await.unwrap();
+    }
+}

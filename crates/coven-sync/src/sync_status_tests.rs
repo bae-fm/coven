@@ -122,7 +122,9 @@ fn local_name(failure: LocalFailure) -> &'static str {
 fn reason_json(reason: &PendingReason) -> Value {
     match reason {
         PendingReason::Missing { .. } => json!("missing"),
-        PendingReason::Waits(_) => json!("waits"),
+        PendingReason::Waits(Prerequisite::SequenceCatchUp) => json!("waits"),
+        PendingReason::Waits(Prerequisite::Reload(_)) => json!("waitsReload"),
+        PendingReason::Waits(Prerequisite::Floor) => json!("waitsFloor"),
         PendingReason::KeyUnavailable { .. } => json!("keyUnavailable"),
         PendingReason::UpdateRequired(_) => json!("updateRequired"),
         PendingReason::NoStorage => json!("noStorage"),
@@ -177,6 +179,8 @@ fn reasons() -> Vec<PendingReason> {
     let mut reasons = vec![
         PendingReason::Missing { path: ObjectPath::floor(store) },
         PendingReason::Waits(Prerequisite::SequenceCatchUp),
+        PendingReason::Waits(Prerequisite::Reload(Audience::Store)),
+        PendingReason::Waits(Prerequisite::Floor),
         key_unavailable(),
         PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 }),
         PendingReason::NoStorage,
@@ -234,6 +238,14 @@ pub(super) fn upload_record(n: u128, reason: PendingReason) -> PendingRecord {
     PendingRecord::new(
         PendingSubject::Upload { device: DeviceId(1), object: ObjectId(uuid::Uuid::from_u128(n)) },
         reason,
+    )
+}
+
+/// The record of the first write in the send queue waiting for a key.
+pub(super) fn write_key_record() -> PendingRecord {
+    PendingRecord::new(
+        PendingSubject::Write(coven_merge::WriteId { device: DeviceId(1), number: 1 }),
+        key_unavailable(),
     )
 }
 
@@ -338,11 +350,12 @@ fn state_name(state: &SyncState) -> &'static str {
 }
 
 #[deny(clippy::wildcard_enum_match_arm)]
-fn wait_name(wait: SyncWait) -> &'static str {
+fn wait_name(wait: &SyncWait) -> &'static str {
     match wait {
         SyncWait::NotSyncing => "notSyncing",
         SyncWait::CoolingDown { .. } => "coolingDown",
-        SyncWait::Blocked => "blocked",
+        SyncWait::KeyCopy { .. } => "keyCopy",
+        SyncWait::Snapshot { .. } => "snapshot",
         SyncWait::Retrying { .. } => "retrying",
     }
 }
@@ -456,6 +469,7 @@ fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
         "unmeteredOnly": facts.unmetered_only,
         "metered": facts.metered,
         "keysChanging": facts.keys_changing,
+        "writeKey": facts.write_key().is_some(),
         "passRetrying": facts.pass_retry.is_some(),
         "records": records,
     })
@@ -465,7 +479,7 @@ fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
 fn shown(facts: &Facts) -> Value {
     let state = facts.state();
     let wait = match &state {
-        SyncState::WaitingToSync(wait) => json!(wait_name(*wait)),
+        SyncState::WaitingToSync(wait) => json!(wait_name(wait)),
         _ => Value::Null,
     };
     let activity = match &state {
@@ -481,8 +495,9 @@ fn shown(facts: &Facts) -> Value {
 /// list, and beside a location with no credentials; every location, move
 /// and upload progress combination, offline; every activity source alone and
 /// in pairs (what the pass moved, a bound upload moving or next in line, a
-/// write, the next pass's turn), under each way sync can be held; and queued
-/// bound uploads under
+/// write, the next pass's turn), under each way sync can be held; a write
+/// recorded as waiting for a key beside a held or retrying pass and file; and
+/// queued bound uploads under
 /// every wait, one alone or two after a stored one, so the first waiting one
 /// names the wait, with the pause, the setting to move files only on
 /// unmetered networks and the network set any way, with a write queued
@@ -613,6 +628,25 @@ fn cases() -> Vec<Facts> {
             }
         }
     }
+    let keyed = Some(LastPass::Blocked { slot: slot(7), reason: key_unavailable(), error: None });
+    for sync in [RetrySync::Stopped, RetrySync::Started { cooling_until: None }, cooling] {
+        for last in [None, keyed.clone(), limited.clone()] {
+            for unsent in [false, true] {
+                let mut retrying = upload(Progress::Queued);
+                retrying.retry_at = Some(UNIX_EPOCH + Duration::from_secs(9));
+                for uploads in [Vec::new(), vec![retrying], vec![upload(Progress::Queued)]] {
+                    cases.push(Facts {
+                        sync,
+                        last: last.clone(),
+                        unsent,
+                        uploads,
+                        records: vec![write_key_record()],
+                        ..connected()
+                    });
+                }
+            }
+        }
+    }
     for case in &mut cases {
         case.queued = case.uploads.iter().any(|upload| upload.progress != Progress::Stored);
     }
@@ -653,7 +687,7 @@ fn the_differential_covers_every_reason() {
         .collect();
     kinds.sort();
     kinds.dedup();
-    assert_eq!(kinds.len(), 21, "{kinds:?}");
+    assert_eq!(kinds.len(), 23, "{kinds:?}");
 }
 
 /// An upload of each kind: bound or trailing, sending, stored or queued, with

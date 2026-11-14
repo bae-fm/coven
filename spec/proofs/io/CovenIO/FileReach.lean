@@ -95,7 +95,7 @@ theorem queued_syncs (f : Facts) (s : Files.State) (settled : Settled f)
   have recorded : f.storage ≠ .none := by rw [settled.connected]; simp
   have loop : f.loop = .synced := by
     simp [Facts.loop, settled.still, Facts.ended, settled.last]
-  have blocked : f.blocked = false := by simp [Facts.blocked, settled.last]
+  have blocked : f.slotWait = none := by simp [Facts.slotWait, settled.last]
   have free : f.heldAll = none := by
     simp [Facts.heldAll, settled.running, settled.cooling, blocked]
   have mem : (⟨.queued, true, false, none⟩ : Upload) ∈ f.bound := by
