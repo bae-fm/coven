@@ -319,6 +319,9 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
         if let syn::Fields::Named(fields) = &node.fields {
             for field in &fields.named {
                 let Some(field_name) = &field.ident else { continue };
+                if self.gated(&field.attrs) {
+                    continue;
+                }
                 if let Some(ty) = peel(&field.ty, Some(&name), &self.index.pointers) {
                     self.index.fields.insert((name.clone(), field_name.to_string()), ty);
                 }

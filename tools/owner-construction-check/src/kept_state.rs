@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
+use syn::visit_mut::{self, VisitMut};
 
 use crate::kept_capture::captured_state;
 use crate::macros::parse_macro_body;
@@ -26,7 +27,7 @@ use crate::policy::{Policy, ReadShapes, Shape};
 use crate::read_code::{Body, ReadCode};
 use crate::read_index::Index;
 use crate::row_work::Hit;
-use crate::syntax::{collect_declared_types, RustFile, StructInfo};
+use crate::syntax::{collect_declared_types, is_test_support_only, RustFile, StructInfo};
 use crate::type_identity::TypeIdentity;
 
 /// The workspace's declared types and what they retain.
@@ -86,6 +87,7 @@ pub(crate) fn kept_state(
     policy: &Policy,
     shapes: &ReadShapes,
 ) -> Vec<Hit> {
+    let files = &without_test_support_fields(files, policy.test_support_features());
     let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
     let graph = Graph {
         types: collect_declared_types(files, &policy.shared_pointer_types, &identity),
@@ -128,6 +130,28 @@ pub(crate) fn kept_state(
     }
     hits.extend(captured_state(read, &graph, files));
     hits
+}
+
+/// The files without the fields only test support compiles.
+fn without_test_support_fields(files: &[RustFile], features: &[String]) -> Vec<RustFile> {
+    struct Gated<'a>(&'a [String]);
+    impl VisitMut for Gated<'_> {
+        fn visit_fields_named_mut(&mut self, fields: &mut syn::FieldsNamed) {
+            fields.named = std::mem::take(&mut fields.named)
+                .into_iter()
+                .filter(|field| !is_test_support_only(&field.attrs, self.0))
+                .collect();
+            visit_mut::visit_fields_named_mut(self, fields);
+        }
+    }
+    files
+        .iter()
+        .map(|file| {
+            let mut file = file.clone();
+            Gated(features).visit_file_mut(&mut file.syntax);
+            file
+        })
+        .collect()
 }
 
 /// The types that hold a live query, and are not request plumbing.

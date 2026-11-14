@@ -339,3 +339,28 @@ fn read_code_naming_a_static_that_keeps_state_is_found() {
         [("read".to_string(), "reads the static `SEEN`, which keeps `Mutex` state".to_string())]
     );
 }
+
+#[test]
+fn a_field_gated_on_test_support_is_no_state_beside_the_live_query() {
+    let found = found(&[
+        LIVE,
+        (
+            A,
+            r#"
+            struct Gated {
+                query: LiveQuery<u8>,
+                #[cfg(feature = "test-utils")]
+                tables: Mutex<u8>,
+            }
+            struct Plain { query: LiveQuery<u8>, tables: Mutex<u8> }
+            "#,
+        ),
+    ]);
+    assert_eq!(
+        found,
+        [(
+            "Plain".to_string(),
+            "keeps `tables`, which holds `Mutex` state, beside its live query".to_string()
+        )]
+    );
+}
