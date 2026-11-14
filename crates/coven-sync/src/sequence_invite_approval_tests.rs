@@ -336,6 +336,57 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
     }
 }
 
+/// `coven_invites` shows each invite's stage (`waiting`, `approving`), and, once a checked request arrives, the member it names
+/// and the name its joiner typed, as columns an app's SQL joins and filters
+/// on without decoding the invite (§13.2). An invite with no request shows
+/// neither.
+#[tokio::test]
+async fn coven_invites_shows_the_stage_and_the_requests_member_and_joiner() {
+    type Row = (i64, String, Option<String>, Option<String>);
+    async fn shown(device: &Device) -> Vec<Row> {
+        device
+            .database()
+            .read(|sql| {
+                Ok::<_, DbError>(sql.query(
+                    "SELECT operation,stage,request_member,joiner_name FROM coven_invites
+                     ORDER BY operation",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = invite(&ana).await;
+    let operation = invite.operation.0;
+    // Creating the invite grants its access and shows its code in one call.
+    assert_eq!(shown(&ana).await, [(operation, "waiting".to_owned(), None, None)]);
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let typed = crate::sequence_sync::sequence_invites::tests::carol_for(
+        &read_invite_code(invite.shown_code()).unwrap(),
+    );
+    assert!(typed.is_some(), "an invite for a new person asks for a name");
+    assert_eq!(
+        shown(&ana).await,
+        [(operation, "waiting".to_owned(), Some(invite.member.to_string()), typed.clone())]
+    );
+    let checked = requests(&ana).await;
+    let binding = approve(&ana, &checked[0]).await;
+    let rows = shown(&ana).await;
+    assert_eq!(
+        rows,
+        [(operation, "approving".to_owned(), Some(invite.member.to_string()), typed)],
+        "binding {binding:?}"
+    );
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Approve the request as the app's write step does, without a pass, and
 /// return the operation that binds its pair.
 async fn approve(device: &Device, request: &JoinRequest) -> coven_database::OperationId {

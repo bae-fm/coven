@@ -3763,6 +3763,9 @@ let moved = handle
 | | `original_path` | for a record whose reason is `original`, the original's path as the operating system's bytes, the form `coven_user_files.path` holds, so a join on it finds the original's row; NULL otherwise |
 | `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
+| | `stage` | `granting` until the invite's code is shown, `waiting` while it waits for its request or the admin's decision, `approving` once the admin approved the request; as `InviteStage` names them |
+| | `request_member` | the member the invite's request names, as canonical UUID text and read as `MemberId`, once a request has arrived; NULL before |
+| | `joiner_name` | the name the person asking typed; NULL for a recovery, and before a request has arrived |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
 | | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |

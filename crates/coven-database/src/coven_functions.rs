@@ -155,7 +155,37 @@ pub(crate) fn register(
             _ => return Err(damaged()),
         })
     })?;
+    // What a join request's encoded bytes name, for `coven_invites`: the
+    // member the invite fixed, as canonical UUID text, and the name a new
+    // person typed, NULL for a recovery.
+    add(connection, authorization, "_coven_request_member", 1, PURE, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Null => Value::Null,
+            ValueRef::Blob(bytes) => Value::Text(join_request(bytes)?.member.to_string()),
+            _ => return Err(damaged()),
+        })
+    })?;
+    add(connection, authorization, "_coven_request_joiner", 1, PURE, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Null => Value::Null,
+            ValueRef::Blob(bytes) => match join_request(bytes)?.joiner.person() {
+                Some(name) => Value::Text(name.to_owned()),
+                None => Value::Null,
+            },
+            _ => return Err(damaged()),
+        })
+    })?;
     Ok(())
+}
+
+/// The join request `bytes` encode: what an invite's `Waiting` and
+/// `Approving` states keep of the request they hold.
+#[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
+fn join_request(bytes: &[u8]) -> rusqlite::Result<coven_format::objects::JoinRequest> {
+    match coven_format::Object::decode(bytes).map_err(|_| damaged())? {
+        coven_format::Object::JoinRequest(request) => Ok(request),
+        _ => Err(damaged()),
+    }
 }
 
 /// The name of the variant in `json`, which serde wrote for an enum value:

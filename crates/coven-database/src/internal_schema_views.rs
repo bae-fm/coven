@@ -130,9 +130,23 @@ pub(super) const SCHEMA: &str = concat!(
     // cancel or expiry alike.
     // `invite` is the journal entry, the invite's state as coven-sync encodes
     // it (`InviteWork`), which its `Invite` reads; `operation` names its
-    // pending record in `coven_pending`.
-    "CREATE VIEW coven_invites(invite,operation) AS
-        SELECT o.data,o.id
+    // pending record in `coven_pending`. `stage` is `granting` until the
+    // code is shown, then `waiting`, then `approving` once the admin
+    // approved the request. `request_member` and `joiner_name` come from the
+    // request a waiting or approving invite holds, which is encoded bytes:
+    // the member it names, and the name a new person typed, NULL for a
+    // recovery; both NULL while no request has arrived.
+    "CREATE VIEW coven_invites(invite,operation,stage,request_member,joiner_name) AS
+        SELECT o.data,o.id,
+            CASE WHEN json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL THEN 'waiting'
+                WHEN json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL THEN 'approving'
+                ELSE 'granting' END,
+            _coven_request_member(_coven_json_bytes(
+                coalesce(json_extract(CAST(o.data AS TEXT),'$.state.Waiting.request'),
+                    json_extract(CAST(o.data AS TEXT),'$.state.Approving.request')))),
+            _coven_request_joiner(_coven_json_bytes(
+                coalesce(json_extract(CAST(o.data AS TEXT),'$.state.Waiting.request'),
+                    json_extract(CAST(o.data AS TEXT),'$.state.Approving.request'))))
         FROM _coven_operations AS o
         WHERE o.kind='",
     crate::operation_kind::invite_kind!(),
