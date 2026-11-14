@@ -1,1 +1,4 @@
 use_small_heuristics = "Max"
+# Every crate is edition 2021. cargo fmt passes each crate's edition, but a bare
+# `rustfmt <file>`, as the commit hook runs it, defaults to 2015.
+edition = "2021"
