@@ -3,6 +3,7 @@
 
 use super::*;
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 use coven_storage::test_utils::MemoryRequest;
 use std::num::NonZeroUsize;
 
@@ -73,7 +74,7 @@ async fn a_lone_files_pin_sends_as_many_requests_as_the_limit_lets_go() {
     prepare.await.unwrap();
     assert_eq!(reads(&f, &file), 4, "each request went out once");
     assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(true)]);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }
 
@@ -139,6 +140,6 @@ async fn a_stopped_prepare_keeps_only_the_bytes_that_follow_on() {
     let before = reads(&f, &file);
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(reads(&f, &file) - before, 3, "the three requests after the first go again");
-    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }

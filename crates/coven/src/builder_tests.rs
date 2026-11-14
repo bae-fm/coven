@@ -148,14 +148,17 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // Upload completion switched the file to the cloud under the same id,
     // so the reference taken before upload reads it from the cache or
     // storage.
-    assert_eq!(handle.read_file(&local).await.unwrap(), vec![42; 200_000]);
+    assert_eq!(
+        handle.read_file(&local, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![42; 200_000]
+    );
     let file = handle.file_ref(staged).await.unwrap();
     let FilePlace::Cloud { location, .. } = file.place() else {
         panic!("the upload stored the file");
     };
     let path = location.path(directory.id());
     let reads = storage.reads().await.len();
-    let stream = handle.open_file_stream(&file).await.unwrap();
+    let stream = handle.open_file_stream(&file, &crate::FileLease::for_test().await).await.unwrap();
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
     assert!(storage.reads().await[reads..].iter().all(|(read, _, _)| read != &path));
     assert!(matches!(

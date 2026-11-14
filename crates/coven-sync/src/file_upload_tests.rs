@@ -2,6 +2,7 @@ use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
 use coven_database::{FileLocation, FileLocationKey, FilePlace, FileRef, Provenance};
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::Faults, Storage, UploadSession};
 
@@ -154,7 +155,7 @@ async fn an_unedited_move_stores_the_bytes_its_import_read() {
     assert!(matches!(stored.place(), FilePlace::Cloud { .. }), "{stored:?}");
     // Reads on this device now use storage, never the original.
     std::fs::remove_file(&path).unwrap();
-    assert_eq!(f.files.read_file(&stored).await.unwrap(), imported);
+    assert_eq!(f.files.read_file(&stored, &FileLease::for_test().await).await.unwrap(), imported);
     f.close().await;
 }
 
@@ -210,7 +211,10 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
         let (sent, largest) = f.storage.transferred().await;
         assert!(sent > bytes.len() as u64);
         assert!(largest <= CHUNK);
-        assert_eq!(f.files.read_file(&uploaded).await.unwrap(), bytes);
+        assert_eq!(
+            f.files.read_file(&uploaded, &FileLease::for_test().await).await.unwrap(),
+            bytes
+        );
         f.close().await;
     }
 }
@@ -243,7 +247,10 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
         .set_times(std::fs::FileTimes::new().set_modified(modified))
         .unwrap();
     f.reopen().await;
-    assert_eq!(f.files.read_file(&file).await.unwrap(), [94; CHUNK * 3 + 18]);
+    assert_eq!(
+        f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+        [94; CHUNK * 3 + 18]
+    );
     f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads().await.unwrap();
     // The changed original fails its move: nothing was sent, and the file
@@ -299,7 +306,10 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         assert_eq!(reference.key.to_secret_bytes().as_bytes(), key.to_secret_bytes().as_bytes());
         let encrypted = f.storage.read(&location.path(f.directory.id())).await.unwrap();
         assert_eq!(encrypted.len() as u64, expected_size);
-        assert_eq!(f.files.read_file(&uploaded).await.unwrap(), vec![94; CHUNK * 5 + 18]);
+        assert_eq!(
+            f.files.read_file(&uploaded, &FileLease::for_test().await).await.unwrap(),
+            vec![94; CHUNK * 5 + 18]
+        );
         f.close().await;
     }
 }
@@ -387,7 +397,10 @@ async fn uploads_no_file_waits_for_are_retired_unsent() {
             Provenance::UserProvided => {
                 let path = f.root.path().join("new");
                 std::fs::write(&path, [37; 5]).unwrap();
-                let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+                let prepared =
+                    coven_database::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+                        .await
+                        .unwrap();
                 let file = f
                     .database
                     .write_as::<_, _, coven_database::DbError>(move |sql| {
@@ -436,7 +449,7 @@ async fn completing_a_replaced_files_upload_cannot_restore_it() {
         f.storage.list(&coven_storage::ObjectPrefix::files(f.directory.id())).await.unwrap();
     assert_eq!(objects.len(), 1);
     assert_eq!(objects[0].path, old.path(f.directory.id()));
-    assert_eq!(f.files.read_file(&new).await.unwrap(), vec![34; 19]);
+    assert_eq!(f.files.read_file(&new, &FileLease::for_test().await).await.unwrap(), vec![34; 19]);
     f.close().await;
 }
 
@@ -822,4 +835,66 @@ mod differential {
         }
         assert_eq!(results, expected);
     }
+}
+
+/// The upload takes its place before it opens its original. While the
+/// budget has none to give, the upload waits and no file is open; when one
+/// comes back, the upload runs.
+#[tokio::test]
+async fn an_upload_waits_for_a_place_before_it_opens_its_original() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.original("waits", &[1; 100]).await;
+    let budget = f.files.inner.files.clone();
+    let watch = budget.watch();
+    let everything = budget.lease(budget.size()).await.unwrap();
+    let guard = f.files.inner.drain.lock().await;
+    f.files.inner.set_paused(false);
+    let item = f.files.inner.database.uploads().await.unwrap().remove(0);
+    let meter = unwatched(&f, &item);
+    let waited = watch.lease_waits_from_now(1);
+    let upload = tokio::spawn({
+        let inner = f.files.inner.clone();
+        async move { inner.upload(&item, meter).await }
+    });
+    coven_foundation::clock::within(waited).await.unwrap();
+    assert!(!upload.is_finished());
+    coven_foundation::files::assert_no_open_files_under(&f.root.path().join("waits"));
+    drop(everything);
+    let attempted =
+        coven_foundation::clock::within(upload).await.unwrap().unwrap().expect("the upload runs");
+    assert_eq!(attempted, crate::files::file_upload::Attempted::Stored);
+    f.files.inner.set_paused(true);
+    drop(guard);
+    assert_eq!(watch.holding(), 0);
+    f.close().await;
+}
+
+/// The upload holds one place from the opening of its original until it
+/// ends, and gives it back when it ends.
+#[tokio::test]
+async fn an_upload_holds_one_place_while_it_sends() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.original("holds", &[2; 100]).await;
+    let budget = f.files.inner.files.clone();
+    let watch = budget.watch();
+    let guard = f.files.inner.drain.lock().await;
+    f.files.inner.set_paused(false);
+    let item = f.files.inner.database.uploads().await.unwrap().remove(0);
+    let meter = unwatched(&f, &item);
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (resume_request, held) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_request(started, held).await;
+    let upload = tokio::spawn({
+        let inner = f.files.inner.clone();
+        async move { inner.upload(&item, meter).await }
+    });
+    tokio::time::timeout(HANG_GUARD, starting).await.unwrap().unwrap();
+    assert_eq!(watch.holding(), 1);
+    assert_eq!(watch.leased(), 1);
+    resume_request.send(()).unwrap();
+    coven_foundation::clock::within(upload).await.unwrap().unwrap().unwrap();
+    f.files.inner.set_paused(true);
+    drop(guard);
+    assert_eq!((watch.holding(), watch.most_holding(), watch.leased()), (0, 1, 0));
+    f.close().await;
 }

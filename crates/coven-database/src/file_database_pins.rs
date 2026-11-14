@@ -120,14 +120,7 @@ impl FileDatabase {
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
         let (id, size, copy) = (file.id().to_string(), file.size(), copy.clone());
         self.database
-            .call(move |inner| {
-                file_ref::open_source(
-                    &inner.access.directory,
-                    &id,
-                    size,
-                    file_ref::LocalSource::Copy(copy),
-                )
-            })
+            .call(move |inner| file_ref::open_copy(&inner.access.directory, &id, size, &copy))
             .await
     }
 }

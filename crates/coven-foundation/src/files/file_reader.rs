@@ -1,6 +1,6 @@
 //! Open read-only handles for positioned reads.
 
-use super::{FileError, ObservationError};
+use super::{FileError, LeasePlace, LeasedFile, ObservationError};
 use std::{
     fs::{File, Metadata},
     io,
@@ -10,33 +10,62 @@ use std::{
 
 /// An open read-only file. Renaming or unlinking its path never redirects reads.
 /// Reads return what's on disk, as the platform's own positioned reads do.
+/// A user's original holds its place of the app's budget until the reader
+/// drops (§17.3); coven's own files hold none.
 pub struct FileReader {
-    file: File,
+    file: ReaderFile,
     path: PathBuf,
     size: u64,
 }
 
+enum ReaderFile {
+    /// A user's original, in its place; the file closes before the place
+    /// goes back.
+    Original(LeasedFile<File>),
+    /// A file of coven's own.
+    Own(File),
+}
+
+impl std::ops::Deref for ReaderFile {
+    type Target = File;
+    fn deref(&self) -> &File {
+        match self {
+            Self::Original(file) => file,
+            Self::Own(file) => file,
+        }
+    }
+}
+
 impl FileReader {
-    /// Open a user original and check its size and modification time,
-    /// once: later reads return what's on disk.
+    /// Open a user original in `place` and check its size and modification
+    /// time, once: later reads return what's on disk.
     pub(super) fn open_original(
+        place: LeasePlace,
         path: &Path,
         size: u64,
         modified: SystemTime,
     ) -> Result<Self, ObservationError> {
-        let (file, metadata) = open_file(path)?;
+        #[cfg(any(test, feature = "test-utils"))]
+        super::reached::reached(path);
+        let file =
+            place.open(path).map_err(|error| ObservationError::at("read file", path, error))?;
+        let metadata = regular_file(&file, path)?;
         let opened = metadata
             .modified()
             .map_err(|source| FileError::at("read modification time", path, source))?;
         if metadata.len() != size || opened != modified {
             return Err(ObservationError::Changed(path.to_owned()));
         }
-        Ok(Self { file, path: path.to_owned(), size })
+        Ok(Self { file: ReaderFile::Original(file), path: path.to_owned(), size })
     }
 
     pub(crate) fn open(path: &Path) -> Result<Self, ObservationError> {
-        let (file, metadata) = open_file(path)?;
-        Ok(Self { file, path: path.to_owned(), size: metadata.len() })
+        #[cfg(any(test, feature = "test-utils"))]
+        super::reached::reached(path);
+        let file =
+            File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
+        let metadata = regular_file(&file, path)?;
+        Ok(Self { file: ReaderFile::Own(file), path: path.to_owned(), size: metadata.len() })
     }
 
     /// The size captured on this open handle.
@@ -97,11 +126,8 @@ impl FileReader {
     }
 }
 
-/// Open a regular file for positioned reads, with its metadata.
-fn open_file(path: &Path) -> Result<(File, Metadata), ObservationError> {
-    #[cfg(any(test, feature = "test-utils"))]
-    super::reached::reached(path);
-    let file = File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
+/// The facts of an open file, which must be a regular one.
+fn regular_file(file: &File, path: &Path) -> Result<Metadata, ObservationError> {
     let metadata =
         file.metadata().map_err(|error| ObservationError::at("read file", path, error))?;
     if !metadata.is_file() {
@@ -112,7 +138,7 @@ fn open_file(path: &Path) -> Result<(File, Metadata), ObservationError> {
         )
         .into());
     }
-    Ok((file, metadata))
+    Ok(metadata)
 }
 
 #[cfg(test)]

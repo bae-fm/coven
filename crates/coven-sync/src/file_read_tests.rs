@@ -3,6 +3,7 @@
 //! written back over it.
 use super::*;
 use coven_format::file::FILE_HEADER_LEN;
+use coven_foundation::files::FileLease;
 
 /// Change the bytes of the cache file of `size` bytes, as a disk might.
 fn damage(f: &Fixture, size: usize, change: impl FnOnce(&mut Vec<u8>)) {
@@ -41,21 +42,30 @@ async fn a_damaged_cached_copy_is_fetched_and_written_back_not_refused() {
         if pinned {
             f.files.pin(std::slice::from_ref(&file)).await.unwrap();
         } else {
-            assert_eq!(f.files.read_file(&file).await.unwrap(), vec![20; CHUNK]);
+            assert_eq!(
+                f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+                vec![20; CHUNK]
+            );
         }
         damage(&f, size, |bytes| bytes[at] ^= 1);
         let requests = f.storage.request_count();
         if pin {
             f.files.pin(std::slice::from_ref(&file)).await.unwrap();
         } else {
-            assert_eq!(f.files.read_file(&file).await.unwrap(), vec![20; CHUNK]);
+            assert_eq!(
+                f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+                vec![20; CHUNK]
+            );
         }
         assert!(f.storage.request_count() > requests, "the damaged bytes are fetched");
         assert!(f.database.pending::<crate::PendingRecord>().await.unwrap().is_empty());
         let id = file.id();
         assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(pinned || pin)]);
         let requests = f.storage.request_count();
-        assert_eq!(f.files.read_file(&file).await.unwrap(), vec![20; CHUNK]);
+        assert_eq!(
+            f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+            vec![20; CHUNK]
+        );
         assert_eq!(f.storage.request_count(), requests, "the copy holds the stored bytes again");
         f.close().await;
     }
@@ -84,11 +94,17 @@ async fn a_cache_file_of_another_size_is_fetched_and_written_back() {
         if pinned {
             f.files.pin(std::slice::from_ref(&file)).await.unwrap();
         } else {
-            assert_eq!(f.files.read_file(&file).await.unwrap(), vec![20; CHUNK]);
+            assert_eq!(
+                f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+                vec![20; CHUNK]
+            );
         }
         damage(&f, size, |bytes| bytes.resize(length, 9));
         let requests = f.storage.request_count();
-        assert_eq!(f.files.read_file(&file).await.unwrap(), vec![20; CHUNK]);
+        assert_eq!(
+            f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+            vec![20; CHUNK]
+        );
         // Bytes past the end are no chunk's: a copy that only gained some
         // lost nothing to fetch.
         assert_eq!(f.storage.request_count() > requests, length < size, "what it lost is fetched");
@@ -96,8 +112,29 @@ async fn a_cache_file_of_another_size_is_fetched_and_written_back() {
         let id = file.id();
         assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(pinned)]);
         let requests = f.storage.request_count();
-        assert_eq!(f.files.read_file(&file).await.unwrap(), vec![20; CHUNK]);
+        assert_eq!(
+            f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+            vec![20; CHUNK]
+        );
         assert_eq!(f.storage.request_count(), requests, "the copy holds the stored bytes again");
         f.close().await;
     }
+}
+
+/// A stream of a stored file holds one place of the caller's lease from its
+/// opening until it drops, whether its bytes come from the cache or storage.
+#[tokio::test]
+async fn a_stream_of_a_stored_file_holds_a_place() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("held", vec![5; 100]).await;
+    let budget = coven_foundation::files::FileBudget::new(std::num::NonZeroUsize::MIN);
+    let watch = budget.watch();
+    let lease = budget.lease(1).await.unwrap();
+    let stream = f.files.open_file_stream(&file, &lease).await.unwrap();
+    assert_eq!(watch.holding(), 1);
+    assert_eq!(stream.read_at(0, 100).await.unwrap(), vec![5; 100]);
+    assert_eq!(watch.holding(), 1);
+    drop(stream);
+    assert_eq!((watch.holding(), watch.most_holding()), (0, 1));
+    f.close().await;
 }

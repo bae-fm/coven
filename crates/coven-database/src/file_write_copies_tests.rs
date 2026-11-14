@@ -13,6 +13,7 @@ use crate::{
     DbError, FileCandidate, FileColumn, FilePlace, Migration, Place, Provenance, RowIdentity,
     SyncedTable,
 };
+use coven_foundation::files::{FileLease, LeasePlace};
 use coven_foundation::id_source::{CircleId, FileId, ObjectId, SequentialIds};
 use std::collections::BTreeSet;
 
@@ -213,7 +214,8 @@ async fn stored_track(db: &crate::Database) -> (FileId, crate::FileLocation) {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"track").unwrap();
-    let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
+    let prepared =
+        crate::prepare_user_file(&original, &FileLease::for_test().await, |_| {}).await.unwrap();
     let track = db
         .write_as::<_, _, DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
@@ -368,7 +370,8 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"local track").unwrap();
-    let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
+    let prepared =
+        crate::prepare_user_file(&original, &FileLease::for_test().await, |_| {}).await.unwrap();
     let track = db
         .write_as::<_, _, DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;
@@ -392,7 +395,11 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     assert!(imported.is_some());
     assert_eq!(shared, imported);
     let reference = db.file_ref(copy).await.unwrap();
-    let local = db.open_local_file(&reference).await.unwrap().expect("its original is here");
+    let local = db
+        .open_local_file(&reference, LeasePlace::for_test().await)
+        .await
+        .unwrap()
+        .expect("its original is here");
     assert_eq!(local.read_at(0, reference.size()).await.unwrap(), b"local track");
     db.close().await.unwrap();
 }
@@ -411,7 +418,8 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"local track").unwrap();
-    let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
+    let prepared =
+        crate::prepare_user_file(&original, &FileLease::for_test().await, |_| {}).await.unwrap();
     let track = a
         .write_as::<_, _, DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;

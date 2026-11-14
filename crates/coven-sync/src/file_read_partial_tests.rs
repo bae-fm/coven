@@ -2,6 +2,7 @@
 //! prepare of the file continues from them (§17.8).
 
 use super::*;
+use coven_foundation::files::FileLease;
 use coven_storage::test_utils::MemoryRequest;
 
 /// The size of a request to storage, which a download moves in steps of.
@@ -70,7 +71,7 @@ async fn a_stopped_prepare_continues_from_the_bytes_it_kept() {
     );
     assert!(partial(&f, &file).await.is_none(), "the pin made the partial the copy");
     assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(true)]);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }
 
@@ -93,7 +94,7 @@ async fn a_partial_that_no_longer_matches_is_deleted_and_the_file_restarts() {
     assert_eq!(reads_since(&f, &file, before).len(), 2, "the whole file is fetched again");
     assert!(!path.exists(), "the damaged partial is deleted");
     assert!(partial(&f, &file).await.is_none());
-    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }
 

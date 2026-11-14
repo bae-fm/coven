@@ -7807,6 +7807,19 @@ them with what its scan saw before the write. The time is the operating
 system's, at its full precision: nanoseconds on macOS and Linux, 100 ns on
 Windows. It is the value coven checks the original against afterwards.
 
+**The app's budget of open files.** Ana's app imports 2,000 tracks while it
+plays one and uploads another, and the operating system lets a process keep
+only so many files open at once. When the app builds its installation it gives
+coven a budget of places, sized under that limit, and every store the
+installation opens shares it. Every read of a user's original (staging's read,
+a read of a file on this device only, an upload's source) and every file
+stream holds one place from its open until it closes. A piece of work takes
+every place it will hold in one wait, and then opens inside them. So work that
+holds places never waits for the budget, and every place comes back. Making
+files device-only waits once, before it reads or makes anything, and then reads
+each file in turn. Coven's own files (its store, its locks, its cache, its
+copies, and a pin's reading of coven's copy) take none.
+
 **This device keeps the bytes** of each of its files on this device only, by
 file id, while the file's record exists here: the original's recorded path,
 size and modification time, or coven's copy. App SQL reads the originals through
@@ -8355,6 +8368,12 @@ this device staged whose record is gone fails with `FileAbsent`.
 The app reads any byte range, at any offset, as a stream. Playing a song and
 seeking within it are reads of different ranges.
 
+A read opens in a place of the caller's lease on the app's budget (§17.3). The
+stream holds that place from its open until it closes, whether its bytes come
+from the original, coven's copy, the cache or storage. A read of this device's
+file that the app stopped waiting for, which finishes on a blocking worker,
+keeps the place until it ends.
+
 - **A file on this device, or in the cache,** is read with positioned reads of the
   file on disk.
   - Opening a file on this device only checks that its bytes are there with
@@ -8794,6 +8813,11 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   changes location (§20.3), so a recorded session naming another location is
   damage: the connection refuses it before any request, a failure that never
   clears.
+- **An upload waits for a place before it opens its source.** It takes one
+  place of the app's budget (§17.3) and holds it while it sends, so uploads
+  never open more files than the budget has places. An upload waiting for a
+  place holds nothing else but its slot under the upload limit, and no upload
+  holding a place waits for one, so the places come back.
 - A changed limit applies to the next upload that starts. Uploads in flight
   keep running when the limit drops.
 - Pausing starts no new trailing upload; a bound one runs on (§17.4). The pause
@@ -11761,6 +11785,10 @@ OneDrive's metadata fetches and rechecks (§20.5), a container-existence check.
   recorded. A record a read in progress holds waits for the next floor.
 - **Custody is unlocked once per open handle.** Sync passes don't repeat
   passphrase derivation.
+- **The person's files open at once never pass the app's budget.** Staging's
+  read, a read of a file on this device only, an upload's source and every
+  file stream hold a place of it (§17.3), so a store with thousands of files
+  to import, play and upload opens no more than the budget allows.
 - **The database writer is never held** across a network request, a custody
   call, decoding, a timer or file IO, so the app's own writes never wait on the
   network. A snapshot's records are decoded as its body streams; loading takes

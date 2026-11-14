@@ -4,7 +4,7 @@
 use super::Coven;
 use crate::*;
 use coven_crypto::custody::{Keychain, KeyringCustody, StoreKeychain};
-use coven_foundation::files::StoreDirectories;
+use coven_foundation::files::{FileBudget, StoreDirectories};
 use coven_foundation::network_watch::{NetworkSource, TestNetwork};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,24 @@ impl Coven {
     /// test that hears them (E15).
     pub fn in_memory_reporting_to(app_dir: PathBuf, bugs: crate::task::BugSinkRef) -> Self {
         Self::testing(app_dir, Keychain::in_memory("coven-test").expect("valid service name"), bugs)
+    }
+
+    /// `in_memory`, whose bugs go to `bugs` and whose places for open files
+    /// are `files`, the budget an app's test shares with the library's own
+    /// reads of files.
+    pub fn in_memory_sharing(
+        app_dir: PathBuf,
+        bugs: crate::task::BugSinkRef,
+        files: FileBudget,
+    ) -> Self {
+        Self {
+            files,
+            ..Self::testing(
+                app_dir,
+                Keychain::in_memory("coven-test").expect("valid service name"),
+                bugs,
+            )
+        }
     }
 
     /// An installation, as `in_memory` makes, whose keychain's device-only
@@ -82,6 +100,9 @@ impl Coven {
             directories: StoreDirectories::new(app_dir, bugs),
             keychain,
             network: NetworkSource::Test(TestNetwork::new(true, false)),
+            // Another device is another process: each installation made for a
+            // test has places of its own.
+            files: FileBudget::for_test(),
         }
     }
 

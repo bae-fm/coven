@@ -1,4 +1,5 @@
 use coven_format::value::Value;
+use coven_foundation::files::FileLease;
 use coven_foundation::id_source::{DeviceId, StoreId};
 use coven_merge::{Timestamp, WriteId};
 
@@ -172,7 +173,10 @@ async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
         let original = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(original.path(), b"original").unwrap();
         let before = contents(&db);
-        let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
+        let prepared =
+            crate::prepare_user_file(original.path(), &FileLease::for_test().await, |_| {})
+                .await
+                .unwrap();
         let user = kind == crate::Provenance::UserProvided;
         let insert = |sql: &crate::SqlContext<'_, '_>, file| {
             sql.execute(

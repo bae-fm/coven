@@ -54,19 +54,26 @@ impl CovenReadHandle {
     pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError> {
         self.database.user_file(file).await
     }
-    /// Reads a whole file. A stored file is checked against its content hash.
-    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
-        let stream = self.open_file_stream(file).await?;
+    /// Reads a whole file, in one place of `lease`. A stored file is checked
+    /// against its content hash.
+    pub async fn read_file(
+        &self,
+        file: &FileRef,
+        lease: &FileLease,
+    ) -> Result<Vec<u8>, FileReadError> {
+        let stream = self.open_file_stream(file, lease).await?;
         stream.read_at(0, stream.plaintext_size()).await
     }
     /// Opens a file for reading ranges (§17.7), as its record stands when it
-    /// opens; keep the stream for as long as the file is read. Its shared
-    /// store lock prevents deletion until it and its I/O finish.
+    /// opens; keep the stream for as long as the file is read. The stream
+    /// holds one place of `lease` until it drops. Its shared store lock
+    /// prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(
         &self,
         file: &FileRef,
+        lease: &FileLease,
     ) -> Result<FileStream<ReadOnly>, FileReadError> {
-        self.files.open_file_stream(file).await
+        self.files.open_file_stream(file, lease).await
     }
     /// Closes read and cache connections on all clones and releases their
     /// storage client and shared store lock, while the app still holds the

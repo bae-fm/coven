@@ -203,7 +203,8 @@ write drops the loss, on every device ([Merge](/docs/merge#lost-values)).
 
 ```rust
 let attachment = UuidText(Uuid::now_v7());
-let prepared = coven::prepare_user_file(&path, |read| show_progress(read)).await?;
+let lease = files.lease(1).await?;
+let prepared = coven::prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 let file = handle.write(move |sql| {
     let file = sql.put_user_file("attachments", prepared, coven::Place::Cloud)?;
     sql.execute(
@@ -221,7 +222,8 @@ opens it:
 
 ```rust
 let file = handle.file_ref(file).await?;
-let bytes = handle.read_file(&file).await?;
+let lease = files.lease(1).await?;
+let bytes = handle.read_file(&file, &lease).await?;
 ```
 
 ## Invite Ben

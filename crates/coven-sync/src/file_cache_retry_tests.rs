@@ -1,6 +1,7 @@
 //! A download's outcome as the shared boundary records it.
 use super::*;
 use crate::{PendingReason, Retry};
+use coven_foundation::files::FileLease;
 
 /// Downloads receives the same controlled boundary outcomes as the real reader
 /// and pin; completion and retry disposition come from its durable file
@@ -61,7 +62,7 @@ async fn io_differential_download() {
         let result = if pin {
             b.files.pin(std::slice::from_ref(&reference)).await
         } else {
-            b.files.read_file(&reference).await.map(|_bytes| ())
+            b.files.read_file(&reference, &FileLease::for_test().await).await.map(|_bytes| ())
         };
         let pending = b.database.pending::<crate::PendingRecord>().await.unwrap();
         assert!(pending.len() <= 1, "{pending:?}");
@@ -112,9 +113,13 @@ async fn io_differential_read_settles() {
         }
         f.storage.set_online(true);
         if whole {
-            assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+            assert_eq!(
+                f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+                bytes
+            );
         } else {
-            let stream = f.files.open_file_stream(&file).await.unwrap();
+            let stream =
+                f.files.open_file_stream(&file, &FileLease::for_test().await).await.unwrap();
             stream.read_at(0, 1).await.unwrap();
         }
         let retries = download_retries(&f).await;

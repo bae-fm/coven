@@ -110,3 +110,39 @@ async fn a_dropped_calls_append_finishes_before_its_copy_is_removed() {
     assert_eq!(std::fs::read_dir(music.path()).unwrap().count(), 0);
     f.close().await;
 }
+
+/// The call waits for a place before it reads anything or makes anything in
+/// the person's folder; once a place comes back, it downloads.
+#[tokio::test]
+async fn a_device_only_call_waits_for_a_place_before_it_reads() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let file = f.original("song", &vec![63; CHUNK + 7]).await;
+    f.drain().await;
+    let music = tempfile::tempdir().unwrap();
+    let budget = f.files.inner.files.clone();
+    let watch = budget.watch();
+    let everything = budget.lease(budget.size()).await.unwrap();
+    let waited = watch.lease_waits_from_now(1);
+    let call = {
+        let (files, folder) = (f.files.clone(), music.path().to_owned());
+        tokio::spawn(async move {
+            files
+                .prepare_device_only(
+                    &folder,
+                    vec![(file.id(), RelativePath::new(["song.flac"]).unwrap())],
+                    &tokio::sync::watch::channel(false).1,
+                    tokio::sync::watch::channel(None).0,
+                )
+                .await
+        })
+    };
+    coven_foundation::clock::within(waited).await.unwrap();
+    assert!(!call.is_finished());
+    assert_eq!(std::fs::read_dir(music.path()).unwrap().count(), 0);
+    drop(everything);
+    let prepared = coven_foundation::clock::within(call).await.unwrap().unwrap().unwrap();
+    drop(prepared);
+    assert_eq!(watch.holding(), 0);
+    f.close().await;
+}

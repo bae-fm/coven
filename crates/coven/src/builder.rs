@@ -32,6 +32,9 @@ pub struct CovenBuilder {
     clock: ClockRef,
     connector: Option<Arc<dyn StorageConnector>>,
     transfers: Arc<coven_storage::TransferBudget>,
+    /// The installation's places for open files, which every file owner this
+    /// builder makes shares.
+    files: coven_foundation::files::FileBudget,
     /// Where the store's watch hears about the device's network (§6.7).
     network: coven_foundation::network_watch::NetworkSource,
     oauth: Option<OAuthClients>,
@@ -96,6 +99,7 @@ impl CovenBuilder {
         directories: coven_foundation::files::StoreDirectories,
         keychain: Arc<Keychain>,
         network: coven_foundation::network_watch::NetworkSource,
+        files: coven_foundation::files::FileBudget,
     ) -> Self {
         let ids: IdSourceRef = Arc::new(UuidIds);
         let clock: ClockRef = Arc::new(SystemClock);
@@ -115,6 +119,7 @@ impl CovenBuilder {
             presenter: None,
             authentication: None,
             transfers: Arc::new(coven_storage::TransferBudget::new(TransferLimits::default())),
+            files,
             network,
             keys: SessionSource::Configured(CustodyChoice::Keyring),
             identity: SessionSource::Configured(CustodyChoice::Keyring),
@@ -660,6 +665,7 @@ impl CovenBuilder {
             clients,
             authentication: self.authentication,
             transfers: self.transfers,
+            files: self.files,
             network,
             device: settings.device_id,
             keys,
@@ -693,63 +699,6 @@ impl CovenBuilder {
         };
         Ok(Arc::new(KeySession::open(custody)?))
     }
-
-    /// Make the next replacement stop right after its swap, undoing nothing.
-    #[cfg(test)]
-    pub(crate) fn interrupt_after_swap(mut self) -> Self {
-        self.interrupt_after_swap = true;
-        self
-    }
-
-    /// Have SQLite refuse to close the store this builder opens.
-    #[cfg(test)]
-    pub(crate) fn refuse_database_close(mut self) -> Self {
-        self.refuse_database_close = true;
-        self
-    }
-
-    /// Have the platform refuse this store's network watch with `error`.
-    #[cfg(test)]
-    pub(crate) fn refuse_network_watch(mut self, error: NetworkWatchError) -> Self {
-        self.network = coven_foundation::network_watch::NetworkSource::Refused(error);
-        self
-    }
-
-    /// Make the insert of the next reset's device-reset notice fail.
-    #[cfg(test)]
-    pub(crate) fn fail_device_reset_notice(mut self) -> Self {
-        self.fail_device_reset_notice = true;
-        self
-    }
-
-    /// Make the next replacement stop right after its fresh device
-    /// registered, before its swap, undoing nothing.
-    #[cfg(test)]
-    pub(crate) fn interrupt_after_registering(mut self) -> Self {
-        self.interrupt_after_registering = true;
-        self
-    }
-
-    /// Make the next commit of a new installation's custody stop right after
-    /// it writes the device id, undoing nothing.
-    #[cfg(test)]
-    pub(crate) fn interrupt_commit(mut self) -> Self {
-        self.interrupt_commit = true;
-        self
-    }
-
-    /// Keep time by `recorder`, which records every value a bootstrap
-    /// through this builder reports as it loads, values a host reading the
-    /// loading watch could miss.
-    #[cfg(test)]
-    pub(crate) fn record_loading(
-        mut self,
-        recorder: Arc<RecordingClock<coven_database::LoadStep>>,
-    ) -> Self {
-        self.clock = recorder.clone();
-        self.loading_recorder = Some(recorder);
-        self
-    }
 }
 
 /// Retains the graph while its asynchronous database opening is in progress.
@@ -763,6 +712,7 @@ struct OpeningStore {
 
 pub(crate) struct OpeningOwners {
     transfers: Arc<coven_storage::TransferBudget>,
+    files: coven_foundation::files::FileBudget,
     /// The store's watch of the device's network, from opening to closing.
     network: coven_foundation::network_watch::NetworkWatch,
     keychain: Arc<StoreKeychain>,
@@ -919,6 +869,7 @@ impl OpeningOwners {
             waits.clone(),
             self.ids.clone(),
             self.transfers.clone(),
+            self.files.clone(),
             self.clock.clone(),
             self.network.view(),
         );
@@ -990,6 +941,8 @@ mod creation;
 
 #[path = "bootstrap.rs"]
 mod bootstrap;
+#[path = "builder_hooks.rs"]
+mod hooks;
 #[path = "builder_read_only.rs"]
 mod read_only;
 pub use bootstrap::{

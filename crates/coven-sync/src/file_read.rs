@@ -18,7 +18,7 @@ use coven_format::{
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{FileName, StoreReadLock};
+use coven_foundation::files::{FileLease, FileName, LeasePlace, StoreReadLock};
 use coven_storage::{ByteProgress, ByteRange, ObjectPath};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -85,6 +85,10 @@ pub(crate) struct UploadedFile<M: FilesMode = Writer> {
     /// moves whole parts; `None` on one whose range moves only its bytes.
     /// Settled at its first fetch, from the provider's part size (§17.7).
     parts: std::sync::OnceLock<Option<parts::HeldParts>>,
+    /// The stream's place of the app's budget, which a pin's download
+    /// (coven's own work on its cache) holds none of. It goes back after the
+    /// stream's reads end.
+    _place: Option<LeasePlace>,
     _lock: StoreReadLock,
 }
 /// Where a read that fetches from storage tells how much of its range is
@@ -127,13 +131,23 @@ enum ChunkDestination<'a> {
 impl<M: FilesMode> Files<M> {
     /// Open the file as its record now stands: its bytes here while it is on
     /// this device only, uploading or not, or else its cached or stored
-    /// bytes. A file only on another device can't be read here (§17.7).
-    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream<M>, FileReadError> {
+    /// bytes. A file only on another device can't be read here (§17.7). The
+    /// stream holds one place of `lease` until it drops.
+    pub async fn open_file_stream(
+        &self,
+        file: &FileRef,
+        lease: &FileLease,
+    ) -> Result<FileStream<M>, FileReadError> {
         self.inner.check_open()?;
         let mut file = self.inner.current(file).await?;
         if let FilePlace::DeviceOnly { .. } = file.place() {
             let uploading = self.inner.local(&file).await?.map(Arc::new);
-            let local = self.inner.database.open_local(&file).await.map_err(FileReadError::from);
+            let local = self
+                .inner
+                .database
+                .open_local(&file, lease.place().await)
+                .await
+                .map_err(FileReadError::from);
             match local {
                 Ok(Some(stream)) => {
                     return Ok(FileStream::new(
@@ -163,16 +177,22 @@ impl<M: FilesMode> Files<M> {
         if let FilePlace::DeviceOnly { device } = file.place() {
             return Err(self.inner.unreadable(&file, device).await);
         }
-        let opened = match UploadedFile::open(self.inner.clone(), file.clone(), true).await {
+        let place = Some(lease.place().await);
+        let opened = match UploadedFile::open(self.inner.clone(), file.clone(), true, place).await {
             Ok(opened) => opened,
             Err(error) => return self.inner.complete_read(&file, Err(error.into()), false).await,
         };
         Ok(FileStream::new(&file, OpenFile::Uploaded(Arc::new(opened))))
     }
-    /// Read the whole file. A stored file is checked against its content
-    /// hash; a file this device uploads reads as it is on disk (§17.7).
-    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
-        self.open_file_stream(file).await?.read_at(0, file.size()).await
+    /// Read the whole file, in one place of `lease`. A stored file is checked
+    /// against its content hash; a file this device uploads reads as it is on
+    /// disk (§17.7).
+    pub async fn read_file(
+        &self,
+        file: &FileRef,
+        lease: &FileLease,
+    ) -> Result<Vec<u8>, FileReadError> {
+        self.open_file_stream(file, lease).await?.read_at(0, file.size()).await
     }
 }
 impl<M: FilesMode> FileStream<M> {
@@ -349,7 +369,7 @@ impl FilesInner {
         if file.size() == 0 && self.downloads_held() {
             return Ok(None);
         }
-        UploadedFile::open(self.clone(), file, false).await?.keep_whole().await
+        UploadedFile::open(self.clone(), file, false, None).await?.keep_whole().await
     }
 }
 impl<M: FilesMode> UploadedFile<M> {
@@ -359,11 +379,12 @@ impl<M: FilesMode> UploadedFile<M> {
     /// it alone (§17.7). An empty file's header is the whole object, so it
     /// is checked here, waiting for a connection that is coming when
     /// `wait_for_connection`, which a pin's download, holding the pins' lock,
-    /// leaves off.
+    /// leaves off. The open file holds `place` until it drops.
     pub(crate) async fn open(
         owner: Arc<FilesInner<M>>,
         file: FileRef,
         wait_for_connection: bool,
+        place: Option<LeasePlace>,
     ) -> Result<Self, FileReadError> {
         let (location, hash) = stored(&file)?;
         let location = location.clone();
@@ -388,6 +409,7 @@ impl<M: FilesMode> UploadedFile<M> {
             key,
             path,
             parts: std::sync::OnceLock::new(),
+            _place: place,
             _lock: lock,
         };
         if opened.header.chunk_count() == 0 {

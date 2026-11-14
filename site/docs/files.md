@@ -138,6 +138,17 @@ For both kinds, the first read records the whole-file hash and a SHA-256 of
 each 64 KiB chunk. Every upload attempt checks against those, so a retry can
 never encrypt different bytes than the first attempt did.
 
+## The app's budget of open files
+
+A process can keep only so many files open. The app makes one `FileBudget` when
+it starts, an eighth of the process's limit on open files
+(`FileBudget::under_descriptor_limit`), and gives it to `Coven::new`. Every
+read of a user's file and every file stream holds one place of it until the file
+closes. The app takes the places a piece of work needs in one wait, with
+`budget.lease(count)`, and passes that `FileLease` to `prepare_user_file`,
+`read_file` and `open_file_stream`. Work that holds a place never waits for the
+budget, so places always come back. The examples below name the budget `files`.
+
 ## Staging a file
 
 A file comes in as a step of a write, which gives it a new id for the write's
@@ -147,7 +158,8 @@ write, with `prepare_user_file`, and the write stages it with `put_user_file`:
 ```rust
 let note = UuidText(Uuid::now_v7());
 let attachment = UuidText(Uuid::now_v7());
-let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
+let lease = files.lease(1).await?;
+let prepared = prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 
 let file = handle.write(move |sql| {
     let file = sql.put_user_file("attachments", prepared, Place::Cloud)?;
@@ -196,7 +208,8 @@ That device reads it from its bytes there; others get
 `FileReadError::DeviceOnly`, and nothing waits for it.
 
 ```rust
-let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
+let lease = files.lease(1).await?;
+let prepared = prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 handle.write(move |sql| {
     let file = sql.put_user_file("attachments", prepared, Place::DeviceOnly)?;
     sql.execute(
@@ -442,7 +455,8 @@ reads it from storage once it is stored.
 
 ```rust
 let recording = handle.file_ref(file).await?;
-let stream = handle.open_file_stream(&recording).await?;
+let lease = files.lease(1).await?;
+let stream = handle.open_file_stream(&recording, &lease).await?;
 
 // A voice memo: read its header, then seek to where listening resumes.
 let header = stream.read_at(0, 64 * 1024).await?;

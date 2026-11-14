@@ -3,6 +3,7 @@
 //! from that one fetch (§17.7, Appendix E.1).
 
 use super::*;
+use coven_foundation::files::FileLease;
 use std::num::NonZeroUsize;
 
 /// CloudKit's part: each asset holds up to 8 MiB of an object.
@@ -53,7 +54,10 @@ async fn a_pin_moves_each_part_once() {
         let moved = f.storage.moved_bytes(&f.path(file)).await - before;
         assert_eq!(moved, stored_size(file), "{} moved each part once", file.id());
     }
-    assert_eq!(f.files.read_file(&video).await.unwrap(), content(20 * 1024 * 1024));
+    assert_eq!(
+        f.files.read_file(&video, &FileLease::for_test().await).await.unwrap(),
+        content(20 * 1024 * 1024)
+    );
     f.close().await;
 }
 
@@ -66,7 +70,7 @@ async fn a_whole_read_moves_each_part_once() {
     let video = f.uploaded("video", bytes.clone()).await;
     f.files.stop_background_for_counts().await;
     let before = f.storage.moved_bytes(&f.path(&video)).await;
-    assert_eq!(f.files.read_file(&video).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&video, &FileLease::for_test().await).await.unwrap(), bytes);
     let moved = f.storage.moved_bytes(&f.path(&video)).await - before;
     assert_eq!(moved, stored_size(&video), "each part moved once");
     f.close().await;
@@ -85,7 +89,7 @@ async fn a_part_changed_on_the_way_is_fetched_again_from_storage() {
     f.files.stop_background_for_counts().await;
     let garbled = [(f.path(&video), Garble { at: PART as u64 + 200, reads: 1 })].into();
     f.storage.set_faults(Faults { garbled_reads: garbled, ..Faults::none() }).await;
-    let stream = f.files.open_file_stream(&video).await.unwrap();
+    let stream = f.files.open_file_stream(&video, &FileLease::for_test().await).await.unwrap();
     // The chunk that reaches across the first part's end into the byte.
     let (offset, length) = (127 * 64 * 1024, 64 * 1024);
     let result = stream.read_at(offset, length).await;

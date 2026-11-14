@@ -6,6 +6,7 @@ use crate::{
     Database, DbError, FileColumn, Migration, Namespace, OldWrites, Provenance, RowIdentity,
     SyncedTable,
 };
+use coven_foundation::files::FileLease;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::id_source::CircleId;
 use coven_merge::Audience;
@@ -217,7 +218,9 @@ async fn a_migration_reading_file_records_sees_its_audiences() {
         .unwrap();
     connect(&db).await;
     store.join_circle(&db, gifts());
-    let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let prepared = crate::prepare_user_file(original.path(), &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let circle = Audience::Circle(gifts()).to_string();
     db.write_as::<_, _, DbError>(move |sql| {
         let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;

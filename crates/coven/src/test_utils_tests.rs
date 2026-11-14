@@ -447,7 +447,10 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         // Each file is stored at the path its staging write fixed.
         assert!(objects.iter().any(|object| object.path == location.path(f.directory.id())));
         handle.evict_file(file.id()).await.unwrap();
-        assert_eq!(handle.read_file(&file).await.unwrap(), content);
+        assert_eq!(
+            handle.read_file(&file, &crate::FileLease::for_test().await).await.unwrap(),
+            content
+        );
     }
     handle.close().await.unwrap();
 }
@@ -621,5 +624,43 @@ async fn a_store_opens_over_the_keychain_its_installation_saved() {
     let handle = builder(&app).open(store, |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert_eq!(read_note(&handle).await, "kept");
+    handle.close().await.unwrap();
+}
+
+/// The budget an app gives its installation reaches the file owner of every
+/// store the installation opens: a device-only call, which takes a place of
+/// that budget before it does anything else, waits while the app holds them
+/// all, and goes on once one comes back (api.md E1).
+#[tokio::test]
+async fn a_store_opened_through_an_installation_uses_the_budget_the_app_gave_it() {
+    let root = tempfile::tempdir().unwrap();
+    let budget = FileBudget::new(std::num::NonZeroUsize::MIN);
+    let watch = budget.watch();
+    let app = Coven::in_memory_sharing(
+        root.path().to_owned(),
+        crate::task::HeardBugs::shared(),
+        budget.clone(),
+    );
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    let handle = app
+        .builder()
+        .synced_tables(Vec::new())
+        .migrations(Vec::new())
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
+    let held = budget.lease(1).await.unwrap();
+    let waited = watch.lease_waits_from_now(1);
+    let folder = tempfile::tempdir().unwrap();
+    let (cancel, cancelled) = tokio::sync::watch::channel(false);
+    let call = tokio::spawn({
+        let (handle, folder) = (handle.clone(), folder.path().to_owned());
+        async move { handle.prepare_device_only(&folder, Vec::new(), &cancelled, |_| {}).await }
+    });
+    coven_foundation::clock::within(waited).await.unwrap();
+    assert!(!call.is_finished());
+    drop(held);
+    coven_foundation::clock::within(call).await.unwrap().unwrap().unwrap();
+    drop(cancel);
     handle.close().await.unwrap();
 }

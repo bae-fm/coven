@@ -6,6 +6,7 @@ use crate::{
 };
 #[cfg(unix)]
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::{FileLease, LeasePlace};
 
 /// A stored file of these bytes, referenced by row `7`.
 pub(crate) async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
@@ -129,7 +130,9 @@ async fn stage_kind(
         Provenance::UserProvided => {
             let path = originals.join(format!("{}", bytes.len()));
             std::fs::write(&path, &bytes).unwrap();
-            let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
+            let prepared = crate::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+                .await
+                .unwrap();
             db.write_as::<_, _, DbError>(move |sql| {
                 let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
                 sql.execute(
@@ -197,7 +200,11 @@ async fn chunk_hashes_belong_to_the_queued_upload_whatever_its_rows_become() {
                     expected
                 );
             }
-            assert!(owner.open_upload_source(&first).await.unwrap().is_some());
+            assert!(owner
+                .open_upload_source(&first, LeasePlace::for_test().await)
+                .await
+                .unwrap()
+                .is_some());
             if change == "retarget" {
                 let second = owner
                     .uploads()
@@ -295,7 +302,11 @@ async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
             .await
             .unwrap();
         let reference = database.file_ref(file).await.unwrap();
-        assert!(owner.open_local(&reference).await.unwrap().is_some());
+        assert!(owner
+            .open_local(&reference, LeasePlace::for_test().await)
+            .await
+            .unwrap()
+            .is_some());
         let queued = owner.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].files, [file]);
@@ -731,7 +742,9 @@ async fn a_stalled_upload_source_holds_back_no_app_write() {
     std::fs::remove_file(&path).unwrap();
     fifo(&path);
     let reached = coven_foundation::files::when_reached(&path);
-    let opening = tokio::spawn(async move { owner.open_upload_source(&upload).await });
+    let opening = tokio::spawn(async move {
+        owner.open_upload_source(&upload, LeasePlace::for_test().await).await
+    });
     // The work reached the FIFO, whose open holds it until released.
     tokio::time::timeout(HANG_GUARD, reached)
         .await

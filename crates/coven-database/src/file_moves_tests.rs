@@ -8,6 +8,7 @@ use crate::{
     write::tests::records,
     Database, DbError, FileDatabase, FilePlace, MoveFile, MoveId, Place, Provenance,
 };
+use coven_foundation::files::FileLease;
 use coven_foundation::id_source::{FileId, SequentialIds};
 
 /// Stage one file per row id, each where `place` says, in one write.
@@ -358,7 +359,9 @@ async fn a_moved_original_uploads_with_what_its_staging_recorded() {
     let imported: Vec<u8> = (0..chunk + 9).map(|i| (i % 249) as u8).collect();
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), &imported).unwrap();
-    let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let prepared = crate::prepare_user_file(original.path(), &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let modified_at = prepared.modified_at();
     let file = db
         .write_as::<_, _, DbError>(move |sql| {

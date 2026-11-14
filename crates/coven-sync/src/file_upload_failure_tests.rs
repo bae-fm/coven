@@ -2,6 +2,7 @@
 use super::*;
 use crate::{FileMissingReason, FileSourceFailure, Retry};
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 
 /// A moved original fails at opening, before any provider request, and its
 /// move says it is missing. A same-size change to coven's copy opens, and the
@@ -78,7 +79,7 @@ async fn restored_sources_upload_after_backoff() {
         assert!(!f.queued(&file).await);
         assert_eq!(f.upload_reason(&file).await, None);
         assert!(f.move_reasons().await.is_empty());
-        assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+        assert_eq!(f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), bytes);
         f.close().await;
     }
 }
@@ -95,7 +96,11 @@ async fn a_changed_original_fails_its_move_and_switches_nothing() {
     for name in ["kept", "changed"] {
         let path = f.root.path().join(name);
         std::fs::write(&path, vec![5; CHUNK + 3]).unwrap();
-        prepared.push(coven_database::prepare_user_file(&path, |_| {}).await.unwrap());
+        prepared.push(
+            coven_database::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+                .await
+                .unwrap(),
+        );
     }
     let files = f
         .database
@@ -135,7 +140,10 @@ async fn a_changed_original_fails_its_move_and_switches_nothing() {
         assert!(matches!(file.place(), coven_database::FilePlace::DeviceOnly { .. }));
     }
     let kept = f.database.file_ref(files[0]).await.unwrap();
-    assert_eq!(f.files.read_file(&kept).await.unwrap(), vec![5; CHUNK + 3]);
+    assert_eq!(
+        f.files.read_file(&kept, &FileLease::for_test().await).await.unwrap(),
+        vec![5; CHUNK + 3]
+    );
     // Cancelling the failed move ends its record; the files stay here.
     f.database.write(move |sql| sql.cancel_move(id)).await.unwrap();
     assert!(f.move_reasons().await.is_empty());

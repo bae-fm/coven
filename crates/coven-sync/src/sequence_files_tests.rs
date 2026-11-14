@@ -2,6 +2,7 @@ use crate::sequence_sync::tests::*;
 use coven_database::DbError;
 use coven_format::admin::StoreChange;
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 use coven_storage::{ObjectPath, Storage};
 
 /// Ana's store on S3 with Ben admitted, then removed: his key still works.
@@ -199,7 +200,9 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let originals = tempfile::tempdir().unwrap();
     let path = originals.path().join("recording");
     std::fs::write(&path, b"sound").unwrap();
-    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = coven_database::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let staged = ana
         .database()
         .write_as::<_, _, coven_database::DbError>(move |sql| {
@@ -260,7 +263,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     resume.send(()).unwrap();
     tokio::time::timeout(HANG_GUARD, pinning).await.unwrap().unwrap().unwrap();
     assert!(kept().await);
-    assert_eq!(ana.files().read_file(&file).await.unwrap(), b"sound");
+    assert_eq!(ana.files().read_file(&file, &FileLease::for_test().await).await.unwrap(), b"sound");
     for device in devices {
         device.files().close().await;
         device.database().close().await.unwrap();
@@ -369,7 +372,9 @@ async fn stored_file_whose_row_was_deleted(group: &Group, ana: &Device) -> Objec
     let originals = tempfile::tempdir().unwrap();
     let path = originals.path().join("recording");
     std::fs::write(&path, b"sound").unwrap();
-    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = coven_database::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let staged = ana
         .database()
         .write_as::<_, _, coven_database::DbError>(move |sql| {
@@ -728,7 +733,9 @@ async fn stored_objects_never_hold_a_files_key_hashes_or_path() {
     let bytes: Vec<u8> =
         (0..70_000u32).map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
     std::fs::write(&path, &bytes).unwrap();
-    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = coven_database::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let staged = ana
         .database()
         .write_as::<_, _, coven_database::DbError>(move |sql| {
@@ -860,7 +867,10 @@ async fn file_deletion_reads_no_snapshot_whose_announcement_was_forgotten() {
     let originals = tempfile::tempdir().unwrap();
     let recording = originals.path().join("recording");
     std::fs::write(&recording, b"sound").unwrap();
-    let prepared = coven_database::prepare_user_file(&recording, |_| {}).await.unwrap();
+    let prepared =
+        coven_database::prepare_user_file(&recording, &FileLease::for_test().await, |_| {})
+            .await
+            .unwrap();
     let staged = ana
         .database()
         .write_as::<_, _, coven_database::DbError>(move |sql| {

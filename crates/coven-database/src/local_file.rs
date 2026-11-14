@@ -5,7 +5,7 @@ use coven_foundation::files::StoreDirAccess;
 use coven_foundation::task::{Bug, CarriesBug};
 use coven_foundation::{
     files::{
-        FileError, FileReader, ObservationError, StagedName, StoreDir, StoreLockError,
+        FileError, FileReader, LeasePlace, ObservationError, StagedName, StoreDir, StoreLockError,
         StoreReadLock, UserOriginal,
     },
     id_source::DeviceId,
@@ -117,7 +117,7 @@ impl CarriesBug for LocalFileError {
 /// An open local file checked against its recorded facts. Retaining it keeps
 /// the opened bytes readable across its upload completing and file
 /// unlinking, and prevents store deletion until its reads and handles have
-/// finished.
+/// finished. It holds its place of the app's budget until then (§17.3).
 pub struct LocalFileStream {
     file: Arc<LocalFileReader>,
     /// Where a panic in a read its caller stopped waiting for goes (E15).
@@ -125,7 +125,11 @@ pub struct LocalFileStream {
 }
 
 struct LocalFileReader {
+    // An original's reader holds its own place.
     reader: FileReader,
+    // Coven's copy holds the stream's place here, which goes back after the
+    // open file closes.
+    _place: Option<LeasePlace>,
     // Drop the open file before allowing deletion, even on a cancelled read.
     _lock: StoreReadLock,
     id: String,
@@ -280,41 +284,68 @@ pub(crate) fn queued_source(
     }
 }
 
-/// Open a file's local source: it must still have the size, and an
-/// original the modification time, recorded at staging. Reads then return
-/// what's on disk; an upload checks each chunk it sends (§17.9). Touches
-/// only the disk, never the database. `id` names the file in its errors.
+/// Open a file's local source in `place`: it must still have the size, and
+/// an original the modification time, recorded at staging. Reads then return
+/// what's on disk; an upload checks each chunk it sends (§17.9). The stream
+/// holds the place until its last read ends. Touches only the disk, never
+/// the database. `id` names the file in its errors.
 pub(crate) fn open_source(
     directory: &StoreDir,
     id: &str,
     size: u64,
     source: LocalSource,
+    place: LeasePlace,
 ) -> Result<LocalFileStream, LocalFileError> {
     let id = id.to_owned();
     let lock = directory.lock_read_only()?;
-    let (reader, original) = match source {
+    let (reader, original, place) = match source {
         LocalSource::Original { path, modified_at } => (
             UserOriginal::at(path.clone())
-                .open_reader(size, modified_at)
+                .open_reader(place, size, modified_at)
                 .map_err(|error| observation(error, &id, true))?,
             Some(path),
+            None,
         ),
         LocalSource::Copy(name) => {
-            let reader = directory
-                .staged_file(&name)
-                .open_reader()
-                .map_err(|error| observation(error, &id, false))?;
-            // The stream's size is its open handle's, which must be the file's.
-            if reader.size() != size {
-                return Err(LocalFileError::Integrity { id });
-            }
-            (reader, None)
+            (open_copy_reader(directory, &id, size, &name)?, None, Some(place))
         }
     };
-    Ok(LocalFileStream {
-        file: Arc::new(LocalFileReader { reader, _lock: lock, id, original }),
-        bugs: directory.bugs().clone(),
-    })
+    Ok(stream(directory, LocalFileReader { reader, _place: place, _lock: lock, id, original }))
+}
+
+/// Open coven's own copy of a file, which must have its size. No place is
+/// held: the copy is coven's file, kept for a pin (§17.8).
+pub(crate) fn open_copy(
+    directory: &StoreDir,
+    id: &str,
+    size: u64,
+    name: &StagedName,
+) -> Result<LocalFileStream, LocalFileError> {
+    let lock = directory.lock_read_only()?;
+    let reader = open_copy_reader(directory, id, size, name)?;
+    Ok(stream(
+        directory,
+        LocalFileReader { reader, _place: None, _lock: lock, id: id.to_owned(), original: None },
+    ))
+}
+
+fn open_copy_reader(
+    directory: &StoreDir,
+    id: &str,
+    size: u64,
+    name: &StagedName,
+) -> Result<FileReader, LocalFileError> {
+    let reader =
+        directory.staged_file(name).open_reader().map_err(|error| observation(error, id, false))?;
+    // The stream's size is its open handle's, which must be the file's.
+    if reader.size() != size {
+        return Err(LocalFileError::Integrity { id: id.to_owned() });
+    }
+    Ok(reader)
+}
+
+fn stream(directory: &StoreDir, reader: LocalFileReader) -> LocalFileStream {
+    LocalFileStream { file: Arc::new(reader), bugs: directory.bugs().clone() }
 }
 
 fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileError {

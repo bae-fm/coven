@@ -191,6 +191,31 @@ pub enum Audience {
   every bug in work nobody waits for, in each store and in the `Coven`'s own
   calls (E15). There is no default: an app that names no reporter would lose
   those bugs to a log.
+- `Coven::new` takes the app's `FileBudget`, its places for open files, which
+  every store the `Coven` opens shares ([§17.3](coven.md#173-staging-a-file)).
+  The app makes it once, when it starts, because the process's descriptor limit
+  is the app's to divide: its own files and sockets take descriptors the budget
+  doesn't count, and an app that opens the person's files itself takes its
+  places from the same budget. `FileBudget::under_descriptor_limit` sizes it at
+  an eighth of the soft limit on open files, at least 1: 32 places under a macOS
+  app's limit of 256, 128 under 1,024. No limit counts as 10,240, macOS's
+  `OPEN_MAX`, and so does Windows, whose handles for `std::fs` and SQLite have
+  none, giving 1,280. A place stands for at most 4 descriptors: the file it
+  opens, or the cache files a stream's reads in flight open (up to 3), and one
+  file its work writes beside it. So the places take at most half the limit, and
+  the other half holds what the budget doesn't count: each open store's database
+  files, coven's locks, sockets and the platform's own descriptors.
+- **A piece of work takes its places in one wait, and nothing it awaits waits on
+  the budget.** The app calls `FileBudget::lease(count)` for the places the work
+  will hold, and the work opens inside the `FileLease` it gets. A task calls
+  `lease` only while it holds no place, and a place holder awaits nothing that
+  waits on the budget, so every place comes back. The budget serves leases in
+  order of asking, so a lease of two is never passed by later leases of one. A
+  lease of more places than the budget has fails at once with `LeaseTooLarge`.
+  `lease_blocking` and `place_blocking` do the same on a thread of the caller's
+  own; call them only off the async workers. A place of a lease waits only for
+  another place of the same lease to come back, and a place comes back when
+  the file it holds has closed, so a file is never open without its place.
 - `Coven::storage_config` reads a closed store's saved location without opening
   its database or custody. The handle's `storage_config` reads the same committed
   `StorageConfig`, including the member's account label and, on Dropbox and
@@ -676,6 +701,17 @@ impl Coven {
     /// `in_memory`, whose bugs in work nobody waits for go to `bugs`, for a
     /// test that hears them (E15).
     pub fn in_memory_reporting_to(app_dir: PathBuf, bugs: coven::task::BugSinkRef) -> Self;
+
+    /// `in_memory`, whose bugs go to `bugs` and whose places for open files are
+    /// `files`: the budget an app's test shares with its own reads of files, so
+    /// it cannot give coven and the app two budgets. The other constructors
+    /// give each installation a budget of its own of 64 places, as another
+    /// device is another process.
+    pub fn in_memory_sharing(
+        app_dir: PathBuf,
+        bugs: coven::task::BugSinkRef,
+        files: FileBudget,
+    ) -> Self;
 
     /// `in_memory`, whose device-only entries are the ones
     /// `save_device_keychain` saved at `path`: the same device again, which
@@ -2367,6 +2403,7 @@ impl Coven {
     /// and never opens a directory above it, which Android refuses. No key is
     /// read here. A bug in work nobody waits for, in any store or in this
     /// `Coven`'s own calls, goes to `bugs`, the app's crash reporter (E15).
+    /// Every store shares `files`, the app's budget of open files.
     /// An empty service name, or one containing NUL, fails with
     /// `KeyError::InvalidServiceName`; an OS keychain coven can't reach
     /// fails with its `KeyError`.
@@ -2374,6 +2411,7 @@ impl Coven {
         app_dir: PathBuf,
         keyring_service: &str,
         bugs: coven::task::BugSinkRef,
+        files: FileBudget,
     ) -> Result<Self, KeyError>;
 
     /// The stores on this device, ordered by id, with their committed names.
@@ -3482,9 +3520,11 @@ impl JoiningWrite<'_> {
 /// staged for the cloud or on this device only and moved later. `progress`
 /// receives the bytes read so far. Fails if the file changes while it is
 /// read. Its path may be any the operating system opens, valid Unicode or
-/// not (§17.1).
+/// not (§17.1). The read holds one place of `lease` until it ends, whichever
+/// way it ends (E1).
 pub async fn prepare_user_file(
     path: &Path,
+    lease: &FileLease,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<PreparedUserFile, DbError>;
 
@@ -3522,7 +3562,7 @@ Example:
 ```rust
 let note_id = UuidText(Uuid::now_v7());
 let attachment_id = UuidText(Uuid::now_v7());
-let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
+let prepared = prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 
 let file = handle
     .write(move |sql| {
@@ -3558,7 +3598,7 @@ let cover = handle
 Staging on this device only, then moving to the cloud as one move:
 
 ```rust
-let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
+let prepared = prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 let file = handle
     .write(move |sql| {
         let file = sql.put_user_file("attachments", prepared, Place::DeviceOnly)?;
@@ -4304,10 +4344,15 @@ impl CovenReadHandle {
     /// The path, size and modification time coven recorded for a file's
     /// user original on this device, or `None` when it has none.
     pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError>;
-    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
+    pub async fn read_file(
+        &self,
+        file: &FileRef,
+        lease: &FileLease,
+    ) -> Result<Vec<u8>, FileReadError>;
     pub async fn open_file_stream(
         &self,
         file: &FileRef,
+        lease: &FileLease,
     ) -> Result<FileStream<ReadOnly>, FileReadError>;
 }
 ```
@@ -5111,6 +5156,118 @@ pub struct TransferLimits {
     /// doesn't count against it: its 16 reads ahead bound it
     /// ([§21.1](coven.md#211-counting-the-requests-of-a-pass)).
     pub downloads: NonZeroUsize,
+}
+
+/// The app's places for open files, shared by every store its `Coven` opens
+/// (E1). Cloning shares the places.
+#[derive(Clone)]
+pub struct FileBudget(/* private */);
+
+impl FileBudget {
+    /// A budget of `size` places, which the app chooses when it knows its
+    /// own descriptors; a test needs a size of its own.
+    pub fn new(size: NonZeroUsize) -> Self;
+
+    /// An eighth of the process's soft descriptor limit, at least 1, read
+    /// once here. The app calls it once, at its start.
+    pub fn under_descriptor_limit() -> Self;
+
+    /// How many places the budget has.
+    pub fn size(&self) -> usize;
+
+    /// Takes `count` places in one wait, behind every lease that began waiting
+    /// before. Call it only while holding no place of this budget. `count`
+    /// above `size` fails at once.
+    pub async fn lease(&self, count: usize) -> Result<FileLease, LeaseTooLarge>;
+
+    /// `lease` for a thread of the caller's own; never on an async worker.
+    pub fn lease_blocking(&self, count: usize) -> Result<FileLease, LeaseTooLarge>;
+}
+
+/// Places taken from a budget in one wait, shared by the openers of one piece
+/// of work by cloning it. Its places go back to the budget once it, every
+/// place taken from it and every file opened in one are gone.
+#[derive(Clone)]
+pub struct FileLease(/* private */);
+
+impl FileLease {
+    /// One place of this lease. It waits only for another place of the lease to
+    /// come back, never for the budget.
+    pub async fn place(&self) -> LeasePlace;
+
+    /// `place` for a thread of the caller's own; never on an async worker.
+    pub fn place_blocking(&self) -> LeasePlace;
+
+    /// How many places the lease took.
+    pub fn count(&self) -> usize;
+}
+
+/// What a test reads of a budget, from `FileBudget::watch`. Cloning shares the
+/// reading.
+#[cfg(feature = "test-utils")]
+#[derive(Clone)]
+pub struct FileBudgetWatch(/* private */);
+
+#[cfg(feature = "test-utils")]
+impl FileBudgetWatch {
+    /// The places leased now, and the most leased at once.
+    pub fn leased(&self) -> usize;
+    pub fn most_leased(&self) -> usize;
+    /// The places holding an open file or stream now (taken from a lease and not
+    /// yet given back), and the most at once.
+    pub fn holding(&self) -> usize;
+    pub fn most_holding(&self) -> usize;
+    /// Resolves once leases have found the budget full and waited `count` more
+    /// times than before this call.
+    pub fn lease_waits_from_now(
+        &self,
+        count: usize,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static;
+}
+
+#[cfg(feature = "test-utils")]
+impl FileBudget {
+    /// What a test reads of this budget's use.
+    pub fn watch(&self) -> FileBudgetWatch;
+    /// A budget of 64 places, as an installation made for a test has.
+    pub fn for_test() -> Self;
+}
+
+#[cfg(feature = "test-utils")]
+impl FileLease {
+    /// All 64 places of a budget of its own, for a test with no budget to
+    /// watch.
+    pub async fn for_test() -> Self;
+}
+
+#[cfg(feature = "test-utils")]
+impl LeasePlace {
+    /// One place of a budget of its own, for a test with no budget to watch.
+    pub async fn for_test() -> Self;
+}
+
+/// One place of a lease, for one open.
+pub struct LeasePlace(/* private */);
+
+impl LeasePlace {
+    /// Opens the file at `path` in this place; a failed open gives the place
+    /// back.
+    pub fn open(self, path: &Path) -> io::Result<LeasedFile<std::fs::File>>;
+
+    /// `open` for a tokio file.
+    pub async fn open_async(self, path: &Path) -> io::Result<LeasedFile<tokio::fs::File>>;
+}
+
+/// An open file holding its place: it derefs to the file, and the file closes
+/// before the place goes back.
+pub struct LeasedFile<F>(/* private */);
+
+/// A lease asked for more places than the budget has.
+pub struct LeaseTooLarge {
+    /// The places asked for.
+    pub requested: usize,
+    /// The places the budget has.
+    pub size: usize,
 }
 
 /// The single storage failure classification used by every app-facing error (Appendix F.5).
@@ -6555,6 +6712,11 @@ impl CovenHandle {
   each plaintext chunk before encryption. A changed user original reports
   `UserFileChanged`; a changed app-provided copy reports `Integrity`. Retries retain the same
   file id, key and chunk hashes, without an encrypted local copy.
+- An upload attempt takes one place of the app's `FileBudget` (E1) before it
+  opens its source, and holds it until the attempt ends. An attempt waiting for
+  a place holds no place, so it never keeps another from coming back, and a
+  upload limit of 3 with a budget of 1 runs one attempt at a time
+  ([§17.9](coven.md#179-uploads)).
 
 ```rust
 impl CovenHandle {
@@ -6924,17 +7086,28 @@ impl CovenHandle {
     /// complete one is `Integrity`.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
 
-    /// Reads a whole file. A stored file is checked against its content hash.
-    /// Bytes not cached wait for a storage connection that is coming, and
-    /// fail with `NoStorage` when none is (§17.7).
-    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
+    /// Reads a whole file, in one place of `lease` (E1). A stored file is
+    /// checked against its content hash. Bytes not cached wait for a storage
+    /// connection that is coming, and fail with `NoStorage` when none is
+    /// (§17.7).
+    pub async fn read_file(
+        &self,
+        file: &FileRef,
+        lease: &FileLease,
+    ) -> Result<Vec<u8>, FileReadError>;
 
     /// Opens a file for reading ranges (§17.7), as its record stands when it
-    /// opens; keep the stream for as long as the file is read. A file on this
-    /// device only reads from its bytes here, uploading or not; a file only on
-    /// another device fails with `FileReadError::DeviceOnly`. Its shared store
-    /// lock prevents deletion until it and its I/O finish.
-    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
+    /// opens; keep the stream for as long as the file is read. The stream holds
+    /// one place of `lease` from its open until it drops, whether its bytes
+    /// come from the original, coven's copy, the cache or storage (E1). A file
+    /// on this device only reads from its bytes here, uploading or not; a file
+    /// only on another device fails with `FileReadError::DeviceOnly`. Its
+    /// shared store lock prevents deletion until it and its I/O finish.
+    pub async fn open_file_stream(
+        &self,
+        file: &FileRef,
+        lease: &FileLease,
+    ) -> Result<FileStream, FileReadError>;
 
     /// The path, size and modification time coven recorded for a file's
     /// user original on this device, or `None` when it has none.
@@ -6962,7 +7135,9 @@ impl CovenHandle {
     /// under way, making a folder, creating a copy, writing its bytes or
     /// renaming it to its path, finishes with its record, and closing the
     /// store waits for it. The store's next write after it removes what the
-    /// call made.
+    /// call made. The call waits once for one place of the app's `FileBudget`
+    /// (E1), before it reads or makes anything, and reads each file in it in
+    /// turn; its copies' writers are outside the budget.
     pub async fn prepare_device_only(
         &self,
         folder: &Path,
@@ -7374,7 +7549,8 @@ Example:
 
 ```rust
 let recording = handle.file_ref(file).await?;
-let stream = handle.open_file_stream(&recording).await?;
+let lease = budget.lease(1).await?;
+let stream = handle.open_file_stream(&recording, &lease).await?;
 
 // A voice memo: read its header, then seek to where listening resumes.
 let header = stream.read_at(0, 64 * 1024).await?;

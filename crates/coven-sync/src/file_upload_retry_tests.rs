@@ -6,6 +6,7 @@ use crate::PendingReason;
 use coven_database::RetrySubject;
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::clock::{Clock, FixedClock};
+use coven_foundation::files::FileLease;
 use coven_storage::{test_utils::Faults, StorageFailure};
 
 async fn fixture(clock: &Arc<FixedClock>) -> Fixture {
@@ -541,7 +542,10 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     assert_eq!(reconnected.calls("resume"), 1);
     assert_eq!(reconnected.calls("begin"), 0);
     assert_eq!(provider_parts(&f), 3);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
+    assert_eq!(
+        f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+        three_parts()
+    );
     f.close().await;
 }
 
@@ -564,7 +568,10 @@ async fn a_metered_network_stops_an_upload_between_parts_and_keeps_its_session()
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert_eq!(storage.calls("resume"), 1);
     assert_eq!(storage.calls("begin"), 1);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
+    assert_eq!(
+        f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+        three_parts()
+    );
     f.close().await;
 }
 
@@ -594,7 +601,10 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(f.queue().await.files.is_empty());
     assert_eq!(f.upload_reason(&file).await, None);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
+    assert_eq!(
+        f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+        three_parts()
+    );
     f.close().await;
 }
 
@@ -628,7 +638,10 @@ async fn elapsed_time_does_not_expire_an_applied_device_between_parts() {
     assert_eq!(storage.calls("begin"), 1);
     assert_eq!(storage.calls("finish"), 1);
     assert_eq!(provider_parts(&f), 3);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
+    assert_eq!(
+        f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+        three_parts()
+    );
     f.close().await;
 }
 

@@ -1,6 +1,7 @@
 //! Bound references at commit (§17.4): what a write setting one may name,
 //! and the write its file's upload holds.
 use crate::{tests::TestStore, write::tests::records, *};
+use coven_foundation::files::FileLease;
 use coven_foundation::id_source::FileId;
 
 const SCHEMA: &str = "CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY,file TEXT);
@@ -110,7 +111,8 @@ async fn a_bound_reference_to_a_users_file_fails_the_write() {
     let path = store.database_path().parent().unwrap().join("original");
     std::fs::write(&path, b"the person's bytes").unwrap();
     for place in [Place::DeviceOnly, Place::Cloud] {
-        let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+        let prepared =
+            prepare_user_file(&path, &FileLease::for_test().await, |_| {}).await.unwrap();
         let staged = db
             .write_as::<_, _, DbError>(move |sql| {
                 let file = sql.put_user_file("originals", prepared, place)?;

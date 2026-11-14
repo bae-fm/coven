@@ -1,5 +1,6 @@
 use crate::file_write::tests::{complete_uploads, namespaces, open, stage, tables, SCHEMA};
 use crate::{tests::TestStore, *};
+use coven_foundation::files::{FileLease, LeasePlace};
 use coven_foundation::id_source::{CircleId, DeviceId, FileId, ObjectId};
 
 /// A file reference reads the file's record by its id: one that is still
@@ -58,7 +59,7 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
     assert_eq!(location.uploader(), DeviceId(1));
     assert_eq!(location.object(), ObjectId(id));
     // Only a file this device uploads has a local source.
-    assert!(db.open_local_file(&uploaded).await.unwrap().is_none());
+    assert!(db.open_local_file(&uploaded, LeasePlace::for_test().await).await.unwrap().is_none());
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
     let valid = format!("file 1 {id} {}", "ab".repeat(32));
     let mut malformed: Vec<_> = (0..valid.len()).map(|end| valid[..end].to_owned()).collect();
@@ -138,7 +139,7 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     let path = directory.path().join(name);
     std::fs::write(&path, b"original").unwrap();
     let metadata = std::fs::metadata(&path).unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = prepare_user_file(&path, &FileLease::for_test().await, |_| {}).await.unwrap();
     let file = db
         .write_as::<_, _, crate::DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
@@ -275,7 +276,7 @@ async fn open_local_around(
     .await;
     let reading = tokio::spawn({
         let db = db.clone();
-        async move { db.open_local_file(&reference).await }
+        async move { db.open_local_file(&reference, LeasePlace::for_test().await).await }
     });
     finding.await.unwrap();
     meanwhile.await;
@@ -314,7 +315,7 @@ async fn an_original_deleted_after_its_upload_as_a_read_opens_it_reads_from_stor
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("photo");
     std::fs::write(&path, b"original").unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = prepare_user_file(&path, &FileLease::for_test().await, |_| {}).await.unwrap();
     let file = db
         .write_as::<_, _, crate::DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;

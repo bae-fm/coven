@@ -86,7 +86,8 @@ async fn an_uncached_file_body_waits_for_the_download_limit_and_a_pass_does_not(
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
         memory.hold_body_at(stored_path(directory.id(), &first_file), 1, entered, resumed).await;
-        let first = handle.read_file(&first_file);
+        let first_lease = crate::FileLease::for_test().await;
+        let first = handle.read_file(&first_file, &first_lease);
         tokio::pin!(first);
         tokio::select! {
             result = &mut first => panic!("first response was not held: {result:?}"),
@@ -96,7 +97,8 @@ async fn an_uncached_file_body_waits_for_the_download_limit_and_a_pass_does_not(
         // The second file's body waits for the held body's place under the
         // limit.
         let waiting = handle.test_downloads_waiting(1);
-        let second = handle.read_file(&second_file);
+        let second_lease = crate::FileLease::for_test().await;
+        let second = handle.read_file(&second_file, &second_lease);
         tokio::pin!(second);
         tokio::select! {
             result = &mut second => panic!("second file bypassed the active download: {:?}", result.map(|bytes| bytes.len())),
@@ -223,7 +225,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         assert!(matches!(outcome, RetryOutcome::Failed(PassFailure::Offline { .. })), "{outcome:?}");
         memory.set_online(true);
         handle.evict_file(uploaded[0].id()).await.unwrap();
-        assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
+        assert_eq!(handle.read_file(&uploaded[0], &crate::FileLease::for_test().await).await.unwrap(), vec![0; 2048]);
         memory.set_online(false);
         // The earlier Offline is stale: the person's retry is answered by the
         // attempt that begins after it, which ends the backoff the first
@@ -319,8 +321,11 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let original = vec![42; 512 * 1024];
     std::fs::write(&path, &original).unwrap();
     let progress = std::sync::Mutex::new(Vec::new());
-    let prepared =
-        prepare_user_file(&path, |read| progress.lock().unwrap().push(read)).await.unwrap();
+    let prepared = prepare_user_file(&path, &crate::FileLease::for_test().await, |read| {
+        progress.lock().unwrap().push(read)
+    })
+    .await
+    .unwrap();
     assert_eq!(progress.lock().unwrap().last(), Some(&(original.len() as u64)));
     let note = note_id.clone();
     let attachment = attachment_id.clone();
@@ -342,9 +347,13 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let recording = handle.file_ref(recorded).await.unwrap();
     assert_eq!(recording.size(), original.len() as u64);
     assert_eq!(recording.namespace(), "attachments");
-    assert_eq!(handle.read_file(&recording).await.unwrap(), original);
+    assert_eq!(
+        handle.read_file(&recording, &crate::FileLease::for_test().await).await.unwrap(),
+        original
+    );
     assert_eq!(handle.user_file(recorded).await.unwrap().unwrap().path, path);
-    let stream = handle.open_file_stream(&recording).await.unwrap();
+    let stream =
+        handle.open_file_stream(&recording, &crate::FileLease::for_test().await).await.unwrap();
     let header = stream.read_at(0, 64 * 1024).await.unwrap();
     assert_eq!(header, original[..64 * 1024]);
     assert_eq!(
@@ -363,33 +372,41 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let reference = handle.file_ref(staged).await.unwrap();
     assert_eq!(reference.size(), 9);
     assert_eq!(reference.audience(), Audience::Store);
-    let old_stream = handle.open_file_stream(&reference).await.unwrap();
+    let old_stream =
+        handle.open_file_stream(&reference, &crate::FileLease::for_test().await).await.unwrap();
     assert_eq!(old_stream.read_at(2, 4).await.unwrap(), b"umbn");
     let readonly = builder(&app, ids.clone()).open_read_only(directory.id()).await.unwrap();
-    assert_eq!(readonly.read_file(&reference).await.unwrap(), b"thumbnail");
+    assert_eq!(
+        readonly.read_file(&reference, &crate::FileLease::for_test().await).await.unwrap(),
+        b"thumbnail"
+    );
     // Pointing the row at another file deletes the first one's record: nothing
     // references it now. A stream already open keeps reading it.
     let replaced =
         thumbnail(&handle, &note_id, &thumbnail_id, b"replacement".to_vec(), false).await;
     assert!(matches!(
-        handle.read_file(&reference).await,
+        handle.read_file(&reference, &crate::FileLease::for_test().await).await,
         Err(FileReadError::Database(DbError::FileAbsent { .. }))
     ));
     assert_eq!(old_stream.read_at(0, 9).await.unwrap(), b"thumbnail");
     let current = handle.file_ref(replaced).await.unwrap();
-    assert_eq!(handle.read_file(&current).await.unwrap(), b"replacement");
+    assert_eq!(
+        handle.read_file(&current, &crate::FileLease::for_test().await).await.unwrap(),
+        b"replacement"
+    );
     std::fs::write(&path, b"changed").unwrap();
     assert!(matches!(
-        handle.read_file(&recording).await,
+        handle.read_file(&recording, &crate::FileLease::for_test().await).await,
         Err(FileReadError::UserFileChanged { .. })
     ));
     std::fs::remove_file(&path).unwrap();
     assert!(matches!(
-        handle.read_file(&recording).await,
+        handle.read_file(&recording, &crate::FileLease::for_test().await).await,
         Err(FileReadError::UserFileMissing { .. })
     ));
     std::fs::write(&path, b"the user's new original").unwrap();
-    let current_stream = handle.open_file_stream(&current).await.unwrap();
+    let current_stream =
+        handle.open_file_stream(&current, &crate::FileLease::for_test().await).await.unwrap();
     readonly.close().await.unwrap();
     handle.close().await.unwrap();
     assert!(matches!(
@@ -542,7 +559,8 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap();
     handle.evict_file(file.id()).await.unwrap();
     let reads = storage.reads().await.len();
-    let stream = readonly.open_file_stream(&file).await.unwrap();
+    let stream =
+        readonly.open_file_stream(&file, &crate::FileLease::for_test().await).await.unwrap();
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
     assert!(storage.reads().await.len() > reads, "uncached read-only ranges reach saved storage");
     assert_eq!(
@@ -630,7 +648,8 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let attachment = ids.new_id().to_string();
     let path = root.path().join("recording");
     std::fs::write(&path, b"the first take").unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&path, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     let (row, recorded) = (thumbnail.clone(), attachment.clone());
     // Two writes, so two moves: the recording's failing leaves the
     // thumbnail's alone (§17.3).

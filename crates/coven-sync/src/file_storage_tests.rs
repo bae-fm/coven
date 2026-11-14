@@ -4,6 +4,7 @@ use super::{Fixture, CHUNK};
 use crate::FileReadError;
 use coven_database::{DbError, Provenance};
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 use std::sync::Arc;
 
 /// A read that needs storage, asked while a connection is coming, waits for
@@ -15,7 +16,8 @@ async fn a_read_while_a_connection_is_coming_waits_for_it() {
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let coming = f.files.expect_connection();
     let files = f.files.clone();
-    let reading = tokio::spawn(async move { files.read_file(&file).await });
+    let reading =
+        tokio::spawn(async move { files.read_file(&file, &FileLease::for_test().await).await });
     while f.files.inner.storage.receiver_count() == 0 {
         tokio::task::yield_now().await;
     }
@@ -33,10 +35,16 @@ async fn a_read_while_a_connection_is_coming_waits_for_it() {
 async fn a_cached_read_does_not_wait_for_a_connection() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cached", vec![6; CHUNK]).await;
-    assert_eq!(f.files.read_file(&file).await.unwrap(), vec![6; CHUNK]);
+    assert_eq!(
+        f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(),
+        vec![6; CHUNK]
+    );
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let _coming = f.files.expect_connection();
-    let read = tokio::time::timeout(HANG_GUARD, f.files.read_file(&file)).await.unwrap();
+    let read =
+        tokio::time::timeout(HANG_GUARD, f.files.read_file(&file, &FileLease::for_test().await))
+            .await
+            .unwrap();
     assert_eq!(read.unwrap(), vec![6; CHUNK]);
     f.close().await;
 }
@@ -50,7 +58,8 @@ async fn a_read_waiting_for_an_attempt_that_ends_without_storage_fails() {
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let coming = f.files.expect_connection();
     let files = f.files.clone();
-    let reading = tokio::spawn(async move { files.read_file(&file).await });
+    let reading =
+        tokio::spawn(async move { files.read_file(&file, &FileLease::for_test().await).await });
     while f.files.inner.storage.receiver_count() == 0 {
         tokio::task::yield_now().await;
     }
@@ -70,14 +79,15 @@ async fn closing_ends_a_waiting_read_with_store_closed() {
     let _coming = f.files.expect_connection();
     let files = f.files.clone();
     let waiting = file.clone();
-    let reading = tokio::spawn(async move { files.read_file(&waiting).await });
+    let reading =
+        tokio::spawn(async move { files.read_file(&waiting, &FileLease::for_test().await).await });
     while f.files.inner.storage.receiver_count() == 0 {
         tokio::task::yield_now().await;
     }
     f.files.close().await;
     let read = tokio::time::timeout(HANG_GUARD, reading).await.unwrap().unwrap();
     assert!(matches!(read, Err(FileReadError::Database(DbError::StoreClosed))), "{read:?}");
-    let after = f.files.read_file(&file).await;
+    let after = f.files.read_file(&file, &FileLease::for_test().await).await;
     assert!(matches!(after, Err(FileReadError::Database(DbError::StoreClosed))), "{after:?}");
     f.database.close().await.unwrap();
 }
@@ -91,7 +101,8 @@ async fn a_dropped_waiting_read_leaves_no_waiter_and_holds_no_lock() {
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let _coming = f.files.expect_connection();
     let files = f.files.clone();
-    let reading = tokio::spawn(async move { files.read_file(&file).await });
+    let reading =
+        tokio::spawn(async move { files.read_file(&file, &FileLease::for_test().await).await });
     while f.files.inner.storage.receiver_count() == 0 {
         tokio::task::yield_now().await;
     }

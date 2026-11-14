@@ -4,6 +4,7 @@
 
 use super::*;
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 use coven_storage::test_utils::{Faults, MemoryRequest};
 use std::num::NonZeroUsize;
 use tokio::sync::Semaphore;
@@ -75,7 +76,7 @@ async fn a_lone_files_parts_go_together_up_to_the_limit() {
     assert!(!moved.is_empty());
     assert!(moved.windows(2).all(|pair| pair[0] <= pair[1]), "{moved:?}");
     let stored = f.database.file_ref(file.id()).await.unwrap();
-    assert_eq!(f.files.read_file(&stored).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&stored, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }
 
@@ -106,7 +107,7 @@ async fn a_retry_after_a_lost_reply_sends_only_the_parts_the_provider_lacks() {
     assert!(!f.queued(&file).await);
     assert_eq!(parts(&f) as u64, total.div_ceil(CHUNK as u64), "no part went twice");
     let stored = f.database.file_ref(file.id()).await.unwrap();
-    assert_eq!(f.files.read_file(&stored).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&stored, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }
 

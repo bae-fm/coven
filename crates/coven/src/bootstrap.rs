@@ -696,6 +696,7 @@ async fn prepare_and_load(
             waits.clone(),
             builder.ids.clone(),
             builder.transfers.clone(),
+            builder.files.clone(),
             clock.clone(),
             coven_foundation::network_watch::NetworkWatch::unwatched().view(),
         );

@@ -555,7 +555,17 @@ mod sessions {
                 Ok(current) => match current.place() {
                     FilePlace::Cloud { .. } => {
                         // Every part went once, in order: the file reads back.
-                        assert_eq!(self.f.files.read_file(&current).await.unwrap(), photo());
+                        assert_eq!(
+                            self.f
+                                .files
+                                .read_file(
+                                    &current,
+                                    &coven_foundation::files::FileLease::for_test().await
+                                )
+                                .await
+                                .unwrap(),
+                            photo()
+                        );
                         true
                     }
                     FilePlace::DeviceOnly { .. } => false,

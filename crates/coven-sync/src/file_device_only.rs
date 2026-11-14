@@ -11,7 +11,7 @@ use coven_database::{
     PreparedDeviceOnly,
 };
 use coven_foundation::{
-    files::{CopyFolder, CopyPathError, FileError, FlushBatch, Flushed, RelativePath},
+    files::{CopyFolder, CopyPathError, FileError, FileLease, FlushBatch, Flushed, RelativePath},
     id_source::FileId,
     progress::{Progress, ProgressReport},
 };
@@ -142,7 +142,9 @@ impl Files {
     /// each file's download and how many of its bytes, and of the call's,
     /// are down. Until it returns, `cancel` stops the call; a failure, a
     /// panic in a download among them, or a cancel removes every copy and
-    /// folder the call made.
+    /// folder the call made. The call waits once for a place of the app's
+    /// budget, before it holds anything, and reads each file's stream in it
+    /// in turn; its copy's writer is outside the budget (§17.3).
     pub async fn prepare_device_only(
         &self,
         folder: &Path,
@@ -151,6 +153,14 @@ impl Files {
         progress: watch::Sender<Option<Progress<DeviceOnlyStep>>>,
     ) -> Result<PreparedDeviceOnly, DeviceOnlyError> {
         self.inner.check_open()?;
+        // One wait for the place every file's stream takes in turn, before
+        // the call holds anything else; a cancel ends it.
+        let mut cancel = cancel.clone();
+        let lease = tokio::select! {
+            biased;
+            () = cancelled(&mut cancel) => return Err(DeviceOnlyError::Cancelled),
+            lease = self.inner.files.lease(1) => lease.expect("a budget has at least one place"),
+        };
         let mut ids = Vec::new();
         let mut paths = Vec::new();
         for (file, path) in files {
@@ -184,7 +194,6 @@ impl Files {
         // Held until the call ends however it ends: dropping the call's
         // future drops it too, and the next write removes what it made.
         let reservation = self.inner.database.record_copies(copies.clone()).await?;
-        let mut cancel = cancel.clone();
         let mut report = ProgressReport::new(progress, self.inner.clock.clone());
         // A panic in a download fails the call as any failure does, and
         // what the call made goes before it returns (E15).
@@ -197,6 +206,7 @@ impl Files {
                 &plan.folders,
                 &refs,
                 &copies,
+                &lease,
                 &mut cancel,
                 &mut report,
             ),
@@ -244,6 +254,7 @@ async fn download(
     folders: &[PathBuf],
     files: &[FileRef],
     copies: &[FolderCopy],
+    lease: &FileLease,
     cancel: &mut watch::Receiver<bool>,
     report: &mut ProgressReport<DeviceOnlyStep>,
 ) -> Result<(Vec<DeviceOnlyCopy>, Flushed), DeviceOnlyError> {
@@ -273,7 +284,7 @@ async fn download(
             return Err(DbError::NotInCloud { file: file.id() }.into());
         };
         let location = location.clone();
-        let stream = handle.open_file_stream(file).await.map_err(download)?;
+        let stream = handle.open_file_stream(file, lease).await.map_err(download)?;
         let mut writer = {
             let (folder, temporary) = (folder.clone(), copy.temporary.clone());
             step(reservation, "create a copy", &bugs, async move {

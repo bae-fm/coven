@@ -7,7 +7,7 @@ use crate::{
     StoreDeletionError, StoreDir, StoreId, StoreLockError,
 };
 use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
-use coven_foundation::files::{ReplacedBy, StoreDirAccess, StoreDirectories};
+use coven_foundation::files::{FileBudget, ReplacedBy, StoreDirAccess, StoreDirectories};
 use coven_foundation::network_watch::NetworkSource;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +21,9 @@ pub struct Coven {
     directories: StoreDirectories,
     keychain: Arc<Keychain>,
     network: NetworkSource,
+    /// The app's places for open files, which every store this installation
+    /// opens shares (§17.3).
+    files: FileBudget,
 }
 
 /// A store on this device (E1).
@@ -137,18 +140,22 @@ impl Coven {
     /// The app creates `app_dir`; coven creates directories only inside it
     /// and never opens a directory above it, which Android refuses. No key
     /// is read here. A bug in work nobody waits for, in any store, goes to
-    /// `bugs`, the app's crash reporter (E15). An empty service name, or one
-    /// containing NUL, fails with `KeyError::InvalidServiceName`; an OS
+    /// `bugs`, the app's crash reporter (E15). Every read of a user's
+    /// original and every file stream, in every store, holds a place of
+    /// `files`, the app's budget of open files (§17.3). An empty service name,
+    /// or one containing NUL, fails with `KeyError::InvalidServiceName`; an OS
     /// keychain coven can't reach fails with its `KeyError`.
     pub fn new(
         app_dir: PathBuf,
         keyring_service: &str,
         bugs: crate::task::BugSinkRef,
+        files: FileBudget,
     ) -> Result<Self, KeyError> {
         Ok(Self {
             directories: StoreDirectories::new(app_dir, bugs),
             keychain: Keychain::native(keyring_service)?,
             network: NetworkSource::Platform,
+            files,
         })
     }
 
@@ -304,7 +311,12 @@ impl Coven {
 
     /// Configure creating, opening, restoring or joining a store.
     pub fn builder(&self) -> CovenBuilder {
-        CovenBuilder::new(self.directories.clone(), self.keychain.clone(), self.network.clone())
+        CovenBuilder::new(
+            self.directories.clone(),
+            self.keychain.clone(),
+            self.network.clone(),
+            self.files.clone(),
+        )
     }
 
     /// Deletes a closed store from this device without opening it: this

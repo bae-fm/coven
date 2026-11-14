@@ -51,6 +51,9 @@ capability_types = [
     "FileWriter",
     "WriterFolder",
     "FileReader",
+    # The app's places for open files, made once when it starts and given to
+    # coven (api.md E1).
+    "FileBudget",
     # The places outside coven's directories an app's call names (F.2): a
     # user's original, the folder the person picked for device-only copies
     # with the copies and folders coven records there, and the folder for
@@ -121,6 +124,7 @@ construction_only_capability_types = [
     "AssetFiles",
     "StoreDirectories",
     "FileReader",
+    "FileBudget",
     "WriterFolder",
     "UserOriginal",
     "CopyFolder",
@@ -362,6 +366,12 @@ task_types = [
     "FileWriter",
     "AssetFile",
     "StoreDeletionLock",
+    # One piece of work's places of the app's budget, one place of them for
+    # one open, and the open file holding its place (api.md E1).
+    "FileLease",
+    "LeasePlace",
+    "LeasedFile",
+    "ReaderFile",
     # When one HTTP exchange last moved bytes; it lives for that exchange.
     "ExchangeProgress",
     # One long operation's progress reports, paced by the operation's clock.
@@ -504,6 +514,8 @@ closed_session_types = [
 # the owner makes one; it, and the owners holding it, return a fresh one; a
 # holder receives it when it is built.
 [handles]
+# What a test reads of the budget (api.md E1).
+FileBudgetWatch = "FileBudget"
 # A live query the database makes from its readers and commit observer for
 # the app, which keeps it as long as it follows the results (api.md E4).
 LiveQuery = "Database"
@@ -1178,6 +1190,17 @@ tables = [
 # exemption.
 [composition_roots]
 "crates/coven-foundation/src/files/atomic_file.rs" = ["FileWriter::run"]
+# Made once per installation by the app, which owns the process's descriptor
+# limit, and given to coven (api.md E1); a test installation makes its own.
+"crates/coven-foundation/src/files/file_budget_tally.rs" = ["Tally::new"]
+"crates/coven-foundation/src/files/file_budget.rs" = [
+    "FileBudget::new",
+    "FileBudget::under_descriptor_limit",
+    "FileBudget::for_test",
+    "FileBudget::granted",
+    "FileLease::for_test",
+    "LeasePlace::for_test",
+]
 # A batch's flush syncs its folders and the drive's cache on a blocking
 # task, which the write waits for before its commit.
 "crates/coven-foundation/src/files/flush_batch.rs" = ["FlushBatch::flush"]
@@ -1391,7 +1414,7 @@ tables = [
 # A file's stream opens its local source: a copy in the store's directory,
 # or the user's original, which lives outside it at the path the app staged
 # it from and coven recorded, read back here (§17.9).
-"crates/coven-database/src/local_file.rs" = ["open_source", "LocalFileStream::read_at"]
+"crates/coven-database/src/local_file.rs" = ["open_source", "open_copy", "LocalFileStream::read_at"]
 # The original the app hands in to stage (§17.3).
 "crates/coven-database/src/user_file.rs" = ["prepare_user_file"]
 # The copies and folders coven recorded in a folder the person picked, read
@@ -1771,6 +1794,8 @@ tables = [
     "Coven::in_memory",
     # An installation whose bugs in work nobody waits for go to the test.
     "Coven::in_memory_reporting_to",
+    # An installation sharing the budget of open files an app's test made.
+    "Coven::in_memory_sharing",
     # The same device again, over the device-only entries a test saved.
     "Coven::in_memory_with_saved_keychain",
     # Another of the person's devices shares only the person entries.

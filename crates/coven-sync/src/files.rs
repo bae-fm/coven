@@ -38,7 +38,10 @@ use crate::SyncError;
 pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase, Mode, ReadOnly, Writer};
 use coven_foundation::locks::lock_unpoisoned;
-use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
+use coven_foundation::{
+    files::{FileBudget, StoreDir},
+    id_source::IdSourceRef,
+};
 use coven_storage::Storage;
 pub use file_device_only::{DeviceOnlyError, DeviceOnlyStep};
 pub use file_error::FileReadError;
@@ -151,6 +154,10 @@ struct FilesInner<M: FilesMode = Writer> {
     cache: tokio::sync::RwLock<()>,
     reads: Mutex<FileReadLocks>,
     transfers: Arc<TransferBudget>,
+    /// The installation's places for open files: coven's own work leases
+    /// from it (an upload, a device-only call), and every file stream takes a
+    /// place of the lease its caller gives (§17.3).
+    files: FileBudget,
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
     /// Runs where an upload run that found uploads blocked, with none in
@@ -187,6 +194,7 @@ impl Files<ReadOnly> {
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,
+        files: FileBudget,
         clock: coven_foundation::clock::ClockRef,
         network: coven_foundation::network_watch::NetworkView,
     ) -> Self {
@@ -198,6 +206,7 @@ impl Files<ReadOnly> {
             waits,
             ids,
             transfers,
+            files,
             clock,
             network,
             (),
@@ -216,6 +225,7 @@ impl<M: FilesMode> FilesInner<M> {
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,
+        files: FileBudget,
         clock: coven_foundation::clock::ClockRef,
         network: coven_foundation::network_watch::NetworkView,
         uploads: M::Uploads,
@@ -246,6 +256,7 @@ impl<M: FilesMode> FilesInner<M> {
             cache: tokio::sync::RwLock::new(()),
             reads: Mutex::new(BTreeMap::new()),
             transfers,
+            files,
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
             #[cfg(test)]
@@ -295,6 +306,7 @@ impl Files {
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,
+        files: FileBudget,
         clock: coven_foundation::clock::ClockRef,
         network: coven_foundation::network_watch::NetworkView,
     ) -> Self {
@@ -308,6 +320,7 @@ impl Files {
             waits,
             ids,
             transfers,
+            files,
             clock,
             network,
             UploadSettings::new(),

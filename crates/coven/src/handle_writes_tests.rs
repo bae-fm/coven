@@ -42,7 +42,8 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, vec![7; 100_000]).unwrap();
-    let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&original, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     let track = ana
         .handle
         .write(move |sql| {
@@ -121,7 +122,10 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     );
     assert_eq!(ana.handle.user_file(copy).await.unwrap(), None);
     assert_eq!(cached(ana), 0, "nothing here holds the bytes");
-    assert_eq!(ana.handle.read_file(&shared).await.unwrap(), vec![7; 100_000]);
+    assert_eq!(
+        ana.handle.read_file(&shared, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![7; 100_000]
+    );
     network.close().await;
 }
 
@@ -228,7 +232,10 @@ async fn a_concurrent_copy_reads_bytes_whose_record_was_deleted() {
     network.sync(1).await;
     network.sync(0).await;
     let shared = ben.handle.file_ref(copy).await.unwrap();
-    assert_eq!(ben.handle.read_file(&shared).await.unwrap(), vec![9; 4096]);
+    assert_eq!(
+        ben.handle.read_file(&shared, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![9; 4096]
+    );
 
     ben.handle
         .write(|sql| {
@@ -329,7 +336,10 @@ async fn a_concurrent_move_reads_bytes_whose_record_was_deleted() {
         .unwrap();
     assert_ne!(moved, photo, "the moved row has a file of its own");
     let moved = ben.handle.file_ref(moved).await.unwrap();
-    assert_eq!(ben.handle.read_file(&moved).await.unwrap(), vec![5; 4096]);
+    assert_eq!(
+        ben.handle.read_file(&moved, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![5; 4096]
+    );
     network.close().await;
 }
 
@@ -394,9 +404,15 @@ async fn a_concurrent_copy_out_of_a_circle_reads_bytes_whose_record_was_deleted(
     network.sync(1).await;
     network.sync(0).await;
     let shared = ben.handle.file_ref(copy).await.unwrap();
-    assert_eq!(ben.handle.read_file(&shared).await.unwrap(), vec![6; 4096]);
+    assert_eq!(
+        ben.handle.read_file(&shared, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![6; 4096]
+    );
     let shared = ana.handle.file_ref(copy).await.unwrap();
-    assert_eq!(ana.handle.read_file(&shared).await.unwrap(), vec![6; 4096]);
+    assert_eq!(
+        ana.handle.read_file(&shared, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![6; 4096]
+    );
     network.close().await;
 }
 
@@ -438,7 +454,8 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, vec![3; 50_000]).unwrap();
-    let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&original, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     let track = ana
         .handle
         .write(move |sql| {

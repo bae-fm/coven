@@ -5,6 +5,7 @@ use crate::{
     *,
 };
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::LeasePlace;
 
 /// The name a staged copy at `path` is recorded by: its staging's folder
 /// and its own name.
@@ -248,7 +249,11 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
     assert!(FileDatabase::new(db.clone()).uploads().await.unwrap().is_empty());
     assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&store).len(), 1);
-    assert!(FileDatabase::new(db.clone()).open_upload_source(&upload).await.unwrap().is_some());
+    assert!(FileDatabase::new(db.clone())
+        .open_upload_source(&upload, LeasePlace::for_test().await)
+        .await
+        .unwrap()
+        .is_some());
     let writes = crate::write::tests::records(&db).len();
     complete(&db).await.unwrap();
     assert_eq!(crate::write::tests::records(&db).len(), writes);

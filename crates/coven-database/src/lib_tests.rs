@@ -6,6 +6,11 @@ use coven_foundation::{
     id_source::{IdSource, SequentialIds, StoreId},
 };
 
+/// A lease of a budget of its own, for a read with no budget to watch.
+pub(crate) async fn lease() -> coven_foundation::files::FileLease {
+    coven_foundation::files::FileLease::for_test().await
+}
+
 pub(crate) struct TestStore {
     directory: StoreDir,
     _temporary: tempfile::TempDir,

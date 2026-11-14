@@ -310,7 +310,10 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
     for name in ["one", "two"] {
         let path = originals.path().join(name);
         std::fs::write(&path, name.repeat(1000)).unwrap();
-        prepared.push((name, prepare_user_file(&path, |_| {}).await.unwrap()));
+        prepared.push((
+            name,
+            prepare_user_file(&path, &crate::FileLease::for_test().await, |_| {}).await.unwrap(),
+        ));
     }
     let files = ana
         .handle

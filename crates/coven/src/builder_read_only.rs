@@ -20,6 +20,7 @@ impl CovenBuilder {
         let waits = Arc::new(coven_sync::RetryWaits::in_memory(clock.clone()));
         let connector = self.connector();
         let transfers = self.transfers.clone();
+        let files = self.files.clone();
         let database = self.database(directory.clone())?;
         // Before the swap's marker exists, only the record shows that a
         // replacement is moving the files a reader would open (§19.3).
@@ -67,6 +68,7 @@ impl CovenBuilder {
             waits,
             ids,
             transfers,
+            files,
             clock,
             coven_foundation::network_watch::NetworkWatch::unwatched().view(),
         );

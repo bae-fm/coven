@@ -2,7 +2,7 @@
 
 use crate::file_hashes::{FileHasher, FileHashes};
 use crate::DbError;
-use coven_foundation::files::{ObservationError, UserOriginal};
+use coven_foundation::files::{FileLease, ObservationError, UserOriginal};
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
@@ -46,15 +46,17 @@ pub struct UserFile {
 /// Read a user's original once, recording its whole-file hash and each upload
 /// chunk's hash from the same bytes, and reporting total bytes read. Changes
 /// during the read are refused; later ones fail its upload, whether it is
-/// staged for the cloud or moved there later.
+/// staged for the cloud or moved there later. The read holds one place of
+/// `lease` until it ends (§17.3).
 pub async fn prepare_user_file(
     path: &Path,
+    lease: &FileLease,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<PreparedUserFile, DbError> {
     let mut hash = FileHasher::new();
     let mut read = 0;
     let observed = UserOriginal::at(path.to_owned())
-        .observe(|bytes| {
+        .observe(lease.place().await, |bytes| {
             hash.update(bytes);
             read += bytes.len() as u64;
             progress(read);

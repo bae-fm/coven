@@ -53,7 +53,10 @@ async fn a_read_during_a_connection_attempt_waits_for_it() {
     let (f, file) = stopped_with_file().await;
     backing_off(&f).await;
     let handle = f.handle.clone();
-    let reading = tokio::spawn(async move { handle.read_file(&file).await });
+    let reading =
+        tokio::spawn(
+            async move { handle.read_file(&file, &crate::FileLease::for_test().await).await },
+        );
     f.handle.test_parked().await;
     assert!(!reading.is_finished(), "the read answered while a connection was coming");
     let wait = f.handle.test_connection_retry_wait().await.expect("the attempt's wait");
@@ -67,7 +70,12 @@ async fn a_read_during_a_connection_attempt_waits_for_it() {
 #[tokio::test]
 async fn a_read_while_sync_is_stopped_fails_at_once() {
     let (f, file) = stopped_with_file().await;
-    let read = tokio::time::timeout(HANG_GUARD, f.handle.read_file(&file)).await.unwrap();
+    let read = tokio::time::timeout(
+        HANG_GUARD,
+        f.handle.read_file(&file, &crate::FileLease::for_test().await),
+    )
+    .await
+    .unwrap();
     assert!(matches!(read, Err(FileReadError::NoStorage)), "{read:?}");
     f.handle.close().await.unwrap();
 }
@@ -79,7 +87,10 @@ async fn closing_ends_a_waiting_read_with_store_closed() {
     let (f, file) = stopped_with_file().await;
     backing_off(&f).await;
     let handle = f.handle.clone();
-    let reading = tokio::spawn(async move { handle.read_file(&file).await });
+    let reading =
+        tokio::spawn(
+            async move { handle.read_file(&file, &crate::FileLease::for_test().await).await },
+        );
     f.handle.test_parked().await;
     f.handle.close().await.unwrap();
     let read = tokio::time::timeout(HANG_GUARD, reading).await.unwrap().unwrap();
@@ -94,7 +105,7 @@ async fn closing_ends_a_waiting_read_with_store_closed() {
 async fn a_read_after_close_fails_with_store_closed() {
     let (f, file) = stopped_with_file().await;
     f.handle.close().await.unwrap();
-    let read = f.handle.read_file(&file).await;
+    let read = f.handle.read_file(&file, &crate::FileLease::for_test().await).await;
     assert!(
         matches!(read, Err(FileReadError::Database(coven_database::DbError::StoreClosed))),
         "{read:?}"
@@ -108,7 +119,10 @@ async fn a_dropped_waiting_read_leaves_nothing_behind() {
     let (f, file) = stopped_with_file().await;
     backing_off(&f).await;
     let handle = f.handle.clone();
-    let reading = tokio::spawn(async move { handle.read_file(&file).await });
+    let reading =
+        tokio::spawn(
+            async move { handle.read_file(&file, &crate::FileLease::for_test().await).await },
+        );
     f.handle.test_parked().await;
     reading.abort();
     assert!(reading.await.unwrap_err().is_cancelled());

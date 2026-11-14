@@ -1,6 +1,6 @@
 //! Observe a user's original without acquiring any ability to modify it.
 
-use super::{FileError, FileReader};
+use super::{FileError, FileReader, LeasePlace};
 use std::{
     fs::Metadata,
     io,
@@ -109,23 +109,27 @@ impl UserOriginal {
         &self.path
     }
 
-    /// Read it once in bounded chunks, checking its handle and path before
-    /// returning. The consumer can hash the bytes and report progress.
+    /// Read it once in bounded chunks, in `place`, checking its handle and
+    /// path before returning. The consumer can hash the bytes and report
+    /// progress. The place goes back when the read ends.
     pub async fn observe(
         &self,
+        place: LeasePlace,
         consume: impl FnMut(&[u8]),
     ) -> Result<ObservedFile, ObservationError> {
-        observe_file(&self.path, consume).await
+        observe_file(place, &self.path, consume).await
     }
 
-    /// Open it for positioned reads and check its size and modification
-    /// time, once: later reads return what's on disk.
+    /// Open it in `place` for positioned reads and check its size and
+    /// modification time, once: later reads return what's on disk. The place
+    /// goes back when the reader drops.
     pub fn open_reader(
         &self,
+        place: LeasePlace,
         size: u64,
         modified: SystemTime,
     ) -> Result<FileReader, ObservationError> {
-        FileReader::open_original(&self.path, size, modified)
+        FileReader::open_original(place, &self.path, size, modified)
     }
 }
 
@@ -161,12 +165,12 @@ async fn observed(path: &Path, file: &tokio::fs::File) -> Result<ObservedFile, O
 }
 
 async fn observe_file(
+    place: LeasePlace,
     path: &Path,
     mut consume: impl FnMut(&[u8]),
 ) -> Result<ObservedFile, ObservationError> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| ObservationError::at("read original", path, e))?;
+    let mut file =
+        place.open_async(path).await.map_err(|e| ObservationError::at("read original", path, e))?;
     let observed = observed(path, &file).await?;
     let mut buffer = vec![0; 64 * 1024];
     let mut size = 0u64;

@@ -321,6 +321,7 @@ impl<L> DatabaseAccess<L> {
     fn open_local_file(
         &self,
         reference: &crate::FileRef,
+        place: coven_foundation::files::LeasePlace,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let file = reference.id();
         let source = || {
@@ -340,6 +341,7 @@ impl<L> DatabaseAccess<L> {
             &file.to_string(),
             reference.size(),
             found,
+            place,
         ) {
             Ok(stream) => Ok(Some(stream)),
             Err(error) if error.judges_bytes() && source()?.is_none() => Ok(None),
@@ -518,15 +520,17 @@ impl<M: Mode> Database<M> {
         )
     }
 
-    /// Open the local source of a file still on this device only. No storage
-    /// operation occurs; `None` means the bytes come from the cache or
-    /// storage.
+    /// Open the local source of a file still on this device only, in `place`
+    /// of the app's budget, which the stream holds until its last read ends.
+    /// No storage operation occurs; `None` means the bytes come from the
+    /// cache or storage, and the place goes back.
     pub async fn open_local_file(
         &self,
         reference: &crate::FileRef,
+        place: coven_foundation::files::LeasePlace,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let reference = reference.clone();
-        self.call(move |open| M::access(open).open_local_file(&reference)).await
+        self.call(move |open| M::access(open).open_local_file(&reference, place)).await
     }
 
     /// The file this device has a record of under this id, from one

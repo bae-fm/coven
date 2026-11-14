@@ -53,7 +53,8 @@ async fn stage(
 ) -> FileId {
     let path = originals.join(name);
     std::fs::write(&path, &bytes).unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&path, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     device
         .handle
         .write(move |sql| {
@@ -125,7 +126,10 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     network.sync(1).await;
     let stored = [ana.handle.file_ref(one).await.unwrap(), ana.handle.file_ref(two).await.unwrap()];
     ana.handle.pin(&stored[..1]).await.unwrap();
-    assert_eq!(ana.handle.read_file(&stored[1]).await.unwrap(), vec![2; 3000]);
+    assert_eq!(
+        ana.handle.read_file(&stored[1], &crate::FileLease::for_test().await).await.unwrap(),
+        vec![2; 3000]
+    );
     assert_eq!(ana.handle.files_pinned(&[one]).await.unwrap(), [Some(true)]);
     assert!(cached(ana) > 0);
 
@@ -168,7 +172,10 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         let local = carol.handle.file_ref(file).await.unwrap();
         assert_eq!(local.place(), FilePlace::DeviceOnly { device });
         assert_eq!(carol.handle.user_file(file).await.unwrap().unwrap().path, album.join(name));
-        assert_eq!(carol.handle.read_file(&local).await.unwrap(), bytes);
+        assert_eq!(
+            carol.handle.read_file(&local, &crate::FileLease::for_test().await).await.unwrap(),
+            bytes
+        );
     }
     let writes = carol.handle.test_queued_writes().await.unwrap();
     assert_eq!(writes.len(), queued + 1, "one write switches both files");
@@ -188,7 +195,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         let elsewhere = ana.handle.file_ref(file).await.unwrap();
         assert_eq!(elsewhere.place(), FilePlace::DeviceOnly { device });
         assert!(matches!(
-            ana.handle.read_file(&elsewhere).await,
+            ana.handle.read_file(&elsewhere, &crate::FileLease::for_test().await).await,
             Err(FileReadError::DeviceOnly { .. })
         ));
         assert_eq!(ana.handle.user_file(file).await.unwrap(), None);
@@ -232,7 +239,8 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
     std::fs::write(&original, b"latin-1 track").unwrap();
-    let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&original, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     let name = path_text(Path::new(original.file_name().unwrap()));
     assert_eq!(name, r"Caf\xE9.flac");
     let file = ana
@@ -490,7 +498,8 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     let other = import(ana, "tracks", "other", originals.path(), vec![6; 700]).await;
     let local_path = originals.path().join("local");
     std::fs::write(&local_path, b"on Ana's laptop only").unwrap();
-    let prepared = prepare_user_file(&local_path, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&local_path, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     let local = ana
         .handle
         .write(move |sql| {
@@ -760,7 +769,10 @@ async fn two_devices_at_once_the_later_write_wins_and_the_losing_copy_goes() {
         carols_music.path().join("two.flac")
     );
     let read = carol.handle.file_ref(two).await.unwrap();
-    assert_eq!(carol.handle.read_file(&read).await.unwrap(), vec![9; 3000]);
+    assert_eq!(
+        carol.handle.read_file(&read, &crate::FileLease::for_test().await).await.unwrap(),
+        vec![9; 3000]
+    );
     // Ana's switch is lost values of each record, on both devices.
     for device in [ana, carol] {
         let lost = device.handle.lost_values().await.unwrap();

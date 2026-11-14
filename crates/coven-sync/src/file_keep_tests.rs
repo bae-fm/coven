@@ -4,6 +4,7 @@
 //! downloads, and its original is never read for the cache.
 
 use super::*;
+use coven_foundation::files::FileLease;
 use coven_foundation::{clock::FixedClock, id_source::FileId};
 use coven_storage::test_utils::MemoryRequest;
 
@@ -27,7 +28,9 @@ async fn kept_app_file(f: &Fixture, id: &str, bytes: Vec<u8>) -> FileId {
 async fn kept_original(f: &Fixture, id: &str, bytes: &[u8]) -> FileId {
     let path = f.root.path().join(id);
     std::fs::write(&path, bytes).unwrap();
-    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = coven_database::prepare_user_file(&path, &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let id = id.to_owned();
     f.database
         .write_as::<_, _, coven_database::DbError>(move |sql| {
@@ -86,7 +89,7 @@ async fn an_app_file_kept_here_is_pinned_from_coven_copy_without_storage() {
     assert_eq!(reads(&f, before), 0);
     assert!(!copy.exists());
     let reference = f.database.file_ref(file).await.unwrap();
-    assert_eq!(f.files.read_file(&reference).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&reference, &FileLease::for_test().await).await.unwrap(), bytes);
     assert_eq!(reads(&f, before), 0);
     assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
     assert!(keep_records(&f).await.is_empty());
@@ -403,7 +406,7 @@ async fn a_damaged_copy_falls_back_to_downloading_the_kept_pin() {
     assert!(pinned(&f, file).await);
     assert!(reads(&f, before) > 0);
     let reference = f.database.file_ref(file).await.unwrap();
-    assert_eq!(f.files.read_file(&reference).await.unwrap(), bytes);
+    assert_eq!(f.files.read_file(&reference, &FileLease::for_test().await).await.unwrap(), bytes);
     f.close().await;
 }
 

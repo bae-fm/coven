@@ -96,13 +96,14 @@ impl<M: Mode> FileDatabase<M> {
         self.database.file_ref(file).await
     }
     /// Open and check the local source of a file still on this device only,
-    /// while it uploads. `None` means its bytes come from the cache or
-    /// storage.
+    /// while it uploads, in `place` of the app's budget. `None` means its
+    /// bytes come from the cache or storage.
     pub async fn open_local(
         &self,
         file: &FileRef,
+        place: coven_foundation::files::LeasePlace,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        self.database.open_local_file(file).await
+        self.database.open_local_file(file, place).await
     }
 
     /// Cached encrypted chunk or header (-1). Its bytes are read with no
@@ -537,13 +538,18 @@ impl FileDatabase {
     }
     /// Open the source an upload sends, from the facts its queue entry fixed
     /// at staging; later row changes cannot replace them. `None` means the
-    /// upload is no longer queued. It is opened with no writer held.
+    /// upload is no longer queued, and the place goes back. It is opened with
+    /// no writer held, in `place` of the app's budget, which the stream
+    /// holds until its last read ends.
     pub async fn open_upload_source(
         &self,
         upload: &FileUpload,
+        place: coven_foundation::files::LeasePlace,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let (id, object, size) = (upload.id, upload.location.object(), upload.size);
-        self.database.call(move |inner| open_upload_source(&inner.access, id, object, size)).await
+        self.database
+            .call(move |inner| open_upload_source(&inner.access, id, object, size, place))
+            .await
     }
 
     /// Persist the provider recording after each confirmed change in progress,
@@ -742,10 +748,13 @@ fn open_upload_source<L>(
     upload: i64,
     object: ObjectId,
     size: u64,
+    place: coven_foundation::files::LeasePlace,
 ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
     let source = access.with_writer(|db| file_ref::queued_source(db, upload))?;
     source
-        .map(|source| file_ref::open_source(&access.directory, &object.to_string(), size, source))
+        .map(|source| {
+            file_ref::open_source(&access.directory, &object.to_string(), size, source, place)
+        })
         .transpose()
 }
 

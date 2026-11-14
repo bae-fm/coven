@@ -11,6 +11,7 @@ mod creation;
 mod deletion;
 mod device_reset;
 mod directory;
+mod file_budget;
 mod file_lock;
 mod file_reader;
 mod flush_batch;
@@ -49,6 +50,9 @@ pub use directory::{
     settle_files, verify_lock, FileArea, FileName, FileNameError, StagedName, StagingFolderError,
     StoreDir, StoreDirAccess, StoreFile, TemporaryFolder, WriterError,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use file_budget::FileBudgetWatch;
+pub use file_budget::{FileBudget, FileLease, LeasePlace, LeaseTooLarge, LeasedFile};
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
 #[cfg(any(test, feature = "test-utils"))]

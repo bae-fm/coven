@@ -5,6 +5,7 @@ use crate::{
     DbError, FileColumn, FilePlace, Migration, Namespace, OldWrites, Provenance, RowIdentity,
     SyncedTable,
 };
+use coven_foundation::files::FileLease;
 
 /// §18: a migration renaming a table, or its file column, keeps the row's
 /// reference to its file under the new names. The upload completes into the
@@ -30,7 +31,10 @@ async fn file_references_follow_a_rename() {
             .open()
             .await
             .unwrap();
-        let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
+        let prepared =
+            crate::prepare_user_file(original.path(), &FileLease::for_test().await, |_| {})
+                .await
+                .unwrap();
         let file = db
             .write_as::<_, _, DbError>(move |sql| {
                 let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;

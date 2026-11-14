@@ -1,3 +1,4 @@
+use crate::tests::lease;
 use crate::{tests::TestStore, write::tests::records, *};
 #[cfg(unix)]
 use coven_foundation::clock::HANG_GUARD;
@@ -165,7 +166,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
     let reference = db.file_ref(file).await.unwrap();
     assert_eq!(reference.size(), LENGTH as u64);
     assert_eq!(reference.place(), FilePlace::DeviceOnly { device: store.device() });
-    let prepared = prepare_user_file(&paths[0], |_| {}).await.unwrap();
+    let prepared = prepare_user_file(&paths[0], &lease().await, |_| {}).await.unwrap();
     let hash: Vec<u8> = db.inspect_writer(|sql| {
         sql.query_row("SELECT hash FROM _coven_file_uploads", [], |r| r.get(0)).unwrap()
     });
@@ -280,7 +281,7 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     let path = original.path().to_owned();
     std::fs::write(&path, vec![1; 256 * 1024]).unwrap();
     let changed = std::sync::atomic::AtomicBool::new(false);
-    let error = prepare_user_file(&path, |_| {
+    let error = prepare_user_file(&path, &lease().await, |_| {
         if !changed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             std::fs::write(&path, b"changed while reading").unwrap();
         }
@@ -289,7 +290,7 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     .unwrap_err();
     assert!(matches!(error, DbError::UserFileChanged { .. }));
     std::fs::write(&path, b"original").unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared = prepare_user_file(&path, &lease().await, |_| {}).await.unwrap();
     std::fs::remove_file(&path).unwrap();
     assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
     tokio::time::timeout(
@@ -315,9 +316,11 @@ async fn preparing_a_users_file_reports_the_bytes_read_so_far() {
     let size = 3 * 1024 * 1024 + 17;
     std::fs::write(original.path(), vec![7; size]).unwrap();
     let reported = std::sync::Mutex::new(Vec::new());
-    let prepared = prepare_user_file(original.path(), |read| reported.lock().unwrap().push(read))
-        .await
-        .unwrap();
+    let prepared = prepare_user_file(original.path(), &lease().await, |read| {
+        reported.lock().unwrap().push(read)
+    })
+    .await
+    .unwrap();
     let reported = reported.into_inner().unwrap();
     assert!(reported.len() > 1, "{reported:?}");
     assert!(reported.windows(2).all(|pair| pair[0] < pair[1]), "{reported:?}");
@@ -333,7 +336,7 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
     let db = open(&store, Provenance::UserProvided).await;
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"original").unwrap();
-    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let prepared = prepare_user_file(original.path(), &lease().await, |_| {}).await.unwrap();
     let file = db
         .write_as::<_, _, crate::DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
@@ -367,7 +370,7 @@ async fn an_applied_deletion_forgets_a_users_original_in_its_transaction() {
     let b = open(&b_store, Provenance::UserProvided).await;
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"original").unwrap();
-    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let prepared = prepare_user_file(original.path(), &lease().await, |_| {}).await.unwrap();
     let file = a
         .write_as::<_, _, crate::DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
@@ -420,7 +423,7 @@ async fn the_wrong_kind_or_an_undeclared_namespace_fails() {
         ("originals", false, Some(Provenance::UserProvided)),
         ("files", true, Some(Provenance::AppProvided)),
     ] {
-        let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+        let prepared = prepare_user_file(original.path(), &lease().await, |_| {}).await.unwrap();
         // A user's original is checked in the write, app bytes as staged.
         let error = if user {
             db.write(move |sql| {
@@ -658,7 +661,7 @@ async fn a_deleted_circles_user_original_is_forgotten() {
     store.join_circle(&db, circle);
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"original").unwrap();
-    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let prepared = prepare_user_file(original.path(), &lease().await, |_| {}).await.unwrap();
     let file = db
         .write_as::<_, _, crate::DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;

@@ -229,7 +229,8 @@ async fn a_missing_original_fails_its_phase_not_the_state_until_it_uploads() {
     let drive = tempfile::tempdir().unwrap();
     let path = drive.path().join("track.flac");
     std::fs::write(&path, vec![9; 4096]).unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared =
+        prepare_user_file(&path, &crate::FileLease::for_test().await, |_| {}).await.unwrap();
     dan.handle.set_uploads_paused(true).await.unwrap();
     let track = dan
         .handle

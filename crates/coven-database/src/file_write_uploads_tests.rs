@@ -8,6 +8,7 @@ use crate::{
     write::tests::records,
     DbError, FilePlace, LocalFileError, Place, Provenance,
 };
+use coven_foundation::files::{FileLease, LeasePlace};
 use coven_foundation::id_source::{FileId, SequentialIds};
 use std::time::Duration;
 
@@ -44,8 +45,70 @@ async fn original_row(
 
 async fn read_local(db: &crate::Database, file: FileId) -> Result<Vec<u8>, LocalFileError> {
     let reference = db.file_ref(file).await.unwrap();
-    let stream = db.open_local_file(&reference).await?.expect("its bytes are here");
+    let stream = db
+        .open_local_file(&reference, LeasePlace::for_test().await)
+        .await?
+        .expect("its bytes are here");
     stream.read_at(0, reference.size()).await
+}
+
+/// A budget of one place, its watch, and the place a test takes for one open.
+async fn one_place(
+) -> (coven_foundation::files::FileBudgetWatch, coven_foundation::files::FileLease) {
+    let budget = coven_foundation::files::FileBudget::new(std::num::NonZeroUsize::MIN);
+    (budget.watch(), budget.lease(1).await.unwrap())
+}
+
+/// A stream of the user's original holds one place of the app's budget from
+/// its opening until it drops, and no file stays open after.
+#[tokio::test]
+async fn a_stream_of_an_original_holds_its_place_until_its_last_read_ends() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let originals = tempfile::tempdir().unwrap();
+    let original = originals.path().join("track.flac");
+    std::fs::write(&original, b"local track").unwrap();
+    let prepared =
+        crate::prepare_user_file(&original, &FileLease::for_test().await, |_| {}).await.unwrap();
+    let file = original_row(&db, prepared, Place::DeviceOnly).await;
+    let reference = db.file_ref(file).await.unwrap();
+    let (watch, lease) = one_place().await;
+    let stream = db
+        .open_local_file(&reference, lease.place().await)
+        .await
+        .unwrap()
+        .expect("its original is here");
+    assert_eq!(watch.holding(), 1);
+    assert_eq!(stream.read_at(0, reference.size()).await.unwrap(), b"local track");
+    assert_eq!(watch.holding(), 1);
+    drop(stream);
+    assert_eq!((watch.holding(), watch.most_holding()), (0, 1));
+    coven_foundation::files::assert_no_open_files_under(originals.path());
+    db.close().await.unwrap();
+}
+
+/// A stream of coven's own copy of a file holds one place too, though the
+/// copy is a file of coven's directory, and a pin's reading of the copy holds
+/// none.
+#[tokio::test]
+async fn a_stream_of_the_store_copy_holds_a_place() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file =
+        stage_row(&db, |batch| batch.put_file("files", b"local bytes".to_vec(), Place::DeviceOnly))
+            .await;
+    let reference = db.file_ref(file).await.unwrap();
+    let (watch, lease) = one_place().await;
+    let stream = db
+        .open_local_file(&reference, lease.place().await)
+        .await
+        .unwrap()
+        .expect("its bytes are here");
+    assert_eq!(watch.holding(), 1);
+    assert_eq!(stream.read_at(0, reference.size()).await.unwrap(), b"local bytes");
+    drop(stream);
+    assert_eq!((watch.holding(), watch.most_holding()), (0, 1));
+    db.close().await.unwrap();
 }
 
 /// An app file staged on this device only keeps coven's copy and queues no
@@ -72,7 +135,11 @@ async fn an_app_file_staged_on_this_device_only_keeps_coven_copy_and_uploads_not
     }
     assert_eq!(b.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { device });
     // Only this device's own files are read from bytes here.
-    assert!(b.open_local_file(&b.file_ref(file).await.unwrap()).await.unwrap().is_none());
+    assert!(b
+        .open_local_file(&b.file_ref(file).await.unwrap(), LeasePlace::for_test().await)
+        .await
+        .unwrap()
+        .is_none());
     a.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
@@ -96,7 +163,9 @@ async fn an_original_staged_on_this_device_only_is_read_from_disk() {
     let db = open(&store, Provenance::UserProvided).await;
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"recorded original").unwrap();
-    let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let prepared = crate::prepare_user_file(original.path(), &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     let file = original_row(&db, prepared, crate::Place::DeviceOnly).await;
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     let (modified_seconds, modified_nanos) = crate::unix_seconds_and_nanos(
@@ -168,9 +237,11 @@ async fn staging_an_original_on_this_device_only_records_its_hashes() {
     std::fs::write(original.path(), &bytes).unwrap();
     let read = std::sync::Mutex::new(Vec::new());
     let prepared =
-        crate::prepare_user_file(original.path(), |bytes| read.lock().unwrap().push(bytes))
-            .await
-            .unwrap();
+        crate::prepare_user_file(original.path(), &FileLease::for_test().await, |bytes| {
+            read.lock().unwrap().push(bytes)
+        })
+        .await
+        .unwrap();
     let read = read.into_inner().unwrap();
     assert!(read.windows(2).all(|pair| pair[0] < pair[1]), "{read:?}");
     assert_eq!(read.last(), Some(&(bytes.len() as u64)));
@@ -226,10 +297,13 @@ async fn reading_an_original_gives_the_facts_coven_records() {
         path
     };
     let local_path = original("local.flac", b"local original!!!");
-    let local = crate::prepare_user_file(&local_path, |_| {}).await.unwrap();
+    let local =
+        crate::prepare_user_file(&local_path, &FileLease::for_test().await, |_| {}).await.unwrap();
     assert_eq!((local.size(), local.modified_at()), (17, scanned));
     let prepared_path = original("prepared.flac", b"prepared original!");
-    let prepared = crate::prepare_user_file(&prepared_path, |_| {}).await.unwrap();
+    let prepared = crate::prepare_user_file(&prepared_path, &FileLease::for_test().await, |_| {})
+        .await
+        .unwrap();
     assert_eq!((prepared.size(), prepared.modified_at()), (18, scanned));
     let device_only = original_row(&db, local, crate::Place::DeviceOnly).await;
     let cloud = db
@@ -269,7 +343,8 @@ async fn coven_user_files_gives_each_modification_time_exactly() {
         let path = folder.path().join(row);
         std::fs::write(&path, b"one size").unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
-        let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
+        let prepared =
+            crate::prepare_user_file(&path, &FileLease::for_test().await, |_| {}).await.unwrap();
         db.write_as::<_, _, DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;
             sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (row, file))?;
@@ -318,7 +393,8 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     std::fs::write(&path, b"original bytes").unwrap();
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
-    let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
+    let prepared =
+        crate::prepare_user_file(&path, &FileLease::for_test().await, |_| {}).await.unwrap();
     let file = original_row(&db, prepared, crate::Place::DeviceOnly).await;
     let (bytes, text) = db
         .read(|sql| {

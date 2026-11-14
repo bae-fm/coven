@@ -4,6 +4,7 @@ use crate::FileSourceFailure;
 use crate::{FileMissingReason, FileReadError};
 use coven_database::{FileRef, Provenance};
 use coven_format::file::FileHeader;
+use coven_foundation::files::FileLease;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{test_utils::MemoryRequest, Storage, StorageFailure};
 use serde_json::{json, Value};
@@ -50,14 +51,14 @@ async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
         panic!("a file staged on this device only is on this device only");
     };
     let before = a.storage.request_trace().len();
-    assert_eq!(a.files.read_file(&file).await.unwrap(), b"kept here");
+    assert_eq!(a.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), b"kept here");
     assert_eq!(a.files.file_status(&file).await.unwrap(), FileStatus::DeviceOnly { device });
     assert_eq!(a.storage.request_trace().len(), before);
     assert!(a.files.inner.database.uploads().await.unwrap().is_empty());
     let (b, remote) = receiver(&a, &file).await;
     assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::DeviceOnly { device });
     assert!(matches!(
-        b.files.read_file(&remote).await,
+        b.files.read_file(&remote, &FileLease::for_test().await).await,
         Err(FileReadError::DeviceOnly { device: d, .. }) if d == device
     ));
     for (files, file) in [(&a.files, &file), (&b.files, &remote)] {
@@ -87,7 +88,7 @@ async fn a_named_file_absent_from_storage_is_lost() {
         b.files.file_status(&remote).await.unwrap(),
         FileStatus::Missing { device, reason: FileMissingReason::Lost }
     );
-    assert!(matches!(b.files.read_file(&remote).await,
+    assert!(matches!(b.files.read_file(&remote, &FileLease::for_test().await).await,
         Err(FileReadError::Missing { device: d, .. }) if d == device));
     // The read's caller has the error; a pin's failure is the record.
     assert!(b.database.pending::<crate::PendingRecord>().await.unwrap().is_empty());
@@ -111,7 +112,10 @@ async fn a_named_file_absent_from_storage_is_lost() {
     // The complete object is available again.
     a.storage.create(&path, &stored).await.unwrap();
     assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::Available);
-    assert_eq!(b.files.read_file(&remote).await.unwrap(), vec![61; CHUNK + 9]);
+    assert_eq!(
+        b.files.read_file(&remote, &FileLease::for_test().await).await.unwrap(),
+        vec![61; CHUNK + 9]
+    );
     b.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     assert!(matches!(b.files.file_status(&remote).await, Err(FileReadError::NoStorage)));
     b.close().await;
@@ -128,7 +132,10 @@ async fn an_uploading_file_is_judged_locally() {
     let file = f.original("photo", &[3; 40]).await;
     assert_eq!(f.files.file_status(&file).await.unwrap(), FileStatus::Uploading);
     std::fs::remove_file(f.root.path().join("photo")).unwrap();
-    assert!(matches!(f.files.read_file(&file).await, Err(FileReadError::UserFileMissing { .. })));
+    assert!(matches!(
+        f.files.read_file(&file, &FileLease::for_test().await).await,
+        Err(FileReadError::UserFileMissing { .. })
+    ));
     assert_eq!(
         f.files.file_status(&file).await.unwrap(),
         FileStatus::Missing {
@@ -151,7 +158,10 @@ async fn an_uploaders_source_failure_shows_on_it_alone() {
     a.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let file = a.original("photo", &[3; 40]).await;
     std::fs::remove_file(a.root.path().join("photo")).unwrap();
-    assert!(matches!(a.files.read_file(&file).await, Err(FileReadError::UserFileMissing { .. })));
+    assert!(matches!(
+        a.files.read_file(&file, &FileLease::for_test().await).await,
+        Err(FileReadError::UserFileMissing { .. })
+    ));
     let device = a.location(&file).await.uploader();
     assert_eq!(
         a.files.file_status(&file).await.unwrap(),
@@ -178,7 +188,7 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
     a.storage.delete(&a.path(&file)).await.unwrap();
     a.storage.create(&a.path(&file), b"truncated").await.unwrap();
     assert!(matches!(b.files.file_status(&remote).await, Err(FileReadError::Integrity { .. })));
-    let read = b.files.read_file(&remote).await;
+    let read = b.files.read_file(&remote, &FileLease::for_test().await).await;
     assert!(matches!(read, Err(FileReadError::Integrity { .. })), "{read:?}");
     b.close().await;
     a.close().await;
@@ -197,7 +207,7 @@ async fn a_longer_object_is_damage_to_status_and_reads() {
     a.storage.delete(&path).await.unwrap();
     a.storage.create(&path, &longer).await.unwrap();
     assert!(matches!(b.files.file_status(&remote).await, Err(FileReadError::Integrity { .. })));
-    let read = b.files.read_file(&remote).await;
+    let read = b.files.read_file(&remote, &FileLease::for_test().await).await;
     assert!(matches!(read, Err(FileReadError::Integrity { .. })), "{read:?}");
     b.close().await;
     a.close().await;
@@ -230,7 +240,10 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
     }
     let remote = b.database.file_ref(file.id()).await.unwrap();
     assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::Available);
-    assert!(matches!(b.files.read_file(&remote).await, Err(FileReadError::Integrity { .. })));
+    assert!(matches!(
+        b.files.read_file(&remote, &FileLease::for_test().await).await,
+        Err(FileReadError::Integrity { .. })
+    ));
     b.close().await;
     a.close().await;
 }
@@ -295,7 +308,7 @@ async fn observe(
     b.database.write(move |sql| sql.evict_file(id)).await.unwrap();
     let status = status_result(b.files.file_status(remote).await);
     let before = a.storage.request_trace().len();
-    let read = read_result(b.files.read_file(remote).await, original);
+    let read = read_result(b.files.read_file(remote, &FileLease::for_test().await).await, original);
     let path = a.path(remote);
     let ranges = a.storage.request_trace()[before..]
         .iter()

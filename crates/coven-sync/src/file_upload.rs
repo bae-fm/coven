@@ -87,8 +87,13 @@ impl FilesInner {
         let storage = super::file_storage::connected(self.storage_state())?;
         // The queue fixed this source at staging; the rows naming its files
         // may have changed since without affecting it (§17.9).
+        // The upload takes its place before it opens the source and holds it
+        // until it ends: it holds no other place, and nothing it awaits
+        // while it sends waits for one (§17.9).
+        let place =
+            self.files.lease(1).await.expect("a budget has at least one place").place().await;
         let source =
-            self.database.open_upload_source(item).await?.ok_or(FileReadError::Database(
+            self.database.open_upload_source(item, place).await?.ok_or(FileReadError::Database(
                 DbError::Invariant { what: "a queued upload keeps the source fixed at staging" },
             ))?;
         let total = item.bytes_total;

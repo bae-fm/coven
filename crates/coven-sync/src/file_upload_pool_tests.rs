@@ -4,6 +4,7 @@
 
 use super::*;
 use coven_foundation::clock::HANG_GUARD;
+use coven_foundation::files::FileLease;
 use coven_storage::test_utils::MemoryRequest;
 use std::num::NonZeroUsize;
 use tokio::sync::Semaphore;
@@ -116,7 +117,10 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     until_queued(&f, 0).await;
     assert_eq!(f.storage.peak_requests(), 4);
     for (n, file) in files.iter().enumerate() {
-        assert_eq!(f.files.read_file(file).await.unwrap(), photo(n as u8 + 1));
+        assert_eq!(
+            f.files.read_file(file, &FileLease::for_test().await).await.unwrap(),
+            photo(n as u8 + 1)
+        );
     }
     f.close().await;
 }
@@ -740,7 +744,7 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
         }
         assert!(!f.queued(&file).await);
         assert_eq!(f.storage.status(&path).await.unwrap().unwrap().size, encrypted(plain));
-        assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+        assert_eq!(f.files.read_file(&file, &FileLease::for_test().await).await.unwrap(), bytes);
         f.close().await;
     }
 }
