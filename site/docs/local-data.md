@@ -429,6 +429,31 @@ second and lives in no table, such as a transfer's progress, goes to the view on
 a stream of its own, not into a live query. State that lives only on screen, such as
 hover, focus or an open popover, stays in the view and never goes into SQL.
 
+A long list's count is never in the same live query as its rows. A count
+changes with every insert, so a query holding both reruns, and rereads every
+window it holds, on every write. Subscribe each window the screen shows as its
+own live query, with that window as its request, and the count as another:
+
+```rust
+// A window: up to 100 notes after the title the screen sends (None: the top).
+let window = |after: &Option<String>, sql: SqlReadContext<'_>| {
+    Ok(sql.query(
+        "SELECT id, title FROM notes WHERE ?1 IS NULL OR title > ?1 ORDER BY title LIMIT 100",
+        [after],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?)
+};
+let top = handle.subscribe_reconfigurable(None, window);
+let next = handle.subscribe_reconfigurable(Some(last_title_on_screen), window);
+// The count, read by itself.
+let count = handle.subscribe(|sql| {
+    Ok(sql.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0))?)
+});
+```
+
+A write that adds a row reruns `count`, and only the window whose rows it
+changed.
+
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
 `subscribe_pin_progress` and others. They all work offline. The upload queue
