@@ -417,6 +417,18 @@ page number or a search term, that the app can replace through
 which request and revision it answers, and whether a new request, a write, or
 both caused it.
 
+A screen's read is the live query and nothing else. Everything the screen shows
+comes from SQL: the rows, and beside them any count, total, group, header, sum
+or facet, in the same query or in a live query of its own. Keep nothing from one
+result to use in the next, don't walk the rows in a second pass beside the
+query, and don't write a value or replace a request only to make the query read
+again: it reruns because what it read changed, and a request changes because the
+person asked for something else. When a query is slow, the fix is in SQL (the
+query, an index, or a table triggers keep). A value that changes many times a
+second and lives in no table, such as a transfer's progress, goes to the view on
+a stream of its own, not into a live query. State that lives only on screen, such as
+hover, focus or an open popover, stays in the view and never goes into SQL.
+
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
 `subscribe_pin_progress` and others. They all work offline. The upload queue
