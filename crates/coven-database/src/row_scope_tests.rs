@@ -240,7 +240,7 @@ fn condition(
         };
     }
     let id = rng.below(10);
-    match rng.below(15) {
+    match rng.below(18) {
         0 => (format!("{name}.id = {}", key(table, id)), true),
         1 => (format!("{name}.a = {}", rng.below(5)), true),
         2 => (format!("{name}.b = {}", b_value(rng)), true),
@@ -282,6 +282,21 @@ fn condition(
             let value = b_value(rng);
             let narrows = value == "NULL";
             (format!("{name}.b IS NOT {value}"), narrows)
+        }
+        15..=17 => {
+            // The truth of a condition, compared with a value of any type.
+            parameters.push(match rng.below(10) {
+                0..=2 => SqlValue::Null,
+                3..=7 => SqlValue::Integer(rng.below(3) as i64),
+                _ => SqlValue::Text(rng.below(3).to_string().into_bytes()),
+            });
+            let index = parameters.len();
+            let condition = match rng.below(3) {
+                0 => format!("({name}.a IS NULL) = ?{index}"),
+                1 => format!("({name}.b = 'x') < ?{index}"),
+                _ => format!("({name}.c >= 3) IS ?{index}"),
+            };
+            (condition, true)
         }
         8 => (format!("abs({name}.c) = {}", rng.below(10)), false),
         9 => (format!("{name}.b LIKE {}", b_value(rng)), false),

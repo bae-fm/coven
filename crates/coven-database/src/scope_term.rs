@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use crate::row_scope::RowScope;
+use crate::row_scope::{compare, RowScope};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, Literal, Operator, UnaryOperator};
@@ -28,6 +28,18 @@ pub(crate) enum ScopeTerm {
     Null {
         column: String,
         not: bool,
+    },
+    /// `(condition) op operand`: the truth of a condition compared with a
+    /// value, which is where the condition holds, where it doesn't, or where
+    /// it is NULL, whichever of those the comparison keeps.
+    Truth {
+        condition: Truth,
+        /// How the comparison orders the truth with the value, and whether
+        /// equal passes; `is` for `IS`, which NULL equals.
+        ordering: Ordering,
+        inclusive: bool,
+        is: bool,
+        operand: Operand,
     },
     /// `column IS ?`: a NULL test when the run's value is NULL, an equality
     /// otherwise.
@@ -65,6 +77,39 @@ impl ScopeTerm {
             Self::Null { column, not } => {
                 Some(RowScope::Null { column: column.clone(), not: *not })
             }
+            Self::Truth { condition, ordering, inclusive, is, operand } => {
+                let value = operand.value(parameters);
+                let passes = |truth: Option<i64>| match (truth, value) {
+                    (None, value) => *is && matches!(value, Value::Null),
+                    (Some(_), Value::Null) => false,
+                    (Some(truth), value) => {
+                        compare(&Value::Integer(truth), value).is_some_and(|found| {
+                            if *is {
+                                found.is_eq()
+                            } else {
+                                found == *ordering || (*inclusive && found.is_eq())
+                            }
+                        })
+                    }
+                };
+                let mut scope = None;
+                for (truth, holds) in [(Some(1), true), (Some(0), false), (None, false)] {
+                    if !passes(truth) {
+                        continue;
+                    }
+                    let found = match truth {
+                        None => condition.when_null(parameters),
+                        _ => condition.when(holds, parameters),
+                    }?;
+                    scope = Some(match scope {
+                        Some(other) => RowScope::or(other, found),
+                        None => found,
+                    });
+                }
+                Some(
+                    scope.unwrap_or_else(|| RowScope::equal(condition.column().to_owned(), vec![])),
+                )
+            }
             Self::Is { column, affinity, operand } => {
                 let value = operand.value(parameters);
                 if matches!(value, Value::Null) {
@@ -94,7 +139,7 @@ impl ScopeTerm {
         match self {
             Self::Compare { .. } | Self::In { .. } => false,
             Self::Null { not, .. } => !not,
-            Self::Is { .. } => true,
+            Self::Is { .. } | Self::Truth { .. } => true,
             Self::And(left, right) => left.may_hold_on_nulls() && right.may_hold_on_nulls(),
             Self::Or(left, right) => left.may_hold_on_nulls() || right.may_hold_on_nulls(),
         }
@@ -114,6 +159,11 @@ impl ScopeTerm {
             | Self::Is { column, .. } => {
                 if !into.contains(column) {
                     into.push(column.clone());
+                }
+            }
+            Self::Truth { condition, .. } => {
+                if !into.iter().any(|column| column == condition.column()) {
+                    into.push(condition.column().to_owned());
                 }
             }
             Self::And(left, right) | Self::Or(left, right) => {
@@ -146,6 +196,13 @@ impl ScopeTerm {
             Self::Null { column: tested, not } => {
                 Some(Self::Null { column: column(tested)?, not: *not })
             }
+            Self::Truth { condition, ordering, inclusive, is, operand } => Some(Self::Truth {
+                condition: condition.renamed(column)?,
+                ordering: *ordering,
+                inclusive: *inclusive,
+                is: *is,
+                operand: operand.clone(),
+            }),
             Self::Is { column: tested, affinity, operand } => Some(Self::Is {
                 column: column(tested)?,
                 affinity: *affinity,
@@ -157,6 +214,99 @@ impl ScopeTerm {
             },
             Self::Or(left, right) => {
                 Some(Self::Or(Box::new(left.renamed(column)?), Box::new(right.renamed(column)?)))
+            }
+        }
+    }
+}
+
+/// The condition whose truth a term compares with a value: a NULL test, or
+/// a column compared with a value. In each row it is 1, 0 or NULL; a NULL
+/// test is never NULL, and a comparison is where its column is NULL.
+#[derive(Clone)]
+pub(crate) enum Truth {
+    Null {
+        column: String,
+        not: bool,
+    },
+    Compare {
+        column: String,
+        affinity: Affinity,
+        operand: Operand,
+        ordering: Ordering,
+        inclusive: bool,
+    },
+}
+
+impl Truth {
+    fn column(&self) -> &str {
+        match self {
+            Self::Null { column, .. } | Self::Compare { column, .. } => column,
+        }
+    }
+
+    fn renamed(&self, rename: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
+        Some(match self {
+            Self::Null { column, not } => Self::Null { column: rename(column)?, not: *not },
+            Self::Compare { column, affinity, operand, ordering, inclusive } => Self::Compare {
+                column: rename(column)?,
+                affinity: *affinity,
+                operand: operand.clone(),
+                ordering: *ordering,
+                inclusive: *inclusive,
+            },
+        })
+    }
+
+    /// The rows where the condition is true, or false when not `holds`, for
+    /// a run bound to `parameters`; `None` when a value would be converted.
+    fn when(&self, holds: bool, parameters: &[Value]) -> Option<RowScope> {
+        match self {
+            Self::Null { column, not } => {
+                Some(RowScope::Null { column: column.clone(), not: *not == holds })
+            }
+            Self::Compare { column, affinity, operand, ordering, inclusive } => {
+                let value = operand.value(parameters);
+                if !affinity.compares(value) {
+                    return None;
+                }
+                // Compared with NULL it is NULL in every row.
+                if matches!(value, Value::Null) {
+                    return Some(RowScope::equal(column.clone(), vec![]));
+                }
+                let compare = |ordering, inclusive| RowScope::Compare {
+                    column: column.clone(),
+                    value: value.clone(),
+                    ordering,
+                    inclusive,
+                };
+                Some(match (holds, ordering) {
+                    (true, _) => compare(*ordering, *inclusive),
+                    // Where NULL fails both, as the comparison's negation does.
+                    (false, Ordering::Equal) => RowScope::or(
+                        compare(Ordering::Less, false),
+                        compare(Ordering::Greater, false),
+                    ),
+                    (false, ordering) => compare(ordering.reverse(), !inclusive),
+                })
+            }
+        }
+    }
+
+    /// The rows where the condition is NULL.
+    fn when_null(&self, parameters: &[Value]) -> Option<RowScope> {
+        match self {
+            // A NULL test is never NULL.
+            Self::Null { column, .. } => Some(RowScope::equal(column.clone(), vec![])),
+            Self::Compare { column, affinity, operand, .. } => {
+                let value = operand.value(parameters);
+                if !affinity.compares(value) {
+                    return None;
+                }
+                Some(if matches!(value, Value::Null) {
+                    RowScope::All
+                } else {
+                    RowScope::Null { column: column.clone(), not: false }
+                })
             }
         }
     }
@@ -232,10 +382,24 @@ pub(crate) fn term(
 ) -> rusqlite::Result<Option<ScopeTerm>> {
     let expr = crate::sql::unparenthesized(expr);
     if let Some((tested, not)) = null_test(expr) {
-        let Some((named, _)) = column(through_collation(tested)) else {
-            return Ok(None);
-        };
-        return Ok(Some(ScopeTerm::Null { column: named, not }));
+        if let Some((named, _)) = column(through_collation(tested)) {
+            return Ok(Some(ScopeTerm::Null { column: named, not }));
+        }
+    }
+    if let Expr::Binary(
+        left,
+        op @ (Operator::Equals
+        | Operator::Less
+        | Operator::LessEquals
+        | Operator::Greater
+        | Operator::GreaterEquals
+        | Operator::Is),
+        right,
+    ) = expr
+    {
+        if let Some(truth) = truth(connection, column, left, *op, right)? {
+            return Ok(Some(truth));
+        }
     }
     let result = match expr {
         Expr::Binary(left, op @ (Operator::And | Operator::Or), right) => {
@@ -297,6 +461,86 @@ pub(crate) fn term(
     Ok(result)
 }
 
+/// The term `(condition) op value` gives, or `value op (condition)`, when
+/// the condition is a NULL test or a column compared with a value, and the
+/// other side is a constant or a parameter.
+fn truth(
+    connection: &Connection,
+    column: &SourceColumn<'_>,
+    left: &Expr<'_>,
+    op: Operator,
+    right: &Expr<'_>,
+) -> rusqlite::Result<Option<ScopeTerm>> {
+    let (condition_expr, value_expr, reversed) =
+        match (condition(connection, column, left)?, condition(connection, column, right)?) {
+            (Some(condition), None) => (condition, right, false),
+            (None, Some(condition)) => (condition, left, true),
+            _ => return Ok(None),
+        };
+    let (ordering, inclusive) = match op {
+        Operator::Equals | Operator::Is => (Ordering::Equal, false),
+        Operator::Less => (Ordering::Less, false),
+        Operator::LessEquals => (Ordering::Less, true),
+        Operator::Greater => (Ordering::Greater, false),
+        _ => (Ordering::Greater, true),
+    };
+    let ordering = if reversed { ordering.reverse() } else { ordering };
+    // The truth has no affinity, nor has the value: nothing converts.
+    let operand = if matches!(crate::sql::unparenthesized(value_expr), Expr::Literal(Literal::Null))
+    {
+        Some(Operand::Constant(Value::Null))
+    } else {
+        operand(connection, value_expr, Affinity::Blob)?
+    };
+    Ok(operand.map(|operand| ScopeTerm::Truth {
+        condition: condition_expr,
+        ordering,
+        inclusive,
+        is: op == Operator::Is,
+        operand,
+    }))
+}
+
+/// The condition `expr` is, if it is one `Truth` holds.
+fn condition(
+    connection: &Connection,
+    column: &SourceColumn<'_>,
+    expr: &Expr<'_>,
+) -> rusqlite::Result<Option<Truth>> {
+    let expr = crate::sql::unparenthesized(expr);
+    if let Some((tested, not)) = null_test(expr) {
+        return Ok(
+            column(through_collation(tested)).map(|(named, _)| Truth::Null { column: named, not })
+        );
+    }
+    let Expr::Binary(left, op, right) = expr else {
+        return Ok(None);
+    };
+    let (mut ordering, inclusive) = match op {
+        Operator::Equals => (Ordering::Equal, false),
+        Operator::Less => (Ordering::Less, false),
+        Operator::LessEquals => (Ordering::Less, true),
+        Operator::Greater => (Ordering::Greater, false),
+        Operator::GreaterEquals => (Ordering::Greater, true),
+        _ => return Ok(None),
+    };
+    let ((named, affinity), operand_expr) = if let Some(named) = column(left) {
+        (named, *right)
+    } else if let Some(named) = column(right) {
+        ordering = ordering.reverse();
+        (named, *left)
+    } else {
+        return Ok(None);
+    };
+    Ok(operand(connection, operand_expr, affinity)?.map(|operand| Truth::Compare {
+        column: named,
+        affinity,
+        operand,
+        ordering,
+        inclusive,
+    }))
+}
+
 /// The expression `expr` tests for NULL, and whether the test is `IS NOT
 /// NULL`: `x IS NULL`, `x ISNULL`, `x IS NOT NULL`, `x NOTNULL` or `x NOT
 /// NULL`.
@@ -356,3 +600,7 @@ fn operand(
         connection.query_row(&format!("SELECT {expr}"), [], |row| row.get::<_, Value>(0))?;
     Ok(affinity.compares(&value).then_some(Operand::Constant(value)))
 }
+
+#[cfg(test)]
+#[path = "scope_term_tests.rs"]
+mod tests;
