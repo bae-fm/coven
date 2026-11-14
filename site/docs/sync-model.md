@@ -186,9 +186,10 @@ slot can't get it past 41.
 The app can still read its data and commit the local writes it is allowed to.
 The last pass is `LastPass::Blocked` with the slot and its reason:
 `KeyUnavailable`, `UpdateRequired`, or a `Refused` cause for damaged bytes. The
-sync state follows the reason: waiting to sync, on the slot
-(`SyncWait::Blocked`), for a key that hasn't arrived; update needed; or failed
-for damaged bytes. A slot whose bytes haven't all arrived is a failed read,
+sync state follows the reason: waiting to sync, key copy, for a key that hasn't
+arrived, naming the key's audience and the members that hold it (`SyncWait::KeyCopy`);
+failed when no member holds it, since no copy will ever be sent; update needed; or
+failed for damaged bytes. A slot whose bytes haven't all arrived is a failed read,
 retried; only a complete object that fails a check is refused.
 
 Two things look like blocks but aren't:

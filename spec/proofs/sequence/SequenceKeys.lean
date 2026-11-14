@@ -1,6 +1,7 @@
 import SequenceInput
 import CovenSequence.Keys
 import CovenSequence.KeyCustody
+import CovenSequence.CopyOrder
 
 /-! Authenticated key-slot projections and the current membership/custody at
 one applied prefix. Hash and exact credential numbers are equality tokens;
@@ -89,7 +90,19 @@ def selectionJson (input : Input) (h : History Nat Nat) (audience : Nat) : Json 
       | some i => Json.mkObj [("unavailable", toJson i.key.id)]
       | none => Json.mkObj [("error", toJson "notAllowed")]
 
+/-- The members other than the writer that hold `k`, with whether each reads
+its audience, in member order (`CopyOrder.holders`). The roster is the
+bindings: the members that read any audience. -/
+def holdersJson (input : Input) (h : History Nat Nat) (k : Key Nat) : Json :=
+  let people := (input.bindings.map (·.1.2)).eraseDups
+  let roster : CovenSequence.CopyOrder.Roster Nat Nat := ⟨input.current, people, []⟩
+  let found := CovenSequence.CopyOrder.holders input.store h roster k input.writer
+  toJson ((found.toArray.qsort (fun a b => a.1 < b.1)).toList.map fun (m, reads) =>
+    Json.mkObj [("member", toJson m), ("reads", toJson reads)])
+
 def result (input : Input) (h : History Nat Nat) : Json := Json.mkObj [
+  ("holders", toJson (input.keys.map fun k => Json.mkObj [
+    ("audience", toJson k.audience), ("key", toJson k.id), ("members", holdersJson input h k)])),
   ("keys", toJson (input.keys.map fun k => Json.mkObj [
     ("audience", toJson k.audience), ("key", toJson k.id),
     ("accepted", toJson (accepted h input.held k)), ("exposed", toJson (exposed h input.current k))])),

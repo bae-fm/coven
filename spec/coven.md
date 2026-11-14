@@ -1577,7 +1577,8 @@ sequence and are how it asks to join.
 
 The device reports why: `KeyUnavailable`, `UpdateRequired`, the read failure, or a
 `Refused` reason. `KeyUnavailable` names the missing key and its audience, so
-Ben's phone stopped at Carol's write reports a Gifts key, not a store key. The
+Ben's phone stopped at Carol's write reports a Gifts key, not a store key. It
+also names the members that hold the key, each with its devices (§12.1). The
 app can still read its data and commit the local writes it is allowed to.
 
 Stopping is deliberate. Skipping slot 80 could mean missing Ben's removal at 81
@@ -4095,6 +4096,26 @@ finds a copy of every key the stop needs
   nothing, so it still holds no keys, and its next pass runs its first scan
   again, through the end of the sequence. That scan finds Carol's copy once it
   lands, and the phone loads on (§16.4).
+- **Who can send the copy.** While the phone is stopped, its status names the
+  members that can send the copy: the other current members with a copy of the
+  key sealed to their current sealing key, with their active devices by name.
+  Ben's phone stopped at slot 41 names Carol's phone and laptop. A copy sealed
+  to an older pair went to devices the replacement cut off, and a removed
+  member's devices send nothing, so neither counts. A holder who reads the
+  audience sends the copy on its next pass
+  ([`reader_holder_sends`](proofs/sequence/CovenSequence/CopyOrder.lean)); one
+  who has left the audience holds the key from before, so its entry says it no
+  longer reads the audience, and a member of the audience has to add it back
+  first. Nobody becomes a holder while the phone waits: a key with no copy at
+  the stop gets none later
+  ([`holders_from_holders`](proofs/sequence/CovenSequence/CopyOrder.lean)). Ana
+  removes Carol, Gifts' only other member, and then recovers Ben. His new phone
+  has no holder to name and no copy of the Gifts key will ever land
+  ([`no_holder_never_clears`](proofs/sequence/CovenSequence/CopyOrder.lean)),
+  so its status says failed instead of waiting. The key's earlier history stays
+  unreadable to Ben however he installs. The phone knows the holders only from
+  the history it applied, which ends at its stop: a member removed above the
+  stop still shows as a holder until the phone reads on.
 
 So a copy doesn't always come before the slot that needs it. A Gifts write can
 even land between the recovery and the copy: Carol's write lost its slot to the
@@ -10123,7 +10144,8 @@ The state is one of, in the order an app lists them:
   waits for, else what the first bound file waits for, else what the write
   waits for: sync isn't running, a provider's cooldown, the key a slot or a
   write needs that this device holds no copy of (the *key copy* wait, which
-  names the key and its audience), the snapshot a raise or reset waits for
+  names the key, its audience and the members that hold it, with their
+  devices), the snapshot a raise or reset waits for
   (the *snapshot* wait, which names the audience), or the time of the next
   try after a failed attempt. A turn that
   hasn't come is never a wait ([`waiting_holds`](proofs/io/CovenIO/Activity.lean)).
@@ -10195,7 +10217,9 @@ which state each fact names, and
   pass, and is no wait of the state's. A pass held back doesn't move the last
   synced time. Ana's phone reads a
   slot sealed with a key her laptop hasn't delivered yet: she waits to sync
-  until the key comes, though nothing of hers is queued.
+  until the key comes, though nothing of hers is queued. A key that no other
+  member holds is no wait, since no copy of it will ever be sent: the state is
+  failed ([`no_holder_is_failed`](proofs/io/CovenIO/SyncState.lean), §12.1).
 - **A wait for a bound file names waiting to sync too.** The same cooldown
   or blocked slot holds the upload queue, and there a bound file isn't in
   storage yet. Which wait it names follows the order above: what holds every
@@ -13868,6 +13892,7 @@ Write-ups explain each model and state its assumptions:
 | Store creation makes the circles its creating write asked for in slot 1: the slot introduces the store's first key and each circle's first key and carries the creator's copy of every one, so each circle's first reader has its copy from the slot that makes it | `creation_carries_own_copies` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §10.3, §12.1 |
 | A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
+| *Body.* Only a member that holds a key, with a copy of it sealed to its current sealing key, can seal a copy of it, and a copy is legal only from such an author or for a key its author is about to introduce. A holder that reads the audience sends the copy on its next pass; a key with no copy at a stop gets none later, so with no holder and the reader holding no copy, the stop never ends: Ben's phone names Carol as the holder of the Gifts key, and with Carol removed first it names none and never clears | `reader_holder_sends`, `holders_from_holders`, `no_holder_never_clears`, `recovery_holders`, `orphan_has_no_holder`, `orphan_never_clears` | `proofs/sequence/CovenSequence/CopyOrder.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1, §19.1 |
 | *Body.* Removing a member from a circle introduces the circle's replacement key in the same entry, with its copies below it to the readers who remain: the removed member no longer reads the circle, the key is the first-attempt choice of a remaining writer holding it, and no copy of it is routed to the removed member | `leave_selects_new_key` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §15.8 |
 | *Body.* Every key a slot needs is introduced by that slot, so a copy of it found above the slot is checked against an applied commitment. Publishing the copies an audience still needs, as a member's pass does, gives each current reader a copy of every key introduced for it; then a stopped reader that scans through them finds a copy of every key its stop needs | `need_introduced`, `stuck_scan_finds_copy`, `owed_complete` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §5.4, §12.1 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
@@ -14089,6 +14114,7 @@ Write-ups explain each model and state its assumptions:
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a bound file is queued decides, and a write committed while offline changes one into the other with no pass; waiting to sync only while nothing moves, naming the wait of a held-back pass, a queued bound file or a queued write, and synced only once every bound file this device uploads is stored and the send queue is empty, and only after a pass that ended synced; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end, or setup, joining or restoring finishing, changes it; only opening, setup or forgetting changes whether storage is set up, and a pass, the sync loop or the attempt to connect ending on a failure that names a state, or the upload worker's panic, shows that state or one that outranks it, never synced, with every queued upload then waiting for sync to run; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `waiting_not_moving`, `synced_bound_stored`, `synced_writes_sent`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `network_keeps_state`, `only_setup_changes_storage`, `failed_worker_shows`, `halted_uploads_wait` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* A pass ending on a failure that clears by itself and names no state of its own never names failed, and the same failure as the pass's, as a slot's block or as coven's own operation's names the same candidate on a quiet device: waiting to sync, retrying | `self_clearing_waits`, `one_retry` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| *Body.* A slot blocked on a key that no other member holds names failed and waits for nothing; with a holder it waits for the key's copy | `no_holder_is_failed` | `proofs/io/CovenIO/SyncState.lean` | §12.1, §19.1 |
 | *Body.* A pass blocked at a slot for a key or a snapshot waits for it, and so does every bound upload and write behind it; such a wait names no state; a slot whose reload met a newer floor holds nothing and its turn is syncing | `blocked_names_its_wait`, `slot_wait_names_no_state`, `floor_is_a_turn` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* Removed shows exactly when a fact names a removal, and shows the first; needs reset shows exactly when a fact names a reset reason and none names a removal, and shows the first; a stopped state counts every queued write and bound file as unsent | `removed_names_which`, `reset_names_why`, `stopped_unsent` | `proofs/io/CovenIO/Standing.lean` | §19.1 |
 | *Body.* Syncing shows exactly when an activity is named and no candidate outranks it; waiting to sync shows only while something holds the work or a retry is armed, never for a turn; what the pass moved comes first and a bound file before the writes it holds; a write committed with nothing holding it shows syncing, sending, in that step; each activity is reached | `syncing_iff`, `waiting_holds`, `move_first`, `bound_before_write`, `next_write_sends`, `every_activity` | `proofs/io/CovenIO/Activity.lean` | §19.1 |
@@ -14221,7 +14247,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 
 | Name | Raised when | Section |
 |---|---|---|
-| `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet; names the key and its audience | §5.4, §6.2, §17.7 |
+| `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet; names the key, its audience and the members that hold it | §5.4, §6.2, §12.1, §17.7 |
 | `UpdateRequired` | a slot needs a newer schema or format | §5.4, §18.3, C.2 |
 | `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
@@ -14273,11 +14299,13 @@ recorded, comes before them all.
 | a write in the send queue | syncing, sending, while nothing holds the pass or a bound file; waiting to sync while something does |
 | the next pass's turn, once nothing holds it: a cooldown that held the last pass is over, or a failure that clears by itself has no backoff armed | syncing, receiving |
 | the last pass synced | synced |
-| the last pass blocked at a slot for a key this device holds no copy of (`KeyUnavailable`) | waiting to sync, key copy: the key and its audience |
+| the last pass blocked at a slot for a key this device holds no copy of (`KeyUnavailable`), while a member holds it | waiting to sync, key copy: the key, its audience and the holders |
+| ... while no member holds it | failed |
 | the last pass blocked at a slot holding a raise or reset whose snapshot isn't named yet (`Waits(Reload)`) | waiting to sync, snapshot: the audience |
 | the last pass blocked at a slot whose reload met a newer floor (`Waits(Floor)`) | none: the next pass's turn, syncing, receiving |
 | the last pass failed with `RateLimited` while the cooldown holds | waiting to sync, cooling down |
-| the first write in the send queue recorded as waiting for a key (`KeyUnavailable` about a write), with nothing holding the pass or a bound file | waiting to sync, key copy |
+| the first write in the send queue recorded as waiting for a key (`KeyUnavailable` about a write), while a member holds it, with nothing holding the pass or a bound file | waiting to sync, key copy |
+| ... while no member holds it | failed |
 | the last pass blocked at a slot with any other reason that names no state and doesn't clear by itself, such as `Waits(SequenceCatchUp)`: a slot blocks with none of them | failed |
 | the last pass got no provider response | offline; offline with unsent changes while the send queue holds a write or the upload queue a bound file with bytes to send |
 | the last pass, or a record, failed with `Authentication` | signed out |
@@ -14296,13 +14324,14 @@ recorded, comes before them all.
 | any other failed pass | failed |
 | a record's `Refused`, `FileUnavailable`, `Original` or `Failed` other than `Shutdown`, about the sequence or a bound file | failed |
 | a record's `Cleanup` | what its cleanup's reason names |
-| a record's `Missing`, `Waits`, `KeyUnavailable`, `NoStorage`, `ProviderPending`, `AccountInUse`, `AccessRemains`, `Rejected`, `WritesRefused`, `Paused` or `Failed(Shutdown)` | none |
+| a record's `Missing`, `Waits`, `KeyUnavailable` with a holder or made without the history, `NoStorage`, `ProviderPending`, `AccountInUse`, `AccessRemains`, `Rejected`, `WritesRefused`, `Paused` or `Failed(Shutdown)` | none |
 
 What waiting to sync names (`SyncWait`), for a held-back pass, else for the
 first waiting bound file in the queue, else for a write in the send queue,
 the first that holds: sync isn't running (`NotSyncing`); a provider's
 cooldown holds every request (`CoolingDown`); the last pass is blocked at a
-slot for a key (`KeyCopy`, which names the key and its audience) or for a
+slot for a key (`KeyCopy`, which names the key, its audience and the members
+that hold it) or for a
 snapshot (`Snapshot`, which names the audience); the first write in the send
 queue is recorded as waiting for a key (`KeyCopy`); the last pass, a slot's
 application, coven's own operation

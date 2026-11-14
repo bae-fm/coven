@@ -56,8 +56,8 @@ inductive PassEnd (seq : Nat → Slot S) (st : Store S) (self : S.Dev) (me : S.M
       PassEnd seq st self me gen dv .synced
   /-- A reader's next slot is its audience's and the device has no key for it. -/
   | keyless (B : S.Aud) (followed : B ∈ dv.follows) (missing : dv.keys B = false)
-      (touch : touches B (seq ((dv.reader B).pos + 1)) = true) :
-      PassEnd seq st self me gen dv (.failed (.blocked .keyUnavailable))
+      (touch : touches B (seq ((dv.reader B).pos + 1)) = true) (holders : Bool) :
+      PassEnd seq st self me gen dv (.failed (.blocked (.keyUnavailable holders)))
   /-- A reader's next slot is kept and the device can't open it. -/
   | unopened (B : S.Aud) (followed : B ∈ dv.follows) (why : Why)
       (reason : why = .refused ∨ why = .updateRequired)
@@ -161,13 +161,13 @@ theorem key_wait_reached {st : Store S} {seq : Nat → Slot S} (g : Good R st se
     (cooling : f.cooling = false) (now : Nat) :
     ∀ dv', DevSteps R st dv dv' →
       ¬ PassEnd seq st self me gen dv' .synced ∧
-      PassEnd seq st self me gen dv' (.failed (.blocked .keyUnavailable)) ∧
-      (run f [.begin, .finish (.failed (.blocked .keyUnavailable)) now]).map
+      PassEnd seq st self me gen dv' (.failed (.blocked (.keyUnavailable true))) ∧
+      (run f [.begin, .finish (.failed (.blocked (.keyUnavailable true))) now]).map
         (fun x => (state x, x.waits)) = some (.waitingToSync, [.keyCopy]) := by
   intro dv' steps
   have stays := (CovenSequence.device_stops R g followed missing ok touch dv' steps).1
   obtain ⟨sameFollows, sameKeys, _⟩ := CovenSequence.devs_frame R steps
-  refine ⟨?_, .keyless B (sameFollows ▸ followed) (sameKeys ▸ missing) (stays ▸ touch), ?_⟩
+  refine ⟨?_, .keyless B (sameFollows ▸ followed) (sameKeys ▸ missing) (stays ▸ touch) true, ?_⟩
   · intro ended
     cases ended with
     | caughtUp all => have := all B (sameFollows ▸ followed); omega

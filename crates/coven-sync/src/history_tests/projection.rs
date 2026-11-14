@@ -176,7 +176,19 @@ impl Projection {
             Err(SyncError::Rejected(OperationRejection::NotAllowed)) => None,
             Err(error) => panic!("unexpected metadata-key failure: {error:?}"),
         };
-        json!({"keys":self.keys.iter().map(|(a,k)| json!({"audience":self.audience(a),
+        let holders: Vec<_> = self
+            .keys
+            .iter()
+            .map(|(a, k)| {
+                let members: Vec<_> = history
+                    .key_holders(a, *k, writer)
+                    .iter()
+                    .map(|h| json!({"member":self.member(h.member), "reads":h.reads_audience}))
+                    .collect();
+                json!({"audience":self.audience(a), "key":self.key(a, *k), "members":members})
+            })
+            .collect();
+        json!({"holders":holders, "keys":self.keys.iter().map(|(a,k)| json!({"audience":self.audience(a),
             "key":self.key(a,*k), "accepted":history.accepted(ring,a,*k),
             "exposed":history.exposed(a,*k)})).collect::<Vec<_>>(), "selection":selections, "metadata":metadata})
     }

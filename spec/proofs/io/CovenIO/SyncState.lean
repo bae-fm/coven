@@ -182,7 +182,11 @@ inductive Reason
   | waitsReload
   /-- A slot's reload met a newer floor, and the next pass retries it. -/
   | waitsFloor
-  | keyUnavailable
+  /-- A key's copy hasn't arrived. `holders` says whether any other member of
+  the store holds the key, as the applied history names them (`holders` in
+  `CopyOrder`) or the record doesn't say: one that holds it sends the copy
+  (§12.1). With no holder, none is ever sent (`no_holder_never_clears`). -/
+  | keyUnavailable (holders : Bool)
   | updateRequired
   | noStorage
   | storage (failure : Failure) (answered : Bool)
@@ -207,7 +211,7 @@ inductive Reason
 does a verdict on an admin operation or on another member's writes, which
 the app shows with that operation. A provider failure that clears by itself
 names none either: it retries on its own, and the pass says whether storage
-is reachable. A file that can't be uploaded or read names failed: its
+is reachable. A key no member holds is failed: no copy of it is ever sent. A file that can't be uploaded or read names failed: its
 original missing or changed, coven's copy failing its check, its stored
 bytes lost or refused. It holds back what waits for it and is never skipped,
 so it shows until the file uploads or the person acts. Any other failure
@@ -219,12 +223,13 @@ def Reason.state : Reason → Option State
       | some s => some s
       | none => if f.byItself then none else some .failed
   | .updateRequired => some .updateNeeded
+  | .keyUnavailable holders => if holders then none else some .failed
   | .removed _ => some .removed
   | .memberKeysReplaced => some .needsReset
   | .refused | .fileLost | .fileSource | .originalMissing | .originalChanged => some .failed
   | .failed l => if l = .shutdown then none else some .failed
   | .cleanup _ c => c.state
-  | .missing | .waits | .waitsReload | .waitsFloor | .keyUnavailable | .noStorage
+  | .missing | .waits | .waitsReload | .waitsFloor | .noStorage
   | .writesRefused | .providerPending | .accountInUse | .accessRemains | .rejected | .paused => none
 
 /-- The reasons that clear by themselves (`PendingReason::clears`): a provider
@@ -247,7 +252,7 @@ def Reason.slotState (r : Reason) : Option State :=
   | some s => some s
   | none =>
       match r with
-      | .keyUnavailable | .waitsReload | .waitsFloor => none
+      | .keyUnavailable _ | .waitsReload | .waitsFloor => none
       | _ => if r.byItself then none else some .failed
 
 /-- Why a pass that reached storage, or the attempt to, didn't end synced:
@@ -411,7 +416,7 @@ def Facts.unsentWork (f : Facts) : Bool :=
 copy of, or a snapshot not named yet. A newer floor names none: the next pass
 retries it, so its turn is syncing. -/
 def Reason.slotWait : Reason → Option SyncWait
-  | .keyUnavailable => some .keyCopy
+  | .keyUnavailable true => some .keyCopy
   | .waitsReload => some .snapshot
   | _ => none
 
@@ -592,6 +597,9 @@ theorem reason_named (r : Reason) : ∀ s, r.state = some s → s.named = true :
   | failed l =>
       intro s h
       cases l <;> simp [Reason.state] at h <;> (subst h; rfl)
+  | keyUnavailable holders =>
+      intro s h
+      cases holders <;> simp [Reason.state] at h <;> (subst h; rfl)
   | cleanup _ c _ ihc =>
       intro s h
       exact ihc s (by simpa [Reason.state] using h)
@@ -1210,7 +1218,7 @@ on another member, on the app or the person. -/
 theorem waits_name_no_state :
     Reason.missing.state = none ∧ Reason.waits.state = none ∧
       Reason.waitsReload.state = none ∧ Reason.waitsFloor.state = none ∧
-      Reason.keyUnavailable.state = none ∧ Reason.noStorage.state = none ∧
+      (Reason.keyUnavailable true).state = none ∧ Reason.noStorage.state = none ∧
       Reason.providerPending.state = none ∧ Reason.accountInUse.state = none ∧
       Reason.paused.state = none := by
   simp [Reason.state]
@@ -1244,7 +1252,7 @@ theorem failed_pass_not_synced (f : Facts) (p : PassFailure) (h : f.last = .fail
 /-- A pass held at a slot for a key or a snapshot, or by a provider's cooldown,
 waits to sync: neither is a failure. -/
 theorem waiting_pass_waits (f : Facts) :
-    ({ f with last := .failed (.blocked .keyUnavailable) } : Facts).ended = .waitingToSync ∧
+    ({ f with last := .failed (.blocked (.keyUnavailable true)) } : Facts).ended = .waitingToSync ∧
       ({ f with last := .failed (.blocked .waitsReload) } : Facts).ended = .waitingToSync ∧
       ({ f with last := .failed (.storage .rateLimited), running := true, cooling := true } :
         Facts).ended = .waitingToSync := by
@@ -1269,10 +1277,24 @@ theorem blocked_names_its_wait (f : Facts) (r : Reason) (w : SyncWait)
   simp [Facts.passWait, Facts.heldAll, Facts.slotWait, Facts.uploadWait, Facts.writeWait, last,
     wait, running, cooling]
 
+/-- **A key nobody holds is failed.** A slot blocked on a key that no other member
+holds waits for no wait and names failed: no copy is ever sent. With a holder it
+waits for the key's copy. -/
+theorem no_holder_is_failed (f : Facts) (running : f.running = true)
+    (cooling : f.cooling = false) (recorded : f.storage ≠ .none) :
+    (Reason.keyUnavailable false).slotState = some .failed ∧
+    (Reason.keyUnavailable false).slotWait = none ∧
+    (Reason.keyUnavailable true).slotState = none ∧
+    (Reason.keyUnavailable true).slotWait = some .keyCopy ∧
+    ({ f with last := .failed (.blocked (.keyUnavailable false)) } : Facts).ended = .failed := by
+  simp [Reason.slotState, Reason.state, Reason.slotWait, Facts.ended, PassFailure.state]
+
 /-- A slot's wait names no state: the pass waits to sync on it, never failed. -/
 theorem slot_wait_names_no_state (r : Reason) (w : SyncWait) (wait : r.slotWait = some w) :
     r.slotState = none := by
-  cases r <;> simp_all [Reason.slotWait, Reason.slotState, Reason.state]
+  cases r with
+  | keyUnavailable holders => cases holders <;> simp_all [Reason.slotWait, Reason.slotState, Reason.state]
+  | _ => simp_all [Reason.slotWait, Reason.slotState, Reason.state]
 
 /-- **A newer floor is the next pass's turn.** A slot whose reload met a newer
 floor names no wait and no state: with sync running and no cooldown, the pass
@@ -1441,7 +1463,7 @@ example : (run connected [.begin, .finish (.failed .offline) 140, .uploads [trac
 yet: with nothing of hers queued, she waits to sync, on the slot, not
 synced. A provider's cooldown that cuts a pass short waits on the cooldown,
 then, once it is over, the next pass's turn has come and she is syncing. -/
-example : (run connected [.begin, .finish (.failed (.blocked .keyUnavailable)) 150]).map
+example : (run connected [.begin, .finish (.failed (.blocked (.keyUnavailable true))) 150]).map
     (fun f => (state f, f.waits)) = some (.waitingToSync, [.keyCopy]) := by decide
 example : (run connected [.settings true true false false, .begin,
     .finish (.failed (.storage .rateLimited)) 150]).map (fun f => (state f, f.waits)) =

@@ -349,7 +349,9 @@ carries, a key-copy slot's one, an admission's or the creation's. A slot introdu
 (`Keys.Event.introduce`): an entry's one, or creation's store key and first circle keys. `legal` says a slot followed
 the rules at its position: any other entry's required copies are in the prefix
 before it, which `operation_outcome` gives when validation asks for them, and
-every key sealing the slot is introduced. `Follows` is a history of legal slots
+every key sealing the slot is introduced, and each copy the slot carries seals a
+key its author holds (`holds`: a copy of it sealed to the author's current sealing key) or is about to
+introduce (`sealable`). `Follows` is a history of legal slots
 after creation, which carries its creator's copy. `CopyPrecedesNeed` is the claim: for every slot after
 creation, every key it needs and every member reading that key's audience just
 before it, a slot below carries a copy to the member's current sealing key.
@@ -382,6 +384,20 @@ before it, a slot below carries a copy to the member's current sealing key.
   retains. So no circle write after the removal is sealed with a key `m` holds.
   The premises about copies are what the sender follows (`required`); the model
   does not stop another member from sending a copy of an unintroduced key.
+- `holders` lists the members other than the asker that hold a key, each with
+  whether it reads the key's audience: the current members with a copy sealed
+  to their current sealing key. `reader_holder_sends`: a holder that reads the
+  audience, when its device runs a pass, sends the copy `Keys.needed` lists to
+  a reader that has none (`owed_complete`). `holders_from_holders`: with
+  sealing keys fresh (`Fresh`), a member holds a key at a later slot only if a
+  member held it at the stop, since `legal` lets a device seal only a key it
+  holds, so no history creates a holder where none was. `no_holder_never_clears`:
+  with no other holder at the stop and the asker holding no copy, it never holds
+  the key, however the history goes on. `recovery_holders` is Ben's phone at
+  slot 14 naming Carol; `orphan_never_clears` is the same recovery with Carol
+  removed first: no holder, and no followed history ends the stop. A recovery by
+  an admin whose only copies of a key are sealed to a pair it replaced is not
+  legal here: the admin can't seal it, though `required` lists it.
 - `races_follow`, `races_keep_order`, `stale_rotation_illegal`
   ([`CopyOrderExamples`](sequence/CovenSequence/CopyOrderExamples.lean)): Ben
   rotates the store key while Ana admits Dan, and Dan replaces his keys among

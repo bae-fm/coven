@@ -42,21 +42,21 @@ def recovery : Nat → CopyOrder.Slot Nat Nat
   | 1 => .entry ana storeKey (.create storeKey 100 10 [])
   | 2 => .entry ana storeKey (.admit ben false 20 benCircleKey 300)
   | 3 => .entry ana storeKey (.admit carol false 30 carolCircleKey 301)
-  | 4 => .copy storeKey ⟨giftsKey, carol, 30⟩
+  | 4 => .copy carol storeKey ⟨giftsKey, carol, 30⟩
   | 5 => .entry carol storeKey (.createCircle giftsKey 200)
-  | 6 => .copy storeKey ⟨giftsKey, ben, 20⟩
+  | 6 => .copy carol storeKey ⟨giftsKey, ben, 20⟩
   | 7 => .entry carol storeKey (.addToCircle gifts ben)
   | 8 => .writes storeKey [giftsKey]
   | 9 => .entry ana storeKey (.recover ben 21 benNewCircleKey 302)
-  | 10 => .copy storeKey ⟨nextStoreKey, ana, 10⟩
-  | 11 => .copy storeKey ⟨nextStoreKey, ben, 21⟩
-  | 12 => .copy storeKey ⟨nextStoreKey, carol, 30⟩
+  | 10 => .copy ana storeKey ⟨nextStoreKey, ana, 10⟩
+  | 11 => .copy ana storeKey ⟨nextStoreKey, ben, 21⟩
+  | 12 => .copy ana storeKey ⟨nextStoreKey, carol, 30⟩
   | 13 => .entry ana storeKey (.rotate nextStoreKey 101)
   | 14 => .writes nextStoreKey [giftsKey]
-  | 15 => .copy nextStoreKey ⟨nextGiftsKey, ben, 21⟩
-  | 16 => .copy nextStoreKey ⟨nextGiftsKey, carol, 30⟩
+  | 15 => .copy carol nextStoreKey ⟨nextGiftsKey, ben, 21⟩
+  | 16 => .copy carol nextStoreKey ⟨nextGiftsKey, carol, 30⟩
   | 17 => .entry carol nextStoreKey (.rotate nextGiftsKey 201)
-  | 18 => .copy nextStoreKey ⟨giftsKey, ben, 21⟩
+  | 18 => .copy carol nextStoreKey ⟨giftsKey, ben, 21⟩
   | _ => .writes nextStoreKey []
 
 theorem recovery_follows : Follows household recovery 18 := by
@@ -109,21 +109,21 @@ replacement carries his own circle's key too, which only he holds. -/
 def races : Nat → CopyOrder.Slot Nat Nat
   | 1 => .entry ana storeKey (.create storeKey 100 10 [])
   | 2 => .entry ana storeKey (.admit ben true 20 benCircleKey 300)
-  | 3 => .copy storeKey ⟨secondKey, ana, 10⟩
+  | 3 => .copy ben storeKey ⟨secondKey, ana, 10⟩
   | 4 => .entry ana storeKey (.admit dan false 40 danCircleKey 303)
-  | 5 => .copy storeKey ⟨secondKey, ben, 20⟩
-  | 6 => .copy storeKey ⟨secondKey, dan, 40⟩
+  | 5 => .copy ben storeKey ⟨secondKey, ben, 20⟩
+  | 6 => .copy ben storeKey ⟨secondKey, dan, 40⟩
   | 7 => .entry ben storeKey (.rotate secondKey 201)
-  | 8 => .copy storeKey ⟨thirdKey, ana, 10⟩
-  | 9 => .copy storeKey ⟨thirdKey, dan, 40⟩
-  | 10 => .copy storeKey ⟨storeKey, dan, 41⟩
-  | 11 => .copy storeKey ⟨secondKey, dan, 41⟩
-  | 12 => .copy storeKey ⟨danCircleKey, dan, 41⟩
+  | 8 => .copy ben storeKey ⟨thirdKey, ana, 10⟩
+  | 9 => .copy ben storeKey ⟨thirdKey, dan, 40⟩
+  | 10 => .copy dan storeKey ⟨storeKey, dan, 41⟩
+  | 11 => .copy dan storeKey ⟨secondKey, dan, 41⟩
+  | 12 => .copy dan storeKey ⟨danCircleKey, dan, 41⟩
   | 13 => .entry dan storeKey (.replaceKeys dan 41)
-  | 14 => .copy storeKey ⟨thirdKey, ben, 20⟩
-  | 15 => .copy storeKey ⟨thirdKey, dan, 41⟩
+  | 14 => .copy ben storeKey ⟨thirdKey, ben, 20⟩
+  | 15 => .copy ben storeKey ⟨thirdKey, dan, 41⟩
   | 16 => .entry ben storeKey (.rotate thirdKey 202)
-  | _ => .copy thirdKey ⟨thirdKey, ana, 10⟩
+  | _ => .copy ana thirdKey ⟨thirdKey, ana, 10⟩
 
 theorem races_follow : Follows household races 17 := by
   refine ⟨⟨ana, storeKey, 100, 10, [], rfl, rfl⟩, ?_⟩
@@ -141,5 +141,46 @@ isn't legal: the claim loop's rereading is what the order needs. -/
 theorem stale_rotation_illegal :
     legal household (keysAt household races 5) (rosterAt household races 5)
       (.entry ben storeKey (.rotate secondKey 201)) = false := by decide +kernel
+
+
+/-- **Ben's wait names Carol.** At slot 14 Ben's phone waits for the Gifts key.
+The only other member who holds it is Carol, who reads Gifts, so her devices
+send the copy on their next pass (`reader_holder_sends`). -/
+theorem recovery_holders :
+    holders household (keysAt household recovery 14) (rosterAt household recovery 14) giftsKey ben =
+      [(carol, true)] := by decide +kernel
+
+/-- Ana removes Carol, Gifts' only other member, then recovers Ben. -/
+def orphan : Nat → CopyOrder.Slot Nat Nat
+  | 9 => .entry ana storeKey (.removeMember carol)
+  | 10 => .entry ana storeKey (.recover ben 21 benNewCircleKey 302)
+  | k => if k < 9 then recovery k else .writes storeKey []
+
+theorem orphan_follows : Follows household orphan 10 := by
+  refine ⟨⟨ana, storeKey, 100, 10, [], rfl, rfl⟩, ?_⟩
+  have all : ∀ k, k < 11 → 2 ≤ k → legal household (keysAt household orphan (k - 1))
+      (rosterAt household orphan (k - 1)) (orphan k) = true := by decide +kernel
+  exact fun k two below => all k (by omega) two
+
+/-- **With Carol gone nobody holds the Gifts key.** Ben reads Gifts with a pair
+no copy of the key is sealed to, and no member can send one. -/
+theorem orphan_has_no_holder :
+    holders household (keysAt household orphan 10) (rosterAt household orphan 10) giftsKey ben =
+      [] ∧
+    holds household (keysAt household orphan 10) (rosterAt household orphan 10) ben giftsKey =
+      false := by decide +kernel
+
+/-- **The stop never ends.** Whatever follows the slots through 10, with fresh
+sealing keys, Ben's phone never holds the Gifts key (`no_holder_never_clears`). -/
+theorem orphan_never_clears (seq : Nat → CopyOrder.Slot Nat Nat) (n : Nat)
+    (hf : Follows household seq n) (le : 10 ≤ n) (fresh : Fresh household seq n)
+    (agree : ∀ k, 1 ≤ k → k ≤ 10 → seq k = orphan k) :
+    holds household (keysAt household seq n) (rosterAt household seq n) ben giftsKey = false := by
+  obtain ⟨hr, hk⟩ := projection_congr (store := household) agree
+  have none := orphan_has_no_holder
+  rw [← hr, ← hk] at none
+  refine no_holder_never_clears hf le (by omega) ?_ fresh none.1 none.2
+  rw [hk]
+  decide +kernel
 
 end CovenSequence.CopyOrderExamples

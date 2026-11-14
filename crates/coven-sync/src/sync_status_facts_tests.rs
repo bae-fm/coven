@@ -1,10 +1,11 @@
 use super::*;
 use crate::sync_status::tests::{
-    connected, key_unavailable, offline, record, upload, upload_record, write_key_record, writes,
+    connected, holder, key_unavailable, offline, record, upload, upload_record, write_key_record,
+    writes,
 };
 use crate::{
-    FileMissingReason, LocalFailure, PendingReason, Prerequisite, SyncStatus, UploadPhase,
-    UploadWait,
+    FileMissingReason, KeyHolder, LocalFailure, PendingReason, PendingRecord, PendingSubject,
+    Prerequisite, SyncStatus, UploadPhase, UploadWait,
 };
 use coven_foundation::id_source::KeyId;
 use coven_merge::{slot, Audience};
@@ -89,7 +90,11 @@ fn a_waiting_pass_is_never_synced() {
     };
     let shown =
         |last: &LastPass, sync| Facts { last: Some(last.clone()), sync, ..connected() }.state();
-    let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
+    let key = SyncWait::KeyCopy {
+        audience: Audience::Store,
+        key: KeyId(uuid::Uuid::from_u128(2)),
+        holders: vec![holder()],
+    };
     assert_eq!(shown(&blocked, started), SyncState::WaitingToSync(key.clone()));
     assert_eq!(shown(&blocked, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
     assert_eq!(shown(&blocked, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
@@ -249,7 +254,11 @@ fn a_failure_that_clears_by_itself_waits_for_its_backoff() {
         let written = Facts { unsent: writes(true), ..armed };
         assert_eq!(written.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
     }
-    let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
+    let key = SyncWait::KeyCopy {
+        audience: Audience::Store,
+        key: KeyId(uuid::Uuid::from_u128(2)),
+        holders: vec![holder()],
+    };
     let blocked_on_a_key =
         Facts { last: Some(blocked(key_unavailable())), pass_retry: Some(at), ..connected() };
     assert_eq!(blocked_on_a_key.state(), SyncState::WaitingToSync(key));
@@ -473,8 +482,17 @@ fn a_blocked_slot_names_its_wait() {
         ..connected()
     };
     assert_eq!(
-        blocked(PendingReason::KeyUnavailable { audience: gifts.clone(), key }).state(),
-        SyncState::WaitingToSync(SyncWait::KeyCopy { audience: gifts.clone(), key })
+        blocked(PendingReason::KeyUnavailable {
+            audience: gifts.clone(),
+            key,
+            holders: Some(vec![holder()])
+        })
+        .state(),
+        SyncState::WaitingToSync(SyncWait::KeyCopy {
+            audience: gifts.clone(),
+            key,
+            holders: vec![holder()]
+        })
     );
     assert_eq!(
         blocked(PendingReason::Waits(Prerequisite::Reload(gifts.clone()))).state(),
@@ -498,12 +516,69 @@ fn a_blocked_slot_names_its_wait() {
     assert_eq!(held.upload_phase(&held.uploads[0]), UploadPhase::Waiting(UploadWait::Sync));
 }
 
+/// A key no other member holds is never sent, so it is no wait: a slot blocked
+/// on it, and a queued write waiting for it, read Failed. A holder that has left
+/// the audience still makes it a wait, and a record made without the history
+/// waits with no holders listed (§12.1, §19.1).
+#[test]
+fn a_key_nobody_holds_is_failed() {
+    let gifts = Audience::Circle(coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(5)));
+    let key = KeyId(uuid::Uuid::from_u128(6));
+    let unavailable =
+        |holders| PendingReason::KeyUnavailable { audience: gifts.clone(), key, holders };
+    let slot_blocked = |reason| Facts {
+        last: Some(LastPass::Blocked { slot: slot(7), reason, error: None }),
+        ..connected()
+    };
+    assert!(matches!(slot_blocked(unavailable(Some(Vec::new()))).state(), SyncState::Failed(_)));
+    let departed = KeyHolder { reads_audience: false, ..holder() };
+    assert_eq!(
+        slot_blocked(unavailable(Some(vec![departed.clone()]))).state(),
+        SyncState::WaitingToSync(SyncWait::KeyCopy {
+            audience: gifts.clone(),
+            key,
+            holders: vec![departed.clone()]
+        })
+    );
+    // A pass held on the slot holds every transfer: a stuck slot with no
+    // holder fails the state, and the file behind it shows why.
+    let write = |holders| {
+        PendingRecord::new(
+            PendingSubject::Write(coven_merge::WriteId {
+                device: coven_foundation::id_source::DeviceId(1),
+                number: 1,
+            }),
+            unavailable(holders),
+        )
+    };
+    let queued =
+        |holders| Facts { unsent: writes(true), records: vec![write(holders)], ..connected() };
+    assert!(matches!(queued(Some(Vec::new())).state(), SyncState::Failed(_)));
+    assert_eq!(
+        queued(Some(vec![departed.clone()])).state(),
+        SyncState::WaitingToSync(SyncWait::KeyCopy {
+            audience: gifts.clone(),
+            key,
+            holders: vec![departed]
+        })
+    );
+    // A record made without the history names no holder and no state: it waits.
+    assert_eq!(
+        queued(None).state(),
+        SyncState::WaitingToSync(SyncWait::KeyCopy { audience: gifts, key, holders: Vec::new() })
+    );
+}
+
 /// A queued write whose circle key isn't held waits for that key, behind what
 /// holds the pass and a bound file; once the record is gone it is next in
 /// line (§12.1, §19.1).
 #[test]
 fn a_queued_write_waits_for_its_key() {
-    let key = SyncWait::KeyCopy { audience: Audience::Store, key: KeyId(uuid::Uuid::from_u128(2)) };
+    let key = SyncWait::KeyCopy {
+        audience: Audience::Store,
+        key: KeyId(uuid::Uuid::from_u128(2)),
+        holders: vec![holder()],
+    };
     let write = Facts { unsent: writes(true), records: vec![write_key_record()], ..connected() };
     assert_eq!(write.state(), SyncState::WaitingToSync(key));
     let stopped = Facts { sync: RetrySync::Stopped, ..write.clone() };

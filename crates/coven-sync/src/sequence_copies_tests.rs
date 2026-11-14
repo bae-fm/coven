@@ -98,12 +98,36 @@ async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
     assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable { .. })));
     assert_eq!(phone.database().applied_slot().await.unwrap(), write - 1);
     let stuck = coven_merge::slot(write);
-    assert!(phone.database().pending::<PendingRecord>().await.unwrap().iter().any(|record| {
+    let pending = phone.database().pending::<PendingRecord>().await.unwrap();
+    assert!(pending.iter().any(|record| {
         record.subject == PendingSubject::Slot(stuck)
             && matches!(record.reason, PendingReason::KeyUnavailable {
                 audience: Audience::Circle(circle), ..
             } if circle == gifts)
     }));
+    // The record names the member who can send the copy, and her device, as
+    // the history the phone applied does.
+    let name =
+        carol.sync.session.lock().await.history.state.devices[&carol.sync.device].name.clone();
+    let holders = pending
+        .iter()
+        .find_map(|record| match &record.reason {
+            PendingReason::KeyUnavailable { holders, .. }
+                if record.subject == PendingSubject::Slot(stuck) =>
+            {
+                holders.clone()
+            }
+            _ => None,
+        })
+        .expect("the stuck slot's record lists its holders");
+    assert_eq!(
+        holders,
+        [crate::KeyHolder {
+            member: carol.identity.member(),
+            reads_audience: true,
+            devices: vec![crate::HolderDevice { id: carol.sync.device, name }],
+        }]
+    );
 
     carol.sync.pass().await.unwrap();
     phone.sync.pass().await.unwrap();
@@ -118,6 +142,63 @@ async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
         .unwrap()
         .iter()
         .all(|record| record.subject != PendingSubject::Slot(stuck)));
+    for device in [&ana, &ben, &carol, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// §12.1, §19.1: Ana removes Carol, Gifts' only other member, before Ben writes
+/// to Gifts. Ana, outside Gifts, then replaces Ben's keys. Ben's new phone
+/// applies the removal and stops at Ben's Gifts write: no member holds the
+/// Gifts key to send it a copy, so its record lists no holder, and no copy ever
+/// comes.
+#[tokio::test]
+async fn a_key_nobody_holds_is_recorded_with_no_holder() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
+    let gifts = carol.sync.create_circle("Gifts".into()).await.unwrap();
+    carol
+        .sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    carol.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .administer(StoreChange::RemoveMember { member: carol.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    pin(ben.database(), "00000000-0000-4000-8000-000000000001", gifts, "scarf").await;
+    ben.sync.pass().await.unwrap();
+    let write = ben.sync.session.lock().await.through;
+    ana.sync.pass().await.unwrap();
+    let replacement = coven_crypto::MemberIdentity::new(
+        ben.identity.member(),
+        coven_format::test_utils::keys_from_seed(12),
+    );
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), replacement.keys().public_keys())
+        .await
+        .unwrap();
+
+    let phone = group.newcomer(replacement, group.storage.for_device()).await;
+    assert!(matches!(phone.sync.pass().await, Err(SyncError::KeyUnavailable { .. })));
+    let stuck = coven_merge::slot(write);
+    let pending = phone.database().pending::<PendingRecord>().await.unwrap();
+    let blocked = pending
+        .iter()
+        .find(|record| record.subject == PendingSubject::Slot(stuck))
+        .expect("the stuck slot has a record");
+    assert!(
+        matches!(&blocked.reason, PendingReason::KeyUnavailable { holders: Some(h), .. } if h.is_empty()),
+        "{blocked:?}"
+    );
     for device in [&ana, &ben, &carol, &phone] {
         device.sync.database.close().await.unwrap();
     }

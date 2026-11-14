@@ -1,7 +1,8 @@
 //! Authenticated administrative history, indexed by its counted slots.
 
 use crate::{
-    effects, snapshot_object::RoutedKey, CutOffRefusal, OperationRejection, Refusal, SyncError,
+    effects, snapshot_object::RoutedKey, CutOffRefusal, HolderDevice, KeyHolder,
+    OperationRejection, Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
 use coven_database::{
@@ -756,6 +757,44 @@ impl History {
             })
             .flat_map(|intro| self.routes(&intro.audience, intro.key))
             .filter(|route| !self.has_copy(route))
+            .collect()
+    }
+
+    /// The members other than `me` that hold `key` of `audience` now: current
+    /// members with a copy of it in the sequence sealed to their current
+    /// sealing key. A copy sealed to an older pair went to devices the
+    /// replacement cut off, and a removed member's devices send nothing, so
+    /// neither holds it (the model's `holders`). Members come in id order.
+    pub(crate) fn key_holders(
+        &self,
+        audience: &Audience,
+        key: KeyId,
+        me: MemberId,
+    ) -> Vec<KeyHolder> {
+        self.state
+            .members
+            .iter()
+            .filter(|(member, _)| **member != me && self.state.active_member(member).is_some())
+            .filter(|(member, current)| {
+                self.copies.iter().any(|copy| {
+                    let route = copy.route();
+                    route.audience == *audience
+                        && route.key == key
+                        && route.member == **member
+                        && route.sealing == current.keys.sealing
+                })
+            })
+            .map(|(member, _)| KeyHolder {
+                member: *member,
+                reads_audience: effects::belongs(&self.state, audience, member),
+                devices: self
+                    .state
+                    .devices
+                    .iter()
+                    .filter(|(_, device)| device.member == *member && device.active())
+                    .map(|(id, device)| HolderDevice { id: *id, name: device.name.clone() })
+                    .collect(),
+            })
             .collect()
     }
 

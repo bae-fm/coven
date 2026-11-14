@@ -5638,7 +5638,12 @@ pub enum ProviderAccessAction {
 pub enum PendingReason {
     Missing { path: ObjectPath },
     Waits(Prerequisite),
-    KeyUnavailable { audience: Audience, key: KeyId },
+    /// `holders`: the members that hold the key, as the history applied when
+    /// the record was made names them, for a stuck slot's record and the first
+    /// write's. `Some` and empty: no member holds the key, so no copy will be
+    /// sent, and the record names `Failed`. `None`: the record was made without
+    /// the history, and names no state.
+    KeyUnavailable { audience: Audience, key: KeyId, holders: Option<Vec<KeyHolder>> },
     UpdateRequired(RequiredUpdate),
     NoStorage,
     /// `answered`: whether the provider answered the failed request, even
@@ -6030,6 +6035,20 @@ pub enum SyncActivity {
     UploadingBoundFile,
 }
 
+/// A member that holds a key a stopped device waits for (§12.1).
+pub struct KeyHolder {
+    pub member: MemberId,
+    /// The member reads the key's audience now, so its devices send the copy on
+    /// their next pass; otherwise it holds the key from before it left the
+    /// audience, and a member of the audience has to add it back first.
+    pub reads_audience: bool,
+    /// Its active devices, as the applied history names them.
+    pub devices: Vec<HolderDevice>,
+}
+
+/// An active device of a `KeyHolder`, with the name it was added under.
+pub struct HolderDevice { pub id: DeviceId, pub name: String }
+
 /// What waiting to sync waits for, as `WaitingToSync` names it: what holds
 /// every transfer, the pass's and each file's alike, first; then, for a
 /// bound file waiting in the upload queue, what holds that file (§19.1).
@@ -6041,8 +6060,12 @@ pub enum SyncWait {
     /// A slot, or the first write in the send queue, needs a key this device
     /// holds no copy of; another device of a member holding it sends one
     /// (§12.1). A slot waiting on it holds everything: nothing goes out or
-    /// comes in until the key arrives (§5.4).
-    KeyCopy { audience: Audience, key: KeyId },
+    /// comes in until the key arrives (§5.4). `holders` are the other current
+    /// members with a copy of the key sealed to their current sealing key, as
+    /// the history this device applied names them; empty only when the record
+    /// was made without that history. A key no member holds is never sent: the
+    /// state is `Failed`.
+    KeyCopy { audience: Audience, key: KeyId, holders: Vec<KeyHolder> },
     /// A slot holds a raise or reset of `audience`, and no snapshot announced
     /// after it is named yet; another device takes one (§16.5). Nothing goes
     /// out or comes in until then.

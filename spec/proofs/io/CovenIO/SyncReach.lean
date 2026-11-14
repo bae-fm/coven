@@ -134,7 +134,10 @@ theorem held_holds (f : Facts) (w : SyncWait) (h : f.heldAll = some w) : f.waitH
       split at h
       · rename_i r e
         have kind : w = .keyCopy ∨ w = .snapshot := by
-          cases r <;> simp [Reason.slotWait] at h <;> simp [← h]
+          cases r with
+          | keyUnavailable holders =>
+              cases holders <;> simp [Reason.slotWait] at h <;> simp [← h]
+          | _ => simp [Reason.slotWait] at h <;> simp [← h]
         rcases kind with rfl | rfl
         · exact .inl ⟨hr, hc, r, e, h⟩
         · exact ⟨hr, hc, r, e, h⟩
@@ -245,7 +248,7 @@ def upload (retrying bound : Bool) : Upload := ⟨.queued, bound, retrying, none
 def toState : State → List Event
   | .notSynced => [.storage .none none]
   | .syncing => [.begin, .move .read]
-  | .waitingToSync => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
+  | .waitingToSync => [.begin, .finish (.failed (.blocked (.keyUnavailable true))) 1]
   | .synced => [.begin, .finish .synced 1]
   | .offline => [.begin, .finish (.failed .offline) 1]
   | .offlineUnsent => [.begin, .finish (.failed .offline) 1, .queue true]
@@ -263,7 +266,7 @@ def toState : State → List Event
 def toWait : SyncWait → List Event
   | .notSyncing => [.settings false false false false, .uploads [upload false true]]
   | .coolingDown => [.settings true true false false, .uploads [upload false true]]
-  | .keyCopy => [.begin, .finish (.failed (.blocked .keyUnavailable)) 1]
+  | .keyCopy => [.begin, .finish (.failed (.blocked (.keyUnavailable true))) 1]
   | .snapshot => [.begin, .finish (.failed (.blocked .waitsReload)) 1]
   | .retrying => [.uploads [upload true true]]
 

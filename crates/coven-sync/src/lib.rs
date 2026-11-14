@@ -90,8 +90,8 @@ pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
 pub use pairing_types::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
 pub use pending::{
-    FileMissingReason, FileSourceFailure, LocalFailure, PendingReason, PendingRecord,
-    PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
+    FileMissingReason, FileSourceFailure, HolderDevice, KeyHolder, LocalFailure, PendingReason,
+    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
 };
 pub use refusal::Refusal;
 pub use restore_codes::{location_code, read_connection, read_location, RestoreCodes};

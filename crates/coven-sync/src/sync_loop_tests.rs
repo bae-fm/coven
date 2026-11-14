@@ -830,10 +830,15 @@ async fn a_slot_waiting_on_a_circle_key_reads_as_a_key_wait() {
             matches!(&status.state, SyncState::WaitingToSync(SyncWait::KeyCopy { .. }))
         })
         .await;
-    let SyncState::WaitingToSync(SyncWait::KeyCopy { audience, key }) = waiting.state else {
+    let SyncState::WaitingToSync(SyncWait::KeyCopy { audience, key, holders }) = waiting.state
+    else {
         unreachable!("waited for a key wait")
     };
     assert_eq!(audience, Audience::Circle(gifts));
+    assert_eq!(
+        holders.iter().map(|holder| holder.member).collect::<Vec<_>>(),
+        [carol.identity.member()]
+    );
     let named = phone
         .database()
         .pending::<PendingRecord>()

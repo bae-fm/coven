@@ -207,6 +207,98 @@ fn sequence_key_selection_matches_lean() {
     }
 }
 
+/// A key's holders are the other current members with a copy of it sealed to
+/// their current sealing key: a copy sealed to a pair the member has replaced
+/// holds nothing, nor does a removed member's, and a member that left the
+/// key's audience still holds it. Each holder lists its active devices (§12.1).
+#[test]
+fn key_holders_are_the_current_members_with_a_copy_for_their_current_pair() {
+    let circle = CircleId(uuid::Uuid::from_u128(1));
+    let gifts = Audience::Circle(circle);
+    let pairs: Vec<_> =
+        (1..=6).map(|seed| coven_format::test_utils::keys_from_seed(seed).public_keys()).collect();
+    let retired = coven_format::test_utils::keys_from_seed(7).public_keys();
+    let mut material = StoreKeyring::new(StoreKey::from_bytes(key(90), [1; 32]));
+    material.insert_circle_key(CircleKey::from_bytes(circle, key(20), [4; 32])).unwrap();
+    let mut history = History::default();
+    for (index, public) in pairs.iter().enumerate() {
+        let id = member(index as u128 + 1);
+        history.state.members.insert(
+            id,
+            StoreMember {
+                keys: *public,
+                access: Some(crate::sequence_sync::tests::access("fixture")),
+                role: MemberRole::Member,
+                // Member 6 was removed.
+                removed: index == 5,
+                joined: None,
+            },
+        );
+    }
+    // Ana (1) asks, Ben (2) and Dan (4) read Gifts; Carol (3) left it; Erin (5)
+    // holds only a copy sealed to the pair she replaced.
+    history.state.circles.insert(
+        circle,
+        StoreCircle {
+            name: "Gifts".into(),
+            members: BTreeSet::from([member(1), member(2), member(4)]),
+            base: 0,
+        },
+    );
+    history.state.members.get_mut(&member(5)).unwrap().keys = pairs[4];
+    let device = |id: u64, owner: u128, name: &str, state| {
+        (
+            DeviceId(id),
+            coven_database::StoreDevice { member: member(owner), name: name.into(), state },
+        )
+    };
+    use coven_database::DeviceState::{Active, Removed};
+    history.state.devices.extend([
+        device(1, 1, "Ana's phone", Active),
+        device(2, 2, "Ben's phone", Active),
+        device(3, 2, "Ben's laptop", Active),
+        device(4, 2, "Ben's old phone", Removed),
+        device(5, 3, "Carol's phone", Active),
+    ]);
+    let sealed_to = |member: MemberId, sealing| KeyCopyPrefix {
+        audience: gifts.clone(),
+        key: key(20),
+        member,
+        sealing,
+    };
+    copy(&mut history, &material, 2, sealed_to(member(2), pairs[1].sealing));
+    copy(&mut history, &material, 3, sealed_to(member(3), pairs[2].sealing));
+    copy(&mut history, &material, 4, sealed_to(member(5), retired.sealing));
+    copy(&mut history, &material, 5, sealed_to(member(6), pairs[5].sealing));
+    copy(&mut history, &material, 6, sealed_to(member(1), pairs[0].sealing));
+
+    let holders = history.key_holders(&gifts, key(20), member(1));
+    let named = |holder: &KeyHolder| {
+        (
+            holder.member,
+            holder.reads_audience,
+            holder.devices.iter().map(|device| device.name.clone()).collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        holders.iter().map(named).collect::<Vec<_>>(),
+        [
+            (member(2), true, vec!["Ben's phone".to_string(), "Ben's laptop".to_string()]),
+            (member(3), false, vec!["Carol's phone".to_string()]),
+        ]
+    );
+    // The asker is never its own holder, and a key nobody holds has none.
+    assert!(history.key_holders(&gifts, key(21), member(1)).is_empty());
+    assert_eq!(
+        history
+            .key_holders(&gifts, key(20), member(2))
+            .iter()
+            .map(|h| h.member)
+            .collect::<Vec<_>>(),
+        [member(1), member(3)]
+    );
+}
+
 /// Ana's phone (device 1) makes Household and admits Ben as an admin with
 /// his phone (device 2); Ana's laptop (device 3) registers. Each entry goes
 /// through the checks a slot's does, so only what they accept counts.

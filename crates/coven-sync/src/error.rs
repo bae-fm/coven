@@ -266,9 +266,11 @@ impl SyncError {
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }
-            SyncError::KeyUnavailable { audience, key } => {
-                PendingReason::KeyUnavailable { audience: audience.clone(), key: *key }
-            }
+            SyncError::KeyUnavailable { audience, key } => PendingReason::KeyUnavailable {
+                audience: audience.clone(),
+                key: *key,
+                holders: None,
+            },
             SyncError::Rejected(reason) => PendingReason::Rejected(reason.clone()),
             SyncError::Cleanup { operation, cleanup } => PendingReason::Cleanup {
                 operation: Box::new(operation.pending_reason(provider)),

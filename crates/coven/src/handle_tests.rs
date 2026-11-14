@@ -556,6 +556,7 @@ fn missing_prerequisites_retry_automatically() {
         PendingReason::KeyUnavailable {
             audience: Audience::Store,
             key: KeyId(uuid::Uuid::from_u128(1)),
+            holders: None,
         },
         PendingReason::ProviderPending {
             action: ProviderAccessAction::Grant,

@@ -136,8 +136,8 @@ impl Facts {
     /// when it can't seal it (the model's `Facts.writeKey`).
     pub(super) fn write_key(&self) -> Option<SyncWait> {
         self.records.iter().find_map(|record| match (&record.subject, &record.reason) {
-            (PendingSubject::Write(_), PendingReason::KeyUnavailable { audience, key }) => {
-                Some(SyncWait::KeyCopy { audience: audience.clone(), key: *key })
+            (PendingSubject::Write(_), reason @ PendingReason::KeyUnavailable { .. }) => {
+                reason.slot_wait()
             }
             _ => None,
         })

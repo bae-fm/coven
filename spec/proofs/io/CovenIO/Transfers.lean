@@ -177,7 +177,7 @@ def toPhase : Phase → List Event
   | .waiting .notSyncing => [.settings false false false false, .uploads [upload false false]]
   | .waiting .coolingDown => [.settings true true false false, .uploads [upload false false]]
   | .waiting .sync =>
-      [.begin, .finish (.failed (.blocked .keyUnavailable)) 1, .uploads [upload false false]]
+      [.begin, .finish (.failed (.blocked (.keyUnavailable true))) 1, .uploads [upload false false]]
   | .waiting .paused => [.settings true false true false, .uploads [upload false false]]
   | .waiting .metered =>
       [.settings true false false true, .network true, .uploads [upload false false]]

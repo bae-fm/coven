@@ -13,7 +13,9 @@
 //! `Facts::upload_phase` as the model's `Upload.phase` in `Transfers.lean`
 //! computes it.
 
-use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, Prerequisite, StatusFailure};
+use crate::{
+    KeyHolder, LastPass, LocalFailure, PendingReason, PendingRecord, Prerequisite, StatusFailure,
+};
 use coven_database::{DbError, RecordedLocation, Removal, RetrySync, UnsentWork};
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
@@ -153,6 +155,12 @@ pub enum SyncWait {
         audience: Audience,
         /// The key.
         key: KeyId,
+        /// The members that hold the key, as the history this device applied
+        /// names them: their devices to open, or, for a holder that no longer
+        /// reads the audience, a member of the audience to add it back (§12.1).
+        /// Empty only when the record was made without the history; a key no
+        /// member holds is never sent, and shows Failed.
+        holders: Vec<KeyHolder>,
     },
     /// A slot holds a raise or reset of `audience`, and no snapshot announced
     /// after it is named yet; another device takes one (§16.5). Nothing goes
@@ -341,9 +349,12 @@ impl PendingReason {
                 | LocalFailure::Bug,
             ) => Some(Named::Failed),
             Self::Cleanup { cleanup, .. } => cleanup.names(),
+            // A key no member holds is never sent: that is no wait.
+            Self::KeyUnavailable { holders, .. } => {
+                holders.as_ref().is_some_and(Vec::is_empty).then_some(Named::Failed)
+            }
             Self::Missing { .. }
             | Self::Waits(_)
-            | Self::KeyUnavailable { .. }
             | Self::NoStorage
             | Self::WritesRefused { .. }
             | Self::ProviderPending { .. }
@@ -360,9 +371,12 @@ impl PendingReason {
     #[deny(clippy::wildcard_enum_match_arm)]
     pub(super) fn slot_wait(&self) -> Option<SyncWait> {
         match self {
-            Self::KeyUnavailable { audience, key } => {
-                Some(SyncWait::KeyCopy { audience: audience.clone(), key: *key })
-            }
+            Self::KeyUnavailable { holders: Some(holders), .. } if holders.is_empty() => None,
+            Self::KeyUnavailable { audience, key, holders } => Some(SyncWait::KeyCopy {
+                audience: audience.clone(),
+                key: *key,
+                holders: holders.clone().unwrap_or_default(),
+            }),
             Self::Waits(Prerequisite::Reload(audience)) => {
                 Some(SyncWait::Snapshot { audience: audience.clone() })
             }
@@ -395,8 +409,9 @@ impl PendingReason {
     #[deny(clippy::wildcard_enum_match_arm)]
     fn slot_names(&self) -> Option<Named> {
         match self {
-            Self::KeyUnavailable { .. }
-            | Self::Waits(Prerequisite::Reload(_) | Prerequisite::Floor) => None,
+            Self::Waits(Prerequisite::Reload(_) | Prerequisite::Floor) => None,
+            // It waits for the copy, or, with no holder to send one, is failed.
+            Self::KeyUnavailable { .. } => self.names(),
             Self::Waits(Prerequisite::SequenceCatchUp)
             | Self::Missing { .. }
             | Self::UpdateRequired(_)

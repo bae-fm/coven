@@ -22,6 +22,31 @@ pub enum FileSourceFailure {
     Integrity,
 }
 
+/// A member of the store that holds a key a stopped device waits for: a copy
+/// of the key is sealed to the member's current sealing key, so every device of
+/// the member with that pair opens it, and a device of the member that reads the
+/// key's audience sends the copy on its next pass (§12.1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyHolder {
+    /// The member.
+    pub member: MemberId,
+    /// The member reads the key's audience now, so its devices send the copy;
+    /// otherwise it holds the key from before it left the audience, and a
+    /// member of the audience has to add it back first.
+    pub reads_audience: bool,
+    /// The member's active devices, as the applied history names them.
+    pub devices: Vec<HolderDevice>,
+}
+
+/// An active device of a `KeyHolder`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderDevice {
+    /// The device.
+    pub id: DeviceId,
+    /// The name it was added under.
+    pub name: String,
+}
+
 /// One local first unmet condition, identified by its subject (§19.1, E5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingRecord {
@@ -235,6 +260,13 @@ pub enum PendingReason {
         audience: Audience,
         /// The missing key.
         key: KeyId,
+        /// The members that hold the key, as the history this device applied
+        /// names them, when the record was made with that history at hand: a
+        /// stuck slot's, and the first queued write's. `Some` and empty means
+        /// no member can ever send a copy (§12.1), which only Failed says.
+        /// `None` is a record made without the history (the start of a
+        /// connection, an operation's failure): it names no state.
+        holders: Option<Vec<KeyHolder>>,
     },
     /// Processing requires a supported schema or format.
     UpdateRequired(RequiredUpdate),

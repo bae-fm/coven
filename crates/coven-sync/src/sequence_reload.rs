@@ -228,7 +228,8 @@ impl SequenceSync {
             None => None,
             Some(PendingRecord {
                 subject: PendingSubject::Slot(slot),
-                reason: PendingReason::KeyUnavailable { audience: Audience::Circle(circle), key },
+                reason:
+                    PendingReason::KeyUnavailable { audience: Audience::Circle(circle), key, .. },
                 ..
             }) => Some((*slot, *circle, *key)),
             Some(record) => return Err(SyncError::Pending(Box::new(record.clone()))),

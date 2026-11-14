@@ -260,10 +260,12 @@ impl SequenceSync {
             match self.send_writes(&mut session, &mut ring, &member, through).await {
                 Ok(()) => self.database.clear_pending(subject).await?,
                 Err(SyncError::KeyUnavailable { audience, key }) => {
+                    let holders =
+                        Some(session.history.key_holders(&audience, key, member.member()));
                     self.database
                         .record_pending(PendingRecord::new(
                             subject,
-                            PendingReason::KeyUnavailable { audience, key },
+                            PendingReason::KeyUnavailable { audience, key, holders },
                         ))
                         .await?;
                 }
@@ -610,7 +612,12 @@ impl SequenceSync {
                 return failed;
             }
         }
-        let reason = slot_block_reason(&error, self.storage.config().provider());
+        let mut reason = slot_block_reason(&error, self.storage.config().provider());
+        if let (PendingReason::KeyUnavailable { audience, key, holders }, Ok(Some(member))) =
+            (&mut reason, self.member.read())
+        {
+            *holders = Some(session.history.key_holders(audience, *key, member.member()));
+        }
         let subject = PendingSubject::Slot(slot);
         self.waits.log_failure(&subject, &reason, error.cause());
         let cause = blocked_cause(session, &subject, &error);

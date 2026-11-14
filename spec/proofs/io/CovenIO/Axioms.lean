@@ -150,6 +150,7 @@ import CovenIO
 #print axioms CovenIO.SyncState.failed_pass_not_synced
 #print axioms CovenIO.SyncState.waiting_pass_waits
 #print axioms CovenIO.SyncState.blocked_names_its_wait
+#print axioms CovenIO.SyncState.no_holder_is_failed
 #print axioms CovenIO.SyncState.slot_wait_names_no_state
 #print axioms CovenIO.SyncState.floor_is_a_turn
 #print axioms CovenIO.SyncState.self_clearing_waits

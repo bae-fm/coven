@@ -232,7 +232,7 @@ impl SequenceSync {
                 None => self.fetch(&path).await?.ok_or(StorageFailure::NotFound)?,
             };
             let evidence = self.slot_files(&input, &session.history, ring, member).await?;
-            referenced.extend(self.complete_files(evidence, id)?);
+            referenced.extend(self.complete_files(evidence, id, &session.history, member)?);
             input.release().await?;
         }
         for announcement in session.history.announcements.values() {
@@ -240,7 +240,7 @@ impl SequenceSync {
                 continue;
             }
             let evidence = self.snapshot_files(announcement, &session.history, ring).await?;
-            referenced.extend(self.complete_files(evidence, id)?);
+            referenced.extend(self.complete_files(evidence, id, &session.history, member)?);
         }
         // Local protection is checked after the asynchronous reference reads.
         for file in self
@@ -266,6 +266,8 @@ impl SequenceSync {
         &self,
         evidence: FileEvidence,
         id: coven_database::OperationId,
+        history: &History,
+        member: &MemberIdentity,
     ) -> Result<BTreeSet<(DeviceId, ObjectId)>, SyncError> {
         match evidence {
             FileEvidence::Complete(files) => Ok(files),
@@ -274,7 +276,8 @@ impl SequenceSync {
                     UnprovenFiles::Parts(parts) => {
                         let (audience, key) =
                             parts.into_iter().next().expect("unread parts name a key");
-                        PendingReason::KeyUnavailable { audience, key }
+                        let holders = Some(history.key_holders(&audience, key, member.member()));
+                        PendingReason::KeyUnavailable { audience, key, holders }
                     }
                     UnprovenFiles::Schema(version) => {
                         PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version })

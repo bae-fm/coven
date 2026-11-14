@@ -3,7 +3,7 @@ use crate::{
     DeviceIdEvidence, FileMissingReason, FileSourceFailure, Prerequisite, ProviderAccessAction,
     Refusal, RequiredUpdate,
 };
-use crate::{PendingSubject, UploadPhase, UploadWait};
+use crate::{HolderDevice, KeyHolder, PendingSubject, UploadPhase, UploadWait};
 use coven_database::{EntryTarget, OperationRejection, PassMove, Removal, UnsentWork, WriteCutoff};
 use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
 use coven_merge::slot;
@@ -125,6 +125,9 @@ fn reason_json(reason: &PendingReason) -> Value {
         PendingReason::Waits(Prerequisite::SequenceCatchUp) => json!("waits"),
         PendingReason::Waits(Prerequisite::Reload(_)) => json!("waitsReload"),
         PendingReason::Waits(Prerequisite::Floor) => json!("waitsFloor"),
+        PendingReason::KeyUnavailable { holders: Some(holders), .. } if holders.is_empty() => {
+            json!("keyUnavailableNoHolder")
+        }
         PendingReason::KeyUnavailable { .. } => json!("keyUnavailable"),
         PendingReason::UpdateRequired(_) => json!("updateRequired"),
         PendingReason::NoStorage => json!("noStorage"),
@@ -162,10 +165,29 @@ fn member() -> MemberId {
     MemberId(uuid::Uuid::from_u128(1))
 }
 
+/// A member that holds the key and reads its audience, with a phone.
+pub(super) fn holder() -> KeyHolder {
+    KeyHolder {
+        member: member(),
+        reads_audience: true,
+        devices: vec![HolderDevice { id: DeviceId(1), name: "Carol's phone".into() }],
+    }
+}
+
 pub(super) fn key_unavailable() -> PendingReason {
     PendingReason::KeyUnavailable {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::from_u128(2)),
+        holders: Some(vec![holder()]),
+    }
+}
+
+/// The same wait with no member holding the key.
+pub(super) fn key_unavailable_without_holder() -> PendingReason {
+    PendingReason::KeyUnavailable {
+        audience: Audience::Store,
+        key: KeyId(uuid::Uuid::from_u128(2)),
+        holders: Some(Vec::new()),
     }
 }
 
@@ -182,6 +204,7 @@ fn reasons() -> Vec<PendingReason> {
         PendingReason::Waits(Prerequisite::Reload(Audience::Store)),
         PendingReason::Waits(Prerequisite::Floor),
         key_unavailable(),
+        key_unavailable_without_holder(),
         PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 }),
         PendingReason::NoStorage,
         PendingReason::Refused(Refusal::Parse { cause: None }),
@@ -774,7 +797,7 @@ fn the_differential_covers_every_reason() {
         .collect();
     kinds.sort();
     kinds.dedup();
-    assert_eq!(kinds.len(), 25, "{kinds:?}");
+    assert_eq!(kinds.len(), 26, "{kinds:?}");
 }
 
 /// An upload of each kind: bound or trailing, sending, stored or queued, with
