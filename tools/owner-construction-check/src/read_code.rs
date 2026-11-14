@@ -5,7 +5,8 @@
 //!
 //! - every function or closure with a parameter of a read type; a callback
 //!   parameter that is only given one (`impl Fn(&SqlReadContext)`) is no such
-//!   parameter, since its taker receives nothing;
+//!   parameter, since its taker receives nothing; a live query
+//!   (`live_query_types`) counts only in a function of a type that holds one;
 //! - every closure or function path passed where the callee's parameter names
 //!   a read type, directly, through `impl Trait`, or through a generic's bound
 //!   in the signature, the `impl` block or a `where` clause;
@@ -130,11 +131,12 @@ impl<'a> ReadCode<'a> {
                 walker.run(callable, body);
             }
         }
+        let holders = live_query_holders(&index, shapes);
         let takes_read = index
             .callables
             .iter()
             .enumerate()
-            .filter(|(_, callable)| takes_read_value(callable, shapes))
+            .filter(|(_, callable)| takes_read_value(callable, shapes, &holders))
             .map(|(id, _)| id)
             .collect::<BTreeSet<_>>();
         let handoffs = walked
@@ -302,12 +304,37 @@ enum Work {
 }
 
 /// Whether a function takes a value of a read type (a callback that is given
-/// one takes none).
-fn takes_read_value(callable: &Callable, shapes: &ReadShapes) -> bool {
+/// one takes none). A live query is handed over to be read only by the type
+/// that holds one: a function elsewhere that takes a live query to wrap or
+/// pass on (a service's `until_closed(&self, query)`) reads nothing.
+fn takes_read_value(callable: &Callable, shapes: &ReadShapes, holders: &BTreeSet<String>) -> bool {
     callable.signature.inputs.iter().any(|input| match input {
-        syn::FnArg::Typed(typed) => !names(&typed.ty, false).is_disjoint(&shapes.read_types),
+        syn::FnArg::Typed(typed) => {
+            let taken = names(&typed.ty, false);
+            let mut read = taken.intersection(&shapes.read_types).peekable();
+            read.peek().is_some()
+                && (read.any(|name| !shapes.live_query_types.contains(name))
+                    || callable.owner.as_ref().is_some_and(|owner| holders.contains(owner)))
+        }
         syn::FnArg::Receiver(_) => false,
     })
+}
+
+/// The types that hold a live query, directly or through the fields of
+/// the workspace's types they hold.
+fn live_query_holders(index: &Index<'_>, shapes: &ReadShapes) -> BTreeSet<String> {
+    let mut holders = BTreeSet::new();
+    loop {
+        let before = holders.len();
+        for ((owner, _), field) in &index.fields {
+            if shapes.live_query_types.contains(field) || holders.contains(field) {
+                holders.insert(owner.clone());
+            }
+        }
+        if holders.len() == before {
+            return holders;
+        }
+    }
 }
 
 /// A closure and where it is.

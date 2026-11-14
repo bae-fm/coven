@@ -10,6 +10,7 @@ fn policy() -> Policy {
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext", "LiveQuery"]
+        live_query_types = ["LiveQuery"]
         plumbing = ["crates/app-store/src/store.rs", "crates/app-store/src/live/"]
         rule = "the read rule"
         "#,
@@ -55,6 +56,27 @@ fn a_function_taking_a_read_type_is_read_code_and_one_taking_a_write_is_not() {
         "fn reads(sql: &SqlReadContext<'_>) {} fn writes(tx: &WriteTransaction) {}",
     )]);
     assert_eq!(found, [unit("reads", Why::Root)]);
+}
+
+#[test]
+fn a_function_taking_a_live_query_is_read_code_only_in_a_type_that_holds_one() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        struct Holder { query: LiveQuery<u8> }
+        impl Holder { fn of(query: LiveQuery<u8>) -> Holder { Holder { query } } }
+        struct Outer { inner: Holder }
+        impl Outer { fn of(query: LiveQuery<u8>) -> Outer { todo!() } }
+        struct Service;
+        impl Service { fn until_closed(&self, query: LiveQuery<u8>) {} }
+        fn start(query: &LiveQuery<u8>) {}
+        fn reads(sql: &SqlReadContext<'_>) {}
+        "#,
+    )]);
+    assert_eq!(
+        found,
+        [unit("Holder::of", Why::Root), unit("Outer::of", Why::Root), unit("reads", Why::Root)]
+    );
 }
 
 #[test]
