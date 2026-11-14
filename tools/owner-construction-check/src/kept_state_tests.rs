@@ -228,6 +228,25 @@ fn a_resolver_assigning_a_captured_binding_is_found_and_one_reading_a_capture_is
 }
 
 #[test]
+fn a_local_of_a_read_function_is_no_kept_state_to_a_closure_inside_the_same_call() {
+    let found = found(&[(
+        A,
+        r#"
+        struct Tally; impl Tally { fn bump(&mut self) {} fn new() -> Tally { Tally } }
+        fn of(sql: &SqlReadContext<'_>, rows: Vec<u8>) {
+            let mut count = 0;
+            let mut tally = Tally::new();
+            rows.iter().for_each(|row| {
+                count += 1;
+                tally.bump();
+            });
+        }
+        "#,
+    )]);
+    assert_eq!(found, []);
+}
+
+#[test]
 fn a_closure_calling_a_mutating_method_on_a_capture_is_found() {
     let found = found(&[
         LIVE,

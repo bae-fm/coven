@@ -100,6 +100,11 @@ pub(crate) struct ReadClosure<'a> {
     pub(crate) owner: Option<String>,
     pub(crate) expr: syn::ExprClosure,
     pub(crate) captures: BTreeMap<String, Option<String>>,
+    /// Whether the closure is itself passed to a read place from a function
+    /// that is no read code: it outlives that call, so what it captures from
+    /// it is kept between reads. A closure inside read code runs within one
+    /// call, and the locals it captures are that call's.
+    pub(crate) outlives_its_function: bool,
 }
 
 pub(crate) struct ReadCode<'a> {
@@ -266,7 +271,7 @@ fn units<'a>(
                 || ancestors(&walked.closures, closure.parent)
                     .any(|above| closures.contains_key(&above))
         })
-        .map(|(_, closure)| {
+        .map(|(position, closure)| {
             let callable = &index.callables[closure.callable];
             ReadClosure {
                 file: callable.file,
@@ -274,6 +279,10 @@ fn units<'a>(
                 owner: callable.owner.clone(),
                 expr: closure.expr.clone(),
                 captures: closure.captures.clone(),
+                outlives_its_function: closures.contains_key(&position)
+                    && !callables.contains_key(&closure.callable)
+                    && !ancestors(&walked.closures, closure.parent)
+                        .any(|above| closures.contains_key(&above)),
             }
         })
         .collect();

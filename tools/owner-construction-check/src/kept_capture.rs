@@ -159,8 +159,10 @@ impl Captures<'_, '_> {
         match expr {
             syn::Expr::Path(path) if path.qself.is_none() => {
                 let name = path.path.get_ident()?.to_string();
-                (!self.bound.contains(&name) && self.closure.captures.contains_key(&name))
-                    .then_some(Captured::Binding(name))
+                (self.closure.outlives_its_function
+                    && !self.bound.contains(&name)
+                    && self.closure.captures.contains_key(&name))
+                .then_some(Captured::Binding(name))
             }
             syn::Expr::Field(inner) => self.captured(&inner.base),
             syn::Expr::Unary(inner) => self.captured(&inner.expr),
