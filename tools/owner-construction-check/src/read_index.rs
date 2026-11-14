@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::visit::{self, Visit};
 
+use crate::module_sources::test_support_module_files;
 use crate::name_resolution::{ItemPath, NameResolver};
 use crate::policy::{Policy, ReadShapes};
 use crate::syntax::{is_test_support_only, type_name, RustFile};
@@ -191,8 +192,11 @@ impl<'a> Index<'a> {
             pointers: policy.shared_pointer_types.clone(),
         };
         let features = policy.test_support_features();
-        for file in files.iter().filter(|file| !is_test_support_only(&file.syntax.attrs, features))
-        {
+        let support_modules = test_support_module_files(files, features);
+        for file in files.iter().filter(|file| {
+            !is_test_support_only(&file.syntax.attrs, features)
+                && !support_modules.contains(&file.relative_path)
+        }) {
             let mut collector = Collector {
                 file,
                 resolver,

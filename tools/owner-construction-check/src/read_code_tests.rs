@@ -345,6 +345,26 @@ fn plumbing_and_test_support_items_are_no_read_code() {
 }
 
 #[test]
+fn a_file_only_a_test_support_mod_line_reaches_is_no_read_code() {
+    let found = units(&[
+        (
+            "crates/app/src/lib.rs",
+            r#"
+            #[cfg(any(test, feature = "test-utils"))]
+            mod support;
+            #[cfg(feature = "test-utils")]
+            pub mod fixtures;
+            mod real;
+            "#,
+        ),
+        ("crates/app/src/support.rs", "pub fn gated(sql: &SqlReadContext<'_>) {}"),
+        ("crates/app/src/fixtures.rs", "pub fn also_gated(sql: &SqlReadContext<'_>) {}"),
+        ("crates/app/src/real.rs", "pub fn reads(sql: &SqlReadContext<'_>) {}"),
+    ]);
+    assert_eq!(found, [("crates/app/src/real.rs".to_string(), "reads".to_string(), Why::Root)]);
+}
+
+#[test]
 fn a_call_that_hands_over_a_read_value_is_known_by_its_place() {
     let files = [RustFile::fixture(
         "crates/app/src/a.rs",

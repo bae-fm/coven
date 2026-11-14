@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::syntax::{is_test_only, RustFile};
+use crate::syntax::{is_test_only, is_test_support_only, RustFile};
 
 /// Each production file's module paths. A file two crate roots declare, such
 /// as an example's `mod shared;` in two examples, is one module in each root's
@@ -245,12 +245,22 @@ fn collect_items(
 /// A file some production declaration also reaches is production, and one no
 /// crate root reaches keeps what its name says.
 pub(crate) fn test_module_files(files: &[RustFile]) -> BTreeSet<String> {
+    test_support_module_files(files, &[])
+}
+
+/// [`test_module_files`], also counting the `features` that only test support
+/// enables: a file only `#[cfg(feature = "test-utils")] mod support;` reaches
+/// is test-support code.
+pub(crate) fn test_support_module_files(
+    files: &[RustFile],
+    features: &[String],
+) -> BTreeSet<String> {
     let sources =
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
     let mut reached = [BTreeSet::new(), BTreeSet::new()];
     for file in files {
         if is_crate_root(file) {
-            reach(file, false, &sources, &mut reached);
+            reach(file, false, features, &sources, &mut reached);
         }
     }
     let [production, test] = reached;
@@ -262,10 +272,13 @@ pub(crate) fn test_module_files(files: &[RustFile]) -> BTreeSet<String> {
 fn reach(
     file: &RustFile,
     in_test: bool,
+    features: &[String],
     sources: &BTreeMap<&str, &RustFile>,
     reached: &mut [BTreeSet<String>; 2],
 ) {
-    let in_test = in_test || file.is_test_source_by_name() || is_test_only(&file.syntax.attrs);
+    let in_test = in_test
+        || file.is_test_source_by_name()
+        || is_test_support_only(&file.syntax.attrs, features);
     if !reached[usize::from(in_test)].insert(file.relative_path.clone()) {
         return;
     }
@@ -275,12 +288,13 @@ fn reach(
         child_directory: &child_directory,
         file_directory: &directory,
     };
-    reach_items(&file.syntax.items, in_test, items, sources, reached);
+    reach_items(&file.syntax.items, in_test, features, items, sources, reached);
 }
 
 fn reach_items(
     items: &[syn::Item],
     in_test: bool,
+    features: &[String],
     directories: Items<'_>,
     sources: &BTreeMap<&str, &RustFile>,
     reached: &mut [BTreeSet<String>; 2],
@@ -289,19 +303,20 @@ fn reach_items(
     for item in items {
         if let Some(path) = included_file(item, file_directory) {
             let syn::Item::Macro(macro_item) = item else { continue };
-            let in_test = in_test || is_test_only(&macro_item.attrs);
+            let in_test = in_test || is_test_support_only(&macro_item.attrs, features);
             if let Some(file) = sources.get(path.as_str()) {
-                let in_test =
-                    in_test || file.is_test_source_by_name() || is_test_only(&file.syntax.attrs);
+                let in_test = in_test
+                    || file.is_test_source_by_name()
+                    || is_test_support_only(&file.syntax.attrs, features);
                 if reached[usize::from(in_test)].insert(file.relative_path.clone()) {
                     let items = included_items(file);
-                    reach_items(&file.syntax.items, in_test, items, sources, reached);
+                    reach_items(&file.syntax.items, in_test, features, items, sources, reached);
                 }
             }
             continue;
         }
         let syn::Item::Mod(item) = item else { continue };
-        let in_test = in_test || is_test_only(&item.attrs);
+        let in_test = in_test || is_test_support_only(&item.attrs, features);
         match module_contents(item, path_directory, child_directory) {
             ModuleContents::Inline(items, directory) => {
                 let inline = Items {
@@ -309,12 +324,12 @@ fn reach_items(
                     child_directory: &directory,
                     file_directory,
                 };
-                reach_items(items, in_test, inline, sources, reached);
+                reach_items(items, in_test, features, inline, sources, reached);
             }
             ModuleContents::Files(paths) => {
                 for path in paths {
                     if let Some(file) = sources.get(path.as_str()) {
-                        reach(file, in_test, sources, reached);
+                        reach(file, in_test, features, sources, reached);
                     }
                 }
             }
