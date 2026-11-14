@@ -438,3 +438,20 @@ fn string_errors_are_refused_in_production_code_and_not_in_tests() {
     assert!(lines[1].starts_with("crates/first/src/lib.rs:1: run returns"), "{lines:?}");
     assert_eq!(lines.len(), 3, "{lines:?}");
 }
+
+#[test]
+fn a_policy_selecting_read_shapes_reports_the_work_a_read_does_on_rows() {
+    let policy = Policy::fixture(
+        r#"rules = ["read-shapes"]
+        [read_shapes]
+        read_types = ["SqlReadContext"]
+        rule = "the read rule"
+        "#,
+    );
+    let files = vec![RustFile::fixture(
+        "crates/app/src/reads.rs",
+        "fn read(sql: &SqlReadContext<'_>) {\n    rows.sort();\n}",
+    )];
+    let lines = check(&workspace(files), &policy).lines();
+    assert_eq!(lines[0], "crates/app/src/reads.rs:2: read sorts with `sort` (sort)");
+}

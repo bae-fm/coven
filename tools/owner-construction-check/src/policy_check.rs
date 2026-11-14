@@ -14,7 +14,7 @@ use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::{Database, Policy};
+use crate::policy::{is_identifier, split_callable, Database, ListKind, Policy};
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
@@ -41,6 +41,7 @@ pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Polic
     stale.extend(undeclared_types(crate_files, &identity, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(code, workspace, policy));
+    stale.extend(invalid_read_shapes(crate_files, code, policy));
     stale
 }
 
@@ -539,6 +540,64 @@ fn invalid_domains(code: &CrateCode, database: &Database, policy: &Policy) -> Ve
                     domain.name
                 ));
             }
+        }
+    }
+    stale
+}
+
+/// The read rule's rows: its plumbing holds a source, and each list row names
+/// a file and a function or method there, with a count of at least one and
+/// what it found or why it is allowed. A key is in one list, once.
+fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) -> Vec<String> {
+    let Some(shapes) = &policy.read_shapes else {
+        return Vec::new();
+    };
+    let mut stale = Vec::new();
+    for home in &shapes.plumbing {
+        if !holds_source(&code.written, home) {
+            stale.push(format!("read_shapes.plumbing: {home} holds no source"));
+        }
+    }
+    let methods = declared_methods(files);
+    let mut seen = BTreeMap::new();
+    for row in shapes.listed() {
+        let list = row.list.name();
+        let (path, item, shape) = (row.path, row.item, row.shape.id());
+        if !files.iter().any(|file| file.relative_path == path) {
+            stale.push(format!("read_shapes.{list}: {path} holds no source"));
+            continue;
+        }
+        let (owner, method) = match split_callable(item) {
+            Some((owner, method)) => (owner, method),
+            None if is_identifier(item) => ("<free>", item),
+            None => {
+                stale.push(format!(
+                    "read_shapes.{list}: {path}: {item} is neither `Type::method` nor a function name"
+                ));
+                continue;
+            }
+        };
+        if !methods.contains_key(&(path.to_string(), owner.to_string(), method.to_string())) {
+            stale.push(format!("read_shapes.{list}: {path}: {item} names no function there"));
+        }
+        if row.count == 0 {
+            stale.push(format!(
+                "read_shapes.{list}: {path}: {item} ({shape}) has a count of 0, not at least 1"
+            ));
+        }
+        if row.note.trim().is_empty() {
+            let note = if row.list == ListKind::Frozen { "finding" } else { "reason" };
+            stale.push(format!("read_shapes.{list}: {path}: {item} ({shape}) states no {note}"));
+        }
+        match seen.insert((path, item, row.shape), row.list) {
+            Some(first) if first == row.list => {
+                stale.push(format!("read_shapes.{list}: {path}: {item} ({shape}) is listed twice"));
+            }
+            Some(first) => stale.push(format!(
+                "read_shapes.{list}: {path}: {item} ({shape}) is also in {}",
+                first.name()
+            )),
+            None => {}
         }
     }
     stale

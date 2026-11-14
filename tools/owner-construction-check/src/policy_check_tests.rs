@@ -546,3 +546,112 @@ fn private_state_is_no_other_row() {
         ]
     );
 }
+
+fn read_shapes_rows(rows: &str) -> String {
+    format!(
+        r#"
+        [read_shapes]
+        read_types = ["SqlReadContext"]
+        rule = "the rule"
+        {rows}
+        "#
+    )
+}
+
+fn read_shape_files() -> Vec<RustFile> {
+    vec![
+        RustFile::fixture(
+            "crates/app/src/reads.rs",
+            "pub struct SqlReadContext; struct Screen; impl Screen { fn read(&self) {} } fn free() {}",
+        ),
+        RustFile::fixture("crates/app/src/plumbing.rs", ""),
+    ]
+}
+
+#[test]
+fn the_read_shapes_rows_naming_what_exists_are_current() {
+    let rows = read_shapes_rows(
+        r#"plumbing = ["crates/app/src/plumbing.rs"]
+        frozen = [{ path = "crates/app/src/reads.rs", item = "Screen::read", shape = "sort", count = 1, finding = "sorts" }]
+        allowed = [{ path = "crates/app/src/reads.rs", item = "free", shape = "pick", count = 2, reason = "a constant table" }]"#,
+    );
+    assert_eq!(stale(read_shape_files(), &rows), Vec::<String>::new());
+}
+
+#[test]
+fn a_read_type_is_declared_by_a_crate_or_external() {
+    let rows = read_shapes_rows("").replace("SqlReadContext", "NoSuchType");
+    assert_eq!(
+        stale(read_shape_files(), &rows),
+        ["read_shapes.read_types: no crate declares NoSuchType"]
+    );
+}
+
+#[test]
+fn plumbing_names_a_file_or_directory_holding_source() {
+    let rows = read_shapes_rows(
+        r#"plumbing = ["crates/app/src/plumbing.rs", "crates/app/src/moved/", "crates/app/src/gone.rs"]"#,
+    );
+    assert_eq!(
+        stale(read_shape_files(), &rows),
+        [
+            "read_shapes.plumbing: crates/app/src/moved/ holds no source",
+            "read_shapes.plumbing: crates/app/src/gone.rs holds no source",
+        ]
+    );
+}
+
+#[test]
+fn a_list_row_names_a_file_and_an_item_there() {
+    let rows = read_shapes_rows(
+        r#"frozen = [
+            { path = "crates/app/src/moved.rs", item = "free", shape = "sort", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", item = "Screen::gone", shape = "sort", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", item = "gone", shape = "sort", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", item = "not an item", shape = "sort", count = 1, finding = "x" },
+        ]"#,
+    );
+    assert_eq!(
+        stale(read_shape_files(), &rows),
+        [
+            "read_shapes.frozen: crates/app/src/moved.rs holds no source",
+            "read_shapes.frozen: crates/app/src/reads.rs: Screen::gone names no function there",
+            "read_shapes.frozen: crates/app/src/reads.rs: gone names no function there",
+            "read_shapes.frozen: crates/app/src/reads.rs: not an item is neither `Type::method` nor a function name",
+        ]
+    );
+}
+
+#[test]
+fn a_list_row_has_a_count_of_at_least_one_and_a_note() {
+    let rows = read_shapes_rows(
+        r#"frozen = [{ path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 0, finding = "" }]
+        allowed = [{ path = "crates/app/src/reads.rs", item = "free", shape = "pick", count = 1, reason = "" }]"#,
+    );
+    assert_eq!(
+        stale(read_shape_files(), &rows),
+        [
+            "read_shapes.frozen: crates/app/src/reads.rs: free (sort) has a count of 0, not at least 1",
+            "read_shapes.frozen: crates/app/src/reads.rs: free (sort) states no finding",
+            "read_shapes.allowed: crates/app/src/reads.rs: free (pick) states no reason",
+        ]
+    );
+}
+
+#[test]
+fn a_key_is_in_at_most_one_list_and_once() {
+    let rows = read_shapes_rows(
+        r#"frozen = [
+            { path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 2, finding = "x" },
+        ]
+        allowed = [{ path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 1, reason = "x" }]"#,
+    );
+    assert_eq!(
+        stale(read_shape_files(), &rows),
+        [
+            "read_shapes.frozen: crates/app/src/reads.rs: free (sort) is listed twice",
+            "read_shapes.allowed: crates/app/src/reads.rs: free (sort) is also in frozen",
+        ]
+    );
+}

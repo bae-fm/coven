@@ -52,6 +52,10 @@ pub(crate) enum Rule {
     CapabilityConstruction,
     /// Appendix F.2: errors are typed, never strings (`typed_errors.rs`).
     TypedErrors,
+    /// The workspace's read rule: a read does no work SQL does and keeps no
+    /// state between reads, except what its policy freezes or allows
+    /// (`read_shapes.rs`).
+    ReadShapes,
     /// Appendix F.5: visibility, file length and test layout (`conventions.rs`).
     Conventions,
 }
@@ -199,6 +203,151 @@ pub(crate) struct Policy {
     /// none.
     #[serde(default)]
     pub(crate) external_types: BTreeSet<String>,
+    /// The read rule's rows, for a workspace that selects `read-shapes`.
+    #[serde(default)]
+    pub(crate) read_shapes: Option<ReadShapes>,
+}
+
+/// The shapes `read-shapes` finds in read code, by the id findings and list
+/// rows name them with.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Shape {
+    /// Rust sorting rows.
+    Sort,
+    /// Rust filtering rows.
+    Filter,
+    /// Rust grouping rows into a map or set.
+    Group,
+    /// Rust counting, summing or folding rows.
+    Aggregate,
+    /// Rust picking a row out of rows.
+    Pick,
+    /// A statement run once for each row of another.
+    QueryPerRow,
+}
+
+impl Shape {
+    /// The id findings and list rows use.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Shape::Sort => "sort",
+            Shape::Filter => "filter",
+            Shape::Group => "group",
+            Shape::Aggregate => "aggregate",
+            Shape::Pick => "pick",
+            Shape::QueryPerRow => "query-per-row",
+        }
+    }
+}
+
+/// The read rule (`read_shapes.rs`): what read code is, where the read
+/// plumbing is, and the findings the workspace has frozen or allowed.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadShapes {
+    /// The types of what a read receives and of the receivers whose callbacks
+    /// are reads: a function or closure taking one is read code, and so is a
+    /// closure passed to a callee that names one in its parameter's type or
+    /// its generic bound, or to a method of one.
+    #[serde(default)]
+    pub(crate) read_types: BTreeSet<String>,
+    /// The read plumbing, which is no read code: source files, and
+    /// directories (ending in `/`) of them.
+    #[serde(default)]
+    pub(crate) plumbing: Vec<String>,
+    /// Where the rule is written, which every finding's remedy names.
+    pub(crate) rule: String,
+    /// The violations the workspace has today; they only shrink.
+    #[serde(default)]
+    pub(crate) frozen: Vec<FrozenRow>,
+    /// Findings that are not a read's work.
+    #[serde(default)]
+    pub(crate) allowed: Vec<AllowedRow>,
+}
+
+/// A violation the workspace has today: `count` findings of `shape` in `item`
+/// of `path`, and what the audit found there.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FrozenRow {
+    pub(crate) path: String,
+    pub(crate) item: String,
+    pub(crate) shape: Shape,
+    pub(crate) count: usize,
+    pub(crate) finding: String,
+}
+
+/// Findings that are not a read's work, and what the values they work on are.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AllowedRow {
+    pub(crate) path: String,
+    pub(crate) item: String,
+    pub(crate) shape: Shape,
+    pub(crate) count: usize,
+    pub(crate) reason: String,
+}
+
+/// The two lists of a policy's read rule.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ListKind {
+    Frozen,
+    Allowed,
+}
+
+impl ListKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            ListKind::Frozen => "frozen",
+            ListKind::Allowed => "allowed",
+        }
+    }
+}
+
+/// One row of either list.
+pub(crate) struct ListedRow<'a> {
+    pub(crate) list: ListKind,
+    pub(crate) path: &'a str,
+    pub(crate) item: &'a str,
+    pub(crate) shape: Shape,
+    pub(crate) count: usize,
+    /// The audit's finding (`frozen`) or the reason (`allowed`).
+    pub(crate) note: &'a str,
+}
+
+impl ReadShapes {
+    /// Whether a file is read plumbing.
+    pub(crate) fn is_plumbing(&self, path: &str) -> bool {
+        self.plumbing.iter().any(|home| {
+            if home.ends_with('/') {
+                path.starts_with(home.as_str())
+            } else {
+                path == home
+            }
+        })
+    }
+
+    /// Every row of both lists.
+    pub(crate) fn listed(&self) -> Vec<ListedRow<'_>> {
+        let frozen = self.frozen.iter().map(|row| ListedRow {
+            list: ListKind::Frozen,
+            path: &row.path,
+            item: &row.item,
+            shape: row.shape,
+            count: row.count,
+            note: &row.finding,
+        });
+        let allowed = self.allowed.iter().map(|row| ListedRow {
+            list: ListKind::Allowed,
+            path: &row.path,
+            item: &row.item,
+            shape: row.shape,
+            count: row.count,
+            note: &row.reason,
+        });
+        frozen.chain(allowed).collect()
+    }
 }
 
 /// `(source file, type, method)`: a callable allowed to construct owners or
@@ -438,6 +587,9 @@ impl Policy {
         for write in self.database.iter().flat_map(|database| &database.write_types) {
             named.push(("database.write_types", write.as_str()));
         }
+        for read in self.read_shapes.iter().flat_map(|read| &read.read_types) {
+            named.push(("read_shapes.read_types", read.as_str()));
+        }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));
             named.push(("capability_factories", factory.product.as_str()));
@@ -516,13 +668,13 @@ fn capability_factories<'de, D: Deserializer<'de>>(
 }
 
 /// `Type::method`, both parts identifiers.
-fn split_callable(callable: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_callable(callable: &str) -> Option<(&str, &str)> {
     callable
         .split_once("::")
         .filter(|(owner, method)| is_identifier(owner) && is_identifier(method))
 }
 
-fn is_identifier(name: &str) -> bool {
+pub(crate) fn is_identifier(name: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|character| character.is_alphanumeric() || character == '_')
 }

@@ -12,6 +12,7 @@ use crate::finding::Finding;
 use crate::owner_dependency_boundary::find_owner_dependency_leaks;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::{Policy, Rule};
+use crate::read_shapes::find_read_shape_violations;
 use crate::retained_capability_parameters::find_retained_capability_parameter_violations;
 use crate::sources::Workspace;
 #[cfg(test)]
@@ -88,6 +89,9 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
     }
     if policy.selects(Rule::CapabilityConstruction) {
         findings.extend(find_capability_construction_violations(files, policy, &graph));
+    }
+    if policy.selects(Rule::ReadShapes) {
+        findings.extend(find_read_shape_violations(code, policy));
     }
     if policy.selects(Rule::TypedErrors) {
         findings.extend(find_string_error_violations(files));
