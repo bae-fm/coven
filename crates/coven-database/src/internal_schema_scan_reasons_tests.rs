@@ -672,6 +672,7 @@ mod source {
                     | "removal_view.rs"
                     | "scope_term.rs"
                     | "scope_lookup.rs"
+                    | "scope_row.rs"
                     | "snapshot_layout.rs"
                     | "snapshot_load.rs"
                     | "snapshot_preparation.rs"
