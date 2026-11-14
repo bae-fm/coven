@@ -116,6 +116,7 @@ pub(crate) struct ReadCode<'a> {
     handoffs: BTreeSet<(String, CallSite)>,
     /// The workspace functions each call resolves to, by file and place.
     callees: BTreeMap<(String, CallSite), Vec<usize>>,
+    workspace_calls: BTreeSet<(String, CallSite)>,
 }
 
 impl<'a> ReadCode<'a> {
@@ -132,6 +133,7 @@ impl<'a> ReadCode<'a> {
                     open: Vec::new(),
                     marks: BTreeMap::new(),
                     parameter_types: BTreeMap::new(),
+                    options: BTreeSet::new(),
                     out: &mut walked,
                 };
                 walker.run(callable, body);
@@ -160,8 +162,13 @@ impl<'a> ReadCode<'a> {
                 ((path, call.site), call.targets.clone())
             })
             .collect();
+        let workspace_calls = walked
+            .workspace_calls
+            .iter()
+            .map(|(callable, site)| (index.callables[*callable].file.relative_path.clone(), *site))
+            .collect();
         let (units, closures) = units(&index, &walked, &takes_read);
-        Self { units, closures, index, handoffs, callees }
+        Self { units, closures, index, handoffs, callees, workspace_calls }
     }
 
     /// Every closure in read code: a unit, or inside one.
@@ -182,6 +189,13 @@ impl<'a> ReadCode<'a> {
     /// at `site` in `path` resolves to.
     pub(crate) fn callees(&self, path: &str, site: CallSite) -> &[usize] {
         self.callees.get(&(path.to_string(), site)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the method call at `site` in `path` is a workspace method found
+    /// by its receiver's type, or a `filter` of one optional value: not the
+    /// standard library's iterator method of that name.
+    pub(crate) fn is_not_row_work(&self, path: &str, site: CallSite) -> bool {
+        self.workspace_calls.contains(&(path.to_string(), site))
     }
 
     /// Whether the call at `site` in `path` hands a read value to its callee.
@@ -377,6 +391,10 @@ struct Walked {
     calls: Vec<CallInfo>,
     /// The functions passed by path to a read place.
     passed_paths: BTreeMap<usize, Why>,
+    /// The method calls whose receiver's type is known and that name a
+    /// workspace method, and the `filter`s of a single optional value: neither
+    /// is the standard library's work on rows.
+    workspace_calls: BTreeSet<(usize, CallSite)>,
 }
 
 impl Walked {
@@ -385,6 +403,8 @@ impl Walked {
         ancestors(&self.closures, closure).any(|enclosing| enclosing == outer)
     }
 }
+
+mod option_values;
 
 struct Context<'i, 'a> {
     index: &'i Index<'a>,
@@ -420,6 +440,8 @@ struct Walker<'i, 'a> {
     /// The closures, by address, whose first untyped parameter takes the type
     /// of what the receiver of the call they are passed to holds.
     parameter_types: BTreeMap<usize, (usize, String)>,
+    /// The names declared or initialized as an `Option`.
+    options: BTreeSet<String>,
     out: &'i mut Walked,
 }
 
@@ -507,6 +529,7 @@ impl Walker<'_, '_> {
         for input in &callable.signature.inputs {
             if let syn::FnArg::Typed(typed) = input {
                 let ty = peel(&typed.ty, callable.owner.as_deref(), &self.context.index.pointers);
+                self.note_option(&typed.pat, &typed.ty);
                 self.bind(&typed.pat, ty);
             }
         }
@@ -801,6 +824,15 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             pattern => (pattern, None),
         };
         let ty = declared.or_else(|| node.init.as_ref().and_then(|init| self.type_of(&init.expr)));
+        match &node.pat {
+            syn::Pat::Type(typed) => self.note_option(&typed.pat, &typed.ty),
+            syn::Pat::Ident(ident)
+                if node.init.as_ref().is_some_and(|init| self.is_option(&init.expr)) =>
+            {
+                self.options.insert(ident.ident.to_string());
+            }
+            _ => {}
+        }
         self.bind(pattern, ty);
     }
 
@@ -859,6 +891,7 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
                         self.callable().owner.as_deref(),
                         &self.context.index.pointers,
                     );
+                    self.note_option(&typed.pat, &typed.ty);
                     self.bind(&typed.pat, ty);
                 }
                 other => {
@@ -917,7 +950,13 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
                 .is_some_and(|receiver| self.context.shapes.read_types.contains(receiver)),
             candidates: &candidates,
         };
-        self.record(call_site(node.method.span()), targets, &call, &node.args);
+        let site = call_site(node.method.span());
+        if (receiver.is_some() && !targets.is_empty())
+            || (name == "filter" && self.is_option(&node.receiver))
+        {
+            self.out.workspace_calls.insert((self.callable, site));
+        }
+        self.record(site, targets, &call, &node.args);
         visit::visit_expr_method_call(self, node);
         self.forget(&node.args);
     }

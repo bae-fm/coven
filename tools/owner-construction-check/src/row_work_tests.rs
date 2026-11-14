@@ -223,3 +223,32 @@ fn a_hit_names_its_line_and_what_it_does() {
     assert_eq!(hits[0].line, 2);
     assert_eq!(hits[0].what, "sorts with `sort_by_key`");
 }
+
+#[test]
+fn a_filter_on_one_optional_value_and_a_workspace_method_named_like_an_iterator_method_are_no_row_work(
+) {
+    let source = "
+        struct Tally;
+        impl Tally { fn count(&self) -> u8 { 0 } fn first_of(&self) {} }
+        struct Label;
+        fn loaded(sql: &SqlReadContext<'_>) -> Result<Option<Label>, u8> { Ok(None) }
+        fn read(
+            sql: &SqlReadContext<'_>,
+            name: Option<String>,
+            tally: &Tally,
+            rows: Vec<u8>,
+        ) -> Result<Option<Label>, u8> {
+            let a = name.filter(|name| !name.is_empty());
+            let b = rows.first().cloned().filter(|row| *row > 1);
+            let c = Some(1u8).filter(|n| *n > 0);
+            let d = loaded(sql)?.map(|label| label).filter(|label| true);
+            let e = |id: Option<String>| id.filter(|id| !id.is_empty());
+            let n = tally.count();
+            let still_rows = rows.iter().filter(|row| **row > 1);
+            let counted = rows.iter().count();
+            Ok(None)
+        }";
+    let found =
+        hits_in(source).into_iter().map(|hit| (hit.line, hit.shape.id())).collect::<Vec<_>>();
+    assert_eq!(found, [(18, "filter"), (19, "aggregate")]);
+}

@@ -179,6 +179,9 @@ impl RowWork<'_> {
     }
 
     fn method(&mut self, node: &syn::ExprMethodCall) {
+        if self.read.is_not_row_work(self.path, call_site(node.method.span())) {
+            return;
+        }
         let name = node.method.to_string();
         let name = name.as_str();
         let line = node.method.span().start().line;
