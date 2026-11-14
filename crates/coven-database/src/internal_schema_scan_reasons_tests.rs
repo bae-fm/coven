@@ -35,6 +35,8 @@ mod fixture {
             ("_coven_unix_nanos", 1),
             ("_coven_variant_kind", 1),
             ("_coven_json_bytes", 1),
+            ("_coven_request_member", 1),
+            ("_coven_request_joiner", 1),
             ("coven_key", -1),
             ("_coven_file_id", 1),
             ("_coven_file_of_key", 1),
