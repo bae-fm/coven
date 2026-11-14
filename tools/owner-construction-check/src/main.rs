@@ -20,6 +20,8 @@ mod database_boundary;
 mod domain_owners;
 mod factories;
 mod finding;
+mod kept_capture;
+mod kept_state;
 mod macro_expansion;
 mod macro_rules;
 mod macros;

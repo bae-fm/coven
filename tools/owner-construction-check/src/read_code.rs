@@ -72,13 +72,38 @@ pub(crate) struct Unit<'a> {
     /// How findings name it: `name` or `Type::name`, the enclosing item for a
     /// closure.
     pub(crate) item: String,
+    /// The type of the `impl` block the function or closure is in.
+    pub(crate) owner: Option<String>,
     pub(crate) body: Body<'a>,
     #[cfg(test)]
     pub(crate) why: Why,
 }
 
+impl Unit<'_> {
+    /// The line the function's name, or the closure, is on.
+    pub(crate) fn body_line(&self) -> usize {
+        match &self.body {
+            Body::Function { signature, .. } => signature.ident.span().start().line,
+            Body::Closure(closure) => closure.span().start().line,
+        }
+    }
+}
+
+/// A closure inside read code, with the bindings of the function around it
+/// that it can capture and their types, when known.
+pub(crate) struct ReadClosure<'a> {
+    pub(crate) file: &'a RustFile,
+    /// The item the closure is in.
+    pub(crate) item: String,
+    pub(crate) owner: Option<String>,
+    pub(crate) expr: syn::ExprClosure,
+    pub(crate) captures: BTreeMap<String, Option<String>>,
+}
+
 pub(crate) struct ReadCode<'a> {
     units: Vec<Unit<'a>>,
+    closures: Vec<ReadClosure<'a>>,
+    index: Index<'a>,
     /// The calls, by file and place, to a function taking a read type: they
     /// hand over a read value, so they run SQL.
     handoffs: BTreeSet<(String, CallSite)>,
@@ -115,7 +140,18 @@ impl<'a> ReadCode<'a> {
             .filter(|call| call.targets.iter().any(|target| takes_read.contains(target)))
             .map(|call| (index.callables[call.callable].file.relative_path.clone(), call.site))
             .collect();
-        Self { units: units(&index, &walked, &takes_read), handoffs }
+        let (units, closures) = units(&index, &walked, &takes_read);
+        Self { units, closures, index, handoffs }
+    }
+
+    /// Every closure in read code: a unit, or inside one.
+    pub(crate) fn closures(&self) -> &[ReadClosure<'a>] {
+        &self.closures
+    }
+
+    /// The workspace's functions, methods and fields the search read.
+    pub(crate) fn index(&self) -> &Index<'a> {
+        &self.index
     }
 
     pub(crate) fn units(&self) -> &[Unit<'a>] {
@@ -130,7 +166,11 @@ impl<'a> ReadCode<'a> {
 
 /// The units of read code: the roots, what is passed to a read place, and
 /// what they call, transitively.
-fn units<'a>(index: &Index<'a>, walked: &Walked, takes_read: &BTreeSet<usize>) -> Vec<Unit<'a>> {
+fn units<'a>(
+    index: &Index<'a>,
+    walked: &Walked,
+    takes_read: &BTreeSet<usize>,
+) -> (Vec<Unit<'a>>, Vec<ReadClosure<'a>>) {
     let readable = |id: usize| {
         let callable = &index.callables[id];
         !callable.plumbing && callable.body.is_some()
@@ -183,12 +223,7 @@ fn units<'a>(index: &Index<'a>, walked: &Walked, takes_read: &BTreeSet<usize>) -
     for (&id, &why) in &callables {
         let callable = &index.callables[id];
         let Some(block) = callable.body else { continue };
-        units.push(unit(
-            callable.file,
-            callable.item(),
-            Body::Function { block, signature: callable.signature },
-            why,
-        ));
+        units.push(unit(callable, Body::Function { block, signature: callable.signature }, why));
     }
     for (&position, &why) in &closures {
         let closure = &walked.closures[position];
@@ -199,17 +234,39 @@ fn units<'a>(index: &Index<'a>, walked: &Walked, takes_read: &BTreeSet<usize>) -
             continue;
         }
         let callable = &index.callables[closure.callable];
-        units.push(unit(callable.file, callable.item(), Body::Closure(closure.expr.clone()), why));
+        units.push(unit(callable, Body::Closure(closure.expr.clone()), why));
     }
-    units
+    let read_closures = walked
+        .closures
+        .iter()
+        .enumerate()
+        .filter(|(position, closure)| {
+            closures.contains_key(position)
+                || callables.contains_key(&closure.callable)
+                || ancestors(&walked.closures, closure.parent)
+                    .any(|above| closures.contains_key(&above))
+        })
+        .map(|(_, closure)| {
+            let callable = &index.callables[closure.callable];
+            ReadClosure {
+                file: callable.file,
+                item: callable.item(),
+                owner: callable.owner.clone(),
+                expr: closure.expr.clone(),
+                captures: closure.captures.clone(),
+            }
+        })
+        .collect();
+    (units, read_closures)
 }
 
 /// A unit; why it is read code is kept for the tests, which tell the causes
 /// apart.
-fn unit<'a>(file: &'a RustFile, item: String, body: Body<'a>, _why: Why) -> Unit<'a> {
+fn unit<'a>(callable: &Callable<'a>, body: Body<'a>, _why: Why) -> Unit<'a> {
     Unit {
-        file,
-        item,
+        file: callable.file,
+        item: callable.item(),
+        owner: callable.owner.clone(),
         body,
         #[cfg(test)]
         why: _why,
@@ -246,6 +303,8 @@ struct ClosureInfo {
     typed_read: bool,
     /// Why it is read code, when it is passed to a read place.
     passed: Option<Why>,
+    /// The bindings in scope where it is written, and their types.
+    captures: BTreeMap<String, Option<String>>,
 }
 
 /// A call in a function's body.
@@ -606,6 +665,11 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             parent: self.open.last().copied(),
             typed_read,
             passed: self.marks.remove(&address),
+            captures: self
+                .scopes
+                .iter()
+                .flat_map(|scope| scope.iter().map(|(name, ty)| (name.clone(), ty.clone())))
+                .collect(),
         });
         self.scopes.push(BTreeMap::new());
         for input in &node.inputs {

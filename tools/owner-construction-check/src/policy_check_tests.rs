@@ -655,3 +655,27 @@ fn a_key_is_in_at_most_one_list_and_once() {
         ]
     );
 }
+
+#[test]
+fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_external() {
+    let rows = r#"
+        external_types = ["Mutex"]
+        [read_shapes]
+        read_types = ["SqlReadContext"]
+        live_query_types = ["LiveQuery"]
+        value_stream_types = ["Watch"]
+        kept_state_types = ["Mutex", "Cell"]
+        rule = "the rule"
+    "#;
+    let files = vec![RustFile::fixture(
+        "crates/app/src/reads.rs",
+        "pub struct SqlReadContext; pub struct LiveQuery; struct Holds(Mutex<u8>);",
+    )];
+    assert_eq!(
+        stale(files, rows),
+        [
+            "read_shapes.value_stream_types: no crate declares Watch",
+            "read_shapes.kept_state_types: no crate declares Cell",
+        ]
+    );
+}

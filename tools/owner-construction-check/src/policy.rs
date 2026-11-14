@@ -225,6 +225,8 @@ pub(crate) enum Shape {
     Pick,
     /// A statement run once for each row of another.
     QueryPerRow,
+    /// Memory kept between reads.
+    KeptState,
 }
 
 impl Shape {
@@ -237,6 +239,7 @@ impl Shape {
             Shape::Aggregate => "aggregate",
             Shape::Pick => "pick",
             Shape::QueryPerRow => "query-per-row",
+            Shape::KeptState => "kept-state",
         }
     }
 }
@@ -252,6 +255,17 @@ pub(crate) struct ReadShapes {
     /// its generic bound, or to a method of one.
     #[serde(default)]
     pub(crate) read_types: BTreeSet<String>,
+    /// The live queries: a type holding one is a read's holder, and keeps no
+    /// state beside it.
+    #[serde(default)]
+    pub(crate) live_query_types: BTreeSet<String>,
+    /// The keyed latest-value streams, which a holder of a live query may
+    /// hold: the values that change many times a second travel on them.
+    #[serde(default)]
+    pub(crate) value_stream_types: BTreeSet<String>,
+    /// The types that keep memory between reads: locks, cells and atomics.
+    #[serde(default)]
+    pub(crate) kept_state_types: BTreeSet<String>,
     /// The read plumbing, which is no read code: source files, and
     /// directories (ending in `/`) of them.
     #[serde(default)]
@@ -587,8 +601,16 @@ impl Policy {
         for write in self.database.iter().flat_map(|database| &database.write_types) {
             named.push(("database.write_types", write.as_str()));
         }
-        for read in self.read_shapes.iter().flat_map(|read| &read.read_types) {
-            named.push(("read_shapes.read_types", read.as_str()));
+        if let Some(read) = &self.read_shapes {
+            let lists = [
+                ("read_shapes.read_types", &read.read_types),
+                ("read_shapes.live_query_types", &read.live_query_types),
+                ("read_shapes.value_stream_types", &read.value_stream_types),
+                ("read_shapes.kept_state_types", &read.kept_state_types),
+            ];
+            for (row, names) in lists {
+                named.extend(names.iter().map(|name| (row, name.as_str())));
+            }
         }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));

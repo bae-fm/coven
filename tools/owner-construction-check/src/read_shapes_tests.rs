@@ -146,3 +146,33 @@ fn plumbing_test_code_and_a_workspace_without_the_rows_have_no_findings() {
     let none = Policy::fixture(r#"rules = ["read-shapes"]"#);
     assert!(find_read_shape_violations(&CrateCode::of(&files, &[]), &none).is_empty());
 }
+
+#[test]
+fn kept_state_has_its_own_remedy_and_is_keyed_by_the_type() {
+    let policy = Policy::fixture(
+        r#"
+        rules = ["read-shapes"]
+        [read_shapes]
+        read_types = ["SqlReadContext"]
+        live_query_types = ["LiveQuery"]
+        kept_state_types = ["Mutex"]
+        rule = "projects/rule.md in agent-instructions"
+        frozen = [{ path = "crates/app/src/a.rs", item = "Holder", shape = "kept-state", count = 1, finding = "keeps a lock" }]
+        "#,
+    );
+    let source = "struct Holder { query: LiveQuery<u8>, told: Mutex<u8> }\nstruct Other { query: LiveQuery<u8>, told: Mutex<u8> }";
+    let files = [RustFile::fixture(PATH, source)];
+    let found = find_read_shape_violations(&CrateCode::of(&files, &[]), &policy);
+    let lines = lines(found);
+    assert_eq!(
+        lines[0],
+        "crates/app/src/a.rs:2: Other keeps `told`, which holds `Mutex` state, beside its live query (kept-state)"
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "projects/rule.md in agent-instructions: a read starts from the database every time: drop the state and read it in SQL; a value no table holds that changes many times a second travels on a keyed stream. {ENDING}"
+        )
+    );
+    assert_eq!(lines.len(), 2);
+}

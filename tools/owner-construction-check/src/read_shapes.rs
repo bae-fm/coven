@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::crate_code::CrateCode;
 use crate::finding::Finding;
+use crate::kept_state::kept_state;
 use crate::policy::{Policy, Shape, FILE_NAME};
 use crate::read_code::ReadCode;
 use crate::row_work::{row_work, Hit};
@@ -25,7 +26,8 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
     };
     let read = ReadCode::collect(&code.expanded, policy, shapes);
     let mut keyed: BTreeMap<(String, String, Shape), Vec<Hit>> = BTreeMap::new();
-    for hit in row_work(&read) {
+    let hits = row_work(&read).into_iter().chain(kept_state(&read, &code.expanded, policy, shapes));
+    for hit in hits {
         keyed.entry((hit.path.clone(), hit.item.clone(), hit.shape)).or_default().push(hit);
     }
     let rows = shapes.listed();
@@ -84,6 +86,9 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
 fn remedy(rule: &str, shape: Shape) -> String {
     let instead = match shape {
         Shape::QueryPerRow => "join in the statement instead of a query per row.",
+        Shape::KeptState => {
+            "a read starts from the database every time: drop the state and read it in SQL; a value no table holds that changes many times a second travels on a keyed stream."
+        }
         Shape::Sort | Shape::Filter | Shape::Group | Shape::Aggregate | Shape::Pick => {
             "the statement filters, sorts, joins, groups, counts and sums, in the same query or its own live query beside it; a read returns what the screen shows."
         }
