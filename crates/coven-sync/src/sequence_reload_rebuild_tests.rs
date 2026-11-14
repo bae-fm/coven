@@ -548,6 +548,53 @@ async fn a_holders_raise_that_lands_first_ends_a_rebuilds_wait() {
     }
 }
 
+/// Ana's app migrates while she holds Garden. Ben, still on the old app, pins
+/// in Garden after her migration and before her raise. A held circle is raised
+/// like the store: from the rows she held, in place, with no gate and no
+/// rebuild, so Ben's pin is a late write, which the migration's `Drop` keeps
+/// as a lost value (§18.3, §18.6).
+#[tokio::test]
+async fn a_write_landing_between_a_holders_migration_and_its_raise_is_a_lost_value() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    pin(ana.database(), EARLY, garden, "early").await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    let circle = Audience::Circle(garden);
+    assert!(ana.database().raise_captures().await.unwrap().iter().any(|c| c.audience == circle));
+    assert!(ana.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert!(ana.database().reloading_audiences().await.unwrap().is_empty());
+    pin(ben.database(), LATE, garden, "late").await;
+    ben.sync.pass().await.unwrap();
+    for _ in 0..4 {
+        ana.sync.pass().await.unwrap();
+    }
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&circle), 2);
+    assert_eq!(state.schema[&circle].snapshot.device, ana.sync.device);
+    assert!(ana.database().raise_captures().await.unwrap().is_empty());
+    assert!(ana.database().rebuilds_waiting().await.unwrap().is_empty());
+    assert_eq!(pins(ana.database()).await, [(EARLY.to_string(), "early".to_string())]);
+    assert_eq!(ana.database().lost_values().await.unwrap().len(), 1);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Ana made a snapshot of Garden on the old app, pinned after it, added Ben,
 /// who is on the new app, and then stopped: no device holds Garden at version
 /// 1 beyond what she sent. Ben rebuilds it from her snapshot and the slots
