@@ -488,6 +488,33 @@ fn a_claim_another_installation_won_is_refused_and_a_passing_failure_is_retried(
     }
 }
 
+/// An app may await a storage call on a thread with a narrow stack (a
+/// bridge host's is 512 KiB). The call's own future must stay small whatever
+/// the work it runs holds: a debug build copies it across the caller's stack
+/// as it spawns it, unless the call boxes the work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_storage_call_keeps_its_work_off_a_narrow_callers_stack() {
+    let phone = Phone::new().await;
+    let storage = phone.handle.test_storage();
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("narrow host".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            runtime
+                .block_on(storage.call(|_owner| async move {
+                    let held = [7u8; 1 << 20];
+                    tokio::task::yield_now().await;
+                    Ok::<usize, SyncError>(std::hint::black_box(held).len())
+                }))
+                .unwrap()
+        })
+        .unwrap()
+        .join()
+        .expect("the call runs within a 512 KiB caller stack");
+    phone.handle.close().await.unwrap();
+}
+
 /// The first setup registers the device under the name it was given; a
 /// reconnect after this device lost its credentials keeps that name and
 /// claims nothing (E5).

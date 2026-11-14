@@ -339,7 +339,7 @@ impl StorageConnections {
         let owner = self.clone();
         let call = async move {
             let _call = owner.lock_open().await?;
-            run(owner.clone()).await
+            Box::pin(run(owner.clone())).await
         };
         crate::task::spawn_completing("storage call", self.database.bugs().clone(), call).await?
     }

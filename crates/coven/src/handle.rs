@@ -695,6 +695,11 @@ impl CovenHandle {
     pub(crate) fn test_pause_asked(&self) -> impl std::future::Future<Output = ()> {
         self.storage.pause_asked_from_now()
     }
+    /// The handle's storage connections, for a test that calls them directly.
+    #[cfg(test)]
+    pub(crate) fn test_storage(&self) -> Arc<crate::storage::StorageConnections> {
+        self.storage.clone()
+    }
     #[cfg(test)]
     pub(crate) async fn test_parked(&self) {
         self.network.parked_from_now().await;
