@@ -15,6 +15,7 @@ use crate::crate_code::CrateCode;
 use crate::cutoffs::cutoffs;
 use crate::finding::Finding;
 use crate::kept_state::kept_state;
+use crate::keyed_statements::keyed_statements;
 use crate::policy::{Policy, Shape, FILE_NAME};
 use crate::read_code::ReadCode;
 use crate::row_work::{row_work, Hit};
@@ -33,7 +34,8 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
         .chain(kept_state(&read, &code.expanded, shapes))
         .chain(counters(code))
         .chain(request_bumps(&read, &code.expanded, shapes))
-        .chain(cutoffs(&read, &code.expanded));
+        .chain(cutoffs(&read, &code.expanded))
+        .chain(keyed_statements(&read));
     for hit in hits {
         keyed.entry((hit.path.clone(), hit.item.clone(), hit.shape)).or_default().push(hit);
     }
@@ -108,6 +110,9 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
 fn remedy(rule: &str, shape: Shape) -> String {
     let instead = match shape {
         Shape::QueryPerRow => "join in the statement instead of a query per row.",
+        Shape::KeyedStatement => {
+            "one statement reads both: join the second statement's tables into the first instead of keying it by what the first returned."
+        }
         Shape::Cutoff => {
             "one query, one path: when the one statement is slow, fix it in SQL (the query, an index, a device-local table its triggers keep) and measure."
         }

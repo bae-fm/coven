@@ -225,6 +225,8 @@ pub(crate) enum Shape {
     Pick,
     /// A statement run once for each row of another.
     QueryPerRow,
+    /// A statement keyed by a value an earlier statement returned.
+    KeyedStatement,
     /// Memory kept between reads.
     KeptState,
     /// A column only ever counted up, to run a live query again.
@@ -254,6 +256,7 @@ impl Shape {
             Shape::Aggregate => "aggregate",
             Shape::Pick => "pick",
             Shape::QueryPerRow => "query-per-row",
+            Shape::KeyedStatement => "keyed-statement",
             Shape::KeptState => "kept-state",
             Shape::Counter => "counter",
             Shape::ResetCounter => "reset-counter",

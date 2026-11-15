@@ -62,9 +62,9 @@ const AGGREGATE_WITH_ARGUMENTS: [&str; 6] =
 const PICK_WITH_CALLBACK: [&str; 6] = ["any", "all", "find", "find_map", "position", "rposition"];
 const COLLECTIONS: [&str; 5] = ["HashMap", "BTreeMap", "HashSet", "BTreeSet", "IndexMap"];
 const COLLECTION_CONSTRUCTORS: [&str; 5] = ["new", "with_capacity", "default", "from", "from_iter"];
-const SQL_CALLS: [&str; 5] = ["query", "query_row", "prepare", "query_map", "execute"];
+pub(crate) const SQL_CALLS: [&str; 5] = ["query", "query_row", "prepare", "query_map", "execute"];
 /// Methods that run their closure argument once for each row.
-const ITERATOR_METHODS: [&str; 12] = [
+pub(crate) const ITERATOR_METHODS: [&str; 12] = [
     "map",
     "for_each",
     "filter_map",
@@ -79,7 +79,7 @@ const ITERATOR_METHODS: [&str; 12] = [
     "map_while",
 ];
 /// The calls whose closure argument runs once for each row they read.
-const ROW_CALLS: [&str; 3] = ["query", "query_row", "query_map"];
+pub(crate) const ROW_CALLS: [&str; 3] = ["query", "query_row", "query_map"];
 
 /// Every place the read code works on rows.
 pub(crate) fn row_work(read: &ReadCode<'_>) -> Vec<Hit> {

@@ -24,6 +24,7 @@ mod factories;
 mod finding;
 mod kept_capture;
 mod kept_state;
+mod keyed_statements;
 mod macro_expansion;
 mod macro_rules;
 mod macros;
