@@ -375,6 +375,14 @@ async fn coven_invites_shows_the_stage_and_the_requests_member_and_joiner() {
         [(operation, "waiting".to_owned(), Some(invite.member.to_string()), typed.clone())]
     );
     let checked = requests(&ana).await;
+    let ids: Vec<String> = ana
+        .database()
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query("SELECT invite_id FROM coven_invites", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids, [invite.id.to_string()]);
     let binding = approve(&ana, &checked[0]).await;
     let rows = shown(&ana).await;
     assert_eq!(

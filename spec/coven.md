@@ -5111,7 +5111,7 @@ operation that binds the pair, so Ana's app shows it as being approved,
 follows its outcome, and offers no second decision. They
 are a view of its operations journal, `coven_invites` (§4), which a live query
 follows as each invite changes. The view also gives each invite's `stage` as a
-column, and, once Carol's request has arrived, the member it names in
+column, and its id as `invite_id`, and, once Carol's request has arrived, the member it names in
 `request_member` and the name she typed in `joiner_name`, so Ana's app joins
 the request to her profile and filters the invites that wait for her decision
 without decoding the invite. Only Ana's phone lists them. Only it holds

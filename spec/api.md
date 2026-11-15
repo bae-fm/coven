@@ -3813,6 +3813,7 @@ let moved = handle
 | | `stage` | `granting` until the invite's code is shown, `waiting` while it waits for its request or the admin's decision, `approving` once the admin approved the request; as `InviteStage` names them |
 | | `request_member` | the member the invite's request names, as canonical UUID text and read as `MemberId`, once a request has arrived; NULL before |
 | | `joiner_name` | the name the person asking typed; NULL for a recovery, and before a request has arrived |
+| | `invite_id` | the invite's id, as canonical UUID text and read as `InviteId`, the id `Invite::id` carries |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
 | | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |

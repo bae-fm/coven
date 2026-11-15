@@ -135,8 +135,10 @@ pub(super) const SCHEMA: &str = concat!(
     // approved the request. `request_member` and `joiner_name` come from the
     // request a waiting or approving invite holds, which is encoded bytes:
     // the member it names, and the name a new person typed, NULL for a
-    // recovery; both NULL while no request has arrived.
-    "CREATE VIEW coven_invites(invite,operation,stage,request_member,joiner_name) AS
+    // recovery; both NULL while no request has arrived. `invite_id` is the
+    // invite's id as canonical UUID text, the id its request path and
+    // `Invite::id` carry.
+    "CREATE VIEW coven_invites(invite,operation,stage,request_member,joiner_name,invite_id) AS
         SELECT o.data,o.id,
             CASE WHEN json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL THEN 'waiting'
                 WHEN json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL THEN 'approving'
@@ -146,7 +148,8 @@ pub(super) const SCHEMA: &str = concat!(
                     json_extract(CAST(o.data AS TEXT),'$.state.Approving.request')))),
             _coven_request_joiner(_coven_json_bytes(
                 coalesce(json_extract(CAST(o.data AS TEXT),'$.state.Waiting.request'),
-                    json_extract(CAST(o.data AS TEXT),'$.state.Approving.request'))))
+                    json_extract(CAST(o.data AS TEXT),'$.state.Approving.request')))),
+            json_extract(CAST(o.data AS TEXT),'$.id')
         FROM _coven_operations AS o
         WHERE o.kind='",
     crate::operation_kind::invite_kind!(),
