@@ -21,8 +21,8 @@
 //!   read type, a live query or a type that holds one;
 //! - every workspace function the read code calls, transitively, when the call
 //!   resolves, and every one it passes by path to any callee, which calls it
-//!   (`.map(Row::shown)`): a path (`NameResolver`), `Type::f`, `Self::f`, a
-//!   parenthesized path (`(Type::f)(x)`), and a method call
+//!   (`.map(Row::shown)`): a path (`NameResolver`), `Type::f`, `Self::f`,
+//!   `<Type>::f`, a parenthesized path (`(Type::f)(x)`), and a method call
 //!   whose receiver's type is known: `self`, a field of a known type (through
 //!   shared pointers), a typed parameter or `let`, a `let` of a struct literal
 //!   or a `Type::ctor(..)`, and the return type of a resolved call, with `?`,
@@ -50,7 +50,7 @@ use crate::name_resolution::{qualified_path, NameResolver};
 use crate::policy::{Policy, ReadShapes};
 use crate::read_index::{names, peel, Callable, Index};
 use crate::retained_types::Graph;
-use crate::syntax::RustFile;
+use crate::syntax::{type_name, RustFile};
 
 /// Where a call is in its file: the line and column of its method's name, or
 /// of the whole call for a path call.
@@ -643,6 +643,29 @@ impl Walker<'_, '_> {
             .collect()
     }
 
+    /// The functions and methods an expression path names: through
+    /// `path_targets`, or for `<Type>::f`, the method `f` of `Type`.
+    fn expr_path_targets(&self, path: &syn::ExprPath) -> Vec<usize> {
+        let Some(qself) = &path.qself else { return self.path_targets(&path.path) };
+        let (0, Some(owner), Some(last)) =
+            (qself.position, type_name(&qself.ty), path.path.segments.last())
+        else {
+            return Vec::new();
+        };
+        let owner = if owner == "Self" {
+            let Some(owner) = self.owner() else { return Vec::new() };
+            owner
+        } else {
+            owner
+        };
+        self.context
+            .index
+            .methods
+            .get(&(owner, last.ident.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn passed(&self, argument: &syn::Expr) -> Option<Passed> {
         match argument {
             syn::Expr::Closure(closure) => {
@@ -651,8 +674,8 @@ impl Walker<'_, '_> {
             syn::Expr::Reference(inner) => self.passed(&inner.expr),
             syn::Expr::Paren(inner) => self.passed(&inner.expr),
             syn::Expr::Group(inner) => self.passed(&inner.expr),
-            syn::Expr::Path(path) if path.qself.is_none() => {
-                let targets = self.path_targets(&path.path);
+            syn::Expr::Path(path) => {
+                let targets = self.expr_path_targets(path);
                 (!targets.is_empty()).then_some(Passed::Functions(targets))
             }
             _ => None,
@@ -861,7 +884,7 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             callee = &inner.expr;
         }
         let targets = match callee {
-            syn::Expr::Path(path) if path.qself.is_none() => self.path_targets(&path.path),
+            syn::Expr::Path(path) => self.expr_path_targets(path),
             _ => Vec::new(),
         };
         self.record(call_site(node.span()), targets, &Call::Path, &node.args);

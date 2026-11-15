@@ -174,12 +174,17 @@ fn a_function_path_read_code_passes_to_any_callee_is_called_by_it() {
         "crates/app/src/a.rs",
         r#"
         struct Row;
-        impl Row { fn shown(self) -> u8 { 0 } fn wrapped(self) -> u8 { 0 } fn unused(self) {} }
+        impl Row {
+            fn shown(self) -> u8 { 0 } fn wrapped(self) -> u8 { 0 } fn unused(self) {}
+            fn qualified(self) -> u8 { 0 } fn called_qualified(self) -> u8 { 0 }
+        }
         fn free_shown(row: Row) -> u8 { 0 }
         fn read(sql: &SqlReadContext<'_>, rows: Vec<Row>, sep: char) {
             rows.into_iter().map(Row::shown);
             rows.into_iter().map(free_shown);
             (Row::wrapped)(row);
+            rows.into_iter().map(<Row>::qualified);
+            <Row>::called_qualified(row);
             "a,b".find(sep);
         }
         fn not_read(rows: Vec<Row>) { rows.into_iter().map(Row::unused); }
@@ -188,6 +193,8 @@ fn a_function_path_read_code_passes_to_any_callee_is_called_by_it() {
     assert_eq!(
         found,
         [
+            unit("Row::called_qualified", Why::Reached),
+            unit("Row::qualified", Why::Reached),
             unit("Row::shown", Why::Reached),
             unit("Row::wrapped", Why::Reached),
             unit("free_shown", Why::Reached),
