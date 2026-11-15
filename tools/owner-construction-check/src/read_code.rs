@@ -13,7 +13,9 @@
 //! - every closure or function path passed to a method whose receiver is a
 //!   read type;
 //! - every workspace function the read code calls, transitively, when the call
-//!   resolves: a path (`NameResolver`), `Type::f`, `Self::f`, and a method call
+//!   resolves, and every one it passes by path to any callee, which calls it
+//!   (`.map(Row::shown)`): a path (`NameResolver`), `Type::f`, `Self::f`, a
+//!   parenthesized path (`(Type::f)(x)`), and a method call
 //!   whose receiver's type is known: `self`, a field of a known type (through
 //!   shared pointers), a typed parameter or `let`, a `let` of a struct literal
 //!   or a `Type::ctor(..)`, and the return type of a resolved call, with `?`,
@@ -748,7 +750,9 @@ impl Walker<'_, '_> {
         }
     }
 
-    /// Records a call and marks what it passes to a read place.
+    /// Records a call and marks what it passes to a read place. A function
+    /// passed by its path is called by the callee (`.map(Row::shown)`), so it
+    /// is a call of its own, at the argument's place.
     fn record(
         &mut self,
         site: CallSite,
@@ -757,22 +761,28 @@ impl Walker<'_, '_> {
         arguments: &Punctuated<syn::Expr, syn::Token![,]>,
     ) {
         for (index, argument) in arguments.iter().enumerate() {
-            let (Some(passed), Some(why)) =
-                (self.passed(argument), self.read_place(call, &targets, index))
-            else {
-                continue;
-            };
+            let Some(passed) = self.passed(argument) else { continue };
+            let why = self.read_place(call, &targets, index);
             match passed {
                 Passed::Closure(address) => {
-                    self.marks.insert(address, why);
+                    if let Some(why) = why {
+                        self.marks.insert(address, why);
+                    }
                 }
                 Passed::Functions(functions) => {
-                    for function in functions {
-                        self.out.passed_paths.entry(function).or_insert(why);
+                    if let Some(why) = why {
+                        for &function in &functions {
+                            self.out.passed_paths.entry(function).or_insert(why);
+                        }
                     }
+                    self.push_call(call_site(argument.span()), functions);
                 }
             }
         }
+        self.push_call(site, targets);
+    }
+
+    fn push_call(&mut self, site: CallSite, targets: Vec<usize>) {
         self.out.calls.push(CallInfo {
             callable: self.callable,
             closure: self.open.last().copied(),
@@ -910,7 +920,11 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        let targets = match node.func.as_ref() {
+        let mut callee = node.func.as_ref();
+        while let syn::Expr::Paren(inner) = callee {
+            callee = &inner.expr;
+        }
+        let targets = match callee {
             syn::Expr::Path(path) if path.qself.is_none() => self.path_targets(&path.path),
             _ => Vec::new(),
         };

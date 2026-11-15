@@ -169,6 +169,34 @@ fn a_function_path_passed_to_a_read_callee_is_read_code() {
 }
 
 #[test]
+fn a_function_path_read_code_passes_to_any_callee_is_called_by_it() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        struct Row;
+        impl Row { fn shown(self) -> u8 { 0 } fn wrapped(self) -> u8 { 0 } fn unused(self) {} }
+        fn free_shown(row: Row) -> u8 { 0 }
+        fn read(sql: &SqlReadContext<'_>, rows: Vec<Row>, sep: char) {
+            rows.into_iter().map(Row::shown);
+            rows.into_iter().map(free_shown);
+            (Row::wrapped)(row);
+            "a,b".find(sep);
+        }
+        fn not_read(rows: Vec<Row>) { rows.into_iter().map(Row::unused); }
+        "#,
+    )]);
+    assert_eq!(
+        found,
+        [
+            unit("Row::shown", Why::Reached),
+            unit("Row::wrapped", Why::Reached),
+            unit("free_shown", Why::Reached),
+            unit("read", Why::Root),
+        ]
+    );
+}
+
+#[test]
 fn a_closure_passed_to_a_method_of_a_read_type_is_read_code() {
     let found = units(&[(
         "crates/app/src/a.rs",
