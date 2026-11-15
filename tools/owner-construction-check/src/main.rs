@@ -39,6 +39,7 @@ mod read_index;
 mod read_shapes;
 mod report;
 mod retained_capability_parameters;
+mod retained_types;
 mod row_work;
 mod rust_prelude;
 mod schema_views;

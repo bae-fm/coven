@@ -217,12 +217,73 @@ fn a_closure_passed_to_a_method_of_a_read_type_is_read_code() {
         fn not_a_read(other: &Other) { other.process(|rows| { rows.x(); }); }
         "#,
     )]);
+    // `Holder` holds a live query, so its methods are read code themselves.
     assert_eq!(
         found,
         [
-            unit("Holder::from_field", Why::PassedToReadReceiver),
+            unit("Holder::from_field", Why::Holds),
+            unit("Holder::from_function_path", Why::Holds),
             unit("Holder::stage", Why::PassedToReadReceiver),
             unit("from_call", Why::PassedToReadReceiver),
+        ]
+    );
+}
+
+#[test]
+fn a_method_of_a_type_holding_a_live_query_is_read_code_through_an_alias_and_another_holder() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        type Rows = LiveQuery<u8>;
+        struct Holder { rows: Rows, told: Option<u8> }
+        impl Holder {
+            fn of(other: u8) -> Holder { todo!() }
+            fn next(&mut self) { self.shown(); }
+            fn shown(&self) {}
+        }
+        struct Outer { inner: std::sync::Arc<Holder> }
+        impl Outer { fn next(&self) {} }
+        struct Plain { count: u8 }
+        impl Plain { fn next(&mut self) {} }
+        "#,
+    )]);
+    assert_eq!(
+        found,
+        [
+            unit("Holder::next", Why::Holds),
+            unit("Holder::shown", Why::Holds),
+            unit("Outer::next", Why::Holds),
+        ]
+    );
+}
+
+#[test]
+fn a_callback_passed_beside_a_live_query_or_read_value_is_read_code() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        struct Projection;
+        fn resolve_projection(projection: Projection) -> u8 { 0 }
+        fn resolve_pointer(projection: Projection) -> u8 { 0 }
+        fn convert_other(n: u8) -> u8 { 0 }
+        fn detail_read(query: LiveQuery<Projection>, resolve: impl Fn(Projection) -> u8) {}
+        fn list_window(query: LiveQuery<Projection>, resolve: fn(Projection) -> u8) {}
+        fn bounded<Q: LiveQuery<u8>, F: Fn(u8)>(query: Q, each: F) {}
+        fn unrelated(count: u8, convert: impl Fn(u8) -> u8) {}
+        fn subscribe(query: LiveQuery<Projection>, other: LiveQuery<u8>) {
+            detail_read(query, resolve_projection);
+            list_window(query, resolve_pointer);
+            bounded(other, |n| { n.x(); });
+            unrelated(3, convert_other);
+        }
+        "#,
+    )]);
+    assert_eq!(
+        found,
+        [
+            unit("resolve_pointer", Why::PassedBesideRead),
+            unit("resolve_projection", Why::PassedBesideRead),
+            unit("subscribe", Why::PassedBesideRead),
         ]
     );
 }

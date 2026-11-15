@@ -172,9 +172,58 @@ impl Callable<'_> {
         !self.parameter_names(index, path_call).is_disjoint(&shapes.read_types)
     }
 
+    /// Whether the parameter is a callback: a function pointer, or a type or
+    /// generic bound naming one of the `Fn` traits.
     pub(crate) fn takes_callback(&self, index: usize, path_call: bool) -> bool {
+        if self.parameter(index, path_call).is_some_and(is_function_pointer) {
+            return true;
+        }
         let names = self.parameter_names(index, path_call);
         ["Fn", "FnMut", "FnOnce"].iter().any(|callback| names.contains(*callback))
+    }
+
+    /// Whether the parameter is a callback and another parameter takes a
+    /// value of a type in `kinds` (by its type, or its generic's bound): the
+    /// callee runs the callback on what that value reads.
+    pub(crate) fn takes_callback_beside(
+        &self,
+        index: usize,
+        path_call: bool,
+        kinds: &[&BTreeSet<String>],
+    ) -> bool {
+        let Some(callback) = self.parameter(index, path_call) else { return false };
+        self.takes_callback(index, path_call)
+            && self
+                .signature
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    syn::FnArg::Typed(typed) => Some(typed.ty.as_ref()),
+                    syn::FnArg::Receiver(_) => None,
+                })
+                .filter(|ty| !std::ptr::eq(*ty, callback))
+                .any(|ty| {
+                    let mut taken = names(ty, false);
+                    let bounded = taken
+                        .iter()
+                        .filter_map(|name| self.bounds.get(name))
+                        .flatten()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    taken.extend(bounded);
+                    taken.iter().any(|name| kinds.iter().any(|kind| kind.contains(name)))
+                })
+    }
+}
+
+/// Whether a type is a function pointer, behind references and parentheses.
+fn is_function_pointer(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::FnPtr(_) => true,
+        syn::Type::Reference(inner) => is_function_pointer(&inner.elem),
+        syn::Type::Paren(inner) => is_function_pointer(&inner.elem),
+        syn::Type::Group(inner) => is_function_pointer(&inner.elem),
+        _ => false,
     }
 }
 

@@ -10,7 +10,8 @@
 //!   a compound operator, or a call on `self.f` of a workspace method that
 //!   takes `&mut self`;
 //! - read code captures state (`kept_capture.rs`);
-//! - a read-code method's `Self` type retains a kept-state type.
+//! - a read-code method's `Self` type, which holds no live query, retains a
+//!   kept-state type.
 //!
 //! The live-query and value-stream types themselves are not looked inside:
 //! their locks are request plumbing.
@@ -19,58 +20,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::visit_mut::{self, VisitMut};
 
 use crate::kept_capture::captured_state;
 use crate::macros::parse_macro_body;
-use crate::policy::{Policy, ReadShapes, Shape};
+use crate::policy::{ReadShapes, Shape};
 use crate::read_code::{Body, ReadCode};
 use crate::read_index::Index;
+use crate::retained_types::Graph;
 use crate::row_work::Hit;
-use crate::syntax::{collect_declared_types, is_test_support_only, RustFile, StructInfo};
-use crate::type_identity::TypeIdentity;
-
-/// The workspace's declared types and what they retain.
-pub(crate) struct Graph<'a> {
-    pub(crate) types: BTreeMap<String, StructInfo>,
-    pub(crate) shapes: &'a ReadShapes,
-}
-
-impl Graph<'_> {
-    fn is_request(&self, name: &str) -> bool {
-        self.shapes.live_query_types.contains(name) || self.shapes.value_stream_types.contains(name)
-    }
-
-    /// The names and the types they retain, through the workspace's types;
-    /// a live query or value stream is named but not looked inside.
-    pub(crate) fn reach(&self, names: &BTreeSet<String>) -> BTreeSet<String> {
-        let mut reached = BTreeSet::new();
-        let mut pending = names.iter().cloned().collect::<Vec<_>>();
-        while let Some(name) = pending.pop() {
-            if !reached.insert(name.clone()) || self.is_request(&name) {
-                continue;
-            }
-            if let Some(info) = self.types.get(&name) {
-                pending.extend(info.field_types.iter().cloned());
-            }
-        }
-        reached
-    }
-
-    /// The first kept-state type these names retain.
-    pub(crate) fn kept(&self, names: &BTreeSet<String>) -> Option<String> {
-        self.reach(names).into_iter().find(|name| self.shapes.kept_state_types.contains(name))
-    }
-
-    /// Whether these names retain a live query or value stream.
-    fn retains_request(&self, names: &BTreeSet<String>) -> bool {
-        self.reach(names).iter().any(|name| self.is_request(name))
-    }
-
-    fn retains_live_query(&self, names: &BTreeSet<String>) -> bool {
-        self.reach(names).iter().any(|name| self.shapes.live_query_types.contains(name))
-    }
-}
+use crate::syntax::{RustFile, StructInfo};
 
 /// A type that holds a live query: its fields beside it.
 struct Holder<'a> {
@@ -81,20 +39,10 @@ struct Holder<'a> {
     others: BTreeMap<&'a str, &'a BTreeSet<String>>,
 }
 
-pub(crate) fn kept_state(
-    read: &ReadCode<'_>,
-    files: &[RustFile],
-    policy: &Policy,
-    shapes: &ReadShapes,
-) -> Vec<Hit> {
-    let files = &without_test_support_fields(files, policy.test_support_features());
-    let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
-    let graph = Graph {
-        types: collect_declared_types(files, &policy.shared_pointer_types, &identity),
-        shapes,
-    };
+pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadShapes) -> Vec<Hit> {
+    let graph = read.graph();
     let mut hits = Vec::new();
-    let holders = holders(&graph);
+    let holders = holders(graph);
     for holder in &holders {
         let Some((path, line)) =
             holder.info.declarations.iter().find(|(path, _)| !shapes.is_plumbing(path))
@@ -118,6 +66,10 @@ pub(crate) fn kept_state(
     writes_after_construction(read.index(), &holders, &mut hits);
     for unit in read.units() {
         let (Body::Function { .. }, Some(owner)) = (&unit.body, &unit.owner) else { continue };
+        // A holder's kept state is found at the type, above.
+        if graph.holds_live_query(owner) {
+            continue;
+        }
         if let Some(kept) = graph.kept(&BTreeSet::from([owner.clone()])) {
             hits.push(Hit {
                 path: unit.file.relative_path.clone(),
@@ -128,40 +80,15 @@ pub(crate) fn kept_state(
             });
         }
     }
-    hits.extend(captured_state(read, &graph, files));
+    hits.extend(captured_state(read, graph, files));
     hits
-}
-
-/// The files without the fields only test support compiles.
-fn without_test_support_fields(files: &[RustFile], features: &[String]) -> Vec<RustFile> {
-    struct Gated<'a>(&'a [String]);
-    impl VisitMut for Gated<'_> {
-        fn visit_fields_named_mut(&mut self, fields: &mut syn::FieldsNamed) {
-            fields.named = std::mem::take(&mut fields.named)
-                .into_iter()
-                .filter(|field| !is_test_support_only(&field.attrs, self.0))
-                .collect();
-            visit_mut::visit_fields_named_mut(self, fields);
-        }
-    }
-    files
-        .iter()
-        .map(|file| {
-            let mut file = file.clone();
-            Gated(features).visit_file_mut(&mut file.syntax);
-            file
-        })
-        .collect()
 }
 
 /// The types that hold a live query, and are not request plumbing.
 fn holders<'a>(graph: &'a Graph<'_>) -> Vec<Holder<'a>> {
     let mut holders = Vec::new();
     for (name, info) in &graph.types {
-        if graph.is_request(name) || info.named_fields.is_empty() {
-            continue;
-        }
-        if !info.named_fields.values().any(|names| graph.retains_live_query(names)) {
+        if !graph.holds_live_query(name) {
             continue;
         }
         let others = info

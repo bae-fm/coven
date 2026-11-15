@@ -1,5 +1,6 @@
 use super::*;
 use crate::crate_code::checked;
+use crate::policy::Policy;
 
 fn policy() -> Policy {
     Policy::fixture(
@@ -42,7 +43,7 @@ fn found(files: &[(&str, &str)]) -> Vec<(String, String)> {
     let policy = policy();
     let shapes = policy.read_shapes.as_ref().expect("rows");
     let read = ReadCode::collect(&files, &policy, shapes);
-    let mut hits = kept_state(&read, &files, &policy, shapes)
+    let mut hits = kept_state(&read, &files, shapes)
         .into_iter()
         .map(|hit| {
             assert_eq!(hit.shape.id(), "kept-state");
@@ -244,6 +245,30 @@ fn a_local_of_a_read_function_is_no_kept_state_to_a_closure_inside_the_same_call
         "#,
     )]);
     assert_eq!(found, []);
+}
+
+#[test]
+fn a_closure_a_plain_read_runs_within_its_call_keeps_no_state_and_one_a_live_query_keeps_does() {
+    let found = found(&[
+        LIVE,
+        (
+            A,
+            r#"
+            fn of(sql: &SqlReadContext<'_>) {
+                let mut seen = 0;
+                sql.each(|row| { seen += 1; });
+            }
+            struct Screen { query: LiveQuery<u8> }
+            impl Screen {
+                fn open(&self, sql: &SqlReadContext<'_>) {
+                    let mut seen = 0;
+                    self.query.process(|rows| { seen += 1; });
+                }
+            }
+            "#,
+        ),
+    ]);
+    assert_eq!(found, [("Screen::open".to_string(), "assigns the captured `seen`".to_string())]);
 }
 
 #[test]

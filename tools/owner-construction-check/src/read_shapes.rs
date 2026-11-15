@@ -30,7 +30,7 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
     let mut keyed: BTreeMap<(String, String, Shape), Vec<Hit>> = BTreeMap::new();
     let hits = row_work(&read)
         .into_iter()
-        .chain(kept_state(&read, &code.expanded, policy, shapes))
+        .chain(kept_state(&read, &code.expanded, shapes))
         .chain(counters(code))
         .chain(request_bumps(&read, &code.expanded, shapes))
         .chain(cutoffs(&read, &code.expanded));

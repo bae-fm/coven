@@ -6,12 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{Body, ClosureInfo, ReadClosure, Unit, Walked, Why};
 use crate::read_index::{Callable, Index};
 
-/// The units of read code: the roots, what is passed to a read place, and
-/// what they call, transitively.
+/// The units of read code: the roots (what takes a read value, and the
+/// methods of a type that holds a live query), what is passed to a read
+/// place, and what they call, transitively.
 pub(super) fn units<'a>(
     index: &Index<'a>,
     walked: &Walked,
     takes_read: &BTreeSet<usize>,
+    holds: &BTreeSet<usize>,
 ) -> (Vec<Unit<'a>>, Vec<ReadClosure<'a>>) {
     let readable = |id: usize| {
         let callable = &index.callables[id];
@@ -23,6 +25,12 @@ pub(super) fn units<'a>(
     for &id in takes_read {
         if readable(id) {
             callables.insert(id, Why::Root);
+            queue.push(Work::Callable(id));
+        }
+    }
+    for &id in holds {
+        if readable(id) && !callables.contains_key(&id) {
+            callables.insert(id, Why::Holds);
             queue.push(Work::Callable(id));
         }
     }
@@ -97,9 +105,10 @@ pub(super) fn units<'a>(
                 expr: closure.expr.clone(),
                 captures: closure.captures.clone(),
                 outlives_its_function: closures.contains_key(&position)
-                    && !callables.contains_key(&closure.callable)
-                    && !ancestors(&walked.closures, closure.parent)
-                        .any(|above| closures.contains_key(&above)),
+                    && (closure.kept_by_live_query
+                        || (!callables.contains_key(&closure.callable)
+                            && !ancestors(&walked.closures, closure.parent)
+                                .any(|above| closures.contains_key(&above)))),
             }
         })
         .collect();

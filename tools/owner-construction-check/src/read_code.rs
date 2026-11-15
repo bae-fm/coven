@@ -10,8 +10,15 @@
 //! - every closure or function path passed where the callee's parameter names
 //!   a read type, directly, through `impl Trait`, or through a generic's bound
 //!   in the signature, the `impl` block or a `where` clause;
+//! - every method taking `self` of a type that holds a live query, through
+//!   its fields at any depth, an alias holding what its target holds: it has
+//!   what the query reads at hand;
+//! - every closure or function path passed where the callee's parameter is a
+//!   callback (a function pointer or one of the `Fn` traits) and another of
+//!   its parameters names a read type or a live query: the callee runs it on
+//!   what that value reads, as in `detail_read(query, resolve)`;
 //! - every closure or function path passed to a method whose receiver is a
-//!   read type;
+//!   read type, a live query or a type that holds one;
 //! - every workspace function the read code calls, transitively, when the call
 //!   resolves, and every one it passes by path to any callee, which calls it
 //!   (`.map(Row::shown)`): a path (`NameResolver`), `Type::f`, `Self::f`, a
@@ -40,6 +47,7 @@ use crate::macros::parse_macro_body;
 use crate::name_resolution::{qualified_path, NameResolver};
 use crate::policy::{Policy, ReadShapes};
 use crate::read_index::{names, peel, Callable, Index};
+use crate::retained_types::Graph;
 use crate::syntax::RustFile;
 
 /// Where a call is in its file: the line and column of its method's name, or
@@ -60,6 +68,13 @@ pub(crate) enum Why {
     PassedToReadCallee,
     /// It is passed to a method of a read type.
     PassedToReadReceiver,
+    /// It is a method of a type that holds a live query, so it has what the
+    /// query reads at hand.
+    Holds,
+    /// It is passed to a callee that takes a read value beside it, and the
+    /// callee runs it on what that value reads (`detail_read(query,
+    /// resolve)`).
+    PassedBesideRead,
     /// Read code calls it.
     Reached,
 }
@@ -102,15 +117,17 @@ pub(crate) struct ReadClosure<'a> {
     pub(crate) owner: Option<String>,
     pub(crate) expr: syn::ExprClosure,
     pub(crate) captures: BTreeMap<String, Option<String>>,
-    /// Whether the closure is itself passed to a read place from a function
-    /// that is no read code: it outlives that call, so what it captures from
-    /// it is kept between reads. A closure inside read code runs within one
-    /// call, and the locals it captures are that call's.
+    /// Whether the closure is itself passed to a live query, or to a read
+    /// place from a function that is no read code: it outlives that call, so
+    /// what it captures from it is kept between reads. Any other closure
+    /// inside read code runs within one call, and the locals it captures are
+    /// that call's.
     pub(crate) outlives_its_function: bool,
 }
 
 pub(crate) struct ReadCode<'a> {
     units: Vec<Unit<'a>>,
+    graph: Graph<'a>,
     closures: Vec<ReadClosure<'a>>,
     index: Index<'a>,
     /// The calls, by file and place, to a function taking a read type: they
@@ -122,14 +139,26 @@ pub(crate) struct ReadCode<'a> {
 }
 
 impl<'a> ReadCode<'a> {
-    pub(crate) fn collect(files: &'a [RustFile], policy: &Policy, shapes: &ReadShapes) -> Self {
+    pub(crate) fn collect(files: &'a [RustFile], policy: &Policy, shapes: &'a ReadShapes) -> Self {
         let resolver = NameResolver::collect(files);
         let index = Index::collect(files, &resolver, policy, shapes);
+        let graph = Graph::of(files, policy, shapes);
+        let holders = graph
+            .types
+            .keys()
+            .filter(|name| graph.holds_live_query(name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let mut walked = Walked::default();
         for (id, callable) in index.callables.iter().enumerate() {
             if let (false, Some(body)) = (callable.plumbing, callable.body) {
                 let mut walker = Walker {
-                    context: Context { index: &index, resolver: &resolver, shapes },
+                    context: Context {
+                        index: &index,
+                        resolver: &resolver,
+                        shapes,
+                        holders: &holders,
+                    },
                     callable: id,
                     scopes: vec![BTreeMap::new()],
                     open: Vec::new(),
@@ -141,7 +170,6 @@ impl<'a> ReadCode<'a> {
                 walker.run(callable, body);
             }
         }
-        let holders = live_query_holders(&index, shapes);
         let takes_read = index
             .callables
             .iter()
@@ -169,8 +197,23 @@ impl<'a> ReadCode<'a> {
             .iter()
             .map(|(callable, site)| (index.callables[*callable].file.relative_path.clone(), *site))
             .collect();
-        let (units, closures) = units::units(&index, &walked, &takes_read);
-        Self { units, closures, index, handoffs, callees, workspace_calls }
+        let holds = index
+            .callables
+            .iter()
+            .enumerate()
+            .filter(|(_, callable)| {
+                callable.signature.receiver().is_some()
+                    && callable.owner.as_ref().is_some_and(|owner| holders.contains(owner))
+            })
+            .map(|(id, _)| id)
+            .collect::<BTreeSet<_>>();
+        let (units, closures) = units::units(&index, &walked, &takes_read, &holds);
+        Self { units, graph, closures, index, handoffs, callees, workspace_calls }
+    }
+
+    /// The workspace's declared types and what each retains.
+    pub(crate) fn graph(&self) -> &Graph<'a> {
+        &self.graph
     }
 
     /// Every closure in read code: a unit, or inside one.
@@ -223,23 +266,6 @@ fn takes_read_value(callable: &Callable, shapes: &ReadShapes, holders: &BTreeSet
     })
 }
 
-/// The types that hold a live query, directly or through the fields of
-/// the workspace's types they hold.
-fn live_query_holders(index: &Index<'_>, shapes: &ReadShapes) -> BTreeSet<String> {
-    let mut holders = BTreeSet::new();
-    loop {
-        let before = holders.len();
-        for ((owner, _), field) in &index.fields {
-            if shapes.live_query_types.contains(field) || holders.contains(field) {
-                holders.insert(owner.clone());
-            }
-        }
-        if holders.len() == before {
-            return holders;
-        }
-    }
-}
-
 /// A closure and where it is.
 struct ClosureInfo {
     expr: syn::ExprClosure,
@@ -251,6 +277,9 @@ struct ClosureInfo {
     typed_read: bool,
     /// Why it is read code, when it is passed to a read place.
     passed: Option<Why>,
+    /// Whether that place is a live query, which keeps the closure to run on
+    /// each value it reads, after the call that passed it returns.
+    kept_by_live_query: bool,
     /// The bindings in scope where it is written, and their types.
     captures: BTreeMap<String, Option<String>>,
 }
@@ -291,6 +320,8 @@ struct Context<'i, 'a> {
     index: &'i Index<'a>,
     resolver: &'i NameResolver,
     shapes: &'i ReadShapes,
+    /// The types that hold a live query.
+    holders: &'i BTreeSet<String>,
 }
 
 /// An argument that is code a callee may run: a closure, or the functions a
@@ -304,9 +335,10 @@ enum Passed {
 enum Call<'c> {
     /// `path(args)`.
     Path,
-    /// `receiver.method(args)`; the receiver's type when known, and whether
-    /// it is a read type; else the methods of that name.
-    Method { known: bool, receiver_read: bool, candidates: &'c [usize] },
+    /// `receiver.method(args)`; the receiver's type when known, whether it
+    /// is a read type, and whether it is a live query or a type that holds
+    /// one (which is a read type too); else the methods of that name.
+    Method { known: bool, receiver_read: bool, receiver_live: bool, candidates: &'c [usize] },
 }
 
 struct Walker<'i, 'a> {
@@ -316,8 +348,8 @@ struct Walker<'i, 'a> {
     scopes: Vec<BTreeMap<String, Option<String>>>,
     open: Vec<usize>,
     /// The closures, by address, passed to a read place in the call being
-    /// visited.
-    marks: BTreeMap<usize, Why>,
+    /// visited, and whether a live query keeps each.
+    marks: BTreeMap<usize, (Why, bool)>,
     /// The closures, by address, whose first untyped parameter takes the type
     /// of what the receiver of the call they are passed to holds.
     parameter_types: BTreeMap<usize, (usize, String)>,
@@ -616,7 +648,8 @@ impl Walker<'_, '_> {
             match passed {
                 Passed::Closure(address) => {
                     if let Some(why) = why {
-                        self.marks.insert(address, why);
+                        let kept = self.live_query_place(call, &targets, index);
+                        self.marks.insert(address, (why, kept));
                     }
                 }
                 Passed::Functions(functions) => {
@@ -735,7 +768,8 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             callable: self.callable,
             parent: self.open.last().copied(),
             typed_read,
-            passed: self.marks.remove(&address),
+            passed: self.marks.get(&address).map(|(why, _)| *why),
+            kept_by_live_query: self.marks.remove(&address).is_some_and(|(_, kept)| kept),
             captures: self
                 .scopes
                 .iter()
@@ -807,11 +841,15 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
                 index.by_name.get(&name).cloned().unwrap_or_default(),
             ),
         };
+        let shapes = self.context.shapes;
+        let receiver_live = receiver.as_ref().is_some_and(|receiver| {
+            shapes.live_query_types.contains(receiver) || self.context.holders.contains(receiver)
+        });
         let call = Call::Method {
             known: receiver.is_some(),
-            receiver_read: receiver
-                .as_ref()
-                .is_some_and(|receiver| self.context.shapes.read_types.contains(receiver)),
+            receiver_read: receiver_live
+                || receiver.as_ref().is_some_and(|receiver| shapes.read_types.contains(receiver)),
+            receiver_live,
             candidates: &candidates,
         };
         let site = call_site(node.method.span());
