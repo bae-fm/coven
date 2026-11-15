@@ -207,7 +207,8 @@ impl SqlAuthorization {
         &self,
         name: &'static str,
         function: impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
-    ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static {
+    ) -> impl Fn(&mut rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static
+    {
         let state = Arc::clone(&self.state);
         move |context| {
             let called = coven_foundation::task::caught_sync(name, || {
