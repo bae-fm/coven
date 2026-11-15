@@ -540,3 +540,42 @@ fn a_call_that_hands_over_a_read_value_is_known_by_its_place() {
     assert!(read.hands_read_value("crates/app/src/a.rs", (2, 4)));
     assert!(!read.hands_read_value("crates/app/src/a.rs", (3, 4)));
 }
+
+#[test]
+fn only_what_a_live_query_s_process_runs_and_no_other_read_code_reaches_is_process_only() {
+    let files = [RustFile::fixture(
+        "crates/app/src/a.rs",
+        r#"
+        struct Builder;
+        impl Builder { fn build(&self) -> LiveQuery<u8> { todo!() } }
+        struct Views;
+        impl Views {
+            fn by_closure(&self, builder: &Builder) {
+                builder.build().process(|rows| { label_lines(rows); shared(rows); });
+            }
+            fn by_path(&self, builder: &Builder) { builder.build().process(Self::shape); }
+            fn shape(rows: Vec<u8>) { helper(); }
+            fn mixed(&self, builder: &Builder, other: &Other) {
+                builder.build().process(|rows| { helper(); });
+                other.subscribe(|sql: &SqlReadContext<'_>| { sql.go(); });
+            }
+        }
+        fn label_lines(rows: Vec<u8>) {}
+        fn helper() {}
+        fn shared(rows: Vec<u8>) {}
+        fn plain(sql: &SqlReadContext<'_>) { shared(vec![]); }
+        "#,
+    )];
+    let files = checked(&files);
+    let policy = policy();
+    let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
+    let only = |item: &str| read.is_process_only("crates/app/src/a.rs", item);
+    for item in ["Views::by_closure", "Views::shape", "label_lines", "helper"] {
+        assert!(only(item), "{item}");
+    }
+    // `shared` is reached by `plain`, `mixed` has a read closure besides its
+    // `process` callback, and `by_path` runs no read code itself.
+    for item in ["shared", "plain", "Views::mixed", "Views::by_path"] {
+        assert!(!only(item), "{item}");
+    }
+}

@@ -34,7 +34,9 @@
 //!
 //! The read plumbing (`ReadShapes::plumbing`), test code and items gated on
 //! test support alone are no read code. A closure counts with its enclosing
-//! item, and a closure inside read code is part of it.
+//! item, and a closure inside read code is part of it. The items only a live
+//! query's `process` runs are told apart (`read_code/process.rs`): the rule
+//! allows them to shape how one result's rows display.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -128,6 +130,9 @@ pub(crate) struct ReadClosure<'a> {
 pub(crate) struct ReadCode<'a> {
     units: Vec<Unit<'a>>,
     graph: Graph<'a>,
+    /// The items, by file and name, that only a live query's `process`
+    /// runs: no other read code reaches them.
+    process_only: BTreeSet<(String, String)>,
     closures: Vec<ReadClosure<'a>>,
     index: Index<'a>,
     /// The calls, by file and place, to a function taking a read type: they
@@ -208,12 +213,19 @@ impl<'a> ReadCode<'a> {
             .map(|(id, _)| id)
             .collect::<BTreeSet<_>>();
         let (units, closures) = units::units(&index, &walked, &takes_read, &holds);
-        Self { units, graph, closures, index, handoffs, callees, workspace_calls }
+        let process_only = process::process_only(&index, &walked, &takes_read, &holds);
+        Self { units, graph, process_only, closures, index, handoffs, callees, workspace_calls }
     }
 
     /// The workspace's declared types and what each retains.
     pub(crate) fn graph(&self) -> &Graph<'a> {
         &self.graph
+    }
+
+    /// Whether only a live query's `process` runs the item, through a
+    /// closure or function passed to it, and no other read code reaches it.
+    pub(crate) fn is_process_only(&self, path: &str, item: &str) -> bool {
+        self.process_only.contains(&(path.to_string(), item.to_string()))
     }
 
     /// Every closure in read code: a unit, or inside one.
@@ -280,6 +292,8 @@ struct ClosureInfo {
     /// Whether that place is a live query, which keeps the closure to run on
     /// each value it reads, after the call that passed it returns.
     kept_by_live_query: bool,
+    /// Whether that place is a live query's `process`.
+    process: bool,
     /// The bindings in scope where it is written, and their types.
     captures: BTreeMap<String, Option<String>>,
 }
@@ -299,6 +313,10 @@ struct Walked {
     calls: Vec<CallInfo>,
     /// The functions passed by path to a read place.
     passed_paths: BTreeMap<usize, Why>,
+    /// Of those, the ones passed to a live query's `process`, and the ones
+    /// passed to any other read place.
+    passed_to_process: BTreeSet<usize>,
+    passed_elsewhere: BTreeSet<usize>,
     /// The method calls whose receiver's type is known and that name a
     /// workspace method, and the `filter`s of a single optional value: neither
     /// is the standard library's work on rows.
@@ -314,6 +332,7 @@ impl Walked {
 
 mod option_values;
 mod places;
+mod process;
 mod units;
 
 struct Context<'i, 'a> {
@@ -338,7 +357,15 @@ enum Call<'c> {
     /// `receiver.method(args)`; the receiver's type when known, whether it
     /// is a read type, and whether it is a live query or a type that holds
     /// one (which is a read type too); else the methods of that name.
-    Method { known: bool, receiver_read: bool, receiver_live: bool, candidates: &'c [usize] },
+    /// `process` says whether the method is a live query's `process`, whose
+    /// callback shapes what the query read.
+    Method {
+        known: bool,
+        receiver_read: bool,
+        receiver_live: bool,
+        process: bool,
+        candidates: &'c [usize],
+    },
 }
 
 struct Walker<'i, 'a> {
@@ -348,8 +375,8 @@ struct Walker<'i, 'a> {
     scopes: Vec<BTreeMap<String, Option<String>>>,
     open: Vec<usize>,
     /// The closures, by address, passed to a read place in the call being
-    /// visited, and whether a live query keeps each.
-    marks: BTreeMap<usize, (Why, bool)>,
+    /// visited.
+    marks: BTreeMap<usize, Mark>,
     /// The closures, by address, whose first untyped parameter takes the type
     /// of what the receiver of the call they are passed to holds.
     parameter_types: BTreeMap<usize, (usize, String)>,
@@ -648,14 +675,23 @@ impl Walker<'_, '_> {
             match passed {
                 Passed::Closure(address) => {
                     if let Some(why) = why {
-                        let kept = self.live_query_place(call, &targets, index);
-                        self.marks.insert(address, (why, kept));
+                        let mark = Mark {
+                            why,
+                            kept_by_live_query: self.live_query_place(call, &targets, index),
+                            process: is_process(call),
+                        };
+                        self.marks.insert(address, mark);
                     }
                 }
                 Passed::Functions(functions) => {
                     if let Some(why) = why {
                         for &function in &functions {
                             self.out.passed_paths.entry(function).or_insert(why);
+                            if is_process(call) {
+                                self.out.passed_to_process.insert(function);
+                            } else {
+                                self.out.passed_elsewhere.insert(function);
+                            }
                         }
                     }
                     self.push_call(call_site(argument.span()), functions);
@@ -681,6 +717,18 @@ impl Walker<'_, '_> {
             }
         }
     }
+}
+
+/// What a closure passed to a read place is: why it is read code, whether a
+/// live query keeps it, and whether it is a live query's `process` callback.
+struct Mark {
+    why: Why,
+    kept_by_live_query: bool,
+    process: bool,
+}
+
+fn is_process(call: &Call<'_>) -> bool {
+    matches!(call, Call::Method { process: true, .. })
 }
 
 struct PatternNames(Vec<String>);
@@ -768,8 +816,12 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             callable: self.callable,
             parent: self.open.last().copied(),
             typed_read,
-            passed: self.marks.get(&address).map(|(why, _)| *why),
-            kept_by_live_query: self.marks.remove(&address).is_some_and(|(_, kept)| kept),
+            passed: self.marks.get(&address).map(|mark| mark.why),
+            kept_by_live_query: self
+                .marks
+                .get(&address)
+                .is_some_and(|mark| mark.kept_by_live_query),
+            process: self.marks.remove(&address).is_some_and(|mark| mark.process),
             captures: self
                 .scopes
                 .iter()
@@ -850,6 +902,10 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             receiver_read: receiver_live
                 || receiver.as_ref().is_some_and(|receiver| shapes.read_types.contains(receiver)),
             receiver_live,
+            process: name == "process"
+                && receiver
+                    .as_ref()
+                    .is_some_and(|receiver| shapes.live_query_types.contains(receiver)),
             candidates: &candidates,
         };
         let site = call_site(node.method.span());

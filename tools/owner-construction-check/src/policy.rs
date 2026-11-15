@@ -247,6 +247,31 @@ pub(crate) enum Shape {
 }
 
 impl Shape {
+    /// Whether a function a live query's `process` runs may take this shape
+    /// to shape how the one result it is given displays: sorting, filtering,
+    /// grouping, counting and picking among that result's rows. Keeping
+    /// state, running a statement and choosing a read path never shape a
+    /// display.
+    pub(crate) fn shapes_display(self) -> bool {
+        match self {
+            Shape::Sort
+            | Shape::Filter
+            | Shape::Group
+            | Shape::Aggregate
+            | Shape::Pick
+            | Shape::Join
+            | Shape::LengthBranch
+            | Shape::DropRow => true,
+            Shape::QueryPerRow
+            | Shape::KeyedStatement
+            | Shape::KeptState
+            | Shape::Counter
+            | Shape::ResetCounter
+            | Shape::RequestBump
+            | Shape::Cutoff => false,
+        }
+    }
+
     /// The id findings and list rows use.
     pub(crate) fn id(self) -> &'static str {
         match self {
@@ -322,7 +347,10 @@ pub(crate) struct FrozenRow {
     pub(crate) finding: String,
 }
 
-/// Findings that are not a read's work, and what the values they work on are.
+/// Findings that are not a read's work: uses over values that are not rows,
+/// with what the values are, or a function a live query's `process` runs to
+/// shape how one result's rows display, with what it shapes (`reason`) and
+/// which query's result it takes (`process`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AllowedRow {
@@ -331,6 +359,8 @@ pub(crate) struct AllowedRow {
     pub(crate) shape: Shape,
     pub(crate) count: usize,
     pub(crate) reason: String,
+    #[serde(default)]
+    pub(crate) process: Option<String>,
 }
 
 /// The two lists of a policy's read rule.

@@ -3,7 +3,10 @@
 //! (`row_work.rs`) and holds what they find against the policy's two lists.
 //!
 //! `frozen` lists the violations the workspace has today and `allowed` the
-//! findings that are not a read's work. A row is keyed by file, item and
+//! findings that are not a read's work: uses over values that are not rows,
+//! and the shaping a function does that only a live query's `process` runs
+//! (a row naming `process`), which may only sort, filter, group, count, pick
+//! or join among the one result it is given. A row is keyed by file, item and
 //! shape, and its count is exact: more findings under the key than the count
 //! fail as findings, fewer fail with the count to lower it to. A finding no
 //! row covers fails as it is.
@@ -16,7 +19,7 @@ use crate::cutoffs::cutoffs;
 use crate::finding::Finding;
 use crate::kept_state::kept_state;
 use crate::keyed_statements::keyed_statements;
-use crate::policy::{Policy, Shape, FILE_NAME};
+use crate::policy::{Policy, ReadShapes, Shape, FILE_NAME};
 use crate::read_code::ReadCode;
 use crate::row_work::{row_work, Hit};
 
@@ -40,7 +43,7 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
         keyed.entry((hit.path.clone(), hit.item.clone(), hit.shape)).or_default().push(hit);
     }
     let rows = shapes.listed();
-    let mut findings = Vec::new();
+    let mut findings = process_rows(&read, shapes);
     for (key, hits) in &keyed {
         let row =
             rows.iter().find(|row| (row.path, row.item, row.shape) == (&key.0, &key.1, key.2));
@@ -98,6 +101,37 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
                     row.item,
                     row.shape.id(),
                     row.count
+                ),
+                remedy(&shapes.rule, row.shape),
+            ));
+        }
+    }
+    findings
+}
+
+/// The `allowed` rows that name a `process` function, held to what the rule
+/// allows one: only a live query's `process` runs it, and the shape is one
+/// that shapes how a result displays.
+fn process_rows(read: &ReadCode<'_>, shapes: &ReadShapes) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for row in shapes.allowed.iter().filter(|row| row.process.is_some()) {
+        let named = format!("read_shapes.allowed: {}: {} ({})", row.path, row.item, row.shape.id());
+        if !row.shape.shapes_display() {
+            findings.push(Finding::new(
+                FILE_NAME,
+                1,
+                format!(
+                    "{named} names a `process` function, but a function `process` runs never takes this shape: freeze the finding instead"
+                ),
+                remedy(&shapes.rule, row.shape),
+            ));
+        }
+        if !read.is_process_only(&row.path, &row.item) {
+            findings.push(Finding::new(
+                FILE_NAME,
+                1,
+                format!(
+                    "{named} names a `process` function, but read code other than a live query's `process` runs it too: drop `process` if its values are not rows, or freeze the finding"
                 ),
                 remedy(&shapes.rule, row.shape),
             ));

@@ -271,3 +271,66 @@ fn read(sql: &SqlReadContext<'_>, rows: Vec<u8>, ids: Vec<u8>, q: &mut Query) {
         ]
     );
 }
+
+/// A workspace whose `Views::subscribe` passes a closure to a live query's
+/// `process`, which calls `label_lines`, and `shared` also called by a plain
+/// read.
+const PROCESSED: &str = "
+struct Builder;
+impl Builder { fn build(&self) -> LiveQuery<u8> { todo!() } }
+struct Views;
+impl Views {
+    fn subscribe(&self, builder: &Builder) {
+        builder.build().process(|rows| { label_lines(rows); shared(rows); });
+    }
+}
+fn label_lines(rows: Vec<u8>) { rows.sort(); }
+fn shared(rows: Vec<u8>) { rows.sort(); }
+fn other(sql: &SqlReadContext<'_>, rows: Vec<u8>) { shared(rows); }
+";
+
+fn run_processed(rows: &str) -> Vec<String> {
+    let policy = Policy::fixture(&format!(
+        r#"
+        rules = ["read-shapes"]
+        [database]
+        capability = "SQLite"
+        test_support_features = ["test-utils"]
+        [read_shapes]
+        read_types = ["SqlReadContext", "LiveQuery"]
+        live_query_types = ["LiveQuery"]
+        rule = "projects/rule.md in agent-instructions"
+        frozen = [{{ path = "{PATH}", item = "shared", shape = "sort", count = 1, finding = "sorts" }}]
+        {rows}
+        "#
+    ));
+    let files = [RustFile::fixture(PATH, PROCESSED)];
+    let found = find_read_shape_violations(&CrateCode::of(&files, &[]), &policy);
+    found.into_iter().map(|finding| finding.message).collect()
+}
+
+#[test]
+fn an_allowed_row_names_a_function_only_a_live_query_s_process_runs_and_the_shaping_it_does() {
+    let row = |item: &str, shape: &str| {
+        format!(
+            r#"{{ path = "{PATH}", item = "{item}", shape = "{shape}", count = 1, reason = "orders a label's lines", process = "the album detail query" }}"#
+        )
+    };
+    assert_eq!(
+        run_processed(&format!("allowed = [{}]", row("label_lines", "sort"))),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        run_processed(&format!("allowed = [{}]", row("label_lines", "kept-state"))),
+        [
+            "read_shapes.allowed: crates/app/src/a.rs: label_lines (kept-state) names a `process` function, but a function `process` runs never takes this shape: freeze the finding instead",
+            "label_lines sorts with `sort` (sort)",
+            "read_shapes.allowed: crates/app/src/a.rs: label_lines (kept-state) lists 1 findings but the code has none: remove the row",
+        ]
+    );
+    let found = run_processed(&format!("allowed = [{}]", row("shared", "sort")));
+    assert!(
+        found.contains(&"read_shapes.allowed: crates/app/src/a.rs: shared (sort) names a `process` function, but read code other than a live query's `process` runs it too: drop `process` if its values are not rows, or freeze the finding".to_string()),
+        "{found:?}"
+    );
+}
