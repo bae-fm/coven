@@ -6,7 +6,8 @@
 //! (`ReadCode::hands_read_value`) or a SQL call on a connection or prepared
 //! statement (`query_row`, `query`, `query_map`, `prepare`, `execute`). A
 //! binding holds what a statement returned when its `let` (or `if let`)
-//! runs a statement or names such a binding. A statement is keyed when an
+//! runs a statement or names such a binding, and so does a `match` arm's
+//! pattern when the matched expression does. A statement is keyed when an
 //! argument, or the receiver of a call that hands over a read value, runs a
 //! statement or names such a binding outside a closure: a closure argument
 //! maps the rows the statement reads and does not choose them. A statement run once for each row is
@@ -184,6 +185,18 @@ impl<'ast> Visit<'ast> for Keyed<'_> {
         visit::visit_expr_let(self, node);
         if self.key_in(&node.expr).is_some() {
             self.bind(&node.pat);
+        }
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        self.visit_expr(&node.expr);
+        if self.key_in(&node.expr).is_some() {
+            for arm in &node.arms {
+                self.bind(&arm.pat);
+            }
+        }
+        for arm in &node.arms {
+            self.visit_arm(arm);
         }
     }
 

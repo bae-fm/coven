@@ -64,7 +64,8 @@ fn a_key_carried_through_a_binding_a_sql_call_or_a_nested_statement_is_found() {
          let name: String = sql.query_row(\"SELECT name FROM a\", [], |r| r.get(0))?;
          sql.query_row(\"SELECT id FROM b WHERE name = ?\", [&name], |r| r.get(0))?;
          load_album(sql, &load_detail(sql, 2)?.album_id)?;
-         if let Ok(found) = load_detail(sql, 3) { load_album(sql, &found.album_id)?; }",
+         if let Ok(found) = load_detail(sql, 3) { load_album(sql, &found.album_id)?; }
+         match detail.album_id.as_str() { \"\" => {}, album => { load_album(sql, album)?; } }",
     );
     let found = found.iter().map(|(line, what)| (*line, what.as_str())).collect::<Vec<_>>();
     assert_eq!(
@@ -74,6 +75,7 @@ fn a_key_carried_through_a_binding_a_sql_call_or_a_nested_statement_is_found() {
             (5, "runs `query_row`, which runs SQL, keyed by what `name` returned"),
             (6, "runs `load_album`, which runs SQL, keyed by what `load_detail` returned"),
             (7, "runs `load_album`, which runs SQL, keyed by what `found` returned"),
+            (8, "runs `load_album`, which runs SQL, keyed by what `album` returned"),
         ]
     );
 }
@@ -90,6 +92,7 @@ fn independent_statements_a_prepared_statement_a_row_mapper_a_named_argument_and
              statement.query_row([request.id], |r| r.get(0))?;
              for id in ids { load_album(sql, &detail.album_id)?; }
              let all = ids.iter().map(|id| load_album(sql, &detail.album_id));
+             match request.id { Some(id) => { load_album(sql, &id)?; } None => {} }
              sql.query_row(\"SELECT 2\", [], |r| shown(&detail))?;
              sql.query_row(&format!(\"SELECT {detail}\", detail = request.columns), [], f)?;"
         ),
