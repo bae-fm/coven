@@ -21,6 +21,7 @@ use syn::visit::{self, Visit};
 use crate::macros::parse_macro_body;
 use crate::policy::Shape;
 use crate::read_code::{call_site, Body, ReadCode};
+use crate::read_statements::{RowDepth, Statement, VisitRows};
 
 /// One place read code works on rows.
 pub(crate) struct Hit {
@@ -62,25 +63,6 @@ const AGGREGATE_WITH_ARGUMENTS: [&str; 6] =
 const PICK_WITH_CALLBACK: [&str; 6] = ["any", "all", "find", "find_map", "position", "rposition"];
 const COLLECTIONS: [&str; 5] = ["HashMap", "BTreeMap", "HashSet", "BTreeSet", "IndexMap"];
 const COLLECTION_CONSTRUCTORS: [&str; 5] = ["new", "with_capacity", "default", "from", "from_iter"];
-pub(crate) const SQL_CALLS: [&str; 5] = ["query", "query_row", "prepare", "query_map", "execute"];
-/// Methods that run their closure argument once for each row.
-pub(crate) const ITERATOR_METHODS: [&str; 12] = [
-    "map",
-    "for_each",
-    "filter_map",
-    "flat_map",
-    "try_for_each",
-    "fold",
-    "try_fold",
-    "inspect",
-    "scan",
-    "filter",
-    "find_map",
-    "map_while",
-];
-/// The calls whose closure argument runs once for each row they read.
-pub(crate) const ROW_CALLS: [&str; 3] = ["query", "query_row", "query_map"];
-
 /// Every place the read code works on rows.
 pub(crate) fn row_work(read: &ReadCode<'_>) -> Vec<Hit> {
     let mut hits = Vec::new();
@@ -90,8 +72,7 @@ pub(crate) fn row_work(read: &ReadCode<'_>) -> Vec<Hit> {
             path: &unit.file.relative_path,
             item: &unit.item,
             hits: &mut hits,
-            loops: 0,
-            rows: 0,
+            depth: RowDepth::default(),
             typed_init: None,
             compared_lengths: Vec::new(),
         };
@@ -114,10 +95,7 @@ struct RowWork<'a> {
     path: &'a str,
     item: &'a str,
     hits: &'a mut Vec<Hit>,
-    /// How many loop bodies the code visited is inside.
-    loops: usize,
-    /// How many closures run once for each row it is inside.
-    rows: usize,
+    depth: RowDepth,
     /// The call whose collection the `let` it initializes already names.
     typed_init: Option<usize>,
     /// The `len` calls a comparison already found, by address.
@@ -268,10 +246,6 @@ impl RowWork<'_> {
         });
     }
 
-    fn per_row(&self) -> bool {
-        self.loops > 0 || self.rows > 0
-    }
-
     fn returns(&mut self, output: &syn::ReturnType, span: proc_macro2::Span) {
         if let syn::ReturnType::Type(_, ty) = output {
             if let Some(name) = collection(ty) {
@@ -347,22 +321,15 @@ impl<'ast> Visit<'ast> for RowWork<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.visit_expr(&node.expr);
-        self.loops += 1;
-        self.visit_block(&node.body);
-        self.loops -= 1;
+        self.visit_for_loop_rows(node);
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loops += 1;
-        visit::visit_expr_while(self, node);
-        self.loops -= 1;
+        self.visit_while_rows(node);
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loops += 1;
-        visit::visit_expr_loop(self, node);
-        self.loops -= 1;
+        self.visit_loop_rows(node);
     }
 
     fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
@@ -370,7 +337,7 @@ impl<'ast> Visit<'ast> for RowWork<'_> {
             node.op,
             syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_) | syn::BinOp::MulAssign(_)
         );
-        if accumulates && self.loops > 0 {
+        if accumulates && self.depth.in_loop() {
             if let syn::Expr::Path(path) = node.left.as_ref() {
                 if let Some(local) = path.path.get_ident() {
                     self.hit(
@@ -431,12 +398,13 @@ impl<'ast> Visit<'ast> for RowWork<'_> {
                     );
                 }
             }
-            if self.per_row() && self.read.hands_read_value(self.path, call_site(node.span())) {
-                let callee = segments.last().map(|last| last.ident.to_string()).unwrap_or_default();
+        }
+        if let Some(statement) = Statement::of_call(self.read, self.path, node) {
+            if self.depth.per_row() {
                 self.hit(
                     Shape::QueryPerRow,
                     line,
-                    format!("runs `{callee}`, which runs SQL, once for each row"),
+                    format!("runs `{}`, which runs SQL, once for each row", statement.name()),
                 );
             }
         }
@@ -460,39 +428,34 @@ impl<'ast> Visit<'ast> for RowWork<'_> {
                 }
             }
         }
-        if self.per_row() {
-            if SQL_CALLS.contains(&name.as_str()) {
-                self.hit(
+        if self.depth.per_row() {
+            match Statement::of_method(self.read, self.path, node) {
+                Some(Statement::Sql(name)) => self.hit(
                     Shape::QueryPerRow,
                     line,
                     format!("runs SQL with `{name}` once for each row"),
-                );
-            } else if self.read.hands_read_value(self.path, call_site(node.method.span())) {
-                self.hit(
+                ),
+                Some(Statement::Read(name)) => self.hit(
                     Shape::QueryPerRow,
                     line,
                     format!("runs `{name}`, which runs SQL, once for each row"),
-                );
+                ),
+                None => {}
             }
         }
-        self.visit_expr(&node.receiver);
-        let per_row =
-            ITERATOR_METHODS.contains(&name.as_str()) || ROW_CALLS.contains(&name.as_str());
-        for argument in &node.args {
-            if per_row && matches!(argument, syn::Expr::Closure(_)) {
-                self.rows += 1;
-                self.visit_expr(argument);
-                self.rows -= 1;
-            } else {
-                self.visit_expr(argument);
-            }
-        }
+        self.visit_method_call_rows(node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if let Some(body) = parse_macro_body(node) {
             body.visit(self);
         }
+    }
+}
+
+impl<'ast> VisitRows<'ast> for RowWork<'_> {
+    fn depth(&mut self) -> &mut RowDepth {
+        &mut self.depth
     }
 }
 

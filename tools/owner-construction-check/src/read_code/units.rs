@@ -15,59 +15,35 @@ pub(super) fn units<'a>(
     takes_read: &BTreeSet<usize>,
     holds: &BTreeSet<usize>,
 ) -> (Vec<Unit<'a>>, Vec<ReadClosure<'a>>) {
-    let readable = |id: usize| {
-        let callable = &index.callables[id];
-        !callable.plumbing && callable.body.is_some()
-    };
+    let reach = Reach::new(index, walked);
+    let readable = |id: usize| reach.readable(id);
     let mut callables: BTreeMap<usize, Why> = BTreeMap::new();
     let mut closures: BTreeMap<usize, Why> = BTreeMap::new();
-    let mut queue = Vec::new();
     for &id in takes_read {
         if readable(id) {
             callables.insert(id, Why::Root);
-            queue.push(Work::Callable(id));
         }
     }
     for &id in holds {
-        if readable(id) && !callables.contains_key(&id) {
-            callables.insert(id, Why::Holds);
-            queue.push(Work::Callable(id));
+        if readable(id) {
+            callables.entry(id).or_insert(Why::Holds);
         }
     }
     for (&id, &why) in &walked.passed_paths {
-        if readable(id) && !callables.contains_key(&id) {
-            callables.insert(id, why);
-            queue.push(Work::Callable(id));
+        if readable(id) {
+            callables.entry(id).or_insert(why);
         }
     }
     for (position, closure) in walked.closures.iter().enumerate() {
-        let why = if closure.typed_read { Some(Why::Root) } else { closure.passed };
+        let why =
+            if closure.typed_read { Some(Why::Root) } else { closure.passed.map(|mark| mark.why) };
         if let Some(why) = why {
             closures.insert(position, why);
-            queue.push(Work::Closure(position));
         }
     }
-    let mut calls_of = vec![Vec::new(); index.callables.len()];
-    for (position, call) in walked.calls.iter().enumerate() {
-        calls_of[call.callable].push(position);
-    }
-    while let Some(work) = queue.pop() {
-        let (callable, closure) = match work {
-            Work::Callable(id) => (id, None),
-            Work::Closure(position) => (walked.closures[position].callable, Some(position)),
-        };
-        for &position in &calls_of[callable] {
-            let call = &walked.calls[position];
-            if closure.is_some_and(|closure| !walked.inside(call.closure, closure)) {
-                continue;
-            }
-            for &target in &call.targets {
-                if readable(target) && !callables.contains_key(&target) {
-                    callables.insert(target, Why::Reached);
-                    queue.push(Work::Callable(target));
-                }
-            }
-        }
+    let reached = reach.from(callables.keys().copied(), closures.keys().copied(), false);
+    for id in reached {
+        callables.entry(id).or_insert(Why::Reached);
     }
     let mut units = Vec::new();
     for (&id, &why) in &callables {
@@ -105,7 +81,7 @@ pub(super) fn units<'a>(
                 expr: closure.expr.clone(),
                 captures: closure.captures.clone(),
                 outlives_its_function: closures.contains_key(&position)
-                    && (closure.kept_by_live_query
+                    && (closure.passed.is_some_and(|mark| mark.kept_by_live_query)
                         || (!callables.contains_key(&closure.callable)
                             && !ancestors(&walked.closures, closure.parent)
                                 .any(|above| closures.contains_key(&above)))),
@@ -128,15 +104,75 @@ fn unit<'a>(callable: &Callable<'a>, body: Body<'a>, _why: Why) -> Unit<'a> {
     }
 }
 
+/// A walk through what read code calls.
+pub(super) struct Reach<'w, 'i, 'a> {
+    index: &'i Index<'a>,
+    walked: &'w Walked,
+    /// The calls in each function, by their place in `walked.calls`.
+    calls_of: Vec<Vec<usize>>,
+}
+
+impl<'w, 'i, 'a> Reach<'w, 'i, 'a> {
+    pub(super) fn new(index: &'i Index<'a>, walked: &'w Walked) -> Self {
+        let mut calls_of = vec![Vec::new(); index.callables.len()];
+        for (position, call) in walked.calls.iter().enumerate() {
+            calls_of[call.callable].push(position);
+        }
+        Self { index, walked, calls_of }
+    }
+
+    /// Whether a function is read code when something reads it: it has a
+    /// body, and the policy's `plumbing` list does not hold its file.
+    pub(super) fn readable(&self, id: usize) -> bool {
+        let callable = &self.index.callables[id];
+        !callable.plumbing && callable.body.is_some()
+    }
+
+    /// The functions the given functions and closures are or call,
+    /// transitively. With `skip_process`, the walk leaves out the calls
+    /// inside a live query's `process` callback.
+    pub(super) fn from(
+        &self,
+        functions: impl Iterator<Item = usize>,
+        closures: impl Iterator<Item = usize>,
+        skip_process: bool,
+    ) -> BTreeSet<usize> {
+        let walked = self.walked;
+        let in_process = |closure: Option<usize>| {
+            ancestors(&walked.closures, closure)
+                .any(|enclosing| walked.closures[enclosing].passed.is_some_and(|mark| mark.process))
+        };
+        let mut reached = BTreeSet::new();
+        let mut queue = Vec::new();
+        for id in functions.filter(|&id| self.readable(id)) {
+            if reached.insert(id) {
+                queue.push((id, None));
+            }
+        }
+        queue.extend(closures.map(|position| (walked.closures[position].callable, Some(position))));
+        while let Some((callable, closure)) = queue.pop() {
+            for call in self.calls_of[callable].iter().map(|&position| &walked.calls[position]) {
+                if closure.is_some_and(|closure| !walked.inside(call.closure, closure)) {
+                    continue;
+                }
+                if skip_process && in_process(call.closure) {
+                    continue;
+                }
+                for &target in &call.targets {
+                    if self.readable(target) && reached.insert(target) {
+                        queue.push((target, None));
+                    }
+                }
+            }
+        }
+        reached
+    }
+}
+
 /// The closures enclosing one, innermost first, starting at `from`.
 pub(super) fn ancestors(
     closures: &[ClosureInfo],
     from: Option<usize>,
 ) -> impl Iterator<Item = usize> + '_ {
     std::iter::successors(from, |&position| closures[position].parent)
-}
-
-enum Work {
-    Callable(usize),
-    Closure(usize),
 }

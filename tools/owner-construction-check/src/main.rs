@@ -38,6 +38,7 @@ mod policy_check;
 mod read_code;
 mod read_index;
 mod read_shapes;
+mod read_statements;
 mod report;
 mod retained_capability_parameters;
 mod retained_types;

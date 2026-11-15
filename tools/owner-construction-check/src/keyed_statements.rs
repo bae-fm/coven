@@ -2,9 +2,9 @@
 //! read code that runs one statement, then runs a second with a value the
 //! first gave, joins the two in Rust where one statement would read both.
 //!
-//! A statement is a call that hands a read value to its callee
-//! (`ReadCode::hands_read_value`) or a SQL call on a connection or prepared
-//! statement (`query_row`, `query`, `query_map`, `prepare`, `execute`). A
+//! A statement is a call that runs SQL (`read_statements.rs`): a SQL call on
+//! a connection or prepared statement, or a call that hands its callee a
+//! read value. A
 //! binding holds what a statement returned when its `let` (or `if let`)
 //! runs a statement or names such a binding, and so does a `match` arm's
 //! pattern when the matched expression does. A statement is keyed when an
@@ -20,8 +20,9 @@ use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
 use crate::policy::Shape;
-use crate::read_code::{call_site, Body, ReadCode};
-use crate::row_work::{Hit, ITERATOR_METHODS, ROW_CALLS, SQL_CALLS};
+use crate::read_code::{Body, ReadCode};
+use crate::read_statements::{RowDepth, Statement, VisitRows};
+use crate::row_work::Hit;
 
 pub(crate) fn keyed_statements(read: &ReadCode<'_>) -> Vec<Hit> {
     let mut hits = Vec::new();
@@ -31,7 +32,7 @@ pub(crate) fn keyed_statements(read: &ReadCode<'_>) -> Vec<Hit> {
             path: &unit.file.relative_path,
             item: &unit.item,
             returned: BTreeSet::new(),
-            per_row: 0,
+            depth: RowDepth::default(),
             hits: &mut hits,
         };
         match &unit.body {
@@ -48,9 +49,7 @@ struct Keyed<'a> {
     item: &'a str,
     /// The bindings that hold what a statement returned.
     returned: BTreeSet<String>,
-    /// How many loop bodies, and closures run once for each row, the code
-    /// visited is inside.
-    per_row: usize,
+    depth: RowDepth,
     hits: &'a mut Vec<Hit>,
 }
 
@@ -63,30 +62,14 @@ impl Keyed<'_> {
         found.found
     }
 
-    /// The statement an expression is, by the name a finding gives it.
+    /// The statement an expression runs, by the name a finding gives it.
     fn statement(&self, expr: &syn::Expr) -> Option<String> {
-        match expr {
-            syn::Expr::Call(node) => self.call_statement(node),
-            syn::Expr::MethodCall(node) => self.method_statement(node),
+        let statement = match expr {
+            syn::Expr::Call(node) => Statement::of_call(self.read, self.path, node),
+            syn::Expr::MethodCall(node) => Statement::of_method(self.read, self.path, node),
             _ => None,
-        }
-    }
-
-    /// The callee a path call names, when the call hands it a read value.
-    fn call_statement(&self, node: &syn::ExprCall) -> Option<String> {
-        let syn::Expr::Path(path) = node.func.as_ref() else { return None };
-        self.read
-            .hands_read_value(self.path, call_site(node.span()))
-            .then(|| path.path.segments.last().map(|last| last.ident.to_string()))
-            .flatten()
-    }
-
-    /// The method, when it is a SQL call or the call hands it a read value.
-    fn method_statement(&self, node: &syn::ExprMethodCall) -> Option<String> {
-        let name = node.method.to_string();
-        (SQL_CALLS.contains(&name.as_str())
-            || self.read.hands_read_value(self.path, call_site(node.method.span())))
-        .then_some(name)
+        };
+        statement.map(|statement| statement.name().to_string())
     }
 
     fn bind(&mut self, pattern: &syn::Pat) {
@@ -107,12 +90,12 @@ impl Keyed<'_> {
 
     /// Records the statement at `line` when one of `keys` holds what an
     /// earlier statement returned, unless it runs once for each row.
-    fn check(&mut self, line: usize, statement: Option<String>, keys: &[Option<String>]) {
-        if self.per_row > 0 {
+    fn check(&mut self, line: usize, statement: &str, keys: &[Option<String>]) {
+        if self.depth.per_row() {
             return;
         }
-        if let (Some(statement), Some(key)) = (statement, keys.iter().flatten().next()) {
-            self.keyed(line, &statement, key);
+        if let Some(key) = keys.iter().flatten().next() {
+            self.keyed(line, statement, key);
         }
     }
 }
@@ -201,58 +184,49 @@ impl<'ast> Visit<'ast> for Keyed<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.visit_expr(&node.expr);
-        self.per_row += 1;
-        self.visit_block(&node.body);
-        self.per_row -= 1;
+        self.visit_for_loop_rows(node);
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.per_row += 1;
-        visit::visit_expr_while(self, node);
-        self.per_row -= 1;
+        self.visit_while_rows(node);
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.per_row += 1;
-        visit::visit_expr_loop(self, node);
-        self.per_row -= 1;
+        self.visit_loop_rows(node);
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let Some(statement) = self.call_statement(node) {
+        if let Some(statement) = Statement::of_call(self.read, self.path, node) {
             let keys = node.args.iter().map(|argument| self.key_in(argument)).collect::<Vec<_>>();
-            self.check(node.span().start().line, Some(statement), &keys);
+            self.check(node.span().start().line, statement.name(), &keys);
         }
         visit::visit_expr_call(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let name = node.method.to_string();
-        if let Some(statement) = self.method_statement(node) {
+        if let Some(statement) = Statement::of_method(self.read, self.path, node) {
             // A SQL call's receiver is the connection or statement it runs on.
-            let receiver = (!SQL_CALLS.contains(&name.as_str()))
-                .then(|| self.key_in(&node.receiver))
-                .flatten();
+            let receiver = match statement {
+                Statement::Sql(_) => None,
+                Statement::Read(_) => self.key_in(&node.receiver),
+            };
             let mut keys = vec![receiver];
             keys.extend(node.args.iter().map(|argument| self.key_in(argument)));
-            self.check(node.method.span().start().line, Some(statement), &keys);
+            self.check(node.method.span().start().line, statement.name(), &keys);
         }
-        self.visit_expr(&node.receiver);
-        let per_row =
-            ITERATOR_METHODS.contains(&name.as_str()) || ROW_CALLS.contains(&name.as_str());
-        for argument in &node.args {
-            let closure = matches!(argument, syn::Expr::Closure(_));
-            self.per_row += usize::from(per_row && closure);
-            self.visit_expr(argument);
-            self.per_row -= usize::from(per_row && closure);
-        }
+        self.visit_method_call_rows(node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if let Some(body) = parse_macro_body(node) {
             body.visit(self);
         }
+    }
+}
+
+impl<'ast> VisitRows<'ast> for Keyed<'_> {
+    fn depth(&mut self) -> &mut RowDepth {
+        &mut self.depth
     }
 }
 

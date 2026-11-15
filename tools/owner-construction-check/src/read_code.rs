@@ -291,13 +291,8 @@ struct ClosureInfo {
     parent: Option<usize>,
     /// A parameter of a read type, written on the closure.
     typed_read: bool,
-    /// Why it is read code, when it is passed to a read place.
-    passed: Option<Why>,
-    /// Whether that place is a live query, which keeps the closure to run on
-    /// each value it reads, after the call that passed it returns.
-    kept_by_live_query: bool,
-    /// Whether that place is a live query's `process`.
-    process: bool,
+    /// What the read place that code passes it to makes of it.
+    passed: Option<Mark>,
     /// The bindings in scope where it is written, and their types.
     captures: BTreeMap<String, Option<String>>,
 }
@@ -751,9 +746,13 @@ impl Walker<'_, '_> {
 
 /// What a closure passed to a read place is: why it is read code, whether a
 /// live query keeps it, and whether it is a live query's `process` callback.
+#[derive(Clone, Copy)]
 struct Mark {
     why: Why,
+    /// Whether the place is a live query, which keeps the closure to run on
+    /// each value it reads, after the call that passed it returns.
     kept_by_live_query: bool,
+    /// Whether the place is a live query's `process`.
     process: bool,
 }
 
@@ -846,12 +845,7 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             callable: self.callable,
             parent: self.open.last().copied(),
             typed_read,
-            passed: self.marks.get(&address).map(|mark| mark.why),
-            kept_by_live_query: self
-                .marks
-                .get(&address)
-                .is_some_and(|mark| mark.kept_by_live_query),
-            process: self.marks.remove(&address).is_some_and(|mark| mark.process),
+            passed: self.marks.remove(&address),
             captures: self
                 .scopes
                 .iter()
