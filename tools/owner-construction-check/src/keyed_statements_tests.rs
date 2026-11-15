@@ -79,7 +79,8 @@ fn a_key_carried_through_a_binding_a_sql_call_or_a_nested_statement_is_found() {
 }
 
 #[test]
-fn independent_statements_a_prepared_statement_and_a_statement_per_row_are_not_keyed() {
+fn independent_statements_a_prepared_statement_a_row_mapper_a_named_argument_and_a_statement_per_row_are_not_keyed(
+) {
     assert_eq!(
         keyed(
             "let detail = load_detail(sql, 1)?;
@@ -88,7 +89,9 @@ fn independent_statements_a_prepared_statement_and_a_statement_per_row_are_not_k
              let mut statement = sql.prepare(\"SELECT 1\")?;
              statement.query_row([request.id], |r| r.get(0))?;
              for id in ids { load_album(sql, &detail.album_id)?; }
-             let all = ids.iter().map(|id| load_album(sql, &detail.album_id));"
+             let all = ids.iter().map(|id| load_album(sql, &detail.album_id));
+             sql.query_row(\"SELECT 2\", [], |r| shown(&detail))?;
+             sql.query_row(&format!(\"SELECT {detail}\", detail = request.columns), [], f)?;"
         ),
         []
     );

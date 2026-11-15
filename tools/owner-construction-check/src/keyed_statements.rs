@@ -8,7 +8,8 @@
 //! binding holds what a statement returned when its `let` (or `if let`)
 //! runs a statement or names such a binding. A statement is keyed when an
 //! argument, or the receiver of a call that hands over a read value, runs a
-//! statement or names such a binding. A statement run once for each row is
+//! statement or names such a binding outside a closure: a closure argument
+//! maps the rows the statement reads and does not choose them. A statement run once for each row is
 //! `query-per-row` (`row_work.rs`) and is not counted again here.
 
 use std::collections::BTreeSet;
@@ -140,6 +141,16 @@ impl<'ast> Visit<'ast> for Key<'_, '_> {
             return;
         }
         visit::visit_expr(self, node);
+    }
+
+    // A closure argument maps the rows a statement reads; it does not choose
+    // them.
+    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+
+    // What an assignment writes is no value it reads, as the name of a
+    // `format!` argument (`artists = listing()`) is not.
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        self.visit_expr(&node.right);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
