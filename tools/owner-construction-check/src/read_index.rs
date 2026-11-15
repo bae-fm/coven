@@ -240,6 +240,9 @@ pub(crate) struct Index<'a> {
     pub(crate) fields: BTreeMap<(String, String), String>,
     /// The structs, enums and `impl` types the workspace declares.
     pub(crate) declared: BTreeSet<String>,
+    /// The aliases of a function pointer that takes a read type: calling a
+    /// value of one runs a read.
+    pub(crate) read_functions: BTreeSet<String>,
     pub(crate) pointers: BTreeSet<String>,
 }
 
@@ -257,6 +260,7 @@ impl<'a> Index<'a> {
             by_name: BTreeMap::new(),
             fields: BTreeMap::new(),
             declared: BTreeSet::new(),
+            read_functions: BTreeSet::new(),
             pointers: policy.shared_pointer_types.clone(),
         };
         let features = policy.test_support_features();
@@ -378,6 +382,15 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
         }
         self.index.declared.insert(name);
         visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'a syn::ItemType) {
+        if !self.gated(&node.attrs)
+            && is_function_pointer(&node.ty)
+            && !names(&node.ty, true).is_disjoint(&self.shapes.read_types)
+        {
+            self.index.read_functions.insert(node.ident.to_string());
+        }
     }
 
     fn visit_item_enum(&mut self, node: &'a syn::ItemEnum) {

@@ -135,7 +135,8 @@ pub(crate) struct ReadCode<'a> {
     process_only: BTreeSet<(String, String)>,
     closures: Vec<ReadClosure<'a>>,
     index: Index<'a>,
-    /// The calls, by file and place, to a function taking a read type: they
+    /// The calls, by file and place, to a function taking a read type, or
+    /// of a value whose type is an alias of such a function pointer: they
     /// hand over a read value, so they run SQL.
     handoffs: BTreeSet<(String, CallSite)>,
     /// The workspace functions each call resolves to, by file and place.
@@ -187,6 +188,9 @@ impl<'a> ReadCode<'a> {
             .iter()
             .filter(|call| call.targets.iter().any(|target| takes_read.contains(target)))
             .map(|call| (index.callables[call.callable].file.relative_path.clone(), call.site))
+            .chain(walked.read_function_calls.iter().map(|&(callable, site)| {
+                (index.callables[callable].file.relative_path.clone(), site)
+            }))
             .collect();
         let callees = walked
             .calls
@@ -321,6 +325,9 @@ struct Walked {
     /// workspace method, and the `filter`s of a single optional value: neither
     /// is the standard library's work on rows.
     workspace_calls: BTreeSet<(usize, CallSite)>,
+    /// The calls of a value whose type is an alias of a function pointer
+    /// that takes a read type (`Index::read_functions`).
+    read_function_calls: Vec<(usize, CallSite)>,
 }
 
 impl Walked {
@@ -887,6 +894,9 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
             syn::Expr::Path(path) => self.expr_path_targets(path),
             _ => Vec::new(),
         };
+        if self.type_of(callee).is_some_and(|ty| self.context.index.read_functions.contains(&ty)) {
+            self.out.read_function_calls.push((self.callable, call_site(node.span())));
+        }
         self.record(call_site(node.span()), targets, &Call::Path, &node.args);
         visit::visit_expr_call(self, node);
         self.forget(&node.args);

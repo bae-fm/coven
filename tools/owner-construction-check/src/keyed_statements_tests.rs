@@ -99,3 +99,31 @@ fn independent_statements_a_prepared_statement_a_row_mapper_a_named_argument_and
         []
     );
 }
+
+#[test]
+fn a_statement_keyed_by_what_a_read_function_value_returned_is_found() {
+    let source = format!(
+        "{HELPERS}
+        type LanguageRead = fn(&SqlReadContext<'_>) -> Result<u8, Error>;
+        type Shown = fn(&Detail) -> u8;
+        fn list(sql: &SqlReadContext<'_>, language: LanguageRead, shown: Shown, detail: Detail) {{
+            let language = language(sql)?;
+            load_album(sql, &language)?;
+            let count = shown(&detail);
+            load_album(sql, &count)?;
+        }}"
+    );
+    let files = [RustFile::fixture("crates/app/src/a.rs", &source)];
+    let files = checked(&files);
+    let policy = policy();
+    let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
+    let found =
+        keyed_statements(&read).into_iter().map(|hit| (hit.item, hit.what)).collect::<Vec<_>>();
+    assert_eq!(
+        found,
+        [(
+            "list".to_string(),
+            "runs `load_album`, which runs SQL, keyed by what `language` returned".to_string()
+        )]
+    );
+}
