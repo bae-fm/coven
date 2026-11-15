@@ -580,7 +580,7 @@ fn only_what_a_live_query_s_process_runs_and_no_other_read_code_reaches_is_proce
     for item in ["Views::by_closure", "Views::shape", "label_lines", "helper"] {
         assert!(only(item), "{item}");
     }
-    // `shared` is reached by `plain`, `mixed` has a read closure besides its
+    // `plain` reaches `shared`, `mixed` has a read closure besides its
     // `process` callback, and `by_path` runs no read code itself.
     for item in ["shared", "plain", "Views::mixed", "Views::by_path"] {
         assert!(!only(item), "{item}");

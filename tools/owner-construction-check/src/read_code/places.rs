@@ -1,6 +1,6 @@
-//! Where an argument goes (`read_code.rs`): to a read place, which makes a
-//! closure or function passed there read code, and to a live query, which
-//! keeps a closure passed there.
+//! This module tells where an argument goes (`read_code.rs`): to a read
+//! place, which makes a closure or function that code passes there read
+//! code, or to a live query, which keeps a closure that code passes there.
 
 use super::{Call, Walker, Why};
 

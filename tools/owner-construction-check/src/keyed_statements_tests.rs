@@ -25,8 +25,8 @@ const HELPERS: &str = "
     fn shown(detail: &Detail) {}
 ";
 
-/// Each keyed statement in a read function with this body, as its line and
-/// what it says.
+/// Returns the line and message of each keyed statement in a read function
+/// with this body.
 fn keyed(body: &str) -> Vec<(usize, String)> {
     let source =
         format!("{HELPERS}\nfn read(sql: &SqlReadContext<'_>, request: Request) {{\n{body}\n}}");
@@ -51,7 +51,7 @@ fn a_statement_keyed_by_what_an_earlier_one_returned_is_found() {
             "let detail = load_detail(sql, 1)?;
              let album = load_album(sql, &detail.album_id)?;"
         ),
-        [(2, "runs `load_album`, which runs SQL, keyed by what `detail` returned".to_string())]
+        [(2, "runs `load_album`, which runs SQL, keyed by what `detail` holds".to_string())]
     );
 }
 
@@ -71,11 +71,11 @@ fn a_key_carried_through_a_binding_a_sql_call_or_a_nested_statement_is_found() {
     assert_eq!(
         found,
         [
-            (3, "runs `load_album`, which runs SQL, keyed by what `id` returned"),
-            (5, "runs `query_row`, which runs SQL, keyed by what `name` returned"),
-            (6, "runs `load_album`, which runs SQL, keyed by what `load_detail` returned"),
-            (7, "runs `load_album`, which runs SQL, keyed by what `found` returned"),
-            (8, "runs `load_album`, which runs SQL, keyed by what `album` returned"),
+            (3, "runs `load_album`, which runs SQL, keyed by what `id` holds"),
+            (5, "runs `query_row`, which runs SQL, keyed by what `name` holds"),
+            (6, "runs `load_album`, which runs SQL, keyed by what `load_detail` returns"),
+            (7, "runs `load_album`, which runs SQL, keyed by what `found` holds"),
+            (8, "runs `load_album`, which runs SQL, keyed by what `album` holds"),
         ]
     );
 }
@@ -123,7 +123,7 @@ fn a_statement_keyed_by_what_a_read_function_value_returned_is_found() {
         found,
         [(
             "list".to_string(),
-            "runs `load_album`, which runs SQL, keyed by what `language` returned".to_string()
+            "runs `load_album`, which runs SQL, keyed by what `language` holds".to_string()
         )]
     );
 }

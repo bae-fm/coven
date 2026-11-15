@@ -247,11 +247,11 @@ pub(crate) enum Shape {
 }
 
 impl Shape {
-    /// Whether a function a live query's `process` runs may take this shape
-    /// to shape how the one result it is given displays: sorting, filtering,
-    /// grouping, counting and picking among that result's rows. Keeping
-    /// state, running a statement and choosing a read path never shape a
-    /// display.
+    /// Whether a function that only a live query's `process` runs may make a
+    /// finding of this shape: one that sorts, filters, groups, counts or
+    /// picks among the rows of the one result that `process` passes the
+    /// function. Keeping state, running a statement and choosing a read path
+    /// do none of these.
     pub(crate) fn shapes_display(self) -> bool {
         match self {
             Shape::Sort
@@ -347,10 +347,12 @@ pub(crate) struct FrozenRow {
     pub(crate) finding: String,
 }
 
-/// Findings that are not a read's work: uses over values that are not rows,
-/// with what the values are, or a function a live query's `process` runs to
-/// shape how one result's rows display, with what it shapes (`reason`) and
-/// which query's result it takes (`process`).
+/// A finding that is not a read's work. The row lists either code that works
+/// on values that are not rows, with `reason` saying what the values are, or
+/// a function that only a live query's `process` runs to sort, filter,
+/// group, count or pick among one result's rows for display, with `reason`
+/// saying what the function does and `process` naming the query whose result
+/// it takes.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AllowedRow {

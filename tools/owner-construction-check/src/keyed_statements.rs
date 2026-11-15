@@ -1,17 +1,18 @@
-//! A statement keyed by what an earlier statement returned (the read rule):
-//! read code that runs one statement, then runs a second with a value the
-//! first gave, joins the two in Rust where one statement would read both.
+//! This check finds a statement keyed by what an earlier statement returned
+//! (the read rule). Read code that runs one statement and then runs a second
+//! with a value the first returned joins the two in Rust, where one
+//! statement would read both.
 //!
 //! A statement is a call that runs SQL (`read_statements.rs`): a SQL call on
 //! a connection or prepared statement, or a call that hands its callee a
-//! read value. A
-//! binding holds what a statement returned when its `let` (or `if let`)
-//! runs a statement or names such a binding, and so does a `match` arm's
-//! pattern when the matched expression does. A statement is keyed when an
-//! argument, or the receiver of a call that hands over a read value, runs a
-//! statement or names such a binding outside a closure: a closure argument
-//! maps the rows the statement reads and does not choose them. A statement run once for each row is
-//! `query-per-row` (`row_work.rs`) and is not counted again here.
+//! read value. A binding holds what a statement returned when its `let` (or
+//! `if let`) runs a statement or names such a binding, and so does a `match`
+//! arm's pattern when the matched expression does. The check reports a
+//! statement when an argument, or the receiver of a call that hands over a
+//! read value, runs a statement or names such a binding outside a closure: a
+//! closure argument maps the rows the statement reads and does not choose
+//! them. `row_work.rs` reports a statement that runs once for each row as
+//! `query-per-row`, and this check does not report it again.
 
 use std::collections::BTreeSet;
 
@@ -56,7 +57,7 @@ struct Keyed<'a> {
 impl Keyed<'_> {
     /// What in `expr` holds what a statement returned: a binding it names,
     /// or a statement it runs.
-    fn key_in(&self, expr: &syn::Expr) -> Option<String> {
+    fn key_in(&self, expr: &syn::Expr) -> Option<KeySource> {
         let mut found = Key { keyed: self, found: None };
         found.visit_expr(expr);
         found.found
@@ -77,20 +78,24 @@ impl Keyed<'_> {
         names.visit_pat(pattern);
     }
 
-    /// Records a statement keyed by what `key` holds.
-    fn keyed(&mut self, line: usize, statement: &str, key: &str) {
+    /// Records a statement keyed by what `key` holds or returns.
+    fn keyed(&mut self, line: usize, statement: &str, key: &KeySource) {
+        let key = match key {
+            KeySource::Binding(name) => format!("what `{name}` holds"),
+            KeySource::Statement(name) => format!("what `{name}` returns"),
+        };
         self.hits.push(Hit {
             path: self.path.to_string(),
             line,
             item: self.item.to_string(),
             shape: Shape::KeyedStatement,
-            what: format!("runs `{statement}`, which runs SQL, keyed by what `{key}` returned"),
+            what: format!("runs `{statement}`, which runs SQL, keyed by {key}"),
         });
     }
 
     /// Records the statement at `line` when one of `keys` holds what an
     /// earlier statement returned, unless it runs once for each row.
-    fn check(&mut self, line: usize, statement: &str, keys: &[Option<String>]) {
+    fn check(&mut self, line: usize, statement: &str, keys: &[Option<KeySource>]) {
         if self.depth.per_row() {
             return;
         }
@@ -100,11 +105,18 @@ impl Keyed<'_> {
     }
 }
 
-/// The first binding holding what a statement returned that an expression
-/// names, or the first statement it runs.
+/// What holds a key: a binding that holds what a statement returned, or a
+/// statement that returns it.
+enum KeySource {
+    Binding(String),
+    Statement(String),
+}
+
+/// A visitor that finds, in an expression, the first binding that holds what
+/// a statement returned, or the first statement the expression runs.
 struct Key<'a, 'b> {
     keyed: &'a Keyed<'b>,
-    found: Option<String>,
+    found: Option<KeySource>,
 }
 
 impl<'ast> Visit<'ast> for Key<'_, '_> {
@@ -115,13 +127,13 @@ impl<'ast> Visit<'ast> for Key<'_, '_> {
         if let syn::Expr::Path(path) = node {
             if let Some(name) = path.path.get_ident() {
                 if self.keyed.returned.contains(&name.to_string()) {
-                    self.found = Some(name.to_string());
+                    self.found = Some(KeySource::Binding(name.to_string()));
                     return;
                 }
             }
         }
         if let Some(statement) = self.keyed.statement(node) {
-            self.found = Some(statement);
+            self.found = Some(KeySource::Statement(statement));
             return;
         }
         visit::visit_expr(self, node);
@@ -131,8 +143,9 @@ impl<'ast> Visit<'ast> for Key<'_, '_> {
     // them.
     fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
 
-    // What an assignment writes is no value it reads, as the name of a
-    // `format!` argument (`artists = listing()`) is not.
+    // Only the right side of an assignment reads a value. The left side, as
+    // the name of a `format!` argument (`artists = listing()`), reads
+    // nothing.
     fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
         self.visit_expr(&node.right);
     }

@@ -254,8 +254,8 @@ fn a_filter_on_one_optional_value_and_a_workspace_method_named_like_an_iterator_
         }";
     let found =
         hits_in(source).into_iter().map(|hit| (hit.line, hit.shape.id())).collect::<Vec<_>>();
-    // The emptiness tests on lines 12 and 16 are on one text each: a policy
-    // lists such uses in `allowed`.
+    // The `is_empty()` calls on lines 12 and 16 test one string each, not a
+    // list of rows: a policy lists such uses in `allowed`.
     assert_eq!(
         found,
         [(12, "length-branch"), (16, "length-branch"), (18, "filter"), (19, "aggregate")]

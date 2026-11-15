@@ -1,5 +1,6 @@
-//! The units of read code (`read_code.rs`): from the roots and what is
-//! passed to a read place, through what they call.
+//! This module finds the units of read code (`read_code.rs`): it starts at
+//! the roots and at what code passes to a read place, then follows what they
+//! call.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,7 +8,7 @@ use super::{Body, ClosureInfo, ReadClosure, Unit, Walked, Why};
 use crate::read_index::{Callable, Index};
 
 /// The units of read code: the roots (what takes a read value, and the
-/// methods of a type that holds a live query), what is passed to a read
+/// methods of a type that holds a live query), what code passes to a read
 /// place, and what they call, transitively.
 pub(super) fn units<'a>(
     index: &Index<'a>,
@@ -91,8 +92,8 @@ pub(super) fn units<'a>(
     (units, read_closures)
 }
 
-/// A unit; why it is read code is kept for the tests, which tell the causes
-/// apart.
+/// Builds a unit. In test builds the unit also records why it is read code,
+/// so the tests can tell the causes apart.
 fn unit<'a>(callable: &Callable<'a>, body: Body<'a>, _why: Why) -> Unit<'a> {
     Unit {
         file: callable.file,

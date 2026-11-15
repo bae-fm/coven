@@ -1,15 +1,17 @@
 //! The read rule: a read does no work SQL does and keeps no state between
-//! reads. This module runs the shapes over the code `read_code.rs` finds
-//! (`row_work.rs`) and holds what they find against the policy's two lists.
+//! reads. This module runs the shape checks (`row_work.rs`) over the code
+//! `read_code.rs` finds and compares what they find with the policy's two
+//! lists.
 //!
 //! `frozen` lists the violations the workspace has today and `allowed` the
-//! findings that are not a read's work: uses over values that are not rows,
-//! and the shaping a function does that only a live query's `process` runs
-//! (a row naming `process`), which may only sort, filter, group, count, pick
-//! or join among the one result it is given. A row is keyed by file, item and
-//! shape, and its count is exact: more findings under the key than the count
-//! fail as findings, fewer fail with the count to lower it to. A finding no
-//! row covers fails as it is.
+//! findings that are not a read's work: code that works on values that are
+//! not rows, and a function that only a live query's `process` runs (a row
+//! naming `process`), which may only sort, filter, group, count, pick or
+//! join among the rows of the one result that `process` passes it. The check
+//! keys a row by file, item and shape, and the row's count is exact: when
+//! more findings fall under the key than the count, the check reports them
+//! as findings, and when fewer do, it reports the count to lower the row to.
+//! The check reports a finding that no row covers as it is.
 
 use std::collections::BTreeMap;
 
@@ -109,9 +111,9 @@ pub(crate) fn find_read_shape_violations(code: &CrateCode, policy: &Policy) -> V
     findings
 }
 
-/// The `allowed` rows that name a `process` function, held to what the rule
-/// allows one: only a live query's `process` runs it, and the shape is one
-/// that shapes how a result displays.
+/// Checks the `allowed` rows that name a `process` function against what the
+/// rule allows: only a live query's `process` runs the function, and the
+/// finding sorts, filters, groups, counts or picks among one result's rows.
 fn process_rows(read: &ReadCode<'_>, shapes: &ReadShapes) -> Vec<Finding> {
     let mut findings = Vec::new();
     for row in shapes.allowed.iter().filter(|row| row.process.is_some()) {
@@ -121,7 +123,7 @@ fn process_rows(read: &ReadCode<'_>, shapes: &ReadShapes) -> Vec<Finding> {
                 FILE_NAME,
                 1,
                 format!(
-                    "{named} names a `process` function, but a function `process` runs never takes this shape: freeze the finding instead"
+                    "{named} names a `process` function, but a function that `process` runs never makes a finding of this shape: freeze the finding instead"
                 ),
                 remedy(&shapes.rule, row.shape),
             ));

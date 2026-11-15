@@ -11,8 +11,8 @@
 //!   a read type, directly, through `impl Trait`, or through a generic's bound
 //!   in the signature, the `impl` block or a `where` clause;
 //! - every method taking `self` of a type that holds a live query, through
-//!   its fields at any depth, an alias holding what its target holds: it has
-//!   what the query reads at hand;
+//!   its fields at any depth, an alias holding what its target holds: it can
+//!   read what the query returns through `self`;
 //! - every closure or function path passed where the callee's parameter is a
 //!   callback (a function pointer or one of the `Fn` traits) and another of
 //!   its parameters names a read type or a live query: the callee runs it on
@@ -32,11 +32,12 @@
 //!   closure to a read callee only when every method of that name with a
 //!   callback at that place takes a read closure.
 //!
-//! The read plumbing (`ReadShapes::plumbing`), test code and items gated on
-//! test support alone are no read code. A closure counts with its enclosing
-//! item, and a closure inside read code is part of it. The items only a live
-//! query's `process` runs are told apart (`read_code/process.rs`): the rule
-//! allows them to shape how one result's rows display.
+//! The files the policy lists in `plumbing` (`ReadShapes::plumbing`), test
+//! code and items gated on test support alone are no read code. A closure
+//! counts with its enclosing item, and a closure inside read code is part of
+//! it. `read_code/process.rs` finds the items that only a live query's
+//! `process` runs: the rule lets them sort, filter, group, count or pick
+//! among one result's rows for display.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,14 +67,14 @@ pub(crate) fn call_site(span: Span) -> CallSite {
 pub(crate) enum Why {
     /// It takes a value of a read type.
     Root,
-    /// It is passed to a callee whose parameter names a read type.
+    /// Code passes it to a callee whose parameter names a read type.
     PassedToReadCallee,
-    /// It is passed to a method of a read type.
+    /// Code passes it to a method of a read type.
     PassedToReadReceiver,
-    /// It is a method of a type that holds a live query, so it has what the
-    /// query reads at hand.
+    /// It is a method of a type that holds a live query, so it can read the
+    /// query's results through `self`.
     Holds,
-    /// It is passed to a callee that takes a read value beside it, and the
+    /// Code passes it to a callee that takes a read value beside it, and the
     /// callee runs it on what that value reads (`detail_read(query,
     /// resolve)`).
     PassedBesideRead,
@@ -119,11 +120,11 @@ pub(crate) struct ReadClosure<'a> {
     pub(crate) owner: Option<String>,
     pub(crate) expr: syn::ExprClosure,
     pub(crate) captures: BTreeMap<String, Option<String>>,
-    /// Whether the closure is itself passed to a live query, or to a read
-    /// place from a function that is no read code: it outlives that call, so
-    /// what it captures from it is kept between reads. Any other closure
-    /// inside read code runs within one call, and the locals it captures are
-    /// that call's.
+    /// Whether code passes the closure to a live query, or to a read place
+    /// from a function that is no read code: the closure outlives that call,
+    /// so it keeps what it captures from the call between reads. Any other
+    /// closure inside read code runs within one call, and the locals it
+    /// captures are that call's.
     pub(crate) outlives_its_function: bool,
 }
 
@@ -360,7 +361,7 @@ enum Call<'c> {
     /// is a read type, and whether it is a live query or a type that holds
     /// one (which is a read type too); else the methods of that name.
     /// `process` says whether the method is a live query's `process`, whose
-    /// callback shapes what the query read.
+    /// callback works on what the query read.
     Method {
         known: bool,
         receiver_read: bool,
@@ -684,9 +685,10 @@ impl Walker<'_, '_> {
         }
     }
 
-    /// Records a call and marks what it passes to a read place. A function
-    /// passed by its path is called by the callee (`.map(Row::shown)`), so it
-    /// is a call of its own, at the argument's place.
+    /// Records a call and marks what it passes to a read place. The callee
+    /// calls a function that the call passes by its path (`.map(Row::shown)`),
+    /// so the walker records that as a call of its own, at the argument's
+    /// place.
     fn record(
         &mut self,
         site: CallSite,

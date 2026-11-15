@@ -326,9 +326,10 @@ fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
     stale
 }
 
-/// A type the policy names is declared by a crate, or is one of its external
-/// types: named by a crate's production source, as a type or as a trait a
-/// bound names (`impl coven::SqlRead`), and declared by none.
+/// Each type the policy names must be one a crate declares, or one of the
+/// policy's external types: a crate's production source names it, as a type
+/// or as a trait a bound names (`impl coven::SqlRead`), and no crate declares
+/// it. Returns a message for each type that breaks this.
 fn undeclared_types(
     crate_files: &[RustFile],
     identity: &TypeIdentity,

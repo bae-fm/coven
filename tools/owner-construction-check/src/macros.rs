@@ -6,16 +6,16 @@
 //!
 //! When the arguments parse as comma-separated expressions or as statements —
 //! the shape of nearly every call: `format!`, `vec!`, `assert!`, `write!` —
-//! a rule visits them as code, with every rule it applies elsewhere. A
-//! `matches!` call is an expression and a pattern, visited as each. A
-//! `select!` call's branches are each a future, a pattern that binds what the
-//! future gives, an optional precondition and a handler: a rule visits each
-//! branch as `match future { pattern => handler }`, and the precondition as an
+//! a rule visits them as code, with every rule it applies elsewhere. A rule
+//! visits a `matches!` call as an expression and a pattern. A `select!`
+//! call's branches are each a future, a pattern that binds what the future
+//! gives, an optional precondition and a handler: a rule visits each branch
+//! as `match future { pattern => handler }`, and the precondition as an
 //! expression. When the arguments parse as none of these, the rule reads the
-//! tokens: the paths, the calls and the string literals in them, each path
-//! marked as a type or a value by the tokens around it, so the construction
-//! rule counts only values. `cfg!` and `stringify!` take no code, and are read
-//! as neither.
+//! tokens: the paths, the calls and the string literals in them. The rule
+//! marks each path as a type or a value by the tokens around it, so the
+//! construction rule counts only values. `cfg!` and `stringify!` take no
+//! code, and a rule reads them as neither.
 
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::parse::Parser;
@@ -33,8 +33,8 @@ pub(crate) enum MacroBody {
         pattern: syn::Pat,
         guard: Option<syn::Expr>,
     },
-    /// `select!` (tokio's): `biased;` when written, then the branches in
-    /// order.
+    /// `select!` (tokio's): `biased;` when the call has it, then the
+    /// branches in order.
     Select {
         biased: bool,
         branches: Vec<SelectBranch>,
@@ -43,9 +43,9 @@ pub(crate) enum MacroBody {
 
 /// One branch of a `select!` call.
 pub(crate) enum SelectBranch {
-    /// `pattern = future, if precondition => handler`, held as
-    /// `match future { pattern => handler }`: the pattern binds what the
-    /// future gives, in the handler.
+    /// `pattern = future, if precondition => handler`. The parser holds it
+    /// as `match future { pattern => handler }`, so the pattern binds what
+    /// the future gives in the handler.
     Future { arm: syn::ExprMatch, precondition: Option<syn::Expr> },
     /// `else => handler`, which runs when no other branch can.
     Else(syn::Expr),
@@ -108,8 +108,8 @@ mod keyword {
     syn::custom_keyword!(biased);
 }
 
-/// `select!`'s arguments: `biased;` when written, then branches, each ending
-/// in a comma that a block handler may leave out.
+/// `select!`'s arguments: `biased;` when the call has it, then branches, each
+/// ending in a comma that a block handler may leave out.
 fn parse_select(input: syn::parse::ParseStream<'_>) -> syn::Result<MacroBody> {
     let biased = input.peek(keyword::biased) && input.peek2(syn::Token![;]);
     if biased {

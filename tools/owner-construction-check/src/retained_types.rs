@@ -1,8 +1,8 @@
 //! The workspace's declared types and the types each retains through its
-//! fields, as the read rule asks them (`read_code.rs`, `kept_state.rs`):
+//! fields, for the read rule's questions (`read_code.rs`, `kept_state.rs`):
 //! which types hold a live query or a value stream, and which keep state. An
-//! alias retains what its target does. The fields only test support compiles
-//! are left out.
+//! alias retains what its target does. The graph leaves out the fields that
+//! only test support compiles.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,14 +28,16 @@ impl<'a> Graph<'a> {
         }
     }
 
-    /// Whether a type is a live query or a value stream, which the graph
-    /// names but does not look inside: its locks are request plumbing.
+    /// Whether a type is a live query or a value stream. The graph names such
+    /// a type but does not look inside it: its locks belong to how the query
+    /// or stream delivers its values.
     pub(crate) fn is_request(&self, name: &str) -> bool {
         self.shapes.live_query_types.contains(name) || self.shapes.value_stream_types.contains(name)
     }
 
-    /// The names and the types they retain, through the workspace's types;
-    /// a live query or value stream is named but not looked inside.
+    /// The names and the types they retain, through the workspace's types.
+    /// The graph names a live query or value stream but does not look inside
+    /// it.
     pub(crate) fn reach(&self, names: &BTreeSet<String>) -> BTreeSet<String> {
         let mut reached = BTreeSet::new();
         let mut pending = names.iter().cloned().collect::<Vec<_>>();
@@ -75,7 +77,7 @@ impl<'a> Graph<'a> {
 
     /// Whether a type, which is no live query or value stream itself, has a
     /// field that retains a live query or a value stream: it hands on what
-    /// the query reads or the stream says.
+    /// the query reads or the stream delivers.
     pub(crate) fn holds_request(&self, name: &str) -> bool {
         !self.is_request(name)
             && self.types.get(name).is_some_and(|info| {

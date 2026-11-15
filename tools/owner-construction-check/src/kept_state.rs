@@ -13,8 +13,9 @@
 //! - a read-code method's `Self` type, which holds no live query or value
 //!   stream, retains a kept-state type.
 //!
-//! The live-query and value-stream types themselves are not looked inside:
-//! their locks are request plumbing.
+//! The check does not look inside the live-query and value-stream types
+//! themselves: their locks belong to how the query or stream delivers its
+//! values.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +31,8 @@ use crate::retained_types::Graph;
 use crate::row_work::Hit;
 use crate::syntax::{RustFile, StructInfo};
 
-/// A type that holds a live query or a value stream: its fields beside it.
+/// A type that holds a live query or a value stream, with the other fields
+/// it has beside that one.
 struct Holder<'a> {
     name: &'a str,
     info: &'a StructInfo,
@@ -72,7 +74,7 @@ pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadS
     writes_after_construction(read.index(), &holders, &mut hits);
     for unit in read.units() {
         let (Body::Function { .. }, Some(owner)) = (&unit.body, &unit.owner) else { continue };
-        // A holder's kept state is found at the type, above.
+        // The holder loop above reports a holder's kept state at its type.
         if graph.holds_request(owner) {
             continue;
         }
@@ -90,8 +92,8 @@ pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadS
     hits
 }
 
-/// The types that hold a live query or a value stream, and are not request
-/// plumbing.
+/// The types that hold a live query or a value stream and are neither
+/// themselves.
 fn holders<'a>(graph: &'a Graph<'_>) -> Vec<Holder<'a>> {
     let mut holders = Vec::new();
     for (name, info) in &graph.types {

@@ -1,7 +1,8 @@
-//! The read code only a live query's `process` runs (`read_code.rs`): the
-//! closures and functions passed to `process`, and what they call, less what
-//! any other read code reaches. The read rule allows such code to shape how
-//! one result's rows display, and a policy's `allowed` row says so
+//! This module finds the read code that only a live query's `process` runs
+//! (`read_code.rs`): the closures and functions that code passes to
+//! `process`, and what they call, less what any other read code reaches. The
+//! read rule lets such code sort, filter, group, count or pick among one
+//! result's rows for display, and a policy's `allowed` row says so
 //! (`read_shapes.rs`).
 
 use std::collections::BTreeSet;

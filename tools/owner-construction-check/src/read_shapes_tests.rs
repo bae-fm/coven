@@ -273,8 +273,8 @@ fn read(sql: &SqlReadContext<'_>, rows: Vec<u8>, ids: Vec<u8>, q: &mut Query) {
 }
 
 /// A workspace whose `Views::subscribe` passes a closure to a live query's
-/// `process`, which calls `label_lines`, and `shared` also called by a plain
-/// read.
+/// `process`. The closure calls `label_lines` and `shared`, and the plain
+/// read `other` also calls `shared`.
 const PROCESSED: &str = "
 struct Builder;
 impl Builder { fn build(&self) -> LiveQuery<u8> { todo!() } }
@@ -323,7 +323,7 @@ fn an_allowed_row_names_a_function_only_a_live_query_s_process_runs_and_the_shap
     assert_eq!(
         run_processed(&format!("allowed = [{}]", row("label_lines", "kept-state"))),
         [
-            "read_shapes.allowed: crates/app/src/a.rs: label_lines (kept-state) names a `process` function, but a function `process` runs never takes this shape: freeze the finding instead",
+            "read_shapes.allowed: crates/app/src/a.rs: label_lines (kept-state) names a `process` function, but a function that `process` runs never makes a finding of this shape: freeze the finding instead",
             "label_lines sorts with `sort` (sort)",
             "read_shapes.allowed: crates/app/src/a.rs: label_lines (kept-state) lists 1 findings but the code has none: remove the row",
         ]
