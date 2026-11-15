@@ -72,6 +72,16 @@ impl<'a> Graph<'a> {
                 info.named_fields.values().any(|names| self.retains_live_query(names))
             })
     }
+
+    /// Whether a type, which is no live query or value stream itself, has a
+    /// field that retains a live query or a value stream: it hands on what
+    /// the query reads or the stream says.
+    pub(crate) fn holds_request(&self, name: &str) -> bool {
+        !self.is_request(name)
+            && self.types.get(name).is_some_and(|info| {
+                info.named_fields.values().any(|names| self.retains_request(names))
+            })
+    }
 }
 
 /// The files without the fields only test support compiles.

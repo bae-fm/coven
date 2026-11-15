@@ -1,17 +1,17 @@
 //! Memory kept between reads (the read rule): a read starts from the database
 //! every time. Four forms, each a finding of the shape `kept-state`:
 //!
-//! - a type that holds a live query (a field whose type, at any depth through
-//!   the workspace's types, is one of the policy's `live_query_types`) has
-//!   another field, which is neither a live query nor a value stream
-//!   (`value_stream_types`), whose type retains a `kept_state_types` type;
+//! - a type that holds a live query or a value stream (a field whose type, at
+//!   any depth through the workspace's types, is one of the policy's
+//!   `live_query_types` or `value_stream_types`) has another field, which is
+//!   neither, whose type retains a `kept_state_types` type;
 //! - such a type writes one of those other fields after construction: in a
 //!   method that takes `self`, an assignment to `self.f`, through it or with
 //!   a compound operator, or a call on `self.f` of a workspace method that
 //!   takes `&mut self`;
 //! - read code captures state (`kept_capture.rs`);
-//! - a read-code method's `Self` type, which holds no live query, retains a
-//!   kept-state type.
+//! - a read-code method's `Self` type, which holds no live query or value
+//!   stream, retains a kept-state type.
 //!
 //! The live-query and value-stream types themselves are not looked inside:
 //! their locks are request plumbing.
@@ -30,13 +30,16 @@ use crate::retained_types::Graph;
 use crate::row_work::Hit;
 use crate::syntax::{RustFile, StructInfo};
 
-/// A type that holds a live query: its fields beside it.
+/// A type that holds a live query or a value stream: its fields beside it.
 struct Holder<'a> {
     name: &'a str,
     info: &'a StructInfo,
     /// The fields that are no live query or value stream, with the names
     /// each holds.
     others: BTreeMap<&'a str, &'a BTreeSet<String>>,
+    /// What it holds, as a finding names it: "live query" when it holds one,
+    /// else "value stream".
+    holds: &'static str,
 }
 
 pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadShapes) -> Vec<Hit> {
@@ -59,7 +62,10 @@ pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadS
                 line: *line,
                 item: holder.name.to_string(),
                 shape: Shape::KeptState,
-                what: format!("keeps `{field}`, which holds `{kept}` state, beside its live query"),
+                what: format!(
+                    "keeps `{field}`, which holds `{kept}` state, beside its {}",
+                    holder.holds
+                ),
             });
         }
     }
@@ -67,7 +73,7 @@ pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadS
     for unit in read.units() {
         let (Body::Function { .. }, Some(owner)) = (&unit.body, &unit.owner) else { continue };
         // A holder's kept state is found at the type, above.
-        if graph.holds_live_query(owner) {
+        if graph.holds_request(owner) {
             continue;
         }
         if let Some(kept) = graph.kept(&BTreeSet::from([owner.clone()])) {
@@ -84,11 +90,12 @@ pub(crate) fn kept_state(read: &ReadCode<'_>, files: &[RustFile], shapes: &ReadS
     hits
 }
 
-/// The types that hold a live query, and are not request plumbing.
+/// The types that hold a live query or a value stream, and are not request
+/// plumbing.
 fn holders<'a>(graph: &'a Graph<'_>) -> Vec<Holder<'a>> {
     let mut holders = Vec::new();
     for (name, info) in &graph.types {
-        if !graph.holds_live_query(name) {
+        if !graph.holds_request(name) {
             continue;
         }
         let others = info
@@ -97,7 +104,8 @@ fn holders<'a>(graph: &'a Graph<'_>) -> Vec<Holder<'a>> {
             .filter(|(_, names)| !graph.retains_request(names))
             .map(|(field, names)| (field.as_str(), names))
             .collect();
-        holders.push(Holder { name, info, others });
+        let holds = if graph.holds_live_query(name) { "live query" } else { "value stream" };
+        holders.push(Holder { name, info, others, holds });
     }
     holders
 }

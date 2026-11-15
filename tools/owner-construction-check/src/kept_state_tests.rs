@@ -99,6 +99,36 @@ fn a_value_stream_beside_the_live_query_is_not_kept_state() {
 }
 
 #[test]
+fn a_holder_of_a_value_stream_keeping_state_beside_it_or_writing_it_is_found() {
+    let found = found(&[
+        LIVE,
+        (
+            A,
+            r#"
+            struct Sample { last: Cell<u8> }
+            struct Watched { transfers: TransferWatch, latest: Option<u8>, sample: Sample }
+            impl Watched {
+                fn next(&mut self) { self.latest = Some(1); }
+                fn peek(&self) -> Option<u8> { self.latest }
+            }
+            struct Plain { latest: Option<u8> }
+            impl Plain { fn next(&mut self) { self.latest = Some(1); } }
+            "#,
+        ),
+    ]);
+    assert_eq!(
+        found,
+        [
+            (
+                "Watched".to_string(),
+                "keeps `sample`, which holds `Cell` state, beside its value stream".to_string()
+            ),
+            ("Watched::next".to_string(), "writes `self.latest` after construction".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn a_holder_nested_two_types_deep_is_found() {
     assert_eq!(
         items(&[
