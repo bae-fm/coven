@@ -6,9 +6,11 @@
 //!
 //! Three shapes read code takes from a statement's rows without an iterator
 //! method: `join` (`.get(place)` with a computed key or place, which matches
-//! one statement's rows to another's), `length-branch` (a slice pattern, or
-//! `.len()` compared, which counts and picks the case in Rust) and `drop-row` (`and_then(|row| row.column.map(..))`, which drops the
-//! row when an optional column is empty).
+//! one statement's rows to another's), `length-branch` (a slice pattern,
+//! `.len()` compared, or `.is_empty()`, which counts and picks the case in
+//! Rust) and `drop-row` (`and_then(|row| row.column.map(..))`, which drops
+//! the row when an optional column is empty). A `.len()` that is not compared
+//! counts the rows (`aggregate`), and `.reverse()` orders them (`sort`).
 //!
 //! A callback argument is a closure or the path of a function (`Self::keep`,
 //! `char::is_numeric`): a single name may be a value, as in `line.find(sep)`.
@@ -91,6 +93,7 @@ pub(crate) fn row_work(read: &ReadCode<'_>) -> Vec<Hit> {
             loops: 0,
             rows: 0,
             typed_init: None,
+            compared_lengths: Vec::new(),
         };
         match &unit.body {
             Body::Function { block, signature } => {
@@ -117,6 +120,8 @@ struct RowWork<'a> {
     rows: usize,
     /// The call whose collection the `let` it initializes already names.
     typed_init: Option<usize>,
+    /// The `len` calls a comparison already found, by address.
+    compared_lengths: Vec<usize>,
 }
 
 /// The standard collection a type is, through the wrappers a read returns.
@@ -145,14 +150,14 @@ fn collection(ty: &syn::Type) -> Option<String> {
     }
 }
 
-/// Whether an expression is a call of `len` with no arguments, behind
-/// references and conversions of one value (`u32::try_from(x.len())`).
-fn is_len_call(expr: &syn::Expr) -> bool {
+/// The call of `len` with no arguments an expression is, behind parentheses
+/// and casts (`x.len() as u32`).
+fn len_call(expr: &syn::Expr) -> Option<&syn::ExprMethodCall> {
     match expr {
-        syn::Expr::Paren(inner) => is_len_call(&inner.expr),
-        syn::Expr::Cast(inner) => is_len_call(&inner.expr),
-        syn::Expr::MethodCall(call) => call.method == "len" && call.args.is_empty(),
-        _ => false,
+        syn::Expr::Paren(inner) => len_call(&inner.expr),
+        syn::Expr::Cast(inner) => len_call(&inner.expr),
+        syn::Expr::MethodCall(call) if call.method == "len" && call.args.is_empty() => Some(call),
+        _ => None,
     }
 }
 
@@ -288,6 +293,15 @@ impl RowWork<'_> {
             || (SORT_WITH_ARGUMENTS.contains(&name) && arguments > 0)
         {
             (Shape::Sort, format!("sorts with `{name}`"))
+        } else if name == "reverse" && arguments == 0 {
+            (Shape::Sort, "reverses the order with `reverse`".to_string())
+        } else if name == "is_empty" && arguments == 0 {
+            (Shape::LengthBranch, "tests whether there are rows with `is_empty`".to_string())
+        } else if name == "len"
+            && arguments == 0
+            && !self.compared_lengths.contains(&(std::ptr::from_ref(node) as usize))
+        {
+            (Shape::Aggregate, "counts the rows with `len`".to_string())
         } else if (FILTER_WITH_CALLBACK.contains(&name) && callback)
             || (FILTER_WITHOUT_ARGUMENTS.contains(&name) && arguments == 0)
         {
@@ -376,7 +390,10 @@ impl<'ast> Visit<'ast> for RowWork<'_> {
                 | syn::BinOp::Gt(_)
                 | syn::BinOp::Ge(_)
         );
-        if compares && [&node.left, &node.right].into_iter().any(|side| is_len_call(side)) {
+        let lengths = [&node.left, &node.right].into_iter().filter_map(|side| len_call(side));
+        let lengths = lengths.map(|call| std::ptr::from_ref(call) as usize).collect::<Vec<_>>();
+        if compares && !lengths.is_empty() {
+            self.compared_lengths.extend(lengths);
             self.hit(
                 Shape::LengthBranch,
                 node.span().start().line,

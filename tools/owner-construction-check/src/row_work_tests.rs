@@ -43,12 +43,15 @@ fn every_sorting_form_is_found_and_its_neighbors_are_not() {
              rows.sort_by_key(|r| r.id); rows.sort_by_cached_key(|r| r.id);
              rows.sort_unstable_by(|a, b| a.cmp(b)); rows.sort_unstable_by_key(|r| r.id);
              let a = rows.iter().sorted(); let b = rows.iter().sorted_by(|a, b| a.cmp(b));
-             let c = rows.iter().sorted_by_key(|r| r.id);"
+             let c = rows.iter().sorted_by_key(|r| r.id); rows.reverse();"
         ),
-        ["sort"; 10]
+        ["sort"; 11]
     );
     assert_eq!(
-        shapes("let a = x.max(y); let b = Ord::max(x, y); let c = x.min(y); db.sort(order);"),
+        shapes(
+            "let a = x.max(y); let b = Ord::max(x, y); let c = x.min(y); db.sort(order);
+             path.reverse(segment);"
+        ),
         Vec::<&str>::new()
     );
 }
@@ -126,14 +129,15 @@ fn every_aggregating_form_is_found_and_its_neighbors_are_not() {
              let h = rows.iter().min_by(|a, b| a.cmp(b)); let i = rows.iter().min_by_key(|r| r.id);
              let j = rows.iter().fold(0, |a, b| a + b); let k = rows.iter().reduce(|a, b| a);
              let mut total = 0; for row in rows { total += row.n; total -= 1; total *= 2; }
-             while more { count += 1; }"
+             while more { count += 1; }
+             let l = rows.len(); let m = u32::try_from(rows.len());"
         ),
-        ["aggregate"; 15]
+        ["aggregate"; 17]
     );
     assert_eq!(
         shapes(
-            "let a = x.max(y); let b = rows.len(); total += 1; for row in rows { self.seen += 1; row.n += 1; }
-             let c = x.min(y);"
+            "let a = x.max(y); total += 1; for row in rows { self.seen += 1; row.n += 1; }
+             let c = x.min(y); let d = rows.len_of(x);"
         ),
         Vec::<&str>::new()
     );
@@ -250,7 +254,12 @@ fn a_filter_on_one_optional_value_and_a_workspace_method_named_like_an_iterator_
         }";
     let found =
         hits_in(source).into_iter().map(|hit| (hit.line, hit.shape.id())).collect::<Vec<_>>();
-    assert_eq!(found, [(18, "filter"), (19, "aggregate")]);
+    // The emptiness tests on lines 12 and 16 are on one text each: a policy
+    // lists such uses in `allowed`.
+    assert_eq!(
+        found,
+        [(12, "length-branch"), (16, "length-branch"), (18, "filter"), (19, "aggregate")]
+    );
 }
 
 #[test]
@@ -298,10 +307,12 @@ fn a_branch_on_how_many_rows_there_are_is_found() {
         shapes("match sheet.audio.as_slice() { [audio] => 1, [_, _, ..] => 2, [] => 0 };"),
         ["length-branch"; 3]
     );
-    // An emptiness test guards a statement's input as often as it counts rows.
-    assert_eq!(shapes("if found.is_empty() { return; }"), Vec::<&str>::new());
+    // An emptiness test counts the rows, as `len() == 0` does.
+    assert_eq!(shapes("if found.is_empty() { return; }"), ["length-branch"]);
+    assert_eq!(shapes("if found.is_empty_of(x) { return; }"), Vec::<&str>::new());
+    // A compared length is one finding, not a count as well.
     assert_eq!(
-        shapes("if rows.len() > 1 {} if 0 == rows.len() {} let n = rows.len(); let m = u32::try_from(rows.len());"),
-        ["length-branch"; 2]
+        shapes("if rows.len() > 1 {} if 0 == rows.len() {} if (rows.len() as u32) < 2 {}"),
+        ["length-branch"; 3]
     );
 }
