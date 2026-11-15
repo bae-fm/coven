@@ -24,7 +24,7 @@ use syn::visit_mut::{self, VisitMut};
 
 use crate::finding::Finding;
 use crate::macro_rules::{Expansion, MacroRules};
-use crate::macros::{parse_macro_body, unparsed_tokens, MacroBody};
+use crate::macros::{parse_macro_body, unparsed_tokens, MacroBody, SelectBranch};
 use crate::name_resolution::{MacroLookup, NameResolver};
 use crate::syntax::RustFile;
 
@@ -281,6 +281,19 @@ impl Expander<'_> {
                     self.visit_expr_mut(guard);
                 }
             }
+            MacroBody::Select { branches, .. } => {
+                for branch in branches.iter_mut() {
+                    match branch {
+                        SelectBranch::Future { arm, precondition } => {
+                            if let Some(precondition) = precondition {
+                                self.visit_expr_mut(precondition);
+                            }
+                            self.visit_expr_match_mut(arm);
+                        }
+                        SelectBranch::Else(handler) => self.visit_expr_mut(handler),
+                    }
+                }
+            }
         }
         if self.budget != before {
             node.tokens = body_tokens(&body);
@@ -305,6 +318,24 @@ fn body_tokens(body: &MacroBody) -> TokenStream {
             if let Some(guard) = guard {
                 <syn::Token![if]>::default().to_tokens(&mut tokens);
                 guard.to_tokens(&mut tokens);
+            }
+        }
+        MacroBody::Select { biased, branches } => {
+            if *biased {
+                tokens.extend(quote::quote!(biased;));
+            }
+            for branch in branches {
+                match branch {
+                    SelectBranch::Future { arm, precondition } => {
+                        let syn::ExprMatch { expr: future, arms, .. } = arm;
+                        let syn::Arm { pat, body, .. } = &arms[0];
+                        let precondition = precondition
+                            .as_ref()
+                            .map(|precondition| quote::quote!(, if #precondition));
+                        tokens.extend(quote::quote!(#pat = #future #precondition => #body,));
+                    }
+                    SelectBranch::Else(handler) => tokens.extend(quote::quote!(else => #handler,)),
+                }
             }
         }
     }

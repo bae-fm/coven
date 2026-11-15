@@ -7,15 +7,20 @@
 //! When the arguments parse as comma-separated expressions or as statements —
 //! the shape of nearly every call: `format!`, `vec!`, `assert!`, `write!` —
 //! a rule visits them as code, with every rule it applies elsewhere. A
-//! `matches!` call is an expression and a pattern, visited as each. When they
-//! don't, as in `tokio::select!`, the rule reads the tokens: the paths, the
-//! calls and the string literals in them, each path marked as a type or a
-//! value by the tokens around it, so the construction rule counts only values.
-//! `cfg!` and `stringify!` take no code, and are read as neither.
+//! `matches!` call is an expression and a pattern, visited as each. A
+//! `select!` call's branches are each a future, a pattern that binds what the
+//! future gives, an optional precondition and a handler: a rule visits each
+//! branch as `match future { pattern => handler }`, and the precondition as an
+//! expression. When the arguments parse as none of these, the rule reads the
+//! tokens: the paths, the calls and the string literals in them, each path
+//! marked as a type or a value by the tokens around it, so the construction
+//! rule counts only values. `cfg!` and `stringify!` take no code, and are read
+//! as neither.
 
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 pub(crate) enum MacroBody {
@@ -28,6 +33,22 @@ pub(crate) enum MacroBody {
         pattern: syn::Pat,
         guard: Option<syn::Expr>,
     },
+    /// `select!` (tokio's): `biased;` when written, then the branches in
+    /// order.
+    Select {
+        biased: bool,
+        branches: Vec<SelectBranch>,
+    },
+}
+
+/// One branch of a `select!` call.
+pub(crate) enum SelectBranch {
+    /// `pattern = future, if precondition => handler`, held as
+    /// `match future { pattern => handler }`: the pattern binds what the
+    /// future gives, in the handler.
+    Future { arm: syn::ExprMatch, precondition: Option<syn::Expr> },
+    /// `else => handler`, which runs when no other branch can.
+    Else(syn::Expr),
 }
 
 /// Whether a macro's arguments are no code: `cfg!` reads a configuration
@@ -56,6 +77,11 @@ pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
             return Some(body);
         }
     }
+    if node.path.segments.last().is_some_and(|segment| segment.ident == "select") {
+        if let Ok(body) = parse_select.parse2(node.tokens.clone()) {
+            return Some(body);
+        }
+    }
     if let Ok(expressions) =
         Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(node.tokens.clone())
     {
@@ -76,6 +102,74 @@ fn parse_match(input: syn::parse::ParseStream<'_>) -> syn::Result<MacroBody> {
     };
     input.parse::<Option<syn::Token![,]>>()?;
     Ok(MacroBody::Match { value, pattern, guard })
+}
+
+mod keyword {
+    syn::custom_keyword!(biased);
+}
+
+/// `select!`'s arguments: `biased;` when written, then branches, each ending
+/// in a comma that a block handler may leave out.
+fn parse_select(input: syn::parse::ParseStream<'_>) -> syn::Result<MacroBody> {
+    let biased = input.peek(keyword::biased) && input.peek2(syn::Token![;]);
+    if biased {
+        input.parse::<keyword::biased>()?;
+        input.parse::<syn::Token![;]>()?;
+    }
+    let mut branches = Vec::new();
+    while !input.is_empty() {
+        if input.parse::<Option<syn::Token![else]>>()?.is_some() {
+            input.parse::<syn::Token![=>]>()?;
+            branches.push(SelectBranch::Else(parse_handler(input)?));
+            continue;
+        }
+        let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+        input.parse::<syn::Token![=]>()?;
+        let future = input.parse::<syn::Expr>()?;
+        let precondition = if input.peek(syn::Token![,]) && input.peek2(syn::Token![if]) {
+            input.parse::<syn::Token![,]>()?;
+            input.parse::<syn::Token![if]>()?;
+            Some(input.parse::<syn::Expr>()?)
+        } else {
+            None
+        };
+        let fat_arrow_token = input.parse::<syn::Token![=>]>()?;
+        let handler = parse_handler(input)?;
+        let arm = syn::ExprMatch {
+            attrs: Vec::new(),
+            match_token: syn::Token![match](pattern.span()),
+            expr: Box::new(future),
+            brace_token: syn::token::Brace(pattern.span()),
+            arms: vec![syn::Arm {
+                attrs: Vec::new(),
+                pat: pattern,
+                fat_arrow_token,
+                body: Box::new(handler),
+                comma: None,
+            }],
+        };
+        branches.push(SelectBranch::Future { arm, precondition });
+    }
+    if branches.is_empty() {
+        return Err(input.error("a select! call has a branch"));
+    }
+    Ok(MacroBody::Select { biased, branches })
+}
+
+/// A `select!` branch's handler and the comma after it: a block, whose comma
+/// is optional, or an expression, whose comma only the last branch leaves
+/// out.
+fn parse_handler(input: syn::parse::ParseStream<'_>) -> syn::Result<syn::Expr> {
+    if input.peek(syn::token::Brace) {
+        let block = input.parse::<syn::Block>()?;
+        input.parse::<Option<syn::Token![,]>>()?;
+        return Ok(syn::Expr::Block(syn::ExprBlock { attrs: Vec::new(), label: None, block }));
+    }
+    let handler = input.parse::<syn::Expr>()?;
+    if !input.is_empty() {
+        input.parse::<syn::Token![,]>()?;
+    }
+    Ok(handler)
 }
 
 impl MacroBody {
@@ -99,6 +193,19 @@ impl MacroBody {
                 visitor.visit_pat(pattern);
                 if let Some(guard) = guard {
                     visitor.visit_expr(guard);
+                }
+            }
+            MacroBody::Select { branches, .. } => {
+                for branch in branches {
+                    match branch {
+                        SelectBranch::Future { arm, precondition } => {
+                            if let Some(precondition) = precondition {
+                                visitor.visit_expr(precondition);
+                            }
+                            visitor.visit_expr_match(arm);
+                        }
+                        SelectBranch::Else(handler) => visitor.visit_expr(handler),
+                    }
                 }
             }
         }

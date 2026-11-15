@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeSet;
 
+use quote::ToTokens;
+
 fn mac(source: &str) -> syn::Macro {
     syn::parse_str(source).expect("parse fixture macro")
 }
@@ -19,6 +21,45 @@ fn statement_bodies_parse_as_statements() {
         parse_macro_body(&mac("run! { let value = compute(); store(value); }")),
         Some(MacroBody::Statements(statements)) if statements.len() == 2
     ));
+}
+
+#[test]
+fn select_branches_parse_as_a_match_each_with_its_precondition() {
+    let Some(MacroBody::Select { biased, branches }) = parse_macro_body(&mac(
+        "tokio::select! { biased; Some(read) = rows.next(), if open => use_it(read), \
+         _ = sleep() => { wait(); } changes = watch.next() => heard(changes?), \
+         else => stop() }",
+    )) else {
+        panic!("select! parses as its branches");
+    };
+    assert!(biased);
+    let read = branches
+        .iter()
+        .map(|branch| match branch {
+            SelectBranch::Future { arm, precondition } => format!(
+                "{} {}",
+                arm.to_token_stream(),
+                precondition.as_ref().map_or(String::new(), |p| p.to_token_stream().to_string())
+            ),
+            SelectBranch::Else(handler) => format!("else {}", handler.to_token_stream()),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        read,
+        [
+            "match rows . next () { Some (read) => use_it (read) } open",
+            "match sleep () { _ => { wait () ; } } ",
+            "match watch . next () { changes => heard (changes ?) } ",
+            "else stop ()",
+        ]
+    );
+}
+
+#[test]
+fn a_select_branch_missing_its_comma_is_read_as_tokens() {
+    assert!(
+        parse_macro_body(&mac("tokio::select! { a = f() => one() b = g() => two() }")).is_none()
+    );
 }
 
 #[test]

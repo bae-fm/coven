@@ -111,6 +111,32 @@ fn every_position_expands() {
 }
 
 #[test]
+fn a_select_branch_expands_and_is_written_back_as_a_branch() {
+    let code = code(&[(
+        "crates/app/src/lib.rs",
+        r#"
+        macro_rules! value { () => { 41 + 1 }; }
+        async fn run() {
+            tokio::select! {
+                biased;
+                got = wait(value!()), if ready => handle(got),
+                _ = other() => { value!(); }
+                else => done(),
+            }
+        }
+        "#,
+    )]);
+    assert!(code.unexpanded.is_empty(), "{:?}", code.unexpanded);
+    let printed =
+        quote::ToTokens::to_token_stream(&file(&code, "crates/app/src/lib.rs").syntax).to_string();
+    assert!(
+        printed.contains("biased ; got = wait (41 + 1) , if ready => handle (got) ,"),
+        "{printed}"
+    );
+    assert!(printed.contains("_ = other () => { 41 + 1 } , else => done () ,"), "{printed}");
+}
+
+#[test]
 fn what_the_checker_cannot_expand_is_a_finding() {
     let code = code(&[(
         "crates/app/src/lib.rs",
@@ -121,7 +147,7 @@ fn what_the_checker_cannot_expand_is_a_finding() {
             fn run() {
                 secret!();
                 only_a!(b);
-                tokio::select! { _ = value!() => {} }
+                markup! { <p> value!() </p> }
             }
             "#,
     )]);
@@ -135,7 +161,7 @@ fn what_the_checker_cannot_expand_is_a_finding() {
         [
             (6, "cannot expand secret!: no definition answers its name: no definition or import in the caller's scope"),
             (7, "cannot expand only_a!: no arm matches the invocation"),
-            (8, "cannot expand value!: it is inside the arguments of select!, which do not parse as code"),
+            (8, "cannot expand value!: it is inside the arguments of markup!, which do not parse as code"),
         ]
     );
 }
