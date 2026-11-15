@@ -327,7 +327,8 @@ fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
 }
 
 /// A type the policy names is declared by a crate, or is one of its external
-/// types: named by a crate's production source and declared by none.
+/// types: named by a crate's production source, as a type or as a trait a
+/// bound names (`impl coven::SqlRead`), and declared by none.
 fn undeclared_types(
     crate_files: &[RustFile],
     identity: &TypeIdentity,
@@ -342,6 +343,9 @@ fn undeclared_types(
         let mut names = TypeNames::new(names);
         names.visit_file(&file.syntax);
         mentioned.extend(names.names);
+        let mut bounds = BoundTraits(BTreeSet::new());
+        bounds.visit_file(&file.syntax);
+        mentioned.extend(bounds.0);
     }
     let named = policy.named_types();
     let mut stale = named
@@ -361,6 +365,24 @@ fn undeclared_types(
         }
     }
     stale
+}
+
+/// The traits a file's bounds name, by their last segment.
+struct BoundTraits(BTreeSet<String>);
+
+impl<'ast> Visit<'ast> for BoundTraits {
+    fn visit_trait_bound(&mut self, node: &'ast syn::TraitBound) {
+        if let Some(last) = node.path.segments.last() {
+            self.0.insert(last.ident.to_string());
+        }
+        visit::visit_trait_bound(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if let Some(body) = parse_macro_body(node) {
+            body.visit(self);
+        }
+    }
 }
 
 fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {

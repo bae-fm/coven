@@ -469,13 +469,14 @@ fn external_types_are_named_by_a_crate_and_declared_by_none() {
     let files = vec![
         RustFile::fixture(
             "crates/app/src/lib.rs",
-            "struct Worker { runtime: tokio::runtime::Runtime, lock: Mutex<()> } struct Local;",
+            "struct Worker { runtime: tokio::runtime::Runtime, lock: Mutex<()> } struct Local;
+             fn read(sql: &impl coven::SqlRead) {}",
         ),
         RustFile::fixture("crates/app/src/lib_tests.rs", "struct Fixture { handle: Handle }"),
     ];
     let rows = r#"
-        capability_types = ["Runtime", "Mutex", "Local", "Handle", "Gone"]
-        external_types = ["Runtime", "Mutex", "Local", "Handle", "Gone", "Unused"]
+        capability_types = ["Runtime", "Mutex", "Local", "Handle", "Gone", "SqlRead"]
+        external_types = ["Runtime", "Mutex", "Local", "Handle", "Gone", "Unused", "SqlRead"]
     "#;
     assert_eq!(
         stale(files, rows),
