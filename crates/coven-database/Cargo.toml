@@ -19,6 +19,7 @@ rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preup
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+futures-lite = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "io-util"] }
 uuid.workspace = true
 

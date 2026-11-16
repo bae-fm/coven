@@ -11,7 +11,6 @@ mod audience_database;
 mod author_judgement;
 mod authorization;
 mod authorship;
-mod block_on;
 mod change_capture;
 mod connection_setup;
 mod coven_functions;

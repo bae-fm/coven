@@ -999,6 +999,7 @@ dependencies = [
  "coven-format",
  "coven-foundation",
  "coven-merge",
+ "futures-lite",
  "proc-macro2",
  "rusqlite",
  "serde",

@@ -1,12 +1,12 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
-use crate::block_on::block_on;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{caught_sync, BugSinkRef, CarriesBug};
+use futures_lite::future::block_on;
 use std::{
     future::{poll_fn, Future},
     pin::pin,

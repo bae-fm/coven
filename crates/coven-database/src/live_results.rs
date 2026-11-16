@@ -1,6 +1,6 @@
 //! A live query's results for code on an async executor.
 
-use crate::{DbError, LiveQuery};
+use crate::{database::finish_blocking, DbError, LiveQuery};
 use coven_foundation::locks::{into_unpoisoned, lock_unpoisoned};
 use coven_foundation::task::{blocking_completing, CarriesBug};
 use std::sync::{Arc, Mutex};
@@ -45,11 +45,10 @@ where
             Ok(slot) => into_unpoisoned(slot),
             Err(_) => unreachable!("the pool has dropped or ended the work"),
         };
-        match result {
-            Ok(Ok(None)) => {}
-            Ok(Ok(Some(value))) => return (query, Some(Ok(value))),
-            Ok(Err(error)) => return (query, Some(Err(error))),
-            Err(failed) => return (query, Some(Err(E::from(DbError::from(failed))))),
+        match finish_blocking(result) {
+            Ok(None) => {}
+            Ok(Some(value)) => return (query, Some(Ok(value))),
+            Err(error) => return (query, Some(Err(error))),
         }
     }
 }
