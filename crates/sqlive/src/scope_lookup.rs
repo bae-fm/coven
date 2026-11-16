@@ -32,8 +32,10 @@ pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
 pub const LOOKUP_STEPS: i32 = 1_000;
 
 /// The scope of each table among `sources`, for a run bound to
-/// `parameters`.
-pub(crate) fn scopes(sources: &Sources, parameters: &[Value]) -> Scopes {
+/// `parameters` that returned `last`, the ORDER BY's values of its last row,
+/// when it returned as many rows as its LIMIT. The sources placed after the
+/// sorted one look its rows up within that bound too.
+pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
     let parameters: Arc<[Value]> = parameters.into();
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
     for &position in &sources.order {
@@ -62,6 +64,11 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value]) -> Scopes {
                     &parameters,
                 )),
             });
+        }
+        if let (Some(sorted), Some(last)) = (&sources.sorted, last) {
+            if sorted.source == position {
+                scope = scope.and(crate::scope_order::sorted_at_or_before(&sorted.terms, last));
+            }
         }
         bound[position] = Some(scope);
     }

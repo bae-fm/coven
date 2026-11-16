@@ -432,35 +432,52 @@ hover, focus or an open popover, stays in the view and never goes into SQL.
 A long list's count is never in the same live query as its rows. A count
 changes with every insert, so a query holding both reruns, and rereads every
 window it holds, on every write. Subscribe each window the screen shows as its
-own live query, with that window as its request, and the count as another:
+own live query, with the window's first key as its request, and the count as
+another:
 
 ```rust
-// A window: the notes from one title up to the next window's first title.
-let window = |(from, until): &(String, String), sql: SqlReadContext<'_>| {
+// A window: the 100 notes from one title on.
+let window = |from: &String, sql: SqlReadContext<'_>| {
     Ok(sql.query(
-        "SELECT id, title FROM notes WHERE title >= ?1 AND title < ?2 ORDER BY title",
-        [from, until],
+        "SELECT id, title FROM notes WHERE title >= ?1 ORDER BY title LIMIT 100",
+        [from],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )?)
 };
-let top = handle.subscribe_reconfigurable((String::new(), second_window_first), window);
-let next = handle.subscribe_reconfigurable((second_window_first, third_window_first), window);
+let top = handle.subscribe_reconfigurable(String::new(), window);
 // The count, read by itself.
 let count = handle.subscribe(|sql| {
     Ok(sql.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0))?)
 });
 ```
 
-A write that adds a row reruns `count`, and only the window whose range holds
-it.
+A write that adds a row reruns `count`, and reruns the window only when the
+row sorts at or before the window's last row: when a run returns all 100 rows,
+a note that sorts after the last of them can't enter the window. Each run sets
+that bound again from its own last row, so a note inserted or deleted inside
+the window moves the bound to the window's new last row. A note equal to the
+last row on every ORDER BY column counts as inside, since SQLite could sort it
+before the last row. A run that returns fewer than 100 rows already holds every
+note after its start, and reruns for a change to any of them.
 
-A live query reruns for a write that changes a row its WHERE comparisons take
-in; its `LIMIT` and `OFFSET` narrow nothing. So bound each window by a key at
-both ends. `WHERE title > ?1 ... LIMIT 100` reruns for any change after `?1`,
-and `LIMIT 100 OFFSET 200` for any change at all. The screen holds its windows
-as a chain whose ranges meet, so each row is in exactly one; a jump to a far
-position, such as a scrollbar drag, reads the key at that position once and
-starts a chain there.
+Coven narrows a window to its last row when:
+
+- the statement is one SELECT, with an `ORDER BY` and a `LIMIT` and no
+  `OFFSET`;
+- each `ORDER BY` term names a column of the same table, with no `COLLATE` and
+  no `NULLS FIRST` or `NULLS LAST`, and the column is stored and uses BINARY
+  collation;
+- that table isn't the right side of a `LEFT JOIN`;
+- the statement returns each `ORDER BY` column as a result column listed before
+  any `*`, since coven reads the last row's values from the result;
+- the SELECT has no `GROUP BY` and calls no aggregate or window function in its
+  result columns.
+
+`ORDER BY` terms may be ascending or descending, in any mix. Any other window,
+such as one ordered by an expression or with an `OFFSET`, reruns for a change to
+any row its `WHERE` takes in: `LIMIT 100 OFFSET 200` reruns for any change at
+all. A jump to a far position, such as a scrollbar drag, reads the key at that
+position once and makes it the window's request.
 
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,

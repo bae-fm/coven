@@ -342,7 +342,7 @@ pub(crate) enum Operand {
 }
 
 impl Operand {
-    fn value<'a>(&'a self, parameters: &'a [Value]) -> &'a Value {
+    pub(crate) fn value<'a>(&'a self, parameters: &'a [Value]) -> &'a Value {
         match self {
             Self::Constant(value) => value,
             Self::Parameter(index) => &parameters[*index],
@@ -597,7 +597,7 @@ fn through_collation<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
 
 /// The value `expr` stands for: a parameter, or a constant spelled in the
 /// SQL whose type compares as it is with a column of `affinity`.
-fn operand(
+pub(crate) fn operand(
     connection: &Connection,
     expr: &Expr<'_>,
     affinity: Affinity,

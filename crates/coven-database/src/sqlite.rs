@@ -735,20 +735,31 @@ impl DatabaseConnection {
             let mut statement = self.app_statement(sql)?;
             let parameters = sqlive::parameters(&self.connection, &statement, params)?;
             let plan = self.live_scope_plan(sql, &statement)?;
+            // A run that returns as many rows as its LIMIT depends only on the
+            // rows up to its last one (§4).
+            let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
+            let mut last = None;
             let result = self.counting_steps(&mut statement, StepsOf::AppRead, |statement| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
+                let mut returned = 0;
                 loop {
                     let row = {
                         let _scope = self.authorization.step();
                         self.authorization.app_result(rows.next())?
                     };
                     let Some(row) = row else { return Ok(()) };
+                    returned += 1;
+                    if let Some(last_row) =
+                        last_row.as_ref().filter(|found| found.limit == returned)
+                    {
+                        last = Some(last_row.values(row)?);
+                    }
                     if !each(row)? {
                         return Ok(());
                     }
                 }
             });
-            self.record_app_statement(plan.as_deref(), &parameters);
+            self.record_app_statement(plan.as_deref(), &parameters, last.as_deref());
             #[cfg(any(test, feature = "test-utils"))]
             if recorded == Recorded::Yes {
                 if let Some(log) = self.statement_log.borrow().as_ref() {

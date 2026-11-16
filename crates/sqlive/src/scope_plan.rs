@@ -25,6 +25,7 @@ use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
+use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
@@ -59,12 +60,19 @@ impl ScopePlan {
         Ok(Self { sources: Sources::read(connection, sql, statement, whole)? })
     }
 
+    /// Where a run bound to `parameters` finds the row its scope ends at, or
+    /// `None` when no row of the run bounds it (`scope_order.rs`).
+    pub fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
+        self.sources.as_ref()?.sorted.as_ref()?.last_row(parameters)
+    }
+
     /// The scope of each table the statement reads as one of its sources,
-    /// for a run bound to `parameters`. A table the plan doesn't name
-    /// depends on every row.
-    pub fn scopes(&self, parameters: &[Value]) -> Scopes {
+    /// for a run bound to `parameters` that returned `last`, the ORDER BY's
+    /// values of the row `last_row` names, when it returned that many rows. A
+    /// table the plan doesn't name depends on every row.
+    pub fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
         match &self.sources {
-            Some(sources) => crate::scope_lookup::scopes(sources, parameters),
+            Some(sources) => crate::scope_lookup::scopes(sources, parameters, last),
             None => Scopes::default(),
         }
     }
@@ -78,6 +86,8 @@ pub(crate) struct Sources {
     /// The app's views and the CTEs read as sources of their own, by the
     /// names, lowercase, SQLite reports reads through them by.
     pub(crate) inlined: BTreeSet<String>,
+    /// The order and LIMIT a full run's last row bounds its source by.
+    pub(crate) sorted: Option<SortedLimit>,
 }
 
 pub(crate) struct Source {
@@ -166,8 +176,15 @@ impl Sources {
             inlined: Vec::new(),
             whole,
         };
-        Ok(read_select(connection, &mut planner, select, None, &Ctes::default())?
-            .map(|_| planner.ordered()))
+        let Some(cores) = read_select(connection, &mut planner, select, None, &Ctes::default())?
+        else {
+            return Ok(None);
+        };
+        let sorted = match cores[..] {
+            [core] => sorted_limit(connection, &planner, select, core)?,
+            _ => None,
+        };
+        Ok(Some(planner.ordered(sorted)))
     }
 }
 
@@ -207,7 +224,7 @@ impl Planner<'_> {
     /// sources the core's narrowing started from, then those with
     /// conditions of their own, then views and table functions, which
     /// nothing narrows but whose values others can take, in FROM order.
-    fn ordered(mut self) -> Sources {
+    fn ordered(mut self, sorted: Option<SortedLimit>) -> Sources {
         let mut order: Vec<usize> = Vec::new();
         let all: Vec<usize> =
             self.cores.iter().flat_map(|core| core.items.iter().copied()).collect();
@@ -301,6 +318,7 @@ impl Planner<'_> {
             sources: self.items.into_iter().map(|item| item.source).collect(),
             order,
             inlined: self.inlined.into_iter().collect(),
+            sorted,
         }
     }
 

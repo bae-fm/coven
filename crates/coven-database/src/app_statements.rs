@@ -94,14 +94,16 @@ impl DatabaseConnection {
     }
 
     /// End the app statement begun last: each table it read in the scope
-    /// `plan` gives it for this run, or whole.
+    /// `plan` gives it for this run, which returned `last` as the ORDER BY's
+    /// values of the row the plan's `last_row` names, or whole.
     pub(super) fn record_app_statement(
         &self,
         plan: Option<&sqlive::ScopePlan>,
         parameters: &[sqlive::SqlValue],
+        last: Option<&[sqlive::SqlValue]>,
     ) {
         self.authorization.record_statement(&match plan {
-            Some(plan) => plan.scopes(parameters),
+            Some(plan) => plan.scopes(parameters, last),
             None => sqlive::Scopes::default(),
         });
     }

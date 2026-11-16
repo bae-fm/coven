@@ -5,6 +5,8 @@
 
 #[path = "live_judging_tests/derived.rs"]
 mod derived;
+#[path = "live_judging_tests/limit.rs"]
+mod limit;
 #[path = "live_judging_tests/lookup.rs"]
 mod lookup;
 #[path = "live_judging_tests/plan.rs"]
