@@ -4,9 +4,11 @@
 //! commit wait for it, `F_FULLFSYNC` included on macOS and iOS. While a live
 //! query keeps a reader's snapshot open nearly all the time, that checkpoint
 //! can't finish, so every later commit runs another and the WAL never starts
-//! over. So the writer never checkpoints as it commits. Each commit only
-//! wakes a thread of the database's own, which reads how many frames the WAL
-//! holds past what was checkpointed and, past the threshold, checkpoints on a
+//! over. So no connection of the database's checkpoints as it commits: not
+//! the writer, and not the statistics thread's connection, whose commits
+//! hold the writer. Each of the writer's commits only wakes a thread of the
+//! database's own, which reads how many frames the WAL holds past what was
+//! checkpointed and, past the threshold, checkpoints on a
 //! connection of its own: first copying what it can while writes go on and
 //! syncing the copy, again for the frames committed meanwhile while each
 //! pass leaves fewer, then, holding the writer so no write starts,
@@ -19,6 +21,10 @@
 //! again at the next wake, as one that finds the database busy is. Any
 //! other failure fails the handle rather than leave the database open while
 //! its WAL grows without bound.
+//!
+//! Every checkpoint then goes through `HostSql::wal_checkpoint`, the
+//! checkpointer's and the host's alike, which sends the main file's size to
+//! the database's watch (`Database::checkpointed_size`).
 
 use crate::authorization::{Policy, PolicyError};
 use crate::connection::HostSql;
@@ -94,7 +100,7 @@ impl<P: Policy> UpkeepThread<Checkpoints<P>> {
         let wake = checkpointer.wake();
         {
             let mut writer = lock_unpoisoned(writer);
-            writer.batch("PRAGMA wal_autocheckpoint = 0")?;
+            leave_checkpoints_to_checkpointer(&writer)?;
             writer.signal_commits(wake);
         }
         Ok(checkpointer)
@@ -209,6 +215,15 @@ impl<P: Policy> Checkpoints<P> {
             let _ = restarts.send(restarted);
         }
     }
+}
+
+/// Turn SQLite's own automatic checkpoint off on `connection`, a connection
+/// of a database with a checkpointer that commits, so its commits run no
+/// checkpoint while the database stays open.
+pub(crate) fn leave_checkpoints_to_checkpointer<P: Policy>(
+    connection: &HostSql<P>,
+) -> Result<(), PolicyError<P>> {
+    connection.batch("PRAGMA wal_autocheckpoint = 0")
 }
 
 /// The frames the WAL holds that the database file doesn't, or None when

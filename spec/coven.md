@@ -983,9 +983,11 @@ on macOS and iOS (§3). A live query that runs again after every commit keeps a
 reader's snapshot open nearly all the time, so that checkpoint can't copy the
 whole WAL, and every later commit runs another. Ben's music app imported 2,000
 small writes in 0.36 s with nobody reading, and in 2.3 to 4.5 s with its list's
-live query running again after each one, while the WAL grew to 23 MB. So the
-writer never checkpoints as it commits. Each commit wakes a thread of the
-store's own instead, which checkpoints on a connection of its own once the WAL
+live query running again after each one, while the WAL grew to 23 MB. So no
+connection of the store's checkpoints as it commits: not the writer, and not
+the connection that keeps the planner's statistics while the store stays open,
+whose commits hold the writer. Each commit wakes a thread of the store's own
+instead, which checkpoints on a connection of its own once the WAL
 holds 1,000 pages, or the app's `wal_autocheckpoint`, not yet copied. It copies what
 it can while writes go on and syncs the database file, then holds coven's
 writer, copies and syncs what was committed meanwhile, and waits up to 100 ms for

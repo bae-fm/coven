@@ -56,9 +56,10 @@ pub struct SqliteSettings {
     /// Unset is sqlive's 4 MiB.
     pub journal_size_limit: Option<JournalSizeLimit>,
     /// The WAL size at which sqlive checkpoints it, off the commit path; unset
-    /// is SQLite's 1000 pages (§4). The writer never checkpoints as it
-    /// commits. A read-only handle's own commits, which only its cache
-    /// makes, checkpoint as SQLite's `PRAGMA wal_autocheckpoint` does.
+    /// is SQLite's 1000 pages (§4). No connection of a writable handle
+    /// checkpoints as it commits. A read-only handle's own commits, which
+    /// only its cache makes, checkpoint as SQLite's
+    /// `PRAGMA wal_autocheckpoint` does.
     pub wal_autocheckpoint: Option<WalAutocheckpoint>,
     /// Whether the query planner may build a temporary index for one query
     /// (`PRAGMA automatic_index`).
@@ -94,7 +95,8 @@ pub struct SqliteSettings {
 
 /// The SQLite settings one connection to a database has in effect,
 /// as SQLite reports them. Every connection has the same, except that a
-/// writable handle's writer never checkpoints as it commits.
+/// writable handle's writer and statistics connection never checkpoint as
+/// they commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqliteSettingsInEffect {
     /// `PRAGMA busy_timeout`, to the millisecond.
@@ -113,8 +115,8 @@ pub struct SqliteSettingsInEffect {
     /// `PRAGMA journal_size_limit`.
     pub journal_size_limit: JournalSizeLimit,
     /// `PRAGMA wal_autocheckpoint`, which on a writable handle's readers is
-    /// the size at which sqlive checkpoints. Its writer's own is off: it
-    /// never checkpoints as it commits.
+    /// the size at which sqlive checkpoints. Its writer's and its statistics
+    /// connection's own are off: neither checkpoints as it commits.
     pub wal_autocheckpoint: WalAutocheckpoint,
     /// `PRAGMA automatic_index`.
     pub automatic_index: bool,

@@ -114,9 +114,6 @@ impl<P: Policy> Database<P> {
             let (mut writer, sizes) = open_writer()?;
             let prepared = writer.with_profile(|writer| -> Result<T, E> {
                 writer.enable_wal()?;
-                // Switching a new database to WAL writes its first page to
-                // the main file.
-                writer.send_checkpointed_size()?;
                 let prepared = prepare(writer)?;
                 if statistics {
                     // On a connection of its own: one that analyzes a small
@@ -131,6 +128,11 @@ impl<P: Policy> Database<P> {
             })?;
             (writer, sizes, prepared)
         };
+        // Switching a new database to WAL writes the main file's first page,
+        // and the open's commits may run SQLite's own automatic checkpoint,
+        // which sends no size, until the checkpointer takes checkpoints over.
+        // No commit comes between this and that.
+        writer.send_checkpointed_size()?;
         match options.capture {
             Some(recorded) => writer.observe_commits(handle.clone(), recorded),
             None => writer.serve(handle.clone()),
@@ -156,8 +158,14 @@ impl<P: Policy> Database<P> {
             )?);
         }
         if statistics {
+            let connection = open(false)?;
+            // A run's commit holds the writer, so it must not checkpoint
+            // either.
+            if database.checkpoints.is_some() {
+                crate::wal_checkpoints::leave_checkpoints_to_checkpointer(&connection)?;
+            }
             database.statistics = Some(UpkeepThread::<PlannerStatistics<P>>::start(
-                open(false)?,
+                connection,
                 &database.writer,
                 handle.clone(),
             )?);
@@ -186,17 +194,18 @@ impl<P: Policy> Database<P> {
     /// A view of the main database file's size in bytes after the latest
     /// checkpoint, which wakes when a later checkpoint changes the size.
     /// Before the first checkpoint, the watch holds the file's size once the
-    /// writer opened and switched the database to WAL. The writer and the
-    /// checkpointer send the size after each checkpoint they run through
+    /// open's own commits ended. The writer and the checkpointer send the
+    /// size after each checkpoint they run through
     /// `HostSql::wal_checkpoint`: the checkpointer's own, and the host's on
     /// the writer.
     ///
     /// Two kinds of checkpoint send nothing. SQLite checkpoints the WAL as
     /// the database closes, and nothing reads the watch after that, because
     /// the watch closes with the database. SQLite's own automatic
-    /// checkpoint, which runs inside a commit on a connection whose
-    /// `wal_autocheckpoint` is on, sends nothing either; while sqlive's
-    /// checkpointer runs, the writer's is off.
+    /// checkpoint, which runs inside a commit, sends nothing either; while
+    /// sqlive's checkpointer runs, no connection of the database's runs one.
+    /// Without the checkpointer, the writer runs one as its
+    /// `wal_autocheckpoint` asks.
     pub fn checkpointed_size(&self) -> crate::CheckpointedSize {
         crate::CheckpointedSize::new(self.checkpointed_size.clone())
     }

@@ -262,6 +262,49 @@ fn a_checkpoint_that_copies_nothing_leaves_the_watch_unchanged() {
     db.close();
 }
 
+/// A commit of the statistics thread holds the writer, so it runs no
+/// checkpoint either, however many pages the WAL holds not yet copied. Every
+/// checkpoint then goes through `wal_checkpoint`, which sends the file's
+/// size after each (§4). The checkpointer here waits for far more pages than the test
+/// writes, while every connection's `wal_autocheckpoint` is SQLite's 1,000.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_statistics_commit_runs_no_checkpoint() {
+    let db = TestDatabase::open_with(
+        "CREATE TABLE items(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body BLOB NOT NULL);
+         CREATE INDEX items_kind ON items(kind)",
+        TestOptions {
+            checkpoint_pages: NonZeroU32::new(1_000_000),
+            statistics: true,
+            ..TestOptions::default()
+        },
+    );
+    let pages = crate::CHECKPOINT_PAGES.get();
+    let mut runs = db.with_database(|database| database.report_statistics_runs());
+    // Each commit writes ten rows of 16,000 bytes, some 40 pages of the WAL.
+    // The 1,000 pages take some 250 rows, short of the 1,000 changed rows
+    // that wake the statistics thread.
+    while not_copied(&db) < pages {
+        db.write(
+            "INSERT INTO items(kind, body) SELECT 'large', randomblob(16000)
+             FROM (VALUES(1),(2),(3),(4),(5),(6),(7),(8),(9),(10))",
+        )
+        .unwrap();
+    }
+    // A thousand small rows wake the statistics thread, which finds the
+    // table without statistics.
+    db.write(
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+         INSERT INTO items(kind, body) SELECT printf('kind %d', i), x'00' FROM n",
+    )
+    .unwrap();
+    tokio::time::timeout(HANG_GUARD, runs.recv())
+        .await
+        .expect("the thread gathers the items' statistics")
+        .expect("the database stays open");
+    assert!(not_copied(&db) >= pages, "the statistics commit checkpointed the WAL");
+    db.close();
+}
+
 /// With `Off`, sqlive never checkpoints: the WAL grows until the host does.
 #[test]
 fn off_leaves_checkpoints_to_the_host() {
