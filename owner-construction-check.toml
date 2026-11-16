@@ -1961,7 +1961,11 @@ crates = [
 
 [[capabilities]]
 name = "current time"
-homes = ["crates/coven-foundation/src/clock.rs"]
+homes = [
+    "crates/coven-foundation/src/clock.rs",
+    # Times how long a checkpoint holds the writer, for a log line.
+    "crates/coven-database/src/wal_checkpoints.rs",
+]
 
 [[capabilities.gates]]
 kind = "system clock"

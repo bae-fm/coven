@@ -13,7 +13,6 @@
 //! starts a run. A run gathers the statistics as an open does, holding
 //! coven's writer so no write of coven's finds the database locked meanwhile.
 
-use crate::database::with_locked;
 use crate::observation::{CommitObserver, HandleFailure};
 use crate::sqlite::DatabaseConnection;
 use crate::upkeep::{Upkeep, UpkeepThread, Wake};
@@ -81,23 +80,21 @@ impl Upkeep for PlannerStatistics {
     /// may let its writer go before the thread stops; there is then nothing
     /// to keep statistics for.
     fn run(&self) -> Result<(), DbError> {
-        with_locked(&self.connection, |connection| {
-            if !connection.statistics_wanted()? {
-                return Ok(());
-            }
-            let Some(writer) = self.writer.upgrade() else {
-                return Ok(());
-            };
-            // The run moves the schema cookie without changing a table, so
-            // the writer keeps the shapes it read: the next write reads none.
-            with_locked(&writer, |writes| {
-                writes.keeping_table_shapes(|| connection.gather_statistics_for_every_connection())
-            })?;
-            tracing::debug!("gathered the planner's statistics");
-            #[cfg(test)]
-            self.report();
-            Ok(())
-        })
+        let mut connection = lock_unpoisoned(&self.connection);
+        if !connection.statistics_wanted()? {
+            return Ok(());
+        }
+        let Some(writer) = self.writer.upgrade() else {
+            return Ok(());
+        };
+        // The run moves the schema cookie without changing a table, so
+        // the writer keeps the shapes it read: the next write reads none.
+        lock_unpoisoned(&writer)
+            .keeping_table_shapes(|| connection.gather_statistics_for_every_connection())?;
+        tracing::debug!("gathered the planner's statistics");
+        #[cfg(test)]
+        self.report();
+        Ok(())
     }
 
     fn failure(error: Arc<DbError>) -> HandleFailure {
