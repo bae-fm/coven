@@ -85,7 +85,8 @@ fn main() {
         }
     };
     let code = crate_code::CrateCode::read(&workspace, &policy);
-    let stale = policy_check::stale_rows(&workspace, &code, &policy);
+    let graph = owner_graph::OwnerGraph::collect(&code.expanded, &policy);
+    let stale = policy_check::stale_rows(&workspace, &code, &graph, &policy);
     if !stale.is_empty() {
         eprintln!(
             "owner-construction-check: {} names what the workspace does not hold:",
@@ -96,7 +97,7 @@ fn main() {
         }
         std::process::exit(2);
     }
-    let report = match report::check_packages(&workspace, &code, &policy, &packages) {
+    let report = match report::check_packages(&workspace, &code, &graph, &policy, &packages) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");

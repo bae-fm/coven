@@ -2,6 +2,13 @@ use super::*;
 use crate::crate_code::CrateCode;
 use crate::sources::{Manifest, SqlFile};
 
+/// The rows of `policy` that name what `workspace` does not hold, read as
+/// the checker reads them.
+fn current_stale_rows(workspace: &Workspace, policy: &Policy) -> Vec<String> {
+    let code = CrateCode::read(workspace, policy);
+    stale_rows(workspace, &code, &OwnerGraph::collect(&code.expanded, policy), policy)
+}
+
 fn workspace(files: Vec<RustFile>, members: &[(&str, &str)]) -> Workspace {
     Workspace {
         files,
@@ -21,7 +28,7 @@ fn stale(files: Vec<RustFile>, rows: &str) -> Vec<String> {
     let members = [("crates/app-foundation", "app-foundation"), ("crates/app", "app")];
     let workspace = workspace(files, &members);
     let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
-    stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy)
+    current_stale_rows(&workspace, &policy)
 }
 
 #[test]
@@ -52,7 +59,7 @@ fn a_policy_naming_only_what_exists_is_current() {
 #[test]
 fn a_policy_must_select_rules() {
     let (workspace, policy) = (workspace(Vec::new(), &[]), Policy::fixture(""));
-    let rows = stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy);
+    let rows = current_stale_rows(&workspace, &policy);
     assert_eq!(rows, ["rules: the policy selects no rules"]);
 }
 
@@ -89,7 +96,7 @@ fn library_names_name_a_dependency() {
         library_names = { "coreaudio-rs" = "coreaudio", "objc2-rs" = "objc2" }"#,
     );
     assert_eq!(
-        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        current_stale_rows(&workspace, &policy),
         ["library_names: no member depends on objc2-rs"]
     );
 }
@@ -221,7 +228,7 @@ fn every_type_the_policy_names_is_declared_by_a_crate() {
     assert_eq!(
         {
             let workspace = workspace(files, &members);
-            stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy)
+            current_stale_rows(&workspace, &policy)
         },
         [
             "capability_types: no crate declares Fixture",
@@ -400,7 +407,7 @@ fn sql_files_create_the_schemas_tables() {
         "#,
     );
     assert_eq!(
-        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        current_stale_rows(&workspace, &policy),
         [
             "database: schema table listing_search is in no domain",
             "database: domain table gone is not a schema table",
@@ -455,7 +462,7 @@ fn domains_name_views_the_sql_creates() {
         "#,
     );
     assert_eq!(
-        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        current_stale_rows(&workspace, &policy),
         [
             "database: domain listing names view listing, which is a schema table",
             "database: domain listing names view fixture, which the SQL never creates",
@@ -702,7 +709,7 @@ fn a_kept_state_row_names_a_type_or_a_function_and_a_counter_row_a_sql_column() 
     }];
     let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
     assert_eq!(
-        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        current_stale_rows(&workspace, &policy),
         [
             "read_shapes.frozen: crates/app/src/reads.rs: Gone names no type or function there",
             "read_shapes.frozen: crates/app/src/schema.sql: v.gone is no column the SQL there increases",

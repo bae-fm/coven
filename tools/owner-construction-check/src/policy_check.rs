@@ -18,16 +18,22 @@ use crate::owner_graph::OwnerGraph;
 use crate::policy::{is_identifier, split_callable, Database, ListKind, Policy, Shape};
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
-use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
+use crate::syntax::{type_name, type_names, RustFile, TypeNames};
 use crate::type_identity::TypeIdentity;
 
 /// Each policy row that names something the workspace does not hold. Rows
 /// naming code are held against the crates' code with their macros
 /// expanded, so a method a macro writes can be a composition root; the
-/// schema's table macros are read as written.
-pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Policy) -> Vec<String> {
+/// schema's table macros are read as written. `graph` is the owner graph of
+/// those expanded files.
+pub(crate) fn stale_rows(
+    workspace: &Workspace,
+    code: &CrateCode,
+    graph: &OwnerGraph,
+    policy: &Policy,
+) -> Vec<String> {
     let crate_files = &code.expanded;
-    let identity = TypeIdentity::of(crate_files, &policy.phantom_type_arguments);
+    let identity = &graph.identity;
     let mut stale = Vec::new();
     if policy.rules.is_empty() {
         stale.push("rules: the policy selects no rules".to_string());
@@ -36,13 +42,13 @@ pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Polic
     stale.extend(unknown_libraries(workspace, policy));
     stale.extend(missing_homes(&code.written, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
-    stale.extend(invalid_capability_factories(crate_files, &identity, policy));
-    stale.extend(invalid_handles(crate_files, &identity, policy));
+    stale.extend(invalid_capability_factories(crate_files, identity, policy));
+    stale.extend(invalid_handles(crate_files, identity, policy));
     stale.extend(overlapping_state_rows(policy));
-    stale.extend(undeclared_types(crate_files, &identity, policy));
+    stale.extend(undeclared_types(crate_files, graph, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
-    stale.extend(invalid_database(code, workspace, policy));
-    stale.extend(invalid_read_shapes(crate_files, code, policy));
+    stale.extend(invalid_database(code, workspace, graph, policy));
+    stale.extend(invalid_read_shapes(crate_files, code, graph, policy));
     stale
 }
 
@@ -330,12 +336,8 @@ fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
 /// policy's external types: a crate's production source names it, as a type
 /// or as a trait a bound names (`impl coven::SqlRead`), and no crate declares
 /// it. Returns a message for each type that breaks this.
-fn undeclared_types(
-    crate_files: &[RustFile],
-    identity: &TypeIdentity,
-    policy: &Policy,
-) -> Vec<String> {
-    let declared = collect_declared_types(crate_files, &policy.shared_pointer_types, identity);
+fn undeclared_types(crate_files: &[RustFile], graph: &OwnerGraph, policy: &Policy) -> Vec<String> {
+    let (identity, declared) = (&graph.identity, &graph.types);
     // Every name, type arguments of phantom generics included.
     let every_argument = BTreeSet::new();
     let mut mentioned = BTreeSet::new();
@@ -417,7 +419,12 @@ fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<S
 /// is the schema's, so a new table is placed when it lands and none goes
 /// unguarded. The schema's tables are those its table macros declare and those
 /// a `CREATE TABLE` in the crates' SQL files makes.
-fn invalid_database(code: &CrateCode, workspace: &Workspace, policy: &Policy) -> Vec<String> {
+fn invalid_database(
+    code: &CrateCode,
+    workspace: &Workspace,
+    graph: &OwnerGraph,
+    policy: &Policy,
+) -> Vec<String> {
     let Some(database) = &policy.database else {
         return Vec::new();
     };
@@ -430,7 +437,7 @@ fn invalid_database(code: &CrateCode, workspace: &Workspace, policy: &Policy) ->
             stale.push(format!("database: rusqlite_reexport {package} is not a workspace member"));
         }
     }
-    stale.extend(invalid_domains(code, database, policy));
+    stale.extend(invalid_domains(code, database, &graph.owners));
     let mut schema = code
         .sql
         .iter()
@@ -532,8 +539,11 @@ fn invalid_domain_views(
 
 /// Each domain has a unique name, homes that hold a source, Rust or SQL, and
 /// an owner the checker infers as one; no table is in two domains.
-fn invalid_domains(code: &CrateCode, database: &Database, policy: &Policy) -> Vec<String> {
-    let inferred = OwnerGraph::collect(&code.expanded, policy).owners;
+fn invalid_domains(
+    code: &CrateCode,
+    database: &Database,
+    inferred: &BTreeSet<String>,
+) -> Vec<String> {
     let mut stale = Vec::new();
     let mut names = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -574,7 +584,12 @@ fn invalid_domains(code: &CrateCode, database: &Database, policy: &Policy) -> Ve
 /// memory a type keeps, `table.column` for a counter), with a count of at
 /// least one and what it found or why it is allowed. A key is in one list,
 /// once.
-fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) -> Vec<String> {
+fn invalid_read_shapes(
+    files: &[RustFile],
+    code: &CrateCode,
+    graph: &OwnerGraph,
+    policy: &Policy,
+) -> Vec<String> {
     let Some(shapes) = &policy.read_shapes else {
         return Vec::new();
     };
@@ -585,8 +600,7 @@ fn invalid_read_shapes(files: &[RustFile], code: &CrateCode, policy: &Policy) ->
         }
     }
     let methods = declared_methods(files);
-    let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
-    let types = collect_declared_types(files, &policy.shared_pointer_types, &identity);
+    let types = &graph.types;
     let increments = increment_sites(code);
     let sql_paths =
         code.sql.iter().map(|file| file.relative_path.as_str()).collect::<BTreeSet<_>>();

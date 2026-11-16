@@ -29,9 +29,11 @@ pub(crate) struct UnknownPackage(String);
 
 /// Package selection limits diagnostics, never the workspace used to resolve
 /// names and ownership. An empty selection checks the whole workspace.
+/// `graph` is the owner graph of the crates' expanded code.
 pub(crate) fn check_packages(
     workspace: &Workspace,
     code: &CrateCode,
+    graph: &OwnerGraph,
     policy: &Policy,
     packages: &[String],
 ) -> Result<Report, UnknownPackage> {
@@ -53,16 +55,21 @@ pub(crate) fn check_packages(
                 .ok_or_else(|| UnknownPackage(package.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(check_paths(workspace, code, policy, &roots))
+    Ok(check_paths(workspace, code, graph, policy, &roots))
 }
 
 /// The policy's selected rules. The capability and owner rules read the
 /// crates' code (`crate_code.rs`); conventions read every file as written,
 /// tools and tests included. An invocation the checker could not expand is a
 /// finding whenever a rule reads the crates' code.
-fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: &[&str]) -> Report {
+fn check_paths(
+    workspace: &Workspace,
+    code: &CrateCode,
+    graph: &OwnerGraph,
+    policy: &Policy,
+    roots: &[&str],
+) -> Report {
     let files = &code.expanded;
-    let graph = OwnerGraph::collect(files, policy);
     let mut findings = Vec::new();
     if policy.rules.iter().any(|rule| rule.reads_crate_code()) {
         findings.extend(code.unexpanded.iter().cloned());
@@ -72,14 +79,14 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
     }
     if policy.selects(Rule::DatabaseBoundary) {
         findings.extend(find_database_boundary_violations(code, policy));
-        findings.extend(find_domain_owner_forwarding(files, policy, &graph));
+        findings.extend(find_domain_owner_forwarding(files, policy, graph));
     }
     if policy.selects(Rule::OwnerDependencies) {
-        findings.extend(find_owner_dependency_leaks(files, policy, &graph));
-        findings.extend(find_task_state_leaks(files, policy, &graph));
+        findings.extend(find_owner_dependency_leaks(files, policy, graph));
+        findings.extend(find_task_state_leaks(files, policy, graph));
     }
     if policy.selects(Rule::RetainedCapabilityParameters) {
-        findings.extend(find_retained_capability_parameter_violations(files, &graph, policy));
+        findings.extend(find_retained_capability_parameter_violations(files, graph, policy));
     }
     if policy.selects(Rule::ComponentBundles) {
         findings.extend(find_component_bundle_violations(files, &graph.identity));
@@ -88,7 +95,7 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
         findings.extend(find_capability_boundary_violations(files, policy));
     }
     if policy.selects(Rule::CapabilityConstruction) {
-        findings.extend(find_capability_construction_violations(files, policy, &graph));
+        findings.extend(find_capability_construction_violations(files, policy, graph));
     }
     if policy.selects(Rule::ReadShapes) {
         findings.extend(find_read_shape_violations(code, policy));
@@ -107,7 +114,7 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
     // Ambiguous names invalidate the workspace graph, even when the first
     // declaration (where the diagnostic points) is outside selected packages.
     if policy.rules.iter().any(|rule| rule.reads_owner_graph()) {
-        findings.extend(find_unique_type_name_violations(files, policy, &graph));
+        findings.extend(find_unique_type_name_violations(files, policy, graph));
     }
     findings.sort();
     findings.dedup();
