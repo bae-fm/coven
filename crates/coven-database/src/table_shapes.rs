@@ -5,7 +5,8 @@
 //! shape an earlier schema gave it, and no commit reads them again.
 
 use super::DatabaseConnection;
-use crate::DbError;
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ pub(crate) struct TableShapes {
 }
 
 impl TableShapes {
-    fn read(database: &DatabaseConnection) -> Result<Self, DbError> {
+    fn read(database: &DatabaseConnection) -> Result<Self, EngineError<StoreFailure>> {
         let tables = database.query(
             "SELECT name,type FROM pragma_table_list
              WHERE schema='main' AND type IN ('table','shadow','virtual') AND name NOT GLOB 'sqlite_*'",
@@ -107,7 +108,7 @@ impl DatabaseConnection {
     /// The shapes of the main schema's tables as the connection has the
     /// schema now: those read before, while SQLite's schema cookie still
     /// names the schema they were read in, else read afresh.
-    pub(crate) fn table_shapes(&self) -> Result<Arc<TableShapes>, DbError> {
+    pub(crate) fn table_shapes(&self) -> Result<Arc<TableShapes>, EngineError<StoreFailure>> {
         let cookie = self.app_schema_cookie()?;
         if let Some((read_in, shapes)) = self.shapes.borrow().as_ref() {
             if *read_in == cookie {
@@ -122,13 +123,13 @@ impl DatabaseConnection {
     /// Run `change`, which moves SQLite's schema cookie without changing any
     /// table, so the shapes stay those of the schema it leaves: the next
     /// capture reads no table again.
-    pub(crate) fn keeping_table_shapes<T>(
+    pub(crate) fn keeping_table_shapes<T, E: From<EngineError<StoreFailure>>>(
         &mut self,
-        change: impl FnOnce() -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
+        change: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
         self.table_shapes()?;
         let changed = change()?;
-        let cookie = self.schema_cookie()?;
+        let cookie = self.schema_cookie().map_err(EngineError::from)?;
         if let Some((read_in, _)) = self.shapes.borrow_mut().as_mut() {
             *read_in = cookie;
         }

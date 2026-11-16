@@ -73,7 +73,7 @@ impl FileStaging {
             let slot = read_unpoisoned(&database);
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             if let Some(error) = inner.access.observer.error() {
-                return Err(error.into());
+                return Err(DbError::from(error).into());
             }
             // A panic in the batch fails the staging with `DbError::Bug`, as
             // a refused batch fails it.

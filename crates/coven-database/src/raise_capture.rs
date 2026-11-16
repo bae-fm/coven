@@ -228,24 +228,24 @@ pub(crate) fn prepare(
 }
 
 pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
-    db.query_row("SELECT max(through) FROM _coven_raise_captures", [], |r| {
+    Ok(db.query_row("SELECT max(through) FROM _coven_raise_captures", [], |r| {
         r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()
-    })
+    })?)
 }
 
 pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32, u64)>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
         [],
         |r| Ok((audience(r, 0)?, r.get(1)?, counter(r.get(2)?)?)),
-    )
+    )?)
 }
 
 pub(crate) fn captures(
     db: &DatabaseConnection,
     device: DeviceId,
 ) -> Result<Vec<RaiseCapture>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience",
         [],
         |r| {
@@ -256,7 +256,7 @@ pub(crate) fn captures(
                 covers: counter(r.get(3)?)?,
             })
         },
-    )
+    )?)
 }
 
 pub(crate) fn write<E>(
@@ -285,7 +285,9 @@ pub(crate) fn write<E>(
 /// if none: received writes are read from it on (§18.5), and a snapshot this
 /// installation writes announces it as its breaking version (§16.3).
 pub(crate) fn breaking_version(db: &DatabaseConnection) -> Result<u32, DbError> {
-    db.query_row("SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1", [], |r| r.get(0))
+    Ok(db.query_row("SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1", [], |r| {
+        r.get(0)
+    })?)
 }
 
 /// Read received writes from schema version `minimum` on, the version a

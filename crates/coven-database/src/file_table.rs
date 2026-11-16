@@ -55,12 +55,12 @@ pub(crate) fn declared(tables: &[SyncedTable]) -> Vec<(String, String)> {
 
 /// The file references last registered, with whether each is write-once.
 pub(crate) fn registered(db: &DatabaseConnection) -> Result<Vec<(String, String, bool)>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT table_name,column_name,write_once FROM _coven_file_columns
          ORDER BY table_name,column_name",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )
+    )?)
 }
 
 /// File references under a migration step's renames; a dropped table or

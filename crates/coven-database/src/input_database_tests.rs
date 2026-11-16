@@ -156,12 +156,12 @@ async fn a_failed_range_commit_preserves_prior_ranges_and_budget() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let input = input(&db, "write", 1, false).await;
     input.keep_range(0, vec![1, 2]).await.unwrap();
-    db.call(|inner| inner.inputs.write(|db, _| db.batch("CREATE TRIGGER refuse_input AFTER INSERT ON _coven_input_ranges BEGIN SELECT RAISE(ABORT,'input failed'); END"))).await.unwrap();
+    db.call(|inner| inner.inputs.write(|db, _| Ok(db.batch("CREATE TRIGGER refuse_input AFTER INSERT ON _coven_input_ranges BEGIN SELECT RAISE(ABORT,'input failed'); END")?))).await.unwrap();
     let before = db.input_budget().await.unwrap();
     assert!(input.keep_range(2, vec![3, 4]).await.is_err());
     assert_eq!(db.input_budget().await.unwrap(), before);
     assert_eq!(input.ranges(0, 4).await.unwrap()[0].bytes, [1, 2]);
-    db.call(|inner| inner.inputs.write(|db, _| db.batch("DROP TRIGGER refuse_input")))
+    db.call(|inner| inner.inputs.write(|db, _| Ok(db.batch("DROP TRIGGER refuse_input")?)))
         .await
         .unwrap();
     input.keep_range(2, vec![3, 4]).await.unwrap();

@@ -13,10 +13,11 @@
 //! starts a run. A run gathers the statistics as an open does, holding
 //! coven's writer so no write of coven's finds the database locked meanwhile.
 
-use crate::observation::{CommitObserver, HandleFailure};
+use crate::engine_error::EngineError;
+use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
+use crate::store_failure::StoreFailure;
 use crate::upkeep::{Upkeep, UpkeepThread, Wake};
-use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, Weak};
@@ -49,7 +50,7 @@ impl UpkeepThread<PlannerStatistics> {
         connection: DatabaseConnection,
         writer: &Arc<Mutex<DatabaseConnection>>,
         handle: CommitObserver,
-    ) -> Result<Self, DbError> {
+    ) -> Result<Self, EngineError<StoreFailure>> {
         let statistics = Self::spawn(
             PlannerStatistics {
                 connection: Mutex::new(connection),
@@ -68,7 +69,7 @@ impl UpkeepThread<PlannerStatistics> {
     }
 
     /// Stop, after any check or run in progress, and close the connection.
-    pub(crate) fn stop(self) -> Result<(), DbError> {
+    pub(crate) fn stop(self) -> Result<(), EngineError<StoreFailure>> {
         coven_foundation::locks::into_unpoisoned(self.join().connection).close()
     }
 }
@@ -79,7 +80,7 @@ impl Upkeep for PlannerStatistics {
     /// One wake's check, and the run it calls for. A store whose open failed
     /// may let its writer go before the thread stops; there is then nothing
     /// to keep statistics for.
-    fn run(&self) -> Result<(), DbError> {
+    fn run(&self) -> Result<(), EngineError<StoreFailure>> {
         let mut connection = lock_unpoisoned(&self.connection);
         if !connection.statistics_wanted()? {
             return Ok(());
@@ -97,8 +98,8 @@ impl Upkeep for PlannerStatistics {
         Ok(())
     }
 
-    fn failure(error: Arc<DbError>) -> HandleFailure {
-        HandleFailure::Statistics(error)
+    fn failure(error: EngineError<StoreFailure>) -> EngineError<StoreFailure> {
+        EngineError::StatisticsFailed(Arc::new(error))
     }
 }
 

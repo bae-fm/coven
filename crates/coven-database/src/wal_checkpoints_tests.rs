@@ -1,3 +1,5 @@
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use crate::tests::TestStore;
 use crate::{CheckpointMode, DbError, Migration, SqliteSettings, WalAutocheckpoint, WalCheckpoint};
 use coven_foundation::clock::HANG_GUARD;
@@ -15,12 +17,15 @@ impl super::WalCheckpointer {
     }
 
     /// Run one wake's checkpoint now, on the calling thread.
-    pub(crate) fn run_now(&self) -> Result<(), crate::DbError> {
+    pub(crate) fn run_now(&self) -> Result<(), EngineError<StoreFailure>> {
         self.upkeep().checkpoint()
     }
 
     /// Run `fault` as each checkpoint takes the writer.
-    pub(crate) fn fault(&self, fault: impl FnMut() -> Result<(), crate::DbError> + Send + 'static) {
+    pub(crate) fn fault(
+        &self,
+        fault: impl FnMut() -> Result<(), EngineError<StoreFailure>> + Send + 'static,
+    ) {
         *self.upkeep().fault.lock().unwrap() = Some(Box::new(fault));
     }
 
@@ -272,15 +277,15 @@ fn checkpointed_at_100_pages() -> SqliteSettings {
     }
 }
 
-fn sqlite_error(code: std::ffi::c_int) -> DbError {
-    DbError::Sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
+fn sqlite_error(code: std::ffi::c_int) -> EngineError<StoreFailure> {
+    EngineError::Sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
 }
 
 /// Run `fault` as each checkpoint takes the writer, telling the returned
 /// receiver as it does.
 fn faulted(
     db: &crate::Database,
-    mut fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
+    mut fault: impl FnMut() -> Result<(), EngineError<StoreFailure>> + Send + 'static,
 ) -> UnboundedReceiver<()> {
     let (tried, tries) = unbounded_channel();
     db.fault_checkpoints(move || {
@@ -299,7 +304,7 @@ fn faulted(
 /// failure refuses.
 async fn checkpointer_failure(
     db: &crate::Database,
-    fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
+    fault: impl FnMut() -> Result<(), EngineError<StoreFailure>> + Send + 'static,
 ) -> DbError {
     let mut tries = faulted(db, fault);
     let mut query = db.subscribe(|sql| {

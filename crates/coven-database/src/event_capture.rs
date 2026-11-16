@@ -9,7 +9,8 @@
 
 use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;
-use crate::DbError;
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use sqlive::SqlValue;
@@ -46,13 +47,17 @@ pub(super) struct EventCapture {
 
 impl EventCapture {
     /// Record `transaction`'s row operations until it stops observing them.
-    pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
+    pub(super) fn begin(
+        transaction: &mut WriteTransaction<'_>,
+    ) -> Result<Self, EngineError<StoreFailure>> {
         let (tables, recorded, scoped) = transaction.within(|database| {
             let recorded = Arc::clone(
                 &database
                     .observation
                     .as_ref()
-                    .ok_or(DbError::Invariant { what: "a local write's writer serves its handle" })?
+                    .ok_or(EngineError::Invariant {
+                        what: "a local write's writer serves its handle",
+                    })?
                     .recorded,
             );
             let tables = database.table_shapes()?;
@@ -60,7 +65,7 @@ impl EventCapture {
                 Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
                 None => std::collections::HashMap::new(),
             };
-            Ok::<_, DbError>((tables, recorded, scoped))
+            Ok::<_, EngineError<StoreFailure>>((tables, recorded, scoped))
         })?;
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
@@ -95,12 +100,12 @@ impl EventCapture {
                 let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
                     count(accessor.get_column_count())
                         .map(|i| Ok(old_value(accessor, i)?.map(SqlValue::from)))
-                        .collect::<Result<Vec<_>, DbError>>()
+                        .collect::<Result<Vec<_>, EngineError<StoreFailure>>>()
                 };
                 let new = |accessor: &rusqlite::hooks::PreUpdateNewValueAccessor| {
                     count(accessor.get_column_count())
                         .map(|i| Ok(new_value(accessor, i)?.map(SqlValue::from)))
-                        .collect::<Result<Vec<_>, DbError>>()
+                        .collect::<Result<Vec<_>, EngineError<StoreFailure>>>()
                 };
                 let event = match case {
                     PreUpdateCase::Insert(accessor) => Operation {

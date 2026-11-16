@@ -1,9 +1,10 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
+use crate::engine_error::EngineError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
-use crate::DbError;
+use crate::store_failure::StoreFailure;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{caught_sync, BugSinkRef, CarriesBug};
 use futures_lite::future::block_on;
@@ -18,6 +19,10 @@ use tokio::sync::Notify;
 /// One run of the query for a request: it reads on a connection it releases
 /// before returning, and hands its reads to the subscription.
 type Run<Q, T, E> = Arc<dyn Fn(&Q, &CommitSubscription) -> Result<T, E> + Send + Sync>;
+
+/// How a query's error type `E` holds an engine error: the handle's failure,
+/// or the bug a run's panic is.
+pub(crate) type Failed<E> = fn(EngineError<StoreFailure>) -> E;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -115,6 +120,7 @@ impl<Q> Drop for QueryLifetime<Q> {
 pub struct ReconfigurableLiveQuery<Q, T, E> {
     lifetime: QueryLifetime<Q>,
     run: Run<Q, T, E>,
+    failed: Failed<E>,
     commits: CommitSubscription,
     /// Where a bug in a result nobody waits for any more goes (E15).
     bugs: BugSinkRef,
@@ -132,11 +138,12 @@ impl<Q, T, E> ReconfigurableLiveQuery<Q, T, E>
 where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Send + 'static,
-    E: From<DbError> + CarriesBug + Send + 'static,
+    E: CarriesBug + Send + 'static,
 {
     pub(crate) fn new(
         request: Q,
         run: Run<Q, T, E>,
+        failed: Failed<E>,
         commits: CommitSubscription,
         bugs: BugSinkRef,
     ) -> Self {
@@ -151,6 +158,7 @@ where
                 changed: Notify::new(),
             })),
             run,
+            failed,
             commits,
             bugs,
             current: None,
@@ -197,6 +205,7 @@ where
         let ReconfigurableLiveQuery {
             lifetime,
             run,
+            failed,
             commits,
             bugs,
             current,
@@ -208,7 +217,7 @@ where
         let mapped: Run<Q, U, E> = Arc::new(move |request, commits| {
             let value = run(request, commits)?;
             caught_sync("process a read", || process(value))
-                .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
+                .unwrap_or_else(|bug| Err(failed(EngineError::Bug(bug))))
         });
         // A new output type has no previous result to compare. Rerun the current
         // request so the transformed query answers it.
@@ -221,6 +230,7 @@ where
         ReconfigurableLiveQuery {
             lifetime,
             run: mapped,
+            failed,
             commits,
             bugs,
             current,
@@ -296,11 +306,11 @@ where
         };
         let ((request, revision), cause) = next?;
         let result = if let Some(error) = failure {
-            Err(error.into())
+            Err((self.failed)(error))
         } else {
             self.commits.begin();
             caught_sync("live query", || (self.run)(&request, &self.commits))
-                .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
+                .unwrap_or_else(|bug| Err((self.failed)(EngineError::Bug(bug))))
         };
         self.current = Some((request.clone(), revision));
         let equal = match &result {
@@ -342,7 +352,7 @@ where
     /// result equals the last. Once the store is closed, or the handle fails
     /// every call, one result reports why and every later call returns
     /// `None`. So does a run whose error carries a bug, as one that panicked
-    /// does with `DbError::Bug`: what it read is unknown, so no commit could
+    /// does with `EngineError::Bug`: what it read is unknown, so no commit could
     /// tell whether to run it again (E15).
     pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
@@ -380,7 +390,7 @@ pub struct LiveQuery<T, E> {
     inner: ReconfigurableLiveQuery<(), T, E>,
 }
 
-impl<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static> LiveQuery<T, E> {
+impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
     pub(crate) fn new(inner: ReconfigurableLiveQuery<(), T, E>) -> Self {
         Self { inner }
     }

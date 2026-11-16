@@ -3,6 +3,7 @@
 
 use crate::sqlite::{DatabaseConnection, Operation};
 use crate::store_call::StoreCall;
+use crate::write_failure::{hosted, Hosted};
 use crate::DbError;
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::Slot;
@@ -24,11 +25,14 @@ where
 {
     sql.with_profile(|db| {
         db.write_with(
-            |database, operations| app_phase(database, call, operations, files, app),
+            |database, operations| hosted(|| app_phase(database, call, operations, files, app)),
             |database, operations, applied| {
-                host_phase(database, call, operations, applied, schema, device, now, files)
+                hosted(|| {
+                    host_phase(database, call, operations, applied, schema, device, now, files)
+                })
             },
         )
+        .map_err(Hosted::into_inner)
     })
 }
 
@@ -82,7 +86,7 @@ where
     let result = sql(files)?;
     // SQLite ending the transaction says more than the
     // statement that ended it.
-    database.require_transaction()?;
+    database.require_transaction().map_err(DbError::from)?;
     files.check_parts()?;
     files.finish_app(operations)?;
     Ok((result, deleted_circles))

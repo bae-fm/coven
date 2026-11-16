@@ -37,7 +37,7 @@ pub(crate) fn object_path(
     format!("{}/{}", uploader.0, object)
 }
 fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
-    db.query_row("SELECT coalesce(max(last_read),0)+1 FROM _coven_cache", [], |r| r.get(0))
+    Ok(db.query_row("SELECT coalesce(max(last_read),0)+1 FROM _coven_cache", [], |r| r.get(0))?)
 }
 /// One stored entry and where `index` lies in it: a verified range of
 /// consecutive chunks, a header, or a checked whole file.
@@ -131,7 +131,7 @@ pub(super) fn read<L>(
     access.with_writer(|db, _| {
         db.transaction(|db: &DatabaseConnection| {
             db.execute("UPDATE _coven_cache SET last_read=?2 WHERE path=?1", (&path, tick(db)?))?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
     })?;
     Ok(Some(bytes))
@@ -173,9 +173,11 @@ pub(super) fn repair<L>(
 /// row still names them, which is damage.
 fn evicted<L>(access: &DatabaseAccess<L>, path: &str) -> Result<(), DbError> {
     let recorded = access.with_writer(|db, _| {
-        db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)", [path], |r| {
-            r.get::<_, bool>(0)
-        })
+        Ok::<_, DbError>(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)",
+            [path],
+            |r| r.get::<_, bool>(0),
+        )?)
     })?;
     if recorded {
         Err(DbError::DamagedDatabase)
@@ -445,11 +447,11 @@ pub(crate) fn clear_entries(db: &DatabaseConnection, namespace: &str) -> Result<
 /// Whether a pinned, checked whole copy of this file is on the device.
 pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND checked_hash=?3)",
         (file.namespace(), object_path_of(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
         |r| r.get(0),
-    )
+    )?)
 }
 /// Publish a written whole file as the file's only cache entry, pinned;
 /// older entries become recorded removals in the same
@@ -493,11 +495,11 @@ pub(crate) fn publish(
 /// the last such record off them removes their entries, and one publishing
 /// an entry after it would name bytes nothing could read or unpin.
 pub(crate) fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND object_path=?2)",
         (file.namespace(), object_path_of(file)?),
         |r| r.get(0),
-    )
+    )?)
 }
 /// Delete a file's cache entries and record their names for removal, once
 /// no row names them; returns the names.

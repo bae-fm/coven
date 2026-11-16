@@ -231,7 +231,7 @@ fn taken(
         ),
         params![table.table],
     )?;
-    db.batch("DROP TABLE temp._coven_install_shown")
+    Ok(db.batch("DROP TABLE temp._coven_install_shown")?)
 }
 
 /// The synced tables whose references lead back to themselves.

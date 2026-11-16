@@ -90,7 +90,7 @@ fn settlement(text: String) -> rusqlite::Result<ClaimSettlement> {
 }
 
 fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
-    db.query("SELECT device,number,through,operation,settlement FROM _coven_claim_journal WHERE singleton=1", [], |r| {
+    Ok(db.query("SELECT device,number,through,operation,settlement FROM _coven_claim_journal WHERE singleton=1", [], |r| {
         let work = match (r.get::<_,Option<Vec<u8>>>(2)?, r.get::<_,Option<i64>>(3)?) {
             (Some(n),None) => ClaimWork::Writes(counter(n)?),
             (None,Some(id)) => ClaimWork::Operation(OperationId(id)),
@@ -98,7 +98,7 @@ fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
         };
         Ok(Claim { device:r.get::<_, DeviceId>(0)?, number:counter(r.get(1)?)?, work,
             attempts:Vec::new(), settlement:settlement(r.get(4)?)? })
-    }).map(|mut rows| rows.pop())
+    }).map(|mut rows| rows.pop())?)
 }
 
 pub(crate) fn current(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
@@ -231,7 +231,7 @@ impl Iterator for ClaimBytes<'_> {
             }
             Err(error) => {
                 self.ended = true;
-                Some(Err(error))
+                Some(Err(error.into()))
             }
         }
     }
@@ -242,11 +242,13 @@ pub(crate) fn read_attempt<T, E: From<DbError>>(
     consume: impl FnOnce(ClaimBytes<'_>) -> Result<T, E>,
 ) -> Result<T, E> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
-    let attempt = db.query_row(
-        "SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
-        params![claim.device, claim.number.to_be_bytes()],
-        |r| r.get(0),
-    )?;
+    let attempt = db
+        .query_row(
+            "SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
+            params![claim.device, claim.number.to_be_bytes()],
+            |r| r.get(0),
+        )
+        .map_err(DbError::from)?;
     consume(ClaimBytes {
         db,
         device: claim.device,
@@ -411,11 +413,11 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
 /// Path evidence distinguishes contention from an unattempted use of this id.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn attempted(db: &DatabaseConnection, path: &ObjectPath) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_claim_attempts WHERE path=?1)",
         [path.as_str()],
         |r| r.get(0),
-    )
+    )?)
 }
 
 pub(crate) fn attempted_digest(
@@ -424,8 +426,8 @@ pub(crate) fn attempted_digest(
     path: &ObjectPath,
     digest: &[u8; 32],
 ) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_claim_attempts WHERE number=?1 AND path=?2 AND digest=?3)",
-        params![number.to_be_bytes(), path.as_str(), digest], |r| r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_claim_attempts WHERE number=?1 AND path=?2 AND digest=?3)",
+        params![number.to_be_bytes(), path.as_str(), digest], |r| r.get(0))?)
 }
 
 /// Durable transfer state for the current attempt's exact sealed bytes.
@@ -438,8 +440,8 @@ pub struct ClaimUpload {
 
 pub(crate) fn upload(db: &DatabaseConnection) -> Result<ClaimUpload, DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
-    db.query_row("SELECT size,session FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
-        params![claim.device, claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?)?, session: row.get(1)?}))
+    Ok(db.query_row("SELECT size,session FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
+        params![claim.device, claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?)?, session: row.get(1)?}))?)
 }
 
 pub(crate) fn save_upload(db: &DatabaseConnection, session: Vec<u8>) -> Result<(), DbError> {

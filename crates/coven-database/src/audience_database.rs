@@ -129,7 +129,7 @@ impl AudienceDatabase {
                     scratch.batch(sql)?;
                 }
             }
-            Ok(())
+            Ok::<_, DbError>(())
         })?;
         result.circles = circles;
         result.staged = staged;
@@ -215,7 +215,7 @@ pub(crate) fn verify(
             }
             scratch.batch("ROLLBACK TO reads_across; RELEASE reads_across")?;
             if difference.is_some() {
-                return Ok(difference);
+                return Ok::<_, DbError>(difference);
             }
         }
         Ok(None)

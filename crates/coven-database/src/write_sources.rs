@@ -2,6 +2,7 @@
 
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
+use crate::write_failure::{hosted, Hosted};
 use crate::{merge_store::MergeStore, write_encoding::counter, DbError};
 use coven_format::{
     merge_fields,
@@ -774,7 +775,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
          LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
          WHERE c.audience=?1 ORDER BY c.write_id,c.table_name,c.key",
         [audience],
-        |r| {
+        |r| hosted(|| {
             let write: Vec<u8> = r.get(0).map_err(DbError::from)?;
             let header =
                 merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(1).map_err(DbError::from)?)
@@ -799,8 +800,8 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
                 verdict: read_verdict(r.get(4).map_err(DbError::from)?)?,
                 stop,
             }))
-        },
-    )
+        }),
+    ).map_err(Hosted::into_inner)
 }
 
 /// This device's migration write changes rows only through its own raise's

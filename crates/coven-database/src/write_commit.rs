@@ -97,10 +97,10 @@ fn retain(
             });
         }
     }
-    database.query_row(
+    Ok(database.query_row(
         "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4) RETURNING id",
         params![stamp, id.number.to_be_bytes().as_slice(), read_through.to_be_bytes().as_slice(), slot.map(|s|s.get().to_be_bytes().to_vec())],
-        |r| r.get(0))
+        |r| r.get(0))?)
 }
 
 /// Delete the applied-write entry `ordinal`, which no check reads any more

@@ -801,12 +801,16 @@ impl Database {
     pub async fn original_slots(&self) -> Result<Vec<coven_format::floor::OriginalSlot>, DbError> {
         self.call(|inner| {
             inner.access.with_committed(|db, _| {
-                db.query("SELECT slot,record FROM _coven_slot_records ORDER BY slot", [], |row| {
-                    Ok(coven_format::floor::OriginalSlot {
-                        slot: crate::write_encoding::slot_counter(row.get(0)?)?,
-                        object: row.get(1)?,
-                    })
-                })
+                Ok(db.query(
+                    "SELECT slot,record FROM _coven_slot_records ORDER BY slot",
+                    [],
+                    |row| {
+                        Ok(coven_format::floor::OriginalSlot {
+                            slot: crate::write_encoding::slot_counter(row.get(0)?)?,
+                            object: row.get(1)?,
+                        })
+                    },
+                )?)
             })
         })
         .await

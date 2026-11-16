@@ -352,7 +352,7 @@ impl<'a> AppView<'a> {
             )
         };
         if self.overrides.is_empty() {
-            return matching(values);
+            return Ok(matching(values)?);
         }
         let values = crate::removal_sql::reference_values(self.database, table, columns, values)?;
         let index = table

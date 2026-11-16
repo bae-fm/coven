@@ -311,7 +311,7 @@ impl<'c> MigrationSnapshot<'c> {
             identifier(&snapshot.temporary),
             terms.join(",")
         ))?;
-        db.query(
+        Ok(db.query(
             &format!(
                 "SELECT {} FROM temp.{} WHERE {}",
                 snapshot.projection(),
@@ -320,7 +320,7 @@ impl<'c> MigrationSnapshot<'c> {
             ),
             params_from_iter(values.iter().map(crate::write_encoding::sql_value)),
             |r| snapshot.values(r),
-        )
+        )?)
     }
 
     pub(crate) fn differences(

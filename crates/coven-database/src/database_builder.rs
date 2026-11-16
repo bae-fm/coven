@@ -332,7 +332,7 @@ impl DatabaseBuilder {
                     input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
                 match version {
                     0 => input_writer.transaction(|db| {
-                        db.batch(&crate::internal_schema::initial_input_schema())
+                        Ok::<_, DbError>(db.batch(&crate::internal_schema::initial_input_schema())?)
                     })?,
                     1 => (),
                     _ => return Err(DbError::DamagedDatabase.into()),

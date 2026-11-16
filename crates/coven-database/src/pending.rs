@@ -231,9 +231,11 @@ pub(crate) fn operation_recorded(
     db: &DatabaseConnection,
     id: OperationId,
 ) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE operation=?1)", [id.0], |r| {
-        r.get(0)
-    })
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE operation=?1)",
+        [id.0],
+        |r| r.get(0),
+    )?)
 }
 
 pub(crate) fn operation<P: PendingValue>(
@@ -251,11 +253,11 @@ pub(crate) fn recorded<S: Serialize>(
     db: &DatabaseConnection,
     subject: &S,
 ) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE subject=?1)",
         [SubjectKey::of(subject)?],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// A subject's stored record, if it has one.

@@ -183,7 +183,7 @@ struct RetainedBoundary {
 }
 
 fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbError> {
-    database.query(
+    Ok(database.query(
         "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied
          FROM _coven_boundaries b ORDER BY b.slot",
         [],
@@ -202,7 +202,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
             let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter).transpose()?;
             Ok(RetainedBoundary { boundary, included, applied: row.get(7)? })
         },
-    )
+    )?)
 }
 
 /// What a realized boundary decides about an uncovered part of its audience.

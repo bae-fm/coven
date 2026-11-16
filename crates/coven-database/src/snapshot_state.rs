@@ -100,16 +100,16 @@ pub(crate) fn loss(
 }
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
-    database.query_row(
+    Ok(database.query_row(
         &format!("SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
         params![id.device, id.number.to_be_bytes().as_slice()],
         |r| r.get(0),
-    )
+    )?)
 }
 
 pub(crate) fn drop_tables(database: &DatabaseConnection) -> Result<(), DbError> {
-    database
-        .batch("DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")
+    Ok(database
+        .batch("DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")?)
 }
 
 #[cfg(test)]

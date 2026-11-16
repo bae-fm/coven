@@ -53,15 +53,20 @@ pub(crate) fn follow(db: &DatabaseConnection, marker: coven_merge::WriteId) -> R
 pub(crate) fn rebuilding(
     db: &DatabaseConnection,
 ) -> Result<std::collections::BTreeMap<Audience, coven_merge::WriteId>, DbError> {
-    db.query("SELECT audience,marker FROM _coven_data_reloads WHERE marker IS NOT NULL", [], |r| {
-        Ok((
-            crate::write_encoding::audience(r, 0)?,
-            crate::write_encoding::decoded(coven_format::merge_fields::decode_write_id(
-                &r.get::<_, Vec<u8>>(1)?,
-            ))?,
-        ))
-    })
-    .map(|rows| rows.into_iter().collect())
+    Ok(db
+        .query(
+            "SELECT audience,marker FROM _coven_data_reloads WHERE marker IS NOT NULL",
+            [],
+            |r| {
+                Ok((
+                    crate::write_encoding::audience(r, 0)?,
+                    crate::write_encoding::decoded(coven_format::merge_fields::decode_write_id(
+                        &r.get::<_, Vec<u8>>(1)?,
+                    ))?,
+                ))
+            },
+        )
+        .map(|rows| rows.into_iter().collect())?)
 }
 
 /// The audience no longer waits for a reload, with its pending record: its
@@ -93,11 +98,11 @@ pub(crate) fn reloading_audiences(db: &DatabaseConnection) -> Result<BTreeSet<Au
 }
 
 pub(crate) fn reloading(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_data_reloads WHERE audience=?1)",
         [audience],
         |r| r.get(0),
-    )
+    )?)
 }
 
 #[cfg(test)]

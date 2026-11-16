@@ -7,6 +7,7 @@ use super::stream_capture::{StreamCapture, StreamChanges};
 use super::transaction_capture::{ChangeCapture, SupplementalChanges};
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
+use crate::store_failure::StoreFailure;
 use sqlive::RowChange;
 
 impl DatabaseConnection {
@@ -15,7 +16,7 @@ impl DatabaseConnection {
     /// judge the live queries, commit and tell the subscriptions. `app` gets
     /// a call that returns the operations so far. `host` gets what `app`
     /// returned.
-    pub(crate) fn write_with<A, T, E: crate::WriteFailure>(
+    pub(crate) fn write_with<A, T, E: crate::engine_error::RollbackJoin<StoreFailure>>(
         &mut self,
         app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
         host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<T, E>,
@@ -31,7 +32,7 @@ impl DatabaseConnection {
     /// transaction. When they do, the app phase takes the hook the stream's
     /// capture held, which has seen every change of `stream`; both commit, or
     /// neither.
-    pub(crate) fn stream_then_write<S, A, E: crate::WriteFailure>(
+    pub(crate) fn stream_then_write<S, A, E: crate::engine_error::RollbackJoin<StoreFailure>>(
         &mut self,
         stream: impl FnOnce(&DatabaseConnection) -> Result<(S, bool), E>,
         app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
@@ -65,7 +66,7 @@ impl DatabaseConnection {
 /// transaction and whose hooks this sets. Returns the host's result and the
 /// row changes that the commit sends to the live queries; `transaction`
 /// commits or rolls back with them.
-fn phases<A, T, E: crate::WriteFailure>(
+fn phases<A, T, E: crate::engine_error::RollbackJoin<StoreFailure>>(
     transaction: &mut WriteTransaction<'_>,
     app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
     host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<T, E>,

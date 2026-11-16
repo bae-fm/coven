@@ -48,7 +48,7 @@ impl<L> DatabaseAccess<L> {
             #[cfg(any(test, feature = "test-utils"))]
             self.tests.record_work(|work| work.writer_holds += 1);
             if let Some(error) = self.observer.error() {
-                return Err(error.into());
+                return Err(DbError::from(error).into());
             }
             let device = writer.observes_commits().then_some(self.device);
             let call = StoreCall::new(device, &self.tests);

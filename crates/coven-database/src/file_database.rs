@@ -652,7 +652,7 @@ impl FileDatabase {
     /// Observe the upload worker's work: newly queued uploads, and uploads a
     /// file stopped waiting for. Subscribing before reading the work list
     /// prevents missed commits.
-    pub fn queued_work_changes(&self) -> DatabaseChanges {
+    pub fn queued_work_changes(&self) -> DatabaseChanges<DbError> {
         // A newly queued upload, an upload a file stopped waiting for, which
         // the worker then retires (§17.9), and a self-replacement's write
         // pause starting or ending, which holds trailing uploads'
@@ -777,12 +777,12 @@ impl Database {
     pub async fn settle_files(&self) -> Result<(), DbError> {
         self.call(move |inner| {
             let waiting = inner.access.with_committed(|db, _| {
-                db.query_row(
+                Ok::<_, DbError>(db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM _coven_unreferenced_files)
                         AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)",
                     [],
                     |r| r.get::<_, bool>(0),
-                )
+                )?)
             })?;
             if !waiting {
                 return Ok(());

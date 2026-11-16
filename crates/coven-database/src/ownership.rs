@@ -10,6 +10,7 @@
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
+use crate::write_failure::{hosted, Hosted};
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_format::write_sources::ChangeId;
@@ -27,7 +28,7 @@ pub(crate) struct Creation {
 
 /// The selected creation of a row, if any write has created it.
 pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Creation>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT write_id,creator FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
         |r| {
@@ -37,7 +38,7 @@ pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Cr
             })
         },
     )
-    .map(|mut rows| rows.pop())
+    .map(|mut rows| rows.pop())?)
 }
 
 /// Offer a part's generation-zero inserts as creations, before any check
@@ -139,7 +140,7 @@ pub(crate) fn visit<E: From<DbError>>(
     db.for_each(
         "SELECT table_name,key,write_id,creator FROM _coven_creations WHERE audience=?1 ORDER BY table_name,key",
         [audience],
-        |r| {
+        |r| hosted(|| {
             let row = RowId {
                 table: r.get(0).map_err(DbError::from)?,
                 key: r.get(1).map_err(DbError::from)?,
@@ -156,8 +157,8 @@ pub(crate) fn visit<E: From<DbError>>(
                 .map_err(DbError::from)?,
             };
             visit(row, creation)
-        },
-    )
+        }),
+    ).map_err(Hosted::into_inner)
 }
 
 /// Whether a synced table restricts direct writes to each row's owner.

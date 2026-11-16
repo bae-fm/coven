@@ -380,16 +380,20 @@ impl RemovalView for DatabaseRemovalView<'_> {
                     .map(|e| format!("({e})=?"))
                     .collect::<Vec<_>>()
                     .join(" AND ");
-                for values in self.database.query(
-                    &format!(
-                        "SELECT {} FROM main.{} WHERE ({}) AND {condition}",
-                        column_list(table),
-                        identifier(&table.name),
-                        unique.predicate
-                    ),
-                    params_from_iter(parameters.iter().map(sql_value)),
-                    |r| read_row(table, r),
-                )? {
+                for values in self
+                    .database
+                    .query(
+                        &format!(
+                            "SELECT {} FROM main.{} WHERE ({}) AND {condition}",
+                            column_list(table),
+                            identifier(&table.name),
+                            unique.predicate
+                        ),
+                        params_from_iter(parameters.iter().map(sql_value)),
+                        |r| read_row(table, r),
+                    )
+                    .map_err(DbError::from)?
+                {
                     let key = (table.name.clone(), row_key(table, &values)?);
                     match &self.states {
                         States::Updated { app, .. } => {

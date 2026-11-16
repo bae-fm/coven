@@ -103,11 +103,11 @@ impl Database {
     pub async fn test_fail_sync_status(&self) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.batch(
+                Ok(writer.batch(
                     "CREATE TEMP TRIGGER fail_sync_status
                      BEFORE UPDATE OF last_pass,moved,last_synced ON coven_sync_status
                      BEGIN SELECT RAISE(ABORT,'injected sync status failure'); END;",
-                )
+                )?)
             })
         })
         .await
@@ -117,10 +117,10 @@ impl Database {
     pub async fn test_fail_device_reset(&self) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.batch(
+                Ok(writer.batch(
                     "CREATE TEMP TRIGGER fail_device_reset BEFORE INSERT ON _coven_device_reset
                      BEGIN SELECT RAISE(ABORT,'injected reset notice failure'); END;",
-                )
+                )?)
             })
         })
         .await
@@ -131,12 +131,12 @@ impl Database {
     pub async fn test_fail_device_id_in_use(&self, fail: bool) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.batch(if fail {
+                Ok(writer.batch(if fail {
                     "CREATE TEMP TRIGGER fail_device_id_in_use BEFORE INSERT ON _coven_device_id_in_use
                      BEGIN SELECT RAISE(ABORT,'injected device id record failure'); END;"
                 } else {
                     "DROP TRIGGER IF EXISTS fail_device_id_in_use;"
-                })
+                })?)
             })
         })
         .await
@@ -146,10 +146,10 @@ impl Database {
     pub async fn test_fail_retry_effect(&self) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.batch(
+                Ok(writer.batch(
                     "CREATE TEMP TRIGGER fail_retry_effect BEFORE UPDATE ON coven_retry_effect
                      BEGIN SELECT RAISE(ABORT,'injected retry effect failure'); END;",
-                )
+                )?)
             })
         })
         .await

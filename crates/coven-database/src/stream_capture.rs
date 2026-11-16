@@ -6,7 +6,8 @@ use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::DbError;
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::RowChange;
 use std::collections::BTreeSet;
@@ -41,9 +42,11 @@ impl StreamCapture {
     /// knows its tables' shapes and the columns waiting live queries narrow
     /// by; it keeps those values of each changed row, up to a bound per
     /// table, as a local write does.
-    pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
+    pub(super) fn begin(
+        transaction: &mut WriteTransaction<'_>,
+    ) -> Result<Self, EngineError<StoreFailure>> {
         let recorded = Arc::new(Mutex::new(transaction.within(|database| {
-            Ok::<_, DbError>(match &database.observation {
+            Ok::<_, EngineError<StoreFailure>>(match &database.observation {
                 Some(_) => {
                     let shapes = database.table_shapes()?;
                     let scoped = match &database.handle {

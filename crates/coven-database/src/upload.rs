@@ -283,13 +283,13 @@ fn batch(
     device: DeviceId,
     through: u64,
 ) -> Result<Vec<QueueEntry>, DbError> {
-    database.query(
+    Ok(database.query(
         "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u
         LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number
         WHERE u.device=?1 AND u.number<=?2 ORDER BY u.number",
         params![device, through.to_be_bytes()],
         QueueEntry::read,
-    )
+    )?)
 }
 
 /// Fix the keys of every write in `device`'s queue through `through` that
@@ -319,7 +319,7 @@ pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
             for (write, keys) in selected {
                 keep_keys(database, write, &keys)?;
             }
-            Ok(())
+            Ok::<_, DbError>(())
         })?;
     }
     Ok(PreparedUploads { writes })
@@ -374,11 +374,11 @@ pub(crate) fn dismissed(
     database: &DatabaseConnection,
     write: WriteId,
 ) -> Result<Vec<coven_merge::RowId>, DbError> {
-    database.query(
+    Ok(database.query(
         "SELECT table_name,key,audience FROM _coven_queued_dismissals WHERE device=?1 AND number=?2",
         params![write.device, write.number.to_be_bytes().as_slice()],
         crate::row_queries::read_identity,
-    )
+    )?)
 }
 
 /// The writes `device`'s landed claim `claim` carried leave the queue.

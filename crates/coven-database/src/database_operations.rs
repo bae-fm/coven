@@ -1,6 +1,7 @@
 //! Operation transactions, borrowing the database owner's connections.
 
 use super::Database;
+use crate::write_failure::{hosted, Hosted};
 use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate};
 use coven_foundation::id_source::DeviceId;
 use std::collections::BTreeSet;
@@ -67,11 +68,15 @@ impl Database {
     ) -> Result<OperationId, E> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.transaction_as(|db| {
-                    let id = crate::operation::insert(db, &operation)?;
-                    crate::operation::advance(db, &update(id)?)?;
-                    Ok(id)
-                })
+                writer
+                    .transaction(|db| {
+                        hosted(|| {
+                            let id = crate::operation::insert(db, &operation)?;
+                            crate::operation::advance(db, &update(id)?)?;
+                            Ok(id)
+                        })
+                    })
+                    .map_err(Hosted::into_inner)
             })
         })
         .await
@@ -358,11 +363,11 @@ impl Database {
         let now = i64::try_from(now).unwrap_or(i64::MAX);
         self.call(move |inner| {
             inner.access.with_committed(|db, _| {
-                db.query(
+                Ok(db.query(
                     "SELECT path FROM _coven_object_removals WHERE after<=?1 ORDER BY after",
                     [now],
                     |r| r.get(0),
-                )
+                )?)
             })
         })
         .await
@@ -383,9 +388,9 @@ impl Database {
     pub async fn requests_ended(&self) -> Result<BTreeSet<DeviceId>, DbError> {
         self.call(move |inner| {
             inner.access.with_committed(|db, _| {
-                db.query("SELECT device FROM _coven_requests_ended", [], |r| {
+                Ok(db.query("SELECT device FROM _coven_requests_ended", [], |r| {
                     r.get::<_, DeviceId>(0)
-                })
+                })?)
             })
         })
         .await
@@ -398,8 +403,9 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
-                    db.execute("INSERT INTO _coven_requests_ended(device) VALUES(?1)", [device])
-                        .map(drop)
+                    Ok(db
+                        .execute("INSERT INTO _coven_requests_ended(device) VALUES(?1)", [device])
+                        .map(drop)?)
                 })
             })
         })
@@ -411,9 +417,9 @@ impl Database {
     pub async fn gone_storage_cleared(&self) -> Result<BTreeSet<DeviceId>, DbError> {
         self.call(move |inner| {
             inner.access.with_committed(|db, _| {
-                db.query("SELECT device FROM _coven_gone_storage_cleared", [], |r| {
+                Ok(db.query("SELECT device FROM _coven_gone_storage_cleared", [], |r| {
                     r.get::<_, DeviceId>(0)
-                })
+                })?)
             })
         })
         .await
@@ -428,11 +434,11 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
-                    db.execute(
+                    Ok(db.execute(
                         "INSERT INTO _coven_gone_storage_cleared(device) VALUES(?1) ON CONFLICT DO NOTHING",
                         [device],
                     )
-                    .map(drop)
+                    .map(drop)?)
                 })
             })
         })

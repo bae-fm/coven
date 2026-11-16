@@ -146,14 +146,14 @@ impl CovenPolicy {
     ) -> Result<DatabaseConnection, DbError> {
         let authorization = SqlAuthorization::new(Arc::clone(whole), Arc::new(self.clone()));
         let policy = self.clone();
-        DatabaseConnection::open(path, read_only, authorization, self, settings, &|setup| {
+        Ok(DatabaseConnection::open(path, read_only, authorization, self, settings, &|setup| {
             crate::coven_functions::register(setup, &policy)?;
             functions.register(setup)?;
             match views {
                 Some(views) => views(setup),
                 None => Ok(()),
             }
-        })
+        })?)
     }
 
     /// Whether materialized SQL is running, as `coven_applying()` says.
@@ -219,12 +219,15 @@ impl Drop for ApplyingSql<'_> {
     }
 }
 
+/// Coven's policy refuses with a `DbError`, boxed for the engine.
+type Refusal = Box<dyn std::error::Error + Send + Sync>;
+
 impl Policy for CovenPolicy {
-    fn judge(&self, action: &PolicyAction<'_>) -> Result<(), DbError> {
-        lock_unpoisoned(&self.state).judge(action)
+    fn judge(&self, action: &PolicyAction<'_>) -> Result<(), Refusal> {
+        Ok(lock_unpoisoned(&self.state).judge(action)?)
     }
 
-    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), DbError> {
+    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), Refusal> {
         // SQLITE_ALTER_TABLE reports the old name, not the rename destination.
         // Check the destination token too; comments and string contents are not SQL.
         for part in tokens.windows(3) {
@@ -236,7 +239,7 @@ impl Policy for CovenPolicy {
                     _ => continue,
                 };
                 if crate::internal_schema::reserved_name(name) {
-                    return Err(DbError::InternalTable { table: name.clone() });
+                    return Err(Box::new(DbError::InternalTable { table: name.clone() }));
                 }
             }
         }

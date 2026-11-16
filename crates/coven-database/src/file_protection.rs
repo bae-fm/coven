@@ -22,9 +22,11 @@ pub(crate) type Merged = BTreeMap<coven_merge::RowId, coven_merge::RowUpdate<Val
 /// The column naming a stored path: a record's coordinates.
 /// Whether any row names `file`.
 pub(crate) fn referenced(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)", [file], |r| {
-        r.get::<_, bool>(0)
-    })
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)",
+        [file],
+        |r| r.get::<_, bool>(0),
+    )?)
 }
 
 pub(crate) fn location(table: &str) -> Option<&'static str> {

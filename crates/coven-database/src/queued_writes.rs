@@ -248,7 +248,7 @@ pub(crate) fn put_back(
 }
 
 pub(crate) fn present(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE w.slot IS NULL)"),[],|r|r.get(0))
+    Ok(db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE w.slot IS NULL)"),[],|r|r.get(0))?)
 }
 
 /// After an applied slot, fold the queued writes `refold` names over the

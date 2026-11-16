@@ -3,6 +3,7 @@
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, damaged, decoded, encoded};
+use crate::write_failure::{hosted, Hosted};
 use crate::DbError;
 use coven_format::value::Value;
 use coven_format::{
@@ -81,8 +82,8 @@ pub(crate) fn visit_table<E: From<DbError>>(
     database.for_each(
         &format!("{select} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.frozen,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 WHEN 'dependency' THEN 3 ELSE 4 END,CASE WHEN l.replacement_kind IN ('excluded','dependency','unauthorized') THEN substr(l.replaced_by,1,16) END"),
         [audience],
-        |r| visit(read(r).map_err(DbError::from)?),
-    )
+        |r| hosted(|| visit(read(r).map_err(DbError::from)?)),
+    ).map_err(Hosted::into_inner)
 }
 
 pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {

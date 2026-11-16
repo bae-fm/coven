@@ -74,13 +74,13 @@ pub(crate) fn newest_number(
 /// device keeps each device's last landed write's entry, whatever else it
 /// forgot (§16.7).
 pub(crate) fn landed(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>=?2 AND slot IS NOT NULL)"
         ),
         params![write.device, write.number.to_be_bytes().as_slice()],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// Whether `write` landed before `landing`, the write being judged: a write
@@ -92,7 +92,7 @@ pub(crate) fn landed_before(
     write: WriteId,
     landing: WriteId,
 ) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>=?2 AND slot IS NOT NULL AND NOT ({WRITE_DEVICE_SQL}=?3 AND number=?4))"
         ),
@@ -103,7 +103,7 @@ pub(crate) fn landed_before(
             landing.number.to_be_bytes().as_slice()
         ],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// The last write of `write`'s device that landed numbered below it, if one
@@ -132,7 +132,7 @@ pub(crate) fn later_landed_before(
     write: WriteId,
     slot: coven_merge::Slot,
 ) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>?2 AND slot<?3)"
         ),
@@ -142,7 +142,7 @@ pub(crate) fn later_landed_before(
             slot.get().to_be_bytes().as_slice()
         ],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// The `read_through` of `device`'s last landed write, if one landed. A

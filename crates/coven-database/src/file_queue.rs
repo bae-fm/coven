@@ -143,13 +143,13 @@ impl UnsentWork {
 }
 
 pub(crate) fn unsent(db: &DatabaseConnection) -> Result<UnsentWork, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)",
         [],
         |r| {
             Ok(UnsentWork { writes: r.get::<_, i64>(0)? as u64, files: r.get::<_, i64>(1)? as u64 })
         },
-    )
+    )?)
 }
 
 pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError> {
@@ -164,12 +164,12 @@ pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError
 }
 
 pub(crate) fn paused(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", [], |r| r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", [], |r| r.get(0))?)
 }
 
 /// Whether the app moves files only on unmetered networks, as persisted.
 pub(crate) fn unmetered_only(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_unmetered_only)", [], |r| r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_unmetered_only)", [], |r| r.get(0))?)
 }
 
 pub(crate) fn set_unmetered_only(
@@ -361,13 +361,13 @@ pub(crate) fn bound(db: &DatabaseConnection) -> Result<std::collections::BTreeSe
 /// Whether a bound upload stores `file`, holding this device's writes until
 /// it is stored (§17.4).
 pub(crate) fn held_upload_of(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_upload_files AS l
              JOIN _coven_file_uploads AS u ON u.id=l.upload
              WHERE l.file=?1 AND u.holds IS NOT NULL)",
         [file],
         |row| row.get(0),
-    )
+    )?)
 }
 
 /// The first-read hash of one queued plaintext chunk. A missing hash is
@@ -390,8 +390,10 @@ pub(crate) fn chunk_hash(
             |r| r.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| match error {
-            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
-            error => error,
+            crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                DbError::DamagedDatabase
+            }
+            error => DbError::from(error),
         })?;
     crate::file_hashes::stored_hash(hash)
 }
@@ -451,10 +453,10 @@ pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     let copy: Option<String> = db
         .query_row("SELECT copy FROM _coven_file_uploads WHERE id=?1", [id], |r| r.get(0))
         .map_err(|error| match error {
-            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+            crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
                 DbError::Invariant { what: "a retired upload is queued" }
             }
-            error => error,
+            error => DbError::from(error),
         })?;
     db.execute("DELETE FROM _coven_upload_files WHERE upload=?1", [id])?;
     db.execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
@@ -694,11 +696,11 @@ pub(crate) fn record_session(
     confirmed: i64,
     total: i64,
 ) -> Result<usize, DbError> {
-    db.execute(
+    Ok(db.execute(
         "UPDATE _coven_file_uploads SET session=?2,bytes_confirmed=?3,bytes_total=?4
          WHERE id=?1",
         (id, session, confirmed, total),
-    )
+    )?)
 }
 
 /// Mark an upload's bytes stored: its move switches it with the rest.

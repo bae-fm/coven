@@ -102,10 +102,10 @@ impl FileWrite<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|error| match error {
-                DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
                     DbError::Invariant { what: "a completed upload is queued" }
                 }
-                error => error,
+                error => DbError::from(error),
             })?;
         let mut completion = self.files.completion.borrow_mut();
         let completion = completion.get_or_insert_with(Completion::default);

@@ -2,6 +2,7 @@ use super::*;
 use crate::sqlite::DatabaseConnection;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
+use crate::DbError;
 use coven_foundation::id_source::{IdSource, UuidIds};
 use std::path::Path;
 
@@ -451,7 +452,9 @@ fn wal_refusal_names_the_selected_journal_mode() {
             None,
         )
         .unwrap();
-    assert!(matches!(sql.enable_wal(), Err(DbError::WalUnavailable { mode }) if mode == "memory"));
+    assert!(
+        matches!(sql.enable_wal(), Err(crate::engine_error::EngineError::WalUnavailable { mode }) if mode == "memory")
+    );
 }
 
 /// A synced table with an index the planner keeps statistics for.

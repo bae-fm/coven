@@ -477,7 +477,7 @@ impl Drop for ConnectionChange<'_> {
 async fn upload_worker(
     owner: std::sync::Weak<FilesInner>,
     stopping: watch::Receiver<bool>,
-    changes: coven_database::DatabaseChanges,
+    changes: coven_database::DatabaseChanges<coven_database::DbError>,
 ) {
     let ended = serve_uploads(owner.clone(), stopping, changes).await;
     // No run serves an app retry once the worker has ended, so each waiting
@@ -493,7 +493,7 @@ async fn upload_worker(
 async fn serve_uploads(
     owner: std::sync::Weak<FilesInner>,
     mut stopping: watch::Receiver<bool>,
-    mut changes: coven_database::DatabaseChanges,
+    mut changes: coven_database::DatabaseChanges<coven_database::DbError>,
 ) -> Option<SyncError> {
     let first = owner.upgrade()?;
     let parks = first.upload_parks.clone();

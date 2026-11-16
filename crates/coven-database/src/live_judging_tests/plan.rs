@@ -463,7 +463,7 @@ async fn commits_while_dependencies_are_unknown_still_filter_outside_keys() {
     write(&db, "INSERT INTO items VALUES (9,'outside')");
     db.inspect_writer(|writer, _| {
         assert!(writer
-            .transaction::<()>(|writer| {
+            .transaction::<(), crate::DbError>(|writer| {
                 writer.batch("INSERT INTO items VALUES (3,'rolled back')")?;
                 Err(crate::DbError::TransactionEnded)
             })

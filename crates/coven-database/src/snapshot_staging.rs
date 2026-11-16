@@ -375,7 +375,7 @@ impl Database {
     pub async fn input_temp_store(&self) -> Result<u8, DbError> {
         self.call(|inner| {
             inner.inputs.with_writer(|writer, _| {
-                writer.query_row("PRAGMA temp_store", [], |row| row.get(0))
+                Ok(writer.query_row("PRAGMA temp_store", [], |row| row.get(0))?)
             })
         })
         .await

@@ -57,7 +57,9 @@ impl MoveState {
 
 /// Record a new move, moving.
 pub(crate) fn create(db: &DatabaseConnection) -> Result<MoveId, DbError> {
-    db.query_row("INSERT INTO _coven_moves(state) VALUES('moving') RETURNING id", [], |r| r.get(0))
+    Ok(db.query_row("INSERT INTO _coven_moves(state) VALUES('moving') RETURNING id", [], |r| {
+        r.get(0)
+    })?)
 }
 
 /// The move's state, or `None` for a move this device never made.
@@ -77,21 +79,21 @@ pub(crate) fn state(db: &DatabaseConnection, id: MoveId) -> Result<Option<MoveSt
 /// Whether the move is a bound file's (§17.4): its upload holds a write
 /// until the file is stored, so the app can't cancel it.
 pub(crate) fn bound(db: &DatabaseConnection, id: MoveId) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE move=?1 AND holds IS NOT NULL)",
         [id],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// The move an upload belongs to.
 pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, DbError> {
     db.query_row("SELECT move FROM _coven_file_uploads WHERE id=?1", [upload], |r| r.get(0))
         .map_err(|error| match error {
-            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+            crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
                 DbError::Invariant { what: "a queued upload belongs to a move" }
             }
-            error => error,
+            error => DbError::from(error),
         })
 }
 

@@ -1,29 +1,37 @@
 //! Commit notifications shared by file work and synchronization.
-use crate::DbError;
 
-/// A live commit observation; coalesces changes and ends when the writer closes.
-pub struct DatabaseChanges {
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
+
+/// A live commit observation; coalesces changes and ends when the writer
+/// closes. Its calls fail with `E`, which the handle's failure becomes.
+pub struct DatabaseChanges<E> {
     commits: crate::observation::CommitSubscription,
     reads: sqlive::ReadSet,
     first: bool,
+    failed: crate::live_query::Failed<E>,
 }
-impl DatabaseChanges {
+
+impl<E> DatabaseChanges<E> {
     /// What `commits`, waiting on `reads`, reports; `first` reports the
     /// state now as their first change.
     pub(crate) fn new(
         commits: crate::observation::CommitSubscription,
         reads: sqlive::ReadSet,
         first: bool,
-    ) -> Self {
-        Self { commits, reads, first }
+    ) -> Self
+    where
+        E: From<EngineError<StoreFailure>>,
+    {
+        Self { commits, reads, first, failed: E::from }
     }
 
     /// Whether a relevant commit happened since the previous observation,
     /// without waiting; the first call reports the initial state.
-    pub fn take_changed(&mut self) -> Result<bool, DbError> {
+    pub fn take_changed(&mut self) -> Result<bool, E> {
         let state = self.commits.state();
         if let Some(error) = state.error() {
-            return Err(error);
+            return Err((self.failed)(error));
         }
         if self.first || state.changed {
             self.first = false;
@@ -53,11 +61,11 @@ impl DatabaseChanges {
     }
 
     /// The initial state, then each relevant commit. No timer or polling is used.
-    pub async fn next(&mut self) -> Result<(), DbError> {
+    pub async fn next(&mut self) -> Result<(), E> {
         loop {
             let state = self.commits.state();
             if let Some(error) = state.error() {
-                return Err(error);
+                return Err((self.failed)(error));
             }
             if self.first || state.changed {
                 self.first = false;

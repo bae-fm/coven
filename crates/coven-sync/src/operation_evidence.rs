@@ -36,7 +36,7 @@ enum Wait {
     Attempt { scope: CommitScope, commits: AttemptCommits },
     /// The wait an attempt ended in.
     Waiting {
-        rows: DatabaseChanges,
+        rows: DatabaseChanges<DbError>,
         /// The key it lacks; whether this device held it when the wait
         /// began, unknown for a wait armed on opening.
         key: Option<(Audience, KeyId, Option<bool>)>,

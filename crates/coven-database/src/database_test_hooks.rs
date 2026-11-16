@@ -88,7 +88,7 @@ impl Database {
         run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> T,
     ) -> T {
         self.inspect_writer(|writer, call| {
-            writer.transaction(|writer| Ok(run(writer, call))).unwrap()
+            writer.transaction(|writer| Ok::<_, DbError>(run(writer, call))).unwrap()
         })
     }
 
@@ -151,7 +151,11 @@ impl Database {
     /// database's, takes the writer (§4).
     pub(crate) fn fault_checkpoints(
         &self,
-        fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
+        fault: impl FnMut() -> Result<
+                (),
+                crate::engine_error::EngineError<crate::store_failure::StoreFailure>,
+            > + Send
+            + 'static,
     ) {
         let slot = self.inner.read().unwrap();
         let checkpointers = &slot.as_ref().unwrap().checkpoints;
@@ -199,7 +203,7 @@ impl Database {
         let slot = self.inner.read().unwrap();
         let checkpointers = &slot.as_ref().unwrap().checkpoints;
         assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
-        checkpointers[1].run_now()
+        Ok(checkpointers[1].run_now()?)
     }
 }
 

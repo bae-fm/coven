@@ -18,7 +18,7 @@ pub(crate) fn capture(
 }
 
 pub(crate) fn includes(db: &DatabaseConnection, header: &WriteHeader) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_migration_prefix WHERE singleton=1 AND device=?1 AND through>=?2 AND version>=?3)",rusqlite::params![header.position.device,header.position.number.to_be_bytes(),header.schema_version],|r|r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_migration_prefix WHERE singleton=1 AND device=?1 AND through>=?2 AND version>=?3)",rusqlite::params![header.position.device,header.position.number.to_be_bytes(),header.schema_version],|r|r.get(0))?)
 }
 
 pub(crate) fn audiences(
@@ -28,11 +28,11 @@ pub(crate) fn audiences(
     if !includes(db, header)? {
         return Ok(vec![]);
     }
-    db.query(
+    Ok(db.query(
         "SELECT audience FROM _coven_authored_parts WHERE write_id=?1 ORDER BY audience",
         [coven_format::merge_fields::encode_write_id(&header.position)?],
         |r| crate::write_encoding::audience(r, 0),
-    )
+    )?)
 }
 
 fn column(

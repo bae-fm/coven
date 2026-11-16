@@ -8,11 +8,11 @@ pub(crate) fn cached(
     size: i64,
     read: i64,
 ) -> Result<usize, crate::DbError> {
-    db.execute(
+    Ok(db.execute(
         "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read)
          VALUES('files',?1,0,?2,?3,?4)",
         (object_path, path, size, read),
-    )
+    )?)
 }
 
 /// Record a partial download of `size` bytes at `path`, as a stopped pin

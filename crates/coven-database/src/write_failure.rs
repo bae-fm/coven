@@ -1,6 +1,8 @@
 //! Preserve the facade's callback failure when a transaction or cleanup also fails.
 //! A committed result never becomes a failure because of cleanup (§2.1, Appendix C.3).
 
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use crate::DbError;
 
 /// A caller's write error can retain both its original cause and failures that
@@ -48,5 +50,40 @@ impl WriteFailure for DbError {
     }
     fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
         Self::FileCleanup { write: Err(Box::new(write)), failures }
+    }
+}
+
+impl crate::engine_error::RollbackJoin<StoreFailure> for DbError {
+    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+        WriteFailure::with_rollback(self, rollback)
+    }
+}
+
+/// A caller's error `E` inside an engine call. `E` may be an app's or sync's
+/// type, which knows only `DbError`, so the engine's errors reach it as the
+/// `DbError` each maps to.
+pub(crate) struct Hosted<E>(pub(crate) E);
+
+impl<E> Hosted<E> {
+    /// The caller's error.
+    pub(crate) fn into_inner(self) -> E {
+        self.0
+    }
+}
+
+/// Run `run`, whose error is the caller's `E`, inside an engine closure.
+pub(crate) fn hosted<T, E>(run: impl FnOnce() -> Result<T, E>) -> Result<T, Hosted<E>> {
+    run().map_err(Hosted)
+}
+
+impl<E: From<DbError>> From<EngineError<StoreFailure>> for Hosted<E> {
+    fn from(error: EngineError<StoreFailure>) -> Self {
+        Self(E::from(DbError::from(error)))
+    }
+}
+
+impl<E: WriteFailure> crate::engine_error::RollbackJoin<StoreFailure> for Hosted<E> {
+    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+        Self(self.0.with_rollback(rollback))
     }
 }

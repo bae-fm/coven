@@ -13,9 +13,9 @@ use coven_merge::{ClaimOrder, Slot, WriteId};
 use rusqlite::params;
 
 pub(crate) fn applied(db: &DatabaseConnection) -> Result<u64, DbError> {
-    db.query_row("SELECT applied FROM _coven_sequence WHERE singleton=1", [], |r| {
+    Ok(db.query_row("SELECT applied FROM _coven_sequence WHERE singleton=1", [], |r| {
         counter(r.get(0)?)
-    })
+    })?)
 }
 
 pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbError> {
@@ -27,13 +27,17 @@ pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbEr
 }
 
 pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError> {
-    db.query("SELECT device,number,digest FROM _coven_last_claims ORDER BY device", [], |r| {
-        Ok(LastClaim {
-            device: r.get::<_, DeviceId>(0)?,
-            number: counter(r.get(1)?)?,
-            digest: r.get(2)?,
-        })
-    })
+    Ok(db.query(
+        "SELECT device,number,digest FROM _coven_last_claims ORDER BY device",
+        [],
+        |r| {
+            Ok(LastClaim {
+                device: r.get::<_, DeviceId>(0)?,
+                number: counter(r.get(1)?)?,
+                digest: r.get(2)?,
+            })
+        },
+    )?)
 }
 
 /// Coverage orders observations from different audience snapshots and their suffixes.
@@ -68,13 +72,13 @@ pub(crate) fn note_claim(
 }
 
 pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Option<Slot>, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         &format!(
             "SELECT (SELECT slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"
         ),
         params![write.device, write.number.to_be_bytes().as_slice()],
         |r| r.get::<_, Option<Vec<u8>>>(0)?.map(slot_counter).transpose(),
-    )
+    )?)
 }
 
 /// Local originals have no containing slot until their batch is applied.
@@ -151,8 +155,8 @@ pub(crate) fn refusal(
 }
 
 pub(crate) fn refused(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
-    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_writes w JOIN _coven_write_refusals r ON r.slot=w.slot WHERE {WRITE_DEVICE_SQL}=?1 AND w.number=?2)"),
-        params![write.device,write.number.to_be_bytes().as_slice()],|r|r.get(0))
+    Ok(db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_writes w JOIN _coven_write_refusals r ON r.slot=w.slot WHERE {WRITE_DEVICE_SQL}=?1 AND w.number=?2)"),
+        params![write.device,write.number.to_be_bytes().as_slice()],|r|r.get(0))?)
 }
 
 #[cfg(test)]

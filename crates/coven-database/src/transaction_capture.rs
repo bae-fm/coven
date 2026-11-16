@@ -3,8 +3,9 @@
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
+use crate::engine_error::EngineError;
 use crate::observation::UnrecordedTables;
-use crate::DbError;
+use crate::store_failure::StoreFailure;
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::RowChange;
 use std::collections::BTreeSet;
@@ -34,7 +35,9 @@ pub(super) struct SupplementalChanges {
 impl SupplementalChanges {
     /// Watch the tables of `transaction`'s schema that no key names; none
     /// are watched where there are none.
-    pub(super) fn observe(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
+    pub(super) fn observe(
+        transaction: &mut WriteTransaction<'_>,
+    ) -> Result<Self, EngineError<StoreFailure>> {
         let shapes = transaction.within(DatabaseConnection::table_shapes)?;
         let changed = Arc::new(Mutex::new(BTreeSet::new()));
         if shapes.iter().any(|(_, shape)| shape.whole) {
@@ -61,12 +64,12 @@ impl<'a> ChangeCapture<'a> {
     pub(super) fn begin(
         database: &'a DatabaseConnection,
         supplemental: SupplementalChanges,
-    ) -> Result<Self, DbError> {
+    ) -> Result<Self, EngineError<StoreFailure>> {
         let unrecorded = Arc::clone(
             database
                 .handle
                 .as_ref()
-                .ok_or(DbError::Invariant { what: "a capturing connection has its handle" })?
+                .ok_or(EngineError::Invariant { what: "a capturing connection has its handle" })?
                 .unrecorded(),
         );
         let mut session = std::ptr::null_mut();
@@ -102,7 +105,7 @@ impl<'a> ChangeCapture<'a> {
         Ok(capture)
     }
 
-    pub(super) fn take_changes(&mut self) -> Result<Vec<RowChange>, DbError> {
+    pub(super) fn take_changes(&mut self) -> Result<Vec<RowChange>, EngineError<StoreFailure>> {
         let _scope = self.database.authorization.internal();
         let copied = self.changeset()?;
         let scoped = self
@@ -133,7 +136,7 @@ impl<'a> ChangeCapture<'a> {
 
 impl ChangeCapture<'_> {
     /// The session's changeset so far, inside the transaction it captures.
-    fn changeset(&mut self) -> Result<Vec<u8>, DbError> {
+    fn changeset(&mut self) -> Result<Vec<u8>, EngineError<StoreFailure>> {
         self.database.require_transaction()?;
         let mut length = 0;
         let mut bytes = std::ptr::null_mut();
@@ -175,7 +178,7 @@ unsafe extern "C" fn recorded_table(
     table.to_str().map_or(1, |name| std::ffi::c_int::from(unrecorded.recorded(name)))
 }
 
-fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {
+fn sqlite_ok(code: std::ffi::c_int) -> Result<(), EngineError<StoreFailure>> {
     if code == rusqlite::ffi::SQLITE_OK {
         Ok(())
     } else {

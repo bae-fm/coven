@@ -164,7 +164,7 @@ async fn stored_generations_tell_inserted_from_found() {
                         (vec![3], generation(1), late),
                     ]
                 );
-                Ok(())
+                Ok::<_, crate::DbError>(())
             })
             .unwrap();
     });

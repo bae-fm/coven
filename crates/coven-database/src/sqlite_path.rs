@@ -12,14 +12,14 @@
 //! a local verbatim path goes to SQLite in its plain form, where each
 //! connection locks through a handle of its own.
 
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use std::borrow::Cow;
 use std::path::Path;
 
-use crate::DbError;
-
 /// The path SQLite opens for the file at `path`: elsewhere `path` itself.
 #[cfg(not(windows))]
-pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, DbError> {
+pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, EngineError<StoreFailure>> {
     Ok(Cow::Borrowed(path))
 }
 
@@ -30,7 +30,7 @@ pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, DbError> {
 /// space, and a device's name such as `NUL`; a verbatim path holding one
 /// would open another file, so it is refused.
 #[cfg(windows)]
-pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, DbError> {
+pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, EngineError<StoreFailure>> {
     use std::ffi::OsString;
     use std::path::{Component, PathBuf, Prefix};
     let mut components = path.components();
@@ -54,14 +54,13 @@ pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, DbError> {
             Component::RootDir => {}
             Component::Normal(name) if reads_alike(name) => plain.push(name),
             _ => {
-                return Err(DbError::Disk(coven_foundation::files::FileError::Io {
-                    operation: "open database",
+                return Err(EngineError::Path {
                     path: path.to_owned(),
-                    source: Box::new(std::io::Error::new(
+                    source: std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         "a name in the path means another file without its \\\\?\\ prefix",
-                    )),
-                }))
+                    ),
+                })
             }
         }
     }

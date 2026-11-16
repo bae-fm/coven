@@ -144,21 +144,21 @@ pub(crate) fn awaiting_registration(
     database: &DatabaseConnection,
     device: DeviceId,
 ) -> Result<bool, DbError> {
-    database.query_row(
+    Ok(database.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_store WHERE singleton=1 AND joined=1)
             AND NOT EXISTS(SELECT 1 FROM _coven_devices WHERE device=?1)",
         [device],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// Whether the applied history has created the store.
 pub(crate) fn created(database: &DatabaseConnection) -> Result<bool, DbError> {
-    database.query_row(
+    Ok(database.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_store WHERE singleton=1 AND created=1)",
         [],
         |r| r.get(0),
-    )
+    )?)
 }
 
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError> {

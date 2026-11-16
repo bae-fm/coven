@@ -15,7 +15,9 @@ fn a_bug_inside_a_call_is_the_calls_own() {
     let ((), own) = handle.calling(|| handle.fail_with_bug(bug("torn")));
     assert_eq!(own, Some(bug("torn")));
     assert!(bugs.take().is_empty());
-    assert!(matches!(handle.error(), Some(DbError::StoreFailed(found)) if found == bug("torn")));
+    assert!(
+        matches!(handle.error(), Some(crate::engine_error::EngineError::HandleFailed(found)) if found == bug("torn"))
+    );
 }
 
 /// A call that hits a second bug returns the first, and the sink hears the
@@ -30,7 +32,9 @@ fn a_calls_second_bug_goes_to_the_sink() {
     });
     assert_eq!(own, Some(bug("first")));
     assert_eq!(bugs.take(), [bug("second")]);
-    assert!(matches!(handle.error(), Some(DbError::StoreFailed(found)) if found == bug("first")));
+    assert!(
+        matches!(handle.error(), Some(crate::engine_error::EngineError::HandleFailed(found)) if found == bug("first"))
+    );
 }
 
 /// A call made inside another on the same handle leaves its bug to the

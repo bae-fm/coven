@@ -230,7 +230,7 @@ async fn row_count_ignores_updates_and_rollback_journals_do_not_publish() {
     db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','a',''); SAVEPOINT s; INSERT INTO notes VALUES ('b','b',''); ROLLBACK TO s").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), 1);
     db.inspect_writer(|sql, _| {
-        let error = sql.transaction::<()>(|sql| {
+        let error = sql.transaction::<(), crate::DbError>(|sql| {
             sql.batch("INSERT INTO notes VALUES ('c','c','')")?;
             Err(DbError::TransactionEnded)
         });
@@ -539,7 +539,7 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     db.inspect_writer(|sql, _| {
         sql.transaction(|sql| {
             sql.app_execute("UPDATE child SET title='two'", [])?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .unwrap()
     });

@@ -61,11 +61,11 @@ fn table_origin(
     version: u32,
     table: &str,
 ) -> Result<(u32, String), DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT origin_version,origin_name FROM _coven_table_origins WHERE version=?1 AND name=?2",
         params![version, table],
         |r| Ok((r.get(0)?, r.get(1)?)),
-    )
+    )?)
 }
 
 fn column_origin(
@@ -74,7 +74,7 @@ fn column_origin(
     table: &str,
     column: &str,
 ) -> Result<(u32, String, String), DbError> {
-    db.query_row("SELECT origin_version,origin_table,origin_name FROM _coven_column_origins WHERE version=?1 AND table_name=?2 AND name=?3",params![version,table,column],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+    Ok(db.query_row("SELECT origin_version,origin_table,origin_name FROM _coven_column_origins WHERE version=?1 AND table_name=?2 AND name=?3",params![version,table,column],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)
 }
 
 /// Resolve one known schema identity into another version. Absence means the
@@ -88,7 +88,7 @@ pub(crate) fn table(
     if from == to {
         return Ok(Some(name.to_owned()));
     }
-    db.query_row("SELECT (SELECT target.name FROM _coven_table_origins source JOIN _coven_table_origins target ON target.origin_version=source.origin_version AND target.origin_name=source.origin_name WHERE source.version=?1 AND source.name=?2 AND target.version=?3)",params![from,name,to],|r| r.get(0))
+    Ok(db.query_row("SELECT (SELECT target.name FROM _coven_table_origins source JOIN _coven_table_origins target ON target.origin_version=source.origin_version AND target.origin_name=source.origin_name WHERE source.version=?1 AND source.name=?2 AND target.version=?3)",params![from,name,to],|r| r.get(0))?)
 }
 
 pub(crate) fn column(
@@ -102,7 +102,7 @@ pub(crate) fn column(
     if from == to {
         return Ok((table == target).then(|| name.to_owned()));
     }
-    db.query_row("SELECT (SELECT target.name FROM _coven_column_origins source JOIN _coven_column_origins target ON target.origin_version=source.origin_version AND target.origin_table=source.origin_table AND target.origin_name=source.origin_name WHERE source.version=?1 AND source.table_name=?2 AND source.name=?3 AND target.version=?4 AND target.table_name=?5)",params![from,table,name,to,target],|r| r.get(0))
+    Ok(db.query_row("SELECT (SELECT target.name FROM _coven_column_origins source JOIN _coven_column_origins target ON target.origin_version=source.origin_version AND target.origin_table=source.origin_table AND target.origin_name=source.origin_name WHERE source.version=?1 AND source.table_name=?2 AND source.name=?3 AND target.version=?4 AND target.table_name=?5)",params![from,table,name,to,target],|r| r.get(0))?)
 }
 
 #[cfg(test)]

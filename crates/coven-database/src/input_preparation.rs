@@ -19,7 +19,7 @@ impl<'a> PreparedInputs<'a> {
     }
     /// Drop the catalog and every record prepared in it.
     pub(crate) fn finish(self) -> Result<(), DbError> {
-        self.db.batch("DROP TABLE temp._coven_prepared_records")
+        Ok(self.db.batch("DROP TABLE temp._coven_prepared_records")?)
     }
     /// The staged snapshot of the staging `staging`, whose stream carried
     /// `header`, with its write evidence authenticated, read on this

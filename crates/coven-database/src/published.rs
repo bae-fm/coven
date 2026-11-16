@@ -22,7 +22,7 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn exists(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published)", [], |r| r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published)", [], |r| r.get(0))?)
 }
 
 /// How many rows one statement of `capture_rows` covers.

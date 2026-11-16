@@ -64,11 +64,11 @@ pub(crate) fn decode_failure(
 pub(crate) fn latest_timestamp(
     database: &DatabaseConnection,
 ) -> Result<Option<Timestamp>, DbError> {
-    database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
+    Ok(database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
         row.get::<_, Option<Vec<u8>>>(0)?
             .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
             .transpose()
-    })
+    })?)
 }
 
 #[expect(clippy::map_err_ignore, reason = "a time past u64 milliseconds is ClockOutOfRange")]

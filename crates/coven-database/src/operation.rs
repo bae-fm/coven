@@ -144,7 +144,9 @@ pub(crate) fn acknowledge(db: &DatabaseConnection, id: OperationId) -> Result<()
 
 /// Whether a self-replacement pauses this device's writes (§12.3).
 pub(crate) fn writes_paused(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| {
+        r.get(0)
+    })?)
 }
 
 /// Refuse an app write while a self-replacement pauses writes (§12.3).
@@ -169,22 +171,22 @@ pub(crate) fn reserve_snapshot(db: &DatabaseConnection) -> Result<std::num::NonZ
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id",
         [],
         record,
-    )
+    )?)
 }
 
 pub(crate) fn of_kind(
     db: &DatabaseConnection,
     kind: &str,
 ) -> Result<Vec<OperationRecord>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id",
         [kind],
         record,
-    )
+    )?)
 }
 
 pub(crate) fn find(
@@ -273,7 +275,7 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
         return Err(DbError::Invariant { what: "an operation ends after its claim" });
     }
     crate::pending::clear_operation(db, id)?;
-    db.execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
+    Ok(db.execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?)
 }
 
 /// End every operation an app's write journaled that still runs, and every

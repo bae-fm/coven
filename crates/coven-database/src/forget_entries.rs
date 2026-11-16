@@ -209,7 +209,7 @@ fn last(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
 /// lost value's setter or replacer.
 fn named(db: &DatabaseConnection, ordinal: i64, write: WriteId) -> Result<bool, DbError> {
     let id = encoded(merge_fields::encode_write_id(&write))?;
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_rows WHERE write_id=?1)
              OR EXISTS(SELECT 1 FROM _coven_cells WHERE write_id=?1)
              OR EXISTS(SELECT 1 FROM _coven_published_writes WHERE write_id=?1)
@@ -217,5 +217,5 @@ fn named(db: &DatabaseConnection, ordinal: i64, write: WriteId) -> Result<bool, 
              OR EXISTS(SELECT 1 FROM _coven_lost WHERE replaced_by=?2 AND frozen=0 AND replacement_kind='write')",
         params![ordinal, id],
         |r| r.get(0),
-    )
+    )?)
 }

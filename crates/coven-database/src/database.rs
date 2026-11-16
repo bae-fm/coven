@@ -52,10 +52,12 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::app_policy::CovenPolicy;
 use crate::connection_setup::Setup;
-use crate::observation::{CommitObserver, HandleFailure, UnrecordedTables};
+use crate::engine_error::EngineError;
+use crate::observation::{CommitObserver, UnrecordedTables};
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::write_failure::Hosted;
 use crate::{DbError, Migration, MigrationOutcome, SyncedTable};
 use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
 
@@ -249,7 +251,7 @@ impl<L> DatabaseAccess<L> {
         run: impl FnOnce() -> Result<R, E>,
     ) -> Result<R, E> {
         if let Some(error) = self.observer.error() {
-            return Err(error.into());
+            return Err(DbError::from(error).into());
         }
         let (result, own) = self.observer.calling(run);
         if let Some(bug) = own {
@@ -260,7 +262,7 @@ impl<L> DatabaseAccess<L> {
             return Err(DbError::Bug(bug).into());
         }
         match (result, self.observer.error()) {
-            (Ok(_), Some(error)) => Err(error.into()),
+            (Ok(_), Some(error)) => Err(DbError::from(error).into()),
             (result, _) => result,
         }
     }
@@ -340,7 +342,9 @@ impl<L> DatabaseAccess<L> {
     ) -> Result<R, E> {
         self.with_reader(|reader, call| {
             let _constants = crate::transaction_constants::keep_constants(reader, call);
-            reader.read_snapshot(|reader| read(SqlReadContext::new(reader)))
+            reader
+                .read_snapshot(|reader| read(SqlReadContext::new(reader)).map_err(Hosted))
+                .map_err(Hosted::into_inner)
         })
     }
 
@@ -350,17 +354,18 @@ impl<L> DatabaseAccess<L> {
 
     /// Every connection has the same settings, so one reader reports them.
     fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
-        self.readers.acquire_reader().with_reader(DatabaseConnection::sqlite_settings)
+        Ok(self.readers.acquire_reader().with_reader(DatabaseConnection::sqlite_settings)?)
     }
 
     fn close(self) -> Result<(), DbError> {
         self.observer.close();
-        let mut failures = self.readers.close();
+        let mut failures: Vec<DbError> =
+            self.readers.close().into_iter().map(DbError::from).collect();
         // Each checkpointer stopped before, and let go of the writer.
         match Arc::try_unwrap(self.writer) {
             Ok(writer) => {
                 if let Err(error) = coven_foundation::locks::into_unpoisoned(writer).close() {
-                    failures.push(error);
+                    failures.push(error.into());
                 }
             }
             Err(_held) => failures.push(DbError::Invariant {
@@ -424,7 +429,10 @@ impl DatabaseInner {
                     .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
             // After a failed rollback the writer may still hold this write;
             // removal records wait for the next open (Appendix C.3).
-            let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
+            let usable = !matches!(
+                self.access.observer.error(),
+                Some(EngineError::Host(StoreFailure::Rollback))
+            );
             let chosen = usable.then(|| released(writer, call, self));
             Ok::<_, E>((result, chosen, files.take_committed()))
         })?;
@@ -583,13 +591,13 @@ impl Database {
     /// Upload confirmation removing a row is this device's own bookkeeping
     /// and wakes nothing (§6.7). Register before the first sync to
     /// include writes committed while a pass is running.
-    pub fn sync_changes(&self) -> crate::DatabaseChanges {
+    pub fn sync_changes(&self) -> crate::DatabaseChanges<DbError> {
         self.table_changes(&["_coven_uploads"], true, true)
     }
 
     /// Observe operations as they start: rows inserted into the journal,
     /// such as an invite, whose expiry the handle wakes to write (§13.2).
-    pub fn started_operations(&self) -> crate::DatabaseChanges {
+    pub fn started_operations(&self) -> crate::DatabaseChanges<DbError> {
         self.table_changes(&["_coven_operations"], true, true)
     }
 
@@ -597,7 +605,7 @@ impl Database {
     /// later call and live query fails with `DbError::WallTimer` until the
     /// store is reopened (§13.2).
     pub fn fail_expiry_wait(&self, error: coven_foundation::clock::WallTimerError) {
-        self.observer.fail(HandleFailure::Host(StoreFailure::WallTimer(error)));
+        self.observer.fail(StoreFailure::WallTimer(error));
     }
 
     /// `first` reports the initial state as a change; `inserted_only`
@@ -607,7 +615,7 @@ impl Database {
         tables: &[&str],
         first: bool,
         inserted_only: bool,
-    ) -> crate::DatabaseChanges {
+    ) -> crate::DatabaseChanges<DbError> {
         let reads: Vec<_> = tables
             .iter()
             .map(|table| sqlive::TableRead {
@@ -635,7 +643,7 @@ impl Database {
         &self,
         attempt: crate::AttemptCommits,
         rows: &[crate::PrerequisiteRows],
-    ) -> crate::DatabaseChanges {
+    ) -> crate::DatabaseChanges<DbError> {
         self.observer.watch_attempt(attempt, rows)
     }
 
@@ -696,13 +704,18 @@ impl Database {
                 inner.call(|inner| {
                     inner.access.with_reader(|reader, call| {
                         let _constants = crate::transaction_constants::keep_constants(reader, call);
-                        reader.live_read(
-                            &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                            |reader| query(request, SqlReadContext::new(reader)),
-                        )
+                        reader
+                            .live_read(
+                                &mut |reads, lookups| completion.finish_judging(reads, lookups),
+                                |reader| {
+                                    query(request, SqlReadContext::new(reader)).map_err(Hosted)
+                                },
+                            )
+                            .map_err(Hosted::into_inner)
                     })
                 })
             }),
+            |error| E::from(DbError::from(error)),
             commits,
             self.bugs.clone(),
         )
@@ -840,7 +853,12 @@ impl Database {
         R: Send + 'static,
         E: crate::WriteFailure + Send + 'static,
     {
-        self.call(move |inner| inner.access.with_writer(|writer, _| writer.bulk_write(sql))).await
+        self.call(move |inner| {
+            inner.access.with_writer(|writer, _| {
+                writer.bulk_write(|bulk| sql(bulk).map_err(Hosted)).map_err(Hosted::into_inner)
+            })
+        })
+        .await
     }
 
     /// Checkpoint the store's WAL on the writer, between writes (§4).
@@ -848,15 +866,17 @@ impl Database {
         &self,
         mode: crate::CheckpointMode,
     ) -> Result<crate::WalCheckpoint, DbError> {
-        self.call(move |inner| inner.access.with_writer(|writer, _| writer.wal_checkpoint(mode)))
-            .await
+        self.call(move |inner| {
+            inner.access.with_writer(|writer, _| Ok(writer.wal_checkpoint(mode)?))
+        })
+        .await
     }
 
     /// Give back free pages of a store created with incremental auto-vacuum,
     /// on the writer, between writes (§4). On any other store it does nothing.
     pub async fn incremental_vacuum(&self, pages: crate::IncrementalVacuum) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer, _| writer.incremental_vacuum(pages))
+            inner.access.with_writer(|writer, _| Ok(writer.incremental_vacuum(pages)?))
         })
         .await
     }
@@ -879,7 +899,7 @@ impl Database {
         let inner = read_unpoisoned(&self.inner);
         let inner = inner.as_ref().ok_or(DbError::StoreClosed)?;
         if let Some(error) = inner.access.observer.error() {
-            return Err(error);
+            return Err(error.into());
         }
         Ok(inner.migrations.clone())
     }
@@ -909,16 +929,16 @@ impl Database {
                         let mut failures: Vec<DbError> = inner
                             .checkpoints
                             .into_iter()
-                            .filter_map(|checkpoints| checkpoints.stop().err())
+                            .filter_map(|checkpoints| checkpoints.stop().err().map(DbError::from))
                             .collect();
-                        failures.extend(inner.statistics.stop().err());
+                        failures.extend(inner.statistics.stop().err().map(DbError::from));
                         failures.extend(inner.inputs.close());
                         // The statistics follow this session's writes, outside
                         // any captured transaction. A failed handle's writer may
                         // still hold a transaction, which closing rolls back.
                         if inner.access.observer.error().is_none() {
                             if let Err(error) = lock_unpoisoned(&inner.access.writer).optimize() {
-                                failures.push(error);
+                                failures.push(error.into());
                             }
                         }
                         match inner.access.close() {

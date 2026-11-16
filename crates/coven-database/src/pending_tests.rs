@@ -689,16 +689,27 @@ pub(crate) fn scan_reason(
     relation: &str,
 ) -> Option<&'static str> {
     match (file, template, relation) {
-("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
-    Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
-    Some("pending returns every retained condition"),
-("pending.rs", "UPDATE _coven_pending SET build=?1", "_coven_pending") =>
-    Some("test support: every record becomes another build's"),
-("pending.rs", "UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", "_coven_pending") =>
-    Some("once per open: every record's cause names an error an earlier run met"),
-("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
-    Some("reset visits every condition; provider-obligation lookups remain indexed"),
+        ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") => {
+            Some("pending returns every retained condition")
+        }
+        (
+            "pending.rs",
+            "SELECT subject,value,operation,slot_key,work,device,object,build,move,pin,cause,id FROM _coven_pending",
+            "_coven_pending",
+        ) => Some("pending returns every retained condition"),
+        ("pending.rs", "UPDATE _coven_pending SET build=?1", "_coven_pending") => {
+            Some("test support: every record becomes another build's")
+        }
+        (
+            "pending.rs",
+            "UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL",
+            "_coven_pending",
+        ) => Some("once per open: every record's cause names an error an earlier run met"),
+        (
+            "pending.rs",
+            "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",
+            "p",
+        ) => Some("reset visits every condition; provider-obligation lookups remain indexed"),
         _ => None,
     }
 }

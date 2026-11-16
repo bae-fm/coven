@@ -179,7 +179,7 @@ pub(crate) fn record_library(db: &DatabaseConnection) -> Result<(), DbError> {
 /// as it is read (a VIRTUAL generated column). A partial index's condition
 /// doesn't count.
 fn expression_indexes(db: &DatabaseConnection) -> Result<Vec<String>, DbError> {
-    db.query(
+    Ok(db.query(
         "SELECT s.name FROM main.sqlite_schema AS s
          WHERE s.type='index' AND EXISTS(
              SELECT 1 FROM pragma_index_xinfo(s.name,'main') AS x
@@ -188,7 +188,7 @@ fn expression_indexes(db: &DatabaseConnection) -> Result<Vec<String>, DbError> {
          ORDER BY s.name",
         [],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// At a read-only open, which can't rebuild: every registered collation

@@ -37,7 +37,7 @@ const INSTALLING: i64 = 0;
 /// Create the table of staged snapshots' applied writes, in the connection's
 /// temporary storage.
 pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.batch("CREATE TEMP TABLE _coven_snapshot_writes(source INTEGER NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(source,device,number)) WITHOUT ROWID")
+    Ok(db.batch("CREATE TEMP TABLE _coven_snapshot_writes(source INTEGER NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(source,device,number)) WITHOUT ROWID")?)
 }
 
 /// Forget the applied writes of the snapshot staged as `source`.
@@ -87,11 +87,11 @@ impl<'a> SnapshotMetadata<'a> {
     /// device's last write through coverage, and a device's writes land in
     /// the order it numbered them (coven.md §16.7).
     pub(crate) fn covers(&self, write: WriteId) -> Result<bool, DbError> {
-        self.database.query_row(
+        Ok(self.database.query_row(
             "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number>=?3)",
             params![self.source, write.device, write.number.to_be_bytes().as_slice()],
             |r| r.get(0),
-        )
+        )?)
     }
 
     /// Refuse an applied write outside the snapshot's coverage, or one not

@@ -138,11 +138,11 @@ pub(crate) fn holds_leaves(
     write: WriteId,
     audience: &Audience,
 ) -> Result<bool, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_part_leaves WHERE write_id=?1 AND audience=?2)",
         params![encoded(merge_fields::encode_write_id(&write))?, audience],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// The kept records of `write`'s part in `audience` are forgotten (§16.7):

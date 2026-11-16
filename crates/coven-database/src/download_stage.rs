@@ -58,11 +58,11 @@ pub(crate) fn replaced(
     database: &DatabaseConnection,
     audience: &Audience,
 ) -> Result<bool, DbError> {
-    database.query_row(
+    Ok(database.query_row(
         "SELECT EXISTS(SELECT 1 FROM temp._coven_download_replaced WHERE audience=?1)",
         [audience],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// A present row's staged values: those a write staged for it, else those
@@ -374,11 +374,11 @@ pub(crate) fn retain_values(
 
 /// The rows staged so far in this transaction.
 pub(crate) fn staged_rows(database: &DatabaseConnection) -> Result<Vec<RowId>, DbError> {
-    database.query(
+    Ok(database.query(
         "SELECT table_name,key,audience FROM temp._coven_download_rows",
         [],
         crate::row_queries::read_identity,
-    )
+    )?)
 }
 
 /// Install app rows once after the counted and queued folds have completed.
@@ -433,9 +433,9 @@ pub(crate) fn rules(
 
 /// Empty the staging once the transaction's rows are materialized.
 pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch(
+    Ok(database.batch(
         "DELETE FROM temp._coven_download_rows; DELETE FROM temp._coven_download_dismissals; DELETE FROM temp._coven_download_replaced",
-    )
+    )?)
 }
 
 /// The counted projection's losses must be captured before the local overlay.

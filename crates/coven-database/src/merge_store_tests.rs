@@ -49,7 +49,7 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
             let updates = store.apply(&incoming)?;
             crate::write_commit::commit(db, call,&incoming,&store,&updates)?;
             db.execute("UPDATE children SET a='c',b='0'",[])?;
-            Ok(())
+            Ok::<_, crate::DbError>(())
         }).unwrap();
         let value = db.query_row("SELECT value FROM _coven_lost WHERE table_name='children' AND column_id=(SELECT id FROM _coven_columns WHERE table_name='children' AND column_name='a')",[],|r| Ok(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
         assert_eq!(value.value,Value::Text("a".into()));

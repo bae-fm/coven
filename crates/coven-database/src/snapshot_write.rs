@@ -3,6 +3,7 @@ use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, slot_counter};
+use crate::write_failure::{hosted, Hosted};
 use crate::{write_schema::WriteSchema, DbError};
 use coven_format::{
     admin::SnapshotId,
@@ -68,11 +69,13 @@ pub(crate) fn write<E>(
         }
         Ok::<_, DbError>(())
     })?;
-    counts[section::WRITE] = db.query_row(
-        "SELECT count(*) FROM _coven_writes WHERE slot<=?1",
-        [covers.to_be_bytes()],
-        |r| r.get::<_, i64>(0).map(|n| n as u64),
-    )?;
+    counts[section::WRITE] = db
+        .query_row(
+            "SELECT count(*) FROM _coven_writes WHERE slot<=?1",
+            [covers.to_be_bytes()],
+            |r| r.get::<_, i64>(0).map(|n| n as u64),
+        )
+        .map_err(DbError::from)?;
     counts[section::COLUMN] = columns.len() as u64;
     crate::write_sources::visit_evidence(db, &audience, |_| {
         counts[section::AUTHORED] += 1;
@@ -99,11 +102,13 @@ pub(crate) fn write<E>(
             (section::KEY_COPY, "key"),
             (section::ANNOUNCEMENT, "announcement"),
         ] {
-            counts[at] = db.query_row(
-                "SELECT count(*) FROM _coven_slot_records WHERE kind=?1 AND slot<=?2",
-                rusqlite::params![kind, covers.to_be_bytes()],
-                |r| r.get::<_, i64>(0).map(|n| n as u64),
-            )?;
+            counts[at] = db
+                .query_row(
+                    "SELECT count(*) FROM _coven_slot_records WHERE kind=?1 AND slot<=?2",
+                    rusqlite::params![kind, covers.to_be_bytes()],
+                    |r| r.get::<_, i64>(0).map(|n| n as u64),
+                )
+                .map_err(DbError::from)?;
         }
     }
     let claims = crate::sequence::claims(db)?;
@@ -118,7 +123,7 @@ pub(crate) fn write<E>(
     begin(encoder.header()).map_err(SnapshotWriteError::Output)?;
     emit(header).map_err(SnapshotWriteError::Output)?;
     let mut record = |record| emit(encoder.record(record)?).map_err(SnapshotWriteError::Output);
-    db.for_each(&format!("SELECT timestamp,number,read_through,slot FROM _coven_writes WHERE slot<=?1 ORDER BY {WRITE_DEVICE_SQL},number"),[covers.to_be_bytes()],|r|record(SnapshotRecord::Write(read_write(r).map_err(DbError::from)?)))?;
+    db.for_each(&format!("SELECT timestamp,number,read_through,slot FROM _coven_writes WHERE slot<=?1 ORDER BY {WRITE_DEVICE_SQL},number"),[covers.to_be_bytes()],|r|hosted(|| record(SnapshotRecord::Write(read_write(r).map_err(DbError::from)?)))).map_err(Hosted::into_inner)?;
     for (table, column) in columns {
         record(SnapshotRecord::Column(SyncedColumn { table, column }))?;
     }
@@ -139,10 +144,10 @@ pub(crate) fn write<E>(
     }
     if audience == Audience::Store {
         for kind in ["admin", "key", "announcement"] {
-            db.for_each("SELECT slot,record FROM _coven_slot_records WHERE kind=?1 AND slot<=?2 ORDER BY slot",rusqlite::params![kind,covers.to_be_bytes()],|r| {
+            db.for_each("SELECT slot,record FROM _coven_slot_records WHERE kind=?1 AND slot<=?2 ORDER BY slot",rusqlite::params![kind,covers.to_be_bytes()],|r| hosted(|| {
                 let original=coven_format::floor::OriginalSlot {slot:slot_counter(r.get(0).map_err(DbError::from)?).map_err(DbError::from)?,object:r.get(1).map_err(DbError::from)?};
                 record(match kind {"admin"=>SnapshotRecord::Admin(original),"key"=>SnapshotRecord::KeyCopy(original),_=>SnapshotRecord::Announcement(original)})
-            })?;
+            })).map_err(Hosted::into_inner)?;
         }
     }
     for claim in claims {

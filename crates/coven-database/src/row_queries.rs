@@ -87,11 +87,11 @@ pub(crate) fn frozen_column(
         "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,0) ON CONFLICT DO NOTHING",
         rusqlite::params![table, column],
     )?;
-    database.query_row(
+    Ok(database.query_row(
         "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
         rusqlite::params![table, column],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// The table name a migration parks a column under while it moves columns
@@ -139,11 +139,11 @@ pub(crate) fn stage_successor(
         "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)",
         params![staged, column],
     )?;
-    database.query_row(
+    Ok(database.query_row(
         "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
         params![staged, column],
         |r| r.get(0),
-    )
+    )?)
 }
 
 /// Give column `id` the table and name it has after the migration.
@@ -217,7 +217,7 @@ pub(crate) fn claimants(
     audience: &coven_merge::Audience,
     value: &[u8],
 ) -> Result<Vec<RowId>, DbError> {
-    database.query("SELECT r.table_name,r.key,r.audience FROM _coven_claims c JOIN _coven_rows r ON r.id=c.row_id WHERE c.constraint_id=(SELECT id FROM _coven_constraints WHERE table_name=?1 AND identity=?2) AND c.audience=?3 AND c.value=?4", params![table,encoded(merge_fields::encode_unique_constraint(constraint))?,audience,value], read_identity)
+    Ok(database.query("SELECT r.table_name,r.key,r.audience FROM _coven_claims c JOIN _coven_rows r ON r.id=c.row_id WHERE c.constraint_id=(SELECT id FROM _coven_constraints WHERE table_name=?1 AND identity=?2) AND c.audience=?3 AND c.value=?4", params![table,encoded(merge_fields::encode_unique_constraint(constraint))?,audience,value], read_identity)?)
 }
 
 /// Whether a row the removal rules took out claims a unique value of `table`
@@ -227,7 +227,7 @@ pub(crate) fn holds_claims(
     table: &str,
     audience: &coven_merge::Audience,
 ) -> Result<bool, DbError> {
-    database.query_row("SELECT EXISTS(SELECT 1 FROM _coven_constraints k JOIN _coven_claims c ON c.constraint_id=k.id WHERE k.table_name=?1 AND c.audience=?2)", params![table, audience], |r| r.get(0))
+    Ok(database.query_row("SELECT EXISTS(SELECT 1 FROM _coven_constraints k JOIN _coven_claims c ON c.constraint_id=k.id WHERE k.table_name=?1 AND c.audience=?2)", params![table, audience], |r| r.get(0))?)
 }
 
 /// How many rows one `pointed_at` statement reads.
@@ -354,7 +354,7 @@ fn definition_id(
 ) -> Result<i64, DbError> {
     let parameters = rusqlite::params![table, identity];
     database.execute(definitions.insert, parameters)?;
-    database.query_row(definitions.id, parameters, |r| r.get(0))
+    Ok(database.query_row(definitions.id, parameters, |r| r.get(0))?)
 }
 
 #[cfg(test)]

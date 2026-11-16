@@ -32,7 +32,7 @@ pub(crate) fn prepare_internal_schema(sql: &mut DatabaseConnection) -> Result<()
         sql.transaction(|db| {
             db.batch(&internal_schema::initial_schema())?;
             crate::sql_versions::record_library(db)?;
-            db.batch(&format!("PRAGMA application_id = {}", internal_schema::VERSION))
+            Ok(db.batch(&format!("PRAGMA application_id = {}", internal_schema::VERSION))?)
         })
         .map_err(|source| CovenMigrationError::Failed { source: Box::new(source) })?;
     }

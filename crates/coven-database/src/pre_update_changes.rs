@@ -6,7 +6,8 @@
 //! scope tests, only where a waiting live query narrows that table.
 
 use super::table_shapes::{TableShape, TableShapes};
-use crate::DbError;
+use crate::engine_error::EngineError;
+use crate::store_failure::StoreFailure;
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
 use rusqlite::types::ValueRef;
 use sqlive::{RowChange, RowImage, SqlValue, ROWS_PER_TABLE};
@@ -47,23 +48,29 @@ impl ImageColumns {
             .collect()
     }
 
-    fn before(&self, old: &PreUpdateOldValueAccessor) -> Result<RowImage, DbError> {
+    fn before(
+        &self,
+        old: &PreUpdateOldValueAccessor,
+    ) -> Result<RowImage, EngineError<StoreFailure>> {
         self.image(|index| old_value(old, index))
     }
 
-    fn after(&self, new: &PreUpdateNewValueAccessor) -> Result<RowImage, DbError> {
+    fn after(
+        &self,
+        new: &PreUpdateNewValueAccessor,
+    ) -> Result<RowImage, EngineError<StoreFailure>> {
         self.image(|index| new_value(new, index))
     }
 
     fn image<'a>(
         &self,
-        value: impl Fn(usize) -> Result<Option<ValueRef<'a>>, DbError>,
-    ) -> Result<RowImage, DbError> {
+        value: impl Fn(usize) -> Result<Option<ValueRef<'a>>, EngineError<StoreFailure>>,
+    ) -> Result<RowImage, EngineError<StoreFailure>> {
         let values = self
             .positions
             .iter()
             .map(|index| Ok(value(*index)?.map(SqlValue::from)))
-            .collect::<Result<_, DbError>>()?;
+            .collect::<Result<_, EngineError<StoreFailure>>>()?;
         Ok(RowImage::new(Arc::clone(&self.names), values))
     }
 }
@@ -74,7 +81,7 @@ impl ImageColumns {
 /// takes it for a value that isn't there.
 pub(crate) fn column_value(
     read: rusqlite::Result<ValueRef<'_>>,
-) -> Result<Option<ValueRef<'_>>, DbError> {
+) -> Result<Option<ValueRef<'_>>, EngineError<StoreFailure>> {
     match read {
         Ok(value) => Ok(Some(value)),
         Err(rusqlite::Error::SqliteFailure(error, _))
@@ -90,7 +97,7 @@ pub(crate) fn column_value(
 pub(crate) fn old_value(
     old: &PreUpdateOldValueAccessor,
     index: usize,
-) -> Result<Option<ValueRef<'_>>, DbError> {
+) -> Result<Option<ValueRef<'_>>, EngineError<StoreFailure>> {
     column_value(old.get_old_column_value(at(index)))
 }
 
@@ -98,7 +105,7 @@ pub(crate) fn old_value(
 pub(crate) fn new_value(
     new: &PreUpdateNewValueAccessor,
     index: usize,
-) -> Result<Option<ValueRef<'_>>, DbError> {
+) -> Result<Option<ValueRef<'_>>, EngineError<StoreFailure>> {
     column_value(new.get_new_column_value(at(index)))
 }
 
@@ -143,7 +150,7 @@ impl PreUpdateChanges {
         shapes: &TableShapes,
         position: usize,
         case: &PreUpdateCase,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), EngineError<StoreFailure>> {
         let shape = shapes.shape(position);
         let before = self.rows.len();
         self.record_rows(shape, position, case)?;
@@ -170,7 +177,7 @@ impl PreUpdateChanges {
         shape: &TableShape,
         position: usize,
         case: &PreUpdateCase,
-    ) -> Result<(), DbError> {
+    ) -> Result<(), EngineError<StoreFailure>> {
         let image = self.scoped.get(&position);
         match case {
             PreUpdateCase::Insert(new) => match image {
@@ -187,7 +194,7 @@ impl PreUpdateChanges {
                 }
             },
             PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
-                let changed = |index: usize| -> Result<bool, DbError> {
+                let changed = |index: usize| -> Result<bool, EngineError<StoreFailure>> {
                     Ok(old_value(old, index)? != new_value(new, index)?)
                 };
                 let mut key_changed = false;

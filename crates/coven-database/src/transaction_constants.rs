@@ -9,6 +9,7 @@
 use crate::sqlite::CookieScope;
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
+use crate::write_failure::{hosted, Hosted};
 use crate::DbError;
 use coven_merge::Audience;
 use std::cell::{Cell, RefCell};
@@ -96,7 +97,7 @@ pub(crate) fn read_with_constants<R, E: From<DbError>>(
     read: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     let _constants = keep_constants(sql, call);
-    sql.read_transaction(read)
+    sql.read_transaction(|| hosted(read)).map_err(Hosted::into_inner)
 }
 
 /// The app schema version the store is at.

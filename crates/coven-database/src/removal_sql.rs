@@ -76,11 +76,11 @@ pub(crate) fn evaluate_values(
         ),
         params_from_iter(columns.iter().filter_map(|c| values.get(&c.name).map(sql_value))),
     )?;
-    db.query_row(
+    Ok(db.query_row(
         &format!("SELECT {} FROM temp.{target} WHERE {ordinal}=1", column_list(table)),
         [],
         |r| read_row(table, r),
-    )
+    )?)
 }
 
 /// Bind reference values into the target's declared types. SQLite, rather than
@@ -113,9 +113,9 @@ pub(crate) fn reference_values(
         ),
         params_from_iter(values.iter().map(sql_value)),
     )?;
-    db.query_row(&format!("SELECT {names} FROM temp.{target} WHERE {ordinal}=1"), [], |r| {
+    Ok(db.query_row(&format!("SELECT {names} FROM temp.{target} WHERE {ordinal}=1"), [], |r| {
         (0..columns.len()).map(|i| value(r.get_ref(i)?)).collect()
-    })
+    })?)
 }
 
 /// The row's unique claims and failed CHECKs, read from the row staged in the

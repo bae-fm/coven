@@ -366,7 +366,7 @@ fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     drop(attempt);
     let heard = bugs.take();
     assert!(
-        matches!(handle.error(), Some(crate::DbError::StoreFailed(bug)) if heard == [bug.clone()] && bug.operation == "end a transfer in flight"),
+        matches!(handle.error(), Some(crate::engine_error::EngineError::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "end a transfer in flight"),
         "{:?}, heard {heard:?}",
         handle.error()
     );

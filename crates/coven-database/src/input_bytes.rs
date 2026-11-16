@@ -43,9 +43,11 @@ impl Read for RetainedBytes {
         let start = self.position;
         let end = start + length;
         let ranges = read_local(&self.reader, |db, _| {
-            db.query(RANGES, (self.reading.id, sql_offset(start)?, sql_offset(end)?), |row| {
-                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
-            })
+            Ok(db.query(
+                RANGES,
+                (self.reading.id, sql_offset(start)?, sql_offset(end)?),
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?)),
+            )?)
         })
         .map_err(io::Error::other)?;
         let mut copied = 0;

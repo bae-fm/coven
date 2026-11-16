@@ -14,11 +14,12 @@
 //! live query reports it until the store is reopened, rather than the store
 //! staying open without its upkeep. A panic in a run is a bug in coven: it
 //! goes to the store's bug sink and fails the handle the same way, as
-//! `DbError::StoreFailed` carrying it, so the thread never ends in a way no
+//! `EngineError::HandleFailed` carrying it, so the thread never ends in a way no
 //! one hears of.
 
-use crate::observation::{CommitObserver, HandleFailure};
-use crate::DbError;
+use crate::engine_error::EngineError;
+use crate::observation::CommitObserver;
+use crate::store_failure::StoreFailure;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -28,11 +29,11 @@ pub(crate) trait Upkeep: Send + Sync + 'static {
     const THREAD: &'static str;
 
     /// One wake's upkeep. A wake may come with no commit.
-    fn run(&self) -> Result<(), DbError>;
+    fn run(&self) -> Result<(), EngineError<StoreFailure>>;
 
-    /// What the handle fails with once a run fails other than on a busy or
-    /// locked database.
-    fn failure(error: Arc<DbError>) -> HandleFailure;
+    /// What the handle fails with once a run fails with `error` other than
+    /// on a busy or locked database.
+    fn failure(error: EngineError<StoreFailure>) -> EngineError<StoreFailure>;
 }
 
 /// Wakes an upkeep thread. Waking only leaves the thread's permit, which
@@ -65,17 +66,20 @@ pub(crate) struct UpkeepThread<U: Upkeep> {
 impl<U: Upkeep> UpkeepThread<U> {
     /// Run `upkeep` at each wake from now on, failing `handle` once a run
     /// fails.
-    pub(crate) fn spawn(upkeep: U, handle: CommitObserver) -> Result<Self, DbError> {
+    pub(crate) fn spawn(
+        upkeep: U,
+        handle: CommitObserver,
+    ) -> Result<Self, EngineError<StoreFailure>> {
         #[cfg(test)]
         if handle.upkeep_thread_refused() {
-            return Err(DbError::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
+            return Err(EngineError::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
         }
         let shared = Arc::new(Shared { closing: AtomicBool::new(false), upkeep });
         let serving = Serving { shared: shared.clone(), handle };
         let thread = std::thread::Builder::new()
             .name(U::THREAD.into())
             .spawn(move || serving.serve())
-            .map_err(DbError::UpkeepThread)?;
+            .map_err(EngineError::UpkeepThread)?;
         Ok(Self { shared, thread: Some(thread) })
     }
 
@@ -150,7 +154,7 @@ impl<U: Upkeep> Serving<U> {
                     tracing::debug!(?error, thread = U::THREAD, "upkeep found the database busy");
                 }
                 Err(error) => {
-                    self.handle.fail(U::failure(Arc::new(error)));
+                    self.handle.fail(StoreFailure::from(U::failure(error)));
                     return;
                 }
             }
@@ -164,10 +168,10 @@ impl<U: Upkeep> Serving<U> {
 
 /// Whether `error` is SQLite finding the database busy or locked: another
 /// connection held on past the busy timeout.
-fn busy(error: &DbError) -> bool {
+fn busy(error: &EngineError<StoreFailure>) -> bool {
     matches!(
         error,
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+        EngineError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
             if matches!(
                 failure.code,
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked

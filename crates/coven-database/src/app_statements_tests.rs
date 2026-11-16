@@ -98,15 +98,22 @@ async fn a_statement_cached_in_a_write_is_still_refused_in_a_read() {
         writer
             .transaction(|writer| {
                 let _reading = writer.authorization.reading();
-                Ok(writer.app_query(crate::sqlite::Recorded::No, INSERT, ["2"], |_| Ok(())))
+                Ok::<_, DbError>(writer.app_query(
+                    crate::sqlite::Recorded::No,
+                    INSERT,
+                    ["2"],
+                    |_| Ok(()),
+                ))
             })
             .unwrap()
     });
     match refused {
         Err(rusqlite::Error::UserFunctionError(error)) => assert!(
             matches!(
-                error.downcast_ref::<DbError>(),
-                Some(DbError::StatementForbidden { operation: "writing through a read context" })
+                error.downcast_ref::<crate::engine_error::EngineError<crate::store_failure::StoreFailure>>(),
+                Some(crate::engine_error::EngineError::StatementForbidden {
+                    operation: "writing through a read context"
+                })
             ),
             "{error:?}"
         ),

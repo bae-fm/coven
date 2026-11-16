@@ -232,12 +232,13 @@ impl InputDatabase {
 
     pub(crate) fn close(self) -> Vec<DbError> {
         let reader = lock_unpoisoned(&self.reader).take().expect("open input reader");
-        let mut failures: Vec<DbError> = reader.close().err().into_iter().collect();
+        let mut failures: Vec<DbError> =
+            reader.close().err().into_iter().map(DbError::from).collect();
         // The checkpointer stopped before, and let go of the writer.
         match Arc::try_unwrap(self.writer) {
             Ok(writer) => {
                 if let Err(error) = coven_foundation::locks::into_unpoisoned(writer).close() {
-                    failures.push(error);
+                    failures.push(error.into());
                 }
             }
             Err(_held) => failures.push(DbError::Invariant {
@@ -299,7 +300,7 @@ fn observation(db: &DatabaseConnection, path: &str) -> Result<Option<(i64, Vec<u
 const RANGES: &str = "SELECT max(start,?2),substr(bytes,max(start,?2)-start+1,min(end,?3)-max(start,?2)) FROM _coven_input_ranges WHERE object=?1 AND start>=coalesce((SELECT start FROM _coven_input_ranges WHERE object=?1 AND start<=?2 ORDER BY start DESC LIMIT 1),?2) AND start<?3 AND end>?2 ORDER BY start";
 
 fn budget(db: &DatabaseConnection) -> Result<InputBudget, DbError> {
-    db.query_row(
+    Ok(db.query_row(
         "SELECT maximum,retained,evicted FROM _coven_input_budget WHERE singleton=1",
         [],
         |r| {
@@ -309,7 +310,7 @@ fn budget(db: &DatabaseConnection) -> Result<InputBudget, DbError> {
                 evicted: r.get::<_, i64>(2)? as u64,
             })
         },
-    )
+    )?)
 }
 
 fn evict(
@@ -399,7 +400,7 @@ impl Database {
                 let upload = crate::claim::upload(source)?;
                 let id = inner.inputs.write(|db: &DatabaseConnection, _| {
                     db.execute("DELETE FROM _coven_input_objects WHERE path='local-claim'", [])?;
-                    db.query_row("INSERT INTO _coven_input_objects(path,identity,observation) VALUES('local-claim',x'',x'') RETURNING id", [], |row| row.get(0))
+                    Ok(db.query_row("INSERT INTO _coven_input_objects(path,identity,observation) VALUES('local-claim',x'',x'') RETURNING id", [], |row| row.get(0))?)
                 })?;
                 let reading = inner.inputs.reading(id);
                 copy_claim(&inner.inputs, source, id)?;
@@ -458,7 +459,7 @@ impl Database {
                     _ => (),
                 }
                 db.execute("DELETE FROM _coven_input_objects WHERE path=?1", [&path])?;
-                db.query_row("INSERT INTO _coven_input_objects(path,slot,identity,observation) VALUES(?1,?2,?3,?4) RETURNING id", (&path, slot, &identity, &observation_bytes), |r| r.get(0)).map(Some)
+                Ok(db.query_row("INSERT INTO _coven_input_objects(path,slot,identity,observation) VALUES(?1,?2,?3,?4) RETURNING id", (&path, slot, &identity, &observation_bytes), |r| r.get(0)).map(Some)?)
             })
         }).await?;
         match id {
@@ -512,9 +513,9 @@ impl Database {
                          UPDATE _coven_input_peak SET peak=max(peak,NEW.retained);
                      END;",
                 )?;
-                writer.query_row("SELECT peak FROM temp._coven_input_peak", [], |row| {
+                Ok(writer.query_row("SELECT peak FROM temp._coven_input_peak", [], |row| {
                     row.get::<_, i64>(0)
-                })
+                })?)
             })
         })
         .await
@@ -549,9 +550,11 @@ impl RetainedInput {
     /// native metadata whose representation can differ in later listings.
     pub async fn observation(&self) -> Result<Vec<u8>, DbError> {
         self.read(|db, _, id| {
-            db.query_row("SELECT observation FROM _coven_input_objects WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
+            Ok(db.query_row(
+                "SELECT observation FROM _coven_input_objects WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?)
         })
         .await
     }
@@ -585,9 +588,9 @@ impl RetainedInput {
         let start = sql_offset(start)?;
         let end = sql_offset(end)?;
         self.read(move |db, _, id| {
-            db.query(RANGES, (id, start, end), |r| {
+            Ok(db.query(RANGES, (id, start, end), |r| {
                 Ok(RetainedRange { offset: r.get::<_, i64>(0)? as u64, bytes: r.get(1)? })
-            })
+            })?)
         })
         .await
     }
@@ -602,9 +605,11 @@ impl RetainedInput {
     /// transport EOF. This records receipt, never content authentication.
     pub async fn received(&self) -> Result<bool, DbError> {
         self.read(|db, _, id| {
-            db.query_row("SELECT received FROM _coven_input_objects WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
+            Ok(db.query_row(
+                "SELECT received FROM _coven_input_objects WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?)
         })
         .await
     }
@@ -613,11 +618,11 @@ impl RetainedInput {
     /// so the object is held whole when this equals its size.
     pub async fn retained_length(&self) -> Result<u64, DbError> {
         self.read(|db, _, id| {
-            db.query_row(
+            Ok(db.query_row(
                 "SELECT coalesce(sum(end-start),0) FROM _coven_input_ranges WHERE object=?1",
                 [id],
                 |r| r.get::<_, i64>(0),
-            )
+            )?)
         })
         .await
         .map(|length| length as u64)

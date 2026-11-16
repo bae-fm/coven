@@ -12,7 +12,7 @@ async fn streamed_commits_observe_without_rowid_and_virtual_tables_and_discard_r
     assert!(search.next_inline().await.expect("the live query answers").unwrap().is_empty());
     db.inspect_writer(|writer, _| {
         assert!(writer
-            .stream_transaction::<()>(|writer| {
+            .stream_transaction::<(), crate::DbError>(|writer| {
                 writer.batch(
                     "INSERT INTO items VALUES('one','failed'); INSERT INTO search VALUES('failed')",
                 )?;

@@ -1,8 +1,10 @@
 //! Per-subscription dependencies. Commits during a read are retained until its
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
+use crate::database_changes::DatabaseChanges;
+use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
-use crate::{CommitScope, DbError};
+use crate::CommitScope;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{Bug, BugSinkRef};
 use sqlive::{affected, Answers, Lookups, ReadSet, RowChange, RowScope};
@@ -31,32 +33,20 @@ impl UnrecordedTables {
 /// Why this handle refuses every call until the store is reopened.
 #[derive(Clone)]
 pub(crate) enum HandleFailure {
-    /// A failure coven reported as the handle's host.
+    /// The host's failure: one coven reported, or the engine's that ended
+    /// the handle, as the host holds it.
     Host(StoreFailure),
-    /// Rolling back a failed transaction failed, so the writer may still hold
-    /// its uncommitted changes.
-    Rollback,
-    /// A WAL checkpoint failed with this cause, other than on a busy or
-    /// locked database, and the store's checkpointing stopped.
-    Checkpoint(Arc<DbError>),
-    /// Checking or gathering the planner's statistics failed with this
-    /// cause, other than on a busy or locked database, and keeping them
-    /// stopped.
-    Statistics(Arc<DbError>),
     /// A bug, a panic or a fault a drop found, may have left this store's
     /// state wrong (E15). It reached its one reporter as it happened, so
-    /// the calls after it repeat it as `DbError::StoreFailed`.
+    /// the calls after it repeat it as `EngineError::HandleFailed`.
     Bug(Bug),
 }
 
 impl HandleFailure {
-    fn error(&self) -> DbError {
+    fn error(&self) -> EngineError<StoreFailure> {
         match self {
-            Self::Host(failure) => failure.error(),
-            Self::Rollback => DbError::RollbackFailed,
-            Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
-            Self::Statistics(cause) => DbError::StatisticsFailed(cause.clone()),
-            Self::Bug(bug) => DbError::StoreFailed(bug.clone()),
+            Self::Host(failure) => EngineError::Host(failure.clone()),
+            Self::Bug(bug) => EngineError::HandleFailed(bug.clone()),
         }
     }
 }
@@ -74,11 +64,11 @@ impl CommitState {
         self.closed
     }
 
-    pub(crate) fn error(&self) -> Option<DbError> {
+    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure>> {
         self.failure
             .as_ref()
             .map(HandleFailure::error)
-            .or_else(|| self.closed.then_some(DbError::StoreClosed))
+            .or_else(|| self.closed.then_some(EngineError::Closed))
     }
 }
 
@@ -407,11 +397,15 @@ impl CommitObserver {
 
     /// Watch `reads` from now on; `first` reports the state now as their
     /// first change.
-    pub(crate) fn changes(&self, reads: ReadSet, first: bool) -> crate::DatabaseChanges {
+    pub(crate) fn changes<E: From<EngineError<StoreFailure>>>(
+        &self,
+        reads: ReadSet,
+        first: bool,
+    ) -> DatabaseChanges<E> {
         let commits = self.subscribe();
         commits.begin();
         commits.finish(reads.clone());
-        crate::DatabaseChanges::new(commits, reads, first)
+        DatabaseChanges::new(commits, reads, first)
     }
 
     /// Keep every commit made from now on outside `attempt`, until the
@@ -424,14 +418,14 @@ impl CommitObserver {
 
     /// Watch `rows` after `attempt`: a commit since it began that changed
     /// one is reported at once, as evidence against the wait it ended in.
-    pub(crate) fn watch_attempt(
+    pub(crate) fn watch_attempt<E: From<EngineError<StoreFailure>>>(
         &self,
         attempt: AttemptCommits,
         rows: &[crate::PrerequisiteRows],
-    ) -> crate::DatabaseChanges {
+    ) -> DatabaseChanges<E> {
         let reads: ReadSet = rows.iter().flat_map(crate::PrerequisiteRows::reads).collect();
         attempt.commits.finish(reads.clone());
-        crate::DatabaseChanges::new(attempt.commits, reads, false)
+        DatabaseChanges::new(attempt.commits, reads, false)
     }
 
     /// Judge a write's `changes`, made within `scope`, for every live query
@@ -543,20 +537,21 @@ impl CommitObserver {
     }
 
     /// What every call on the handle fails with: its failure, or
-    /// `StoreClosed` once it closed.
-    pub(crate) fn error(&self) -> Option<DbError> {
+    /// `EngineError::Closed` once it closed.
+    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure>> {
         self.with_state(|state| {
             state
                 .failure
                 .as_ref()
                 .map(HandleFailure::error)
-                .or_else(|| state.closed.then_some(DbError::StoreClosed))
+                .or_else(|| state.closed.then_some(EngineError::Closed))
         })
     }
 
-    /// Fail every later call and subscription; the first failure is kept.
-    pub(crate) fn fail(&self, failure: HandleFailure) {
-        self.with_state(|state| state.fail(failure));
+    /// Fail every later call and subscription with `failure`; the first
+    /// failure is kept.
+    pub(crate) fn fail(&self, failure: StoreFailure) {
+        self.with_state(|state| state.fail(HandleFailure::Host(failure)));
     }
 
     /// Fail the handle with `bug`, a panic in work that may have held its

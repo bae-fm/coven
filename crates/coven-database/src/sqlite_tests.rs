@@ -365,7 +365,7 @@ async fn native_cycle_deletes_commit_with_enforcement_and_transaction_deferral()
                                     .get::<_, bool>(0))?);
                             writer.execute("DELETE FROM nodes WHERE id=?1", [first])?;
                             writer.execute("DELETE FROM nodes WHERE id=?1", [second])?;
-                            Ok(())
+                            Ok::<_, DbError>(())
                         })
                         .unwrap();
                     assert!(writer
@@ -750,7 +750,7 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
     });
     assert_eq!(next(&mut query).await, (0, vec!["unchanged".into()]));
     db.inspect_writer(|writer, _| {
-        let result = writer.transaction::<()>(|writer| {
+        let result = writer.transaction::<(), crate::DbError>(|writer| {
             writer.batch("UPDATE local SET extra=1")?;
             Err(DbError::TransactionEnded)
         });
@@ -793,7 +793,7 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
                                 [vec![value; 4096]],
                             )?;
                         }
-                        Ok(())
+                        Ok::<_, DbError>(())
                     })
                 })
                 .unwrap();

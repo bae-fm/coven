@@ -33,6 +33,8 @@ mod transaction_capture;
 mod write_transaction;
 #[path = "write_with.rs"]
 mod write_with;
+use crate::engine_error::EngineError;
+use crate::DbError;
 use app_statements::StepsOf;
 pub(crate) use app_triggers::check_followed_triggers;
 pub(crate) use event_capture::Operation;
@@ -51,7 +53,6 @@ use crate::authorization::SqlAuthorization;
 use crate::connection_setup::Setup;
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
-use crate::DbError;
 
 /// Statements kept prepared per connection, coven's and the app's: a local
 /// write runs about a hundred distinct ones of coven's, which a smaller cache
@@ -139,7 +140,7 @@ impl DatabaseConnection {
         policy: CovenPolicy,
         settings: &crate::SqliteSettings,
         setup: &dyn Fn(&Setup<'_>) -> rusqlite::Result<()>,
-    ) -> Result<Self, DbError> {
+    ) -> Result<Self, EngineError<StoreFailure>> {
         let flags = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         } else {
@@ -200,7 +201,7 @@ impl DatabaseConnection {
 
     /// The most arguments an SQL function call can pass on this connection.
     #[cfg(test)]
-    pub(crate) fn function_argument_limit(&self) -> Result<usize, DbError> {
+    pub(crate) fn function_argument_limit(&self) -> Result<usize, EngineError<StoreFailure>> {
         Ok(self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_FUNCTION_ARG)? as usize)
     }
 
@@ -227,7 +228,7 @@ impl DatabaseConnection {
     /// yet fails nothing.
     pub(crate) fn fail_handle(&self, failure: StoreFailure) {
         if let Some(handle) = &self.handle {
-            handle.fail(crate::observation::HandleFailure::Host(failure));
+            handle.fail(failure);
         }
     }
 
@@ -277,13 +278,17 @@ impl DatabaseConnection {
         }
     }
 
-    pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {
+    pub(crate) fn batch(&self, sql: &str) -> Result<(), EngineError<StoreFailure>> {
         let _scope = self.authorization.internal();
         self.connection.execute_batch(sql).map_err(Into::into)
     }
 
     /// The collation a column declares, BINARY when it names none.
-    pub(crate) fn column_collation(&self, table: &str, column: &str) -> Result<String, DbError> {
+    pub(crate) fn column_collation(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<String, EngineError<StoreFailure>> {
         let _scope = self.authorization.internal();
         let (_, collation, _, _, _) =
             self.connection.column_metadata(Some("main"), table, column)?;
@@ -292,17 +297,25 @@ impl DatabaseConnection {
 
     /// The columns `sql` reads and the functions it calls, as SQLite
     /// resolves them while preparing it; it never runs.
-    pub(crate) fn reads(&self, sql: &str) -> Result<crate::authorization::StatementReads, DbError> {
+    pub(crate) fn reads(
+        &self,
+        sql: &str,
+    ) -> Result<crate::authorization::StatementReads, EngineError<StoreFailure>> {
         let _scope = self.authorization.internal();
         let reads = self.authorization.observe_reads();
         self.connection.prepare(sql)?;
         Ok(reads.reads())
     }
 
-    pub(crate) fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize, DbError> {
+    pub(crate) fn execute<P: Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> Result<usize, EngineError<StoreFailure>> {
         let _scope = self.authorization.internal();
-        let changed =
-            self.with_statement(sql, |statement| statement.execute(params).map_err(DbError::from))?;
+        let changed = self.with_statement(sql, |statement| {
+            statement.execute(params).map_err(EngineError::from)
+        })?;
         self.bound_stream_cache()?;
         Ok(changed)
     }
@@ -312,11 +325,11 @@ impl DatabaseConnection {
         sql: &str,
         params: P,
         map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
-    ) -> Result<T, DbError> {
+    ) -> Result<T, EngineError<StoreFailure>> {
         let _scope = self.authorization.internal();
         self.authorization.begin_read_statement();
         let result = self.with_statement(sql, |statement| {
-            statement.query_row(params, map).map_err(DbError::from)
+            statement.query_row(params, map).map_err(EngineError::from)
         });
         self.authorization.record_statement(&sqlive::Scopes::default());
         result
@@ -327,9 +340,9 @@ impl DatabaseConnection {
         sql: &str,
         params: P,
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
-    ) -> Result<Vec<T>, DbError> {
+    ) -> Result<Vec<T>, EngineError<StoreFailure>> {
         let mut values = Vec::new();
-        self.for_each::<_, DbError>(sql, params, |row| {
+        self.for_each::<_, EngineError<StoreFailure>>(sql, params, |row| {
             values.push(map(row)?);
             Ok(())
         })?;
@@ -337,7 +350,7 @@ impl DatabaseConnection {
     }
 
     /// Stream rows to a consumer with its own error type.
-    pub(crate) fn for_each<P: Params, E: From<DbError>>(
+    pub(crate) fn for_each<P: Params, E: From<EngineError<StoreFailure>>>(
         &self,
         sql: &str,
         params: P,
@@ -346,8 +359,8 @@ impl DatabaseConnection {
         let _scope = self.authorization.internal();
         self.authorization.begin_read_statement();
         let result = self.with_statement(sql, |statement| {
-            let mut rows = statement.query(params).map_err(DbError::from)?;
-            while let Some(row) = rows.next().map_err(DbError::from)? {
+            let mut rows = statement.query(params).map_err(EngineError::from)?;
+            while let Some(row) = rows.next().map_err(EngineError::from)? {
                 visit(row)?;
             }
             Ok(())
@@ -356,18 +369,23 @@ impl DatabaseConnection {
         result
     }
 
+    /// `prepared`, or the error the authorizer refused it with.
+    fn judged<T>(&self, prepared: rusqlite::Result<T>) -> Result<T, EngineError<StoreFailure>> {
+        Ok(self.authorization.app_result(prepared)?)
+    }
+
     /// Run coven's own SQL on the connection's cached statement, parsed once per
     /// connection. The authorizer records reads only while a statement is
     /// prepared, so while it records, the statement is prepared afresh.
-    fn with_statement<T, E: From<DbError>>(
+    fn with_statement<T, E: From<EngineError<StoreFailure>>>(
         &self,
         sql: &str,
         run: impl FnOnce(&mut rusqlite::Statement<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
         if self.authorization.recording() {
-            run(&mut self.trigger_judged(self.connection.prepare(sql))?)
+            run(&mut self.judged(self.connection.prepare(sql))?)
         } else {
-            let mut statement = self.trigger_judged(self.connection.prepare_cached(sql))?;
+            let mut statement = self.judged(self.connection.prepare_cached(sql))?;
             // The statement profile reports each execution's own full scans.
             #[cfg(test)]
             statement.reset_status(rusqlite::StatementStatus::FullscanStep);
@@ -441,10 +459,10 @@ impl DatabaseConnection {
 
     /// Run one migration step inside the open migration transaction. Which
     /// tables its statements write is decided as they are prepared (§18.1).
-    pub(crate) fn migrating<T>(
+    pub(crate) fn migrating<T, E: From<EngineError<StoreFailure>>>(
         &self,
-        run: impl FnOnce() -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
+        run: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
         assert!(self.observation.is_none(), "migrations precede commit observation");
         let result = run()?;
         self.require_transaction()?;
@@ -575,9 +593,9 @@ impl DatabaseConnection {
         self.authorization.write()
     }
 
-    pub(crate) fn require_transaction(&self) -> Result<(), DbError> {
+    pub(crate) fn require_transaction(&self) -> Result<(), EngineError<StoreFailure>> {
         if self.connection.is_autocommit() {
-            Err(DbError::TransactionEnded)
+            Err(EngineError::TransactionEnded)
         } else {
             Ok(())
         }
@@ -593,32 +611,25 @@ impl DatabaseConnection {
         Ok(())
     }
 
-    pub(crate) fn transaction<T>(
-        &mut self,
-        run: impl FnOnce(&Self) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
-        self.transaction_captured(false, run)
-    }
-
-    /// Streaming transfers publish table invalidations without a session's
-    /// retained before/after BLOB values growing with the transferred object.
-    /// `transaction`, for a run whose failures are `E`: a failed rollback
-    /// joins the run's own error.
-    pub(crate) fn transaction_as<T, E: crate::WriteFailure>(
+    /// Run `run` in a write transaction, whose failures are `E`: a failed
+    /// rollback joins the run's own error.
+    pub(crate) fn transaction<T, E: crate::engine_error::RollbackJoin<StoreFailure>>(
         &mut self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
         self.transaction_captured(false, run)
     }
 
-    pub(crate) fn stream_transaction<T>(
+    /// Streaming transfers publish table invalidations without a session's
+    /// retained before/after BLOB values growing with the transferred object.
+    pub(crate) fn stream_transaction<T, E: crate::engine_error::RollbackJoin<StoreFailure>>(
         &mut self,
-        run: impl FnOnce(&Self) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
+        run: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.transaction_captured(true, run)
     }
 
-    fn transaction_captured<T, E: crate::WriteFailure>(
+    fn transaction_captured<T, E: crate::engine_error::RollbackJoin<StoreFailure>>(
         &mut self,
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
@@ -663,7 +674,7 @@ impl DatabaseConnection {
         transaction.commit(outcome)
     }
 
-    pub(crate) fn close(self) -> Result<(), DbError> {
+    pub(crate) fn close(self) -> Result<(), EngineError<StoreFailure>> {
         self.connection.close().map_err(|(_connection, error)| error.into())
     }
 

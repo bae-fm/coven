@@ -32,7 +32,7 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
     for table in &SnapshotLayout::new(schema).tables {
         db.batch(&table.create_installed(schema))?;
     }
-    db.batch(
+    Ok(db.batch(
         "CREATE TEMP TABLE _coven_install_generations(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,generation BLOB NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL);
          CREATE TEMP TABLE _coven_install_parts(write_id BLOB NOT NULL,audience TEXT NOT NULL,header BLOB NOT NULL,PRIMARY KEY(write_id,audience)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_authored(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,admission BLOB,stop BLOB,PRIMARY KEY(write_id,audience,table_name,key)) WITHOUT ROWID;
@@ -46,7 +46,7 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
          CREATE TEMP TABLE _coven_install_stored(device BLOB NOT NULL,object BLOB NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(device,object,table_name,key)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_released(file TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_records(file TEXT PRIMARY KEY NOT NULL,namespace TEXT,object_path TEXT) WITHOUT ROWID;",
-    )
+    )?)
 }
 
 /// Drop the install's tables whole.
@@ -54,12 +54,12 @@ pub(crate) fn drop_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Resu
     for table in &SnapshotLayout::new(schema).tables {
         db.batch(&format!("DROP TABLE {}", table.installed()))?;
     }
-    db.batch(
+    Ok(db.batch(
         "DROP TABLE temp._coven_install_generations; DROP TABLE temp._coven_install_parts; DROP TABLE temp._coven_install_authored;
          DROP TABLE temp._coven_install_before; DROP TABLE temp._coven_install_conflicts; DROP TABLE temp._coven_install_region;
          DROP TABLE temp._coven_install_changed; DROP TABLE temp._coven_install_lost; DROP TABLE temp._coven_install_protected; DROP TABLE temp._coven_install_references;
          DROP TABLE temp._coven_install_stored; DROP TABLE temp._coven_install_released; DROP TABLE temp._coven_install_records",
-    )
+    )?)
 }
 
 /// Copy `select`'s rows from the staged tables into the writer with
@@ -135,7 +135,7 @@ fn exists<P: rusqlite::Params>(
     sql: &str,
     params: P,
 ) -> Result<bool, DbError> {
-    db.query_row(sql, params, |r| r.get(0))
+    Ok(db.query_row(sql, params, |r| r.get(0))?)
 }
 
 /// Write the merge records of the audience's rows, one statement per table
@@ -347,7 +347,7 @@ pub(crate) fn values(
         select.push(layout.value(j));
         select.push(layout.setter_device(j));
     }
-    db.query_row(
+    Ok(db.query_row(
         &format!(
             "SELECT {} FROM {} WHERE {}=?1 AND {}=?2",
             select.join(","),
@@ -365,7 +365,7 @@ pub(crate) fn values(
             }
             Ok(values)
         },
-    )
+    )?)
 }
 
 /// The installed rows of `audience` holding `value` for the unique
@@ -388,7 +388,7 @@ pub(crate) fn claim_holders(
         .join(" AND ");
     let mut parameters = vec![rusqlite::types::Value::from(audience)];
     parameters.extend(value.iter().map(sql_value));
-    db.query(
+    Ok(db.query(
         &format!(
             "SELECT {} FROM {} AS {} WHERE {}=?1 AND {}=1 AND ({}) AND {condition}",
             layout.column("key"),
@@ -400,7 +400,7 @@ pub(crate) fn claim_holders(
         ),
         params_from_iter(parameters),
         |r| Ok(RowId { table: table.name.clone(), key: r.get(0)?, audience: audience.clone() }),
-    )
+    )?)
 }
 
 /// Each coordinates value of the audience's file records, as the snapshot

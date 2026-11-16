@@ -1,6 +1,7 @@
 use super::*;
 use crate::sqlite::write_transaction::WriteTransaction;
 use crate::tests::TestStore;
+use crate::DbError;
 use crate::{RowIdentity, SyncedTable};
 
 const SCHEMA: &str = "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY);
@@ -219,7 +220,9 @@ async fn a_failing_hook_rolls_its_transaction_back() {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         transaction
             .observe_operations(|_, _, _, _| {
-                Err(DbError::Invariant { what: "the row's old value could be read" })
+                Err(crate::engine_error::EngineError::Invariant {
+                    what: "the row's old value could be read",
+                })
             })
             .unwrap();
         transaction.within(|db| db.batch("INSERT INTO parent VALUES('p')")).unwrap();
