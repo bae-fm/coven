@@ -4,6 +4,7 @@ use crate::engine_error::EngineError;
 use crate::sqlite::table_shapes::{TableShape, TableShapes};
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use rusqlite::{
     fallible_streaming_iterator::FallibleStreamingIterator, hooks::Action, session::ChangesetIter,
 };
@@ -37,7 +38,7 @@ fn changed_table<'a>(
     shapes: &'a TableShapes,
     table: &str,
     changes: &mut Vec<RowChange>,
-) -> Result<&'a TableShape, EngineError<StoreFailure>> {
+) -> Result<&'a TableShape, EngineError<StoreFailure, DbError>> {
     let shape = shapes
         .position(table)
         .map(|position| shapes.shape(position))
@@ -54,7 +55,7 @@ fn changed_table<'a>(
 pub(crate) fn table_changes(
     database: &DatabaseConnection,
     mut tables: BTreeSet<String>,
-) -> Result<Vec<RowChange>, EngineError<StoreFailure>> {
+) -> Result<Vec<RowChange>, EngineError<StoreFailure, DbError>> {
     let shapes = database.table_shapes()?;
     for table in tables.clone() {
         if let Some(parent) = shapes.parent(&table) {
@@ -71,7 +72,7 @@ pub(crate) fn changes(
     database: &DatabaseConnection,
     bytes: &[u8],
     scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, EngineError<StoreFailure>> {
+) -> Result<Vec<RowChange>, EngineError<StoreFailure, DbError>> {
     let mut input = bytes;
     let input: &mut dyn std::io::Read = &mut input;
     let mut items = ChangesetIter::start_strm(&input)?;
@@ -194,7 +195,7 @@ fn current(
     pk: &[u8],
     before: &[Option<SqlValue>],
     wanted: &[usize],
-) -> Result<Vec<Option<SqlValue>>, EngineError<StoreFailure>> {
+) -> Result<Vec<Option<SqlValue>>, EngineError<StoreFailure, DbError>> {
     let keys: Vec<usize> = (0..names.len()).filter(|index| pk[*index] != 0).collect();
     let sql = format!(
         "SELECT {} FROM main.{} WHERE {}",
@@ -246,7 +247,7 @@ pub(crate) fn event_changes(
     database: &DatabaseConnection,
     events: &[crate::sqlite::Operation],
     scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, EngineError<StoreFailure>> {
+) -> Result<Vec<RowChange>, EngineError<StoreFailure, DbError>> {
     let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
     let mut changes = Vec::new();

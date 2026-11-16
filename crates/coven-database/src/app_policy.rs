@@ -219,15 +219,14 @@ impl Drop for ApplyingSql<'_> {
     }
 }
 
-/// Coven's policy refuses with a `DbError`, boxed for the engine.
-type Refusal = Box<dyn std::error::Error + Send + Sync>;
-
 impl Policy for CovenPolicy {
-    fn judge(&self, action: &PolicyAction<'_>) -> Result<(), Refusal> {
-        Ok(lock_unpoisoned(&self.state).judge(action)?)
+    type Refusal = DbError;
+
+    fn judge(&self, action: &PolicyAction<'_>) -> Result<(), DbError> {
+        lock_unpoisoned(&self.state).judge(action)
     }
 
-    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), Refusal> {
+    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), DbError> {
         // SQLITE_ALTER_TABLE reports the old name, not the rename destination.
         // Check the destination token too; comments and string contents are not SQL.
         for part in tokens.windows(3) {
@@ -239,7 +238,7 @@ impl Policy for CovenPolicy {
                     _ => continue,
                 };
                 if crate::internal_schema::reserved_name(name) {
-                    return Err(Box::new(DbError::InternalTable { table: name.clone() }));
+                    return Err(DbError::InternalTable { table: name.clone() });
                 }
             }
         }

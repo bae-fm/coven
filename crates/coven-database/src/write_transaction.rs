@@ -7,6 +7,7 @@
 use super::DatabaseConnection;
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{caught_sync, Bug};
 use rusqlite::hooks::{Action, PreUpdateCase};
@@ -29,7 +30,7 @@ pub(super) struct WriteTransaction<'a> {
     /// hook's panic, so a hook call that failed left what it observes
     /// incomplete: the transaction rolls back with it rather than committing
     /// what its observers missed (E15).
-    hook_failure: Arc<Mutex<Option<EngineError<StoreFailure>>>>,
+    hook_failure: Arc<Mutex<Option<EngineError<StoreFailure, DbError>>>>,
 }
 
 impl<'a> WriteTransaction<'a> {
@@ -38,7 +39,7 @@ impl<'a> WriteTransaction<'a> {
     pub(super) fn begin(
         database: &'a mut DatabaseConnection,
         streaming: bool,
-    ) -> Result<Self, EngineError<StoreFailure>> {
+    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
         database.batch("BEGIN IMMEDIATE")?;
         database.streaming.set(streaming);
         Ok(Self {
@@ -65,10 +66,15 @@ impl<'a> WriteTransaction<'a> {
     /// session takes the same hook, so none may begin meanwhile.
     pub(super) fn observe_operations(
         &mut self,
-        mut hook: impl FnMut(Action, &str, &str, &PreUpdateCase) -> Result<(), EngineError<StoreFailure>>
+        mut hook: impl FnMut(
+                Action,
+                &str,
+                &str,
+                &PreUpdateCase,
+            ) -> Result<(), EngineError<StoreFailure, DbError>>
             + Send
             + 'static,
-    ) -> Result<(), EngineError<StoreFailure>> {
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         let failed = self.hook_failure.clone();
         #[cfg(test)]
         let fault = self.database.hook_panics.clone();
@@ -90,7 +96,9 @@ impl<'a> WriteTransaction<'a> {
         Ok(())
     }
 
-    pub(super) fn stop_observing_operations(&mut self) -> Result<(), EngineError<StoreFailure>> {
+    pub(super) fn stop_observing_operations(
+        &mut self,
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         if self.operations {
             self.database
                 .connection
@@ -104,10 +112,10 @@ impl<'a> WriteTransaction<'a> {
     /// transaction ends.
     pub(super) fn observe_rows(
         &mut self,
-        mut hook: impl FnMut(Action, &str, &str, i64) -> Result<(), EngineError<StoreFailure>>
+        mut hook: impl FnMut(Action, &str, &str, i64) -> Result<(), EngineError<StoreFailure, DbError>>
             + Send
             + 'static,
-    ) -> Result<(), EngineError<StoreFailure>> {
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         let failed = self.hook_failure.clone();
         self.database.connection.update_hook(Some(
             move |action, schema: &str, table: &str, rowid| {
@@ -129,7 +137,7 @@ impl<'a> WriteTransaction<'a> {
 
     /// Judge `outcome`'s changes for the handle's live queries, commit and
     /// report them; or roll back, when `outcome` or any of that fails.
-    pub(super) fn commit<T, E: crate::engine_error::RollbackJoin<StoreFailure>>(
+    pub(super) fn commit<T, E: crate::engine_error::RollbackJoin<StoreFailure, DbError>>(
         &self,
         outcome: Result<(T, Vec<RowChange>), E>,
     ) -> Result<T, E> {
@@ -186,8 +194,8 @@ impl<'a> WriteTransaction<'a> {
 
 /// Keep a hook call's failure, the first one, for the commit to fail with.
 fn keep_failure(
-    failed: &Mutex<Option<EngineError<StoreFailure>>>,
-    observed: Result<Result<(), EngineError<StoreFailure>>, Bug>,
+    failed: &Mutex<Option<EngineError<StoreFailure, DbError>>>,
+    observed: Result<Result<(), EngineError<StoreFailure, DbError>>, Bug>,
 ) {
     let failure = match observed {
         Ok(Ok(())) => return,

@@ -14,12 +14,15 @@
 
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use std::borrow::Cow;
 use std::path::Path;
 
 /// The path SQLite opens for the file at `path`: elsewhere `path` itself.
 #[cfg(not(windows))]
-pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, EngineError<StoreFailure>> {
+pub(crate) fn sqlite_path(
+    path: &Path,
+) -> Result<Cow<'_, Path>, EngineError<StoreFailure, DbError>> {
     Ok(Cow::Borrowed(path))
 }
 
@@ -30,7 +33,9 @@ pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, EngineError<Stor
 /// space, and a device's name such as `NUL`; a verbatim path holding one
 /// would open another file, so it is refused.
 #[cfg(windows)]
-pub(crate) fn sqlite_path(path: &Path) -> Result<Cow<'_, Path>, EngineError<StoreFailure>> {
+pub(crate) fn sqlite_path(
+    path: &Path,
+) -> Result<Cow<'_, Path>, EngineError<StoreFailure, DbError>> {
     use std::ffi::OsString;
     use std::path::{Component, PathBuf, Prefix};
     let mut components = path.components();

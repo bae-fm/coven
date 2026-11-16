@@ -7,6 +7,7 @@
 
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -103,7 +104,7 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
 /// memory. It refuses one built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`
 /// too: each connection would keep its unused pages apart, and releasing
 /// memory on one connection would leave every other's (§4).
-pub(crate) fn opening() -> Result<(), EngineError<StoreFailure>> {
+pub(crate) fn opening() -> Result<(), EngineError<StoreFailure, DbError>> {
     // SAFETY: the option is a NUL-terminated string that outlives the call.
     if unsafe { rusqlite::ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) }
         == 0

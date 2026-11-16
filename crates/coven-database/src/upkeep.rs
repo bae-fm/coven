@@ -20,6 +20,7 @@
 use crate::engine_error::{EngineError, EngineFailure};
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -29,11 +30,11 @@ pub(crate) trait Upkeep: Send + Sync + 'static {
     const THREAD: &'static str;
 
     /// One wake's upkeep. A wake may come with no commit.
-    fn run(&self) -> Result<(), EngineError<StoreFailure>>;
+    fn run(&self) -> Result<(), EngineError<StoreFailure, DbError>>;
 
     /// What the handle fails with once a run fails with `error` other than
     /// on a busy or locked database.
-    fn failure(error: EngineError<StoreFailure>) -> EngineFailure<StoreFailure>;
+    fn failure(error: EngineError<StoreFailure, DbError>) -> EngineFailure<StoreFailure, DbError>;
 }
 
 /// Wakes an upkeep thread. Waking only leaves the thread's permit, which
@@ -69,7 +70,7 @@ impl<U: Upkeep> UpkeepThread<U> {
     pub(crate) fn spawn(
         upkeep: U,
         handle: CommitObserver,
-    ) -> Result<Self, EngineError<StoreFailure>> {
+    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
         #[cfg(test)]
         if handle.upkeep_thread_refused() {
             return Err(EngineError::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
@@ -168,7 +169,7 @@ impl<U: Upkeep> Serving<U> {
 
 /// Whether `error` is SQLite finding the database busy or locked: another
 /// connection held on past the busy timeout.
-fn busy(error: &EngineError<StoreFailure>) -> bool {
+fn busy(error: &EngineError<StoreFailure, DbError>) -> bool {
     matches!(
         error,
         EngineError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))

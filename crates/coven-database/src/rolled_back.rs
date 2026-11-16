@@ -4,6 +4,7 @@
 use super::DatabaseConnection;
 use crate::engine_error::{EngineError, EngineFailure, RollbackJoin};
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 
 impl DatabaseConnection {
     /// A one-shot read of one snapshot. Nothing runs it again, so it records
@@ -11,7 +12,7 @@ impl DatabaseConnection {
     pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
-        E: From<EngineError<StoreFailure>>,
+        E: From<EngineError<StoreFailure, DbError>>,
     {
         self.read_transaction(|| {
             let _reading = self.authorization.reading();
@@ -19,7 +20,7 @@ impl DatabaseConnection {
         })
     }
 
-    pub(crate) fn read_transaction<R, E: From<EngineError<StoreFailure>>>(
+    pub(crate) fn read_transaction<R, E: From<EngineError<StoreFailure, DbError>>>(
         &self,
         read: impl FnOnce() -> Result<R, E>,
     ) -> Result<R, E> {
@@ -54,7 +55,7 @@ impl DatabaseConnection {
     /// Run checks that write scratch state, such as temporary tables, in a
     /// transaction that always rolls back, so nothing they write is kept or
     /// observed. It takes no write lock until something writes the main schema.
-    pub(crate) fn discarded_transaction<T, E: RollbackJoin<StoreFailure>>(
+    pub(crate) fn discarded_transaction<T, E: RollbackJoin<StoreFailure, DbError>>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
@@ -68,14 +69,14 @@ impl DatabaseConnection {
     /// with `SQLITE_BUSY` if another connection holds it even for a moment,
     /// where `BEGIN IMMEDIATE` waits out the busy timeout.
     #[cfg(test)]
-    pub(crate) fn discarded_write_transaction<T, E: RollbackJoin<StoreFailure>>(
+    pub(crate) fn discarded_write_transaction<T, E: RollbackJoin<StoreFailure, DbError>>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
         self.discarded("BEGIN IMMEDIATE", run)
     }
 
-    fn discarded<T, E: RollbackJoin<StoreFailure>>(
+    fn discarded<T, E: RollbackJoin<StoreFailure, DbError>>(
         &self,
         begin: &str,
         run: impl FnOnce(&Self) -> Result<T, E>,

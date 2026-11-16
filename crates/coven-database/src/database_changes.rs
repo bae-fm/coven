@@ -2,6 +2,7 @@
 
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 
 /// A live commit observation; coalesces changes and ends when the writer
 /// closes. Its calls fail with `E`, which the handle's failure becomes.
@@ -21,7 +22,7 @@ impl<E> DatabaseChanges<E> {
         first: bool,
     ) -> Self
     where
-        E: From<EngineError<StoreFailure>>,
+        E: From<EngineError<StoreFailure, DbError>>,
     {
         Self { commits, reads, first, failed: E::from }
     }

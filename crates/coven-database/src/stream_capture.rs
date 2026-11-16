@@ -8,6 +8,7 @@ use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::RowChange;
 use std::collections::BTreeSet;
@@ -44,9 +45,9 @@ impl StreamCapture {
     /// table, as a local write does.
     pub(super) fn begin(
         transaction: &mut WriteTransaction<'_>,
-    ) -> Result<Self, EngineError<StoreFailure>> {
+    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
         let recorded = Arc::new(Mutex::new(transaction.within(|database| {
-            Ok::<_, EngineError<StoreFailure>>(match &database.observation {
+            Ok::<_, EngineError<StoreFailure, DbError>>(match &database.observation {
                 Some(_) => {
                     let shapes = database.table_shapes()?;
                     let scoped = match &database.handle {

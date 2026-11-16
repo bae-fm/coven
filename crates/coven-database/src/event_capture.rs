@@ -11,6 +11,7 @@ use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use sqlive::SqlValue;
@@ -49,7 +50,7 @@ impl EventCapture {
     /// Record `transaction`'s row operations until it stops observing them.
     pub(super) fn begin(
         transaction: &mut WriteTransaction<'_>,
-    ) -> Result<Self, EngineError<StoreFailure>> {
+    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
         let (tables, recorded, scoped) = transaction.within(|database| {
             let recorded = Arc::clone(
                 &database
@@ -65,7 +66,7 @@ impl EventCapture {
                 Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
                 None => std::collections::HashMap::new(),
             };
-            Ok::<_, EngineError<StoreFailure>>((tables, recorded, scoped))
+            Ok::<_, EngineError<StoreFailure, DbError>>((tables, recorded, scoped))
         })?;
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
@@ -100,12 +101,12 @@ impl EventCapture {
                 let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
                     count(accessor.get_column_count())
                         .map(|i| Ok(old_value(accessor, i)?.map(SqlValue::from)))
-                        .collect::<Result<Vec<_>, EngineError<StoreFailure>>>()
+                        .collect::<Result<Vec<_>, EngineError<StoreFailure, DbError>>>()
                 };
                 let new = |accessor: &rusqlite::hooks::PreUpdateNewValueAccessor| {
                     count(accessor.get_column_count())
                         .map(|i| Ok(new_value(accessor, i)?.map(SqlValue::from)))
-                        .collect::<Result<Vec<_>, EngineError<StoreFailure>>>()
+                        .collect::<Result<Vec<_>, EngineError<StoreFailure, DbError>>>()
                 };
                 let event = match case {
                     PreUpdateCase::Insert(accessor) => Operation {

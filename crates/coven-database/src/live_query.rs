@@ -5,6 +5,7 @@ use crate::engine_error::EngineError;
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{caught_sync, BugSinkRef, CarriesBug};
 use futures_lite::future::block_on;
@@ -22,7 +23,7 @@ type Run<Q, T, E> = Arc<dyn Fn(&Q, &CommitSubscription) -> Result<T, E> + Send +
 
 /// How a query's error type `E` holds an engine error: the handle's failure,
 /// or the bug a run's panic is.
-pub(crate) type Failed<E> = fn(EngineError<StoreFailure>) -> E;
+pub(crate) type Failed<E> = fn(EngineError<StoreFailure, DbError>) -> E;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

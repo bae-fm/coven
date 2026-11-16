@@ -3,6 +3,7 @@
 
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -291,7 +292,7 @@ impl PageSize {
         }
     }
 
-    fn from_bytes(bytes: i64) -> Result<Self, EngineError<StoreFailure>> {
+    fn from_bytes(bytes: i64) -> Result<Self, EngineError<StoreFailure, DbError>> {
         Ok(match bytes {
             512 => PageSize::Bytes512,
             1024 => PageSize::Bytes1024,
@@ -350,7 +351,7 @@ impl SqliteSettings {
     }
 
     /// The PRAGMAs that set these choices on any connection.
-    fn connection_pragmas(&self) -> Result<Vec<String>, EngineError<StoreFailure>> {
+    fn connection_pragmas(&self) -> Result<Vec<String>, EngineError<StoreFailure, DbError>> {
         let mut pragmas = Vec::new();
         if let Some(timeout) = self.busy_timeout {
             let milliseconds = int("busy_timeout", timeout.as_millis())?;
@@ -456,7 +457,7 @@ impl DatabaseConnection {
         &self,
         settings: &SqliteSettings,
         read_only: bool,
-    ) -> Result<(), EngineError<StoreFailure>> {
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         self.batch(
             "PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;",
         )?;
@@ -474,7 +475,7 @@ impl DatabaseConnection {
     }
 
     /// Put the database in WAL mode and make every commit durable (§4).
-    pub(crate) fn enable_wal(&self) -> Result<(), EngineError<StoreFailure>> {
+    pub(crate) fn enable_wal(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
         let mode: String = self.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
             return Err(EngineError::WalUnavailable { mode });
@@ -484,8 +485,8 @@ impl DatabaseConnection {
 
     pub(crate) fn sqlite_settings(
         &self,
-    ) -> Result<SqliteSettingsInEffect, EngineError<StoreFailure>> {
-        let read = |pragma: &str| -> Result<i64, EngineError<StoreFailure>> {
+    ) -> Result<SqliteSettingsInEffect, EngineError<StoreFailure, DbError>> {
+        let read = |pragma: &str| -> Result<i64, EngineError<StoreFailure, DbError>> {
             self.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
         };
         let positive = |value: i64| u32::try_from(value).ok().and_then(NonZeroU32::new);
@@ -550,7 +551,7 @@ impl DatabaseConnection {
     pub(crate) fn wal_checkpoint(
         &self,
         mode: CheckpointMode,
-    ) -> Result<WalCheckpoint, EngineError<StoreFailure>> {
+    ) -> Result<WalCheckpoint, EngineError<StoreFailure, DbError>> {
         let mode = match mode {
             CheckpointMode::Noop => "NOOP",
             CheckpointMode::Passive => "PASSIVE",
@@ -591,7 +592,7 @@ impl DatabaseConnection {
     /// plans each table as a large one, which a small table answers as
     /// quickly. The connection keeps planning with the counts it found, so a
     /// writable open runs this on a connection of its own.
-    pub(crate) fn optimize(&self) -> Result<(), EngineError<StoreFailure>> {
+    pub(crate) fn optimize(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
         self.batch("PRAGMA optimize=0x10012")?;
         let analyzed: bool = self.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sqlite_stat1')",
@@ -615,7 +616,7 @@ impl DatabaseConnection {
     /// and each one with rows and an index that has none: one never
     /// analyzed, and every one under [`SMALL_TABLE`] rows. Reading at most
     /// that many rows of each tells which a run would keep statistics for.
-    pub(crate) fn statistics_wanted(&self) -> Result<bool, EngineError<StoreFailure>> {
+    pub(crate) fn statistics_wanted(&self) -> Result<bool, EngineError<StoreFailure, DbError>> {
         let named = self.query("PRAGMA optimize=0x10013", [], |r| r.get::<_, String>(0))?;
         for analyze in named {
             let table = analyze.strip_prefix("ANALYZE ").ok_or(EngineError::Invariant {
@@ -641,7 +642,7 @@ impl DatabaseConnection {
     /// which so loads no count of a table whose statistics it forgot.
     pub(crate) fn gather_statistics_for_every_connection(
         &mut self,
-    ) -> Result<(), EngineError<StoreFailure>> {
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         self.transaction(|connection| {
             connection.optimize()?;
             connection.batch(
@@ -652,7 +653,7 @@ impl DatabaseConnection {
     }
 
     /// Gather the statistics on this connection of their own, then close it.
-    pub(crate) fn gather_statistics(self) -> Result<(), EngineError<StoreFailure>> {
+    pub(crate) fn gather_statistics(self) -> Result<(), EngineError<StoreFailure, DbError>> {
         self.optimize()?;
         self.close()
     }
@@ -662,7 +663,7 @@ impl DatabaseConnection {
     pub(crate) fn incremental_vacuum(
         &self,
         pages: IncrementalVacuum,
-    ) -> Result<(), EngineError<StoreFailure>> {
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         let sql = match pages {
             IncrementalVacuum::All => "PRAGMA main.incremental_vacuum".to_owned(),
             IncrementalVacuum::Pages(pages) => format!(
@@ -677,8 +678,8 @@ impl DatabaseConnection {
     /// Give back the free pages of an incrementally vacuumed database past
     /// [`KEPT_FREE_BYTES`]; any other auto-vacuum mode is the app's choice
     /// and keeps its meaning.
-    pub(crate) fn give_back_free_pages(&self) -> Result<(), EngineError<StoreFailure>> {
-        let pragma = |name: &str| -> Result<u64, EngineError<StoreFailure>> {
+    pub(crate) fn give_back_free_pages(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
+        let pragma = |name: &str| -> Result<u64, EngineError<StoreFailure, DbError>> {
             let value: i64 = self.query_row(&format!("PRAGMA main.{name}"), [], |r| r.get(0))?;
             unsigned(value)
         };
@@ -696,7 +697,10 @@ impl DatabaseConnection {
 }
 
 /// `value` as one of SQLite's 32-bit integer settings.
-fn int(setting: &'static str, value: impl Into<u128>) -> Result<i32, EngineError<StoreFailure>> {
+fn int(
+    setting: &'static str,
+    value: impl Into<u128>,
+) -> Result<i32, EngineError<StoreFailure, DbError>> {
     i32::try_from(value.into()).map_err(|_overflow| EngineError::SqliteSettingOutOfRange {
         setting,
         maximum: i32::MAX as u64,
@@ -704,19 +708,19 @@ fn int(setting: &'static str, value: impl Into<u128>) -> Result<i32, EngineError
 }
 
 /// `value` as one of SQLite's 64-bit integer settings.
-fn int64(setting: &'static str, value: u64) -> Result<i64, EngineError<StoreFailure>> {
+fn int64(setting: &'static str, value: u64) -> Result<i64, EngineError<StoreFailure, DbError>> {
     i64::try_from(value).map_err(|_overflow| EngineError::SqliteSettingOutOfRange {
         setting,
         maximum: i64::MAX as u64,
     })
 }
 
-fn unsigned<T: TryFrom<i64>>(value: i64) -> Result<T, EngineError<StoreFailure>> {
+fn unsigned<T: TryFrom<i64>>(value: i64) -> Result<T, EngineError<StoreFailure, DbError>> {
     T::try_from(value).map_err(|_overflow| unreported())
 }
 
 /// SQLite reported a setting outside the values it documents.
-fn unreported() -> EngineError<StoreFailure> {
+fn unreported() -> EngineError<StoreFailure, DbError> {
     EngineError::Invariant { what: "SQLite reports a setting within its documented values" }
 }
 

@@ -3,6 +3,7 @@
 use super::DatabaseConnection;
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 
 impl DatabaseConnection {
     /// Sync the database file as this connection's checkpoints do: with
@@ -11,8 +12,8 @@ impl DatabaseConnection {
     /// otherwise. It goes through SQLite's own handle to the file, because
     /// closing any other handle to it would drop every lock SQLite holds on
     /// it in this process.
-    pub(crate) fn sync_database_file(&self) -> Result<(), EngineError<StoreFailure>> {
-        let flush = |pragma: &str| -> Result<bool, EngineError<StoreFailure>> {
+    pub(crate) fn sync_database_file(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
+        let flush = |pragma: &str| -> Result<bool, EngineError<StoreFailure, DbError>> {
             Ok(self.query_row::<i64, _>(&format!("PRAGMA {pragma}"), [], |r| r.get(0))? != 0)
         };
         let flags = if flush("checkpoint_fullfsync")? || flush("fullfsync")? {
@@ -44,7 +45,7 @@ impl DatabaseConnection {
 }
 
 /// SQLite's result `code` as a result.
-fn failed(code: std::ffi::c_int) -> Result<(), EngineError<StoreFailure>> {
+fn failed(code: std::ffi::c_int) -> Result<(), EngineError<StoreFailure, DbError>> {
     if code == rusqlite::ffi::SQLITE_OK {
         return Ok(());
     }

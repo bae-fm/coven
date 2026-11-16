@@ -21,23 +21,19 @@ struct Recording {
 }
 
 impl Policy for Recording {
-    fn judge(
-        &self,
-        action: &PolicyAction<'_>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    type Refusal = DbError;
+
+    fn judge(&self, action: &PolicyAction<'_>) -> Result<(), DbError> {
         if let AuthAction::Insert { table_name } = action.action {
             self.inserts.lock().unwrap().push((table_name.into(), action.owner));
             if self.refused.lock().unwrap().iter().any(|refused| refused == table_name) {
-                return Err(Box::new(DbError::InternalTable { table: table_name.into() }));
+                return Err(DbError::InternalTable { table: table_name.into() });
             }
         }
         Ok(())
     }
 
-    fn check_sql(
-        &self,
-        _tokens: &[sqlive::sql::Token],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn check_sql(&self, _tokens: &[sqlive::sql::Token]) -> Result<(), DbError> {
         Ok(())
     }
 

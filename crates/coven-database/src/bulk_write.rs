@@ -9,11 +9,12 @@
 
 use super::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 
 impl DatabaseConnection {
     pub(crate) fn bulk_write<F, R, E>(&mut self, sql: F) -> Result<R, E>
     where
-        E: crate::engine_error::RollbackJoin<StoreFailure>,
+        E: crate::engine_error::RollbackJoin<StoreFailure, DbError>,
         F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
     {
         self.with_profile(|db| db.bulk_transaction(sql))
@@ -21,7 +22,7 @@ impl DatabaseConnection {
 
     fn bulk_transaction<F, R, E>(&mut self, sql: F) -> Result<R, E>
     where
-        E: crate::engine_error::RollbackJoin<StoreFailure>,
+        E: crate::engine_error::RollbackJoin<StoreFailure, DbError>,
         F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
     {
         let transaction = super::write_transaction::WriteTransaction::begin(self, false)?;

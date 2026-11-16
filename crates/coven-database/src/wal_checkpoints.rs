@@ -25,6 +25,7 @@ use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
 use crate::upkeep::{Upkeep, UpkeepThread};
+use crate::DbError;
 use crate::{CheckpointMode, WalCheckpoint};
 use coven_foundation::locks::lock_unpoisoned;
 use std::num::NonZeroU32;
@@ -58,7 +59,7 @@ pub(crate) struct Checkpoints {
 }
 
 #[cfg(test)]
-type Fault = Box<dyn FnMut() -> Result<(), EngineError<StoreFailure>> + Send>;
+type Fault = Box<dyn FnMut() -> Result<(), EngineError<StoreFailure, DbError>> + Send>;
 
 /// A database's checkpointer: a thread of the store's own, woken by the
 /// writer's commits, which runs each checkpoint on its own connection. It
@@ -76,7 +77,7 @@ impl UpkeepThread<Checkpoints> {
         writer: &Arc<Mutex<DatabaseConnection>>,
         threshold: NonZeroU32,
         handle: CommitObserver,
-    ) -> Result<Self, EngineError<StoreFailure>> {
+    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
         connection.batch(&format!("PRAGMA busy_timeout = {}", READER_WAIT.as_millis()))?;
         // Made before the writer's steps, so a step that fails stops the
         // thread as this drops.
@@ -104,7 +105,7 @@ impl UpkeepThread<Checkpoints> {
     }
 
     /// Stop, after any checkpoint in progress, and close the connection.
-    pub(crate) fn stop(self) -> Result<(), EngineError<StoreFailure>> {
+    pub(crate) fn stop(self) -> Result<(), EngineError<StoreFailure, DbError>> {
         coven_foundation::locks::into_unpoisoned(self.join().connection).close()
     }
 }
@@ -112,11 +113,11 @@ impl UpkeepThread<Checkpoints> {
 impl Upkeep for Checkpoints {
     const THREAD: &'static str = "coven WAL checkpoint";
 
-    fn run(&self) -> Result<(), EngineError<StoreFailure>> {
+    fn run(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
         self.checkpoint()
     }
 
-    fn failure(error: EngineError<StoreFailure>) -> EngineFailure<StoreFailure> {
+    fn failure(error: EngineError<StoreFailure, DbError>) -> EngineFailure<StoreFailure, DbError> {
         EngineFailure::Checkpoint(error)
     }
 }
@@ -128,7 +129,7 @@ impl Checkpoints {
     /// tried again once the WAL grows by the threshold. A store whose open
     /// failed may let its writer go before its checkpointer stops; there is
     /// then nothing to checkpoint.
-    fn checkpoint(&self) -> Result<(), EngineError<StoreFailure>> {
+    fn checkpoint(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
         let connection = lock_unpoisoned(&self.connection);
         let Some(writer) = self.writer.upgrade() else {
             return Ok(());
@@ -187,7 +188,7 @@ impl Checkpoints {
 
     /// Run the fault a test set, as the checkpoint's last step begins.
     #[cfg(test)]
-    fn fault(&self) -> Result<(), EngineError<StoreFailure>> {
+    fn fault(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
         lock_unpoisoned(&self.fault).as_mut().map_or(Ok(()), |f| f())
     }
 
@@ -217,7 +218,7 @@ impl Checkpoints {
 /// or committing to it.
 fn uncopied_frames(
     connection: &DatabaseConnection,
-) -> Result<Option<u32>, EngineError<StoreFailure>> {
+) -> Result<Option<u32>, EngineError<StoreFailure, DbError>> {
     Ok(match connection.wal_checkpoint(CheckpointMode::Noop)? {
         WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } => {
             Some(log_frames.saturating_sub(checkpointed_frames))

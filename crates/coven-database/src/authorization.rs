@@ -3,6 +3,7 @@
 
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -42,18 +43,14 @@ pub(crate) struct PolicyAction<'a> {
 
 /// What the host adds to the authorizer's rules.
 pub(crate) trait Policy: Send + Sync + 'static {
+    /// What the policy refuses a statement with.
+    type Refusal: std::error::Error + Send + Sync + 'static;
     /// Judge an action the authorizer's rules allowed; `Err` refuses the
     /// statement with it. A host statement's actions come here too, so the
     /// policy sees every action allowed.
-    fn judge(
-        &self,
-        action: &PolicyAction<'_>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn judge(&self, action: &PolicyAction<'_>) -> Result<(), Self::Refusal>;
     /// Judge an app statement's text before it is prepared.
-    fn check_sql(
-        &self,
-        tokens: &[sqlive::sql::Token],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), Self::Refusal>;
     /// A new app call begins: forget what the last statement left.
     fn begin_app_call(&self);
     /// Whether `name`, a trigger or view, is the host's own object.
@@ -96,7 +93,7 @@ impl<'a> FunctionCall<'a> {
 
     /// Refuse the statement running the function with `refusal`, in place
     /// of the message the function's own failure carries.
-    pub(crate) fn deny(&self, refusal: Box<dyn std::error::Error + Send + Sync>) {
+    pub(crate) fn deny(&self, refusal: DbError) {
         lock_unpoisoned(self.state).denied = Some(EngineError::Refused(refusal));
     }
 }
@@ -113,7 +110,7 @@ pub(crate) struct SqlAuthorization {
     whole: Arc<WholeViews>,
     /// What the host adds to the rules. The authorizer asks it after its own
     /// rules allow an action.
-    policy: Arc<dyn Policy>,
+    policy: Arc<dyn Policy<Refusal = DbError>>,
 }
 
 struct AuthorizationState {
@@ -130,7 +127,7 @@ struct AuthorizationState {
     /// What a live query's statements read, while one of its runs reads.
     reads: Option<ReadCapture>,
     altering: bool,
-    denied: Option<EngineError<StoreFailure>>,
+    denied: Option<EngineError<StoreFailure, DbError>>,
     /// The authorizer panicked with this: the state may be half-changed, so
     /// it refuses every later statement with it (E15).
     broken: Option<Bug>,
@@ -146,7 +143,7 @@ struct AuthorizationState {
 impl SqlAuthorization {
     /// An authorizer that asks `policy` about each action its own rules
     /// allow.
-    pub(crate) fn new(whole: Arc<WholeViews>, policy: Arc<dyn Policy>) -> Self {
+    pub(crate) fn new(whole: Arc<WholeViews>, policy: Arc<dyn Policy<Refusal = DbError>>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AuthorizationState {
                 internal: false,
@@ -211,9 +208,8 @@ impl SqlAuthorization {
             });
             called.unwrap_or_else(|bug| {
                 lock_unpoisoned(&state).denied = Some(EngineError::Bug(bug.clone()));
-                Err(rusqlite::Error::UserFunctionError(Box::new(EngineError::<StoreFailure>::Bug(
-                    bug,
-                ))))
+                let error: EngineError<StoreFailure, DbError> = EngineError::Bug(bug);
+                Err(rusqlite::Error::UserFunctionError(Box::new(error)))
             })
         }
     }
@@ -424,14 +420,14 @@ impl SqlAuthorization {
         // while keeping direct app PRAGMAs outside the SQL capability.
         let tokens = sqlive::sql::tokens(sql)?;
         if tokens.first().is_some_and(|token| token.word("pragma")) {
-            return Err(rusqlite::Error::UserFunctionError(Box::new(
-                EngineError::<StoreFailure>::StatementForbidden { operation: "PRAGMA" },
-            )));
+            let error: EngineError<StoreFailure, DbError> =
+                EngineError::StatementForbidden { operation: "PRAGMA" };
+            return Err(rusqlite::Error::UserFunctionError(Box::new(error)));
         }
         self.policy.check_sql(&tokens).map_err(|refusal| {
-            rusqlite::Error::UserFunctionError(Box::new(EngineError::<StoreFailure>::Refused(
-                refusal,
-            )))
+            rusqlite::Error::UserFunctionError(Box::new(
+                EngineError::<StoreFailure, DbError>::Refused(refusal),
+            ))
         })
     }
 
@@ -528,7 +524,7 @@ impl Drop for InternalSql<'_> {
 impl AuthorizationState {
     /// Whose statement `accessor`, the innermost trigger or view being
     /// prepared, if any, belongs to.
-    fn owner(&self, accessor: Option<&str>, policy: &dyn Policy) -> Owner {
+    fn owner(&self, accessor: Option<&str>, policy: &dyn Policy<Refusal = DbError>) -> Owner {
         match accessor {
             _ if !self.internal => Owner::App,
             Some(name) if !policy.host_object(name) => Owner::AppTriggerOfHost,
@@ -538,7 +534,11 @@ impl AuthorizationState {
 
     /// Judge the statement being prepared, `context`, recording what it
     /// reads and changes.
-    fn judge(&mut self, context: AuthContext<'_>, policy: &dyn Policy) -> Authorization {
+    fn judge(
+        &mut self,
+        context: AuthContext<'_>,
+        policy: &dyn Policy<Refusal = DbError>,
+    ) -> Authorization {
         #[cfg(test)]
         assert!(!std::mem::take(&mut self.panic_next), "the authorizer's state is past repair");
         if let (
@@ -593,7 +593,10 @@ impl AuthorizationState {
 
     /// The error that refuses `context` by the authorizer's own rules, if
     /// any.
-    fn refusal(&mut self, context: AuthContext<'_>) -> Result<(), EngineError<StoreFailure>> {
+    fn refusal(
+        &mut self,
+        context: AuthContext<'_>,
+    ) -> Result<(), EngineError<StoreFailure, DbError>> {
         use AuthAction::*;
         // FTS5 reads the database's data version as it prepares a statement
         // over its table, in a read or in a write that changes its index, as

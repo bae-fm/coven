@@ -18,6 +18,7 @@ use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
 use crate::upkeep::{Upkeep, UpkeepThread, Wake};
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, Weak};
@@ -50,7 +51,7 @@ impl UpkeepThread<PlannerStatistics> {
         connection: DatabaseConnection,
         writer: &Arc<Mutex<DatabaseConnection>>,
         handle: CommitObserver,
-    ) -> Result<Self, EngineError<StoreFailure>> {
+    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
         let statistics = Self::spawn(
             PlannerStatistics {
                 connection: Mutex::new(connection),
@@ -69,7 +70,7 @@ impl UpkeepThread<PlannerStatistics> {
     }
 
     /// Stop, after any check or run in progress, and close the connection.
-    pub(crate) fn stop(self) -> Result<(), EngineError<StoreFailure>> {
+    pub(crate) fn stop(self) -> Result<(), EngineError<StoreFailure, DbError>> {
         coven_foundation::locks::into_unpoisoned(self.join().connection).close()
     }
 }
@@ -80,7 +81,7 @@ impl Upkeep for PlannerStatistics {
     /// One wake's check, and the run it calls for. A store whose open failed
     /// may let its writer go before the thread stops; there is then nothing
     /// to keep statistics for.
-    fn run(&self) -> Result<(), EngineError<StoreFailure>> {
+    fn run(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
         let mut connection = lock_unpoisoned(&self.connection);
         if !connection.statistics_wanted()? {
             return Ok(());
@@ -98,7 +99,7 @@ impl Upkeep for PlannerStatistics {
         Ok(())
     }
 
-    fn failure(error: EngineError<StoreFailure>) -> EngineFailure<StoreFailure> {
+    fn failure(error: EngineError<StoreFailure, DbError>) -> EngineFailure<StoreFailure, DbError> {
         EngineFailure::Statistics(error)
     }
 }

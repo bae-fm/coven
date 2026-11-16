@@ -8,15 +8,12 @@ use crate::{DbError, OpenError};
 /// An engine error as the `DbError` an app sees. An error coven raised
 /// inside a SQL function, or a refusal of coven's policy, comes back as
 /// coven raised it.
-impl From<EngineError<StoreFailure>> for DbError {
-    fn from(error: EngineError<StoreFailure>) -> Self {
+impl From<EngineError<StoreFailure, DbError>> for DbError {
+    fn from(error: EngineError<StoreFailure, DbError>) -> Self {
         match error {
             EngineError::Sqlite(error) => Self::from(error),
             EngineError::DamagedDatabase => Self::DamagedDatabase,
-            EngineError::Refused(refusal) => match refusal.downcast::<Self>() {
-                Ok(error) => *error,
-                Err(_) => Self::Invariant { what: "coven's policy refuses only with a DbError" },
-            },
+            EngineError::Refused(refusal) => refusal,
             EngineError::StatementForbidden { operation } => Self::StatementForbidden { operation },
             EngineError::TransactionEnded => Self::TransactionEnded,
             EngineError::Closed => Self::StoreClosed,
@@ -43,8 +40,8 @@ impl From<EngineError<StoreFailure>> for DbError {
     }
 }
 
-impl From<EngineError<StoreFailure>> for OpenError {
-    fn from(error: EngineError<StoreFailure>) -> Self {
+impl From<EngineError<StoreFailure, DbError>> for OpenError {
+    fn from(error: EngineError<StoreFailure, DbError>) -> Self {
         Self::Database(error.into())
     }
 }
@@ -57,8 +54,8 @@ pub(crate) fn raised(
 ) -> Result<DbError, Box<dyn std::error::Error + Send + Sync>> {
     match source.downcast::<DbError>() {
         Ok(error) => Ok(*error),
-        Err(source) => {
-            source.downcast::<EngineError<StoreFailure>>().map(|error| DbError::from(*error))
-        }
+        Err(source) => source
+            .downcast::<EngineError<StoreFailure, DbError>>()
+            .map(|error| DbError::from(*error)),
     }
 }

@@ -146,7 +146,10 @@ impl Database {
         &self,
         fault: impl FnMut() -> Result<
                 (),
-                crate::engine_error::EngineError<crate::store_failure::StoreFailure>,
+                crate::engine_error::EngineError<
+                    crate::store_failure::StoreFailure,
+                    crate::DbError,
+                >,
             > + Send
             + 'static,
     ) {

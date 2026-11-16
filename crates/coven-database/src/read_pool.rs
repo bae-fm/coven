@@ -3,6 +3,7 @@
 use crate::engine_error::EngineError;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Condvar, Mutex};
 
@@ -39,7 +40,7 @@ impl ReadPool {
         }
     }
 
-    pub(super) fn close(self) -> Vec<EngineError<StoreFailure>> {
+    pub(super) fn close(self) -> Vec<EngineError<StoreFailure, DbError>> {
         let mut failures = Vec::new();
         for reader in self.readers {
             if let Err(error) = coven_foundation::locks::into_unpoisoned(reader).close() {

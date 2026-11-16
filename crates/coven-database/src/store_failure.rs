@@ -42,8 +42,8 @@ impl StoreFailure {
 
 /// The engine's failure that ended the handle, as coven holds it: each later
 /// call's error carries the same cause.
-impl From<EngineFailure<StoreFailure>> for StoreFailure {
-    fn from(failure: EngineFailure<StoreFailure>) -> Self {
+impl From<EngineFailure<StoreFailure, DbError>> for StoreFailure {
+    fn from(failure: EngineFailure<StoreFailure, DbError>) -> Self {
         match failure {
             EngineFailure::Rollback => Self::Rollback,
             EngineFailure::Checkpoint(cause) => Self::Checkpoint(Arc::new(DbError::from(cause))),

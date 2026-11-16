@@ -57,9 +57,7 @@ pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Res
             if call.owner() == Owner::Host {
                 return Ok(true);
             }
-            call.deny(Box::new(crate::DbError::StatementForbidden {
-                operation: "changing a hidden rowid",
-            }));
+            call.deny(crate::DbError::StatementForbidden { operation: "changing a hidden rowid" });
             Err(rusqlite::Error::UserFunctionError("changing a hidden rowid".into()))
         },
     )?;

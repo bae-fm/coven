@@ -1,6 +1,7 @@
 //! The error the engine's modules return: SQLite's failures, the handle's,
 //! and its host's. `F` is the host's failure type, which a handle the host
-//! failed carries as it is.
+//! failed carries as it is, and `R` is the type the host's policy refuses
+//! with, which a refused statement carries as it is.
 
 use coven_foundation::task::Bug;
 use std::path::PathBuf;
@@ -8,29 +9,30 @@ use std::path::PathBuf;
 /// A failure of the engine's own that ends its handle: every later call
 /// and live query fails with the host's failure built from it.
 #[derive(Debug)]
-pub(crate) enum EngineFailure<F> {
+pub(crate) enum EngineFailure<F, R> {
     /// Rolling back a failed transaction failed, so a connection may still
     /// be inside it.
     Rollback,
     /// One of the engine's WAL checkpoints failed with this cause, other than
     /// on a busy or locked database, so checkpointing stopped.
-    Checkpoint(EngineError<F>),
+    Checkpoint(EngineError<F, R>),
     /// Checking or gathering the query planner's statistics failed with this
     /// cause, other than on a busy or locked database, so keeping them
     /// stopped.
-    Statistics(EngineError<F>),
+    Statistics(EngineError<F, R>),
 }
 
 /// Why an engine call failed.
 #[derive(Debug)]
-pub(crate) enum EngineError<F> {
+pub(crate) enum EngineError<F, R> {
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
     /// `SQLITE_NOTADB`).
     DamagedDatabase,
-    /// The host's policy refused a statement or an action with this error.
-    Refused(Box<dyn std::error::Error + Send + Sync>),
+    /// The host's policy, or one of the host's SQL functions, refused a
+    /// statement with this refusal.
+    Refused(R),
     /// App SQL tried transaction control, a PRAGMA, ATTACH, loading an
     /// extension, changing a hidden rowid, or changing the schema outside a
     /// migration.
@@ -84,13 +86,13 @@ pub(crate) enum EngineError<F> {
     /// with `EngineFailure::Rollback`.
     Rollback {
         /// The operation that required rollback.
-        operation: Box<EngineError<F>>,
+        operation: Box<EngineError<F, R>>,
         /// SQLite's rollback failure.
         rollback: rusqlite::Error,
     },
 }
 
-impl<F: std::fmt::Display> std::fmt::Display for EngineError<F> {
+impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for EngineError<F, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(error) => error.fmt(f),
@@ -122,7 +124,9 @@ impl<F: std::fmt::Display> std::fmt::Display for EngineError<F> {
     }
 }
 
-impl<F: std::error::Error + 'static> std::error::Error for EngineError<F> {
+impl<F: std::error::Error + 'static, R: std::error::Error + 'static> std::error::Error
+    for EngineError<F, R>
+{
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(error) => error.source(),
@@ -137,7 +141,11 @@ impl<F: std::error::Error + 'static> std::error::Error for EngineError<F> {
     }
 }
 
-impl<F: std::error::Error + Send + Sync + 'static> From<rusqlite::Error> for EngineError<F> {
+impl<F, R> From<rusqlite::Error> for EngineError<F, R>
+where
+    F: std::error::Error + Send + Sync + 'static,
+    R: std::error::Error + Send + Sync + 'static,
+{
     fn from(error: rusqlite::Error) -> Self {
         match error {
             // An error the engine raised inside a SQL function or a column
@@ -163,12 +171,12 @@ impl<F: std::error::Error + Send + Sync + 'static> From<rusqlite::Error> for Eng
 
 /// A caller's error for a transaction it runs: built from the engine's
 /// errors, and able to keep a failed rollback beside its own cause.
-pub(crate) trait RollbackJoin<F>: From<EngineError<F>> {
+pub(crate) trait RollbackJoin<F, R>: From<EngineError<F, R>> {
     /// Keep `rollback`, SQLite's failure to roll back, beside this error.
     fn with_rollback(self, rollback: rusqlite::Error) -> Self;
 }
 
-impl<F> RollbackJoin<F> for EngineError<F> {
+impl<F, R> RollbackJoin<F, R> for EngineError<F, R> {
     fn with_rollback(self, rollback: rusqlite::Error) -> Self {
         Self::Rollback { operation: Box::new(self), rollback }
     }

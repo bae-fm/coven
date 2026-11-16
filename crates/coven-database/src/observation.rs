@@ -5,6 +5,7 @@ use crate::database_changes::DatabaseChanges;
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::CommitScope;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{Bug, BugSinkRef};
 use sqlive::{affected, Answers, Lookups, ReadSet, RowChange, RowScope};
@@ -43,7 +44,7 @@ pub(crate) enum HandleFailure {
 }
 
 impl HandleFailure {
-    fn error(&self) -> EngineError<StoreFailure> {
+    fn error(&self) -> EngineError<StoreFailure, DbError> {
         match self {
             Self::Host(failure) => EngineError::Host(failure.clone()),
             Self::Bug(bug) => EngineError::HandleFailed(bug.clone()),
@@ -64,7 +65,7 @@ impl CommitState {
         self.closed
     }
 
-    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure>> {
+    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure, DbError>> {
         self.failure
             .as_ref()
             .map(HandleFailure::error)
@@ -397,7 +398,7 @@ impl CommitObserver {
 
     /// Watch `reads` from now on; `first` reports the state now as their
     /// first change.
-    pub(crate) fn changes<E: From<EngineError<StoreFailure>>>(
+    pub(crate) fn changes<E: From<EngineError<StoreFailure, DbError>>>(
         &self,
         reads: ReadSet,
         first: bool,
@@ -418,7 +419,7 @@ impl CommitObserver {
 
     /// Watch `rows` after `attempt`: a commit since it began that changed
     /// one is reported at once, as evidence against the wait it ended in.
-    pub(crate) fn watch_attempt<E: From<EngineError<StoreFailure>>>(
+    pub(crate) fn watch_attempt<E: From<EngineError<StoreFailure, DbError>>>(
         &self,
         attempt: AttemptCommits,
         rows: &[crate::PrerequisiteRows],
@@ -538,7 +539,7 @@ impl CommitObserver {
 
     /// What every call on the handle fails with: its failure, or
     /// `EngineError::Closed` once it closed.
-    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure>> {
+    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure, DbError>> {
         self.with_state(|state| {
             state
                 .failure

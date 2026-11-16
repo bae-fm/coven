@@ -7,6 +7,7 @@ use super::DatabaseConnection;
 use crate::engine_error::EngineError;
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
+use crate::DbError;
 use sqlive::{Judging, Lookups, ReadSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,7 +23,7 @@ impl DatabaseConnection {
     ) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
-        E: From<EngineError<StoreFailure>>,
+        E: From<EngineError<StoreFailure, DbError>>,
     {
         let mut finished = false;
         let result = self.read_transaction(|| {
@@ -52,7 +53,7 @@ impl DatabaseConnection {
         &self,
         handle: &CommitObserver,
         changes: Vec<sqlive::RowChange>,
-    ) -> Result<crate::observation::Judged, EngineError<StoreFailure>> {
+    ) -> Result<crate::observation::Judged, EngineError<StoreFailure, DbError>> {
         let _reading = self.authorization.reading();
         handle
             .judge(changes, crate::commit_scope::committing(), &mut |judging| {
