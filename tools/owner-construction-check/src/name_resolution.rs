@@ -522,10 +522,16 @@ impl NameResolver {
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>();
-            return if definitions.is_empty() {
-                Err(ResolutionError::ImportCycle)
-            } else {
+            return if !definitions.is_empty() {
                 unique(definitions)
+            } else if lexical {
+                // An import never names itself: `use rusqlite;` names what
+                // the scope's other bindings, the scopes around it, the
+                // dependencies and the prelude call `rusqlite`, as rustc
+                // resolves it.
+                self.enclosing(scope, name, namespace, visiting, ResolutionError::ImportCycle)
+            } else {
+                Err(ResolutionError::ImportCycle)
             };
         }
         let result = self.lookup_inner(scope, name, lexical, namespace, visiting);
@@ -605,6 +611,21 @@ impl NameResolver {
         if !lexical {
             return Err(missing);
         }
+        self.enclosing(scope, name, namespace, visiting, missing)
+    }
+
+    /// What `name` names beyond `scope`'s own bindings: in the scopes
+    /// around it, then among the dependencies, then in the prelude; else
+    /// `missing`.
+    fn enclosing(
+        &self,
+        scope: usize,
+        name: &str,
+        namespace: Namespace,
+        visiting: &mut BTreeSet<(usize, String, bool, Namespace)>,
+        missing: ResolutionError,
+    ) -> Result<ItemPath, ResolutionError> {
+        let current = &self.scopes[scope];
         if let Some(parent) = current.parent {
             return self.lookup(parent, name, true, namespace, visiting);
         }

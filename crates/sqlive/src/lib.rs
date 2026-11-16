@@ -51,7 +51,6 @@ mod token_scan;
 mod upkeep;
 mod wal_checkpoints;
 
-pub use ::rusqlite;
 pub use authorization::{
     FunctionCall, HostError, Owner, Policy, PolicyAction, PolicyError, Refresh, StatementReads,
     StatementScope, WriteSql,
@@ -78,6 +77,7 @@ pub use no_policy::{HandleFailure, NoPolicy};
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
 pub use read_set::{affected, Answers, ColumnSet, ReadSet, RowChange, TableRead, ROWS_PER_TABLE};
 pub use row_scope::{RowImage, RowScope, Scopes};
+pub use rusqlite;
 pub use scope_lookup::{Judging, Lookup, Lookups, LOOKUP_STEPS};
 pub use scope_order::LastRow;
 pub(crate) use scope_plan::ScopePlan;

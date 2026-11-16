@@ -319,6 +319,33 @@ fn external_associated_factories_do_not_match_local_owner_names() {
     }
 }
 
+/// `pub use rusqlite;` re-exports the dependency, as rustc resolves it: an
+/// import never names itself, so a call through the re-export resolves.
+/// Imports that name only each other are still a cycle.
+#[test]
+fn a_reexported_dependency_resolves_to_the_dependency() {
+    let mut engine = RustFile::fixture("crates/engine/src/lib.rs", "pub use rusqlite;");
+    engine.extern_crates.insert("rusqlite".into(), "rusqlite".into());
+    let cycle_modules = "mod a { pub use super::b::open; } mod b { pub use super::a::open; }";
+    for (call, cycle) in [("engine::rusqlite::Connection::open()", false), ("a::open()", true)] {
+        let mut caller =
+            RustFile::fixture(PATH, &format!("{cycle_modules} fn run() {{ {call}; }}"));
+        caller.extern_crates.insert("engine".into(), "engine".into());
+        let files = [engine.clone(), caller];
+        let found = find_capability_construction_violations(
+            &files,
+            &policy(),
+            &OwnerGraph::collect(&files, &policy()),
+        );
+        if cycle {
+            assert_eq!(found.len(), 1, "{call}: {found:?}");
+            assert!(found[0].message.ends_with("cyclic imports"), "{found:?}");
+        } else {
+            assert!(found.is_empty(), "{call}: {found:?}");
+        }
+    }
+}
+
 #[test]
 fn dependency_aliases_and_absolute_macro_paths_keep_crate_identity() {
     for call in ["renamed::prepare()", "::renamed::prepare()", "wrap!(tag => ::renamed::prepare())"]
