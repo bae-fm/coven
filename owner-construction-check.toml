@@ -26,6 +26,7 @@ api_crate = "coven"
 
 # Appendix F.1: the crates in dependency order.
 crate_order = [
+    "windows-names",
     "caught",
     "sqlive",
     "coven-foundation",

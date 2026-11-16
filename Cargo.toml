@@ -1,7 +1,7 @@
 # coven, as spec/coven.md describes it.
 [workspace]
 resolver = "2"
-members = ["crates/caught", "crates/sqlive", "crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "crates/coven", "tools/owner-construction-check"]
+members = ["crates/windows-names", "crates/caught", "crates/sqlive", "crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "crates/coven", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -12,6 +12,7 @@ license = "Apache-2.0"
 # name these with `workspace = true` and the features they need; they never
 # restate a version. The checker refuses a member dependency that does.
 [workspace.dependencies]
+windows-names = { path = "crates/windows-names" }
 caught = { path = "crates/caught" }
 sqlive = { path = "crates/sqlive" }
 coven-foundation = { path = "crates/coven-foundation" }

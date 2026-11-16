@@ -78,25 +78,7 @@ fn reads_alike(name: &std::ffi::OsStr) -> bool {
         return false;
     }
     let base = name.split('.').next().unwrap_or_default().trim_end_matches(' ');
-    !windows_device(base)
-}
-
-/// Whether `base`, a name's part before its first `.` without trailing
-/// spaces, names a Windows device: Windows opens the device for it, with any
-/// extension on some versions, and in any ASCII case. `¹`, `²` and `³` count
-/// as digits. coven-foundation decides the same for the names coven makes;
-/// sqlive depends on no crate of coven's, so it keeps its own.
-#[cfg(windows)]
-fn windows_device(base: &str) -> bool {
-    let base = base.to_ascii_uppercase();
-    if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
-        return true;
-    }
-    let Some(number) = base.strip_prefix("COM").or_else(|| base.strip_prefix("LPT")) else {
-        return false;
-    };
-    let mut number = number.chars();
-    matches!((number.next(), number.next()), (Some('1'..='9' | '¹' | '²' | '³'), None))
+    !windows_names::windows_device(base)
 }
 
 #[cfg(test)]

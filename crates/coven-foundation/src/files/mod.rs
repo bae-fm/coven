@@ -79,7 +79,7 @@ pub use protection::FileProtection;
 pub use protection::ProtectionSupport;
 #[cfg(any(test, feature = "test-utils"))]
 pub use reached::when_reached;
-pub use relative_path::{windows_device, RelativePath, RelativePathError};
+pub use relative_path::{RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};
 #[cfg(any(test, feature = "test-utils"))]

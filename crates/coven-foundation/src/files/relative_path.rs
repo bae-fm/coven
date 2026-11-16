@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use windows_names::windows_device;
 
 /// A path below a folder, as the names the app gives, outermost first: an
 /// album's name, then a track's. Each name is one name on every platform,
@@ -99,22 +100,6 @@ pub(super) fn local_name(name: &str) -> String {
         local.replace_range(..end, &wide);
     }
     fit(local)
-}
-
-/// Whether `base`, a name's part before its first `.` without trailing
-/// spaces, names a Windows device: Windows opens the device for it, with any
-/// extension on some versions, and in any ASCII case. `¹`, `²` and `³` count
-/// as digits.
-pub fn windows_device(base: &str) -> bool {
-    let base = base.to_ascii_uppercase();
-    if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
-        return true;
-    }
-    let Some(number) = base.strip_prefix("COM").or_else(|| base.strip_prefix("LPT")) else {
-        return false;
-    };
-    let mut number = number.chars();
-    matches!((number.next(), number.next()), (Some('1'..='9' | '¹' | '²' | '³'), None))
 }
 
 /// A character no volume of the four platforms refuses in a name.

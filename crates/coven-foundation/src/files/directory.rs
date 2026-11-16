@@ -103,7 +103,7 @@ impl FileName {
             return Err(FileNameError::Character);
         }
         let stem = name.split('.').next().expect("a nonempty name has a stem");
-        if super::relative_path::windows_device(stem) {
+        if windows_names::windows_device(stem) {
             return Err(FileNameError::Reserved);
         }
         Ok(Self(name))
