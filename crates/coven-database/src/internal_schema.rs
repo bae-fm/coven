@@ -24,6 +24,35 @@
 pub(crate) const VERSION: u32 = 1;
 pub(crate) const CACHE_HEADER: i64 = -1;
 pub(crate) const CACHE_COMPLETE_FILE: i64 = -2;
+/// Coven's tables no live query reads: the merge state, authorship, creation,
+/// publication and claim records each write keeps beside its rows. A write records no
+/// change to them, and recording one costs as much as an app row's (§4); a
+/// live query that read one would be a bug coven refuses at once.
+pub(crate) const UNRECORDED: [&str; 23] = [
+    "_coven_authored_admissions",
+    "_coven_authored_changes",
+    "_coven_authored_parts",
+    "_coven_cells",
+    "_coven_claims",
+    "_coven_creations",
+    "_coven_foreign_keys",
+    "_coven_part_leaves",
+    "_coven_part_proofs",
+    "_coven_published",
+    "_coven_published_creations",
+    "_coven_published_dropped",
+    "_coven_published_file_refs",
+    "_coven_published_losses",
+    "_coven_published_rows",
+    "_coven_published_writes",
+    "_coven_references",
+    "_coven_rows",
+    "_coven_unnamed_writes",
+    "_coven_write_evidence",
+    "_coven_write_headers",
+    "_coven_constraints",
+    "_coven_written_values",
+];
 // D2 timestamps contain six clock bytes, two counter bytes, then the device id.
 pub(crate) const WRITE_DEVICE_SQL: &str = "substr(timestamp,9,8)";
 /// Whether removal rules took out the merge row `r` names, through its

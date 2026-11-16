@@ -11,7 +11,7 @@ fn name(text: &str) -> OwnedFile {
 #[test]
 fn releasing_an_unreserved_name_fails_the_handle() {
     let bugs = coven_foundation::task::HeardBugs::shared();
-    let handle = CommitObserver::new(bugs.clone());
+    let handle = CommitObserver::recording_all(bugs.clone());
     let reserved = ReservedNames::new(handle.clone());
     reserved.reserve([name("a")]);
     reserved.release([&name("a")]);

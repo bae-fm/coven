@@ -3,7 +3,8 @@
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::{observation::RowChange, DbError};
+use crate::observation::{RowChange, UnrecordedTables};
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,9 @@ pub(super) struct ChangeCapture<'a> {
     session: *mut rusqlite::ffi::sqlite3_session,
     database: &'a DatabaseConnection,
     supplemental: SupplementalChanges,
+    /// The tables the session doesn't record. The session's filter reads
+    /// them through a pointer, so this outlives the session.
+    unrecorded: Arc<UnrecordedTables>,
 }
 
 /// The tables a transaction's update hook saw change that a session can't
@@ -56,6 +60,13 @@ impl<'a> ChangeCapture<'a> {
         database: &'a DatabaseConnection,
         supplemental: SupplementalChanges,
     ) -> Result<Self, DbError> {
+        let unrecorded = Arc::clone(
+            database
+                .handle
+                .as_ref()
+                .ok_or(DbError::Invariant { what: "a capturing writer serves its handle" })?
+                .unrecorded(),
+        );
         let mut session = std::ptr::null_mut();
         // SAFETY: the borrowed owner retains its connection until this guard drops.
         sqlite_ok(unsafe {
@@ -65,7 +76,7 @@ impl<'a> ChangeCapture<'a> {
                 &mut session,
             )
         })?;
-        let capture = Self { session, database, supplemental };
+        let capture = Self { session, database, supplemental, unrecorded };
         let mut rowid: std::ffi::c_int = 1;
         // SAFETY: the live session has no attached tables yet and rowid is an int.
         sqlite_ok(unsafe {
@@ -75,14 +86,14 @@ impl<'a> ChangeCapture<'a> {
                 (&mut rowid as *mut std::ffi::c_int).cast(),
             )
         })?;
-        // SAFETY: the filter is a plain function reading only its table name,
-        // valid for the session's life; null attaches every current and
-        // subsequently created main table the filter admits.
+        // SAFETY: the filter reads only its table name and its context, the
+        // tables `capture` holds, which outlive the session; null attaches
+        // every current and subsequently created main table the filter admits.
         unsafe {
             rusqlite::ffi::sqlite3session_table_filter(
                 session,
-                Some(observed_table),
-                std::ptr::null_mut(),
+                Some(recorded_table),
+                Arc::as_ptr(&capture.unrecorded).cast_mut().cast(),
             );
         }
         sqlite_ok(unsafe { rusqlite::ffi::sqlite3session_attach(session, std::ptr::null()) })?;
@@ -150,13 +161,16 @@ impl Drop for ChangeCapture<'_> {
 }
 
 /// The session records changes only to the tables a live query can read.
-unsafe extern "C" fn observed_table(
-    _: *mut std::ffi::c_void,
+unsafe extern "C" fn recorded_table(
+    unrecorded: *mut std::ffi::c_void,
     table: *const std::ffi::c_char,
 ) -> std::ffi::c_int {
+    // SAFETY: the context is the `UnrecordedTables` the capture holds, which
+    // outlives its session.
+    let unrecorded = unsafe { &*unrecorded.cast::<UnrecordedTables>() };
     // SAFETY: SQLite passes the table's NUL-terminated name for this call.
     let table = unsafe { std::ffi::CStr::from_ptr(table) };
-    table.to_str().map_or(1, |name| std::ffi::c_int::from(crate::observation::observed(name)))
+    table.to_str().map_or(1, |name| std::ffi::c_int::from(unrecorded.recorded(name)))
 }
 
 fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {

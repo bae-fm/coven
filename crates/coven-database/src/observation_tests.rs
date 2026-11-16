@@ -10,7 +10,7 @@ fn bug(message: &str) -> Bug {
 #[test]
 fn a_bug_inside_a_call_is_the_calls_own() {
     let bugs = HeardBugs::shared();
-    let handle = CommitObserver::new(bugs.clone());
+    let handle = CommitObserver::recording_all(bugs.clone());
     let ((), own) = handle.calling(|| handle.fail_with_bug(bug("torn")));
     assert_eq!(own, Some(bug("torn")));
     assert!(bugs.take().is_empty());
@@ -22,7 +22,7 @@ fn a_bug_inside_a_call_is_the_calls_own() {
 #[test]
 fn a_calls_second_bug_goes_to_the_sink() {
     let bugs = HeardBugs::shared();
-    let handle = CommitObserver::new(bugs.clone());
+    let handle = CommitObserver::recording_all(bugs.clone());
     let ((), own) = handle.calling(|| {
         handle.fail_with_bug(bug("first"));
         handle.fail_with_bug(bug("second"));
@@ -38,8 +38,8 @@ fn a_calls_second_bug_goes_to_the_sink() {
 #[test]
 fn only_the_outer_call_on_the_handle_claims_its_bug() {
     let bugs = HeardBugs::shared();
-    let handle = CommitObserver::new(bugs.clone());
-    let other = CommitObserver::new(bugs.clone());
+    let handle = CommitObserver::recording_all(bugs.clone());
+    let other = CommitObserver::recording_all(bugs.clone());
     let ((), outer) = handle.calling(|| {
         let ((), inner) = handle.calling(|| handle.fail_with_bug(bug("inner")));
         assert_eq!(inner, None);
@@ -49,4 +49,28 @@ fn only_the_outer_call_on_the_handle_claims_its_bug() {
     assert_eq!(own, None);
     assert_eq!(bugs.take(), [bug("elsewhere")]);
     assert!(other.error().is_none());
+}
+
+/// A live query that read a table whose changes no write records is a bug
+/// that panics as its run finishes; a table not named reads fine.
+#[test]
+fn a_run_that_reads_an_unrecorded_table_panics() {
+    let observer =
+        CommitObserver::new(HeardBugs::shared(), Arc::new(UnrecordedTables::new(["Hidden"])));
+    let read = |table: &str| {
+        vec![TableRead {
+            table: table.into(),
+            columns: BTreeSet::new(),
+            scope: RowScope::All,
+            inserted_only: false,
+        }]
+    };
+    let subscription = observer.subscribe();
+    subscription.begin();
+    subscription.finish(read("shown"));
+    subscription.begin();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        subscription.finish(read("HIDDEN"))
+    }));
+    assert!(panicked.is_err());
 }

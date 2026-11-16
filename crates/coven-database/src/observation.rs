@@ -17,39 +17,19 @@ use tokio::sync::watch;
 pub(crate) type ColumnSet = BTreeSet<(String, String)>;
 pub(crate) type ReadSet = Vec<TableRead>;
 
-/// Coven's tables no live query reads: the merge state, authorship, creation,
-/// publication and claim records each write keeps beside its rows. A write records no
-/// change to them, and recording one costs as much as an app row's (§4); a
-/// live query that read one would be a bug coven refuses at once.
-const UNOBSERVED: [&str; 23] = [
-    "_coven_authored_admissions",
-    "_coven_authored_changes",
-    "_coven_authored_parts",
-    "_coven_cells",
-    "_coven_claims",
-    "_coven_creations",
-    "_coven_foreign_keys",
-    "_coven_part_leaves",
-    "_coven_part_proofs",
-    "_coven_published",
-    "_coven_published_creations",
-    "_coven_published_dropped",
-    "_coven_published_file_refs",
-    "_coven_published_losses",
-    "_coven_published_rows",
-    "_coven_published_writes",
-    "_coven_references",
-    "_coven_rows",
-    "_coven_unnamed_writes",
-    "_coven_write_evidence",
-    "_coven_write_headers",
-    "_coven_constraints",
-    "_coven_written_values",
-];
+/// Tables whose changes no write records for live queries, lowercase.
+#[derive(Debug)]
+pub(crate) struct UnrecordedTables(BTreeSet<String>);
 
-/// Whether a write records its changes to `table` for live queries.
-pub(crate) fn observed(table: &str) -> bool {
-    !UNOBSERVED.iter().any(|name| name.eq_ignore_ascii_case(table))
+impl UnrecordedTables {
+    pub(crate) fn new<'a>(tables: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(tables.into_iter().map(str::to_ascii_lowercase).collect())
+    }
+
+    /// Whether a write records its changes to `table` (ASCII case-insensitive).
+    pub(crate) fn recorded(&self, table: &str) -> bool {
+        !self.0.contains(&table.to_ascii_lowercase())
+    }
 }
 
 #[derive(Clone)]
@@ -189,6 +169,8 @@ struct SubscriptionState {
     state: watch::Sender<CommitState>,
     /// Commits made within this scope are not observed.
     outside: Option<CommitScope>,
+    /// The tables whose changes no write records, which a run may not read.
+    unrecorded: Arc<UnrecordedTables>,
 }
 
 #[derive(Clone)]
@@ -198,7 +180,12 @@ pub(crate) struct CommitSubscription {
 }
 
 impl CommitSubscription {
-    fn new(closed: bool, failure: Option<HandleFailure>, outside: Option<CommitScope>) -> Self {
+    fn new(
+        closed: bool,
+        failure: Option<HandleFailure>,
+        outside: Option<CommitScope>,
+        unrecorded: Arc<UnrecordedTables>,
+    ) -> Self {
         let (state, receiver) = watch::channel(CommitState { changed: false, closed, failure });
         Self {
             shared: Arc::new(SubscriptionState {
@@ -208,6 +195,7 @@ impl CommitSubscription {
                 }),
                 state,
                 outside,
+                unrecorded,
             }),
             receiver,
         }
@@ -256,7 +244,8 @@ impl CommitSubscription {
         reads: ReadSet,
         lookups: &mut Lookups<'_>,
     ) -> rusqlite::Result<()> {
-        if let Some(read) = reads.iter().find(|read| !observed(&read.table)) {
+        if let Some(read) = reads.iter().find(|read| !self.shared.unrecorded.recorded(&read.table))
+        {
             panic!("a live query read {}, whose changes no write records", read.table);
         }
         let reads = Arc::new(reads);
@@ -479,6 +468,8 @@ pub(crate) struct CommitObserver {
     state: Arc<Mutex<ObserverState>>,
     /// Where a bug that fails the handle outside its calls goes (E15).
     bugs: BugSinkRef,
+    /// The tables whose changes no write records.
+    unrecorded: Arc<UnrecordedTables>,
     /// How many more of the store's upkeep threads start before the next is
     /// refused, when a test asked for that.
     #[cfg(test)]
@@ -486,7 +477,7 @@ pub(crate) struct CommitObserver {
 }
 
 impl CommitObserver {
-    pub(crate) fn new(bugs: BugSinkRef) -> Self {
+    pub(crate) fn new(bugs: BugSinkRef, unrecorded: Arc<UnrecordedTables>) -> Self {
         Self {
             state: Arc::new(Mutex::new(ObserverState {
                 subscriptions: Vec::new(),
@@ -494,9 +485,21 @@ impl CommitObserver {
                 failure: None,
             })),
             bugs,
+            unrecorded,
             #[cfg(test)]
             upkeep_threads: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// A test observer for which every table records its changes.
+    #[cfg(test)]
+    pub(crate) fn recording_all(bugs: BugSinkRef) -> Self {
+        Self::new(bugs, Arc::new(UnrecordedTables::new([])))
+    }
+
+    /// The tables whose changes no write records.
+    pub(crate) fn unrecorded(&self) -> &Arc<UnrecordedTables> {
+        &self.unrecorded
     }
 
     /// Let `started` upkeep threads start, if given, and refuse the next.
@@ -529,7 +532,12 @@ impl CommitObserver {
     pub(crate) fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
         self.with_state(|state| {
             let failure = if state.closed { None } else { state.failure.clone() };
-            let subscription = CommitSubscription::new(state.closed, failure, outside);
+            let subscription = CommitSubscription::new(
+                state.closed,
+                failure,
+                outside,
+                Arc::clone(&self.unrecorded),
+            );
             state.subscriptions.retain(|subscription| subscription.strong_count() != 0);
             state.subscriptions.push(Arc::downgrade(&subscription.shared));
             subscription

@@ -355,7 +355,7 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
 #[test]
 fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     let bugs = coven_foundation::task::HeardBugs::shared();
-    let handle = crate::observation::CommitObserver::new(bugs.clone());
+    let handle = crate::observation::CommitObserver::recording_all(bugs.clone());
     let transfers = super::TransfersInFlight::new(handle.clone());
     let uploads = transfers.uploads();
     let object = ObjectId(uuid::Uuid::from_u128(1));

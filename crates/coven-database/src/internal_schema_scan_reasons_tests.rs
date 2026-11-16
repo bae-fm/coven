@@ -58,11 +58,13 @@ mod fixture {
         );
         let setup = crate::connection_setup::Setup::new(&db, &authorization);
         crate::transfers_in_flight::TransfersInFlight::new(
-            crate::observation::CommitObserver::new(coven_foundation::task::HeardBugs::shared()),
+            crate::observation::CommitObserver::recording_all(
+                coven_foundation::task::HeardBugs::shared(),
+            ),
         )
         .register(&setup)
         .unwrap();
-        crate::network_facts::NetworkFacts::new(crate::observation::CommitObserver::new(
+        crate::network_facts::NetworkFacts::new(crate::observation::CommitObserver::recording_all(
             coven_foundation::task::HeardBugs::shared(),
         ))
         .register(&setup)
