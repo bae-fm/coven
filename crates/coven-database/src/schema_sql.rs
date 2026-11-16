@@ -1,5 +1,7 @@
-//! SQL over coven's stored schema: statements, triggers and tables as SQLite
-//! recorded them, read for migration and removal.
+//! Coven's SQL text over its own schema and rows. Coven reads the stored
+//! statements, triggers and tables that SQLite recorded when it migrates or
+//! removes tables. The snapshot install and the migration snapshot build the
+//! value comparison `same_value` returns.
 
 use crate::schema_source::SchemaSource;
 use crate::sql::{normalized, unparenthesized, Token};
@@ -66,8 +68,9 @@ fn guarded_predicate(expr: &Expr<'_>) -> bool {
     }
 }
 
-/// Table clauses and suffix, retaining constraints and column definitions for
-/// migration comparison. SQLite has already parsed and accepted this SQL.
+/// Returns the table's clauses and the SQL after them, with its constraints
+/// and column definitions kept, so that migration can compare them. SQLite has
+/// already parsed and accepted this SQL.
 pub(crate) fn table_parts(sql: &str) -> Option<(Vec<Vec<Token>>, Vec<Token>)> {
     let mut source = SchemaSource::new(sql);
     let body = source.try_body()?;

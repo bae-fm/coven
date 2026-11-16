@@ -231,8 +231,8 @@ fn compare_reals(left: f64, right: f64) -> Ordering {
     left.partial_cmp(&right).expect("SQLite stores no NaN")
 }
 
-/// An integer against a real, exactly as SQLite's `sqlite3IntFloatCompare`
-/// does: converting the integer to `f64` would round it.
+/// Compares an integer with a real exactly as SQLite's `sqlite3IntFloatCompare`
+/// does, because converting the integer to `f64` would round it.
 fn compare_integer_real(integer: i64, real: f64) -> Ordering {
     // 2^63 is the first real above every integer.
     if real < -9_223_372_036_854_775_808.0 {
