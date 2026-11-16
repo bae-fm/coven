@@ -1,6 +1,6 @@
-//! A write in two phases on one transaction: the app's SQL, whose row
-//! operations on the recorded tables are kept one at a time (§9.6), then the
-//! host's work under a session.
+//! A write in two phases on one transaction: the app's SQL, while the
+//! pre-update hook keeps each row operation on the recorded tables one at a
+//! time (§9.6), then the host's work under a session.
 
 use super::event_capture::{EventCapture, Operation};
 use super::stream_capture::{StreamCapture, StreamChanges};
@@ -61,10 +61,10 @@ impl DatabaseConnection {
     }
 }
 
-/// The phases of a write on `transaction`, whose connection holds the
-/// transaction and whose hooks this sets. Returns the result and the row
-/// changes live queries are told of; `transaction` commits or rolls back with
-/// them.
+/// Runs the phases of a write on `transaction`, whose connection holds the
+/// transaction and whose hooks this sets. Returns the host's result and the
+/// row changes that the commit sends to the live queries; `transaction`
+/// commits or rolls back with them.
 fn phases<A, T, E: crate::WriteFailure>(
     transaction: &mut WriteTransaction<'_>,
     app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,

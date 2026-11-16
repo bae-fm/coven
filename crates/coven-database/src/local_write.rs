@@ -59,8 +59,9 @@ impl DatabaseConnection {
 
 type DeletedCircles = BTreeMap<CircleId, Slot>;
 
-/// A local write's app phase: the app's SQL, each row operation of it
-/// recorded (§9.6). Returns the result and the circles deleted before it.
+/// A local write's app phase: coven runs the app's SQL and records each of
+/// its row operations (§9.6). Returns the app's result and the circles
+/// deleted before it.
 fn app_phase<F, R, E>(
     database: &DatabaseConnection,
     operations: &dyn Fn() -> Vec<Operation>,
@@ -103,8 +104,8 @@ fn host_phase<R, E: crate::WriteFailure>(
     let after =
         crate::write_rows::AppView::after(database, schema).with_rows_read(files.take_rows_read());
     let store = crate::merge_store::MergeStore::new(database, &before);
-    // Capturing and building the record write no app row: a
-    // parent many rows name is read once.
+    // Capturing and building the record write no app row, so coven reads a
+    // parent that many rows name only once.
     let parents = (before.remembering_parents(), after.remembering_parents());
     let mut steps =
         crate::execution_capture::capture(database, schema, &store, &before, &after, events)?;
@@ -141,8 +142,8 @@ fn host_phase<R, E: crate::WriteFailure>(
     if record.is_some() && crate::store_state_tables::awaiting_registration(database, device)? {
         return Err(DbError::NotRegistered.into());
     }
-    // The paths its record updates move off, read before
-    // the write applies.
+    // Read the paths that the record's updates move off before the write
+    // applies.
     let replaced = match &record {
         Some(record) => crate::file_protection::replaced(&store, record)?,
         None => BTreeSet::new(),

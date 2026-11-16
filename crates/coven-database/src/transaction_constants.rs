@@ -1,9 +1,10 @@
 //! What a read, a local write or applying a slot reads of coven's state that
 //! the transaction can't change: the schema version and each synced column's
-//! and foreign key's registered id. None runs a migration or DDL, so each is
-//! read once in it rather than once for every row or statement; outside them
-//! each is read afresh. A write's own authored parts are kept too, changed
-//! only where it records them (write_sources.rs).
+//! and foreign key's registered id. None runs a migration or DDL, so coven
+//! reads each constant once per transaction rather than once for every row or
+//! statement, and reads it again in the next transaction. Coven keeps a
+//! write's own authored parts too, and changes them only where the write
+//! records them (write_sources.rs).
 
 use super::schema_cookie::CookieScope;
 use super::DatabaseConnection;
@@ -27,8 +28,8 @@ type PartKey = (Vec<u8>, Audience);
 /// An authored part's encoded header.
 pub(crate) type AuthoredPart = Vec<u8>;
 
-/// Holds the constants, and the schema cookie, for one transaction; they go
-/// when it ends.
+/// Holds the constants and the schema cookie for one transaction. Dropping
+/// the scope clears the kept constants and releases the cookie.
 pub(crate) struct ConstantScope<'a> {
     constants: &'a TransactionConstants,
     _cookie: CookieScope<'a>,
@@ -63,8 +64,8 @@ impl DatabaseConnection {
         ConstantScope { constants: &self.constants, _cookie: self.keep_schema_cookie() }
     }
 
-    /// A read of one snapshot, as [`Self::read_transaction`] runs one, in
-    /// which each constant is read once. A read runs no migration and no DDL.
+    /// Run `read` in one snapshot, as [`Self::read_transaction`] does, and
+    /// read each constant once. A read runs no migration and no DDL.
     pub(crate) fn read_with_constants<R, E: From<DbError>>(
         &self,
         read: impl FnOnce() -> Result<R, E>,
