@@ -1,8 +1,13 @@
-use crate::tests::{contents, TestStore};
+use crate::tests::{contents, next, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{ApplyOutcome, DbError};
+use crate::{ApplyOutcome, DbError, StoreDatabase};
 use crate::{RowIdentity, SyncedTable};
 use coven_foundation::id_source::SequentialIds;
+use sqlive::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};
+use sqlive::random_scopes::{CAPTURED, SCHEMA, TABLES};
+use sqlive::SqlValue;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applying_true() {
@@ -385,4 +390,139 @@ async fn another_devices_writes_record_scoped_values() {
     crate::tests::remote_update(&db, "tracks", "2", &[("release", Value::Text("a".into()))]).await;
     assert_eq!(crate::tests::next(&mut query).await, ["uno", "deux"]);
     db.close().await.unwrap();
+}
+
+/// Apply another device's update of one of `rows`, the synced table's keys,
+/// and describe it. Whether the merge keeps its values or not, live queries
+/// must follow what the table then holds.
+async fn remote(db: &StoreDatabase, rng: &mut Rng, rows: &[String]) -> String {
+    use coven_format::value::Value;
+    let id = rng.pick(rows).clone();
+    let (column, value) = match rng.below(3) {
+        0 => ("a", Value::Integer(rng.below(5) as i64)),
+        1 => ("b", Value::Text((*rng.pick(&["x", "k1", "k2", "k3", "1"])).into())),
+        _ => ("c", Value::Integer(rng.below(10) as i64)),
+    };
+    let described = format!("another device sets {CAPTURED}.{column} = {value:?} where id = {id}");
+    crate::tests::try_remote_update(db, CAPTURED, &id, &[(column, value)]).await.unwrap();
+    described
+}
+
+type Rows = Vec<Vec<SqlValue>>;
+
+fn read(
+    sql: &crate::SqlReadContext<'_>,
+    text: &str,
+    parameters: &[SqlValue],
+) -> crate::SqliteResult<Rows> {
+    sql.query(text, sqlive::rusqlite::params_from_iter(parameters), |row| {
+        (0..row.as_ref().column_count()).map(|index| row.get::<_, SqlValue>(index)).collect()
+    })
+}
+
+async fn one_shot(db: &StoreDatabase, query: &Generated) -> Rows {
+    let sql = query.sql.clone();
+    let parameters = query.parameters.clone();
+    db.read(move |context| Ok::<_, DbError>(read(&context, &sql, &parameters)?)).await.unwrap()
+}
+
+/// One seed's case: random app writes, the host's own transactions on the
+/// device-local tables, and another device's updates of the synced table,
+/// under random live queries (sqlive's `random_scopes`). Each commit marks
+/// every query whose result it changed, and a rerun returns what a one-shot
+/// read does.
+async fn run_seed(seed: u64) {
+    let mut rng = Rng::seeded(seed);
+    let store = TestStore::new();
+    let db = store
+        .schema(vec![SyncedTable::new(CAPTURED, RowIdentity::SharedKey)], SCHEMA)
+        .await
+        .unwrap();
+    // Rows in every table from the start, so joins, chained ones too, find
+    // partners for the writes to change.
+    let mut rows = Vec::new();
+    for table in TABLES {
+        for id in 0..6 {
+            rows.push(format!(
+                "INSERT INTO {table}(id, a, b, c) VALUES ({}, {}, {}, {})",
+                key(table, id),
+                a_value(&mut rng),
+                b_value(&mut rng),
+                rng.below(10)
+            ));
+        }
+    }
+    let seeded: &'static str = Box::leak(rows.join("; ").into_boxed_str());
+    sql(&db, seeded).await.unwrap();
+    let queries: Vec<Generated> = (0..16).map(|_| query(&mut rng)).collect();
+    let mut live = Vec::new();
+    for query in &queries {
+        // Each run counted, so a rerun whose rows equal the last still
+        // answers.
+        let runs = Arc::new(AtomicUsize::new(0));
+        let sql = query.sql.clone();
+        let parameters = query.parameters.clone();
+        let mut subscription = db.subscribe(move |context| {
+            let run = runs.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, DbError>((run, read(&context, &sql, &parameters)?))
+        });
+        let (_, rows) = next(&mut subscription).await;
+        live.push((subscription, rows));
+    }
+    for step in 0..24 {
+        let generated = write(&mut rng);
+        // The host's own transactions write device-local tables only: synced
+        // rows change through writes, so their merge state stays whole.
+        let host = !generated.captured && rng.chance(40);
+        let mut described = generated.sql.clone();
+        let synced: Vec<String> = db
+            .read(|context| {
+                Ok::<_, DbError>(
+                    context.query(&format!("SELECT id FROM {CAPTURED}"), [], |r| r.get(0))?,
+                )
+            })
+            .await
+            .unwrap();
+        if !synced.is_empty() && rng.chance(20) {
+            described = remote(&db, &mut rng, &synced).await;
+        } else if host {
+            db.commit_writer(move |writer, _| writer.batch(&generated.sql).unwrap());
+        } else {
+            let leaked: &'static str = Box::leak(generated.sql.into_boxed_str());
+            sql(&db, leaked).await.unwrap();
+        }
+        for (query, (subscription, last)) in queries.iter().zip(live.iter_mut()) {
+            let fresh = one_shot(&db, query).await;
+            let marked = subscription.is_marked_for_rerun();
+            let case = || {
+                format!(
+                    "seed {seed}, step {step}: {} {:?} after `{described}`",
+                    query.sql, query.parameters
+                )
+            };
+            if fresh != *last {
+                assert!(marked, "a changed result wasn't marked: {}", case());
+            }
+            // A marked query sometimes stays marked through the next write,
+            // which its judging then skips.
+            if marked && rng.chance(75) {
+                let (_, rows) = next(subscription).await;
+                assert_eq!(rows, fresh, "a rerun differs from a read: {}", case());
+                *last = rows;
+            }
+        }
+    }
+    db.close().await.unwrap();
+}
+
+/// Live queries follow the store's own writes and another device's alike.
+/// `COVEN_SCOPE_SEEDS` sets how many seeds run (default 40).
+#[tokio::test]
+async fn live_queries_rerun_whenever_their_results_change() {
+    let seeds: u64 = std::env::var("COVEN_SCOPE_SEEDS")
+        .ok()
+        .map_or(40, |seeds| seeds.parse().expect("COVEN_SCOPE_SEEDS is a count"));
+    for seed in 0..seeds {
+        run_seed(seed).await;
+    }
 }

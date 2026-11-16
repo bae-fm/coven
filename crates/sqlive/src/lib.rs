@@ -28,6 +28,8 @@ mod live_query;
 mod live_query_runs;
 mod no_policy;
 mod planner_statistics;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod random_scopes;
 mod read_capture;
 mod read_set;
 mod row_scope;
