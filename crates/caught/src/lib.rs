@@ -127,8 +127,8 @@ pub trait BugSink: Send + Sync {
 /// A shared [`BugSink`].
 pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 
-/// Hand `bug` to `bugs`. A sink that panics too is logged, and its panic
-/// goes no further: it runs where nothing above it catches.
+/// Hand `bug` to `bugs`. When the sink panics too, `report` logs that panic
+/// and stops it there, because nothing above the sink catches it.
 pub fn report(bugs: &dyn BugSink, bug: &Bug) {
     if let Err(again) = caught_sync("report a bug", || bugs.report(bug)) {
         tracing::error!(operation = bug.operation, "reporting {bug} panicked: {again}");
