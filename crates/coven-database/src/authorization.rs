@@ -1,5 +1,5 @@
-//! The authorizer: the rules that keep the engine's own promises, then the
-//! policy its host supplies.
+//! The authorizer: the rules the engine enforces on every statement, then
+//! the policy its host supplies.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -66,7 +66,8 @@ pub(crate) struct AppContext {
     /// Whether it records what it reads for a live query: a statement first
     /// prepared in a one-shot read recorded nothing to replay.
     capturing: bool,
-    /// What the policy keeps apart.
+    /// The policy's part of the cache key, so statements the policy judges
+    /// differently get different entries.
     policy: u64,
 }
 
@@ -105,7 +106,8 @@ pub(crate) struct SqlAuthorization {
     handle: Arc<OnceLock<crate::observation::CommitObserver>>,
     /// The views and tables a live query reads whole.
     whole: Arc<WholeViews>,
-    /// What the host adds to the rules, asked after them.
+    /// What the host adds to the rules. The authorizer asks it after its own
+    /// rules allow an action.
     policy: Arc<dyn Policy>,
 }
 

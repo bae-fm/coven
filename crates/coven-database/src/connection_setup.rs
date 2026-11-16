@@ -24,9 +24,9 @@ impl<'a> Setup<'a> {
     }
 
     /// Register `function` as `name`. rusqlite turns a function's panic into
-    /// an error that names no bug, so the authorizer keeps it: the statement
-    /// fails with the bug's text, and the app's call with `DbError::Bug`
-    /// (E15).
+    /// an error that names no bug, so the authorizer catches the panic and
+    /// records it as a bug: the statement fails with the bug's text, and the
+    /// app's call fails with `DbError::Bug` (E15).
     pub(crate) fn scalar_function<T: ToSql>(
         &self,
         name: &'static str,

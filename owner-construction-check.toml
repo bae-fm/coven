@@ -1373,7 +1373,8 @@ tables = [
 "crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
 # A connection's authorizer, whose state its SQLite hooks share.
 "crates/coven-database/src/authorization.rs" = ["SqlAuthorization::new", "SqlAuthorization::function"]
-# What a connection's setup registers on it, made as the connection opens.
+# What a connection's setup registers on it, which `DatabaseConnection::open`
+# makes as it opens the connection.
 "crates/coven-database/src/connection_setup.rs" = ["Setup::new"]
 "crates/coven-database/src/sqlite.rs" = ["DatabaseConnection::open"]
 # Coven's policy for a connection's authorizer, whose state the connection

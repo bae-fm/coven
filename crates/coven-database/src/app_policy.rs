@@ -15,7 +15,8 @@ use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
 
 /// Coven's rules for the statements a connection prepares. A judgment
-/// changes the state whole, so its lock is taken as it is.
+/// changes several fields of the state together, so `judge` holds the
+/// state's lock for the whole judgment.
 #[derive(Clone)]
 pub(crate) struct CovenPolicy {
     state: Arc<Mutex<PolicyState>>,
@@ -73,10 +74,10 @@ enum TableChange {
     All,
 }
 
-/// How a statement being prepared changes which app tables exist. Coven's
-/// internal staging tables can't be named by app SQL, and SQLite's own,
-/// such as the statistics ANALYZE makes, hold no app rows: their creation
-/// does not change which app rowids need protection.
+/// How a statement being prepared changes which app tables exist. App SQL
+/// cannot name coven's internal staging tables, and SQLite's own tables,
+/// such as the statistics ANALYZE makes, hold no app rows: creating them
+/// changes no app rowid that needs protection.
 fn changed_table(action: &PolicyAction<'_>) -> Option<TableChange> {
     let named = |schema: &str, table: &str| {
         TableChange::Named((schema.to_ascii_lowercase(), table.to_ascii_lowercase()))
@@ -170,8 +171,8 @@ impl CovenPolicy {
         ApplyingSql(self)
     }
 
-    /// The tables whose hidden rowids may have changed since this was last
-    /// asked, which the caller now reads again.
+    /// The tables whose hidden rowids may have changed since a caller last
+    /// called `take_changed_tables`. The caller reads them again.
     pub(crate) fn take_changed_tables(&self) -> ChangedTables {
         std::mem::replace(&mut lock_unpoisoned(&self.state).changed_tables, ChangedTables::None)
     }
@@ -262,8 +263,9 @@ impl PolicyState {
     /// tables it changes.
     fn judge(&mut self, action: &PolicyAction<'_>) -> Result<(), DbError> {
         self.record_mutation(action);
-        // Coven's own statements are not judged; the app's triggers and
-        // views they run are, as in an app statement (§9.4).
+        // The policy skips coven's own statements but judges the app's
+        // triggers and views that they run, as it does in an app statement
+        // (§9.4).
         if action.owner != Owner::Host {
             if let Some(error) = self.refusal(action) {
                 return Err(error);
@@ -319,11 +321,11 @@ impl PolicyState {
         {
             return None;
         }
-        // The status and retry rows say what their writer last saw, which a
-        // read-only handle can't tell is still so: a writer that ended
-        // mid-pass left its move behind (§19.1). The app's
-        // triggers, judged as coven compiles them, never run on a read-only
-        // handle, which changes no row.
+        // The status and retry rows say what their writer last saw. A
+        // read-only handle can't tell whether that is still so: a writer that
+        // ended mid-pass leaves an unfinished row in `coven_moves` (§19.1).
+        // Coven judges the app's triggers when it compiles them, and they
+        // never run on a read-only handle, which changes no row.
         if let Read { table_name, .. } = action.action {
             if !self.writer_state
                 && action.owner == Owner::App
@@ -337,10 +339,10 @@ impl PolicyState {
             }
         }
         let object = match action.action {
-            // Coven's views and its pins table are the app's read-only
-            // window on coven's state: their own columns, each column the
-            // views' joins read, and a table this statement reached through
-            // a view that it reads no column of.
+            // App SQL may read coven's views and its pins table, but not
+            // change them. It may read their own columns, each column the
+            // views' joins read, and a table the statement reached through a
+            // view when it reads no column of that table.
             // SQLite names no view for that last read, so a statement that
             // names such a table beside the view could count its rows.
             Read { table_name, .. } if crate::internal_schema::app_readable(table_name) => None,
@@ -444,9 +446,10 @@ impl PolicyState {
             {
                 Some("shadowing a shared trigger")
             }
-            // A live query learns it read what is being transferred from the
-            // views' columns it reads; called anywhere else, nothing would
-            // run it again as a transfer starts or ends.
+            // Coven reruns a live query when a transfer starts or ends only
+            // if the query reads the transfer columns of coven_uploads,
+            // coven_sending or coven_downloading. If app SQL calls these
+            // functions anywhere else, coven never reruns that query.
             Function { function_name }
                 if crate::transfers_in_flight::FUNCTIONS
                     .iter()

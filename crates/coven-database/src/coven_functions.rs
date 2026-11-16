@@ -47,7 +47,8 @@ pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Res
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
         policy.applying_function(),
     )?;
-    // True in coven's own statements, a refusal in the app's.
+    // The function returns true in coven's own statements and refuses the
+    // call in the app's.
     setup.scalar_function(
         "_coven_rowid_changed",
         0,
@@ -251,9 +252,9 @@ fn coven_key(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Vec<u8>
         .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
 }
 
-/// What a connection to the store's database serves of this process, for
-/// coven's views to read: registers `register_views` with the installation,
-/// the files it is transferring and the network it last heard of.
+/// The callback that registers, on a connection to the store's database, the
+/// functions coven's views call: the device id, the transfers in flight and
+/// the network state.
 pub(crate) type Views<'a> = dyn Fn(&Setup<'_>) -> rusqlite::Result<()> + 'a;
 
 /// Register what coven's views call: the device id, the transfers in flight

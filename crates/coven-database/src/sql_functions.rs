@@ -169,8 +169,9 @@ impl SqlFunctions {
     }
 
     /// Register every collation and scalar function on a connection that
-    /// has run no app statement, after coven's own functions. A name coven
-    /// refuses fails the open, as `DbError` inside the error returned.
+    /// has run no app statement, after coven's own functions. When coven
+    /// refuses a name, opening the database fails, and this returns the
+    /// refusal as a `DbError` inside the rusqlite error.
     pub(crate) fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
         let refused = |error: DbError| rusqlite::Error::UserFunctionError(Box::new(error));
         for (position, collation) in self.collations.iter().enumerate() {

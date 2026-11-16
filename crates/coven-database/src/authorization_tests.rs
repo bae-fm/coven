@@ -1,5 +1,6 @@
-//! The authorizer's own rules, tried on plain tables with a policy that
-//! allows what the rules allow and records what it is asked.
+//! These tests try the authorizer's own rules on plain tables, with a policy
+//! that allows what the rules allow and records each action the authorizer
+//! asks it about.
 
 use std::sync::{Arc, Mutex};
 
@@ -10,9 +11,9 @@ use super::{Owner, Policy, PolicyAction, SqlAuthorization};
 use crate::read_capture::WholeViews;
 use crate::DbError;
 
-/// A policy that allows every action it is asked about, and keeps the owner
-/// of each table an insert reached. It calls an object `host_*` the host's
-/// own.
+/// A policy that allows every action the authorizer asks it about and
+/// records the owner of each table an insert reached. `Recording` treats an
+/// object whose name starts with `host_` as the host's own.
 #[derive(Default)]
 struct Recording {
     inserts: Mutex<Vec<(String, Owner)>>,
@@ -97,8 +98,9 @@ fn app_sql_cannot_escape_its_transaction_or_change_connection_settings() {
     }
 }
 
-/// SQLite checks a column added with a CHECK by reading `pragma_quick_check`,
-/// which lasts for that statement and no other.
+/// SQLite checks a column added with a CHECK by reading `pragma_quick_check`.
+/// The authorizer lets that statement read it, and refuses the next
+/// statement that does.
 #[test]
 fn adding_a_checked_column_may_run_the_check_but_the_next_statement_may_not() {
     let (connection, authorization) = plain(&Arc::default());
@@ -177,7 +179,8 @@ fn the_policy_is_asked_after_the_rules_allow_and_can_refuse() {
         app(&connection, &authorization, insert),
         Err(DbError::InternalTable { table }) if table == "local"
     ));
-    // The rules refuse first: the policy never hears of a refused action.
+    // The authorizer never calls the policy's `judge` for an action the
+    // rules refuse.
     policy.inserts.lock().unwrap().clear();
     let _reading = authorization.reading();
     assert_eq!(

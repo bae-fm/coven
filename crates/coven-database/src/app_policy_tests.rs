@@ -3,8 +3,9 @@ use crate::{
     *,
 };
 
-/// An app migration running `attack` fails to open, refused as reaching an
-/// internal object. A domain's tests show its own tables refused this way.
+/// Coven refuses to open the database when an app migration runs `attack`,
+/// because the statement reaches an internal object. A domain's tests show
+/// that coven refuses its own tables this way.
 pub(crate) async fn refused_as_internal(attack: &'static str) {
     let store = TestStore::new();
     let error = store
@@ -66,7 +67,7 @@ async fn reserved_prefixes_cover_every_app_object_and_rename_destination() {
                 .open()
                 .await
                 .err()
-                .expect("reserved object must be refused");
+                .expect("coven refuses an object with a reserved name");
             let error = database_error(error);
             assert!(
                 matches!(&error, DbError::InternalTable { table } if table.eq_ignore_ascii_case(&name)),
@@ -86,7 +87,7 @@ async fn reserved_prefixes_are_refused_in_synced_declarations() {
             .open()
             .await
             .err()
-            .expect("reserved declaration must be refused");
+            .expect("coven refuses a synced table with a reserved name");
         assert!(matches!(database_error(error), DbError::InternalTable { table } if table == name));
     }
 }
@@ -456,9 +457,9 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
                     error,
                     DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ));
-                // SQLite refuses to add, rename or drop a column a rowid
-                // table's address goes by, so the table is rebuilt with an
-                // `oid` column, then again with it renamed.
+                // SQLite refuses to add, rename or drop a column that a rowid
+                // table's address uses, so the migration rebuilds the table
+                // with an `oid` column, then again with it renamed.
                 sql.execute_batch("CREATE TABLE items_oid(id TEXT NOT NULL PRIMARY KEY, oid INTEGER); INSERT INTO items_oid(_rowid_,id) SELECT rowid,id FROM items; DROP TABLE items; ALTER TABLE items_oid RENAME TO items; UPDATE items SET oid=4; CREATE TABLE items_saved(id TEXT NOT NULL PRIMARY KEY, saved_oid INTEGER); INSERT INTO items_saved(rowid,id,saved_oid) SELECT _rowid_,id,oid FROM items; DROP TABLE items; ALTER TABLE items_saved RENAME TO items")?;
                 let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
                 assert!(matches!(
@@ -563,9 +564,9 @@ async fn rowid_policy_allows_declared_alias_columns_without_exposing_hidden_addr
 async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopening() {
     fn migrations() -> Vec<Migration> {
         vec![Migration::addition_with(1, "shadowed addresses", |sql| {
-            // SQLite refuses to add, rename or drop a column a rowid
-            // table's address goes by, so `items` declares both from the
-            // start, and renaming one rebuilds the table.
+            // SQLite refuses to add, rename or drop a `rowid` or `_rowid_`
+            // column, so `items` declares both from the start, and renaming
+            // either one rebuilds the table.
             sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER, _rowid_ INTEGER); INSERT INTO items(oid,id) VALUES(1,'a'); UPDATE items SET rowid=2,_rowid_=3; CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id INTEGER PRIMARY KEY); INSERT INTO middle VALUES(1); CREATE TRIGGER parent AFTER INSERT ON source BEGIN UPDATE middle SET id=2; END; CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;")?;
             let error = DbError::from(sql.execute("INSERT INTO source VALUES(1)", []).unwrap_err());
             assert!(matches!(
@@ -578,7 +579,8 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
             );
             assert_eq!(sql.query_row("SELECT id FROM middle", [], |r| r.get::<_, i64>(0))?, 1);
             // Renaming a table checks every trigger that names it, so the
-            // trigger naming `items` goes while `items` is rebuilt.
+            // migration drops the trigger that names `items` while it
+            // rebuilds `items`.
             const CHILD: &str =
                 "CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;";
             sql.execute_batch(&format!("DROP TRIGGER child; CREATE TABLE items_saved(id TEXT NOT NULL PRIMARY KEY, saved_rowid INTEGER, _rowid_ INTEGER); INSERT INTO items_saved(oid,id,saved_rowid,_rowid_) SELECT oid,id,rowid,_rowid_ FROM items; DROP TABLE items; ALTER TABLE items_saved RENAME TO items; {CHILD}"))?;
@@ -630,7 +632,8 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
 
 /// A table that declares a column named `rowid` keeps a guard on its hidden
 /// address (rowid_policy.rs). The app's migration can still drop the table,
-/// and its guard goes with it; it still can't drop the guard alone.
+/// and coven drops the guard with it. The migration can't drop the guard
+/// alone.
 #[tokio::test]
 async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
     let store = TestStore::new();
@@ -670,7 +673,7 @@ async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
         .open()
         .await
         .err()
-        .expect("dropping the guard alone is refused");
+        .expect("coven refuses to drop the guard without its table");
     assert!(
         matches!(crate::tests::database_error(error), DbError::InternalTable { table } if table == "_coven_rowid_guard_main_items")
     );

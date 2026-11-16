@@ -241,8 +241,8 @@ impl DatabaseBuilder {
             crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
         };
         coven_foundation::task::operation_step("opening the writer's connection");
-        // Coven's views, which the app's migrations may read, are served from
-        // the start.
+        // Opening the writer's connection registers the functions coven's
+        // views call, because the app's migrations may read the views.
         let mut writer = CovenPolicy::new(&tables).open(
             &path,
             false,
